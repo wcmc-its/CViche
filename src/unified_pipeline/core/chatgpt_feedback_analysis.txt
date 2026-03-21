@@ -1,0 +1,242 @@
+==========================================================================================
+PHASE 1 CHATGPT FEEDBACK - AGGREGATE ANALYSIS
+==========================================================================================
+
+Total CVs analyzed: 18
+Average overall quality: 7.6/10
+Average confidence score: 0.925
+Average hint coverage: 33.8%
+
+==========================================================================================
+ISSUE TYPES (sorted by average severity)
+==========================================================================================
+
+
+SEGMENTATION
+  Occurrences: 18/18 CVs (100%)
+  Average severity: 7.1/10
+  Examples:
+    • [Ut_Format] (severity 7): Over 100 groups still labeled 'Unknown' in intermediate taxonomy output, despite clear contextual he
+    • [Albrecht] (severity 6): Multiple 'UMSOM' labeled sections inflated top-level segmentation; should have been merged under sin
+    • [Almasri] (severity 8): Many top-level groups (≈80%) remain labeled as 'Unknown', requiring contextual promotion to known ca
+
+TAXONOMY
+  Occurrences: 16/18 CVs (89%)
+  Average severity: 5.9/10
+  Examples:
+    • [Ut_Format] (severity 6): Some groups mapped to overly generic categories (e.g., 'Personal Information' misrouted to 'Academic
+    • [Albrecht] (severity 7): Overgeneralization of administrative and leadership roles; several 'Institutional Administrative Act
+    • [Bush] (severity 7): Some duplicated headers (e.g., multiple 'I. GENERAL INFORMATION' groups) indicate redundant section 
+
+SIGNAL_DETECTION
+  Occurrences: 18/18 CVs (100%)
+  Average severity: 5.4/10
+  Examples:
+    • [Ut_Format] (severity 5): Hint coverage at 17.24% indicates signal rules not broad enough; missing email, phone, and grant sig
+    • [Albrecht] (severity 5): Signals underfired for contact and email patterns — missing email and address signals despite strong
+    • [Almasri] (severity 4): Signals like `award_honor`, `doi`, and `pmid` fired successfully, but no email or phone patterns det
+
+REPAIR
+  Occurrences: 11/18 CVs (61%)
+  Average severity: 5.4/10
+  Examples:
+    • [Almasri] (severity 5): No new deterministic repairs were applied despite availability of signal-based hints (e.g., missing 
+    • [Bush] (severity 5): contact_coalescing merged address and email but left phone and fax detached as separate groups (G22–
+    • [Dunkel_Schetter] (severity 5): Funding entries not nested under 'Research Support' despite 'funding_containment' applied
+
+==========================================================================================
+REPAIR INEFFECTIVENESS (repairs that failed frequently)
+==========================================================================================
+
+  'contact_coalescing failed to merge scattered email...'
+    Failed in 1 CVs: Ut_Format
+
+  'all_caps_promotion missed uppercase headers like '...'
+    Failed in 1 CVs: Ut_Format
+
+  'contact_coalescing missed phone/email extraction...'
+    Failed in 1 CVs: Albrecht
+
+  'all_caps_promotion yielded multiple redundant 'UMS...'
+    Failed in 1 CVs: Albrecht
+
+  'contact_coalescing missed valid email field (malma...'
+    Failed in 1 CVs: Almasri
+
+  'contact_coalescing missed telephone/fax consolidat...'
+    Failed in 1 CVs: Bush
+
+  'funding_containment not verified due to absent res...'
+    Failed in 1 CVs: Bush
+
+  'contact_coalescing missed email consolidation unde...'
+    Failed in 1 CVs: Frank_Lau
+
+  'funding_containment did not reassign grant-type en...'
+    Failed in 1 CVs: Dunkel_Schetter
+
+  'talk_promotion_from_publications yielded no moveme...'
+    Failed in 1 CVs: Dunkel_Schetter
+
+==========================================================================================
+SIGNAL DETECTION GAPS (signals that missed frequently)
+==========================================================================================
+
+  phone_pattern: missed in 5/18 CVs (28%)
+  email_pattern: missed in 4/18 CVs (22%)
+  No email detection pattern: missed in 3/18 CVs (17%)
+  email detection: missed in 2/18 CVs (11%)
+  email_detection: missed in 2/18 CVs (11%)
+  grant funding (only 13 hits): missed in 1/18 CVs (6%)
+  email/contact pattern: missed in 1/18 CVs (6%)
+  grant_number detection in subheaders (e.g., 'NIA' and 'DoD'): missed in 1/18 CVs (6%)
+  date_range_position_pattern: missed in 1/18 CVs (6%)
+  award_year_pattern: missed in 1/18 CVs (6%)
+  email detection pattern: missed in 1/18 CVs (6%)
+  teaching_role partially duplicated employment hits: missed in 1/18 CVs (6%)
+  No email detection pattern triggered: missed in 1/18 CVs (6%)
+  No explicit ORCID signal firing: missed in 1/18 CVs (6%)
+  phone/address pattern: missed in 1/18 CVs (6%)
+  No explicit email/contact pattern detected despite present line 'Phone: (1) 203-691-0371; Email: natalie.ebner@ufl.edu': missed in 1/18 CVs (6%)
+  Few education boundary detections: missed in 1/18 CVs (6%)
+  grant_role detection (PI, Co-I): missed in 1/18 CVs (6%)
+  email_address: missed in 1/18 CVs (6%)
+  contact_url: missed in 1/18 CVs (6%)
+  employment_pattern: missed in 1/18 CVs (6%)
+  No direct funding signal for NIH/Grant parsing: missed in 1/18 CVs (6%)
+  email: missed in 1/18 CVs (6%)
+  fax: missed in 1/18 CVs (6%)
+  address_number detection: missed in 1/18 CVs (6%)
+  No explicit email or teaching_pattern detection: missed in 1/18 CVs (6%)
+  mentee_pattern fired only once: missed in 1/18 CVs (6%)
+  No institution keyword trigger in Research Support: missed in 1/18 CVs (6%)
+
+==========================================================================================
+PRIORITY FIXES (aggregated across all CVs)
+==========================================================================================
+
+Rank Fix                                                                     Freq  Effort  Impact  Priority
+-------------------------------------------------------------------------------------------------------------------
+   1 Add deterministic rule: merge adjacent ALL-CAPS institution headers      1     2.0     8.0       2.2
+   2 Activate email detection signal using regex '\b[A-Za-z0-9._%+-]+@[A-     1     2.0     8.0       2.2
+   3 Add deterministic rule: Deduplicate identical contact lines during '     1     2.0     8.0       2.2
+   4 Add deterministic deduplication for repeated position lines in EMPLO     1     2.0     8.0       2.2
+   5 Add fallback taxonomy rule: if group contains keywords 'grant', 'fel     1     2.0     8.0       2.2
+   6 Add email/phone regex-based signals to improve contact detection         1     2.0     7.0       1.9
+   7 Promote ALL-CAPS single-line headers (e.g., names) as metadata rathe     1     2.0     7.0       1.9
+   8 Improve regex detection for email/contact lines                          1     2.0     7.0       1.9
+   9 Add deterministic rule: promote ALL-CAPS headers as new top-level gr     1     3.0    10.0       1.9
+  10 Add deterministic rule: Promote ALL-CAPS single-word headers as top-     1     3.0     9.0       1.7
+  11 Add deterministic rule: promote top-level all-caps lines (e.g., 'EMP     1     3.0     9.0       1.7
+  12 Add deterministic rule: Merge top contiguous all-caps single-line ad     1     3.0     9.0       1.7
+  13 Add deterministic rule: Promote ALL-CAPS single-line groups to top-l     1     3.0     9.0       1.7
+  14 Enhance signal pattern for email/URL/ORCID to force section promotio     1     3.0     9.0       1.7
+  15 Add deterministic rule: Promote ALL-CAPS single-word groups to top-l     1     3.0     9.0       1.7
+  16 Add deterministic rule: Promote ALL-CAPS headers like 'POSITIONS HEL     1     3.0     9.0       1.7
+  17 Add deterministic rule: promote ALL-CAPS headers like 'ACADEMIC APPO     1     3.0     9.0       1.7
+  18 Add deterministic rule: Promote ALL-CAPS single-word groups (e.g., E     1     3.0     9.0       1.7
+  19 Add signal templates for phone, fax, and email                           1     2.0     6.0       1.7
+  20 Add regex signal for institutional email detection                       1     2.0     6.0       1.7
+
+Legend:
+  Freq = Number of CVs where this fix was recommended
+  Effort = Average implementation effort (1-10)
+  Impact = Average expected impact (1-10)
+  Priority = (Impact × Frequency × 10) / Effort (higher is better)
+
+==========================================================================================
+LLM TRIGGER RECOMMENDATIONS
+==========================================================================================
+
+Recommend LLM re-processing: 8/18 CVs (44%)
+Fixable deterministically: 10/18 CVs (56%)
+
+CVs recommended for LLM re-processing:
+  • Ut_Format            ( 17.2% hint coverage) - High proportion of misclassified 'Unknown' and Personal Info groups (>40%) indicates need for contextual LLM-based structural repair and rerouting
+  • Almasri              ( 24.7% hint coverage) - Persistent 'Unknown' labeling across 80% of groups and low hint coverage (<30%) indicate need for contextual reclassification and structure repair
+  • Ncebner_Nov          ( 37.7% hint coverage) - All 338 substantive entries are under 'Unknown' after repair and taxonomy mapping; requires structure-aware resegmentation beyond deterministic patterns.
+  • Wende                ( 34.6% hint coverage) - High proportion of 'Unknown' pre-mapped groups (100%) and incomplete repair nesting for Research Support indicate need for contextual LLM-based re-segmentation.
+  • Yisheng              ( 20.4% hint coverage) - Over 40% of top-level groups originated as 'Unknown'; requires contextual reclassification beyond deterministic heuristics
+  • Christopher_Contag   ( 29.7% hint coverage) - Over 40% of groups labeled 'Unknown' and contact/funding context requires semantic understanding beyond deterministic rules
+  • Dabelko-Schoeny      ( 21.4% hint coverage) - High number of 'Unknown' groups (≈100%) with low hint coverage; requires contextual structural repair
+  • Denckla              ( 29.7% hint coverage) - High number of Unknown groups (22/44 ≈ 50%) and low hint coverage (<30%) require contextual repair
+
+==========================================================================================
+TOP 10 ACTIONABLE FIXES
+==========================================================================================
+
+1. Add deterministic rule: merge adjacent ALL-CAPS institution headers (e.g., 'UMSO
+   Frequency: 1/18 CVs (6%)
+   Effort: 2.0/10, Impact: 8.0/10
+   Priority Score: 2.2
+   Affected CVs: Albrecht
+
+2. Activate email detection signal using regex '\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\
+   Frequency: 1/18 CVs (6%)
+   Effort: 2.0/10, Impact: 8.0/10
+   Priority Score: 2.2
+   Affected CVs: Dunkel_Schetter
+
+3. Add deterministic rule: Deduplicate identical contact lines during 'contact_coal
+   Frequency: 1/18 CVs (6%)
+   Effort: 2.0/10, Impact: 8.0/10
+   Priority Score: 2.2
+   Affected CVs: Oliver_Hobert
+
+4. Add deterministic deduplication for repeated position lines in EMPLOYMENT sectio
+   Frequency: 1/18 CVs (6%)
+   Effort: 2.0/10, Impact: 8.0/10
+   Priority Score: 2.2
+   Affected CVs: Petersen
+
+5. Add fallback taxonomy rule: if group contains keywords 'grant', 'fellowship', or
+   Frequency: 1/18 CVs (6%)
+   Effort: 2.0/10, Impact: 8.0/10
+   Priority Score: 2.2
+   Affected CVs: Denckla
+
+6. Add email/phone regex-based signals to improve contact detection
+   Frequency: 1/18 CVs (6%)
+   Effort: 2.0/10, Impact: 7.0/10
+   Priority Score: 1.9
+   Affected CVs: Ut_Format
+
+7. Promote ALL-CAPS single-line headers (e.g., names) as metadata rather than struc
+   Frequency: 1/18 CVs (6%)
+   Effort: 2.0/10, Impact: 7.0/10
+   Priority Score: 1.9
+   Affected CVs: Cvsir
+
+8. Improve regex detection for email/contact lines
+   Frequency: 1/18 CVs (6%)
+   Effort: 2.0/10, Impact: 7.0/10
+   Priority Score: 1.9
+   Affected CVs: Pardini
+
+9. Add deterministic rule: promote ALL-CAPS headers as new top-level groups when la
+   Frequency: 1/18 CVs (6%)
+   Effort: 3.0/10, Impact: 10.0/10
+   Priority Score: 1.9
+   Affected CVs: Wende
+
+10. Add deterministic rule: Promote ALL-CAPS single-word headers as top-level groups
+   Frequency: 1/18 CVs (6%)
+   Effort: 3.0/10, Impact: 9.0/10
+   Priority Score: 1.7
+   Affected CVs: Ut_Format
+
+==========================================================================================
+NEXT STEPS
+==========================================================================================
+
+1. Implement top 3-5 fixes from the list above
+2. Re-run batch processing on the same 20 CVs
+3. Compare before/after metrics:
+   - Average hint coverage improvement
+   - Reduction in 'Unknown' groups
+   - Improvement in taxonomy precision
+4. If improvements are significant (>10%), proceed to Phase 2 (broader validation)
+
+
+✓ Aggregated recommendations saved to: chatgpt_feedback_aggregated.json
+

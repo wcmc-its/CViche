@@ -1,0 +1,96 @@
+<h2>Feedback Nudge Strategy</h2>
+<p class="subtitle">How aggressively should we push users toward the Qualtrics feedback form? All options are non-blocking.</p>
+
+<div class="options">
+  <div class="option" data-choice="a" onclick="toggleSelect(this)">
+    <div class="letter">A</div>
+    <div class="content">
+      <h3>Badge + Banner Combo</h3>
+      <div class="mockup">
+        <div class="mockup-header">Run History — Upload Page</div>
+        <div class="mockup-body" style="padding: 16px; font-family: system-ui; font-size: 13px;">
+          <!-- Feedback banner -->
+          <div style="background: #fef3c7; border: 1px solid #f59e0b; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <strong style="color: #92400e;">&#x1f4cb; You have 2 runs awaiting feedback</strong>
+              <div style="color: #a16207; font-size: 12px; margin-top: 2px;">Your feedback helps us improve CViche and supports our research</div>
+            </div>
+            <a href="#" style="background: #f59e0b; color: white; padding: 6px 14px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 12px; white-space: nowrap;">Give Feedback</a>
+          </div>
+          <!-- Run items -->
+          <div style="font-weight: 600; color: #374151; margin-bottom: 8px; font-size: 12px;">Previous Runs</div>
+          <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="color: #16a34a;">&#10003;</span>
+              <div>
+                <div style="font-weight: 500;">SmithCV.docx</div>
+                <div style="color: #9ca3af; font-size: 11px;">Mar 20 · 2m 38s · $0.215</div>
+              </div>
+            </div>
+            <span style="background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;">Needs feedback</span>
+          </div>
+          <div style="border: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between;">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span style="color: #16a34a;">&#10003;</span>
+              <div>
+                <div style="font-weight: 500;">JonesCV.docx</div>
+                <div style="color: #9ca3af; font-size: 11px;">Mar 19 · 3m 12s · $0.311</div>
+              </div>
+            </div>
+            <span style="background: #dcfce7; color: #166534; padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: 600;">Feedback given</span>
+          </div>
+        </div>
+      </div>
+      <p>Persistent amber banner counting runs without feedback. Each run shows a badge: "Needs feedback" (amber) or "Feedback given" (green). Banner links to Qualtrics. Cannot be permanently dismissed — only goes away when all runs have feedback.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="b" onclick="toggleSelect(this)">
+    <div class="letter">B</div>
+    <div class="content">
+      <h3>Badge + Banner + Upload De-emphasis</h3>
+      <div class="mockup">
+        <div class="mockup-header">Upload Page with pending feedback</div>
+        <div class="mockup-body" style="padding: 16px; font-family: system-ui; font-size: 13px;">
+          <!-- Feedback banner -->
+          <div style="background: #fef3c7; border: 1px solid #f59e0b; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between;">
+            <div>
+              <strong style="color: #92400e;">&#x1f4cb; 2 runs awaiting feedback</strong>
+              <div style="color: #a16207; font-size: 12px; margin-top: 2px;">Please share your feedback before starting another run</div>
+            </div>
+            <a href="#" style="background: #f59e0b; color: white; padding: 6px 14px; border-radius: 6px; text-decoration: none; font-weight: 600; font-size: 12px;">Give Feedback</a>
+          </div>
+          <!-- Upload button de-emphasized -->
+          <div style="border: 2px dashed #d1d5db; border-radius: 8px; padding: 24px; text-align: center; color: #9ca3af; margin-bottom: 12px;">
+            <div style="font-size: 24px; margin-bottom: 8px;">&#x1f4c4;</div>
+            <div>Click to select a file</div>
+          </div>
+          <button style="width: 100%; padding: 10px; background: #93c5fd; color: white; border: none; border-radius: 8px; font-weight: 600; font-size: 14px; cursor: pointer; opacity: 0.7;">Start Pipeline</button>
+          <div style="text-align: center; color: #9ca3af; font-size: 11px; margin-top: 6px;">Upload is available, but please consider giving feedback first</div>
+        </div>
+      </div>
+      <p>Same as A, but also visually softens the upload button when feedback is pending. Upload still works (not blocked), but the reduced contrast + gentle text nudge makes feedback the more prominent action.</p>
+    </div>
+  </div>
+
+  <div class="option" data-choice="c" onclick="toggleSelect(this)">
+    <div class="letter">C</div>
+    <div class="content">
+      <h3>Post-Completion Interstitial</h3>
+      <div class="mockup">
+        <div class="mockup-header">After pipeline completes</div>
+        <div class="mockup-body" style="padding: 16px; font-family: system-ui; font-size: 13px; text-align: center;">
+          <div style="font-size: 36px; margin-bottom: 8px;">&#10003;</div>
+          <div style="font-weight: 700; font-size: 16px; margin-bottom: 4px;">Pipeline Complete!</div>
+          <div style="color: #6b7280; margin-bottom: 16px; font-size: 12px;">Your WCM-formatted CV is ready for download</div>
+          <a href="#" style="display: block; background: #2563eb; color: white; padding: 10px; border-radius: 8px; text-decoration: none; font-weight: 600; margin-bottom: 8px;">Download CV</a>
+          <a href="#" style="display: block; background: #f59e0b; color: white; padding: 10px; border-radius: 8px; text-decoration: none; font-weight: 600; margin-bottom: 8px;">Share Your Feedback (2 min)</a>
+          <a href="#" style="display: block; color: #9ca3af; text-decoration: none; font-size: 12px; margin-top: 4px;">I'll do this later</a>
+        </div>
+      </div>
+      <p>When a run completes, show a completion screen with download AND feedback as equally prominent actions. "I'll do this later" dismisses but the run history badges from Option A still persist.</p>
+    </div>
+  </div>
+</div>
+
+<p class="subtitle" style="margin-top: 24px;"><strong>These are combinable.</strong> You could use A's run history badges + C's completion interstitial together for maximum coverage.</p>

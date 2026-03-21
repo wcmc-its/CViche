@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/Users/paulalbert/Library/CloudStorage/Dropbox/Index/ReCiter/Scholar Signals - An LLM Pipeline/CV parsing - AI project/src/unified_pipeline/core/process_20_word_cvs_phase2.py", line 26, in <module>
+    from confusion_matrix import preprocess_cv
+ImportError: cannot import name 'preprocess_cv' from 'confusion_matrix' (/Users/paulalbert/Library/CloudStorage/Dropbox/Index/ReCiter/Scholar Signals - An LLM Pipeline/CV parsing - AI project/src/unified_pipeline/core/confusion_matrix.py)

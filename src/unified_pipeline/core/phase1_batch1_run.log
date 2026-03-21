@@ -1,0 +1,2855 @@
+================================================================================
+BATCH CV PROCESSING WITH SEGMENTATION REPAIR
+================================================================================
+
+Processing 5 CVs:
+  • Denckla (2025)
+  • Dabelko-Schoeny (2024)
+  • Almasri (2004)
+  • Albrecht (2003)
+  • Bush (2006)
+
+
+================================================================================
+Processing: Denckla (2025)
+================================================================================
+  [1/4] Segmentation exists, skipping...
+  [2/4] Repairing segmentation...
+    ✓ Repaired: 26 → 22 top-level groups
+  [3/4] Preprocessing...
+    ✓ Preprocessed: 21 content groups, 1 headers preserved
+  [4/4] Mapping with v3 signals...
+
+======================================================================
+TESTING COMPREHENSIVE SIGNAL LIBRARY
+======================================================================
+Input: validation_CV_2025_Denckla_preprocessed.json
+Output: validation_CV_2025_Denckla_with_signals_v3.json
+
+======================================================================
+PRE-ANALYSIS: Signal Detection
+======================================================================
+
+Signal Detection Summary:
+  Total entries: 64
+  Entries with hints: 19 (29.7%)
+
+Signal Fire Counts (sorted by frequency):
+  award_honor                      9 ( 14.1%)
+    Ex1: [Unknown] 3/2016 – 3/2019	Harvard T.H. Chan School of Public Health, Harvard University Boston, MA
+Postdoctoral Fellowship, Department of Epidemiology
+Mentor: K...
+    Ex2: [Unknown] 2021	Bronze Award for digital health media and publications in the 23rd Annual Digital Health Awards Fall 2021 Competition for ISTSS Briefing paper: G...
+  employment_pattern               9 ( 14.1%)
+    Ex1: [Unknown] 2011-2012	Merit Scholarship, Adelphi University; Amount awarded: $20,000
+    Ex2: [Unknown] 2021 – 2022 | MPH65 Admission Committee Member | Department of Social and Behavioral Sciences, Harvard School of Public Health, MA
+2022 – 2023 | MPH45...
+  grant_amount                     3 (  4.7%)
+    Ex1: [Unknown] 2012	George Stricker Research Fellowship, Adelphi University; Amount awarded: $18,000
+    Ex2: [Unknown] 2011-2012	Merit Scholarship, Adelphi University; Amount awarded: $20,000
+  committee_role                   2 (  3.1%)
+    Ex1: [Unknown] 2021 – 2022 | MPH65 Admission Committee Member | Department of Social and Behavioral Sciences, Harvard School of Public Health, MA
+2022 – 2023 | MPH45...
+    Ex2: [Unknown] 2021 – 2022 | MPH65 Admission Committee Member | Department of Social and Behavioral Sciences, Harvard School of Public Health, MA
+2022 – 2023 | MPH45...
+  unit_acronym                     1 (  1.6%)
+    Ex1: [Unknown] 2009-2011	Loan Repayment Award, National Health Service Corps, US Department of Health and Human Services; Amount awarded: $32,000
+  location_tail                    1 (  1.6%)
+    Ex1: [Unknown] 5/2010 – 5/2010	Symposium Chair, Association for Psychological Science (APS), Annual Convention, Boston, MA
+  mentee_pattern                   1 (  1.6%)
+    Ex1: [Unknown] 5/2010 – 5/2010	Symposium Chair, Association for Psychological Science (APS), Annual Convention, Boston, MA
+
+======================================================================
+RUNNING TAXONOMY MAPPING WITH ALL SIGNALS
+======================================================================
+================================================================================
+TWO-PASS HIERARCHICAL TAXONOMY MAPPING (V2)
+================================================================================
+Input: validation_CV_2025_Denckla_preprocessed.json
+Strategy: Pass 1 (20 parents) → Router → Pass 2 (3-9 children)
+
+✓ Loaded segmented CV
+
+Processing 22 top-level groups...
+
+  [1] Unknown
+      Entries: 2, Subgroups: 2
+📝 Prompt logged: 2025-11-08_09-41-44_taxonomy_mapping_pass1_e90a5a615a4a.json
+📝 Response logged: 2025-11-08_09-41-48_taxonomy_mapping_pass1_e90a5a615a4a_RESPONSE.json
+      Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-41-48_taxonomy_mapping_pass2_batch_b275dcd53fff.json
+📝 Response logged: 2025-11-08_09-41-52_taxonomy_mapping_pass2_batch_b275dcd53fff_RESPONSE.json
+      Pass 2 (batch of 2) → Current Academic/Clinical Positions (avg: 0.85)
+
+    [2] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-41-52_taxonomy_mapping_pass1_0507705b5b34.json
+📝 Response logged: 2025-11-08_09-41-54_taxonomy_mapping_pass1_0507705b5b34_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-41-54_taxonomy_mapping_pass2_batch_62da907ce73d.json
+📝 Response logged: 2025-11-08_09-41-59_taxonomy_mapping_pass2_batch_62da907ce73d_RESPONSE.json
+        Pass 2 (batch of 4) → Past Academic/Clinical Positions (avg: 0.95)
+
+    [3] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-41-59_taxonomy_mapping_pass1_d02643d87c18.json
+📝 Response logged: 2025-11-08_09-42-02_taxonomy_mapping_pass1_d02643d87c18_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-42-02_taxonomy_mapping_pass2_batch_6729248b4ab2.json
+📝 Response logged: 2025-11-08_09-42-03_taxonomy_mapping_pass2_batch_6729248b4ab2_RESPONSE.json
+        Pass 2 (batch of 1) → Current Academic/Clinical Positions (avg: 0.95)
+
+  [4] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-42-03_taxonomy_mapping_pass1_5e8c429b2587.json
+📝 Response logged: 2025-11-08_09-42-07_taxonomy_mapping_pass1_5e8c429b2587_RESPONSE.json
+      Pass 1 → Professional Positions & Employment (0.85)
+📝 Prompt logged: 2025-11-08_09-42-07_taxonomy_mapping_pass2_batch_c1dda49616bb.json
+📝 Response logged: 2025-11-08_09-42-09_taxonomy_mapping_pass2_batch_c1dda49616bb_RESPONSE.json
+      Pass 2 (batch of 1) → Current Academic/Clinical Positions (avg: 0.90)
+
+  [5] Unknown
+      Entries: 7, Subgroups: 2
+📝 Prompt logged: 2025-11-08_09-42-09_taxonomy_mapping_pass1_3b8b6f518658.json
+📝 Response logged: 2025-11-08_09-42-11_taxonomy_mapping_pass1_3b8b6f518658_RESPONSE.json
+      Pass 1 → Education (0.95)
+📝 Prompt logged: 2025-11-08_09-42-11_taxonomy_mapping_pass2_batch_805f7557ccce.json
+📝 Response logged: 2025-11-08_09-42-19_taxonomy_mapping_pass2_batch_805f7557ccce_RESPONSE.json
+      Pass 2 (batch of 7) → Continuing Education / Professional Development (avg: 0.91)
+
+    [6] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-42-19_taxonomy_mapping_pass1_cf0cf32ea448.json
+📝 Response logged: 2025-11-08_09-42-21_taxonomy_mapping_pass1_cf0cf32ea448_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-42-21_taxonomy_mapping_pass2_batch_93d67a91ffdb.json
+📝 Response logged: 2025-11-08_09-42-24_taxonomy_mapping_pass2_batch_93d67a91ffdb_RESPONSE.json
+        Pass 2 (batch of 3) → Current Academic/Clinical Positions (avg: 0.85)
+
+    [7] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-42-24_taxonomy_mapping_pass1_b3f9810fe392.json
+📝 Response logged: 2025-11-08_09-42-26_taxonomy_mapping_pass1_b3f9810fe392_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-42-26_taxonomy_mapping_pass2_batch_219b5e892061.json
+📝 Response logged: 2025-11-08_09-42-29_taxonomy_mapping_pass2_batch_219b5e892061_RESPONSE.json
+        Pass 2 (batch of 2) → Past Academic/Clinical Positions (avg: 0.80)
+
+  [8] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-42-29_taxonomy_mapping_pass1_a46703d3ad95.json
+📝 Response logged: 2025-11-08_09-42-31_taxonomy_mapping_pass1_a46703d3ad95_RESPONSE.json
+      Pass 1 → Licensure and Certification (0.95)
+      Pass 2 → Failed: No confusion info for parent: F
+
+  [9] Unknown
+      Entries: 10, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-42-31_taxonomy_mapping_pass1_3564d692a15a.json
+📝 Response logged: 2025-11-08_09-42-33_taxonomy_mapping_pass1_3564d692a15a_RESPONSE.json
+      Pass 1 → Honors and Awards (0.95)
+
+  [10] Unknown
+      Entries: 0, Subgroups: 2
+📝 Prompt logged: 2025-11-08_09-42-33_taxonomy_mapping_pass1_535fc95c40d3.json
+📝 Response logged: 2025-11-08_09-42-36_taxonomy_mapping_pass1_535fc95c40d3_RESPONSE.json
+      Pass 1 → Research (0.95)
+
+    [11] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-42-36_taxonomy_mapping_pass1_f70ba273f2ae.json
+📝 Response logged: 2025-11-08_09-42-38_taxonomy_mapping_pass1_f70ba273f2ae_RESPONSE.json
+        Pass 1 → Research (0.95)
+📝 Prompt logged: 2025-11-08_09-42-38_taxonomy_mapping_pass2_batch_e852a6bf49f4.json
+📝 Response logged: 2025-11-08_09-42-39_taxonomy_mapping_pass2_batch_e852a6bf49f4_RESPONSE.json
+        Pass 2 (batch of 1) → Research Support (Grants/Funding) (avg: 0.90)
+
+    [12] Unknown
+        Entries: 12, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-42-39_taxonomy_mapping_pass1_518cfa8fcaeb.json
+📝 Response logged: 2025-11-08_09-42-42_taxonomy_mapping_pass1_518cfa8fcaeb_RESPONSE.json
+        Pass 1 → Research (0.95)
+📝 Prompt logged: 2025-11-08_09-42-42_taxonomy_mapping_pass2_batch_1d9bfc103134.json
+📝 Response logged: 2025-11-08_09-42-54_taxonomy_mapping_pass2_batch_1d9bfc103134_RESPONSE.json
+        Pass 2 (batch of 12) → Research Support (Grants/Funding) (avg: 0.86)
+
+  [13] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-42-54_taxonomy_mapping_pass1_aabc3a2d7524.json
+📝 Response logged: 2025-11-08_09-42-57_taxonomy_mapping_pass1_aabc3a2d7524_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-42-57_taxonomy_mapping_pass2_batch_efc4411b9a10.json
+📝 Response logged: 2025-11-08_09-42-58_taxonomy_mapping_pass2_batch_efc4411b9a10_RESPONSE.json
+      Pass 2 (batch of 1) → Peer-Reviewed Research Articles (original research) (avg: 0.90)
+
+  [14] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-42-58_taxonomy_mapping_pass1_ff483533bba1.json
+📝 Response logged: 2025-11-08_09-43-01_taxonomy_mapping_pass1_ff483533bba1_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-43-01_taxonomy_mapping_pass2_batch_6b0e625ea7bb.json
+📝 Response logged: 2025-11-08_09-43-04_taxonomy_mapping_pass2_batch_6b0e625ea7bb_RESPONSE.json
+      Pass 2 (batch of 1) → Peer-Reviewed Research Articles (original research) (avg: 0.90)
+
+  [15] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-43-04_taxonomy_mapping_pass1_b88c16609467.json
+📝 Response logged: 2025-11-08_09-43-06_taxonomy_mapping_pass1_b88c16609467_RESPONSE.json
+      Pass 1 → Research (0.85)
+📝 Prompt logged: 2025-11-08_09-43-06_taxonomy_mapping_pass2_batch_28038038ef2f.json
+📝 Response logged: 2025-11-08_09-43-08_taxonomy_mapping_pass2_batch_28038038ef2f_RESPONSE.json
+      Pass 2 (batch of 1) → Research Activities (Summary) (avg: 0.80)
+
+  [16] Unknown
+      Entries: 1, Subgroups: 8
+📝 Prompt logged: 2025-11-08_09-43-08_taxonomy_mapping_pass1_a69d8eea6e96.json
+📝 Response logged: 2025-11-08_09-43-11_taxonomy_mapping_pass1_a69d8eea6e96_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-43-11_taxonomy_mapping_pass2_batch_8342855feb82.json
+📝 Response logged: 2025-11-08_09-43-13_taxonomy_mapping_pass2_batch_8342855feb82_RESPONSE.json
+      Pass 2 (batch of 1) → Regulatory Submissions (avg: 0.90)
+
+    [17] Unknown
+        Entries: 37, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-43-13_taxonomy_mapping_pass1_6450ba2bf0b4.json
+📝 Response logged: 2025-11-08_09-43-16_taxonomy_mapping_pass1_6450ba2bf0b4_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-43-16_taxonomy_mapping_pass2_batch_61ce3ebd961b.json
+📝 Response logged: 2025-11-08_09-43-30_taxonomy_mapping_pass2_batch_61ce3ebd961b_RESPONSE.json
+        Pass 2 (batch of 37) → Peer-Reviewed Research Articles (original research) (avg: 0.94)
+
+    [18] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-43-30_taxonomy_mapping_pass1_31c82e410eb5.json
+📝 Response logged: 2025-11-08_09-43-33_taxonomy_mapping_pass1_31c82e410eb5_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-43-33_taxonomy_mapping_pass2_batch_160876ab768b.json
+📝 Response logged: 2025-11-08_09-43-38_taxonomy_mapping_pass2_batch_160876ab768b_RESPONSE.json
+        Pass 2 (batch of 3) → In Review / Submitted / In Preparation (avg: 0.90)
+
+    [19] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-43-38_taxonomy_mapping_pass1_126ade1ecd65.json
+📝 Response logged: 2025-11-08_09-43-40_taxonomy_mapping_pass1_126ade1ecd65_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-43-40_taxonomy_mapping_pass2_batch_e8ff117aa8be.json
+📝 Response logged: 2025-11-08_09-43-45_taxonomy_mapping_pass2_batch_e8ff117aa8be_RESPONSE.json
+        Pass 2 (batch of 3) → In Review / Submitted / In Preparation (avg: 0.90)
+
+    [20] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-43-45_taxonomy_mapping_pass1_bebd9d3d7545.json
+📝 Response logged: 2025-11-08_09-43-47_taxonomy_mapping_pass1_bebd9d3d7545_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-43-47_taxonomy_mapping_pass2_batch_5e796d5595bf.json
+📝 Response logged: 2025-11-08_09-43-49_taxonomy_mapping_pass2_batch_5e796d5595bf_RESPONSE.json
+        Pass 2 (batch of 1) → Non-Peer-Reviewed Publications (white papers, reports) (avg: 0.90)
+
+    [21] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-43-49_taxonomy_mapping_pass1_aa1dda6920fa.json
+📝 Response logged: 2025-11-08_09-43-51_taxonomy_mapping_pass1_aa1dda6920fa_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-43-51_taxonomy_mapping_pass2_batch_a4ddb8ad7e8f.json
+📝 Response logged: 2025-11-08_09-43-53_taxonomy_mapping_pass2_batch_a4ddb8ad7e8f_RESPONSE.json
+        Pass 2 (batch of 1) → Abstracts & Conference Proceedings (avg: 0.90)
+
+    [22] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-43-53_taxonomy_mapping_pass1_5adadeaa4c04.json
+📝 Response logged: 2025-11-08_09-43-55_taxonomy_mapping_pass1_5adadeaa4c04_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-43-55_taxonomy_mapping_pass2_batch_c4814f0ae1cf.json
+📝 Response logged: 2025-11-08_09-43-58_taxonomy_mapping_pass2_batch_c4814f0ae1cf_RESPONSE.json
+        Pass 2 (batch of 2) → Reviews & Editorials (synthesis, commentary) (avg: 0.95)
+
+    [23] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-43-58_taxonomy_mapping_pass1_e820a79cd68c.json
+📝 Response logged: 2025-11-08_09-44-00_taxonomy_mapping_pass1_e820a79cd68c_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-44-00_taxonomy_mapping_pass2_batch_1dbcf9647705.json
+📝 Response logged: 2025-11-08_09-44-05_taxonomy_mapping_pass2_batch_1dbcf9647705_RESPONSE.json
+        Pass 2 (batch of 4) → Chapters (book chapters) (avg: 0.95)
+
+    [24] Unknown
+        Entries: 7, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-44-05_taxonomy_mapping_pass1_8c54fc066be9.json
+📝 Response logged: 2025-11-08_09-44-07_taxonomy_mapping_pass1_8c54fc066be9_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-44-07_taxonomy_mapping_pass2_batch_8d9d9f7c31a6.json
+📝 Response logged: 2025-11-08_09-44-14_taxonomy_mapping_pass2_batch_8d9d9f7c31a6_RESPONSE.json
+        Pass 2 (batch of 7) → Reviews & Editorials (synthesis, commentary) (avg: 0.81)
+
+  [25] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-44-14_taxonomy_mapping_pass1_442fbfd7daf0.json
+📝 Response logged: 2025-11-08_09-44-16_taxonomy_mapping_pass1_442fbfd7daf0_RESPONSE.json
+      Pass 1 → Educational Contributions (0.95)
+📝 Prompt logged: 2025-11-08_09-44-16_taxonomy_mapping_pass2_batch_0f806968f68f.json
+📝 Response logged: 2025-11-08_09-44-18_taxonomy_mapping_pass2_batch_0f806968f68f_RESPONSE.json
+      Pass 2 (batch of 1) → Didactic Teaching (courses taught) (avg: 0.90)
+
+  [26] Unknown
+      Entries: 2, Subgroups: 2
+📝 Prompt logged: 2025-11-08_09-44-18_taxonomy_mapping_pass1_d4683ca24a46.json
+📝 Response logged: 2025-11-08_09-44-21_taxonomy_mapping_pass1_d4683ca24a46_RESPONSE.json
+      Pass 1 → Educational Contributions (0.95)
+📝 Prompt logged: 2025-11-08_09-44-21_taxonomy_mapping_pass2_batch_b6bfc4426cca.json
+📝 Response logged: 2025-11-08_09-44-24_taxonomy_mapping_pass2_batch_b6bfc4426cca_RESPONSE.json
+      Pass 2 (batch of 2) → Administrative Teaching Roles (avg: 0.90)
+
+    [27] Unknown
+        Entries: 6, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-44-24_taxonomy_mapping_pass1_8cc48a221c12.json
+📝 Response logged: 2025-11-08_09-44-26_taxonomy_mapping_pass1_8cc48a221c12_RESPONSE.json
+        Pass 1 → Educational Contributions (0.95)
+📝 Prompt logged: 2025-11-08_09-44-26_taxonomy_mapping_pass2_batch_d2d6ef149136.json
+📝 Response logged: 2025-11-08_09-44-33_taxonomy_mapping_pass2_batch_d2d6ef149136_RESPONSE.json
+        Pass 2 (batch of 6) → Didactic Teaching (courses taught) (avg: 1.00)
+
+    [28] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-44-33_taxonomy_mapping_pass1_4dc962826ada.json
+📝 Response logged: 2025-11-08_09-44-35_taxonomy_mapping_pass1_4dc962826ada_RESPONSE.json
+        Pass 1 → Mentoring (0.85)
+📝 Prompt logged: 2025-11-08_09-44-35_taxonomy_mapping_pass2_batch_8afd66dfb1b8.json
+📝 Response logged: 2025-11-08_09-44-39_taxonomy_mapping_pass2_batch_8afd66dfb1b8_RESPONSE.json
+        Pass 2 (batch of 3) → Current Mentees (Research) (avg: 0.92)
+
+  [29] Unknown
+      Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-44-39_taxonomy_mapping_pass1_1a25f19795a7.json
+📝 Response logged: 2025-11-08_09-44-42_taxonomy_mapping_pass1_1a25f19795a7_RESPONSE.json
+      Pass 1 → Honors and Awards (0.92)
+
+  [30] Unknown
+      Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-44-42_taxonomy_mapping_pass1_a1701997d96c.json
+📝 Response logged: 2025-11-08_09-44-45_taxonomy_mapping_pass1_a1701997d96c_RESPONSE.json
+      Pass 1 → Honors and Awards (0.85)
+
+  [31] Unknown
+      Entries: 5, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-44-45_taxonomy_mapping_pass1_928a6613d169.json
+📝 Response logged: 2025-11-08_09-44-48_taxonomy_mapping_pass1_928a6613d169_RESPONSE.json
+      Pass 1 → Mentoring (0.95)
+📝 Prompt logged: 2025-11-08_09-44-48_taxonomy_mapping_pass2_batch_fe11080cc0fd.json
+📝 Response logged: 2025-11-08_09-44-56_taxonomy_mapping_pass2_batch_fe11080cc0fd_RESPONSE.json
+      Pass 2 (batch of 5) → Current Mentees (Research) (avg: 0.87)
+
+  [32] Unknown
+      Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-44-56_taxonomy_mapping_pass1_cf31c5da8d68.json
+📝 Response logged: 2025-11-08_09-44-58_taxonomy_mapping_pass1_cf31c5da8d68_RESPONSE.json
+      Pass 1 → Mentoring (0.95)
+📝 Prompt logged: 2025-11-08_09-44-58_taxonomy_mapping_pass2_batch_fe119ad7f514.json
+📝 Response logged: 2025-11-08_09-45-01_taxonomy_mapping_pass2_batch_fe119ad7f514_RESPONSE.json
+      Pass 2 (batch of 2) → Leadership & Mentoring Programs (avg: 0.88)
+
+  [33] Unknown
+      Entries: 2, Subgroups: 1
+📝 Prompt logged: 2025-11-08_09-45-01_taxonomy_mapping_pass1_739d2974eae8.json
+📝 Response logged: 2025-11-08_09-45-03_taxonomy_mapping_pass1_739d2974eae8_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-45-03_taxonomy_mapping_pass2_batch_3851f0606c04.json
+📝 Response logged: 2025-11-08_09-45-07_taxonomy_mapping_pass2_batch_3851f0606c04_RESPONSE.json
+      Pass 2 (batch of 2) → Regular Teaching Contributions (avg: 0.80)
+
+    [34] Unknown
+        Entries: 21, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-45-07_taxonomy_mapping_pass1_4edbcf7b7eab.json
+📝 Response logged: 2025-11-08_09-45-10_taxonomy_mapping_pass1_4edbcf7b7eab_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-45-10_taxonomy_mapping_pass2_batch_8ce17aae9813.json
+📝 Response logged: 2025-11-08_09-45-19_taxonomy_mapping_pass2_batch_8ce17aae9813_RESPONSE.json
+        Pass 2 (batch of 21) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.90)
+
+  [35] Unknown
+      Entries: 1, Subgroups: 1
+📝 Prompt logged: 2025-11-08_09-45-19_taxonomy_mapping_pass1_870e14135f6c.json
+📝 Response logged: 2025-11-08_09-45-22_taxonomy_mapping_pass1_870e14135f6c_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-45-22_taxonomy_mapping_pass2_batch_1a220077aafc.json
+📝 Response logged: 2025-11-08_09-45-24_taxonomy_mapping_pass2_batch_1a220077aafc_RESPONSE.json
+      Pass 2 (batch of 1) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.90)
+
+    [36] Unknown
+        Entries: 29, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-45-24_taxonomy_mapping_pass1_17f8ca4a600e.json
+📝 Response logged: 2025-11-08_09-45-27_taxonomy_mapping_pass1_17f8ca4a600e_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-45-27_taxonomy_mapping_pass2_batch_0bd3dbe9b36d.json
+📝 Response logged: 2025-11-08_09-45-37_taxonomy_mapping_pass2_batch_0bd3dbe9b36d_RESPONSE.json
+        Pass 2 (batch of 29) → Invited Panels, Workshops, Symposia (avg: 0.93)
+
+  [37] Unknown
+      Entries: 1, Subgroups: 5
+📝 Prompt logged: 2025-11-08_09-45-37_taxonomy_mapping_pass1_36ca07a0f879.json
+📝 Response logged: 2025-11-08_09-45-41_taxonomy_mapping_pass1_36ca07a0f879_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.90)
+📝 Prompt logged: 2025-11-08_09-45-41_taxonomy_mapping_pass2_batch_1a220077aafc.json
+📝 Response logged: 2025-11-08_09-45-43_taxonomy_mapping_pass2_batch_1a220077aafc_RESPONSE.json
+      Pass 2 (batch of 1) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.90)
+
+    [38] Unknown
+        Entries: 17, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-45-43_taxonomy_mapping_pass1_316f4a29f3b0.json
+📝 Response logged: 2025-11-08_09-45-46_taxonomy_mapping_pass1_316f4a29f3b0_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-45-46_taxonomy_mapping_pass2_batch_6601881b9d6a.json
+📝 Response logged: 2025-11-08_09-45-57_taxonomy_mapping_pass2_batch_6601881b9d6a_RESPONSE.json
+        Pass 2 (batch of 17) → Abstracts & Conference Proceedings (avg: 0.95)
+
+    [39] Unknown
+        Entries: 11, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-45-57_taxonomy_mapping_pass1_6114938c2e22.json
+📝 Response logged: 2025-11-08_09-46-00_taxonomy_mapping_pass1_6114938c2e22_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.90)
+📝 Prompt logged: 2025-11-08_09-46-00_taxonomy_mapping_pass2_batch_bd32b7de3ca2.json
+📝 Response logged: 2025-11-08_09-46-13_taxonomy_mapping_pass2_batch_bd32b7de3ca2_RESPONSE.json
+        Pass 2 (batch of 11) → Editorial Board Membership (avg: 0.89)
+
+    [40] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-46-13_taxonomy_mapping_pass1_ce14bb791013.json
+📝 Response logged: 2025-11-08_09-46-17_taxonomy_mapping_pass1_ce14bb791013_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-46-17_taxonomy_mapping_pass2_batch_0dabd41a3f2c.json
+📝 Response logged: 2025-11-08_09-46-22_taxonomy_mapping_pass2_batch_0dabd41a3f2c_RESPONSE.json
+        Pass 2 (batch of 3) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.87)
+
+    [41] Unknown
+        Entries: 7, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-46-22_taxonomy_mapping_pass1_4f0b347b95bd.json
+📝 Response logged: 2025-11-08_09-46-25_taxonomy_mapping_pass1_4f0b347b95bd_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.90)
+📝 Prompt logged: 2025-11-08_09-46-25_taxonomy_mapping_pass2_batch_df03748b71e1.json
+📝 Response logged: 2025-11-08_09-46-34_taxonomy_mapping_pass2_batch_df03748b71e1_RESPONSE.json
+        Pass 2 (batch of 7) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.80)
+
+    [42] Unknown
+        Entries: 13, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-46-34_taxonomy_mapping_pass1_dcfb5e814ffe.json
+📝 Response logged: 2025-11-08_09-46-38_taxonomy_mapping_pass1_dcfb5e814ffe_RESPONSE.json
+        Pass 1 → Postdoctoral Training (0.95)
+        Pass 2 → Failed: No confusion info for parent: C
+
+  [SKIP] Unknown (structural header - preserved for recovery context)
+  [43] Unknown
+      Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-46-38_taxonomy_mapping_pass1_50ab4e768d88.json
+📝 Response logged: 2025-11-08_09-46-41_taxonomy_mapping_pass1_50ab4e768d88_RESPONSE.json
+      Pass 1 → Extramural Professional Responsibilities (0.95)
+📝 Prompt logged: 2025-11-08_09-46-41_taxonomy_mapping_pass2_batch_2b7673e35788.json
+📝 Response logged: 2025-11-08_09-46-46_taxonomy_mapping_pass2_batch_2b7673e35788_RESPONSE.json
+      Pass 2 (batch of 4) → Service on Boards and/or Committees (avg: 0.90)
+
+  [44] Unknown
+      Entries: 17, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-46-46_taxonomy_mapping_pass1_650cd88199e8.json
+📝 Response logged: 2025-11-08_09-46-49_taxonomy_mapping_pass1_650cd88199e8_RESPONSE.json
+      Pass 1 → Extramural Professional Responsibilities (0.95)
+📝 Prompt logged: 2025-11-08_09-46-49_taxonomy_mapping_pass2_batch_2553318c3d92.json
+📝 Response logged: 2025-11-08_09-47-00_taxonomy_mapping_pass2_batch_2553318c3d92_RESPONSE.json
+      Pass 2 (batch of 17) → Professional Organizations & Society Memberships (avg: 0.90)
+
+================================================================================
+MAPPING RESULTS (V2)
+================================================================================
+Classified sections: 44
+  High confidence (≥0.85): 44 (100.0%)
+Average confidence: 0.937
+
+Skipped structural headers: 1 (preserved for recovery context)
+
+API Calls:
+  Pass 1 (parent): 44
+  Pass 2 (child): 38
+  Total: 82
+  Saved (skipped headers): 1 (1.2% efficiency gain)
+
+Token Usage:
+  Prompt: 121,643
+  Completion: 12,848
+  Total: 134,491
+
+✓ Results saved to: validation_CV_2025_Denckla_with_signals_v3.json
+
+======================================================================
+GENERATING AUDIT REPORT
+======================================================================
+
+✓ Audit report saved to: validation_CV_2025_Denckla_with_signals_v3_AUDIT.json
+    ✓ Mapped: 64 entries, 29.7% hint coverage, avg conf=0.937
+
+================================================================================
+Processing: Dabelko-Schoeny (2024)
+================================================================================
+  [1/4] Segmentation exists, skipping...
+  [2/4] Repairing segmentation...
+    ✓ Repaired: 16 → 23 top-level groups
+  [3/4] Preprocessing...
+    ✓ Preprocessed: 23 content groups, 0 headers preserved
+  [4/4] Mapping with v3 signals...
+
+======================================================================
+TESTING COMPREHENSIVE SIGNAL LIBRARY
+======================================================================
+Input: validation_CV_2024_Dabelko-Schoeny_preprocessed.json
+Output: validation_CV_2024_Dabelko-Schoeny_with_signals_v3.json
+
+======================================================================
+PRE-ANALYSIS: Signal Detection
+======================================================================
+
+Signal Detection Summary:
+  Total entries: 126
+  Entries with hints: 27 (21.4%)
+
+Signal Fire Counts (sorted by frequency):
+  award_honor                     13 ( 10.3%)
+    Ex1: [Unknown] Community-Engaged Scholar Award, The Ohio State University, Columbus, OH	2021
+    Ex2: [Unknown] PhD Faculty Excellence in Teaching Award, College of Social Work,	2020
+The Ohio State University, Columbus, OH
+  location_tail                   13 ( 10.3%)
+    Ex1: [Unknown] PhD Faculty Excellence in Teaching Award, College of Social Work,	2020
+The Ohio State University, Columbus, OH
+    Ex2: [Unknown] Outstanding Doctoral Faculty Award, College of Social Work, 	2015
+The Ohio State University, Columbus, OH
+  doi                              8 (  6.3%)
+    Ex1: [Unknown] Cotton, Q.D., Bailey, D., Albers, E., Ingvalson, S., Bloomquist, E., Marx, K., Anderson, K., Dabelko-Schoeny, H, Parker, L., Gitlin, L, & Gaugler, J.E...
+    Ex2: [Unknown] *Hand, M., Lee, M.Y., Kaiser, M., Mengo, C. & Dabelko-Schoeny, H. (2024). Sexual violence against adults aged 50 years and older and implications for ...
+  teaching_role                    1 (  0.8%)
+    Ex1: [Unknown] Teaching Assistant of the Year, College of Social Work,	2001
+The Ohio State University, Columbus, OH
+  mentee_pattern                   1 (  0.8%)
+    Ex1: [Unknown] Dabelko-Schoeny, H. I., & Anderson, K. A. (2011, November). The state of adult day services: Findings from the 2010 MetLife National Adult Day Service...
+
+======================================================================
+RUNNING TAXONOMY MAPPING WITH ALL SIGNALS
+======================================================================
+================================================================================
+TWO-PASS HIERARCHICAL TAXONOMY MAPPING (V2)
+================================================================================
+Input: validation_CV_2024_Dabelko-Schoeny_preprocessed.json
+Strategy: Pass 1 (20 parents) → Router → Pass 2 (3-9 children)
+
+✓ Loaded segmented CV
+
+Processing 23 top-level groups...
+
+  [1] Unknown
+      Entries: 1, Subgroups: 1
+📝 Prompt logged: 2025-11-08_09-47-00_taxonomy_mapping_pass1_f28a918323dd.json
+📝 Response logged: 2025-11-08_09-47-02_taxonomy_mapping_pass1_f28a918323dd_RESPONSE.json
+      Pass 1 → Personal Data / Contact Information (0.95)
+      Router → Skip Pass 2 (direct to extraction)
+
+    [2] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-47-02_taxonomy_mapping_pass1_3c6e90809c65.json
+📝 Response logged: 2025-11-08_09-47-04_taxonomy_mapping_pass1_3c6e90809c65_RESPONSE.json
+        Pass 1 → Personal Data / Contact Information (0.95)
+        Router → Skip Pass 2 (direct to extraction)
+
+  [3] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-47-04_taxonomy_mapping_pass1_99e935c91f5e.json
+📝 Response logged: 2025-11-08_09-47-06_taxonomy_mapping_pass1_99e935c91f5e_RESPONSE.json
+      Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-47-06_taxonomy_mapping_pass2_batch_bc419c7ff38d.json
+📝 Response logged: 2025-11-08_09-47-09_taxonomy_mapping_pass2_batch_bc419c7ff38d_RESPONSE.json
+      Pass 2 (batch of 1) → Current Academic/Clinical Positions (avg: 0.90)
+
+  [4] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-47-09_taxonomy_mapping_pass1_ffa1171404e9.json
+📝 Response logged: 2025-11-08_09-47-11_taxonomy_mapping_pass1_ffa1171404e9_RESPONSE.json
+      Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-47-11_taxonomy_mapping_pass2_batch_327f47deab6e.json
+📝 Response logged: 2025-11-08_09-47-13_taxonomy_mapping_pass2_batch_327f47deab6e_RESPONSE.json
+      Pass 2 (batch of 1) → Current Academic/Clinical Positions (avg: 0.80)
+
+  [5] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-47-13_taxonomy_mapping_pass1_01fcc16f411e.json
+📝 Response logged: 2025-11-08_09-47-16_taxonomy_mapping_pass1_01fcc16f411e_RESPONSE.json
+      Pass 1 → Institutional / Hospital Affiliation (0.85)
+      Router → Skip Pass 2 (direct to extraction)
+
+  [6] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-47-16_taxonomy_mapping_pass1_c5d1af5ed15d.json
+📝 Response logged: 2025-11-08_09-47-19_taxonomy_mapping_pass1_c5d1af5ed15d_RESPONSE.json
+      Pass 1 → Personal Data / Contact Information (0.95)
+      Router → Skip Pass 2 (direct to extraction)
+
+  [7] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-47-19_taxonomy_mapping_pass1_a8467b38255a.json
+📝 Response logged: 2025-11-08_09-47-20_taxonomy_mapping_pass1_a8467b38255a_RESPONSE.json
+      Pass 1 → Personal Data / Contact Information (0.95)
+      Router → Skip Pass 2 (direct to extraction)
+
+  [8] Unknown
+      Entries: 0, Subgroups: 4
+📝 Prompt logged: 2025-11-08_09-47-20_taxonomy_mapping_pass1_77ca74b650f8.json
+📝 Response logged: 2025-11-08_09-47-22_taxonomy_mapping_pass1_77ca74b650f8_RESPONSE.json
+      Pass 1 → Professional Positions & Employment (0.95)
+
+    [9] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-47-22_taxonomy_mapping_pass1_4a70e6359ca8.json
+📝 Response logged: 2025-11-08_09-47-25_taxonomy_mapping_pass1_4a70e6359ca8_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.85)
+📝 Prompt logged: 2025-11-08_09-47-25_taxonomy_mapping_pass2_batch_73a5e9c75001.json
+📝 Response logged: 2025-11-08_09-47-26_taxonomy_mapping_pass2_batch_73a5e9c75001_RESPONSE.json
+        Pass 2 (batch of 1) → Current Academic/Clinical Positions (avg: 0.90)
+
+    [10] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-47-26_taxonomy_mapping_pass1_13445c93fced.json
+📝 Response logged: 2025-11-08_09-47-29_taxonomy_mapping_pass1_13445c93fced_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-47-29_taxonomy_mapping_pass2_batch_58f4a2c1f632.json
+📝 Response logged: 2025-11-08_09-47-31_taxonomy_mapping_pass2_batch_58f4a2c1f632_RESPONSE.json
+        Pass 2 (batch of 2) → Current Academic/Clinical Positions (avg: 0.85)
+
+    [11] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-47-31_taxonomy_mapping_pass1_681028f0b400.json
+📝 Response logged: 2025-11-08_09-47-34_taxonomy_mapping_pass1_681028f0b400_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-47-34_taxonomy_mapping_pass2_batch_97d086aba9f0.json
+📝 Response logged: 2025-11-08_09-47-37_taxonomy_mapping_pass2_batch_97d086aba9f0_RESPONSE.json
+        Pass 2 (batch of 2) → Past Academic/Clinical Positions (avg: 0.85)
+
+    [12] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-47-37_taxonomy_mapping_pass1_a92bd3f56a68.json
+📝 Response logged: 2025-11-08_09-47-39_taxonomy_mapping_pass1_a92bd3f56a68_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-47-39_taxonomy_mapping_pass2_batch_02594b827d35.json
+📝 Response logged: 2025-11-08_09-47-41_taxonomy_mapping_pass2_batch_02594b827d35_RESPONSE.json
+        Pass 2 (batch of 2) → Past Academic/Clinical Positions (avg: 0.85)
+
+  [13] Unknown
+      Entries: 22, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-47-41_taxonomy_mapping_pass1_bf69922477cf.json
+📝 Response logged: 2025-11-08_09-47-43_taxonomy_mapping_pass1_bf69922477cf_RESPONSE.json
+      Pass 1 → Education (0.95)
+📝 Prompt logged: 2025-11-08_09-47-43_taxonomy_mapping_pass2_batch_623af4371c29.json
+📝 Response logged: 2025-11-08_09-47-53_taxonomy_mapping_pass2_batch_623af4371c29_RESPONSE.json
+      Pass 2 (batch of 22) → Doctoral Degree (PhD, MD, DrPH, etc.) (avg: 1.00)
+
+  [14] Unknown
+      Entries: 0, Subgroups: 4
+📝 Prompt logged: 2025-11-08_09-47-53_taxonomy_mapping_pass1_8a34ee8ef047.json
+📝 Response logged: 2025-11-08_09-47-55_taxonomy_mapping_pass1_8a34ee8ef047_RESPONSE.json
+      Pass 1 → Research (0.95)
+
+    [15] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-47-55_taxonomy_mapping_pass1_a39cc6a79e6b.json
+📝 Response logged: 2025-11-08_09-47-59_taxonomy_mapping_pass1_a39cc6a79e6b_RESPONSE.json
+        Pass 1 → Research (0.85)
+📝 Prompt logged: 2025-11-08_09-47-59_taxonomy_mapping_pass2_batch_199fe80a7cb9.json
+📝 Response logged: 2025-11-08_09-48-03_taxonomy_mapping_pass2_batch_199fe80a7cb9_RESPONSE.json
+        Pass 2 (batch of 3) → Research Activities (Summary) (avg: 0.90)
+
+    [16] Unknown
+        Entries: 30, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-48-03_taxonomy_mapping_pass1_f719b936c335.json
+📝 Response logged: 2025-11-08_09-48-05_taxonomy_mapping_pass1_f719b936c335_RESPONSE.json
+        Pass 1 → Research (0.95)
+📝 Prompt logged: 2025-11-08_09-48-05_taxonomy_mapping_pass2_batch_377d6a999724.json
+📝 Response logged: 2025-11-08_09-48-17_taxonomy_mapping_pass2_batch_377d6a999724_RESPONSE.json
+        Pass 2 (batch of 30) → Research Support (Grants/Funding) (avg: 0.90)
+
+    [17] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-48-17_taxonomy_mapping_pass1_63c723d7a64b.json
+📝 Response logged: 2025-11-08_09-48-18_taxonomy_mapping_pass1_63c723d7a64b_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-48-18_taxonomy_mapping_pass2_batch_9478aa26915b.json
+📝 Response logged: 2025-11-08_09-48-22_taxonomy_mapping_pass2_batch_9478aa26915b_RESPONSE.json
+        Pass 2 (batch of 1) → Books (authored or edited) (avg: 0.90)
+
+    [18] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-48-22_taxonomy_mapping_pass1_a3eae9d2efa3.json
+📝 Response logged: 2025-11-08_09-48-24_taxonomy_mapping_pass1_a3eae9d2efa3_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-48-24_taxonomy_mapping_pass2_batch_9a4ae67fbe51.json
+📝 Response logged: 2025-11-08_09-48-29_taxonomy_mapping_pass2_batch_9a4ae67fbe51_RESPONSE.json
+        Pass 2 (batch of 2) → Reviews & Editorials (synthesis, commentary) (avg: 0.90)
+
+  [19] Unknown
+      Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-48-29_taxonomy_mapping_pass1_bd6a058cf907.json
+📝 Response logged: 2025-11-08_09-48-31_taxonomy_mapping_pass1_bd6a058cf907_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-48-31_taxonomy_mapping_pass2_batch_cd93b091cc56.json
+📝 Response logged: 2025-11-08_09-48-35_taxonomy_mapping_pass2_batch_cd93b091cc56_RESPONSE.json
+      Pass 2 (batch of 3) → In Review / Submitted / In Preparation (avg: 0.92)
+
+  [20] Unknown
+      Entries: 63, Subgroups: 6
+📝 Prompt logged: 2025-11-08_09-48-35_taxonomy_mapping_pass1_cb4712ca0da3.json
+📝 Response logged: 2025-11-08_09-48-37_taxonomy_mapping_pass1_cb4712ca0da3_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-48-37_taxonomy_mapping_pass2_batch_7ec0e31f227f.json
+📝 Response logged: 2025-11-08_09-48-53_taxonomy_mapping_pass2_batch_7ec0e31f227f_RESPONSE.json
+      Pass 2 (batch of 63) → In Review / Submitted / In Preparation (avg: 0.94)
+
+    [21] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-48-53_taxonomy_mapping_pass1_1d9ce38c5f7e.json
+📝 Response logged: 2025-11-08_09-48-55_taxonomy_mapping_pass1_1d9ce38c5f7e_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-48-55_taxonomy_mapping_pass2_batch_a7a625c98c9c.json
+📝 Response logged: 2025-11-08_09-49-00_taxonomy_mapping_pass2_batch_a7a625c98c9c_RESPONSE.json
+        Pass 2 (batch of 2) → Reviews & Editorials (synthesis, commentary) (avg: 0.95)
+
+    [22] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-49-00_taxonomy_mapping_pass1_ed54fcc4505b.json
+📝 Response logged: 2025-11-08_09-49-05_taxonomy_mapping_pass1_ed54fcc4505b_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-49-05_taxonomy_mapping_pass2_batch_c54cbab82c41.json
+📝 Response logged: 2025-11-08_09-49-10_taxonomy_mapping_pass2_batch_c54cbab82c41_RESPONSE.json
+        Pass 2 (batch of 2) → Chapters (book chapters) (avg: 0.90)
+
+    [23] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-49-10_taxonomy_mapping_pass1_d9e32aef31ef.json
+📝 Response logged: 2025-11-08_09-49-12_taxonomy_mapping_pass1_d9e32aef31ef_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-49-12_taxonomy_mapping_pass2_batch_442120028a76.json
+📝 Response logged: 2025-11-08_09-49-18_taxonomy_mapping_pass2_batch_442120028a76_RESPONSE.json
+        Pass 2 (batch of 3) → Chapters (book chapters) (avg: 0.90)
+
+    [24] Unknown
+        Entries: 11, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-49-18_taxonomy_mapping_pass1_bdbcd3eb6ccd.json
+📝 Response logged: 2025-11-08_09-49-20_taxonomy_mapping_pass1_bdbcd3eb6ccd_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-49-20_taxonomy_mapping_pass2_batch_bd10eb38c126.json
+📝 Response logged: 2025-11-08_09-49-32_taxonomy_mapping_pass2_batch_bd10eb38c126_RESPONSE.json
+        Pass 2 (batch of 11) → Non-Peer-Reviewed Publications (white papers, reports) (avg: 0.90)
+
+    [25] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-49-32_taxonomy_mapping_pass1_9908634fd37b.json
+📝 Response logged: 2025-11-08_09-49-34_taxonomy_mapping_pass1_9908634fd37b_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-49-34_taxonomy_mapping_pass2_batch_af8f3ff6b11a.json
+📝 Response logged: 2025-11-08_09-49-39_taxonomy_mapping_pass2_batch_af8f3ff6b11a_RESPONSE.json
+        Pass 2 (batch of 2) → Reviews & Editorials (synthesis, commentary) (avg: 0.90)
+
+    [26] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-49-39_taxonomy_mapping_pass1_6dd469ef55d1.json
+📝 Response logged: 2025-11-08_09-49-41_taxonomy_mapping_pass1_6dd469ef55d1_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-49-41_taxonomy_mapping_pass2_batch_b675119f7e3a.json
+📝 Response logged: 2025-11-08_09-49-45_taxonomy_mapping_pass2_batch_b675119f7e3a_RESPONSE.json
+        Pass 2 (batch of 1) → Non-Peer-Reviewed Publications (white papers, reports) (avg: 0.90)
+
+  [27] Unknown
+      Entries: 1, Subgroups: 1
+📝 Prompt logged: 2025-11-08_09-49-45_taxonomy_mapping_pass1_c5bcf0f9047d.json
+📝 Response logged: 2025-11-08_09-49-50_taxonomy_mapping_pass1_c5bcf0f9047d_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.90)
+📝 Prompt logged: 2025-11-08_09-49-50_taxonomy_mapping_pass2_batch_93b545f47126.json
+📝 Response logged: 2025-11-08_09-49-51_taxonomy_mapping_pass2_batch_93b545f47126_RESPONSE.json
+      Pass 2 (batch of 1) → Peer-Reviewed Presentations (avg: 0.80)
+
+    [28] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-49-51_taxonomy_mapping_pass1_12e806716e40.json
+📝 Response logged: 2025-11-08_09-49-55_taxonomy_mapping_pass1_12e806716e40_RESPONSE.json
+        Pass 1 → Appendix / Other (0.85)
+
+  [29] Unknown
+      Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-49-55_taxonomy_mapping_pass1_c895c9ec24b4.json
+📝 Response logged: 2025-11-08_09-49-59_taxonomy_mapping_pass1_c895c9ec24b4_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-49-59_taxonomy_mapping_pass2_batch_38943280709a.json
+📝 Response logged: 2025-11-08_09-50-04_taxonomy_mapping_pass2_batch_38943280709a_RESPONSE.json
+      Pass 2 (batch of 4) → Abstracts & Conference Proceedings (avg: 0.90)
+
+  [30] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-50-04_taxonomy_mapping_pass1_ee3519fcc554.json
+📝 Response logged: 2025-11-08_09-50-05_taxonomy_mapping_pass1_ee3519fcc554_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-50-05_taxonomy_mapping_pass2_batch_b6a035465666.json
+📝 Response logged: 2025-11-08_09-50-08_taxonomy_mapping_pass2_batch_b6a035465666_RESPONSE.json
+      Pass 2 (batch of 1) → Abstracts & Conference Proceedings (avg: 0.90)
+
+  [31] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-50-08_taxonomy_mapping_pass1_48225f4d0b21.json
+📝 Response logged: 2025-11-08_09-50-10_taxonomy_mapping_pass1_48225f4d0b21_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-50-10_taxonomy_mapping_pass2_batch_8ef9551d5fa8.json
+📝 Response logged: 2025-11-08_09-50-11_taxonomy_mapping_pass2_batch_8ef9551d5fa8_RESPONSE.json
+      Pass 2 (batch of 1) → Submitted Abstracts/Presentations (avg: 0.90)
+
+  [32] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-50-11_taxonomy_mapping_pass1_74fdf949995a.json
+📝 Response logged: 2025-11-08_09-50-13_taxonomy_mapping_pass1_74fdf949995a_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-50-13_taxonomy_mapping_pass2_batch_f98d1b9db333.json
+📝 Response logged: 2025-11-08_09-50-16_taxonomy_mapping_pass2_batch_f98d1b9db333_RESPONSE.json
+      Pass 2 (batch of 1) → Invited Panels, Workshops, Symposia (avg: 0.90)
+
+  [33] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-50-16_taxonomy_mapping_pass1_7d4a75e0f5ac.json
+📝 Response logged: 2025-11-08_09-50-18_taxonomy_mapping_pass1_7d4a75e0f5ac_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-50-18_taxonomy_mapping_pass2_batch_a762db50fcba.json
+📝 Response logged: 2025-11-08_09-50-20_taxonomy_mapping_pass2_batch_a762db50fcba_RESPONSE.json
+      Pass 2 (batch of 1) → Invited Panels, Workshops, Symposia (avg: 0.90)
+
+  [34] Unknown
+      Entries: 21, Subgroups: 1
+📝 Prompt logged: 2025-11-08_09-50-20_taxonomy_mapping_pass1_336135873de1.json
+📝 Response logged: 2025-11-08_09-50-25_taxonomy_mapping_pass1_336135873de1_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-50-25_taxonomy_mapping_pass2_batch_dc6dbf9e9568.json
+📝 Response logged: 2025-11-08_09-50-38_taxonomy_mapping_pass2_batch_dc6dbf9e9568_RESPONSE.json
+      Pass 2 (batch of 21) → Abstracts & Conference Proceedings (avg: 0.90)
+
+    [35] Unknown
+        Entries: 17, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-50-38_taxonomy_mapping_pass1_05c908eb46fe.json
+📝 Response logged: 2025-11-08_09-50-41_taxonomy_mapping_pass1_05c908eb46fe_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-50-41_taxonomy_mapping_pass2_batch_feb5ad1b5b54.json
+📝 Response logged: 2025-11-08_09-50-53_taxonomy_mapping_pass2_batch_feb5ad1b5b54_RESPONSE.json
+        Pass 2 (batch of 17) → Invited Panels, Workshops, Symposia (avg: 0.90)
+
+  [36] Unknown
+      Entries: 1, Subgroups: 4
+📝 Prompt logged: 2025-11-08_09-50-53_taxonomy_mapping_pass1_e00ff9894078.json
+📝 Response logged: 2025-11-08_09-50-56_taxonomy_mapping_pass1_e00ff9894078_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-50-56_taxonomy_mapping_pass2_batch_5dc5d7714758.json
+📝 Response logged: 2025-11-08_09-50-58_taxonomy_mapping_pass2_batch_5dc5d7714758_RESPONSE.json
+      Pass 2 (batch of 1) → Invited Talks (avg: 0.90)
+
+    [37] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-50-58_taxonomy_mapping_pass1_37709c263eec.json
+📝 Response logged: 2025-11-08_09-51-01_taxonomy_mapping_pass1_37709c263eec_RESPONSE.json
+        Pass 1 → Appendix / Other (0.85)
+
+    [38] Unknown
+        Entries: 14, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-51-01_taxonomy_mapping_pass1_57d9ac330fc6.json
+📝 Response logged: 2025-11-08_09-51-04_taxonomy_mapping_pass1_57d9ac330fc6_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-51-04_taxonomy_mapping_pass2_batch_4143baae0957.json
+📝 Response logged: 2025-11-08_09-51-18_taxonomy_mapping_pass2_batch_4143baae0957_RESPONSE.json
+        Pass 2 (batch of 14) → Invited Panels, Workshops, Symposia (avg: 0.88)
+
+    [39] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-51-18_taxonomy_mapping_pass1_e1c1aa6f1118.json
+📝 Response logged: 2025-11-08_09-51-21_taxonomy_mapping_pass1_e1c1aa6f1118_RESPONSE.json
+        Pass 1 → Appendix / Other (0.85)
+
+    [40] Unknown
+        Entries: 7, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-51-21_taxonomy_mapping_pass1_1abb59a921f5.json
+📝 Response logged: 2025-11-08_09-51-27_taxonomy_mapping_pass1_1abb59a921f5_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.90)
+📝 Prompt logged: 2025-11-08_09-51-27_taxonomy_mapping_pass2_batch_b838b18ea576.json
+📝 Response logged: 2025-11-08_09-51-38_taxonomy_mapping_pass2_batch_b838b18ea576_RESPONSE.json
+        Pass 2 (batch of 7) → Invited Panels, Workshops, Symposia (avg: 0.89)
+
+  [41] Unknown
+      Entries: 0, Subgroups: 4
+📝 Prompt logged: 2025-11-08_09-51-38_taxonomy_mapping_pass1_d5d75cfecd90.json
+📝 Response logged: 2025-11-08_09-51-40_taxonomy_mapping_pass1_d5d75cfecd90_RESPONSE.json
+      Pass 1 → Professional Positions & Employment (0.95)
+
+    [42] Unknown
+        Entries: 6, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-51-40_taxonomy_mapping_pass1_c6b44bd99811.json
+📝 Response logged: 2025-11-08_09-51-43_taxonomy_mapping_pass1_c6b44bd99811_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-51-43_taxonomy_mapping_pass2_batch_1a7a32cd1ba0.json
+📝 Response logged: 2025-11-08_09-51-48_taxonomy_mapping_pass2_batch_1a7a32cd1ba0_RESPONSE.json
+        Pass 2 (batch of 6) → Past Academic/Clinical Positions (avg: 0.85)
+
+    [43] Unknown
+        Entries: 5, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-51-48_taxonomy_mapping_pass1_08b50a0a68dd.json
+📝 Response logged: 2025-11-08_09-51-51_taxonomy_mapping_pass1_08b50a0a68dd_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.95)
+        Pass 2 → Failed: No confusion info for parent: L
+
+    [44] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-51-51_taxonomy_mapping_pass1_820067804252.json
+📝 Response logged: 2025-11-08_09-51-54_taxonomy_mapping_pass1_820067804252_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-51-54_taxonomy_mapping_pass2_batch_6f256078d25e.json
+📝 Response logged: 2025-11-08_09-52-01_taxonomy_mapping_pass2_batch_6f256078d25e_RESPONSE.json
+        Pass 2 (batch of 4) → Leadership in Extramural Organizations (avg: 0.82)
+
+    [45] Unknown
+        Entries: 8, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-52-01_taxonomy_mapping_pass1_0cf127b8219d.json
+📝 Response logged: 2025-11-08_09-52-04_taxonomy_mapping_pass1_0cf127b8219d_RESPONSE.json
+        Pass 1 → Institutional Administrative Activities (0.85)
+
+  [46] Unknown
+      Entries: 0, Subgroups: 4
+📝 Prompt logged: 2025-11-08_09-52-04_taxonomy_mapping_pass1_f94b85655a6f.json
+📝 Response logged: 2025-11-08_09-52-06_taxonomy_mapping_pass1_f94b85655a6f_RESPONSE.json
+      Pass 1 → Educational Contributions (0.90)
+
+    [47] Unknown
+        Entries: 7, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-52-06_taxonomy_mapping_pass1_1e120e1b45ec.json
+📝 Response logged: 2025-11-08_09-52-09_taxonomy_mapping_pass1_1e120e1b45ec_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-52-09_taxonomy_mapping_pass2_batch_4be108940d84.json
+📝 Response logged: 2025-11-08_09-52-17_taxonomy_mapping_pass2_batch_4be108940d84_RESPONSE.json
+        Pass 2 (batch of 7) → Current Academic/Clinical Positions (avg: 0.84)
+
+    [48] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-52-17_taxonomy_mapping_pass1_b1efcd866de5.json
+📝 Response logged: 2025-11-08_09-52-19_taxonomy_mapping_pass1_b1efcd866de5_RESPONSE.json
+        Pass 1 → Educational Contributions (0.95)
+📝 Prompt logged: 2025-11-08_09-52-19_taxonomy_mapping_pass2_batch_f813fbdcec24.json
+📝 Response logged: 2025-11-08_09-52-24_taxonomy_mapping_pass2_batch_f813fbdcec24_RESPONSE.json
+        Pass 2 (batch of 4) → Didactic Teaching (courses taught) (avg: 1.00)
+
+    [49] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-52-24_taxonomy_mapping_pass1_35b71b76c878.json
+📝 Response logged: 2025-11-08_09-52-28_taxonomy_mapping_pass1_35b71b76c878_RESPONSE.json
+        Pass 1 → Educational Contributions (0.92)
+📝 Prompt logged: 2025-11-08_09-52-28_taxonomy_mapping_pass2_batch_1ae1359411af.json
+📝 Response logged: 2025-11-08_09-52-31_taxonomy_mapping_pass2_batch_1ae1359411af_RESPONSE.json
+        Pass 2 (batch of 2) → Didactic Teaching (courses taught) (avg: 0.95)
+
+    [50] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-52-31_taxonomy_mapping_pass1_0fd1319c3bb0.json
+📝 Response logged: 2025-11-08_09-52-34_taxonomy_mapping_pass1_0fd1319c3bb0_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.85)
+📝 Prompt logged: 2025-11-08_09-52-34_taxonomy_mapping_pass2_batch_baa887dc0a5f.json
+📝 Response logged: 2025-11-08_09-52-40_taxonomy_mapping_pass2_batch_baa887dc0a5f_RESPONSE.json
+        Pass 2 (batch of 4) → Current Academic/Clinical Positions (avg: 0.83)
+
+  [51] Unknown
+      Entries: 1, Subgroups: 6
+📝 Prompt logged: 2025-11-08_09-52-40_taxonomy_mapping_pass1_7b016d580061.json
+📝 Response logged: 2025-11-08_09-52-42_taxonomy_mapping_pass1_7b016d580061_RESPONSE.json
+      Pass 1 → Mentoring (0.95)
+📝 Prompt logged: 2025-11-08_09-52-42_taxonomy_mapping_pass2_batch_d6a0ac2bdb3d.json
+📝 Response logged: 2025-11-08_09-52-44_taxonomy_mapping_pass2_batch_d6a0ac2bdb3d_RESPONSE.json
+      Pass 2 (batch of 1) → Leadership & Mentoring Programs (avg: 0.90)
+
+    [52] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-52-44_taxonomy_mapping_pass1_bfed7df2f8b8.json
+📝 Response logged: 2025-11-08_09-52-48_taxonomy_mapping_pass1_bfed7df2f8b8_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-52-48_taxonomy_mapping_pass2_batch_0a8f7eb69102.json
+📝 Response logged: 2025-11-08_09-52-50_taxonomy_mapping_pass2_batch_0a8f7eb69102_RESPONSE.json
+        Pass 2 (batch of 1) → Leadership in Extramural Organizations (avg: 0.90)
+
+    [53] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-52-50_taxonomy_mapping_pass1_d724a05d58d5.json
+📝 Response logged: 2025-11-08_09-52-54_taxonomy_mapping_pass1_d724a05d58d5_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.85)
+📝 Prompt logged: 2025-11-08_09-52-54_taxonomy_mapping_pass2_batch_f4e5ed50c5be.json
+📝 Response logged: 2025-11-08_09-52-56_taxonomy_mapping_pass2_batch_f4e5ed50c5be_RESPONSE.json
+        Pass 2 (batch of 1) → Current Academic/Clinical Positions (avg: 0.90)
+
+    [54] Unknown
+        Entries: 6, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-52-56_taxonomy_mapping_pass1_0bb6de86a834.json
+📝 Response logged: 2025-11-08_09-52-58_taxonomy_mapping_pass1_0bb6de86a834_RESPONSE.json
+        Pass 1 → Mentoring (0.85)
+📝 Prompt logged: 2025-11-08_09-52-58_taxonomy_mapping_pass2_batch_33a5f4478c0d.json
+📝 Response logged: 2025-11-08_09-53-04_taxonomy_mapping_pass2_batch_33a5f4478c0d_RESPONSE.json
+        Pass 2 (batch of 6) → Leadership & Mentoring Programs (avg: 0.83)
+
+    [55] Unknown
+        Entries: 1, Subgroups: 1
+📝 Prompt logged: 2025-11-08_09-53-04_taxonomy_mapping_pass1_fe348d30c2c7.json
+📝 Response logged: 2025-11-08_09-53-07_taxonomy_mapping_pass1_fe348d30c2c7_RESPONSE.json
+        Pass 1 → Honors and Awards (0.85)
+
+      [56] Unknown
+          Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-53-08_taxonomy_mapping_pass1_433b313b95cb.json
+📝 Response logged: 2025-11-08_09-53-11_taxonomy_mapping_pass1_433b313b95cb_RESPONSE.json
+          Pass 1 → Mentoring (0.85)
+📝 Prompt logged: 2025-11-08_09-53-11_taxonomy_mapping_pass2_batch_52634dbf1337.json
+📝 Response logged: 2025-11-08_09-53-13_taxonomy_mapping_pass2_batch_52634dbf1337_RESPONSE.json
+          Pass 2 (batch of 2) → Current Mentees (Research) (avg: 0.80)
+
+    [57] Unknown
+        Entries: 1, Subgroups: 2
+📝 Prompt logged: 2025-11-08_09-53-13_taxonomy_mapping_pass1_42e0333ea252.json
+📝 Response logged: 2025-11-08_09-53-17_taxonomy_mapping_pass1_42e0333ea252_RESPONSE.json
+        Pass 1 → Education (0.85)
+📝 Prompt logged: 2025-11-08_09-53-17_taxonomy_mapping_pass2_batch_2b66615fad16.json
+📝 Response logged: 2025-11-08_09-53-20_taxonomy_mapping_pass2_batch_2b66615fad16_RESPONSE.json
+        Pass 2 (batch of 1) → Master's Degree (MA, MS, MPH, MBA) (avg: 0.90)
+
+      [58] Unknown
+          Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-53-20_taxonomy_mapping_pass1_db7bf0e5f605.json
+📝 Response logged: 2025-11-08_09-53-23_taxonomy_mapping_pass1_db7bf0e5f605_RESPONSE.json
+          Pass 1 → Institutional Leadership Activities (0.85)
+📝 Prompt logged: 2025-11-08_09-53-23_taxonomy_mapping_pass2_batch_43ad1e4d79cd.json
+📝 Response logged: 2025-11-08_09-53-26_taxonomy_mapping_pass2_batch_43ad1e4d79cd_RESPONSE.json
+          Pass 2 (batch of 1) → Institutional Leadership Activities (executive) (avg: 1.00)
+
+      [59] Unknown
+          Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-53-26_taxonomy_mapping_pass1_1c4b3a37ba2b.json
+📝 Response logged: 2025-11-08_09-53-29_taxonomy_mapping_pass1_1c4b3a37ba2b_RESPONSE.json
+          Pass 1 → Research (0.85)
+📝 Prompt logged: 2025-11-08_09-53-29_taxonomy_mapping_pass2_batch_df127f3d6ee8.json
+📝 Response logged: 2025-11-08_09-53-31_taxonomy_mapping_pass2_batch_df127f3d6ee8_RESPONSE.json
+          Pass 2 (batch of 1) → Research Activities (Summary) (avg: 0.90)
+
+    [60] Unknown
+        Entries: 1, Subgroups: 2
+📝 Prompt logged: 2025-11-08_09-53-31_taxonomy_mapping_pass1_a7fcbec078b5.json
+📝 Response logged: 2025-11-08_09-53-33_taxonomy_mapping_pass1_a7fcbec078b5_RESPONSE.json
+        Pass 1 → Mentoring (0.95)
+📝 Prompt logged: 2025-11-08_09-53-33_taxonomy_mapping_pass2_batch_6d9fd3fa1ca2.json
+📝 Response logged: 2025-11-08_09-53-35_taxonomy_mapping_pass2_batch_6d9fd3fa1ca2_RESPONSE.json
+        Pass 2 (batch of 1) → Current Mentees (Research) (avg: 0.90)
+
+      [61] Unknown
+          Entries: 9, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-53-35_taxonomy_mapping_pass1_de1df5f5f16a.json
+📝 Response logged: 2025-11-08_09-53-39_taxonomy_mapping_pass1_de1df5f5f16a_RESPONSE.json
+          Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-53-39_taxonomy_mapping_pass2_batch_7f422d5d5d40.json
+📝 Response logged: 2025-11-08_09-53-49_taxonomy_mapping_pass2_batch_7f422d5d5d40_RESPONSE.json
+          Pass 2 (batch of 9) → Current Academic/Clinical Positions (avg: 0.87)
+
+      [62] Unknown
+          Entries: 16, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-53-49_taxonomy_mapping_pass1_3c4013feaf20.json
+📝 Response logged: 2025-11-08_09-53-51_taxonomy_mapping_pass1_3c4013feaf20_RESPONSE.json
+          Pass 1 → Honors and Awards (0.85)
+
+  [63] Unknown
+      Entries: 0, Subgroups: 7
+📝 Prompt logged: 2025-11-08_09-53-51_taxonomy_mapping_pass1_1f68ebd47066.json
+📝 Response logged: 2025-11-08_09-53-54_taxonomy_mapping_pass1_1f68ebd47066_RESPONSE.json
+      Pass 1 → Research (0.85)
+
+    [64] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-53-54_taxonomy_mapping_pass1_a0ad433ebd6a.json
+📝 Response logged: 2025-11-08_09-53-58_taxonomy_mapping_pass1_a0ad433ebd6a_RESPONSE.json
+        Pass 1 → Research (0.85)
+📝 Prompt logged: 2025-11-08_09-53-58_taxonomy_mapping_pass2_batch_5bc3c1ef0784.json
+📝 Response logged: 2025-11-08_09-54-03_taxonomy_mapping_pass2_batch_5bc3c1ef0784_RESPONSE.json
+        Pass 2 (batch of 3) → Research Activities (Summary) (avg: 0.93)
+
+    [65] Unknown
+        Entries: 1, Subgroups: 3
+📝 Prompt logged: 2025-11-08_09-54-03_taxonomy_mapping_pass1_6d374cd66c02.json
+📝 Response logged: 2025-11-08_09-54-06_taxonomy_mapping_pass1_6d374cd66c02_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-54-06_taxonomy_mapping_pass2_batch_0e3e44811664.json
+📝 Response logged: 2025-11-08_09-54-08_taxonomy_mapping_pass2_batch_0e3e44811664_RESPONSE.json
+        Pass 2 (batch of 1) → Reviews & Editorials (synthesis, commentary) (avg: 0.90)
+
+      [66] Unknown
+          Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-54-08_taxonomy_mapping_pass1_21c6a96ddbb3.json
+📝 Response logged: 2025-11-08_09-54-10_taxonomy_mapping_pass1_21c6a96ddbb3_RESPONSE.json
+          Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-54-10_taxonomy_mapping_pass2_batch_94024ef344e3.json
+📝 Response logged: 2025-11-08_09-54-13_taxonomy_mapping_pass2_batch_94024ef344e3_RESPONSE.json
+          Pass 2 (batch of 2) → Reviews & Editorials (synthesis, commentary) (avg: 0.90)
+
+      [67] Unknown
+          Entries: 11, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-54-13_taxonomy_mapping_pass1_5335ad5de906.json
+📝 Response logged: 2025-11-08_09-54-16_taxonomy_mapping_pass1_5335ad5de906_RESPONSE.json
+          Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_09-54-16_taxonomy_mapping_pass2_batch_570d9d2e2f0a.json
+📝 Response logged: 2025-11-08_09-54-28_taxonomy_mapping_pass2_batch_570d9d2e2f0a_RESPONSE.json
+          Pass 2 (batch of 11) → Reviews & Editorials (synthesis, commentary) (avg: 0.90)
+
+      [68] Unknown
+          Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-54-28_taxonomy_mapping_pass1_7156c2d1614d.json
+📝 Response logged: 2025-11-08_09-54-31_taxonomy_mapping_pass1_7156c2d1614d_RESPONSE.json
+          Pass 1 → Professional Organizations and Society Memberships (0.95)
+
+    [69] Unknown
+        Entries: 6, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-54-31_taxonomy_mapping_pass1_93092b98fd2f.json
+📝 Response logged: 2025-11-08_09-54-33_taxonomy_mapping_pass1_93092b98fd2f_RESPONSE.json
+        Pass 1 → Education (0.95)
+📝 Prompt logged: 2025-11-08_09-54-33_taxonomy_mapping_pass2_batch_b51e7fc199af.json
+📝 Response logged: 2025-11-08_09-54-39_taxonomy_mapping_pass2_batch_b51e7fc199af_RESPONSE.json
+        Pass 2 (batch of 6) → Undergraduate Degree (avg: 0.90)
+
+    [70] Unknown
+        Entries: 16, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-54-39_taxonomy_mapping_pass1_57f30a990abc.json
+📝 Response logged: 2025-11-08_09-54-42_taxonomy_mapping_pass1_57f30a990abc_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.95)
+📝 Prompt logged: 2025-11-08_09-54-42_taxonomy_mapping_pass2_batch_30d988b786e0.json
+📝 Response logged: 2025-11-08_09-54-53_taxonomy_mapping_pass2_batch_30d988b786e0_RESPONSE.json
+        Pass 2 (batch of 16) → Professional Organizations & Society Memberships (avg: 0.93)
+
+    [71] Unknown
+        Entries: 1, Subgroups: 2
+📝 Prompt logged: 2025-11-08_09-54-53_taxonomy_mapping_pass1_799b1e778043.json
+📝 Response logged: 2025-11-08_09-54-55_taxonomy_mapping_pass1_799b1e778043_RESPONSE.json
+        Pass 1 → Institutional Administrative Activities (0.95)
+
+      [72] Unknown
+          Entries: 12, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-54-55_taxonomy_mapping_pass1_4b1a36a22614.json
+📝 Response logged: 2025-11-08_09-54-58_taxonomy_mapping_pass1_4b1a36a22614_RESPONSE.json
+          Pass 1 → Institutional Leadership Activities (0.90)
+📝 Prompt logged: 2025-11-08_09-54-58_taxonomy_mapping_pass2_batch_b4085d0cb2cf.json
+📝 Response logged: 2025-11-08_09-55-11_taxonomy_mapping_pass2_batch_b4085d0cb2cf_RESPONSE.json
+          Pass 2 (batch of 12) → Institutional Leadership Activities (executive) (avg: 0.75)
+
+      [73] Unknown
+          Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-55-11_taxonomy_mapping_pass1_fb5adb12af2c.json
+📝 Response logged: 2025-11-08_09-55-15_taxonomy_mapping_pass1_fb5adb12af2c_RESPONSE.json
+          Pass 1 → Institutional Administrative Activities (0.95)
+
+    [74] Unknown
+        Entries: 1, Subgroups: 4
+📝 Prompt logged: 2025-11-08_09-55-15_taxonomy_mapping_pass1_217b91afc864.json
+📝 Response logged: 2025-11-08_09-55-18_taxonomy_mapping_pass1_217b91afc864_RESPONSE.json
+        Pass 1 → Institutional Administrative Activities (0.95)
+
+      [75] Unknown
+          Entries: 9, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-55-18_taxonomy_mapping_pass1_53a45d5bb219.json
+📝 Response logged: 2025-11-08_09-55-21_taxonomy_mapping_pass1_53a45d5bb219_RESPONSE.json
+          Pass 1 → Institutional Administrative Activities (0.95)
+
+      [76] Unknown
+          Entries: 16, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-55-21_taxonomy_mapping_pass1_29f4470e1fd9.json
+📝 Response logged: 2025-11-08_09-55-24_taxonomy_mapping_pass1_29f4470e1fd9_RESPONSE.json
+          Pass 1 → Institutional Administrative Activities (0.95)
+
+      [77] Unknown
+          Entries: 7, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-55-24_taxonomy_mapping_pass1_841c68e5b433.json
+📝 Response logged: 2025-11-08_09-55-28_taxonomy_mapping_pass1_841c68e5b433_RESPONSE.json
+          Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-55-28_taxonomy_mapping_pass2_batch_462cfd56a581.json
+📝 Response logged: 2025-11-08_09-55-37_taxonomy_mapping_pass2_batch_462cfd56a581_RESPONSE.json
+          Pass 2 (batch of 7) → Manuscript Reviewer / Abstract Reviewer (avg: 0.90)
+
+      [78] Unknown
+          Entries: 7, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-55-37_taxonomy_mapping_pass1_7cc246a2e163.json
+📝 Response logged: 2025-11-08_09-55-39_taxonomy_mapping_pass1_7cc246a2e163_RESPONSE.json
+          Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-55-39_taxonomy_mapping_pass2_batch_43e71ce33f00.json
+📝 Response logged: 2025-11-08_09-55-48_taxonomy_mapping_pass2_batch_43e71ce33f00_RESPONSE.json
+          Pass 2 (batch of 7) → Invited Panels, Workshops, Symposia (avg: 0.83)
+
+    [79] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-55-48_taxonomy_mapping_pass1_ae99e7fe7f8b.json
+📝 Response logged: 2025-11-08_09-55-51_taxonomy_mapping_pass1_ae99e7fe7f8b_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.95)
+
+================================================================================
+MAPPING RESULTS (V2)
+================================================================================
+Classified sections: 79
+  High confidence (≥0.85): 79 (100.0%)
+Average confidence: 0.921
+
+API Calls:
+  Pass 1 (parent): 79
+  Pass 2 (child): 55
+  Total: 134
+
+Token Usage:
+  Prompt: 182,070
+  Completion: 19,737
+  Total: 201,807
+
+✓ Results saved to: validation_CV_2024_Dabelko-Schoeny_with_signals_v3.json
+
+======================================================================
+GENERATING AUDIT REPORT
+======================================================================
+
+✓ Audit report saved to: validation_CV_2024_Dabelko-Schoeny_with_signals_v3_AUDIT.json
+    ✓ Mapped: 126 entries, 21.4% hint coverage, avg conf=0.921
+
+================================================================================
+Processing: Almasri (2004)
+================================================================================
+  [1/4] Segmentation exists, skipping...
+  [2/4] Repairing segmentation...
+    ✓ Repaired: 90 → 89 top-level groups
+  [3/4] Preprocessing...
+    ✓ Preprocessed: 89 content groups, 0 headers preserved
+  [4/4] Mapping with v3 signals...
+
+======================================================================
+TESTING COMPREHENSIVE SIGNAL LIBRARY
+======================================================================
+Input: validation_CV_2004_Almasri_preprocessed.json
+Output: validation_CV_2004_Almasri_with_signals_v3.json
+
+======================================================================
+PRE-ANALYSIS: Signal Detection
+======================================================================
+
+Signal Detection Summary:
+  Total entries: 186
+  Entries with hints: 46 (24.7%)
+
+Signal Fire Counts (sorted by frequency):
+  doi                             19 ( 10.2%)
+    Ex1: [Unknown] Hugenberg G, Stallons J, Brockoff K, Gingras M, Smith C, Yardley D, Ayeni OR, Almasri M. Clinical Commentary: A Criteria-Based Testing Protocol for Re...
+    Ex2: [Unknown] DeBernardis DA, Zhang T, Duong A, Fleckenstein CM, Almasri M, Hasan SS. Total Shoulder Arthroplasty in Patients Aged 80 Years and Older: A Systematic ...
+  pmid                            16 (  8.6%)
+    Ex1: [Unknown] DeBernardis DA, Zhang T, Duong A, Fleckenstein CM, Almasri M, Hasan SS. Total Shoulder Arthroplasty in Patients Aged 80 Years and Older: A Systematic ...
+    Ex2: [Unknown] Qiu RY, Fitzpatrick DWD, Cohen D, Kay J, Almasri M, de Sa DL. MRI as the optimal imaging modality for assessment and management of osteochondral fract...
+  location_tail                   12 (  6.5%)
+    Ex1: [Unknown] Magna Cum Laude, Honors BSc Biochemistry  			Aug 2005 – May 2009	University of Ottawa, Ottawa, Ontario
+    Ex2: [Unknown] Almasri M, Montpetit, K, Hamdy R, Fassier F. Reviewing Complication Rates of Fassier-Duval Femoral Rodding in 86 Patients with Osteogenesis Imperfecta...
+  award_honor                     12 (  6.5%)
+    Ex1: [Unknown] 9 citations (Google Scholar), 73 reads (Research Gate), 4.5 Research Interest.
+    Ex2: [Unknown] 3 citations (Google Scholar), 25 reads (Research Gate), 1.2 Research Interest (Research Gate), It has been Tweeted 1 time  and has 18 readers on Mende...
+  citation_like                    6 (  3.2%)
+    Ex1: [Unknown] Almasri M, Ayeni OR. Editorial Commentary: Hip Arthroscopy Outcomes in Older Patients Can Equal Outcomes in Younger Patients With Proper Surgical Indi...
+    Ex2: [Unknown] Wang CK, Cohen D, Kay J, Almasri M, Simunovic N, Cardenas-Nylander C, Ranawat AS, Ayeni OR. The Effect of Femoral and Acetabular Version on Outcomes F...
+  employment_pattern               2 (  1.1%)
+    Ex1: [Unknown] Cincinnati Bengals NFL – Athlete Evaluation in Clinic & Free Agent 	           2019-2020
+    Ex2: [Unknown] Aldhuhoori S, Almasri M, Nicholls SG, Pollock JW, Rollins M, Howard L,
+Lapner P. What outcomes are important in the recovery from acromio-clavicular
+(...
+  unit_acronym                     1 (  0.5%)
+    Ex1: [Unknown] As a senior undergraduate student in Biochemistry, I was recruited to be a Teaching Assistant at the Biochemistry Microbiology and Immunology (BMI) De...
+  teaching_role                    1 (  0.5%)
+    Ex1: [Unknown] As a senior undergraduate student in Biochemistry, I was recruited to be a Teaching Assistant at the Biochemistry Microbiology and Immunology (BMI) De...
+
+======================================================================
+RUNNING TAXONOMY MAPPING WITH ALL SIGNALS
+======================================================================
+================================================================================
+TWO-PASS HIERARCHICAL TAXONOMY MAPPING (V2)
+================================================================================
+Input: validation_CV_2004_Almasri_preprocessed.json
+Strategy: Pass 1 (20 parents) → Router → Pass 2 (3-9 children)
+
+✓ Loaded segmented CV
+
+Processing 89 top-level groups...
+
+  [1] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-55-51_taxonomy_mapping_pass1_a53d4d308ec2.json
+📝 Response logged: 2025-11-08_09-55-53_taxonomy_mapping_pass1_a53d4d308ec2_RESPONSE.json
+      Pass 1 → Personal Data / Contact Information (0.95)
+      Router → Skip Pass 2 (direct to extraction)
+
+  [2] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-55-53_taxonomy_mapping_pass1_19712ee61e48.json
+📝 Response logged: 2025-11-08_09-55-56_taxonomy_mapping_pass1_19712ee61e48_RESPONSE.json
+      Pass 1 → Appendix / Other (0.85)
+
+  [3] Unknown
+      Entries: 1, Subgroups: 1
+📝 Prompt logged: 2025-11-08_09-55-56_taxonomy_mapping_pass1_270a27ee38c2.json
+📝 Response logged: 2025-11-08_09-55-59_taxonomy_mapping_pass1_270a27ee38c2_RESPONSE.json
+      Pass 1 → Personal Data / Contact Information (0.90)
+      Router → Skip Pass 2 (direct to extraction)
+
+    [4] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-55-59_taxonomy_mapping_pass1_08f98ed9648e.json
+📝 Response logged: 2025-11-08_09-56-02_taxonomy_mapping_pass1_08f98ed9648e_RESPONSE.json
+        Pass 1 → Appendix / Other (0.85)
+
+  [5] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-02_taxonomy_mapping_pass1_383d054ed30f.json
+📝 Response logged: 2025-11-08_09-56-04_taxonomy_mapping_pass1_383d054ed30f_RESPONSE.json
+      Pass 1 → Personal Data / Contact Information (0.95)
+      Router → Skip Pass 2 (direct to extraction)
+
+  [6] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-04_taxonomy_mapping_pass1_a2f92298c749.json
+📝 Response logged: 2025-11-08_09-56-06_taxonomy_mapping_pass1_a2f92298c749_RESPONSE.json
+      Pass 1 → Personal Data / Contact Information (0.95)
+      Router → Skip Pass 2 (direct to extraction)
+
+  [7] Unknown
+      Entries: 1, Subgroups: 5
+📝 Prompt logged: 2025-11-08_09-56-06_taxonomy_mapping_pass1_16f2d7d0a2d8.json
+📝 Response logged: 2025-11-08_09-56-09_taxonomy_mapping_pass1_16f2d7d0a2d8_RESPONSE.json
+      Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-56-09_taxonomy_mapping_pass2_batch_e806c8a5cb1e.json
+📝 Response logged: 2025-11-08_09-56-11_taxonomy_mapping_pass2_batch_e806c8a5cb1e_RESPONSE.json
+      Pass 2 (batch of 1) → Current Academic/Clinical Positions (avg: 0.90)
+
+    [8] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-11_taxonomy_mapping_pass1_a23e7c1e7728.json
+📝 Response logged: 2025-11-08_09-56-14_taxonomy_mapping_pass1_a23e7c1e7728_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-56-14_taxonomy_mapping_pass2_batch_1d43c7266a23.json
+📝 Response logged: 2025-11-08_09-56-16_taxonomy_mapping_pass2_batch_1d43c7266a23_RESPONSE.json
+        Pass 2 (batch of 1) → Current Academic/Clinical Positions (avg: 0.95)
+
+    [9] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-16_taxonomy_mapping_pass1_b237195e5ad2.json
+📝 Response logged: 2025-11-08_09-56-19_taxonomy_mapping_pass1_b237195e5ad2_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.85)
+📝 Prompt logged: 2025-11-08_09-56-19_taxonomy_mapping_pass2_batch_ed8118aa6cac.json
+📝 Response logged: 2025-11-08_09-56-22_taxonomy_mapping_pass2_batch_ed8118aa6cac_RESPONSE.json
+        Pass 2 (batch of 2) → Current Academic/Clinical Positions (avg: 0.90)
+
+    [10] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-22_taxonomy_mapping_pass1_dffa44bac6dd.json
+📝 Response logged: 2025-11-08_09-56-24_taxonomy_mapping_pass1_dffa44bac6dd_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-56-24_taxonomy_mapping_pass2_batch_0d8ab91f52b3.json
+📝 Response logged: 2025-11-08_09-56-27_taxonomy_mapping_pass2_batch_0d8ab91f52b3_RESPONSE.json
+        Pass 2 (batch of 2) → Current Academic/Clinical Positions (avg: 0.70)
+
+    [11] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-27_taxonomy_mapping_pass1_f08fcbf17329.json
+📝 Response logged: 2025-11-08_09-56-29_taxonomy_mapping_pass1_f08fcbf17329_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-56-29_taxonomy_mapping_pass2_batch_a44ec3895d81.json
+📝 Response logged: 2025-11-08_09-56-31_taxonomy_mapping_pass2_batch_a44ec3895d81_RESPONSE.json
+        Pass 2 (batch of 1) → Past Academic/Clinical Positions (avg: 0.90)
+
+    [12] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-31_taxonomy_mapping_pass1_399c27753f86.json
+📝 Response logged: 2025-11-08_09-56-33_taxonomy_mapping_pass1_399c27753f86_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_09-56-33_taxonomy_mapping_pass2_batch_b849bf6d09d6.json
+📝 Response logged: 2025-11-08_09-56-36_taxonomy_mapping_pass2_batch_b849bf6d09d6_RESPONSE.json
+        Pass 2 (batch of 1) → Past Academic/Clinical Positions (avg: 0.90)
+
+  [13] Unknown
+      Entries: 1, Subgroups: 4
+📝 Prompt logged: 2025-11-08_09-56-36_taxonomy_mapping_pass1_80b12fa1f839.json
+📝 Response logged: 2025-11-08_09-56-39_taxonomy_mapping_pass1_80b12fa1f839_RESPONSE.json
+      Pass 1 → Postdoctoral Training (0.85)
+      Pass 2 → Failed: No confusion info for parent: C
+
+    [14] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-39_taxonomy_mapping_pass1_3d499230e113.json
+📝 Response logged: 2025-11-08_09-56-41_taxonomy_mapping_pass1_3d499230e113_RESPONSE.json
+        Pass 1 → Postdoctoral Training (0.95)
+        Pass 2 → Failed: No confusion info for parent: C
+
+    [15] Unknown
+        Entries: 8, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-41_taxonomy_mapping_pass1_b47146895a8b.json
+📝 Response logged: 2025-11-08_09-56-44_taxonomy_mapping_pass1_b47146895a8b_RESPONSE.json
+        Pass 1 → Institutional Administrative Activities (0.85)
+
+    [16] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-44_taxonomy_mapping_pass1_8c57043cf43a.json
+📝 Response logged: 2025-11-08_09-56-47_taxonomy_mapping_pass1_8c57043cf43a_RESPONSE.json
+        Pass 1 → Postdoctoral Training (0.95)
+        Pass 2 → Failed: No confusion info for parent: C
+
+    [17] Unknown
+        Entries: 5, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-47_taxonomy_mapping_pass1_5a88a4fc1a91.json
+📝 Response logged: 2025-11-08_09-56-49_taxonomy_mapping_pass1_5a88a4fc1a91_RESPONSE.json
+        Pass 1 → Honors and Awards (0.95)
+
+  [18] Unknown
+      Entries: 4, Subgroups: 4
+📝 Prompt logged: 2025-11-08_09-56-49_taxonomy_mapping_pass1_009179ae7623.json
+📝 Response logged: 2025-11-08_09-56-52_taxonomy_mapping_pass1_009179ae7623_RESPONSE.json
+      Pass 1 → Honors and Awards (0.95)
+
+    [19] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-52_taxonomy_mapping_pass1_8d83eacfd800.json
+📝 Response logged: 2025-11-08_09-56-55_taxonomy_mapping_pass1_8d83eacfd800_RESPONSE.json
+        Pass 1 → Postdoctoral Training (0.90)
+        Pass 2 → Failed: No confusion info for parent: C
+
+    [20] Unknown
+        Entries: 5, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-55_taxonomy_mapping_pass1_6e566e7aa2b5.json
+📝 Response logged: 2025-11-08_09-56-59_taxonomy_mapping_pass1_6e566e7aa2b5_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.85)
+        Pass 2 → Failed: No confusion info for parent: L
+
+    [21] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-56-59_taxonomy_mapping_pass1_85138eff80ee.json
+📝 Response logged: 2025-11-08_09-57-00_taxonomy_mapping_pass1_85138eff80ee_RESPONSE.json
+        Pass 1 → Education (0.95)
+📝 Prompt logged: 2025-11-08_09-57-00_taxonomy_mapping_pass2_batch_0b0135051228.json
+📝 Response logged: 2025-11-08_09-57-03_taxonomy_mapping_pass2_batch_0b0135051228_RESPONSE.json
+        Pass 2 (batch of 1) → Doctoral Degree (PhD, MD, DrPH, etc.) (avg: 1.00)
+
+    [22] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-03_taxonomy_mapping_pass1_ca4ccf63ec28.json
+📝 Response logged: 2025-11-08_09-57-06_taxonomy_mapping_pass1_ca4ccf63ec28_RESPONSE.json
+        Pass 1 → Education (0.85)
+📝 Prompt logged: 2025-11-08_09-57-06_taxonomy_mapping_pass2_batch_85155088d05a.json
+📝 Response logged: 2025-11-08_09-57-09_taxonomy_mapping_pass2_batch_85155088d05a_RESPONSE.json
+        Pass 2 (batch of 3) → Education YOU received (avg: 0.80)
+
+  [23] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-09_taxonomy_mapping_pass1_bb8c385e0211.json
+📝 Response logged: 2025-11-08_09-57-11_taxonomy_mapping_pass1_bb8c385e0211_RESPONSE.json
+      Pass 1 → Honors and Awards (0.95)
+
+  [24] Unknown
+      Entries: 1, Subgroups: 5
+📝 Prompt logged: 2025-11-08_09-57-11_taxonomy_mapping_pass1_96d9ae555e77.json
+📝 Response logged: 2025-11-08_09-57-13_taxonomy_mapping_pass1_96d9ae555e77_RESPONSE.json
+      Pass 1 → Licensure and Certification (0.95)
+      Pass 2 → Failed: No confusion info for parent: F
+
+    [25] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-13_taxonomy_mapping_pass1_96dafc8039b6.json
+📝 Response logged: 2025-11-08_09-57-15_taxonomy_mapping_pass1_96dafc8039b6_RESPONSE.json
+        Pass 1 → Licensure and Certification (0.95)
+        Pass 2 → Failed: No confusion info for parent: F
+
+    [26] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-15_taxonomy_mapping_pass1_18de4686098b.json
+📝 Response logged: 2025-11-08_09-57-17_taxonomy_mapping_pass1_18de4686098b_RESPONSE.json
+        Pass 1 → Licensure and Certification (0.95)
+        Pass 2 → Failed: No confusion info for parent: F
+
+    [27] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-17_taxonomy_mapping_pass1_69e40473b51a.json
+📝 Response logged: 2025-11-08_09-57-20_taxonomy_mapping_pass1_69e40473b51a_RESPONSE.json
+        Pass 1 → Licensure and Certification (0.95)
+        Pass 2 → Failed: No confusion info for parent: F
+
+    [28] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-20_taxonomy_mapping_pass1_8709eb64b160.json
+📝 Response logged: 2025-11-08_09-57-21_taxonomy_mapping_pass1_8709eb64b160_RESPONSE.json
+        Pass 1 → Licensure and Certification (0.95)
+        Pass 2 → Failed: No confusion info for parent: F
+
+    [29] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-21_taxonomy_mapping_pass1_96bdf74f0fc3.json
+📝 Response logged: 2025-11-08_09-57-23_taxonomy_mapping_pass1_96bdf74f0fc3_RESPONSE.json
+        Pass 1 → Licensure and Certification (0.95)
+        Pass 2 → Failed: No confusion info for parent: F
+
+  [30] Unknown
+      Entries: 1, Subgroups: 1
+📝 Prompt logged: 2025-11-08_09-57-23_taxonomy_mapping_pass1_33cd445b80b9.json
+📝 Response logged: 2025-11-08_09-57-24_taxonomy_mapping_pass1_33cd445b80b9_RESPONSE.json
+      Pass 1 → Licensure and Certification (0.95)
+      Pass 2 → Failed: No confusion info for parent: F
+
+    [31] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-24_taxonomy_mapping_pass1_a09f9f0627b3.json
+📝 Response logged: 2025-11-08_09-57-27_taxonomy_mapping_pass1_a09f9f0627b3_RESPONSE.json
+        Pass 1 → Licensure and Certification (0.85)
+        Pass 2 → Failed: No confusion info for parent: F
+
+  [32] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-27_taxonomy_mapping_pass1_d0b4989a8941.json
+📝 Response logged: 2025-11-08_09-57-29_taxonomy_mapping_pass1_d0b4989a8941_RESPONSE.json
+      Pass 1 → Licensure and Certification (0.95)
+      Pass 2 → Failed: No confusion info for parent: F
+
+  [33] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-29_taxonomy_mapping_pass1_9111692af17c.json
+📝 Response logged: 2025-11-08_09-57-31_taxonomy_mapping_pass1_9111692af17c_RESPONSE.json
+      Pass 1 → Licensure and Certification (0.95)
+      Pass 2 → Failed: No confusion info for parent: F
+
+  [34] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-31_taxonomy_mapping_pass1_d403041c19b5.json
+📝 Response logged: 2025-11-08_09-57-33_taxonomy_mapping_pass1_d403041c19b5_RESPONSE.json
+      Pass 1 → Licensure and Certification (0.95)
+      Pass 2 → Failed: No confusion info for parent: F
+
+  [35] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-33_taxonomy_mapping_pass1_732c6e2b6d24.json
+📝 Response logged: 2025-11-08_09-57-38_taxonomy_mapping_pass1_732c6e2b6d24_RESPONSE.json
+      Pass 1 → Licensure and Certification (0.95)
+      Pass 2 → Failed: No confusion info for parent: F
+
+  [36] Unknown
+      Entries: 1, Subgroups: 2
+📝 Prompt logged: 2025-11-08_09-57-38_taxonomy_mapping_pass1_45fbd95d51f1.json
+📝 Response logged: 2025-11-08_09-57-41_taxonomy_mapping_pass1_45fbd95d51f1_RESPONSE.json
+      Pass 1 → Appendix / Other (0.85)
+
+    [37] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-41_taxonomy_mapping_pass1_2ce28b13b051.json
+📝 Response logged: 2025-11-08_09-57-44_taxonomy_mapping_pass1_2ce28b13b051_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-57-44_taxonomy_mapping_pass2_batch_3406c2a12abd.json
+📝 Response logged: 2025-11-08_09-57-46_taxonomy_mapping_pass2_batch_3406c2a12abd_RESPONSE.json
+        Pass 2 (batch of 1) → Professional Organizations & Society Memberships (avg: 0.90)
+
+    [38] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-46_taxonomy_mapping_pass1_936d06b477e3.json
+📝 Response logged: 2025-11-08_09-57-47_taxonomy_mapping_pass1_936d06b477e3_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-57-47_taxonomy_mapping_pass2_batch_7289da5999a4.json
+📝 Response logged: 2025-11-08_09-57-49_taxonomy_mapping_pass2_batch_7289da5999a4_RESPONSE.json
+        Pass 2 (batch of 1) → Invited Panels, Workshops, Symposia (avg: 0.80)
+
+  [39] Unknown
+      Entries: 1, Subgroups: 2
+📝 Prompt logged: 2025-11-08_09-57-49_taxonomy_mapping_pass1_e82056b97145.json
+📝 Response logged: 2025-11-08_09-57-52_taxonomy_mapping_pass1_e82056b97145_RESPONSE.json
+      Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-57-52_taxonomy_mapping_pass2_batch_7e4cb9612472.json
+📝 Response logged: 2025-11-08_09-57-55_taxonomy_mapping_pass2_batch_7e4cb9612472_RESPONSE.json
+      Pass 2 (batch of 1) → Professional Organizations & Society Memberships (avg: 0.80)
+
+    [40] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-57-55_taxonomy_mapping_pass1_6c3d2d988568.json
+📝 Response logged: 2025-11-08_09-57-58_taxonomy_mapping_pass1_6c3d2d988568_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-57-58_taxonomy_mapping_pass2_batch_1e8344b4bf80.json
+📝 Response logged: 2025-11-08_09-58-02_taxonomy_mapping_pass2_batch_1e8344b4bf80_RESPONSE.json
+        Pass 2 (batch of 2) → Service on Boards and/or Committees (avg: 0.85)
+
+    [41] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-58-02_taxonomy_mapping_pass1_a3ec9082b7e9.json
+📝 Response logged: 2025-11-08_09-58-05_taxonomy_mapping_pass1_a3ec9082b7e9_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-58-05_taxonomy_mapping_pass2_batch_19d31e483c9e.json
+📝 Response logged: 2025-11-08_09-58-07_taxonomy_mapping_pass2_batch_19d31e483c9e_RESPONSE.json
+        Pass 2 (batch of 1) → Professional Organizations & Society Memberships (avg: 0.90)
+
+  [42] Unknown
+      Entries: 1, Subgroups: 4
+📝 Prompt logged: 2025-11-08_09-58-07_taxonomy_mapping_pass1_5b4b35f159c7.json
+📝 Response logged: 2025-11-08_09-58-09_taxonomy_mapping_pass1_5b4b35f159c7_RESPONSE.json
+      Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-58-09_taxonomy_mapping_pass2_batch_c08c436c69f9.json
+📝 Response logged: 2025-11-08_09-58-11_taxonomy_mapping_pass2_batch_c08c436c69f9_RESPONSE.json
+      Pass 2 (batch of 1) → Professional Organizations & Society Memberships (avg: 0.80)
+
+    [43] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-58-11_taxonomy_mapping_pass1_baa95d41e0dc.json
+📝 Response logged: 2025-11-08_09-58-14_taxonomy_mapping_pass1_baa95d41e0dc_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-58-14_taxonomy_mapping_pass2_batch_8e1566b2bee7.json
+📝 Response logged: 2025-11-08_09-58-17_taxonomy_mapping_pass2_batch_8e1566b2bee7_RESPONSE.json
+        Pass 2 (batch of 3) → Professional Organizations & Society Memberships (avg: 0.80)
+
+    [44] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-58-17_taxonomy_mapping_pass1_d161258c484c.json
+📝 Response logged: 2025-11-08_09-58-21_taxonomy_mapping_pass1_d161258c484c_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-58-21_taxonomy_mapping_pass2_batch_7d455ffcee7f.json
+📝 Response logged: 2025-11-08_09-58-23_taxonomy_mapping_pass2_batch_7d455ffcee7f_RESPONSE.json
+        Pass 2 (batch of 1) → Professional Organizations & Society Memberships (avg: 0.90)
+
+    [45] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-58-23_taxonomy_mapping_pass1_77a4168e71c9.json
+📝 Response logged: 2025-11-08_09-58-26_taxonomy_mapping_pass1_77a4168e71c9_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-58-26_taxonomy_mapping_pass2_batch_5f8e4547f985.json
+📝 Response logged: 2025-11-08_09-58-28_taxonomy_mapping_pass2_batch_5f8e4547f985_RESPONSE.json
+        Pass 2 (batch of 1) → Invited Panels, Workshops, Symposia (avg: 0.80)
+
+    [46] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-58-28_taxonomy_mapping_pass1_beae3ba07128.json
+📝 Response logged: 2025-11-08_09-58-31_taxonomy_mapping_pass1_beae3ba07128_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.85)
+        Pass 2 → Failed: No confusion info for parent: L
+
+  [47] Unknown
+      Entries: 1, Subgroups: 1
+📝 Prompt logged: 2025-11-08_09-58-31_taxonomy_mapping_pass1_2fb864f7ffc7.json
+📝 Response logged: 2025-11-08_09-58-34_taxonomy_mapping_pass1_2fb864f7ffc7_RESPONSE.json
+      Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-58-34_taxonomy_mapping_pass2_batch_0711b4878d2d.json
+📝 Response logged: 2025-11-08_09-58-36_taxonomy_mapping_pass2_batch_0711b4878d2d_RESPONSE.json
+      Pass 2 (batch of 1) → Professional Organizations & Society Memberships (avg: 0.80)
+
+    [48] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-58-36_taxonomy_mapping_pass1_950f1bc7e5cb.json
+📝 Response logged: 2025-11-08_09-58-39_taxonomy_mapping_pass1_950f1bc7e5cb_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-58-39_taxonomy_mapping_pass2_batch_8b904c873d18.json
+📝 Response logged: 2025-11-08_09-58-43_taxonomy_mapping_pass2_batch_8b904c873d18_RESPONSE.json
+        Pass 2 (batch of 4) → Professional Organizations & Society Memberships (avg: 0.83)
+
+  [49] Unknown
+      Entries: 1, Subgroups: 1
+📝 Prompt logged: 2025-11-08_09-58-43_taxonomy_mapping_pass1_002723d2e743.json
+📝 Response logged: 2025-11-08_09-58-46_taxonomy_mapping_pass1_002723d2e743_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_09-58-46_taxonomy_mapping_pass2_batch_06a60b401df6.json
+📝 Response logged: 2025-11-08_09-58-48_taxonomy_mapping_pass2_batch_06a60b401df6_RESPONSE.json
+      Pass 2 (batch of 1) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.80)
+
+    [50] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-58-48_taxonomy_mapping_pass1_bcc235dd86d6.json
+📝 Response logged: 2025-11-08_09-58-51_taxonomy_mapping_pass1_bcc235dd86d6_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.85)
+
+  [51] Unknown
+      Entries: 1, Subgroups: 24
+📝 Prompt logged: 2025-11-08_09-58-51_taxonomy_mapping_pass1_b5b6874eb592.json
+📝 Response logged: 2025-11-08_09-58-54_taxonomy_mapping_pass1_b5b6874eb592_RESPONSE.json
+      Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-58-54_taxonomy_mapping_pass2_batch_53181a8a53dd.json
+📝 Response logged: 2025-11-08_09-58-56_taxonomy_mapping_pass2_batch_53181a8a53dd_RESPONSE.json
+      Pass 2 (batch of 1) → Leadership in Extramural Organizations (avg: 0.80)
+
+    [52] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-58-56_taxonomy_mapping_pass1_bb2b4f2425e9.json
+📝 Response logged: 2025-11-08_09-58-59_taxonomy_mapping_pass1_bb2b4f2425e9_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-58-59_taxonomy_mapping_pass2_batch_775416401af3.json
+📝 Response logged: 2025-11-08_09-59-02_taxonomy_mapping_pass2_batch_775416401af3_RESPONSE.json
+        Pass 2 (batch of 3) → Leadership in Extramural Organizations (avg: 0.80)
+
+    [53] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-02_taxonomy_mapping_pass1_e93bf25f6e9d.json
+📝 Response logged: 2025-11-08_09-59-05_taxonomy_mapping_pass1_e93bf25f6e9d_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.85)
+📝 Prompt logged: 2025-11-08_09-59-05_taxonomy_mapping_pass2_batch_f5930c96dfd2.json
+📝 Response logged: 2025-11-08_09-59-11_taxonomy_mapping_pass2_batch_f5930c96dfd2_RESPONSE.json
+        Pass 2 (batch of 4) → Invited Panels, Workshops, Symposia (avg: 0.82)
+
+    [54] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-11_taxonomy_mapping_pass1_427fd6fe92c2.json
+📝 Response logged: 2025-11-08_09-59-13_taxonomy_mapping_pass1_427fd6fe92c2_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.85)
+📝 Prompt logged: 2025-11-08_09-59-13_taxonomy_mapping_pass2_batch_2fe38b1c3f80.json
+📝 Response logged: 2025-11-08_09-59-18_taxonomy_mapping_pass2_batch_2fe38b1c3f80_RESPONSE.json
+        Pass 2 (batch of 3) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.80)
+
+    [55] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-18_taxonomy_mapping_pass1_7d3bb380e268.json
+📝 Response logged: 2025-11-08_09-59-19_taxonomy_mapping_pass1_7d3bb380e268_RESPONSE.json
+        Pass 1 → Licensure and Certification (0.95)
+        Pass 2 → Failed: No confusion info for parent: F
+
+    [56] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-19_taxonomy_mapping_pass1_d91582df42f0.json
+📝 Response logged: 2025-11-08_09-59-21_taxonomy_mapping_pass1_d91582df42f0_RESPONSE.json
+        Pass 1 → Licensure and Certification (0.95)
+        Pass 2 → Failed: No confusion info for parent: F
+
+    [57] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-21_taxonomy_mapping_pass1_c104efcfa587.json
+📝 Response logged: 2025-11-08_09-59-23_taxonomy_mapping_pass1_c104efcfa587_RESPONSE.json
+        Pass 1 → Licensure and Certification (0.95)
+        Pass 2 → Failed: No confusion info for parent: F
+
+    [58] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-23_taxonomy_mapping_pass1_64f393d5226f.json
+📝 Response logged: 2025-11-08_09-59-25_taxonomy_mapping_pass1_64f393d5226f_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.85)
+📝 Prompt logged: 2025-11-08_09-59-25_taxonomy_mapping_pass2_batch_1f5be5dd7b94.json
+📝 Response logged: 2025-11-08_09-59-28_taxonomy_mapping_pass2_batch_1f5be5dd7b94_RESPONSE.json
+        Pass 2 (batch of 2) → Didactic Teaching (avg: 0.85)
+
+    [59] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-28_taxonomy_mapping_pass1_d5825a9a2b43.json
+📝 Response logged: 2025-11-08_09-59-31_taxonomy_mapping_pass1_d5825a9a2b43_RESPONSE.json
+        Pass 1 → Educational Contributions (0.85)
+📝 Prompt logged: 2025-11-08_09-59-31_taxonomy_mapping_pass2_batch_a34a0a1ab8ab.json
+📝 Response logged: 2025-11-08_09-59-35_taxonomy_mapping_pass2_batch_a34a0a1ab8ab_RESPONSE.json
+        Pass 2 (batch of 2) → Continuing/Professional Education (CME) (avg: 0.90)
+
+    [60] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-35_taxonomy_mapping_pass1_a9a07bad1d52.json
+📝 Response logged: 2025-11-08_09-59-37_taxonomy_mapping_pass1_a9a07bad1d52_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.85)
+        Pass 2 → Failed: No confusion info for parent: L
+
+    [61] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-37_taxonomy_mapping_pass1_0b051c682a22.json
+📝 Response logged: 2025-11-08_09-59-40_taxonomy_mapping_pass1_0b051c682a22_RESPONSE.json
+        Pass 1 → Appendix / Other (0.85)
+
+    [62] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-40_taxonomy_mapping_pass1_24fd0504b4d9.json
+📝 Response logged: 2025-11-08_09-59-42_taxonomy_mapping_pass1_24fd0504b4d9_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.85)
+
+    [63] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-42_taxonomy_mapping_pass1_d066198b1c09.json
+📝 Response logged: 2025-11-08_09-59-46_taxonomy_mapping_pass1_d066198b1c09_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_09-59-46_taxonomy_mapping_pass2_batch_246ef6d02f4f.json
+📝 Response logged: 2025-11-08_09-59-48_taxonomy_mapping_pass2_batch_246ef6d02f4f_RESPONSE.json
+        Pass 2 (batch of 2) → Leadership in Extramural Organizations (avg: 0.85)
+
+    [64] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-48_taxonomy_mapping_pass1_7883e0421810.json
+📝 Response logged: 2025-11-08_09-59-51_taxonomy_mapping_pass1_7883e0421810_RESPONSE.json
+        Pass 1 → Postdoctoral Training (0.85)
+        Pass 2 → Failed: No confusion info for parent: C
+
+    [65] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-51_taxonomy_mapping_pass1_81cdf8df6f90.json
+📝 Response logged: 2025-11-08_09-59-54_taxonomy_mapping_pass1_81cdf8df6f90_RESPONSE.json
+        Pass 1 → Postdoctoral Training (0.85)
+        Pass 2 → Failed: No confusion info for parent: C
+
+    [66] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-54_taxonomy_mapping_pass1_fdee5e521a82.json
+📝 Response logged: 2025-11-08_09-59-57_taxonomy_mapping_pass1_fdee5e521a82_RESPONSE.json
+        Pass 1 → Postdoctoral Training (0.85)
+        Pass 2 → Failed: No confusion info for parent: C
+
+    [67] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-57_taxonomy_mapping_pass1_957410355a3a.json
+📝 Response logged: 2025-11-08_09-59-59_taxonomy_mapping_pass1_957410355a3a_RESPONSE.json
+        Pass 1 → Appendix / Other (0.85)
+
+    [68] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_09-59-59_taxonomy_mapping_pass1_55fbecb6577a.json
+📝 Response logged: 2025-11-08_10-00-02_taxonomy_mapping_pass1_55fbecb6577a_RESPONSE.json
+        Pass 1 → Education (0.85)
+📝 Prompt logged: 2025-11-08_10-00-02_taxonomy_mapping_pass2_batch_bbb7a76d7f71.json
+📝 Response logged: 2025-11-08_10-00-05_taxonomy_mapping_pass2_batch_bbb7a76d7f71_RESPONSE.json
+        Pass 2 (batch of 2) → Continuing Education / Professional Development (avg: 0.90)
+
+    [69] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-05_taxonomy_mapping_pass1_ff7c645eac01.json
+📝 Response logged: 2025-11-08_10-00-08_taxonomy_mapping_pass1_ff7c645eac01_RESPONSE.json
+        Pass 1 → Appendix / Other (0.85)
+
+    [70] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-08_taxonomy_mapping_pass1_87140a95c505.json
+📝 Response logged: 2025-11-08_10-00-11_taxonomy_mapping_pass1_87140a95c505_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.85)
+
+    [71] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-11_taxonomy_mapping_pass1_4d33beb7582e.json
+📝 Response logged: 2025-11-08_10-00-14_taxonomy_mapping_pass1_4d33beb7582e_RESPONSE.json
+        Pass 1 → Education (0.85)
+📝 Prompt logged: 2025-11-08_10-00-14_taxonomy_mapping_pass2_batch_296fd4f95cd6.json
+📝 Response logged: 2025-11-08_10-00-17_taxonomy_mapping_pass2_batch_296fd4f95cd6_RESPONSE.json
+        Pass 2 (batch of 2) → Continuing Education / Professional Development (avg: 0.85)
+
+    [72] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-17_taxonomy_mapping_pass1_2636db6d1ef3.json
+📝 Response logged: 2025-11-08_10-00-21_taxonomy_mapping_pass1_2636db6d1ef3_RESPONSE.json
+        Pass 1 → Licensure and Certification (0.95)
+        Pass 2 → Failed: No confusion info for parent: F
+
+    [73] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-21_taxonomy_mapping_pass1_ec23709ee4a5.json
+📝 Response logged: 2025-11-08_10-00-25_taxonomy_mapping_pass1_ec23709ee4a5_RESPONSE.json
+        Pass 1 → Educational Contributions (0.85)
+📝 Prompt logged: 2025-11-08_10-00-25_taxonomy_mapping_pass2_batch_18ecce01746f.json
+📝 Response logged: 2025-11-08_10-00-30_taxonomy_mapping_pass2_batch_18ecce01746f_RESPONSE.json
+        Pass 2 (batch of 2) → Didactic Teaching (courses taught) (avg: 0.75)
+
+    [74] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-30_taxonomy_mapping_pass1_b3edc2c4bf36.json
+📝 Response logged: 2025-11-08_10-00-34_taxonomy_mapping_pass1_b3edc2c4bf36_RESPONSE.json
+        Pass 1 → Licensure and Certification (0.95)
+        Pass 2 → Failed: No confusion info for parent: F
+
+    [75] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-34_taxonomy_mapping_pass1_df94c73ef228.json
+📝 Response logged: 2025-11-08_10-00-37_taxonomy_mapping_pass1_df94c73ef228_RESPONSE.json
+        Pass 1 → Appendix / Other (0.85)
+
+  [76] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-37_taxonomy_mapping_pass1_f427884b8f86.json
+📝 Response logged: 2025-11-08_10-00-40_taxonomy_mapping_pass1_f427884b8f86_RESPONSE.json
+      Pass 1 → Honors and Awards (0.95)
+
+  [77] Unknown
+      Entries: 1, Subgroups: 1
+📝 Prompt logged: 2025-11-08_10-00-40_taxonomy_mapping_pass1_0d8d9b4e8f34.json
+📝 Response logged: 2025-11-08_10-00-42_taxonomy_mapping_pass1_0d8d9b4e8f34_RESPONSE.json
+      Pass 1 → Honors and Awards (0.95)
+
+    [78] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-42_taxonomy_mapping_pass1_9576d591df04.json
+📝 Response logged: 2025-11-08_10-00-45_taxonomy_mapping_pass1_9576d591df04_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.85)
+
+  [79] Unknown
+      Entries: 2, Subgroups: 4
+📝 Prompt logged: 2025-11-08_10-00-45_taxonomy_mapping_pass1_a6253864a32d.json
+📝 Response logged: 2025-11-08_10-00-47_taxonomy_mapping_pass1_a6253864a32d_RESPONSE.json
+      Pass 1 → Honors and Awards (0.95)
+
+    [80] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-47_taxonomy_mapping_pass1_9b8dcea6c3bd.json
+📝 Response logged: 2025-11-08_10-00-49_taxonomy_mapping_pass1_9b8dcea6c3bd_RESPONSE.json
+        Pass 1 → Honors and Awards (0.95)
+
+    [81] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-49_taxonomy_mapping_pass1_06ffabf38064.json
+📝 Response logged: 2025-11-08_10-00-51_taxonomy_mapping_pass1_06ffabf38064_RESPONSE.json
+        Pass 1 → Honors and Awards (0.95)
+
+    [82] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-51_taxonomy_mapping_pass1_2705e2a8f4f9.json
+📝 Response logged: 2025-11-08_10-00-53_taxonomy_mapping_pass1_2705e2a8f4f9_RESPONSE.json
+        Pass 1 → Honors and Awards (0.95)
+
+    [83] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-53_taxonomy_mapping_pass1_7f775f7666c8.json
+📝 Response logged: 2025-11-08_10-00-56_taxonomy_mapping_pass1_7f775f7666c8_RESPONSE.json
+        Pass 1 → Honors and Awards (0.85)
+
+  [84] Unknown
+      Entries: 1, Subgroups: 5
+📝 Prompt logged: 2025-11-08_10-00-56_taxonomy_mapping_pass1_6ca5c55867fa.json
+📝 Response logged: 2025-11-08_10-00-59_taxonomy_mapping_pass1_6ca5c55867fa_RESPONSE.json
+      Pass 1 → Honors and Awards (0.90)
+
+    [85] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-00-59_taxonomy_mapping_pass1_8dcebbd57f0a.json
+📝 Response logged: 2025-11-08_10-01-03_taxonomy_mapping_pass1_8dcebbd57f0a_RESPONSE.json
+        Pass 1 → Research (0.85)
+📝 Prompt logged: 2025-11-08_10-01-03_taxonomy_mapping_pass2_batch_e7f222b1f801.json
+📝 Response logged: 2025-11-08_10-01-06_taxonomy_mapping_pass2_batch_e7f222b1f801_RESPONSE.json
+        Pass 2 (batch of 2) → Research Activities (Summary) (avg: 0.93)
+
+    [86] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-01-06_taxonomy_mapping_pass1_9318f21d3fb8.json
+📝 Response logged: 2025-11-08_10-01-09_taxonomy_mapping_pass1_9318f21d3fb8_RESPONSE.json
+        Pass 1 → Honors and Awards (0.95)
+
+    [87] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-01-09_taxonomy_mapping_pass1_cb305dfe5e07.json
+📝 Response logged: 2025-11-08_10-01-12_taxonomy_mapping_pass1_cb305dfe5e07_RESPONSE.json
+        Pass 1 → Honors and Awards (0.90)
+
+    [88] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-01-12_taxonomy_mapping_pass1_e2cc33bb59f3.json
+📝 Response logged: 2025-11-08_10-01-15_taxonomy_mapping_pass1_e2cc33bb59f3_RESPONSE.json
+        Pass 1 → Honors and Awards (0.95)
+
+    [89] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-01-15_taxonomy_mapping_pass1_677aa1f61f72.json
+📝 Response logged: 2025-11-08_10-01-17_taxonomy_mapping_pass1_677aa1f61f72_RESPONSE.json
+        Pass 1 → Honors and Awards (0.95)
+
+  [90] Unknown
+      Entries: 0, Subgroups: 1
+📝 Prompt logged: 2025-11-08_10-01-17_taxonomy_mapping_pass1_c48c96177f7f.json
+📝 Response logged: 2025-11-08_10-01-19_taxonomy_mapping_pass1_c48c96177f7f_RESPONSE.json
+      Pass 1 → Professional Positions & Employment (0.95)
+
+    [91] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-01-19_taxonomy_mapping_pass1_d6e8387fd0b2.json
+📝 Response logged: 2025-11-08_10-01-21_taxonomy_mapping_pass1_d6e8387fd0b2_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_10-01-21_taxonomy_mapping_pass2_batch_01418f327fbb.json
+📝 Response logged: 2025-11-08_10-01-27_taxonomy_mapping_pass2_batch_01418f327fbb_RESPONSE.json
+        Pass 2 (batch of 4) → Current Academic/Clinical Positions (avg: 0.83)
+
+  [92] Unknown
+      Entries: 1, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-01-27_taxonomy_mapping_pass1_4e41091b18ea.json
+📝 Response logged: 2025-11-08_10-01-30_taxonomy_mapping_pass1_4e41091b18ea_RESPONSE.json
+      Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_10-01-30_taxonomy_mapping_pass2_batch_2f6d786a1045.json
+📝 Response logged: 2025-11-08_10-01-32_taxonomy_mapping_pass2_batch_2f6d786a1045_RESPONSE.json
+      Pass 2 (batch of 1) → Current Academic/Clinical Positions (avg: 0.90)
+
+    [93] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-01-32_taxonomy_mapping_pass1_2d1a8c3fe05f.json
+📝 Response logged: 2025-11-08_10-01-34_taxonomy_mapping_pass1_2d1a8c3fe05f_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.95)
+        Pass 2 → Failed: No confusion info for parent: L
+
+    [94] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-01-34_taxonomy_mapping_pass1_94e11b5bac49.json
+📝 Response logged: 2025-11-08_10-01-36_taxonomy_mapping_pass1_94e11b5bac49_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.95)
+        Pass 2 → Failed: No confusion info for parent: L
+
+  [95] Unknown
+      Entries: 1, Subgroups: 4
+📝 Prompt logged: 2025-11-08_10-01-36_taxonomy_mapping_pass1_d72616bb8afa.json
+📝 Response logged: 2025-11-08_10-01-39_taxonomy_mapping_pass1_d72616bb8afa_RESPONSE.json
+      Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_10-01-39_taxonomy_mapping_pass2_batch_36e47e9e5f43.json
+📝 Response logged: 2025-11-08_10-01-41_taxonomy_mapping_pass2_batch_36e47e9e5f43_RESPONSE.json
+      Pass 2 (batch of 1) → Current Academic/Clinical Positions (avg: 0.90)
+
+    [96] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-01-41_taxonomy_mapping_pass1_1b2caf120087.json
+📝 Response logged: 2025-11-08_10-01-42_taxonomy_mapping_pass1_1b2caf120087_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_10-01-42_taxonomy_mapping_pass2_batch_449b4a190b9e.json
+📝 Response logged: 2025-11-08_10-01-47_taxonomy_mapping_pass2_batch_449b4a190b9e_RESPONSE.json
+        Pass 2 (batch of 3) → Current Academic/Clinical Positions (avg: 0.80)
+
+    [97] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-01-47_taxonomy_mapping_pass1_0622c8392826.json
+📝 Response logged: 2025-11-08_10-01-50_taxonomy_mapping_pass1_0622c8392826_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.90)
+        Pass 2 → Failed: No confusion info for parent: L
+
+    [98] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-01-50_taxonomy_mapping_pass1_f40054c79632.json
+📝 Response logged: 2025-11-08_10-01-52_taxonomy_mapping_pass1_f40054c79632_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.95)
+        Pass 2 → Failed: No confusion info for parent: L
+
+    [99] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-01-52_taxonomy_mapping_pass1_df6f59c4e330.json
+📝 Response logged: 2025-11-08_10-01-55_taxonomy_mapping_pass1_df6f59c4e330_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.85)
+        Pass 2 → Failed: No confusion info for parent: L
+
+  [100] Unknown
+      Entries: 1, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-01-55_taxonomy_mapping_pass1_c9453846dfc0.json
+📝 Response logged: 2025-11-08_10-01-58_taxonomy_mapping_pass1_c9453846dfc0_RESPONSE.json
+      Pass 1 → Clinical Practice, Innovation, and Leadership (0.85)
+      Pass 2 → Failed: No confusion info for parent: L
+
+    [101] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-01-58_taxonomy_mapping_pass1_bdf1b4053506.json
+📝 Response logged: 2025-11-08_10-02-00_taxonomy_mapping_pass1_bdf1b4053506_RESPONSE.json
+        Pass 1 → Personal Data / Contact Information (0.85)
+        Router → Skip Pass 2 (direct to extraction)
+
+    [102] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-02-00_taxonomy_mapping_pass1_d3c63b7e1b78.json
+📝 Response logged: 2025-11-08_10-02-03_taxonomy_mapping_pass1_d3c63b7e1b78_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.85)
+        Pass 2 → Failed: No confusion info for parent: L
+
+  [103] Unknown
+      Entries: 1, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-02-03_taxonomy_mapping_pass1_2145d886bf6b.json
+📝 Response logged: 2025-11-08_10-02-06_taxonomy_mapping_pass1_2145d886bf6b_RESPONSE.json
+      Pass 1 → Clinical Practice, Innovation, and Leadership (0.85)
+      Pass 2 → Failed: No confusion info for parent: L
+
+    [104] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-02-06_taxonomy_mapping_pass1_e1aac1da6deb.json
+📝 Response logged: 2025-11-08_10-02-08_taxonomy_mapping_pass1_e1aac1da6deb_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.85)
+        Pass 2 → Failed: No confusion info for parent: L
+
+    [105] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-02-08_taxonomy_mapping_pass1_150fbce115ad.json
+📝 Response logged: 2025-11-08_10-02-11_taxonomy_mapping_pass1_150fbce115ad_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.85)
+        Pass 2 → Failed: No confusion info for parent: L
+
+  [106] Unknown
+      Entries: 1, Subgroups: 5
+📝 Prompt logged: 2025-11-08_10-02-11_taxonomy_mapping_pass1_e7baf71c6431.json
+📝 Response logged: 2025-11-08_10-02-14_taxonomy_mapping_pass1_e7baf71c6431_RESPONSE.json
+      Pass 1 → Clinical Practice, Innovation, and Leadership (0.90)
+      Pass 2 → Failed: No confusion info for parent: L
+
+    [107] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-02-14_taxonomy_mapping_pass1_12f0777ad379.json
+📝 Response logged: 2025-11-08_10-02-16_taxonomy_mapping_pass1_12f0777ad379_RESPONSE.json
+        Pass 1 → Personal Data / Contact Information (0.85)
+        Router → Skip Pass 2 (direct to extraction)
+
+    [108] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-02-16_taxonomy_mapping_pass1_d7bd391df696.json
+📝 Response logged: 2025-11-08_10-02-19_taxonomy_mapping_pass1_d7bd391df696_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.90)
+        Pass 2 → Failed: No confusion info for parent: L
+
+    [109] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-02-19_taxonomy_mapping_pass1_2139b819b845.json
+📝 Response logged: 2025-11-08_10-02-22_taxonomy_mapping_pass1_2139b819b845_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.85)
+        Pass 2 → Failed: No confusion info for parent: L
+
+    [110] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-02-22_taxonomy_mapping_pass1_c4fe14308017.json
+📝 Response logged: 2025-11-08_10-02-25_taxonomy_mapping_pass1_c4fe14308017_RESPONSE.json
+        Pass 1 → Clinical Practice, Innovation, and Leadership (0.90)
+        Pass 2 → Failed: No confusion info for parent: L
+
+    [111] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-02-25_taxonomy_mapping_pass1_72dd2211131c.json
+📝 Response logged: 2025-11-08_10-02-27_taxonomy_mapping_pass1_72dd2211131c_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.85)
+📝 Prompt logged: 2025-11-08_10-02-27_taxonomy_mapping_pass2_batch_2af9371b73ec.json
+📝 Response logged: 2025-11-08_10-02-30_taxonomy_mapping_pass2_batch_2af9371b73ec_RESPONSE.json
+        Pass 2 (batch of 2) → Past Academic/Clinical Positions (avg: 0.70)
+
+  [112] Unknown
+      Entries: 7, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-02-30_taxonomy_mapping_pass1_791b07390bc4.json
+📝 Response logged: 2025-11-08_10-02-33_taxonomy_mapping_pass1_791b07390bc4_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-02-33_taxonomy_mapping_pass2_batch_c5bb52f0e696.json
+📝 Response logged: 2025-11-08_10-02-55_taxonomy_mapping_pass2_batch_c5bb52f0e696_RESPONSE.json
+      Pass 2 (batch of 7) → In Review / Submitted / In Preparation (avg: 0.91)
+
+  [113] Unknown
+      Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-02-55_taxonomy_mapping_pass1_de0b6cc72b5d.json
+📝 Response logged: 2025-11-08_10-02-57_taxonomy_mapping_pass1_de0b6cc72b5d_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-02-57_taxonomy_mapping_pass2_batch_b922d8e3f113.json
+📝 Response logged: 2025-11-08_10-03-00_taxonomy_mapping_pass2_batch_b922d8e3f113_RESPONSE.json
+      Pass 2 (batch of 2) → Peer-Reviewed Research Articles (original research) (avg: 0.95)
+
+  [114] Unknown
+      Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-03-00_taxonomy_mapping_pass1_2764ae63619f.json
+📝 Response logged: 2025-11-08_10-03-02_taxonomy_mapping_pass1_2764ae63619f_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-03-02_taxonomy_mapping_pass2_batch_d43f8fcd329d.json
+📝 Response logged: 2025-11-08_10-03-07_taxonomy_mapping_pass2_batch_d43f8fcd329d_RESPONSE.json
+      Pass 2 (batch of 4) → In Review / Submitted / In Preparation (avg: 0.86)
+
+  [115] Unknown
+      Entries: 6, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-03-07_taxonomy_mapping_pass1_c899b9905257.json
+📝 Response logged: 2025-11-08_10-03-09_taxonomy_mapping_pass1_c899b9905257_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-03-09_taxonomy_mapping_pass2_batch_fc27d06957a7.json
+📝 Response logged: 2025-11-08_10-03-18_taxonomy_mapping_pass2_batch_fc27d06957a7_RESPONSE.json
+      Pass 2 (batch of 6) → Peer-Reviewed Research Articles (original research) (avg: 0.90)
+
+  [116] Unknown
+      Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-03-18_taxonomy_mapping_pass1_12a167372362.json
+📝 Response logged: 2025-11-08_10-03-20_taxonomy_mapping_pass1_12a167372362_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-03-20_taxonomy_mapping_pass2_batch_7b586a2068fa.json
+📝 Response logged: 2025-11-08_10-03-24_taxonomy_mapping_pass2_batch_7b586a2068fa_RESPONSE.json
+      Pass 2 (batch of 3) → Peer-Reviewed Research Articles (original research) (avg: 0.90)
+
+  [117] Unknown
+      Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-03-24_taxonomy_mapping_pass1_30085b1aacf2.json
+📝 Response logged: 2025-11-08_10-03-26_taxonomy_mapping_pass1_30085b1aacf2_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-03-26_taxonomy_mapping_pass2_batch_3682b1063110.json
+📝 Response logged: 2025-11-08_10-03-30_taxonomy_mapping_pass2_batch_3682b1063110_RESPONSE.json
+      Pass 2 (batch of 2) → Reviews & Editorials (synthesis, commentary) (avg: 0.93)
+
+  [118] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-03-30_taxonomy_mapping_pass1_fd0335962f06.json
+📝 Response logged: 2025-11-08_10-03-33_taxonomy_mapping_pass1_fd0335962f06_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-03-33_taxonomy_mapping_pass2_batch_0d49f5411e41.json
+📝 Response logged: 2025-11-08_10-03-36_taxonomy_mapping_pass2_batch_0d49f5411e41_RESPONSE.json
+      Pass 2 (batch of 1) → Peer-Reviewed Research Articles (original research) (avg: 0.95)
+
+  [119] Unknown
+      Entries: 5, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-03-36_taxonomy_mapping_pass1_46d398437e1d.json
+📝 Response logged: 2025-11-08_10-03-38_taxonomy_mapping_pass1_46d398437e1d_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-03-38_taxonomy_mapping_pass2_batch_e89dd76c29d8.json
+📝 Response logged: 2025-11-08_10-03-46_taxonomy_mapping_pass2_batch_e89dd76c29d8_RESPONSE.json
+      Pass 2 (batch of 5) → Peer-Reviewed Research Articles (original research) (avg: 0.86)
+
+  [120] Unknown
+      Entries: 11, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-03-46_taxonomy_mapping_pass1_a4b01358612a.json
+📝 Response logged: 2025-11-08_10-03-50_taxonomy_mapping_pass1_a4b01358612a_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-03-50_taxonomy_mapping_pass2_batch_bc83b4ffa48b.json
+📝 Response logged: 2025-11-08_10-04-04_taxonomy_mapping_pass2_batch_bc83b4ffa48b_RESPONSE.json
+      Pass 2 (batch of 11) → Peer-Reviewed Research Articles (original research) (avg: 0.87)
+
+  [121] Unknown
+      Entries: 8, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-04-04_taxonomy_mapping_pass1_5297920e7dd5.json
+📝 Response logged: 2025-11-08_10-04-06_taxonomy_mapping_pass1_5297920e7dd5_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-04-06_taxonomy_mapping_pass2_batch_0221c9c31af1.json
+📝 Response logged: 2025-11-08_10-04-16_taxonomy_mapping_pass2_batch_0221c9c31af1_RESPONSE.json
+      Pass 2 (batch of 8) → Reviews & Editorials (synthesis, commentary) (avg: 0.84)
+
+  [122] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-04-16_taxonomy_mapping_pass1_c2be2e058577.json
+📝 Response logged: 2025-11-08_10-04-18_taxonomy_mapping_pass1_c2be2e058577_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-04-18_taxonomy_mapping_pass2_batch_e42bd990a8ce.json
+📝 Response logged: 2025-11-08_10-04-37_taxonomy_mapping_pass2_batch_e42bd990a8ce_RESPONSE.json
+      Pass 2 (batch of 1) → Case Reports (avg: 0.95)
+
+  [123] Unknown
+      Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-04-37_taxonomy_mapping_pass1_6b2b030b4aba.json
+📝 Response logged: 2025-11-08_10-04-40_taxonomy_mapping_pass1_6b2b030b4aba_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-04-40_taxonomy_mapping_pass2_batch_ab50659b08d1.json
+📝 Response logged: 2025-11-08_10-04-47_taxonomy_mapping_pass2_batch_ab50659b08d1_RESPONSE.json
+      Pass 2 (batch of 4) → Peer-Reviewed Research Articles (original research) (avg: 0.88)
+
+  [124] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-04-47_taxonomy_mapping_pass1_90a09335c47a.json
+📝 Response logged: 2025-11-08_10-04-49_taxonomy_mapping_pass1_90a09335c47a_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-04-49_taxonomy_mapping_pass2_batch_a221bea3fff2.json
+📝 Response logged: 2025-11-08_10-04-51_taxonomy_mapping_pass2_batch_a221bea3fff2_RESPONSE.json
+      Pass 2 (batch of 1) → Peer-Reviewed Research Articles (original research) (avg: 0.90)
+
+  [125] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-04-51_taxonomy_mapping_pass1_b247ac4c30e4.json
+📝 Response logged: 2025-11-08_10-04-53_taxonomy_mapping_pass1_b247ac4c30e4_RESPONSE.json
+      Pass 1 → Bibliography (0.85)
+📝 Prompt logged: 2025-11-08_10-04-53_taxonomy_mapping_pass2_batch_f81d4cc4ec28.json
+📝 Response logged: 2025-11-08_10-04-58_taxonomy_mapping_pass2_batch_f81d4cc4ec28_RESPONSE.json
+      Pass 2 (batch of 1) → In Review / Submitted / In Preparation (avg: 0.90)
+
+  [126] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-04-58_taxonomy_mapping_pass1_d7e5a295243a.json
+📝 Response logged: 2025-11-08_10-05-00_taxonomy_mapping_pass1_d7e5a295243a_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-05-00_taxonomy_mapping_pass2_batch_648e83dea8f2.json
+📝 Response logged: 2025-11-08_10-05-02_taxonomy_mapping_pass2_batch_648e83dea8f2_RESPONSE.json
+      Pass 2 (batch of 1) → Abstracts & Conference Proceedings (avg: 0.90)
+
+  [127] Unknown
+      Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-05-02_taxonomy_mapping_pass1_dfd34333a1ef.json
+📝 Response logged: 2025-11-08_10-05-05_taxonomy_mapping_pass1_dfd34333a1ef_RESPONSE.json
+      Pass 1 → Honors and Awards (0.85)
+
+  [128] Unknown
+      Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-05-05_taxonomy_mapping_pass1_664b952e92c3.json
+📝 Response logged: 2025-11-08_10-05-07_taxonomy_mapping_pass1_664b952e92c3_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-05-07_taxonomy_mapping_pass2_batch_167161a4d1d2.json
+📝 Response logged: 2025-11-08_10-05-12_taxonomy_mapping_pass2_batch_167161a4d1d2_RESPONSE.json
+      Pass 2 (batch of 3) → Chapters (book chapters) (avg: 0.92)
+
+  [129] Unknown
+      Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-05-12_taxonomy_mapping_pass1_695c7fd53fa6.json
+📝 Response logged: 2025-11-08_10-05-15_taxonomy_mapping_pass1_695c7fd53fa6_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-05-15_taxonomy_mapping_pass2_batch_eea9e6a28bc1.json
+📝 Response logged: 2025-11-08_10-05-18_taxonomy_mapping_pass2_batch_eea9e6a28bc1_RESPONSE.json
+      Pass 2 (batch of 2) → In Review / Submitted / In Preparation (avg: 0.88)
+
+  [130] Unknown
+      Entries: 5, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-05-18_taxonomy_mapping_pass1_7650dc258906.json
+📝 Response logged: 2025-11-08_10-05-21_taxonomy_mapping_pass1_7650dc258906_RESPONSE.json
+      Pass 1 → Research (0.95)
+📝 Prompt logged: 2025-11-08_10-05-21_taxonomy_mapping_pass2_batch_bb5dcbef096b.json
+📝 Response logged: 2025-11-08_10-05-27_taxonomy_mapping_pass2_batch_bb5dcbef096b_RESPONSE.json
+      Pass 2 (batch of 5) → Research Activities (Summary) (avg: 0.87)
+
+  [131] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-05-27_taxonomy_mapping_pass1_d27fe7f6cd47.json
+📝 Response logged: 2025-11-08_10-05-29_taxonomy_mapping_pass1_d27fe7f6cd47_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-05-29_taxonomy_mapping_pass2_batch_883f10aa241b.json
+📝 Response logged: 2025-11-08_10-05-32_taxonomy_mapping_pass2_batch_883f10aa241b_RESPONSE.json
+      Pass 2 (batch of 1) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.90)
+
+  [132] Unknown
+      Entries: 1, Subgroups: 5
+📝 Prompt logged: 2025-11-08_10-05-32_taxonomy_mapping_pass1_c872c94b996b.json
+📝 Response logged: 2025-11-08_10-05-34_taxonomy_mapping_pass1_c872c94b996b_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-05-34_taxonomy_mapping_pass2_batch_9ce303aad882.json
+📝 Response logged: 2025-11-08_10-05-36_taxonomy_mapping_pass2_batch_9ce303aad882_RESPONSE.json
+      Pass 2 (batch of 1) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.80)
+
+    [133] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-05-36_taxonomy_mapping_pass1_5d16c8b39ed4.json
+📝 Response logged: 2025-11-08_10-05-38_taxonomy_mapping_pass1_5d16c8b39ed4_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-05-38_taxonomy_mapping_pass2_batch_a53ba352f342.json
+📝 Response logged: 2025-11-08_10-05-42_taxonomy_mapping_pass2_batch_a53ba352f342_RESPONSE.json
+        Pass 2 (batch of 2) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.85)
+
+    [134] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-05-42_taxonomy_mapping_pass1_41b9bc85bc45.json
+📝 Response logged: 2025-11-08_10-05-45_taxonomy_mapping_pass1_41b9bc85bc45_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-05-45_taxonomy_mapping_pass2_batch_4e0e1378455e.json
+📝 Response logged: 2025-11-08_10-05-52_taxonomy_mapping_pass2_batch_4e0e1378455e_RESPONSE.json
+        Pass 2 (batch of 3) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.90)
+
+    [135] Unknown
+        Entries: 8, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-05-52_taxonomy_mapping_pass1_cdc6fc0b1b57.json
+📝 Response logged: 2025-11-08_10-05-54_taxonomy_mapping_pass1_cdc6fc0b1b57_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-05-54_taxonomy_mapping_pass2_batch_31acbc10b98b.json
+📝 Response logged: 2025-11-08_10-06-05_taxonomy_mapping_pass2_batch_31acbc10b98b_RESPONSE.json
+        Pass 2 (batch of 8) → Invited Panels, Workshops, Symposia (avg: 0.81)
+
+    [136] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-06-05_taxonomy_mapping_pass1_d297d87710c0.json
+📝 Response logged: 2025-11-08_10-06-07_taxonomy_mapping_pass1_d297d87710c0_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-06-07_taxonomy_mapping_pass2_batch_aa73c8b9da6c.json
+📝 Response logged: 2025-11-08_10-06-12_taxonomy_mapping_pass2_batch_aa73c8b9da6c_RESPONSE.json
+        Pass 2 (batch of 4) → Invited Panels, Workshops, Symposia (avg: 0.90)
+
+    [137] Unknown
+        Entries: 7, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-06-12_taxonomy_mapping_pass1_01dc96dbebd8.json
+📝 Response logged: 2025-11-08_10-06-14_taxonomy_mapping_pass1_01dc96dbebd8_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-06-14_taxonomy_mapping_pass2_batch_0be1fd6d68df.json
+📝 Response logged: 2025-11-08_10-06-24_taxonomy_mapping_pass2_batch_0be1fd6d68df_RESPONSE.json
+        Pass 2 (batch of 7) → Invited Panels, Workshops, Symposia (avg: 0.74)
+
+  [138] Unknown
+      Entries: 1, Subgroups: 1
+📝 Prompt logged: 2025-11-08_10-06-24_taxonomy_mapping_pass1_14ac4a1c19f5.json
+📝 Response logged: 2025-11-08_10-06-27_taxonomy_mapping_pass1_14ac4a1c19f5_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.90)
+📝 Prompt logged: 2025-11-08_10-06-27_taxonomy_mapping_pass2_batch_4190a3661005.json
+📝 Response logged: 2025-11-08_10-06-30_taxonomy_mapping_pass2_batch_4190a3661005_RESPONSE.json
+      Pass 2 (batch of 1) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.80)
+
+    [139] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-06-30_taxonomy_mapping_pass1_785ce637bc30.json
+📝 Response logged: 2025-11-08_10-06-33_taxonomy_mapping_pass1_785ce637bc30_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.85)
+📝 Prompt logged: 2025-11-08_10-06-33_taxonomy_mapping_pass2_batch_18f5745641ea.json
+📝 Response logged: 2025-11-08_10-06-42_taxonomy_mapping_pass2_batch_18f5745641ea_RESPONSE.json
+        Pass 2 (batch of 3) → Submitted Abstracts/Presentations (avg: 0.90)
+
+  [140] Unknown
+      Entries: 1, Subgroups: 1
+📝 Prompt logged: 2025-11-08_10-06-42_taxonomy_mapping_pass1_a668448ca207.json
+📝 Response logged: 2025-11-08_10-06-45_taxonomy_mapping_pass1_a668448ca207_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.90)
+📝 Prompt logged: 2025-11-08_10-06-45_taxonomy_mapping_pass2_batch_4190a3661005.json
+📝 Response logged: 2025-11-08_10-06-47_taxonomy_mapping_pass2_batch_4190a3661005_RESPONSE.json
+      Pass 2 (batch of 1) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.80)
+
+    [141] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-06-47_taxonomy_mapping_pass1_be0eff3b7c0d.json
+📝 Response logged: 2025-11-08_10-06-50_taxonomy_mapping_pass1_be0eff3b7c0d_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.90)
+📝 Prompt logged: 2025-11-08_10-06-50_taxonomy_mapping_pass2_batch_1de1e354b0dc.json
+📝 Response logged: 2025-11-08_10-06-55_taxonomy_mapping_pass2_batch_1de1e354b0dc_RESPONSE.json
+        Pass 2 (batch of 4) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.82)
+
+  [142] Unknown
+      Entries: 1, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-06-55_taxonomy_mapping_pass1_d93480e97d33.json
+📝 Response logged: 2025-11-08_10-06-57_taxonomy_mapping_pass1_d93480e97d33_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-06-57_taxonomy_mapping_pass2_batch_4190a3661005.json
+📝 Response logged: 2025-11-08_10-07-00_taxonomy_mapping_pass2_batch_4190a3661005_RESPONSE.json
+      Pass 2 (batch of 1) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.80)
+
+    [143] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-07-00_taxonomy_mapping_pass1_3b4464d0ffb4.json
+📝 Response logged: 2025-11-08_10-07-03_taxonomy_mapping_pass1_3b4464d0ffb4_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-07-03_taxonomy_mapping_pass2_batch_a26029e3605b.json
+📝 Response logged: 2025-11-08_10-07-09_taxonomy_mapping_pass2_batch_a26029e3605b_RESPONSE.json
+        Pass 2 (batch of 4) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.80)
+
+    [144] Unknown
+        Entries: 5, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-07-09_taxonomy_mapping_pass1_c25c14791327.json
+📝 Response logged: 2025-11-08_10-07-18_taxonomy_mapping_pass1_c25c14791327_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-07-18_taxonomy_mapping_pass2_batch_03c953869ada.json
+📝 Response logged: 2025-11-08_10-07-26_taxonomy_mapping_pass2_batch_03c953869ada_RESPONSE.json
+        Pass 2 (batch of 5) → Invited Panels, Workshops, Symposia (avg: 0.84)
+
+  [145] Unknown
+      Entries: 1, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-07-26_taxonomy_mapping_pass1_e8aa139e7c09.json
+📝 Response logged: 2025-11-08_10-07-28_taxonomy_mapping_pass1_e8aa139e7c09_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-07-28_taxonomy_mapping_pass2_batch_3e1f34582cd7.json
+📝 Response logged: 2025-11-08_10-07-31_taxonomy_mapping_pass2_batch_3e1f34582cd7_RESPONSE.json
+      Pass 2 (batch of 1) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.80)
+
+    [146] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-07-31_taxonomy_mapping_pass1_fe5357552ffa.json
+📝 Response logged: 2025-11-08_10-07-34_taxonomy_mapping_pass1_fe5357552ffa_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-07-34_taxonomy_mapping_pass2_batch_2ef612b0f99a.json
+📝 Response logged: 2025-11-08_10-07-37_taxonomy_mapping_pass2_batch_2ef612b0f99a_RESPONSE.json
+        Pass 2 (batch of 2) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.90)
+
+    [147] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-07-37_taxonomy_mapping_pass1_321baf31c299.json
+📝 Response logged: 2025-11-08_10-07-40_taxonomy_mapping_pass1_321baf31c299_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.85)
+📝 Prompt logged: 2025-11-08_10-07-40_taxonomy_mapping_pass2_batch_5e651833c890.json
+📝 Response logged: 2025-11-08_10-07-44_taxonomy_mapping_pass2_batch_5e651833c890_RESPONSE.json
+        Pass 2 (batch of 3) → Submitted Abstracts/Presentations (avg: 0.90)
+
+  [148] Unknown
+      Entries: 1, Subgroups: 15
+📝 Prompt logged: 2025-11-08_10-07-44_taxonomy_mapping_pass1_007a567bf035.json
+📝 Response logged: 2025-11-08_10-07-46_taxonomy_mapping_pass1_007a567bf035_RESPONSE.json
+      Pass 1 → Professional Organizations and Society Memberships (0.85)
+
+    [149] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-07-46_taxonomy_mapping_pass1_9170ef17ae4c.json
+📝 Response logged: 2025-11-08_10-07-49_taxonomy_mapping_pass1_9170ef17ae4c_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.85)
+📝 Prompt logged: 2025-11-08_10-07-49_taxonomy_mapping_pass2_batch_9505c8fb0020.json
+📝 Response logged: 2025-11-08_10-07-52_taxonomy_mapping_pass2_batch_9505c8fb0020_RESPONSE.json
+        Pass 2 (batch of 2) → Submitted Abstracts/Presentations (avg: 0.85)
+
+    [150] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-07-52_taxonomy_mapping_pass1_a81613d44047.json
+📝 Response logged: 2025-11-08_10-07-55_taxonomy_mapping_pass1_a81613d44047_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.90)
+
+    [151] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-07-55_taxonomy_mapping_pass1_c5b81d77d2fa.json
+📝 Response logged: 2025-11-08_10-07-57_taxonomy_mapping_pass1_c5b81d77d2fa_RESPONSE.json
+        Pass 1 → Research (0.95)
+📝 Prompt logged: 2025-11-08_10-07-57_taxonomy_mapping_pass2_batch_bfa86103a5e1.json
+📝 Response logged: 2025-11-08_10-07-58_taxonomy_mapping_pass2_batch_bfa86103a5e1_RESPONSE.json
+        Pass 2 (batch of 1) → Research Activities (Summary) (avg: 0.90)
+
+    [152] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-07-58_taxonomy_mapping_pass1_52ae390b466f.json
+📝 Response logged: 2025-11-08_10-08-01_taxonomy_mapping_pass1_52ae390b466f_RESPONSE.json
+        Pass 1 → Appendix / Other (0.85)
+
+    [153] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-08-01_taxonomy_mapping_pass1_da013ad1e202.json
+📝 Response logged: 2025-11-08_10-08-03_taxonomy_mapping_pass1_da013ad1e202_RESPONSE.json
+        Pass 1 → Honors and Awards (0.95)
+
+    [154] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-08-03_taxonomy_mapping_pass1_89a9ac5dd2a7.json
+📝 Response logged: 2025-11-08_10-08-05_taxonomy_mapping_pass1_89a9ac5dd2a7_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-08-05_taxonomy_mapping_pass2_batch_8f2276df92f1.json
+📝 Response logged: 2025-11-08_10-08-10_taxonomy_mapping_pass2_batch_8f2276df92f1_RESPONSE.json
+        Pass 2 (batch of 4) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.80)
+
+    [155] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-08-10_taxonomy_mapping_pass1_3741a5662c22.json
+📝 Response logged: 2025-11-08_10-08-12_taxonomy_mapping_pass1_3741a5662c22_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-08-12_taxonomy_mapping_pass2_batch_7216d3251943.json
+📝 Response logged: 2025-11-08_10-08-18_taxonomy_mapping_pass2_batch_7216d3251943_RESPONSE.json
+        Pass 2 (batch of 4) → Regular Teaching (Courses You Instruct) (avg: 0.82)
+
+    [156] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-08-18_taxonomy_mapping_pass1_4d87587a406c.json
+📝 Response logged: 2025-11-08_10-08-21_taxonomy_mapping_pass1_4d87587a406c_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.85)
+📝 Prompt logged: 2025-11-08_10-08-21_taxonomy_mapping_pass2_batch_1a85e9cfe916.json
+📝 Response logged: 2025-11-08_10-08-23_taxonomy_mapping_pass2_batch_1a85e9cfe916_RESPONSE.json
+        Pass 2 (batch of 1) → Invited Keynotes, Named Lectures, Plenaries (avg: 0.90)
+
+    [157] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-08-23_taxonomy_mapping_pass1_474d14f390a2.json
+📝 Response logged: 2025-11-08_10-08-25_taxonomy_mapping_pass1_474d14f390a2_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-08-25_taxonomy_mapping_pass2_batch_f21bbb06ad3d.json
+📝 Response logged: 2025-11-08_10-08-29_taxonomy_mapping_pass2_batch_f21bbb06ad3d_RESPONSE.json
+        Pass 2 (batch of 3) → Regular Teaching Contributions (avg: 0.73)
+
+    [158] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-08-29_taxonomy_mapping_pass1_351b74b83a8c.json
+📝 Response logged: 2025-11-08_10-08-31_taxonomy_mapping_pass1_351b74b83a8c_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.95)
+📝 Prompt logged: 2025-11-08_10-08-31_taxonomy_mapping_pass2_batch_59fca08f1d08.json
+📝 Response logged: 2025-11-08_10-08-34_taxonomy_mapping_pass2_batch_59fca08f1d08_RESPONSE.json
+        Pass 2 (batch of 1) → Grand Rounds, Visiting Professorships, Departmental Seminars (avg: 1.00)
+
+    [159] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-08-34_taxonomy_mapping_pass1_b73410cb41b4.json
+📝 Response logged: 2025-11-08_10-08-37_taxonomy_mapping_pass1_b73410cb41b4_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-08-37_taxonomy_mapping_pass2_batch_dfde4a7efa34.json
+📝 Response logged: 2025-11-08_10-08-41_taxonomy_mapping_pass2_batch_dfde4a7efa34_RESPONSE.json
+        Pass 2 (batch of 3) → Abstracts & Conference Proceedings (avg: 0.88)
+
+    [160] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-08-41_taxonomy_mapping_pass1_27f4382f95ee.json
+📝 Response logged: 2025-11-08_10-08-43_taxonomy_mapping_pass1_27f4382f95ee_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.85)
+📝 Prompt logged: 2025-11-08_10-08-43_taxonomy_mapping_pass2_batch_b6d47a6f5f63.json
+📝 Response logged: 2025-11-08_10-08-48_taxonomy_mapping_pass2_batch_b6d47a6f5f63_RESPONSE.json
+        Pass 2 (batch of 3) → Grand Rounds, Visiting Professorships, Departmental Seminars (avg: 0.80)
+
+    [161] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-08-48_taxonomy_mapping_pass1_4629752f2d8b.json
+📝 Response logged: 2025-11-08_10-08-51_taxonomy_mapping_pass1_4629752f2d8b_RESPONSE.json
+        Pass 1 → Research (0.85)
+📝 Prompt logged: 2025-11-08_10-08-51_taxonomy_mapping_pass2_batch_0bb0d2861c6c.json
+📝 Response logged: 2025-11-08_10-08-53_taxonomy_mapping_pass2_batch_0bb0d2861c6c_RESPONSE.json
+        Pass 2 (batch of 1) → Research Activities (Summary) (avg: 0.90)
+
+    [162] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-08-53_taxonomy_mapping_pass1_7133c1cdf10a.json
+📝 Response logged: 2025-11-08_10-08-57_taxonomy_mapping_pass1_7133c1cdf10a_RESPONSE.json
+        Pass 1 → Bibliography (0.85)
+📝 Prompt logged: 2025-11-08_10-08-57_taxonomy_mapping_pass2_batch_cd18fbd6bcf2.json
+📝 Response logged: 2025-11-08_10-09-02_taxonomy_mapping_pass2_batch_cd18fbd6bcf2_RESPONSE.json
+        Pass 2 (batch of 3) → Abstracts & Conference Proceedings (avg: 0.88)
+
+    [163] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-09-02_taxonomy_mapping_pass1_bb8ba57eaa65.json
+📝 Response logged: 2025-11-08_10-09-07_taxonomy_mapping_pass1_bb8ba57eaa65_RESPONSE.json
+        Pass 1 → Bibliography (0.90)
+📝 Prompt logged: 2025-11-08_10-09-07_taxonomy_mapping_pass2_batch_4a5440fa794f.json
+📝 Response logged: 2025-11-08_10-09-10_taxonomy_mapping_pass2_batch_4a5440fa794f_RESPONSE.json
+        Pass 2 (batch of 2) → Abstracts & Conference Proceedings (avg: 0.90)
+
+  [164] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-09-10_taxonomy_mapping_pass1_8e246995e96b.json
+📝 Response logged: 2025-11-08_10-09-12_taxonomy_mapping_pass1_8e246995e96b_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-09-12_taxonomy_mapping_pass2_batch_7f4609ed3812.json
+📝 Response logged: 2025-11-08_10-09-14_taxonomy_mapping_pass2_batch_7f4609ed3812_RESPONSE.json
+      Pass 2 (batch of 1) → Other (Media, Podcasts, Blogs) (avg: 0.90)
+
+  [165] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-09-14_taxonomy_mapping_pass1_acf156264ad8.json
+📝 Response logged: 2025-11-08_10-09-16_taxonomy_mapping_pass1_acf156264ad8_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-09-16_taxonomy_mapping_pass2_batch_d9890f3efc84.json
+📝 Response logged: 2025-11-08_10-09-18_taxonomy_mapping_pass2_batch_d9890f3efc84_RESPONSE.json
+      Pass 2 (batch of 1) → Abstracts & Conference Proceedings (avg: 0.90)
+
+  [166] Unknown
+      Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-09-18_taxonomy_mapping_pass1_7c415cb70a00.json
+📝 Response logged: 2025-11-08_10-09-26_taxonomy_mapping_pass1_7c415cb70a00_RESPONSE.json
+      Pass 1 → Appendix / Other (0.85)
+
+  [167] Unknown
+      Entries: 11, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-09-26_taxonomy_mapping_pass1_61addf3ffe41.json
+📝 Response logged: 2025-11-08_10-09-29_taxonomy_mapping_pass1_61addf3ffe41_RESPONSE.json
+      Pass 1 → Invitations to Speak/Present (0.85)
+📝 Prompt logged: 2025-11-08_10-09-29_taxonomy_mapping_pass2_batch_ab35af12d214.json
+📝 Response logged: 2025-11-08_10-09-42_taxonomy_mapping_pass2_batch_ab35af12d214_RESPONSE.json
+      Pass 2 (batch of 11) → Submitted Abstracts/Presentations (avg: 0.94)
+
+    [168] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-09-42_taxonomy_mapping_pass1_7dbf9e05013e.json
+📝 Response logged: 2025-11-08_10-09-45_taxonomy_mapping_pass1_7dbf9e05013e_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-09-45_taxonomy_mapping_pass2_batch_8d4e1cfb1b27.json
+📝 Response logged: 2025-11-08_10-09-48_taxonomy_mapping_pass2_batch_8d4e1cfb1b27_RESPONSE.json
+        Pass 2 (batch of 2) → Other (Media, Podcasts, Blogs) (avg: 0.90)
+
+    [169] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-09-48_taxonomy_mapping_pass1_4735011f21b9.json
+📝 Response logged: 2025-11-08_10-09-51_taxonomy_mapping_pass1_4735011f21b9_RESPONSE.json
+        Pass 1 → Invitations to Speak/Present (0.90)
+📝 Prompt logged: 2025-11-08_10-09-51_taxonomy_mapping_pass2_batch_62072aa8a1a0.json
+📝 Response logged: 2025-11-08_10-09-57_taxonomy_mapping_pass2_batch_62072aa8a1a0_RESPONSE.json
+        Pass 2 (batch of 4) → Invited Panels, Workshops, Symposia (avg: 0.88)
+
+  [170] Unknown
+      Entries: 1, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-09-57_taxonomy_mapping_pass1_a138f468e1d5.json
+📝 Response logged: 2025-11-08_10-09-59_taxonomy_mapping_pass1_a138f468e1d5_RESPONSE.json
+      Pass 1 → Professional Organizations and Society Memberships (0.95)
+
+    [171] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-09-59_taxonomy_mapping_pass1_ce35e1dc9ed2.json
+📝 Response logged: 2025-11-08_10-10-00_taxonomy_mapping_pass1_ce35e1dc9ed2_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.95)
+
+    [172] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-00_taxonomy_mapping_pass1_f7cdd6c6ec50.json
+📝 Response logged: 2025-11-08_10-10-04_taxonomy_mapping_pass1_f7cdd6c6ec50_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.85)
+
+  [173] Unknown
+      Entries: 3, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-10-04_taxonomy_mapping_pass1_b1e1ec3c47f5.json
+📝 Response logged: 2025-11-08_10-10-07_taxonomy_mapping_pass1_b1e1ec3c47f5_RESPONSE.json
+      Pass 1 → Licensure and Certification (0.95)
+      Pass 2 → Failed: No confusion info for parent: F
+
+    [174] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-07_taxonomy_mapping_pass1_b3997cec6b91.json
+📝 Response logged: 2025-11-08_10-10-09_taxonomy_mapping_pass1_b3997cec6b91_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.95)
+
+    [175] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-09_taxonomy_mapping_pass1_63552d15eece.json
+📝 Response logged: 2025-11-08_10-10-14_taxonomy_mapping_pass1_63552d15eece_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_10-10-14_taxonomy_mapping_pass2_batch_2bad3b03506d.json
+📝 Response logged: 2025-11-08_10-10-16_taxonomy_mapping_pass2_batch_2bad3b03506d_RESPONSE.json
+        Pass 2 (batch of 1) → Leadership in Extramural Organizations (avg: 0.90)
+
+  [176] Unknown
+      Entries: 3, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-10-16_taxonomy_mapping_pass1_85d906dc0f92.json
+📝 Response logged: 2025-11-08_10-10-19_taxonomy_mapping_pass1_85d906dc0f92_RESPONSE.json
+      Pass 1 → Professional Organizations and Society Memberships (0.85)
+
+    [177] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-19_taxonomy_mapping_pass1_300218e01713.json
+📝 Response logged: 2025-11-08_10-10-21_taxonomy_mapping_pass1_300218e01713_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.95)
+
+    [178] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-21_taxonomy_mapping_pass1_c2eba9e16882.json
+📝 Response logged: 2025-11-08_10-10-24_taxonomy_mapping_pass1_c2eba9e16882_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.85)
+
+  [179] Unknown
+      Entries: 4, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-10-24_taxonomy_mapping_pass1_124513bdbe77.json
+📝 Response logged: 2025-11-08_10-10-27_taxonomy_mapping_pass1_124513bdbe77_RESPONSE.json
+      Pass 1 → Postdoctoral Training (0.85)
+      Pass 2 → Failed: No confusion info for parent: C
+
+    [180] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-27_taxonomy_mapping_pass1_80490f507706.json
+📝 Response logged: 2025-11-08_10-10-30_taxonomy_mapping_pass1_80490f507706_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.95)
+
+    [181] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-30_taxonomy_mapping_pass1_1b32674e7586.json
+📝 Response logged: 2025-11-08_10-10-33_taxonomy_mapping_pass1_1b32674e7586_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_10-10-33_taxonomy_mapping_pass2_batch_5bbbea885578.json
+📝 Response logged: 2025-11-08_10-10-36_taxonomy_mapping_pass2_batch_5bbbea885578_RESPONSE.json
+        Pass 2 (batch of 1) → Professional Organizations & Society Memberships (avg: 0.90)
+
+  [182] Unknown
+      Entries: 3, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-10-36_taxonomy_mapping_pass1_6a21291d0612.json
+📝 Response logged: 2025-11-08_10-10-38_taxonomy_mapping_pass1_6a21291d0612_RESPONSE.json
+      Pass 1 → Licensure and Certification (0.95)
+      Pass 2 → Failed: No confusion info for parent: F
+
+    [183] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-38_taxonomy_mapping_pass1_346a2d9a72e1.json
+📝 Response logged: 2025-11-08_10-10-40_taxonomy_mapping_pass1_346a2d9a72e1_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.95)
+
+    [SKIP] Unknown (structural header - preserved for recovery context)
+  [184] Unknown
+      Entries: 2, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-10-40_taxonomy_mapping_pass1_30332e6ef197.json
+📝 Response logged: 2025-11-08_10-10-43_taxonomy_mapping_pass1_30332e6ef197_RESPONSE.json
+      Pass 1 → Licensure and Certification (0.85)
+      Pass 2 → Failed: No confusion info for parent: F
+
+    [185] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-43_taxonomy_mapping_pass1_e1f834e6b030.json
+📝 Response logged: 2025-11-08_10-10-45_taxonomy_mapping_pass1_e1f834e6b030_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.95)
+
+    [186] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-45_taxonomy_mapping_pass1_45bde22a9d39.json
+📝 Response logged: 2025-11-08_10-10-49_taxonomy_mapping_pass1_45bde22a9d39_RESPONSE.json
+        Pass 1 → Extramural Professional Responsibilities (0.85)
+📝 Prompt logged: 2025-11-08_10-10-49_taxonomy_mapping_pass2_batch_9da16fc626a5.json
+📝 Response logged: 2025-11-08_10-10-51_taxonomy_mapping_pass2_batch_9da16fc626a5_RESPONSE.json
+        Pass 2 (batch of 1) → Leadership in Extramural Organizations (avg: 0.80)
+
+  [187] Unknown
+      Entries: 4, Subgroups: 2
+📝 Prompt logged: 2025-11-08_10-10-51_taxonomy_mapping_pass1_ce82e8f44183.json
+📝 Response logged: 2025-11-08_10-10-53_taxonomy_mapping_pass1_ce82e8f44183_RESPONSE.json
+      Pass 1 → Licensure and Certification (0.95)
+      Pass 2 → Failed: No confusion info for parent: F
+
+    [188] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-53_taxonomy_mapping_pass1_c94a54a39b6c.json
+📝 Response logged: 2025-11-08_10-10-55_taxonomy_mapping_pass1_c94a54a39b6c_RESPONSE.json
+        Pass 1 → Professional Organizations and Society Memberships (0.95)
+
+    [189] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-55_taxonomy_mapping_pass1_7fe65869488e.json
+📝 Response logged: 2025-11-08_10-10-58_taxonomy_mapping_pass1_7fe65869488e_RESPONSE.json
+        Pass 1 → Appendix / Other (0.85)
+
+  [190] Unknown
+      Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-10-58_taxonomy_mapping_pass1_fc498aace1a5.json
+📝 Response logged: 2025-11-08_10-11-02_taxonomy_mapping_pass1_fc498aace1a5_RESPONSE.json
+      Pass 1 → Licensure and Certification (0.85)
+      Pass 2 → Failed: No confusion info for parent: F
+
+  [191] Unknown
+      Entries: 1, Subgroups: 3
+📝 Prompt logged: 2025-11-08_10-11-02_taxonomy_mapping_pass1_fc31b59e5778.json
+📝 Response logged: 2025-11-08_10-11-04_taxonomy_mapping_pass1_fc31b59e5778_RESPONSE.json
+      Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-11-04_taxonomy_mapping_pass2_batch_bee2015c8b05.json
+📝 Response logged: 2025-11-08_10-11-06_taxonomy_mapping_pass2_batch_bee2015c8b05_RESPONSE.json
+      Pass 2 (batch of 1) → Manuscript Reviewer / Abstract Reviewer (avg: 0.90)
+
+    [192] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-11-06_taxonomy_mapping_pass1_1df4363da13c.json
+📝 Response logged: 2025-11-08_10-11-08_taxonomy_mapping_pass1_1df4363da13c_RESPONSE.json
+        Pass 1 → Bibliography (0.90)
+📝 Prompt logged: 2025-11-08_10-11-08_taxonomy_mapping_pass2_batch_36dff28e77e0.json
+📝 Response logged: 2025-11-08_10-11-13_taxonomy_mapping_pass2_batch_36dff28e77e0_RESPONSE.json
+        Pass 2 (batch of 4) → Reviews & Editorials (synthesis, commentary) (avg: 0.88)
+
+    [193] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-11-13_taxonomy_mapping_pass1_a5317102d8a6.json
+📝 Response logged: 2025-11-08_10-11-15_taxonomy_mapping_pass1_a5317102d8a6_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-11-15_taxonomy_mapping_pass2_batch_7bc58139e60f.json
+📝 Response logged: 2025-11-08_10-11-20_taxonomy_mapping_pass2_batch_7bc58139e60f_RESPONSE.json
+        Pass 2 (batch of 4) → Editorial Board Membership (avg: 0.88)
+
+    [194] Unknown
+        Entries: 4, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-11-20_taxonomy_mapping_pass1_226c52309608.json
+📝 Response logged: 2025-11-08_10-11-22_taxonomy_mapping_pass1_226c52309608_RESPONSE.json
+        Pass 1 → Bibliography (0.95)
+📝 Prompt logged: 2025-11-08_10-11-22_taxonomy_mapping_pass2_batch_5ca74f2ed728.json
+📝 Response logged: 2025-11-08_10-11-26_taxonomy_mapping_pass2_batch_5ca74f2ed728_RESPONSE.json
+        Pass 2 (batch of 4) → Editorial Board Membership (avg: 0.86)
+
+  [195] Unknown
+      Entries: 1, Subgroups: 4
+📝 Prompt logged: 2025-11-08_10-11-26_taxonomy_mapping_pass1_567c44d4998e.json
+📝 Response logged: 2025-11-08_10-11-30_taxonomy_mapping_pass1_567c44d4998e_RESPONSE.json
+      Pass 1 → Institutional Administrative Activities (0.92)
+
+    [196] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-11-30_taxonomy_mapping_pass1_fec54d7d07ab.json
+📝 Response logged: 2025-11-08_10-11-32_taxonomy_mapping_pass1_fec54d7d07ab_RESPONSE.json
+        Pass 1 → Institutional Administrative Activities (0.90)
+
+    [197] Unknown
+        Entries: 3, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-11-32_taxonomy_mapping_pass1_001e3164d69b.json
+📝 Response logged: 2025-11-08_10-11-35_taxonomy_mapping_pass1_001e3164d69b_RESPONSE.json
+        Pass 1 → Bibliography (0.90)
+📝 Prompt logged: 2025-11-08_10-11-35_taxonomy_mapping_pass2_batch_d6b045625917.json
+📝 Response logged: 2025-11-08_10-11-39_taxonomy_mapping_pass2_batch_d6b045625917_RESPONSE.json
+        Pass 2 (batch of 3) → Reviews & Editorials (synthesis, commentary) (avg: 0.93)
+
+    [198] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-11-39_taxonomy_mapping_pass1_76ae51062fa1.json
+📝 Response logged: 2025-11-08_10-11-41_taxonomy_mapping_pass1_76ae51062fa1_RESPONSE.json
+        Pass 1 → Institutional Administrative Activities (0.85)
+
+    [199] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-11-41_taxonomy_mapping_pass1_ab0d3a47239e.json
+📝 Response logged: 2025-11-08_10-11-44_taxonomy_mapping_pass1_ab0d3a47239e_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_10-11-44_taxonomy_mapping_pass2_batch_bef8fd5a1b08.json
+📝 Response logged: 2025-11-08_10-11-47_taxonomy_mapping_pass2_batch_bef8fd5a1b08_RESPONSE.json
+        Pass 2 (batch of 1) → Current Academic/Clinical Positions (avg: 0.90)
+
+  [200] Unknown
+      Entries: 1, Subgroups: 8
+📝 Prompt logged: 2025-11-08_10-11-47_taxonomy_mapping_pass1_1e28d04a976b.json
+📝 Response logged: 2025-11-08_10-11-50_taxonomy_mapping_pass1_1e28d04a976b_RESPONSE.json
+      Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_10-11-50_taxonomy_mapping_pass2_batch_23e5481a348f.json
+📝 Response logged: 2025-11-08_10-11-52_taxonomy_mapping_pass2_batch_23e5481a348f_RESPONSE.json
+      Pass 2 (batch of 1) → Current Academic/Clinical Positions (avg: 0.80)
+
+    [201] Unknown
+        Entries: 2, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-11-52_taxonomy_mapping_pass1_6fb922985855.json
+📝 Response logged: 2025-11-08_10-11-55_taxonomy_mapping_pass1_6fb922985855_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.95)
+📝 Prompt logged: 2025-11-08_10-11-55_taxonomy_mapping_pass2_batch_10ba7c0874ca.json
+📝 Response logged: 2025-11-08_10-11-57_taxonomy_mapping_pass2_batch_10ba7c0874ca_RESPONSE.json
+        Pass 2 (batch of 2) → Current Academic/Clinical Positions (avg: 0.85)
+
+    [202] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-11-57_taxonomy_mapping_pass1_79398dae2629.json
+📝 Response logged: 2025-11-08_10-12-06_taxonomy_mapping_pass1_79398dae2629_RESPONSE.json
+        Pass 1 → Institutional Administrative Activities (0.85)
+
+    [203] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-12-06_taxonomy_mapping_pass1_e2e2ad3a7c7c.json
+📝 Response logged: 2025-11-08_10-12-09_taxonomy_mapping_pass1_e2e2ad3a7c7c_RESPONSE.json
+        Pass 1 → Institutional Administrative Activities (0.85)
+
+    [204] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-12-09_taxonomy_mapping_pass1_43ac90df0ff1.json
+📝 Response logged: 2025-11-08_10-12-12_taxonomy_mapping_pass1_43ac90df0ff1_RESPONSE.json
+        Pass 1 → Institutional Administrative Activities (0.85)
+
+    [205] Unknown
+        Entries: 1, Subgroups: 0
+📝 Prompt logged: 2025-11-08_10-12-12_taxonomy_mapping_pass1_cf7eb8072000.json
+📝 Response logged: 2025-11-08_10-12-15_taxonomy_mapping_pass1_cf7eb8072000_RESPONSE.json
+        Pass 1 → Professional Positions & Employment (0.85)
+📝 Prompt logged: 2025-11-08_10-12-15_taxonomy_mapping_pass2_batch_f140fce13ec4.json

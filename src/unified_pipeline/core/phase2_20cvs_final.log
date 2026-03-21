@@ -1,0 +1,389 @@
+
+================================================================================
+PHASE 2 - 20 WORD CVS BATCH PROCESSING
+================================================================================
+Found 20 Word CVs
+Output directory: /Users/paulalbert/Library/CloudStorage/Dropbox/Index/ReCiter/Scholar Signals - An LLM Pipeline/CV parsing - AI project/src/unified_pipeline/core/.outputs/phase2_20cvs
+================================================================================
+
+
+[1/20] Processing...
+
+================================================================================
+Processing: 2001_Ut_Format
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/1 successful
+
+[2/20] Processing...
+
+================================================================================
+Processing: 2002_Holtz
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/2 successful
+
+[3/20] Processing...
+
+================================================================================
+Processing: 2003_Albrechtjs_Cv
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/3 successful
+
+[4/20] Processing...
+
+================================================================================
+Processing: 2004_Almasri_Mahmoud
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/4 successful
+
+[5/20] Processing...
+
+================================================================================
+Processing: 2005_Bpg
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/5 successful
+
+[6/20] Processing...
+
+================================================================================
+Processing: 2006_Bush
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/6 successful
+
+[7/20] Processing...
+
+================================================================================
+Processing: 2007_Frank_Lau
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/7 successful
+
+[8/20] Processing...
+
+================================================================================
+Processing: 2008_Dunkel_Schetter
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/8 successful
+
+[9/20] Processing...
+
+================================================================================
+Processing: 2009_Mucci_March
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/9 successful
+
+[10/20] Processing...
+
+================================================================================
+Processing: 2010_Oliver_Hobert
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/10 successful
+
+[11/20] Processing...
+
+================================================================================
+Processing: 2011_Cvsir
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/11 successful
+
+[12/20] Processing...
+
+================================================================================
+Processing: 2012_Ncebner_Nov
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/12 successful
+
+[13/20] Processing...
+
+================================================================================
+Processing: 2013_Petersen
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/13 successful
+
+[14/20] Processing...
+
+================================================================================
+Processing: 2014_Pardini
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/14 successful
+
+[15/20] Processing...
+
+================================================================================
+Processing: 2015_Wende
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/15 successful
+
+[16/20] Processing...
+
+================================================================================
+Processing: 2016_Yisheng
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/16 successful
+
+[17/20] Processing...
+
+================================================================================
+Processing: 2017_Christopher_Contag
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/17 successful
+
+[18/20] Processing...
+
+================================================================================
+Processing: 2018_Cook_Cv
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/18 successful
+
+[19/20] Processing...
+
+================================================================================
+Processing: 2019_Copenhaver_Phil
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/19 successful
+
+[20/20] Processing...
+
+================================================================================
+Processing: 2020_Cornelius_Groenewald
+================================================================================
+  [1/4] Segmenting...
+  ✗ ERROR: No module named 'core'
+
+Progress: 0/20 successful
+
+
+================================================================================
+BATCH PROCESSING COMPLETE
+================================================================================
+Total time: 0.0s
+Successful: 0/20
+================================================================================
+
+
+================================================================================
+Summary report saved: /Users/paulalbert/Library/CloudStorage/Dropbox/Index/ReCiter/Scholar Signals - An LLM Pipeline/CV parsing - AI project/src/unified_pipeline/core/.outputs/phase2_20cvs/PHASE2_20CVS_PROCESSING_REPORT.md
+================================================================================
+
+# 20 Word CVs - Phase 2 Processing Report
+
+**Date**: 2025-11-09 00:29:49
+**Total CVs**: 20
+**Successful**: 0
+**Failed**: 20
+**Total Processing Time**: 0.0s
+**Average Time per CV**: 0.0s
+
+---
+
+## API Usage
+
+**Total API Calls**: 0
+**Total Tokens**: 0
+**Average Calls per CV**: 0.0
+**Average Tokens per CV**: 0
+
+---
+
+## Phase 2 Improvements Applied
+
+### Repair Stage (repair_segmentation.py)
+- ✓ Fix #12: Repeated header deduplication
+- ✓ Fix #15: Roman numeral header deduplication
+- ✓ Fix #8: Institution header merging
+- ✓ Fix #9: Address block merging
+- ✓ Fix #10: Grant containment under Research Support
+- ✓ Fix #13: N/A placeholder demotion
+
+### Preprocessing Stage (confusion_matrix.py)
+- ✓ Fix #7: URL/ORCID detection
+- ✓ Fix #11: Grant number patterns
+- ✓ Fix #14: Date-only line detection
+- ✓ Fix #19: Conference pattern detection
+
+### Taxonomy Mapping Stage (taxonomy_mapper_v2.py)
+- ✓ Fix #16: Keynote/invited talk promotion
+- ✓ Fix #17: Committee/service mapping
+- ✓ Fix #18: Signal-to-taxonomy override
+- ✓ Fix #20: Enhanced award/honor and teaching signals
+- ✓ Fix #22: Research narrative vs output distinction
+- ✓ Fix #23: A vs D disambiguation guidance
+
+---
+
+## Per-CV Results
+
+
+### 1. 2001_Ut_Format ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 2. 2002_Holtz ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 3. 2003_Albrechtjs_Cv ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 4. 2004_Almasri_Mahmoud ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 5. 2005_Bpg ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 6. 2006_Bush ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 7. 2007_Frank_Lau ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 8. 2008_Dunkel_Schetter ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 9. 2009_Mucci_March ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 10. 2010_Oliver_Hobert ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 11. 2011_Cvsir ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 12. 2012_Ncebner_Nov ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 13. 2013_Petersen ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 14. 2014_Pardini ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 15. 2015_Wende ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 16. 2016_Yisheng ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 17. 2017_Christopher_Contag ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 18. 2018_Cook_Cv ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 19. 2019_Copenhaver_Phil ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+### 20. 2020_Cornelius_Groenewald ✗
+
+- **Error**: No module named 'core'
+- **Time**: 0.0s
+
+---
+
+## Output Files
+
+All processed CVs are saved in:
+`/Users/paulalbert/Library/CloudStorage/Dropbox/Index/ReCiter/Scholar Signals - An LLM Pipeline/CV parsing - AI project/src/unified_pipeline/core/.outputs/phase2_20cvs`
+
+File naming convention:
+- `*_segmented.json` - Segmented CV
+- `*_repaired.json` - After structural repairs (Phase 2 Session 2, 3)
+- `*_preprocessed.json` - After signal detection (Phase 2 Session 1)
+- `*_mapped.json` - Final taxonomy-mapped CV (Phase 2 Session 4, 5)
+
+---
+
+**Report Generated**: 2025-11-09 00:29:49
+**Pipeline Version**: Phase 2 Complete (18/18 fixes implemented)
+

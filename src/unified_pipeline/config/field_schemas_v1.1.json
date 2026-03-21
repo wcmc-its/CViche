@@ -1,0 +1,943 @@
+{
+  "version": "1.1",
+  "created": "2025-11-29",
+  "description": "Target field extraction schemas aligned with WCM CV Template (October 2022). Fields marked as 'extract: false' are not sent to LLM.",
+  "template_reference": "wcm_cv_template_faculty_october_2022_final.docx",
+
+  "extraction_philosophy": {
+    "principle": "Extract only what's needed for the WCM template, except for S-codes (publications) which need full extraction for citation reconstruction and enrichment.",
+    "categories": {
+      "template": "Required for WCM template table columns",
+      "enrichment": "Used for downstream enrichment (e.g., PMID lookup)",
+      "reconstruction": "Needed to reconstruct entry in different format (e.g., Vancouver citations)",
+      "optional": "Nice to have but not essential - DO NOT extract by default"
+    }
+  },
+
+  "schemas": {
+    "A": {
+      "description": "Personal/Contact Information",
+      "wcm_section": "PERSONAL DATA",
+      "wcm_table": 2,
+      "extraction_mode": "minimal",
+      "fields": {
+        "name": {"extract": true, "category": "template"},
+        "email": {"extract": true, "category": "template", "wcm_column": "Email"},
+        "phone": {"extract": true, "category": "template", "wcm_column": "Office telephone"},
+        "address": {"extract": true, "category": "template", "wcm_column": "Office address"},
+        "npi_number": {"extract": true, "category": "template", "wcm_column": "NPI number (optional)"},
+        "dea_number": {"extract": true, "category": "template", "wcm_column": "DEA number (optional)"},
+        "title": {"extract": false, "category": "optional", "notes": "Rarely needed separately"},
+        "degrees": {"extract": false, "category": "optional", "notes": "Usually part of name"},
+        "department": {"extract": false, "category": "optional"},
+        "institution": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "B1": {
+      "description": "Academic Degrees",
+      "wcm_section": "EDUCATION - Academic Degree(s)",
+      "wcm_table": 3,
+      "extraction_mode": "minimal",
+      "fields": {
+        "degree": {"extract": true, "category": "template", "wcm_column": "Degree, include field of study"},
+        "institution": {"extract": true, "category": "template", "wcm_column": "Institution, city and state"},
+        "discipline": {"extract": true, "category": "template", "wcm_column": "Degree, include field of study"},
+        "dates_attended": {"extract": true, "category": "template", "wcm_column": "Dates attended (mm/yyyy-mm/yyyy)"},
+        "year": {"extract": true, "category": "template", "wcm_column": "Year Awarded"},
+        "thesis_title": {"extract": false, "category": "optional"},
+        "advisor": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "B2": {
+      "description": "Other Educational Experiences",
+      "wcm_section": "EDUCATION - Other Educational Experiences",
+      "wcm_table": 4,
+      "extraction_mode": "minimal",
+      "fields": {
+        "program_name": {"extract": true, "category": "template", "wcm_column": "Description"},
+        "institution": {"extract": true, "category": "template", "wcm_column": "Institution, city and state"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates attended"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates attended"},
+        "program_type": {"extract": false, "category": "optional"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "C": {
+      "description": "Postdoctoral Training",
+      "wcm_section": "POSTDOCTORAL TRAINING",
+      "wcm_table": 5,
+      "extraction_mode": "minimal",
+      "fields": {
+        "training_type": {"extract": true, "category": "template", "wcm_column": "Title, include area of training"},
+        "specialty": {"extract": true, "category": "template", "wcm_column": "Title, include area of training"},
+        "institution": {"extract": true, "category": "template", "wcm_column": "Institution, city and state"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "department": {"extract": false, "category": "optional"},
+        "mentor": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "D1": {
+      "description": "Academic Appointments",
+      "wcm_section": "Academic Appointments",
+      "wcm_table": 6,
+      "extraction_mode": "minimal",
+      "fields": {
+        "title": {"extract": true, "category": "template", "wcm_column": "Title"},
+        "institution": {"extract": true, "category": "template", "wcm_column": "Institution, city and state"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "department": {"extract": false, "category": "optional"},
+        "track": {"extract": false, "category": "optional"},
+        "tenure_status": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "D2": {
+      "description": "Hospital Appointments",
+      "wcm_section": "Hospital Appointments",
+      "wcm_table": 7,
+      "extraction_mode": "minimal",
+      "fields": {
+        "title": {"extract": true, "category": "template", "wcm_column": "Title"},
+        "institution": {"extract": true, "category": "template", "wcm_column": "Institution, city and state"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "department": {"extract": false, "category": "optional"},
+        "appointment_type": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "D3": {
+      "description": "Other Professional Positions",
+      "wcm_section": "Other Professional Positions & Employment",
+      "wcm_table": 8,
+      "extraction_mode": "minimal",
+      "fields": {
+        "title": {"extract": true, "category": "template", "wcm_column": "Title"},
+        "organization": {"extract": true, "category": "template", "wcm_column": "Institution, city and state"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "department": {"extract": false, "category": "optional"},
+        "role_type": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "E": {
+      "description": "Employment Status",
+      "wcm_section": "EMPLOYMENT STATUS",
+      "extraction_mode": "minimal",
+      "fields": {
+        "employer": {"extract": true, "category": "template"},
+        "status": {"extract": true, "category": "template"},
+        "fte_percentage": {"extract": true, "category": "template"},
+        "effective_date": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "F1": {
+      "description": "Licensure",
+      "wcm_section": "LICENSURE",
+      "wcm_table": 9,
+      "extraction_mode": "minimal",
+      "fields": {
+        "state_country": {"extract": true, "category": "template", "wcm_column": "State"},
+        "license_number": {"extract": true, "category": "template", "wcm_column": "Number"},
+        "issue_date": {"extract": true, "category": "template", "wcm_column": "Date of issue"},
+        "expiration_date": {"extract": true, "category": "template", "wcm_column": "Date of last registration"},
+        "license_type": {"extract": false, "category": "optional"},
+        "status": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "F2": {
+      "description": "Board Certification",
+      "wcm_section": "BOARD CERTIFICATION",
+      "wcm_table": 11,
+      "extraction_mode": "minimal",
+      "fields": {
+        "certifying_board": {"extract": true, "category": "template", "wcm_column": "Full Name of Board"},
+        "certificate_number": {"extract": true, "category": "template", "wcm_column": "Certificate #"},
+        "year_certified": {"extract": true, "category": "template", "wcm_column": "Dates of Certification"},
+        "recertification_date": {"extract": true, "category": "template", "wcm_column": "Dates of Certification"},
+        "specialty": {"extract": false, "category": "optional"},
+        "status": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "G": {
+      "description": "Institutional/Hospital Affiliation",
+      "wcm_section": "INSTITUTIONAL/HOSPITAL AFFILIATION",
+      "wcm_table": 12,
+      "extraction_mode": "minimal",
+      "fields": {
+        "organization": {"extract": true, "category": "template"},
+        "affiliation_type": {"extract": true, "category": "template", "notes": "Primary vs Other"},
+        "department": {"extract": false, "category": "optional"},
+        "start_date": {"extract": false, "category": "optional"},
+        "end_date": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "H": {
+      "description": "Honors and Awards",
+      "wcm_section": "HONORS, AWARDS",
+      "wcm_table": 13,
+      "extraction_mode": "minimal",
+      "fields": {
+        "award_name": {"extract": true, "category": "template", "wcm_column": "Name of award"},
+        "granting_body": {"extract": true, "category": "template", "wcm_column": "Organization"},
+        "date": {"extract": true, "category": "template", "wcm_column": "Date awarded (yyyy)"},
+        "amount": {"extract": false, "category": "optional"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "I": {
+      "description": "Professional Organizations and Society Memberships",
+      "wcm_section": "PROFESSIONAL ORGANIZATIONS AND SOCIETY MEMBERSHIPS",
+      "wcm_table": 14,
+      "extraction_mode": "minimal",
+      "fields": {
+        "organization": {"extract": true, "category": "template", "wcm_column": "Organization"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Date (yyyy-yyyy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Date (yyyy-yyyy)"},
+        "membership_type": {"extract": true, "category": "template"},
+        "fellowship_designation": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "J": {
+      "description": "Percent Effort",
+      "wcm_section": "PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES",
+      "wcm_table": 15,
+      "extraction_mode": "minimal",
+      "fields": {
+        "activity": {"extract": true, "category": "template", "wcm_column": "Weill Cornell Activity"},
+        "percent_effort": {"extract": true, "category": "template", "wcm_column": "Percent Effort (%)"},
+        "involves_trainees": {"extract": true, "category": "template", "wcm_column": "Does activity involve trainees?"},
+        "clinical_percent": {"extract": false, "category": "optional"},
+        "research_percent": {"extract": false, "category": "optional"},
+        "teaching_percent": {"extract": false, "category": "optional"},
+        "admin_percent": {"extract": false, "category": "optional"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "K1": {
+      "description": "Didactic Teaching",
+      "wcm_section": "EDUCATIONAL CONTRIBUTIONS - Didactic teaching",
+      "extraction_mode": "minimal",
+      "fields": {
+        "course_title": {"extract": true, "category": "template"},
+        "institution": {"extract": true, "category": "template"},
+        "role": {"extract": true, "category": "template"},
+        "start_date": {"extract": true, "category": "template"},
+        "end_date": {"extract": true, "category": "template"},
+        "course_code": {"extract": false, "category": "optional"},
+        "department": {"extract": false, "category": "optional"},
+        "level": {"extract": false, "category": "optional"},
+        "enrollment": {"extract": false, "category": "optional"},
+        "hours_per_year": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "K2": {
+      "description": "Clinical Teaching",
+      "wcm_section": "EDUCATIONAL CONTRIBUTIONS - Clinical teaching",
+      "extraction_mode": "minimal",
+      "fields": {
+        "teaching_role": {"extract": true, "category": "template"},
+        "institution": {"extract": true, "category": "template"},
+        "setting": {"extract": true, "category": "template"},
+        "start_date": {"extract": true, "category": "template"},
+        "end_date": {"extract": true, "category": "template"},
+        "learner_level": {"extract": false, "category": "optional"},
+        "hours_per_week": {"extract": false, "category": "optional"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "K3": {
+      "description": "Administrative/Educational Leadership",
+      "wcm_section": "EDUCATIONAL CONTRIBUTIONS - Administrative teaching",
+      "extraction_mode": "minimal",
+      "fields": {
+        "program_name": {"extract": true, "category": "template"},
+        "role": {"extract": true, "category": "template"},
+        "institution": {"extract": true, "category": "template"},
+        "start_date": {"extract": true, "category": "template"},
+        "end_date": {"extract": true, "category": "template"},
+        "scope": {"extract": false, "category": "optional"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "K4": {
+      "description": "Continuing/Professional Education",
+      "wcm_section": "EDUCATIONAL CONTRIBUTIONS - Continuing education",
+      "extraction_mode": "minimal",
+      "fields": {
+        "activity_title": {"extract": true, "category": "template"},
+        "institution": {"extract": true, "category": "template"},
+        "role": {"extract": true, "category": "template"},
+        "date": {"extract": true, "category": "template"},
+        "cme_credits": {"extract": false, "category": "optional"},
+        "target_audience": {"extract": false, "category": "optional"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "K5": {
+      "description": "Community/Patient Education",
+      "wcm_section": "EDUCATIONAL CONTRIBUTIONS - Other education/outreach",
+      "extraction_mode": "minimal",
+      "fields": {
+        "activity_title": {"extract": true, "category": "template"},
+        "audience": {"extract": true, "category": "template"},
+        "location": {"extract": true, "category": "template"},
+        "date": {"extract": true, "category": "template"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "L1": {
+      "description": "Clinical Practice",
+      "wcm_section": "CLINICAL PRACTICE",
+      "extraction_mode": "minimal",
+      "fields": {
+        "clinical_role": {"extract": true, "category": "template"},
+        "institution": {"extract": true, "category": "template"},
+        "start_date": {"extract": true, "category": "template"},
+        "end_date": {"extract": true, "category": "template"},
+        "service_setting": {"extract": false, "category": "optional"},
+        "fte_clinical": {"extract": false, "category": "optional"},
+        "sessions_per_week": {"extract": false, "category": "optional"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "L2": {
+      "description": "Clinical Innovations",
+      "wcm_section": "CLINICAL INNOVATIONS",
+      "extraction_mode": "minimal",
+      "fields": {
+        "project_name": {"extract": true, "category": "template"},
+        "institution": {"extract": true, "category": "template"},
+        "role": {"extract": true, "category": "template"},
+        "launch_date": {"extract": true, "category": "template"},
+        "outcome": {"extract": false, "category": "optional"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "L3": {
+      "description": "Clinical Leadership",
+      "wcm_section": "CLINICAL LEADERSHIP",
+      "extraction_mode": "minimal",
+      "fields": {
+        "leadership_role": {"extract": true, "category": "template"},
+        "institution": {"extract": true, "category": "template"},
+        "unit_program": {"extract": true, "category": "template"},
+        "start_date": {"extract": true, "category": "template"},
+        "end_date": {"extract": true, "category": "template"},
+        "scope": {"extract": false, "category": "optional"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "M1": {
+      "description": "Research Activities",
+      "wcm_section": "RESEARCH - Research Activities",
+      "extraction_mode": "narrative_primary",
+      "notes": "This section is primarily narrative - the research statement IS the content",
+      "fields": {
+        "narrative": {"extract": true, "category": "template", "notes": "Research statement - primary content"},
+        "research_area": {"extract": false, "category": "optional"},
+        "description": {"extract": false, "category": "optional"},
+        "institution": {"extract": false, "category": "optional"},
+        "start_date": {"extract": false, "category": "optional"},
+        "end_date": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "M2A": {
+      "description": "Current Research Funding",
+      "wcm_section": "RESEARCH - Current Funding",
+      "wcm_table": 16,
+      "extraction_mode": "comprehensive",
+      "notes": "Grants need full extraction for reporting",
+      "fields": {
+        "grant_number": {"extract": true, "category": "template"},
+        "title": {"extract": true, "category": "template", "wcm_column": "Project title"},
+        "pi_role": {"extract": true, "category": "template", "wcm_column": "Your role"},
+        "co_investigators": {"extract": true, "category": "template", "wcm_column": "Names of Co-PIs"},
+        "agency": {"extract": true, "category": "template", "wcm_column": "Award Source"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Start-end dates"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Start-end dates"},
+        "total_funding": {"extract": true, "category": "template", "wcm_column": "Amount, total"},
+        "annual_funding": {"extract": true, "category": "template", "wcm_column": "Amount, yearly direct"},
+        "percent_effort": {"extract": true, "category": "template", "wcm_column": "Effort"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "M2B": {
+      "description": "Past (Completed) Research Funding",
+      "wcm_section": "RESEARCH - Past Funding",
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "grant_number": {"extract": true, "category": "template"},
+        "title": {"extract": true, "category": "template"},
+        "pi_role": {"extract": true, "category": "template"},
+        "co_investigators": {"extract": true, "category": "template"},
+        "agency": {"extract": true, "category": "template"},
+        "start_date": {"extract": true, "category": "template"},
+        "end_date": {"extract": true, "category": "template"},
+        "total_funding": {"extract": true, "category": "template"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "M2C": {
+      "description": "Pending Research Funding",
+      "wcm_section": "RESEARCH - Pending Funding",
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "grant_number": {"extract": true, "category": "template"},
+        "title": {"extract": true, "category": "template"},
+        "pi_role": {"extract": true, "category": "template"},
+        "co_investigators": {"extract": true, "category": "template"},
+        "agency": {"extract": true, "category": "template"},
+        "total_funding_requested": {"extract": true, "category": "template"},
+        "submission_date": {"extract": true, "category": "template"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "M2D": {
+      "description": "Patents and Inventions",
+      "wcm_section": "RESEARCH - Patents & Inventions",
+      "extraction_mode": "minimal",
+      "fields": {
+        "patent_number": {"extract": true, "category": "template"},
+        "title": {"extract": true, "category": "template"},
+        "inventors": {"extract": true, "category": "template"},
+        "filing_date": {"extract": false, "category": "optional"},
+        "issue_date": {"extract": false, "category": "optional"},
+        "status": {"extract": false, "category": "optional"},
+        "assignee": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "M4A_DEPRECATED": {
+      "description": "Interventional Clinical Trials",
+      "extraction_mode": "minimal",
+      "fields": {
+        "nct_number": {"extract": true, "category": "enrichment"},
+        "trial_title": {"extract": true, "category": "template"},
+        "role": {"extract": true, "category": "template"},
+        "sponsor": {"extract": true, "category": "template"},
+        "start_date": {"extract": true, "category": "template"},
+        "end_date": {"extract": true, "category": "template"},
+        "phase": {"extract": false, "category": "optional"},
+        "intervention": {"extract": false, "category": "optional"},
+        "status": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "M4B": {
+      "description": "Observational Studies",
+      "extraction_mode": "minimal",
+      "fields": {
+        "nct_number": {"extract": true, "category": "enrichment"},
+        "study_title": {"extract": true, "category": "template"},
+        "role": {"extract": true, "category": "template"},
+        "sponsor": {"extract": true, "category": "template"},
+        "start_date": {"extract": true, "category": "template"},
+        "end_date": {"extract": true, "category": "template"},
+        "study_type": {"extract": false, "category": "optional"},
+        "status": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "N1": {
+      "description": "Mentoring Leadership/Programs",
+      "wcm_section": "MENTORING - Leadership",
+      "extraction_mode": "minimal",
+      "fields": {
+        "program_name": {"extract": true, "category": "template"},
+        "role": {"extract": true, "category": "template"},
+        "institution": {"extract": true, "category": "template"},
+        "start_date": {"extract": true, "category": "template"},
+        "end_date": {"extract": true, "category": "template"},
+        "number_trainees": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "N2": {
+      "description": "Training Grants",
+      "wcm_section": "MENTORING - Training Grants",
+      "wcm_table": 17,
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "grant_number": {"extract": true, "category": "template"},
+        "grant_title": {"extract": true, "category": "template"},
+        "role": {"extract": true, "category": "template"},
+        "agency": {"extract": true, "category": "template"},
+        "start_date": {"extract": true, "category": "template"},
+        "end_date": {"extract": true, "category": "template"},
+        "trainees_supported": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "N3A": {
+      "description": "Current Mentees",
+      "wcm_section": "MENTORING - Current Mentees",
+      "wcm_table": 18,
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "mentee_name": {"extract": true, "category": "template", "wcm_column": "Name"},
+        "site_position": {"extract": true, "category": "template", "wcm_column": "Site/Position"},
+        "mentee_level": {"extract": true, "category": "template", "wcm_column": "Degree/Level"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Start Date"},
+        "funding_source": {"extract": true, "category": "template", "wcm_column": "Funding"},
+        "research_focus": {"extract": true, "category": "template", "wcm_column": "Research Focus/Project"},
+        "program": {"extract": false, "category": "optional"},
+        "expected_completion": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "N3B": {
+      "description": "Past Mentees",
+      "wcm_section": "MENTORING - Past Mentees",
+      "wcm_table": 19,
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "mentee_name": {"extract": true, "category": "template", "wcm_column": "Name"},
+        "site_position": {"extract": true, "category": "template", "wcm_column": "Site/Position"},
+        "mentee_level": {"extract": true, "category": "template", "wcm_column": "Degree/Level"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates"},
+        "funding_source": {"extract": true, "category": "template", "wcm_column": "Funding"},
+        "research_focus": {"extract": true, "category": "template", "wcm_column": "Research Focus"},
+        "current_position": {"extract": true, "category": "template", "wcm_column": "Current Position"},
+        "program": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "N4": {
+      "description": "Mentee Outputs",
+      "wcm_section": "MENTORING - Outputs",
+      "extraction_mode": "minimal",
+      "fields": {
+        "output_type": {"extract": true, "category": "template"},
+        "mentee_name": {"extract": true, "category": "template"},
+        "title": {"extract": true, "category": "template"},
+        "date": {"extract": true, "category": "template"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "O": {
+      "description": "Institutional Leadership Activities",
+      "wcm_section": "INSTITUTIONAL LEADERSHIP ACTIVITIES",
+      "wcm_table": 20,
+      "extraction_mode": "minimal",
+      "fields": {
+        "leadership_role": {"extract": true, "category": "template", "wcm_column": "Role(s)/Position"},
+        "institution": {"extract": true, "category": "template", "wcm_column": "Institution/Location"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "division_department": {"extract": false, "category": "optional"},
+        "budget_authority": {"extract": false, "category": "optional"},
+        "personnel_supervised": {"extract": false, "category": "optional"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "P": {
+      "description": "Institutional Administrative/Committee Service",
+      "wcm_section": "INSTITUTIONAL ADMINISTRATIVE ACTIVITIES",
+      "wcm_table": 21,
+      "extraction_mode": "minimal",
+      "fields": {
+        "committee_name": {"extract": true, "category": "template", "wcm_column": "Name of Committee"},
+        "role": {"extract": true, "category": "template", "wcm_column": "Role"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "institution": {"extract": false, "category": "optional"},
+        "description": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "Q1": {
+      "description": "Leadership in Extramural Organizations",
+      "wcm_section": "EXTRAMURAL - Leadership",
+      "wcm_table": 22,
+      "extraction_mode": "minimal",
+      "fields": {
+        "role": {"extract": true, "category": "template", "wcm_column": "Role"},
+        "organization": {"extract": true, "category": "template", "wcm_column": "Organization"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "scope": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "Q2": {
+      "description": "Service on Extramural Boards/Committees",
+      "wcm_section": "EXTRAMURAL - Committees",
+      "wcm_table": [23, 24, 25],
+      "extraction_mode": "minimal",
+      "fields": {
+        "committee_name": {"extract": true, "category": "template", "wcm_column": "Name of Committee"},
+        "role": {"extract": true, "category": "template", "wcm_column": "Role"},
+        "organization": {"extract": true, "category": "template", "wcm_column": "Organization"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "scope": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "Q3": {
+      "description": "Grant Reviewing/Study Sections",
+      "wcm_section": "EXTRAMURAL - Grant Reviewing",
+      "wcm_table": 26,
+      "extraction_mode": "minimal",
+      "fields": {
+        "agency": {"extract": true, "category": "template", "wcm_column": "Organization Name"},
+        "role": {"extract": true, "category": "template", "wcm_column": "Role(s)"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "panel_name": {"extract": false, "category": "optional"},
+        "review_type": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "Q4A": {
+      "description": "Editorial - Editor/Co-Editor",
+      "wcm_section": "EXTRAMURAL - Editorial - Editor",
+      "wcm_table": 27,
+      "extraction_mode": "minimal",
+      "fields": {
+        "journal_name": {"extract": true, "category": "template", "wcm_column": "Journal Name"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "role": {"extract": false, "category": "optional"},
+        "publisher": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "Q4B": {
+      "description": "Editorial Board Membership",
+      "wcm_section": "EXTRAMURAL - Editorial - Board",
+      "wcm_table": 28,
+      "extraction_mode": "minimal",
+      "fields": {
+        "journal_name": {"extract": true, "category": "template", "wcm_column": "Journal Name"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "role": {"extract": false, "category": "optional"},
+        "section": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "Q4C": {
+      "description": "Editorial Board Service",
+      "wcm_section": "EXTRAMURAL - Editorial",
+      "wcm_table": 29,
+      "extraction_mode": "minimal",
+      "fields": {
+        "journal_name": {"extract": true, "category": "template", "wcm_column": "Board / Organization Name"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "Q4D": {
+      "description": "Journal Reviewing/Ad hoc Reviewing",
+      "wcm_section": "EXTRAMURAL - Editorial - Ad hoc",
+      "wcm_table": 30,
+      "extraction_mode": "minimal",
+      "fields": {
+        "journal_name": {"extract": true, "category": "template", "wcm_column": "Journal Name"},
+        "start_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy-yyyy)"},
+        "year": {"extract": false, "category": "optional"},
+        "number_reviews": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "R": {
+      "description": "Invitations to Speak/Present",
+      "wcm_section": "INVITATIONS TO SPEAK/PRESENT",
+      "wcm_table": [31, 32, 33],
+      "extraction_mode": "minimal",
+      "fields": {
+        "title": {"extract": true, "category": "template", "wcm_column": "Title"},
+        "location": {"extract": true, "category": "template", "wcm_column": "Institution/Location"},
+        "date": {"extract": true, "category": "template", "wcm_column": "Dates (yyyy)"},
+        "event_name": {"extract": false, "category": "optional"},
+        "presentation_type": {"extract": false, "category": "optional"},
+        "host_organization": {"extract": false, "category": "optional"},
+        "scope": {"extract": false, "category": "optional"},
+        "authors": {"extract": false, "category": "optional"},
+        "target_name": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "S0": {
+      "description": "Researcher Profile/Identifiers",
+      "wcm_section": "BIBLIOGRAPHY",
+      "extraction_mode": "enrichment",
+      "notes": "Extract identifiers for profile linking and enrichment",
+      "fields": {
+        "orcid": {"extract": true, "category": "enrichment"},
+        "google_scholar_url": {"extract": true, "category": "enrichment"},
+        "scopus_id": {"extract": true, "category": "enrichment"},
+        "pubmed_url": {"extract": true, "category": "enrichment"},
+        "researchgate_url": {"extract": false, "category": "optional"},
+        "h_index": {"extract": false, "category": "optional"},
+        "total_citations": {"extract": false, "category": "optional"},
+        "publication_count": {"extract": false, "category": "optional"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "S1": {
+      "description": "Peer-reviewed Research Articles",
+      "wcm_section": "BIBLIOGRAPHY - Peer-reviewed",
+      "extraction_mode": "comprehensive",
+      "notes": "Full extraction needed for citation reconstruction and enrichment",
+      "fields": {
+        "authors": {"extract": true, "category": "reconstruction"},
+        "year": {"extract": true, "category": "reconstruction"},
+        "title": {"extract": true, "category": "reconstruction"},
+        "journal": {"extract": true, "category": "reconstruction"},
+        "volume": {"extract": true, "category": "reconstruction"},
+        "issue": {"extract": true, "category": "reconstruction"},
+        "pages": {"extract": true, "category": "reconstruction"},
+        "doi": {"extract": true, "category": "enrichment"},
+        "pmid": {"extract": true, "category": "enrichment"},
+        "pmcid": {"extract": true, "category": "template", "wcm_notes": "PMCID explicitly required"},
+        "target_name": {"extract": true, "category": "template", "wcm_notes": "Bold your name"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "S2": {
+      "description": "Reviews and Editorials",
+      "wcm_section": "BIBLIOGRAPHY - Reviews and Editorials",
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "authors": {"extract": true, "category": "reconstruction"},
+        "year": {"extract": true, "category": "reconstruction"},
+        "title": {"extract": true, "category": "reconstruction"},
+        "journal": {"extract": true, "category": "reconstruction"},
+        "volume": {"extract": true, "category": "reconstruction"},
+        "issue": {"extract": true, "category": "reconstruction"},
+        "pages": {"extract": true, "category": "reconstruction"},
+        "doi": {"extract": true, "category": "enrichment"},
+        "pmid": {"extract": true, "category": "enrichment"},
+        "pmcid": {"extract": true, "category": "template"},
+        "target_name": {"extract": true, "category": "template"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "S3": {
+      "description": "Books",
+      "wcm_section": "BIBLIOGRAPHY - Books",
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "authors": {"extract": true, "category": "reconstruction"},
+        "editors": {"extract": true, "category": "reconstruction"},
+        "year": {"extract": true, "category": "reconstruction"},
+        "title": {"extract": true, "category": "reconstruction"},
+        "publisher": {"extract": true, "category": "reconstruction"},
+        "edition": {"extract": true, "category": "reconstruction"},
+        "isbn": {"extract": true, "category": "enrichment"},
+        "target_name": {"extract": true, "category": "template"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "S4": {
+      "description": "Book Chapters",
+      "wcm_section": "BIBLIOGRAPHY - Chapters",
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "authors": {"extract": true, "category": "reconstruction"},
+        "year": {"extract": true, "category": "reconstruction"},
+        "chapter_title": {"extract": true, "category": "reconstruction"},
+        "book_title": {"extract": true, "category": "reconstruction"},
+        "editors": {"extract": true, "category": "reconstruction"},
+        "publisher": {"extract": true, "category": "reconstruction"},
+        "pages": {"extract": true, "category": "reconstruction"},
+        "doi": {"extract": true, "category": "enrichment"},
+        "target_name": {"extract": true, "category": "template"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "S5": {
+      "description": "Non-peer-reviewed Research Publications",
+      "wcm_section": "BIBLIOGRAPHY - Non-peer-reviewed",
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "authors": {"extract": true, "category": "reconstruction"},
+        "year": {"extract": true, "category": "reconstruction"},
+        "title": {"extract": true, "category": "reconstruction"},
+        "publication_venue": {"extract": true, "category": "reconstruction"},
+        "report_number": {"extract": true, "category": "reconstruction"},
+        "url": {"extract": true, "category": "reconstruction"},
+        "target_name": {"extract": true, "category": "template"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "S6": {
+      "description": "Case Reports",
+      "wcm_section": "BIBLIOGRAPHY - Case Reports",
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "authors": {"extract": true, "category": "reconstruction"},
+        "year": {"extract": true, "category": "reconstruction"},
+        "title": {"extract": true, "category": "reconstruction"},
+        "journal": {"extract": true, "category": "reconstruction"},
+        "volume": {"extract": true, "category": "reconstruction"},
+        "pages": {"extract": true, "category": "reconstruction"},
+        "doi": {"extract": true, "category": "enrichment"},
+        "pmid": {"extract": true, "category": "enrichment"},
+        "pmcid": {"extract": true, "category": "template"},
+        "target_name": {"extract": true, "category": "template"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "S7": {
+      "description": "In Review/Submitted Manuscripts",
+      "wcm_section": "BIBLIOGRAPHY - In review",
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "authors": {"extract": true, "category": "reconstruction"},
+        "year": {"extract": true, "category": "reconstruction"},
+        "title": {"extract": true, "category": "reconstruction"},
+        "status": {"extract": true, "category": "template"},
+        "target_journal": {"extract": true, "category": "template"},
+        "target_name": {"extract": true, "category": "template"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "S8": {
+      "description": "Abstracts/Conference Proceedings",
+      "wcm_section": "BIBLIOGRAPHY - Abstracts",
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "authors": {"extract": true, "category": "reconstruction"},
+        "year": {"extract": true, "category": "reconstruction"},
+        "title": {"extract": true, "category": "reconstruction"},
+        "conference_name": {"extract": true, "category": "reconstruction"},
+        "location": {"extract": true, "category": "reconstruction"},
+        "abstract_number": {"extract": true, "category": "reconstruction"},
+        "doi": {"extract": true, "category": "enrichment"},
+        "target_name": {"extract": true, "category": "template"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "S9": {
+      "description": "Other Media",
+      "wcm_section": "BIBLIOGRAPHY - Other",
+      "extraction_mode": "comprehensive",
+      "fields": {
+        "authors": {"extract": true, "category": "reconstruction"},
+        "year": {"extract": true, "category": "reconstruction"},
+        "title": {"extract": true, "category": "reconstruction"},
+        "media_type": {"extract": true, "category": "reconstruction"},
+        "venue": {"extract": true, "category": "reconstruction"},
+        "url": {"extract": true, "category": "reconstruction"},
+        "target_name": {"extract": true, "category": "template"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    },
+
+    "T": {
+      "description": "Miscellaneous/Other",
+      "extraction_mode": "minimal",
+      "fields": {
+        "content_type": {"extract": true, "category": "template"},
+        "description": {"extract": true, "category": "template"},
+        "narrative": {"extract": false, "category": "optional"}
+      }
+    }
+  },
+
+  "changelog": [
+    {
+      "version": "1.1",
+      "date": "2025-11-29",
+      "changes": [
+        "Added 'extract' flag to each field to distinguish required vs optional",
+        "Added 'category' to fields: template, enrichment, reconstruction, optional",
+        "Added 'extraction_mode' to schemas: minimal, comprehensive, narrative_primary, enrichment",
+        "S-codes (publications) remain comprehensive for citation reconstruction",
+        "Most other codes switched to minimal extraction (template fields only)",
+        "narrative field marked as 'extract: false' for most codes except M1"
+      ]
+    },
+    {
+      "version": "1.0",
+      "date": "2025-11-29",
+      "changes": [
+        "Initial versioned schema based on WCM CV Template October 2022"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1187 @@
+#!/usr/bin/env python3
+"""
+Stage 2: Entry Extraction (Combined Delimiter Detection + Text Extraction)
+
+Uses LLM to identify individual entries within each CV section and extracts their full text.
+This stage combines the former Stage 2a (delimiter detection) and Stage 2b (text extraction).
+
+Input: Stage 1b hierarchy JSON + Word document
+Output: JSON with extracted entries including full text and hierarchy context
+"""
+
+import os
+import sys
+import json
+import time
+from pathlib import Path
+from typing import List, Dict, Any, Tuple
+from docx import Document
+from openai import OpenAI
+
+# Add to path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from core.output_manager import OutputManager
+from core.prompt_logger import log_prompt_before_call, log_prompt_response
+from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
+
+
+def get_hierarchy_path(node: Dict, current_path: List[str] = None) -> List[str]:
+    """Build full hierarchy path for a node"""
+    if current_path is None:
+        current_path = []
+
+    text = node.get("text", "").strip()
+    if text:
+        current_path.append(text)
+
+    return current_path
+
+
+def build_element_index_map(doc_structure: Dict) -> Dict[int, Dict]:
+    """
+    Build a map from element index to element data from extract_unified_elements output.
+
+    The unified document structure uses unified_idx for all elements:
+    - Paragraphs have unified_idx (integer)
+    - Table headers have unified_idx (integer)
+    - Table content has unified_idx (integer)
+    - Empty elements have unified_idx (integer)
+
+    This function creates a map where all elements can be looked up by unified_idx.
+
+    Returns:
+        Dict mapping unified_idx (int) -> element dict
+    """
+    element_map = {}
+
+    for elem in doc_structure.get("elements", []):
+        # Use unified_idx if available (from extract_unified_elements)
+        # Fall back to idx for backward compatibility
+        idx = elem.get("unified_idx", elem.get("idx"))
+
+        if isinstance(idx, int):
+            element_map[idx] = elem
+        elif isinstance(idx, str) and idx.startswith("table_"):
+            # Legacy table index format - store with string key
+            element_map[idx] = elem
+
+    return element_map
+
+
+def get_element_text(element: Dict) -> str:
+    """
+    Extract text from an element (paragraph, table_header, table_content, table, or empty).
+
+    For table content, uses the pre-flattened text or concatenates cell text.
+    """
+    elem_type = element.get("type", "")
+
+    if elem_type in ("paragraph", "empty", "table_header"):
+        return element.get("text", "").strip()
+    elif elem_type == "table_content":
+        # Table content already has flattened text
+        return element.get("text", "").strip()
+    elif elem_type == "table":
+        # Legacy table format - flatten data into text
+        rows = element.get("data", [])
+        row_texts = []
+        for row in rows:
+            cell_texts = [cell.get("text", "") for cell in row]
+            row_texts.append("\t".join(cell_texts))
+        return "\n".join(row_texts)
+    else:
+        return element.get("text", "").strip()
+
+
+def split_merged_row_into_pseudo_rows(row: list) -> list:
+    """
+    Detect and split table rows where multiple entries were merged into one row.
+
+    If all cells in a row contain the same number of \n\n-separated segments,
+    this indicates the row should have been multiple rows. We split each cell
+    and zip them together to create pseudo-rows.
+
+    Args:
+        row: List of cell dicts with 'text' keys
+
+    Returns:
+        List of pseudo-rows (each is a list of cell texts)
+    """
+    import re
+
+    if not isinstance(row, list) or len(row) < 2:
+        return None  # Can't detect pattern with single cell
+
+    # Extract text from each cell and split on \n\n+ pattern
+    cell_segments = []
+    for cell in row:
+        cell_text = cell.get("text", "") if isinstance(cell, dict) else str(cell)
+        # Split on 2+ newlines (blank line separator)
+        segments = re.split(r'\n\n+', cell_text)
+        segments = [s.strip() for s in segments if s.strip()]
+        cell_segments.append(segments)
+
+    # Check if all cells have the same number of segments (> 1)
+    segment_counts = [len(segs) for segs in cell_segments]
+    if len(set(segment_counts)) != 1 or segment_counts[0] <= 1:
+        return None  # Not a merged row pattern
+
+    num_pseudo_rows = segment_counts[0]
+
+    # Zip segments together to create pseudo-rows
+    pseudo_rows = []
+    for i in range(num_pseudo_rows):
+        pseudo_row = [segs[i] if i < len(segs) else "" for segs in cell_segments]
+        pseudo_rows.append(pseudo_row)
+
+    return pseudo_rows
+
+
+def extract_leaf_sections_with_boundaries(
+    section_boundaries: List[Dict],
+    hierarchy: List[Dict]
+) -> List[Tuple[List[str], int, int]]:
+    """
+    Extract all leaf sections with their boundaries from Stage 1b output.
+
+    Also handles gaps between parent sections and their first child - these
+    contain content that belongs to the parent section before any subsections.
+
+    Args:
+        section_boundaries: List of section boundary dicts from Stage 1b
+        hierarchy: Hierarchy structure (for reference)
+
+    Returns:
+        List of (hierarchy_path, element_idx_start, element_idx_end) tuples
+    """
+    leaf_sections = []
+
+    # First, collect all parent sections that have children
+    # We need to process the gap between parent start and first child start
+    parent_sections = {}
+    for boundary in section_boundaries:
+        if boundary.get("has_children", False):
+            hierarchy_path = tuple(boundary.get("hierarchy", []))
+            start_idx = boundary.get("element_idx_start")
+            end_idx = boundary.get("element_idx_end")
+            if start_idx is not None:
+                parent_sections[hierarchy_path] = {
+                    "start": start_idx,
+                    "end": end_idx,
+                    "first_child_start": None
+                }
+
+    # Find the first child start for each parent
+    for boundary in section_boundaries:
+        if not boundary.get("has_children", False):
+            hierarchy_path = boundary.get("hierarchy", [])
+            start_idx = boundary.get("element_idx_start")
+
+            # Check if this is a child of any parent
+            if len(hierarchy_path) > 1:
+                parent_path = tuple(hierarchy_path[:-1])
+                if parent_path in parent_sections:
+                    current_first = parent_sections[parent_path]["first_child_start"]
+                    if current_first is None or start_idx < current_first:
+                        parent_sections[parent_path]["first_child_start"] = start_idx
+
+    for boundary in section_boundaries:
+        hierarchy_path = boundary.get("hierarchy", [])
+        start_idx = boundary.get("element_idx_start")
+        end_idx = boundary.get("element_idx_end")
+
+        # Only include if we have valid boundaries
+        if start_idx is None or end_idx is None:
+            continue
+
+        if not boundary.get("has_children", False):
+            # Leaf section - include as-is
+            leaf_sections.append((hierarchy_path, start_idx, end_idx))
+        else:
+            # Parent section with children - check for gap before first child
+            parent_path = tuple(hierarchy_path)
+            if parent_path in parent_sections:
+                first_child_start = parent_sections[parent_path]["first_child_start"]
+                if first_child_start is not None and first_child_start > start_idx + 1:
+                    # There's a gap between parent header and first child
+                    # This gap contains content that belongs to the parent section
+                    # (e.g., journal articles before "Book" subsection in PUBLICATIONS)
+                    gap_end = first_child_start - 1
+                    print(f"  [DEBUG] Found gap in '{hierarchy_path[-1]}': elements {start_idx + 1} to {gap_end}")
+                    leaf_sections.append((hierarchy_path, start_idx + 1, gap_end))
+
+    return leaf_sections
+
+
+def collect_header_indices(hierarchy_with_indices: List[Dict]) -> set:
+    """
+    Recursively collect all element indices that are section/subsection headers.
+
+    Args:
+        hierarchy_with_indices: Hierarchy structure from Stage 1b with element_idx
+
+    Returns:
+        Set of element indices that are headers
+    """
+    header_indices = set()
+
+    def walk_hierarchy(items):
+        for item in items:
+            if "element_idx" in item and item["element_idx"] is not None:
+                header_indices.add(item["element_idx"])
+            if "children" in item:
+                walk_hierarchy(item["children"])
+
+    walk_hierarchy(hierarchy_with_indices)
+    return header_indices
+
+
+def collect_header_info(hierarchy_with_indices: List[Dict]) -> Dict[int, List[str]]:
+    """
+    Collect header indices mapped to their hierarchy paths.
+
+    Args:
+        hierarchy_with_indices: Hierarchy structure from Stage 1b with element_idx
+
+    Returns:
+        Dict mapping element_idx -> hierarchy path (list of strings)
+    """
+    header_info = {}
+
+    def walk_hierarchy(items, parent_path=None):
+        if parent_path is None:
+            parent_path = []
+
+        for item in items:
+            text = item.get("text", "").strip()
+            current_path = parent_path + [text] if text else parent_path
+
+            if "element_idx" in item and item["element_idx"] is not None:
+                header_info[item["element_idx"]] = current_path
+
+            if "children" in item:
+                walk_hierarchy(item["children"], current_path)
+
+    walk_hierarchy(hierarchy_with_indices)
+    return header_info
+
+
+def remove_subset_delimiters(delimiters: list) -> list:
+    """
+    Remove delimiters that are subsets of larger delimiters.
+
+    When the LLM returns both a composite entry (e.g., 19-25) AND its sub-parts
+    (e.g., 19-19, 20-20), we keep only the largest non-overlapping entries.
+
+    Args:
+        delimiters: List of delimiter dicts with element_idx_start/end
+
+    Returns:
+        Filtered list with subset entries removed
+    """
+    if not delimiters:
+        return delimiters
+
+    def normalize_idx(idx):
+        """Convert index to sortable tuple (main_idx, sub_idx)."""
+        if isinstance(idx, str):
+            if "." in idx:
+                parts = idx.split(".", 1)
+                return (float(parts[0]), float(parts[1]))
+            elif idx.startswith("table_"):
+                return (1000000 + int(idx.split("_")[1]), 0)
+            else:
+                return (float(idx), 0)
+        return (float(idx), 0)
+
+    def span_size(d):
+        """Calculate span size, handling string indices."""
+        start = normalize_idx(d["element_idx_start"])
+        end = normalize_idx(d["element_idx_end"])
+        # For row entries (same parent), span is end[1] - start[1]
+        # For regular entries, span is end[0] - start[0]
+        if start[0] == end[0]:
+            return end[1] - start[1]
+        return end[0] - start[0]
+
+    # Sort by start index, then by span size (largest first)
+    sorted_delims = sorted(
+        delimiters,
+        key=lambda d: (normalize_idx(d["element_idx_start"]), -span_size(d))
+    )
+
+    kept = []
+    for delim in sorted_delims:
+        start = normalize_idx(delim["element_idx_start"])
+        end = normalize_idx(delim["element_idx_end"])
+
+        # Check if this delimiter is a subset of any already-kept delimiter
+        is_subset = False
+        for kept_delim in kept:
+            kept_start = normalize_idx(kept_delim["element_idx_start"])
+            kept_end = normalize_idx(kept_delim["element_idx_end"])
+
+            # Check if current is fully contained within kept
+            if start >= kept_start and end <= kept_end:
+                # It's a subset (or exact duplicate) - skip it
+                is_subset = True
+                break
+
+        if not is_subset:
+            kept.append(delim)
+
+    return kept
+
+
+def detect_entries_for_section(
+    section_hierarchy: List[str],
+    doc_elements: List[Dict],
+    start_elem_idx: int,
+    end_elem_idx: int,
+    client: OpenAI,
+    document_uid: str = None,
+    header_indices: set = None,
+    element_index_map: Dict = None
+) -> Tuple[List[Dict], Dict]:
+    """
+    Use LLM to detect and extract entries within a section.
+
+    Args:
+        section_hierarchy: Full path (e.g., ["Research Experience", "Publications", "Peer-Reviewed"])
+        doc_elements: List of elements from extract_docx_structure (paragraphs + tables)
+        start_elem_idx: Starting element index for this section
+        end_elem_idx: Ending element index for this section (before next section)
+        client: OpenAI client
+        document_uid: Document identifier for logging
+        header_indices: Set of element indices that are section/subsection headers (to exclude)
+        element_index_map: Map from element index to element data
+
+    Returns:
+        Tuple of (entries_list, cost_info_dict)
+    """
+    if header_indices is None:
+        header_indices = set()
+    if element_index_map is None:
+        element_index_map = {}
+
+    # Extract elements for this section, excluding headers
+    # We now handle unified elements: paragraph, table_header, table_content, empty
+    section_elements = []
+    skipped_headers = 0
+
+    for elem in doc_elements:
+        # Use unified_idx (from extract_unified_elements) or fall back to idx
+        idx = elem.get("unified_idx", elem.get("idx"))
+        elem_type = elem.get("type", "")
+
+        # Skip elements outside our section range
+        if isinstance(idx, int):
+            if idx < start_elem_idx or idx > end_elem_idx:
+                continue
+            if idx in header_indices:
+                skipped_headers += 1
+                continue
+        else:
+            # Non-integer index (shouldn't happen with unified elements)
+            continue
+
+        # Handle different element types from extract_unified_elements
+        if elem_type == "paragraph":
+            text = elem.get("text", "").strip()
+            if text:
+                section_elements.append({
+                    "idx": idx,
+                    "text": text,
+                    "type": "paragraph"
+                })
+        elif elem_type == "empty":
+            # Include empty paragraphs as break markers - these help the LLM
+            # identify natural entry boundaries (blank lines between entries)
+            section_elements.append({
+                "idx": idx,
+                "text": "",
+                "type": "empty"
+            })
+        elif elem_type == "table_header":
+            # Table headers are section markers - usually skip as they're in header_indices
+            # But include if not marked as header (rare case)
+            text = elem.get("text", "").strip()
+            if text:
+                section_elements.append({
+                    "idx": idx,
+                    "text": text,
+                    "type": "table_header"
+                })
+        elif elem_type == "table_content":
+            # Table content contains the actual data rows
+            # Extract individual rows for row-level processing
+            table_data = elem.get("data", [])  # List of row data
+            table_index = elem.get("table_index")
+
+            if isinstance(table_data, list) and table_data:
+                # Break table into individual rows for LLM processing
+                for row_idx, row in enumerate(table_data):
+                    # Check if this row contains merged entries that should be split
+                    if isinstance(row, list):
+                        pseudo_rows = split_merged_row_into_pseudo_rows(row)
+                        if pseudo_rows:
+                            # Row contains multiple merged entries - create pseudo-rows
+                            for pseudo_idx, pseudo_row in enumerate(pseudo_rows):
+                                row_text = " | ".join(pseudo_row).strip()
+                                if row_text:
+                                    section_elements.append({
+                                        "idx": f"{idx}.{row_idx}.{pseudo_idx}",  # Sub-sub-index
+                                        "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
+                                        "type": "table_row",
+                                        "full_text": row_text,
+                                        "table_index": table_index,
+                                        "row_index": row_idx,
+                                        "pseudo_row_index": pseudo_idx,
+                                        "parent_idx": idx
+                                    })
+                        else:
+                            # Normal row - flatten cells to text
+                            row_text = " | ".join(
+                                cell.get("text", "") if isinstance(cell, dict) else str(cell)
+                                for cell in row
+                            ).strip()
+                            if row_text:
+                                section_elements.append({
+                                    "idx": f"{idx}.{row_idx}",  # Sub-index for rows
+                                    "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
+                                    "type": "table_row",
+                                    "full_text": row_text,
+                                    "table_index": table_index,
+                                    "row_index": row_idx,
+                                    "parent_idx": idx
+                                })
+                    elif isinstance(row, dict):
+                        row_text = row.get("text", "").strip()
+                        if row_text:
+                            section_elements.append({
+                                "idx": f"{idx}.{row_idx}",
+                                "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
+                                "type": "table_row",
+                                "full_text": row_text,
+                                "table_index": table_index,
+                                "row_index": row_idx,
+                                "parent_idx": idx
+                            })
+                    else:
+                        row_text = str(row).strip()
+                        if row_text:
+                            section_elements.append({
+                                "idx": f"{idx}.{row_idx}",
+                                "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
+                                "type": "table_row",
+                                "full_text": row_text,
+                                "table_index": table_index,
+                                "row_index": row_idx,
+                                "parent_idx": idx
+                            })
+            else:
+                # Fallback: treat as single element if no row data
+                text = elem.get("text", "").strip()
+                if text:
+                    section_elements.append({
+                        "idx": idx,
+                        "text": text[:500] + ("..." if len(text) > 500 else ""),
+                        "type": "table_content",
+                        "full_text": text,
+                        "rows": elem.get("rows", 0),
+                        "table_index": table_index
+                    })
+        elif elem_type == "table":
+            # Legacy table format (from extract_docx_structure)
+            # Split table into individual rows for proper entry detection
+            table_idx = elem.get("table_index", 0)
+            table_data = elem.get("data", [])
+
+            if isinstance(table_data, list) and len(table_data) > 1:
+                # Multi-row table: break into individual rows for LLM processing
+                # This allows the LLM to identify individual entries (grants, publications, etc.)
+                for row_idx, row in enumerate(table_data):
+                    # Check if this row contains merged entries that should be split
+                    if isinstance(row, list):
+                        pseudo_rows = split_merged_row_into_pseudo_rows(row)
+                        if pseudo_rows:
+                            # Row contains multiple merged entries - create pseudo-rows
+                            for pseudo_idx, pseudo_row in enumerate(pseudo_rows):
+                                row_text = " | ".join(pseudo_row).strip()
+                                if row_text:
+                                    section_elements.append({
+                                        "idx": f"{idx}.{row_idx}.{pseudo_idx}",  # Sub-sub-index
+                                        "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
+                                        "type": "table_row",
+                                        "full_text": row_text,
+                                        "table_index": table_idx,
+                                        "row_index": row_idx,
+                                        "pseudo_row_index": pseudo_idx,
+                                        "parent_idx": idx
+                                    })
+                        else:
+                            # Normal row - flatten cells to text
+                            row_text = " | ".join(
+                                cell.get("text", "") if isinstance(cell, dict) else str(cell)
+                                for cell in row
+                            ).strip()
+                            if row_text:
+                                section_elements.append({
+                                    "idx": f"{idx}.{row_idx}",  # Sub-index for rows
+                                    "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
+                                    "type": "table_row",
+                                    "full_text": row_text,
+                                    "table_index": table_idx,
+                                    "row_index": row_idx,
+                                    "parent_idx": idx
+                                })
+                    elif isinstance(row, dict):
+                        row_text = row.get("text", "").strip()
+                        if row_text:
+                            section_elements.append({
+                                "idx": f"{idx}.{row_idx}",
+                                "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
+                                "type": "table_row",
+                                "full_text": row_text,
+                                "table_index": table_idx,
+                                "row_index": row_idx,
+                                "parent_idx": idx
+                            })
+                    else:
+                        row_text = str(row).strip()
+                        if row_text:
+                            section_elements.append({
+                                "idx": f"{idx}.{row_idx}",
+                                "text": row_text[:300] + ("..." if len(row_text) > 300 else ""),
+                                "type": "table_row",
+                                "full_text": row_text,
+                                "table_index": table_idx,
+                                "row_index": row_idx,
+                                "parent_idx": idx
+                            })
+            else:
+                # Single-row table or no data: treat as single element
+                table_text = get_element_text(elem)
+                if table_text:
+                    section_elements.append({
+                        "idx": idx if isinstance(idx, int) else f"table_{table_idx}",
+                        "text": table_text[:500] + ("..." if len(table_text) > 500 else ""),
+                        "type": "table",
+                        "full_text": table_text,
+                        "rows": elem.get("rows", 0),
+                        "cols": elem.get("cols", 0)
+                    })
+
+    if not section_elements:
+        return [], {"cost": 0, "tokens": 0}
+
+    # Build context for LLM
+    section_name = section_hierarchy[-1] if section_hierarchy else "Unknown Section"
+    full_hierarchy = " > ".join(section_hierarchy)
+
+    # Process in batches if section is large
+    BATCH_SIZE = 50
+    all_validated_entries = []
+    total_cost = 0.0
+    total_tokens = 0
+    prompt_tokens = 0
+    completion_tokens = 0
+    log_ids = []
+
+    num_batches = (len(section_elements) + BATCH_SIZE - 1) // BATCH_SIZE
+
+    for batch_idx in range(num_batches):
+        batch_start = batch_idx * BATCH_SIZE
+        batch_end = min(batch_start + BATCH_SIZE, len(section_elements))
+        batch_elements = section_elements[batch_start:batch_end]
+
+        if num_batches > 1:
+            print(f"    Processing batch {batch_idx + 1}/{num_batches} (elements {batch_start + 1}-{batch_end} of {len(section_elements)})")
+
+        # Create element list for LLM (handles paragraphs, table_content, and legacy tables)
+        element_list_parts = []
+        for elem in batch_elements:
+            idx = elem['idx']
+            text = elem['text']
+            elem_type = elem.get('type', 'paragraph')
+
+            # Format based on element type
+            if elem_type == 'table_row':
+                # Individual table row - show as ROW
+                element_list_parts.append(f"[{idx}] (ROW) {text[:200]}{'...' if len(text) > 200 else ''}")
+            elif elem_type == 'table_content':
+                # Table content - show as table with row count
+                # 'rows' may be an integer count or a list; handle both
+                rows_data = elem.get('rows', 0)
+                row_count = len(rows_data) if isinstance(rows_data, list) else (rows_data if isinstance(rows_data, int) else 0)
+                element_list_parts.append(f"[{idx}] (TABLE {row_count} rows) {text[:200]}{'...' if len(text) > 200 else ''}")
+            elif elem_type == 'table':
+                # Legacy table format
+                rows = elem.get('rows', 0)
+                cols = elem.get('cols', 0)
+                element_list_parts.append(f"[{idx}] (TABLE {rows}x{cols}) {text[:200]}{'...' if len(text) > 200 else ''}")
+            elif elem_type == 'table_header':
+                element_list_parts.append(f"[{idx}] (HEADER) {text[:150]}{'...' if len(text) > 150 else ''}")
+            elif elem_type == 'empty':
+                # Empty paragraph - show as blank line marker to help LLM identify entry boundaries
+                element_list_parts.append(f"[{idx}] (BLANK LINE)")
+            else:
+                # paragraph
+                element_list_parts.append(f"[{idx}] {text[:150]}{'...' if len(text) > 150 else ''}")
+
+        paragraph_list = "\n".join(element_list_parts)
+
+        system_prompt = """You are an intelligent parser analyzing a CV section. Your goal is to identify individual **logical entries** (e.g., a single publication, position, award, or course) from a list of raw paragraphs or table rows. Always respond with valid JSON only."""
+
+        user_prompt = f"""## Input Data
+
+**CV Section Header:** `{full_hierarchy}`
+
+**Raw Data (Paragraphs):**
+{paragraph_list}
+
+-----
+
+## Instructions
+
+### 1. Grouping Logic (Detecting Multi-Part Entries)
+
+A single logical entry may span multiple lines (paragraphs or table rows). You must determine if a line starts a **new entry** or is a **continuation** of the previous one.
+
+**Merge consecutive lines into a SINGLE entry when:**
+
+* **The First Line (Start):** Introduces the main item (contains the date, role, title, course, or event).
+* **The Following Line (Continuation):** Does **NOT** introduce a new date, role, or top-level identifier. Instead, it provides dependent details (descriptions, notes, durations, session counts).
+    * *Rule of thumb:* If the second line would be confusing or incomplete when read alone, but clearly belongs to the line above, group them.
+
+**BLANK LINE markers indicate entry boundaries:**
+
+* Lines marked `(BLANK LINE)` represent empty paragraphs in the original document
+* These typically separate distinct entries - do NOT group across blank lines unless the content clearly belongs together
+* Ignore blank line indices when setting element_idx_start and element_idx_end
+
+**Set Indices Accordingly:**
+
+* `element_idx_start`: Index of the line introducing the item.
+* `element_idx_end`: Index of the last line containing details for that same item.
+* If an entry is a single line, start and end indices are identical.
+
+### 2. Handling Tables
+
+* **Whole Table as Entry:** If a table describes a *single* summary item (e.g., a summary of one grant), treat the entire table as one entry (`element_type: "table"`).
+* **Rows as Entries:** If a table lists *multiple* items (e.g., a list of courses), treat each row (or group of rows based on the logic above) as a separate entry (`element_type: "table_row"`).
+
+### 3. Output Format
+
+Respond **only** with a JSON array containing the identified entries. If no entries are found, return `[]`.
+
+**JSON Structure:**
+
+```json
+[
+  {{
+    "element_idx_start": 120,
+    "element_idx_end": 121,
+    "element_type": "paragraph",
+    "confidence": 0.95,
+    "reasoning": "Details in 121 belong to item in 120"
+  }}
+]
+```
+
+*Note: `element_type` must be "paragraph", "table", or "table_row".*
+
+**IMPORTANT:**
+- Use the exact paragraph indices shown in brackets [idx]
+- Confidence should be 0.0 to 1.0
+- Keep reasoning brief (<60 chars), especially for multi-line groupings
+"""
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ]
+
+        # Log prompt before API call
+        log_id = log_prompt_before_call(
+            messages=messages,
+            model="gpt-5.1",
+            purpose="stage_2_entry_extraction",
+            temperature=0.1,
+            response_format={"type": "json_object"},
+            context={
+                "document_uid": document_uid,
+                "section_hierarchy": section_hierarchy,
+                "start_elem_idx": start_elem_idx,
+                "end_elem_idx": end_elem_idx,
+                "element_count": len(section_elements),
+                "batch": f"{batch_idx + 1}/{num_batches}" if num_batches > 1 else None
+            },
+            caller_file="stage_2_entry_extraction.py"
+        )
+        log_ids.append(log_id)
+
+        try:
+            start_time = time.time()
+            response = client.chat.completions.create(
+                model="gpt-5.1",
+                messages=messages,
+                response_format={"type": "json_object"},
+                temperature=0.1
+            )
+            elapsed_time = time.time() - start_time
+
+            # Log the response
+            log_prompt_response(
+                log_id=log_id,
+                response=response,
+                purpose="stage_2_entry_extraction",
+                elapsed_time=elapsed_time
+            )
+
+            result_text = response.choices[0].message.content
+            result = json.loads(result_text)
+
+            # Accumulate cost (gpt-5.1 pricing: $1.00/1M input, $2.00/1M output)
+            usage = response.usage
+            input_cost = (usage.prompt_tokens / 1_000_000) * 1.00
+            output_cost = (usage.completion_tokens / 1_000_000) * 2.00
+            total_cost += input_cost + output_cost
+            total_tokens += usage.total_tokens
+            prompt_tokens += usage.prompt_tokens
+            completion_tokens += usage.completion_tokens
+
+            # Extract delimiters array - LLM may return in different keys
+            if isinstance(result, dict):
+                # Try common keys the LLM might use
+                delimiters = (
+                    result.get("delimiters") or
+                    result.get("entries") or
+                    result.get("result") or
+                    result.get("data") or
+                    []
+                )
+            else:
+                delimiters = result
+
+            # Build a lookup for batch elements by index (use string keys for consistency)
+            batch_elem_lookup = {str(elem['idx']): elem for elem in batch_elements}
+
+            # Validate delimiters and extract full text
+            for delim in delimiters:
+                if "element_idx_start" in delim and "element_idx_end" in delim:
+                    start_idx = delim["element_idx_start"]
+                    end_idx = delim["element_idx_end"]
+
+                    # Handle table indices (strings like "table_0")
+                    if isinstance(start_idx, str) and start_idx.startswith("table_"):
+                        # Table entry - get full text from batch elements
+                        if start_idx in batch_elem_lookup:
+                            elem = batch_elem_lookup[start_idx]
+                            full_text = elem.get("full_text", elem.get("text", ""))
+                            entry = {
+                                "element_idx_start": start_idx,
+                                "element_idx_end": end_idx,
+                                "element_type": "table",
+                                "confidence": delim.get("confidence", 1.0),
+                                "text": full_text
+                            }
+                            all_validated_entries.append(entry)
+                        continue
+
+                    # Handle row sub-indices (floats like 22.2 or strings like "22.2")
+                    # These come from table_content rows with format "parent_idx.row_idx"
+                    start_idx_str = str(start_idx)
+                    end_idx_str = str(end_idx)
+                    if "." in start_idx_str or "." in end_idx_str:
+                        # Row sub-index - look up in batch elements by string key
+                        if start_idx_str in batch_elem_lookup:
+                            elem = batch_elem_lookup[start_idx_str]
+                            full_text = elem.get("full_text", elem.get("text", ""))
+                            entry = {
+                                "element_idx_start": start_idx_str,
+                                "element_idx_end": end_idx_str,
+                                "element_type": "table_row",
+                                "confidence": delim.get("confidence", 1.0),
+                                "text": full_text,
+                                "table_index": elem.get("table_index"),
+                                "row_index": elem.get("row_index"),
+                                "parent_idx": elem.get("parent_idx")
+                            }
+                            all_validated_entries.append(entry)
+                        continue
+
+                    # Handle paragraph indices (integers)
+                    if not isinstance(start_idx, int) or not isinstance(end_idx, int):
+                        continue
+
+                    # Ensure indices are within bounds
+                    if start_idx >= start_elem_idx and end_idx <= end_elem_idx:
+                        # Extract full text for all elements in the entry range
+                        full_text_parts = []
+                        for idx in range(start_idx, end_idx + 1):
+                            if idx in element_index_map:
+                                elem = element_index_map[idx]
+                                elem_text = get_element_text(elem)
+                                if elem_text:
+                                    full_text_parts.append(elem_text)
+
+                        # Build entry with full text
+                        entry = {
+                            "element_idx_start": start_idx,
+                            "element_idx_end": end_idx,
+                            "element_type": delim.get("element_type", "paragraph"),
+                            "confidence": delim.get("confidence", 1.0),
+                            "text": "\t".join(full_text_parts)  # Tab-separated for compact format
+                        }
+                        all_validated_entries.append(entry)
+
+        except Exception as e:
+            print(f"    ⚠ Error in batch {batch_idx + 1}: {e}")
+            continue
+
+    # Remove subset/duplicate entries from all batches
+    all_validated_entries = remove_subset_delimiters(all_validated_entries)
+
+    # Return entries and cost info
+    cost_info = {
+        "cost": total_cost,
+        "tokens": total_tokens,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "log_ids": log_ids if len(log_ids) > 1 else (log_ids[0] if log_ids else None)
+    }
+    return all_validated_entries, cost_info
+
+
+def run_stage_2(docx_path: str, hierarchy_json_path: str = None):
+    """
+    Main Stage 2: Extract entries from CV sections using LLM
+
+    Args:
+        docx_path: Path to Word document
+        hierarchy_json_path: Optional path to Stage 1b hierarchy JSON with boundaries
+                            (if not provided, will use OutputManager to find it)
+    """
+
+    print(f"Input: {docx_path}")
+    print()
+
+    # Setup
+    om = OutputManager(docx_path)
+    client = OpenAI()  # Uses default env context per project guidelines
+
+    # Load Stage 1b hierarchy with boundaries
+    if hierarchy_json_path is None:
+        hierarchy_json_path = om.get_stage1b_path()
+
+    print(f"Loading hierarchy with boundaries: {hierarchy_json_path}")
+    with open(hierarchy_json_path) as f:
+        hierarchy_data = json.load(f)
+
+    # Extract document structure using unified elements (matches Stage 1b)
+    # This gives us paragraphs + table_header + table_content with unified indices
+    print(f"Extracting document structure from: {docx_path}")
+    doc_structure = extract_unified_elements(docx_path)
+    doc_elements = doc_structure.get("elements", [])
+    element_index_map = build_element_index_map(doc_structure)
+
+    print(f"  Paragraphs: {doc_structure['meta']['num_paragraphs']}")
+    print(f"  Tables: {doc_structure['meta']['num_tables']}")
+    print(f"  Table headers: {doc_structure['meta']['num_table_headers']}")
+    print(f"  Empty elements: {doc_structure['meta']['num_empty']}")
+    print()
+
+    # Also load Document for backward compatibility with paragraph-based indexing
+    doc = Document(docx_path)
+
+    # Extract leaf sections with boundaries from Stage 1b
+    section_boundaries = hierarchy_data.get("section_boundaries", [])
+    hierarchy = hierarchy_data.get("hierarchy_with_indices", [])
+
+    leaf_sections = extract_leaf_sections_with_boundaries(section_boundaries, hierarchy)
+
+    # Collect all header indices to exclude from paragraph lists
+    header_indices = collect_header_indices(hierarchy)
+    print(f"Collected {len(header_indices)} header indices to exclude from entry detection")
+
+    # Find the first section start index to process "Personal Data" section
+    first_section_idx = min([start for _, start, _ in leaf_sections]) if leaf_sections else 0
+
+    # Add "Personal Data" section for elements before the first section
+    sections_to_process = []
+    if first_section_idx > 0:
+        sections_to_process.append((["Personal Data"], 0, first_section_idx - 1))
+
+    sections_to_process.extend(leaf_sections)
+
+    print(f"Found {len(leaf_sections)} leaf sections to analyze")
+    if first_section_idx > 0:
+        print(f"  + Personal Data section (elements 0-{first_section_idx - 1})")
+    print()
+
+    # Build a map of header indices to their hierarchy paths
+    header_info = collect_header_info(hierarchy)
+
+    # Process each section and collect all entries
+    all_entries = []
+    total_cost = 0.0
+    total_tokens = 0
+    document_uid = hierarchy_data.get("document_uid")
+    # Use the number of paragraph indices (not total elements) for coverage calculation
+    doc_length = doc_structure['meta']['num_paragraphs'] + doc_structure['meta']['num_empty']
+
+    # Track all assigned indices for coverage analysis
+    all_assigned_indices = set()
+
+    # Add parent header entries (headers of non-leaf sections)
+    # These are headers that are at the start of sections with children
+    parent_header_indices = set()
+    for section in section_boundaries:
+        if section.get("has_children", False):
+            idx = section.get("element_idx_start")
+            if idx is not None and idx in header_indices:
+                parent_header_indices.add(idx)
+
+    for idx in sorted(parent_header_indices):
+        # Get text from element_index_map instead of doc.paragraphs
+        if idx in element_index_map:
+            header_text = get_element_text(element_index_map[idx])
+        else:
+            header_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
+        parent_header_entry = {
+            "element_idx_start": idx,
+            "element_idx_end": idx,
+            "element_type": "header",
+            "confidence": 1.0,
+            "text": header_text,
+            "hierarchy": header_info.get(idx, [header_text])
+        }
+        all_entries.append(parent_header_entry)
+        all_assigned_indices.add(idx)
+
+    # Add break entries for gaps between parent headers and their first child's start
+    # These are typically empty lines after a parent header
+    leaf_starts = set(start for _, start, _ in sections_to_process)
+    for section in section_boundaries:
+        if section.get("has_children", False):
+            parent_start = section.get("element_idx_start")
+            parent_end = section.get("element_idx_end")
+            if parent_start is not None:
+                # Find the first leaf section that starts within this parent's range
+                first_child_start = None
+                for leaf_start in sorted(leaf_starts):
+                    if parent_start < leaf_start <= parent_end:
+                        first_child_start = leaf_start
+                        break
+
+                # Add break entries for indices between parent header and first child
+                if first_child_start is not None:
+                    for gap_idx in range(parent_start + 1, first_child_start):
+                        if gap_idx not in all_assigned_indices:
+                            # Get text from element_index_map instead of doc.paragraphs
+                            if gap_idx in element_index_map:
+                                gap_text = get_element_text(element_index_map[gap_idx])
+                            else:
+                                gap_text = doc.paragraphs[gap_idx].text.strip() if gap_idx < len(doc.paragraphs) else ""
+                            gap_entry = {
+                                "element_idx_start": gap_idx,
+                                "element_idx_end": gap_idx,
+                                "element_type": "break",
+                                "confidence": 1.0,
+                                "text": gap_text,
+                                "hierarchy": header_info.get(parent_start, section.get("hierarchy", []))
+                            }
+                            all_entries.append(gap_entry)
+                            all_assigned_indices.add(gap_idx)
+
+    for i, (hierarchy_path, start_idx, end_idx) in enumerate(sections_to_process, 1):
+        section_name = hierarchy_path[-1] if hierarchy_path else "Unknown"
+        print(f"[{i}/{len(sections_to_process)}] Processing: {' > '.join(hierarchy_path)}")
+        print(f"  Elements: {start_idx} to {end_idx}")
+
+        # Detect and extract entries using document structure (paragraphs + tables)
+        entries, cost_info = detect_entries_for_section(
+            hierarchy_path,
+            doc_elements,  # Now passing doc_elements instead of doc
+            start_idx,
+            end_idx + 1,  # end_idx is inclusive, so add 1 for range
+            client,
+            document_uid=document_uid,
+            header_indices=header_indices,
+            element_index_map=element_index_map  # New parameter
+        )
+
+        # Track costs
+        total_cost += cost_info.get("cost", 0)
+        total_tokens += cost_info.get("tokens", 0)
+
+        # Track which indices are assigned to entries
+        section_assigned = set()
+        for entry in entries:
+            start_idx_entry = entry["element_idx_start"]
+            end_idx_entry = entry["element_idx_end"]
+
+            # Handle string indices (table rows like "22.2")
+            if isinstance(start_idx_entry, str) or isinstance(end_idx_entry, str):
+                # For row sub-indices, track the string as-is
+                section_assigned.add(str(start_idx_entry))
+                all_assigned_indices.add(str(start_idx_entry))
+
+                # ALSO mark the parent table index as assigned
+                # to prevent it from being added as a "break" entry
+                start_idx_str = str(start_idx_entry)
+                if "." in start_idx_str:
+                    parent_idx = int(start_idx_str.split(".")[0])
+                    section_assigned.add(parent_idx)
+                    all_assigned_indices.add(parent_idx)
+            else:
+                # Integer range for paragraph entries
+                for idx in range(start_idx_entry, end_idx_entry + 1):
+                    section_assigned.add(idx)
+                    all_assigned_indices.add(idx)
+
+        # Find unassigned indices in this section's range
+        section_range = set(range(start_idx, end_idx + 1))
+        unassigned_in_section = section_range - section_assigned - header_indices
+
+        # Add header entries for this section
+        section_headers = []
+        for idx in sorted(section_range & header_indices):
+            # Get text from element_index_map instead of doc.paragraphs
+            if idx in element_index_map:
+                header_text = get_element_text(element_index_map[idx])
+            else:
+                header_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
+            header_entry = {
+                "element_idx_start": idx,
+                "element_idx_end": idx,
+                "element_type": "header",
+                "confidence": 1.0,
+                "text": header_text,
+                "hierarchy": header_info.get(idx, hierarchy_path)
+            }
+            section_headers.append(header_entry)
+            all_assigned_indices.add(idx)
+
+        # Add break entries for unassigned indices (blank lines, etc.)
+        break_entries = []
+        for idx in sorted(unassigned_in_section):
+            # Get text from element_index_map instead of doc.paragraphs
+            if idx in element_index_map:
+                para_text = get_element_text(element_index_map[idx])
+            else:
+                para_text = doc.paragraphs[idx].text.strip() if idx < len(doc.paragraphs) else ""
+            break_entry = {
+                "element_idx_start": idx,
+                "element_idx_end": idx,
+                "element_type": "break",
+                "confidence": 1.0,
+                "text": para_text,  # Usually empty, but capture if not
+                "hierarchy": hierarchy_path
+            }
+            break_entries.append(break_entry)
+            all_assigned_indices.add(idx)
+
+        # Add hierarchy to content entries
+        for entry in entries:
+            entry["hierarchy"] = hierarchy_path
+
+        # Combine all entries for this section
+        all_entries.extend(section_headers)
+        all_entries.extend(entries)
+        all_entries.extend(break_entries)
+
+        content_count = len(entries)
+        header_count = len(section_headers)
+        break_count = len(break_entries)
+
+        if content_count > 0:
+            print(f"  ✓ Extracted {content_count} entries, {header_count} headers, {break_count} breaks (${cost_info.get('cost', 0):.4f})")
+        else:
+            print(f"  - No content entries ({header_count} headers, {break_count} breaks)")
+        print()
+
+    # Sort entries by element_idx_start for consistent output
+    # Handle mixed int/string indices (e.g., 22 vs "22.2")
+    def sort_key(entry):
+        idx = entry["element_idx_start"]
+        if isinstance(idx, str) and "." in idx:
+            # Row sub-index like "22.2" -> (22, 2)
+            parts = idx.split(".", 1)
+            return (float(parts[0]), float(parts[1]) if len(parts) > 1 else 0)
+        elif isinstance(idx, str):
+            # String index like "table_0" -> (1000000 + idx number)
+            if idx.startswith("table_"):
+                return (1000000 + int(idx.split("_")[1]), 0)
+            return (float(idx), 0)
+        else:
+            return (float(idx), 0)
+
+    all_entries.sort(key=sort_key)
+
+    # Calculate coverage statistics
+    content_entries = [e for e in all_entries if e["element_type"] not in ("header", "break")]
+    header_entries = [e for e in all_entries if e["element_type"] == "header"]
+    break_entries = [e for e in all_entries if e["element_type"] == "break"]
+
+    # Check for any gaps in coverage
+    # Only check integer indices (sub-row indices like "22.2" are accounted for by parent)
+    all_doc_indices = set(range(doc_length))
+    integer_assigned = {idx for idx in all_assigned_indices if isinstance(idx, int)}
+    unaccounted_indices = all_doc_indices - integer_assigned
+
+    # Save output
+    output_path = om.get_stage2_path()
+
+    output_data = {
+        "document_uid": document_uid,
+        "document_length": doc_length,
+        "total_entries": len(all_entries),
+        "total_cost": total_cost,
+        "total_tokens": total_tokens,
+        "coverage": {
+            "content_entries": len(content_entries),
+            "header_entries": len(header_entries),
+            "break_entries": len(break_entries),
+            "assigned_indices": len(all_assigned_indices),
+            "unaccounted_indices": sorted(list(unaccounted_indices)) if unaccounted_indices else [],
+            "coverage_percentage": round(len(all_assigned_indices) / doc_length * 100, 1) if doc_length > 0 else 100.0
+        },
+        "entries": all_entries
+    }
+
+    with open(output_path, 'w') as f:
+        json.dump(output_data, f, indent=2)
+
+    print("="*80)
+    print("STAGE 2 COMPLETE")
+    print("="*80)
+    print(f"Output: {output_path}")
+    print(f"Document length: {doc_length} paragraphs")
+    print(f"Coverage: {output_data['coverage']['coverage_percentage']}%")
+    print(f"  Content entries: {len(content_entries)}")
+    print(f"  Header entries: {len(header_entries)}")
+    print(f"  Break entries: {len(break_entries)}")
+    if unaccounted_indices:
+        print(f"  ⚠ Unaccounted indices: {sorted(list(unaccounted_indices))[:10]}{'...' if len(unaccounted_indices) > 10 else ''}")
+    print(f"Total cost: ${total_cost:.4f}")
+    print(f"Total tokens: {total_tokens:,}")
+    print("="*80)
+
+    return output_data, output_path
+
+
+if __name__ == '__main__':
+    if len(sys.argv) < 2:
+        print("Usage: python stage_2_entry_extraction.py <docx_path> [hierarchy_json]")
+        print()
+        print("Example:")
+        print("  python stage_2_entry_extraction.py data/sample_cvs/word/2071_Zuschlag_Cv.docx")
+        sys.exit(1)
+
+    docx_path = sys.argv[1]
+    hierarchy_json = sys.argv[2] if len(sys.argv) > 2 else None
+
+    run_stage_2(docx_path, hierarchy_json)

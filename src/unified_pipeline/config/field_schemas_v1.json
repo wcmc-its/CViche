@@ -1,0 +1,906 @@
+{
+  "version": "1.0",
+  "created": "2025-11-29",
+  "description": "Target field extraction schemas aligned with WCM CV Template (October 2022)",
+  "template_reference": "wcm_cv_template_faculty_october_2022_final.docx",
+
+  "schemas": {
+    "A": {
+      "description": "Personal/Contact Information",
+      "wcm_section": "PERSONAL DATA",
+      "wcm_table": 2,
+      "fields": {
+        "name": {"type": "string", "wcm_column": null, "notes": "Full name of CV owner"},
+        "title": {"type": "string", "wcm_column": null, "notes": "Professional title"},
+        "degrees": {"type": "string", "wcm_column": null, "notes": "Degrees listed after name"},
+        "department": {"type": "string", "wcm_column": null},
+        "institution": {"type": "string", "wcm_column": null},
+        "email": {"type": "string", "wcm_column": "Email"},
+        "phone": {"type": "string", "wcm_column": "Office telephone"},
+        "address": {"type": "string", "wcm_column": "Office address"},
+        "npi_number": {"type": "string", "wcm_column": "NPI number (optional)", "wcm_table": 10},
+        "dea_number": {"type": "string", "wcm_column": "DEA number (optional)", "wcm_table": 10},
+        "narrative": {"type": "string", "notes": "Additional prose content"}
+      }
+    },
+
+    "B1": {
+      "description": "Academic Degrees",
+      "wcm_section": "EDUCATION - Academic Degree(s)",
+      "wcm_table": 3,
+      "fields": {
+        "degree": {"type": "string", "wcm_column": "Degree, include field of study"},
+        "institution": {"type": "string", "wcm_column": "Institution, city and state"},
+        "discipline": {"type": "string", "wcm_column": "Degree, include field of study", "notes": "Field of study portion"},
+        "dates_attended": {"type": "string", "wcm_column": "Dates attended (mm/yyyy-mm/yyyy)"},
+        "year": {"type": "string", "wcm_column": "Year Awarded"},
+        "thesis_title": {"type": "string", "wcm_column": null, "notes": "Not in template but valuable"},
+        "advisor": {"type": "string", "wcm_column": null, "notes": "Not in template but valuable"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "B2": {
+      "description": "Other Educational Experiences",
+      "wcm_section": "EDUCATION - Other Educational Experiences",
+      "wcm_table": 4,
+      "fields": {
+        "program_type": {"type": "string", "notes": "Certificate, training, etc."},
+        "program_name": {"type": "string", "wcm_column": "Description"},
+        "institution": {"type": "string", "wcm_column": "Institution, city and state"},
+        "start_date": {"type": "string", "wcm_column": "Dates attended (mm/yy – mm/yy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates attended (mm/yy – mm/yy)"},
+        "description": {"type": "string", "wcm_column": "Description"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "C": {
+      "description": "Postdoctoral Training",
+      "wcm_section": "POSTDOCTORAL TRAINING",
+      "wcm_table": 5,
+      "fields": {
+        "training_type": {"type": "string", "wcm_column": "Title, include area of training", "notes": "Residency, fellowship, postdoc"},
+        "specialty": {"type": "string", "wcm_column": "Title, include area of training", "notes": "Area of training portion"},
+        "institution": {"type": "string", "wcm_column": "Institution, city and state"},
+        "department": {"type": "string", "wcm_column": null},
+        "mentor": {"type": "string", "wcm_column": null, "notes": "Not in template but valuable"},
+        "start_date": {"type": "string", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "D1": {
+      "description": "Academic Appointments",
+      "wcm_section": "Academic Appointments",
+      "wcm_table": 6,
+      "fields": {
+        "title": {"type": "string", "wcm_column": "Title"},
+        "institution": {"type": "string", "wcm_column": "Institution, city and state"},
+        "department": {"type": "string", "wcm_column": null},
+        "start_date": {"type": "string", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "track": {"type": "string", "wcm_column": null, "notes": "Research, clinical, educator track"},
+        "tenure_status": {"type": "string", "wcm_column": null},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "D2": {
+      "description": "Hospital Appointments",
+      "wcm_section": "Hospital Appointments",
+      "wcm_table": 7,
+      "fields": {
+        "title": {"type": "string", "wcm_column": "Title"},
+        "institution": {"type": "string", "wcm_column": "Institution, city and state"},
+        "department": {"type": "string", "wcm_column": null},
+        "start_date": {"type": "string", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "appointment_type": {"type": "string", "wcm_column": null, "notes": "Attending, consulting, etc."},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "D3": {
+      "description": "Other Professional Positions",
+      "wcm_section": "Other Professional Positions & Employment",
+      "wcm_table": 8,
+      "fields": {
+        "title": {"type": "string", "wcm_column": "Title"},
+        "organization": {"type": "string", "wcm_column": "Institution, city and state"},
+        "department": {"type": "string", "wcm_column": null},
+        "start_date": {"type": "string", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (mm/yy - mm/yy)"},
+        "role_type": {"type": "string", "wcm_column": null, "notes": "Industry, consulting, etc."},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "E": {
+      "description": "Employment Status",
+      "wcm_section": "EMPLOYMENT STATUS",
+      "wcm_table": null,
+      "fields": {
+        "employer": {"type": "string", "wcm_column": "Name of Current Employer(s)"},
+        "status": {"type": "string", "wcm_column": "Current Employment Status"},
+        "fte_percentage": {"type": "string", "notes": "Percentage of full time effort"},
+        "effective_date": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "F1": {
+      "description": "Licensure",
+      "wcm_section": "LICENSURE, BOARD CERTIFICATION - Licensure",
+      "wcm_table": 9,
+      "fields": {
+        "license_type": {"type": "string", "notes": "Medical, nursing, etc."},
+        "state_country": {"type": "string", "wcm_column": "State"},
+        "license_number": {"type": "string", "wcm_column": "Number"},
+        "issue_date": {"type": "string", "wcm_column": "Date of issue (mm/dd/yyyy)"},
+        "expiration_date": {"type": "string", "wcm_column": "Date of last registration"},
+        "status": {"type": "string", "notes": "Active, inactive, etc."},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "F2": {
+      "description": "Board Certification",
+      "wcm_section": "LICENSURE, BOARD CERTIFICATION - Board Certification",
+      "wcm_table": 11,
+      "fields": {
+        "specialty": {"type": "string", "notes": "Not in template but useful for context"},
+        "certifying_board": {"type": "string", "wcm_column": "Full Name of Board"},
+        "certificate_number": {"type": "string", "wcm_column": "Certificate # (indicate if board eligible)"},
+        "year_certified": {"type": "string", "wcm_column": "Dates of Certification (yyyy–yyyy)"},
+        "recertification_date": {"type": "string", "wcm_column": "Dates of Certification (yyyy–yyyy)"},
+        "status": {"type": "string", "notes": "Certified, board eligible, etc."},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "G": {
+      "description": "Institutional/Hospital Affiliation",
+      "wcm_section": "INSTITUTIONAL/HOSPITAL AFFILIATION",
+      "wcm_table": 12,
+      "fields": {
+        "affiliation_type": {"type": "string", "notes": "Primary, other"},
+        "organization": {"type": "string", "wcm_column": "Primary Hospital Affiliation / Other Hospital Affiliations"},
+        "department": {"type": "string"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "H": {
+      "description": "Honors and Awards",
+      "wcm_section": "HONORS, AWARDS",
+      "wcm_table": 13,
+      "fields": {
+        "award_name": {"type": "string", "wcm_column": "Name of award"},
+        "granting_body": {"type": "string", "wcm_column": "Organization"},
+        "date": {"type": "string", "wcm_column": "Date awarded (yyyy)"},
+        "amount": {"type": "string", "notes": "For monetary awards"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "I": {
+      "description": "Professional Organizations and Society Memberships",
+      "wcm_section": "PROFESSIONAL ORGANIZATIONS AND SOCIETY MEMBERSHIPS",
+      "wcm_table": 14,
+      "fields": {
+        "organization": {"type": "string", "wcm_column": "Organization"},
+        "membership_type": {"type": "string", "notes": "Member, fellow, etc."},
+        "start_date": {"type": "string", "wcm_column": "Date (yyyy-yyyy)"},
+        "end_date": {"type": "string", "wcm_column": "Date (yyyy-yyyy)"},
+        "fellowship_designation": {"type": "string", "notes": "FACP, FACS, etc."},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "J": {
+      "description": "Percent Effort and Institutional Responsibilities",
+      "wcm_section": "PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES",
+      "wcm_table": 15,
+      "fields": {
+        "activity": {"type": "string", "wcm_column": "Weill Cornell Activity"},
+        "percent_effort": {"type": "string", "wcm_column": "Percent Effort (%)"},
+        "involves_trainees": {"type": "boolean", "wcm_column": "Does the activity involve Weill Cornell students/research trainees?"},
+        "clinical_percent": {"type": "string"},
+        "research_percent": {"type": "string"},
+        "teaching_percent": {"type": "string"},
+        "admin_percent": {"type": "string"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "K1": {
+      "description": "Didactic Teaching",
+      "wcm_section": "EDUCATIONAL CONTRIBUTIONS - Didactic teaching",
+      "wcm_table": null,
+      "fields": {
+        "course_code": {"type": "string"},
+        "course_title": {"type": "string"},
+        "institution": {"type": "string"},
+        "department": {"type": "string"},
+        "role": {"type": "string", "notes": "Lecturer, course director, etc."},
+        "level": {"type": "string", "notes": "Undergraduate, graduate, medical students"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "enrollment": {"type": "string"},
+        "hours_per_year": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "K2": {
+      "description": "Clinical Teaching",
+      "wcm_section": "EDUCATIONAL CONTRIBUTIONS - Clinical teaching",
+      "wcm_table": null,
+      "fields": {
+        "teaching_role": {"type": "string"},
+        "institution": {"type": "string"},
+        "setting": {"type": "string", "notes": "Bedside, OR, clinic, etc."},
+        "learner_level": {"type": "string"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "hours_per_week": {"type": "string"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "K3": {
+      "description": "Administrative/Educational Leadership",
+      "wcm_section": "EDUCATIONAL CONTRIBUTIONS - Administrative teaching",
+      "wcm_table": null,
+      "fields": {
+        "program_name": {"type": "string"},
+        "role": {"type": "string", "notes": "Director, co-director, etc."},
+        "institution": {"type": "string"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "scope": {"type": "string"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "K4": {
+      "description": "Continuing/Professional Education",
+      "wcm_section": "EDUCATIONAL CONTRIBUTIONS - Continuing education",
+      "wcm_table": null,
+      "fields": {
+        "activity_title": {"type": "string"},
+        "institution": {"type": "string"},
+        "role": {"type": "string"},
+        "date": {"type": "string"},
+        "cme_credits": {"type": "string"},
+        "target_audience": {"type": "string"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "K5": {
+      "description": "Community/Patient Education",
+      "wcm_section": "EDUCATIONAL CONTRIBUTIONS - Other education/outreach",
+      "wcm_table": null,
+      "fields": {
+        "activity_title": {"type": "string"},
+        "audience": {"type": "string"},
+        "location": {"type": "string"},
+        "date": {"type": "string"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "L1": {
+      "description": "Clinical Practice",
+      "wcm_section": "CLINICAL PRACTICE, INNOVATION, and LEADERSHIP - Clinical Practice",
+      "wcm_table": null,
+      "fields": {
+        "clinical_role": {"type": "string"},
+        "institution": {"type": "string"},
+        "service_setting": {"type": "string"},
+        "fte_clinical": {"type": "string"},
+        "sessions_per_week": {"type": "string"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "L2": {
+      "description": "Clinical Innovations",
+      "wcm_section": "CLINICAL PRACTICE, INNOVATION, and LEADERSHIP - Clinical Innovations",
+      "wcm_table": null,
+      "fields": {
+        "project_name": {"type": "string"},
+        "institution": {"type": "string"},
+        "role": {"type": "string"},
+        "launch_date": {"type": "string"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "outcome": {"type": "string"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "L3": {
+      "description": "Clinical Leadership",
+      "wcm_section": "CLINICAL PRACTICE, INNOVATION, and LEADERSHIP - Clinical Leadership",
+      "wcm_table": null,
+      "fields": {
+        "leadership_role": {"type": "string"},
+        "institution": {"type": "string"},
+        "unit_program": {"type": "string"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "scope": {"type": "string"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "M1": {
+      "description": "Research Activities",
+      "wcm_section": "RESEARCH - Research Activities",
+      "wcm_table": null,
+      "fields": {
+        "research_area": {"type": "string"},
+        "description": {"type": "string"},
+        "institution": {"type": "string"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "narrative": {"type": "string", "notes": "Primary field - research statement is narrative"}
+      }
+    },
+
+    "M2A": {
+      "description": "Current Research Funding",
+      "wcm_section": "RESEARCH - Research Support - Current",
+      "wcm_table": 16,
+      "fields": {
+        "grant_number": {"type": "string", "notes": "e.g., R01CA123456"},
+        "title": {"type": "string", "wcm_column": "Project title"},
+        "pi_role": {"type": "string", "wcm_column": "Your role", "notes": "PI, Co-PI, Co-I, etc."},
+        "co_investigators": {"type": "string", "wcm_column": "Names of Co-PIs"},
+        "agency": {"type": "string", "wcm_column": "Award Source"},
+        "start_date": {"type": "string", "wcm_column": "Start-end dates"},
+        "end_date": {"type": "string", "wcm_column": "Start-end dates"},
+        "total_funding": {"type": "string", "wcm_column": "Amount, total"},
+        "annual_funding": {"type": "string", "wcm_column": "Amount, yearly direct"},
+        "percent_effort": {"type": "string", "wcm_column": "Effort"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "M2B": {
+      "description": "Past (Completed) Research Funding",
+      "wcm_section": "RESEARCH - Research Support - Past",
+      "wcm_table": null,
+      "fields": {
+        "grant_number": {"type": "string"},
+        "title": {"type": "string"},
+        "pi_role": {"type": "string"},
+        "co_investigators": {"type": "string"},
+        "agency": {"type": "string"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "total_funding": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "M2C": {
+      "description": "Pending Research Funding",
+      "wcm_section": "RESEARCH - Research Support - Pending",
+      "wcm_table": null,
+      "fields": {
+        "grant_number": {"type": "string"},
+        "title": {"type": "string"},
+        "pi_role": {"type": "string"},
+        "co_investigators": {"type": "string"},
+        "agency": {"type": "string"},
+        "total_funding_requested": {"type": "string"},
+        "submission_date": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "M2D": {
+      "description": "Patents and Inventions",
+      "wcm_section": "RESEARCH - Patents & Inventions",
+      "wcm_table": null,
+      "fields": {
+        "patent_number": {"type": "string", "wcm_notes": "Please include patent number"},
+        "title": {"type": "string", "wcm_notes": "title of invention"},
+        "inventors": {"type": "string", "wcm_notes": "inventors"},
+        "filing_date": {"type": "string"},
+        "issue_date": {"type": "string"},
+        "status": {"type": "string", "notes": "Issued, pending, provisional"},
+        "assignee": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "__NOTE_M4_REMOVED": "M4A/M4B/M4C clinical trial codes removed - clinical trials now use M2A/M2B/M2C based on status",
+
+    "M4A_DEPRECATED": {
+      "description": "Interventional Clinical Trials",
+      "wcm_section": null,
+      "wcm_table": null,
+      "fields": {
+        "nct_number": {"type": "string"},
+        "trial_title": {"type": "string"},
+        "role": {"type": "string"},
+        "sponsor": {"type": "string"},
+        "phase": {"type": "string"},
+        "intervention": {"type": "string"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "status": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "M4B": {
+      "description": "Observational Studies",
+      "wcm_section": null,
+      "wcm_table": null,
+      "fields": {
+        "nct_number": {"type": "string"},
+        "study_title": {"type": "string"},
+        "role": {"type": "string"},
+        "sponsor": {"type": "string"},
+        "study_type": {"type": "string"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "status": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "N1": {
+      "description": "Mentoring Leadership/Programs",
+      "wcm_section": "MENTORING - Leadership and mentoring in programs",
+      "wcm_table": null,
+      "fields": {
+        "program_name": {"type": "string"},
+        "role": {"type": "string"},
+        "institution": {"type": "string"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "number_trainees": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "N2": {
+      "description": "Training Grants",
+      "wcm_section": "MENTORING - Institutional Training Grants",
+      "wcm_table": 17,
+      "fields": {
+        "grant_number": {"type": "string"},
+        "grant_title": {"type": "string"},
+        "role": {"type": "string", "notes": "PI, Mentor on T32, K-award, etc."},
+        "agency": {"type": "string"},
+        "start_date": {"type": "string"},
+        "end_date": {"type": "string"},
+        "trainees_supported": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "N3A": {
+      "description": "Current Mentees",
+      "wcm_section": "MENTORING - Mentees - Current",
+      "wcm_table": 18,
+      "fields": {
+        "mentee_name": {"type": "string", "wcm_column": "Name"},
+        "site_position": {"type": "string", "wcm_column": "Site/Position"},
+        "mentee_level": {"type": "string", "wcm_column": "Degree/Level"},
+        "program": {"type": "string"},
+        "start_date": {"type": "string", "wcm_column": "Start Date"},
+        "expected_completion": {"type": "string"},
+        "funding_source": {"type": "string", "wcm_column": "Funding"},
+        "research_focus": {"type": "string", "wcm_column": "Research Focus/Project"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "N3B": {
+      "description": "Past Mentees",
+      "wcm_section": "MENTORING - Mentees - Past",
+      "wcm_table": 19,
+      "fields": {
+        "mentee_name": {"type": "string", "wcm_column": "Name"},
+        "site_position": {"type": "string", "wcm_column": "Site/Position"},
+        "mentee_level": {"type": "string", "wcm_column": "Degree/Level"},
+        "program": {"type": "string"},
+        "start_date": {"type": "string", "wcm_column": "Dates"},
+        "end_date": {"type": "string", "wcm_column": "Dates"},
+        "funding_source": {"type": "string", "wcm_column": "Funding"},
+        "research_focus": {"type": "string", "wcm_column": "Research Focus"},
+        "current_position": {"type": "string", "wcm_column": "Current Position"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "N4": {
+      "description": "Mentee Outputs",
+      "wcm_section": "MENTORING - Mentees (optional outputs)",
+      "wcm_table": null,
+      "fields": {
+        "output_type": {"type": "string", "notes": "Publication, award, grant, etc."},
+        "mentee_name": {"type": "string"},
+        "title": {"type": "string"},
+        "date": {"type": "string"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "O": {
+      "description": "Institutional Leadership Activities",
+      "wcm_section": "INSTITUTIONAL LEADERSHIP ACTIVITIES",
+      "wcm_table": 20,
+      "fields": {
+        "leadership_role": {"type": "string", "wcm_column": "Role(s)/Position"},
+        "institution": {"type": "string", "wcm_column": "Institution/Location"},
+        "division_department": {"type": "string"},
+        "start_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "budget_authority": {"type": "string"},
+        "personnel_supervised": {"type": "string"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "P": {
+      "description": "Institutional Administrative/Committee Service",
+      "wcm_section": "INSTITUTIONAL ADMINISTRATIVE ACTIVITIES",
+      "wcm_table": 21,
+      "fields": {
+        "committee_name": {"type": "string", "wcm_column": "Name of Committee"},
+        "role": {"type": "string", "wcm_column": "Role (i.e., member, secretary, etc.)"},
+        "institution": {"type": "string"},
+        "start_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "Q1": {
+      "description": "Leadership in Extramural Organizations",
+      "wcm_section": "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES - Leadership",
+      "wcm_table": 22,
+      "fields": {
+        "role": {"type": "string", "wcm_column": "Role (i.e., officer, secretary, chair, etc.)"},
+        "organization": {"type": "string", "wcm_column": "Organization"},
+        "start_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "scope": {"type": "string", "notes": "Regional, national, international"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "Q2": {
+      "description": "Service on Extramural Boards/Committees",
+      "wcm_section": "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES - Service on Boards/Committees",
+      "wcm_table": [23, 24, 25],
+      "fields": {
+        "committee_name": {"type": "string", "wcm_column": "Name of Committee"},
+        "role": {"type": "string", "wcm_column": "Role (i.e., member, fellow, etc.)"},
+        "organization": {"type": "string", "wcm_column": "Organization (Institution/Location)"},
+        "start_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "scope": {"type": "string", "notes": "Regional, national, international"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "Q3": {
+      "description": "Grant Reviewing/Study Sections",
+      "wcm_section": "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES - Grant Reviewing",
+      "wcm_table": 26,
+      "fields": {
+        "panel_name": {"type": "string"},
+        "agency": {"type": "string", "wcm_column": "Organization Name"},
+        "role": {"type": "string", "wcm_column": "Role(s)"},
+        "start_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "review_type": {"type": "string", "notes": "Standing member, ad hoc, etc."},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "Q4A": {
+      "description": "Editorial - Editor/Co-Editor",
+      "wcm_section": "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES - Editorial Activities - Editor",
+      "wcm_table": 27,
+      "fields": {
+        "role": {"type": "string", "notes": "Editor, Co-Editor, Associate Editor"},
+        "journal_name": {"type": "string", "wcm_column": "Books / Textbooks / Journals / Organization Name"},
+        "publisher": {"type": "string"},
+        "start_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "Q4B": {
+      "description": "Editorial Board Membership",
+      "wcm_section": "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES - Editorial Activities - Board",
+      "wcm_table": 28,
+      "fields": {
+        "role": {"type": "string"},
+        "journal_name": {"type": "string", "wcm_column": "Journal /Textbook/Book Name"},
+        "section": {"type": "string"},
+        "start_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "Q4C": {
+      "description": "Editorial Board Service (Generic)",
+      "wcm_section": "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES - Editorial Activities",
+      "wcm_table": 29,
+      "fields": {
+        "journal_name": {"type": "string", "wcm_column": "Board / Organization Name"},
+        "start_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "Q4D": {
+      "description": "Journal Reviewing/Ad hoc Reviewing",
+      "wcm_section": "EXTRAMURAL PROFESSIONAL RESPONSIBILITIES - Editorial Activities - Ad hoc",
+      "wcm_table": 30,
+      "fields": {
+        "journal_name": {"type": "string", "wcm_column": "Journal / Organization Name"},
+        "start_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "end_date": {"type": "string", "wcm_column": "Dates (yyyy-yyyy)"},
+        "year": {"type": "string", "notes": "Alternative to start/end for single-year entries"},
+        "number_reviews": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "R": {
+      "description": "Invitations to Speak/Present",
+      "wcm_section": "INVITATIONS TO SPEAK/PRESENT",
+      "wcm_table": [31, 32, 33],
+      "fields": {
+        "title": {"type": "string", "wcm_column": "Title"},
+        "event_name": {"type": "string"},
+        "location": {"type": "string", "wcm_column": "Institution/Location"},
+        "date": {"type": "string", "wcm_column": "Dates (yyyy)"},
+        "presentation_type": {"type": "string", "notes": "Keynote, grand rounds, seminar, etc."},
+        "host_organization": {"type": "string"},
+        "scope": {"type": "string", "notes": "Regional, national, international"},
+        "authors": {"type": "string", "notes": "For co-presented talks"},
+        "target_name": {"type": "string", "notes": "CV owner's name as it appears"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "S0": {
+      "description": "Researcher Profile/Identifiers",
+      "wcm_section": "BIBLIOGRAPHY (header mentions PMCID)",
+      "wcm_table": null,
+      "fields": {
+        "orcid": {"type": "string"},
+        "google_scholar_url": {"type": "string"},
+        "scopus_id": {"type": "string"},
+        "researchgate_url": {"type": "string"},
+        "pubmed_url": {"type": "string"},
+        "h_index": {"type": "string"},
+        "total_citations": {"type": "string"},
+        "publication_count": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "S1": {
+      "description": "Peer-reviewed Research Articles",
+      "wcm_section": "BIBLIOGRAPHY - Peer-reviewed Research Articles",
+      "wcm_table": null,
+      "wcm_notes": "Standard journal format with all authors, complete titles, inclusive pagination. Include PMCID: PMC number. Bold your name.",
+      "fields": {
+        "authors": {"type": "string", "wcm_notes": "listing all authors"},
+        "year": {"type": "string"},
+        "title": {"type": "string", "wcm_notes": "complete titles"},
+        "journal": {"type": "string"},
+        "volume": {"type": "string"},
+        "issue": {"type": "string"},
+        "pages": {"type": "string", "wcm_notes": "inclusive pagination"},
+        "doi": {"type": "string"},
+        "pmid": {"type": "string"},
+        "pmcid": {"type": "string", "wcm_notes": "PMCID: PMC number"},
+        "target_name": {"type": "string", "wcm_notes": "Bold your name wherever it appears"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "S2": {
+      "description": "Reviews and Editorials",
+      "wcm_section": "BIBLIOGRAPHY - Reviews and Editorials",
+      "wcm_table": null,
+      "fields": {
+        "authors": {"type": "string"},
+        "year": {"type": "string"},
+        "title": {"type": "string"},
+        "journal": {"type": "string"},
+        "volume": {"type": "string"},
+        "issue": {"type": "string"},
+        "pages": {"type": "string"},
+        "doi": {"type": "string"},
+        "pmid": {"type": "string"},
+        "pmcid": {"type": "string"},
+        "target_name": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "S3": {
+      "description": "Books",
+      "wcm_section": "BIBLIOGRAPHY - Books",
+      "wcm_table": null,
+      "fields": {
+        "authors": {"type": "string"},
+        "editors": {"type": "string"},
+        "year": {"type": "string"},
+        "title": {"type": "string"},
+        "publisher": {"type": "string"},
+        "edition": {"type": "string"},
+        "isbn": {"type": "string"},
+        "target_name": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "S4": {
+      "description": "Book Chapters",
+      "wcm_section": "BIBLIOGRAPHY - Chapters",
+      "wcm_table": null,
+      "fields": {
+        "authors": {"type": "string"},
+        "year": {"type": "string"},
+        "chapter_title": {"type": "string"},
+        "book_title": {"type": "string"},
+        "editors": {"type": "string"},
+        "publisher": {"type": "string"},
+        "pages": {"type": "string"},
+        "doi": {"type": "string"},
+        "target_name": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "S5": {
+      "description": "Non-peer-reviewed Research Publications",
+      "wcm_section": "BIBLIOGRAPHY - Non-peer-reviewed Research Publications",
+      "wcm_table": null,
+      "fields": {
+        "authors": {"type": "string"},
+        "year": {"type": "string"},
+        "title": {"type": "string"},
+        "publication_venue": {"type": "string"},
+        "report_number": {"type": "string"},
+        "url": {"type": "string"},
+        "target_name": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "S6": {
+      "description": "Case Reports",
+      "wcm_section": "BIBLIOGRAPHY - Case Reports",
+      "wcm_table": null,
+      "fields": {
+        "authors": {"type": "string"},
+        "year": {"type": "string"},
+        "title": {"type": "string"},
+        "journal": {"type": "string"},
+        "volume": {"type": "string"},
+        "pages": {"type": "string"},
+        "doi": {"type": "string"},
+        "pmid": {"type": "string"},
+        "pmcid": {"type": "string"},
+        "target_name": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "S7": {
+      "description": "In Review/Submitted Manuscripts",
+      "wcm_section": "BIBLIOGRAPHY - In review",
+      "wcm_table": null,
+      "fields": {
+        "authors": {"type": "string"},
+        "year": {"type": "string"},
+        "title": {"type": "string"},
+        "status": {"type": "string", "notes": "Submitted, under review, in revision, in preparation"},
+        "target_journal": {"type": "string"},
+        "target_name": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "S8": {
+      "description": "Abstracts/Conference Proceedings",
+      "wcm_section": "BIBLIOGRAPHY - Abstracts",
+      "wcm_table": null,
+      "fields": {
+        "authors": {"type": "string"},
+        "year": {"type": "string"},
+        "title": {"type": "string"},
+        "conference_name": {"type": "string"},
+        "location": {"type": "string"},
+        "abstract_number": {"type": "string"},
+        "doi": {"type": "string"},
+        "target_name": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "S9": {
+      "description": "Other Media",
+      "wcm_section": "BIBLIOGRAPHY - Other",
+      "wcm_table": null,
+      "fields": {
+        "authors": {"type": "string"},
+        "year": {"type": "string"},
+        "title": {"type": "string"},
+        "media_type": {"type": "string", "notes": "Podcast, video, blog, etc."},
+        "venue": {"type": "string"},
+        "url": {"type": "string"},
+        "target_name": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    },
+
+    "T": {
+      "description": "Miscellaneous/Other",
+      "wcm_section": null,
+      "wcm_table": null,
+      "fields": {
+        "content_type": {"type": "string"},
+        "description": {"type": "string"},
+        "narrative": {"type": "string"}
+      }
+    }
+  },
+
+  "changelog": [
+    {
+      "version": "1.0",
+      "date": "2025-11-29",
+      "changes": [
+        "Initial versioned schema based on WCM CV Template October 2022",
+        "Added npi_number, dea_number to A (from template Table 10)",
+        "Added certificate_number to F2 (from template Table 11)",
+        "Added co_investigators to M2A, M2B, M2C (from template Table 16)",
+        "Added site_position, funding_source to N3A, N3B (from template Tables 18-19)",
+        "Added start_date, end_date to Q4D (template shows date ranges)",
+        "Added dates_attended to B1 (separate from year_awarded)",
+        "Added scope field to R for regional/national/international classification",
+        "Documented wcm_column mappings for all template table fields"
+      ]
+    }
+  ]
+}

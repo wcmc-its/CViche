@@ -1,0 +1,313 @@
+{
+  "description": "URL Domain to WCM Section Mapping - Tiered by Confidence",
+  "version": "1.0",
+  "last_updated": "2025-11-12",
+  "tier_definitions": {
+    "tier_1": "Unambiguous domains with single clear section mapping (0.8-0.9 confidence)",
+    "tier_2": "Strongly suggestive domains, narrow range of likely sections (0.5-0.7 confidence)",
+    "tier_3": "Weak hints, broad range of possibilities (0.2-0.4 confidence)"
+  },
+  "domain_mappings": {
+    "__comment_tier1": "=== TIER 1: UNAMBIGUOUS DOMAINS (0.8-0.9) ===",
+
+    "clinicaltrials.gov": {
+      "section_id": "M2A",
+      "canonical_name": "Research Support (Clinical Trials)",
+      "tier": 1,
+      "confidence": 0.90,
+      "reasoning": "ClinicalTrials.gov is for clinical trial registrations - now routed to M2A/M2B/M2C based on status"
+    },
+
+    "patents.google.com": {
+      "section_id": "M2D",
+      "canonical_name": "Patents and Inventions",
+      "tier": 1,
+      "confidence": 0.90,
+      "reasoning": "Google Patents is exclusively for patent documents"
+    },
+
+    "uspto.gov": {
+      "section_id": "M2D",
+      "canonical_name": "Patents and Inventions",
+      "tier": 1,
+      "confidence": 0.90,
+      "reasoning": "US Patent and Trademark Office - patents only"
+    },
+
+    "reporter.nih.gov": {
+      "section_id": "M2",
+      "canonical_name": "Grant Support and Funding",
+      "tier": 1,
+      "confidence": 0.85,
+      "reasoning": "NIH RePORTER tracks federal grant funding"
+    },
+
+    "grantome.com": {
+      "section_id": "M2",
+      "canonical_name": "Grant Support and Funding",
+      "tier": 1,
+      "confidence": 0.85,
+      "reasoning": "Grantome aggregates NIH grant data"
+    },
+
+    "github.com": {
+      "section_id": "S11",
+      "canonical_name": "Software and Code",
+      "tier": 1,
+      "confidence": 0.85,
+      "reasoning": "GitHub hosts code repositories"
+    },
+
+    "gitlab.com": {
+      "section_id": "S11",
+      "canonical_name": "Software and Code",
+      "tier": 1,
+      "confidence": 0.85,
+      "reasoning": "GitLab hosts code repositories"
+    },
+
+    "bitbucket.org": {
+      "section_id": "S11",
+      "canonical_name": "Software and Code",
+      "tier": 1,
+      "confidence": 0.85,
+      "reasoning": "Bitbucket hosts code repositories"
+    },
+
+    "protocols.io": {
+      "section_id": "S13",
+      "canonical_name": "Protocols and Methods",
+      "tier": 1,
+      "confidence": 0.85,
+      "reasoning": "Protocols.io exclusively hosts research protocols"
+    },
+
+    "biorxiv.org": {
+      "section_id": "S10",
+      "canonical_name": "Preprints",
+      "tier": 1,
+      "confidence": 0.90,
+      "reasoning": "bioRxiv is exclusively for biology preprints"
+    },
+
+    "medrxiv.org": {
+      "section_id": "S10",
+      "canonical_name": "Preprints",
+      "tier": 1,
+      "confidence": 0.90,
+      "reasoning": "medRxiv is exclusively for medical preprints"
+    },
+
+    "arxiv.org": {
+      "section_id": "S10",
+      "canonical_name": "Preprints",
+      "tier": 1,
+      "confidence": 0.90,
+      "reasoning": "arXiv is exclusively for preprints"
+    },
+
+    "osf.io": {
+      "section_id": "S10",
+      "canonical_name": "Preprints",
+      "tier": 1,
+      "confidence": 0.80,
+      "reasoning": "Open Science Framework hosts preprints and research data"
+    },
+
+    "__comment_tier2": "=== TIER 2: STRONGLY SUGGESTIVE (0.5-0.7) ===",
+
+    "doi.org": {
+      "section_id": "S",
+      "canonical_name": "Bibliography (Published)",
+      "tier": 2,
+      "confidence": 0.70,
+      "reasoning": "DOI indicates published work, likely S1-S9"
+    },
+
+    "pubmed.ncbi.nlm.nih.gov": {
+      "section_id": "S1",
+      "canonical_name": "Peer-Reviewed Research Articles",
+      "tier": 2,
+      "confidence": 0.70,
+      "reasoning": "PubMed indexes peer-reviewed biomedical literature"
+    },
+
+    "ncbi.nlm.nih.gov": {
+      "section_id": "S1",
+      "canonical_name": "Peer-Reviewed Research Articles",
+      "tier": 2,
+      "confidence": 0.65,
+      "reasoning": "NCBI hosts PubMed and other biomedical databases"
+    },
+
+    "scholar.google.com": {
+      "section_id": "S",
+      "canonical_name": "Bibliography",
+      "tier": 2,
+      "confidence": 0.60,
+      "reasoning": "Google Scholar links to scholarly publications"
+    },
+
+    "researchgate.net": {
+      "section_id": "S",
+      "canonical_name": "Bibliography",
+      "tier": 2,
+      "confidence": 0.60,
+      "reasoning": "ResearchGate hosts publication profiles"
+    },
+
+    "orcid.org": {
+      "section_id": "A",
+      "canonical_name": "Personal Data",
+      "tier": 2,
+      "confidence": 0.65,
+      "reasoning": "ORCID is researcher identifier system"
+    },
+
+    "linkedin.com": {
+      "section_id": "D",
+      "canonical_name": "Professional Positions",
+      "tier": 2,
+      "confidence": 0.60,
+      "reasoning": "LinkedIn profiles list professional positions"
+    },
+
+    "zenodo.org": {
+      "section_id": "S12",
+      "canonical_name": "Data and Datasets",
+      "tier": 2,
+      "confidence": 0.70,
+      "reasoning": "Zenodo hosts research data and datasets"
+    },
+
+    "figshare.com": {
+      "section_id": "S12",
+      "canonical_name": "Data and Datasets",
+      "tier": 2,
+      "confidence": 0.70,
+      "reasoning": "Figshare hosts research data and datasets"
+    },
+
+    "dryad.org": {
+      "section_id": "S12",
+      "canonical_name": "Data and Datasets",
+      "tier": 2,
+      "confidence": 0.70,
+      "reasoning": "Dryad hosts research data repository"
+    },
+
+    "dataverse.harvard.edu": {
+      "section_id": "S12",
+      "canonical_name": "Data and Datasets",
+      "tier": 2,
+      "confidence": 0.70,
+      "reasoning": "Harvard Dataverse hosts research datasets"
+    },
+
+    "youtube.com": {
+      "section_id": "T3",
+      "canonical_name": "Public Outreach and Media",
+      "tier": 2,
+      "confidence": 0.55,
+      "reasoning": "YouTube videos often used for public outreach"
+    },
+
+    "vimeo.com": {
+      "section_id": "T3",
+      "canonical_name": "Public Outreach and Media",
+      "tier": 2,
+      "confidence": 0.55,
+      "reasoning": "Vimeo videos often used for public outreach"
+    },
+
+    "twitter.com": {
+      "section_id": "T3",
+      "canonical_name": "Public Outreach and Media",
+      "tier": 2,
+      "confidence": 0.50,
+      "reasoning": "Twitter/X used for public engagement"
+    },
+
+    "x.com": {
+      "section_id": "T3",
+      "canonical_name": "Public Outreach and Media",
+      "tier": 2,
+      "confidence": 0.50,
+      "reasoning": "X (formerly Twitter) used for public engagement"
+    },
+
+    "__comment_tier3": "=== TIER 3: WEAK HINTS (0.2-0.4) ===",
+
+    "*.edu": {
+      "section_id": "multiple",
+      "possible_sections": ["A", "B", "D", "K"],
+      "tier": 3,
+      "confidence": 0.35,
+      "reasoning": "Educational institutions host personal pages, CVs, teaching materials - context dependent"
+    },
+
+    "*.ac.uk": {
+      "section_id": "multiple",
+      "possible_sections": ["A", "B", "D", "K"],
+      "tier": 3,
+      "confidence": 0.35,
+      "reasoning": "UK academic institutions - context dependent"
+    },
+
+    "*.org": {
+      "section_id": "multiple",
+      "possible_sections": ["I", "Q", "H"],
+      "tier": 3,
+      "confidence": 0.30,
+      "reasoning": "Organizations could be professional societies, committees, awards"
+    },
+
+    "*.gov": {
+      "section_id": "multiple",
+      "possible_sections": ["D", "Q", "O", "P"],
+      "tier": 3,
+      "confidence": 0.30,
+      "reasoning": "Government sites could be positions, service, leadership"
+    },
+
+    "__comment_patterns": "=== PATTERN MATCHES (use * wildcard) ===",
+
+    "*.faculty.*": {
+      "section_id": "multiple",
+      "possible_sections": ["A", "D"],
+      "tier": 3,
+      "confidence": 0.40,
+      "reasoning": "Faculty profile pages - personal data or positions"
+    },
+
+    "*.profile.*": {
+      "section_id": "A",
+      "canonical_name": "Personal Data",
+      "tier": 3,
+      "confidence": 0.40,
+      "reasoning": "Profile pages typically contain personal/contact information"
+    },
+
+    "*.lab.*": {
+      "section_id": "M1",
+      "canonical_name": "Research Activities",
+      "tier": 3,
+      "confidence": 0.40,
+      "reasoning": "Lab websites often describe research activities"
+    },
+
+    "*.department.*": {
+      "section_id": "multiple",
+      "possible_sections": ["A", "D", "O"],
+      "tier": 3,
+      "confidence": 0.35,
+      "reasoning": "Department pages - could be contact, positions, or leadership"
+    }
+  },
+  "notes": {
+    "multiple_sections": "When section_id is 'multiple', check possible_sections array for candidates",
+    "position_awareness": "Validator applies position-based adjustments for .edu, .org domains",
+    "aggregation": "Multiple URLs with same section_id increase confidence through voting",
+    "override": "All URL domain signals are 'soft' guidance - LLM can override with stronger evidence"
+  }
+}

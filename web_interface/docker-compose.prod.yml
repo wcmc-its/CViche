@@ -1,0 +1,55 @@
+# docker-compose.prod.yml -- Production settings
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
+version: "3.9"
+
+services:
+  # --- Backend (production) ---
+  backend:
+    restart: always
+    environment:
+      # Production overrides (set via .env or deployment pipeline)
+      CVICHE_DATABASE_URL: "${CVICHE_DATABASE_URL}"
+      CVICHE_SESSION_SECRET: "${CVICHE_SESSION_SECRET}"
+      CVICHE_SECURE_COOKIES: "true"
+      CVICHE_ALLOWED_ORIGINS: "${CVICHE_ALLOWED_ORIGINS}"
+      CVICHE_STORAGE_BACKEND: "s3"
+      CVICHE_S3_BUCKET: "${CVICHE_S3_BUCKET}"
+      CVICHE_S3_PREFIX: "${CVICHE_S3_PREFIX:-cviche}"
+      OPENAI_API_KEY_WORK: "${OPENAI_API_KEY_WORK}"
+    volumes: []  # No hot-reload mounts in production
+    # Production: no --reload flag, add workers
+    command: ["--workers", "4"]
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+  # --- Frontend (production: nginx serves built assets) ---
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+    restart: always
+    ports:
+      - "80:80"
+    volumes: []  # No hot-reload mounts in production
+    command: ["nginx", "-g", "daemon off;"]
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+  # --- DB: use external managed database in production ---
+  # Remove the db service -- production uses a managed MariaDB instance
+  db:
+    profiles:
+      - disabled

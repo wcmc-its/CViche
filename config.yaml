@@ -1,0 +1,153 @@
+# CViche Configuration
+# CV Parsing Pipeline
+
+# Directories
+directories:
+  cv_dir: "sample CVs"
+  output_dir: "outputs/results"
+  report_dir: "outputs/reports"
+  log_dir: "outputs/logs"
+  debug_dir: "outputs/debug"
+
+# Extraction Parameters
+extraction:
+  # Minimum number of major sections before triggering Phase 3 (gap filling)
+  min_section_threshold: 8
+
+  # Font size threshold multiplier for "large font" detection
+  # header_threshold = body_size * font_threshold_multiplier
+  font_threshold_multiplier: 1.15
+
+  # Confidence requirements
+  strong_signals:
+    - bold_caps_base
+    - underlined
+    - caps_taxonomy_fuzzy
+    - bold_taxonomy
+    - taxonomy_exact_large_font
+
+  # Minimum confidence for standalone detection
+  min_confidence: 3
+
+  # Phase 3 gap filling
+  gap_filling:
+    enabled: true
+    min_signals_required: 3
+    taxonomy_specificity_threshold: 75
+
+# Taxonomy Settings
+taxonomy:
+  # Fuzzy matching parameters
+  fuzzy_match:
+    enabled: true
+    min_similarity_short: 0.6  # For words <= 10 chars
+    min_similarity_long: 0.7   # For words > 10 chars
+    min_length: 5              # Minimum text length for fuzzy matching
+
+  # Exact matching
+  exact_match:
+    enabled: true
+    specificity_threshold: 50
+
+# PDF Processing
+pdf:
+  # Character grouping tolerance (y-axis)
+  y_tolerance: 2
+
+  # Horizontal line detection
+  horizontal_lines:
+    enabled: true
+    min_width_ratio: 0.4       # Minimum line width (% of page width)
+    tolerance: 10              # Distance tolerance (points)
+    max_height: 5              # Maximum line height (points)
+
+  # Indentation analysis
+  indent:
+    unit_size: 20              # Pixels per indent level
+
+# Output Format
+output:
+  # JSON output fields
+  include_fields:
+    - line_number
+    - header
+    - header_upper
+    - font_size
+    - is_bold
+    - is_all_caps
+    - is_centered
+    - has_underline
+    - indent_level
+    - confidence_signals
+    - confidence
+    - detection_phase
+    - taxonomy_id
+    - taxonomy_canonical
+    - taxonomy_specificity
+    - taxonomy_parent
+
+  # Pretty print JSON
+  pretty_print: true
+  indent_size: 2
+
+# Logging
+logging:
+  level: INFO  # DEBUG, INFO, WARNING, ERROR
+  format: "%(levelname)s:%(name)s:%(message)s"
+  file_logging: true
+  file_path: "outputs/logs/cviche.log"
+
+# Reporting
+reporting:
+  # Number of CVs to show in "top" and "bottom" lists
+  top_n: 10
+  bottom_n: 10
+
+  # Signal usage statistics
+  show_signal_stats: true
+  top_signals: 15
+
+  # Detection distribution
+  section_ranges:
+    - name: "Zero"
+      min: 0
+      max: 0
+    - name: "Very Low"
+      min: 1
+      max: 3
+    - name: "Low"
+      min: 4
+      max: 10
+    - name: "Medium"
+      min: 11
+      max: 20
+    - name: "High"
+      min: 21
+      max: 40
+    - name: "Very High"
+      min: 41
+      max: 999
+
+# Institution Defaults
+# Default locations for institutions when not otherwise specified
+institutions:
+  default_locations:
+    - name: "Weill Cornell Medical College"
+      location: "New York, NY"
+    - name: "Weill Cornell Medicine"
+      location: "New York, NY"
+    - name: "New York Presbyterian Hospital"
+      location: "New York, NY"
+    - name: "NewYork-Presbyterian Hospital"
+      location: "New York, NY"
+
+# Experimental Features
+experimental:
+  # Enable machine learning-based section prediction
+  ml_prediction: false
+
+  # Enable deep learning text embedding for similarity
+  text_embedding: false
+
+  # Enable LLM-based section classification
+  llm_classification: false

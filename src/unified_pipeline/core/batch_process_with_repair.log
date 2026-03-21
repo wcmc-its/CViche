@@ -1,0 +1,58 @@
+================================================================================
+BATCH CV PROCESSING WITH SEGMENTATION REPAIR
+================================================================================
+
+Processing 5 CVs:
+  • Denckla (2025)
+  • Dabelko-Schoeny (2024)
+  • Wyle (2100)
+  • Almasri (2004)
+  • Hui-Chen (2038)
+
+
+================================================================================
+Processing: Denckla (2025)
+================================================================================
+  [1/4] Segmenting Word CV...
+    ✗ Segmentation failed: attempted relative import with no known parent package
+
+================================================================================
+Processing: Dabelko-Schoeny (2024)
+================================================================================
+  [1/4] Segmenting Word CV...
+    ✗ Segmentation failed: attempted relative import with no known parent package
+
+================================================================================
+Processing: Wyle (2100)
+================================================================================
+  [1/4] Segmenting Word CV...
+    ✗ Segmentation failed: attempted relative import with no known parent package
+
+================================================================================
+Processing: Almasri (2004)
+================================================================================
+  [1/4] Segmenting Word CV...
+    ✗ Segmentation failed: attempted relative import with no known parent package
+
+================================================================================
+Processing: Hui-Chen (2038)
+================================================================================
+  [1/4] Segmenting Word CV...
+    ✗ Segmentation failed: attempted relative import with no known parent package
+
+================================================================================
+PROCESSING SUMMARY
+================================================================================
+
+Successful: 0/5
+Failed: 5/5
+
+❌ FAILED:
+  Denckla: Failed at segmentation
+  Dabelko-Schoeny: Failed at segmentation
+  Wyle: Failed at segmentation
+  Almasri: Failed at segmentation
+  Hui-Chen: Failed at segmentation
+
+📊 Summary saved to: batch_processing_with_repair_summary.json
+

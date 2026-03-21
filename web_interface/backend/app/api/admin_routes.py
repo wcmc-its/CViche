@@ -1,0 +1,615 @@
+"""Admin dashboard API endpoints. All endpoints require admin role."""
+import csv
+import io
+import json
+import logging
+from datetime import datetime, timedelta
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from sqlalchemy import func
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.models import User, Run, Feedback, SystemConfig, Consent
+from app.auth import require_admin
+from app.schemas import (
+    AdminStats,
+    AdminUser,
+    AdminRunEntry,
+    AdminRunsResponse,
+    AdminConfigResponse,
+    AdminConfigUpdate,
+    AdminUserUpdate,
+)
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/stats
+# ---------------------------------------------------------------------------
+@router.get("/admin/stats", response_model=AdminStats)
+async def get_stats(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Return overview statistics for the admin dashboard."""
+    total_runs = db.query(func.count(Run.id)).scalar() or 0
+
+    thirty_days_ago = datetime.now() - timedelta(days=30)
+    active_users = (
+        db.query(func.count(func.distinct(Run.user_id)))
+        .filter(Run.started_at >= thirty_days_ago, Run.user_id.isnot(None))
+        .scalar()
+        or 0
+    )
+
+    total_cost = db.query(func.sum(Run.total_cost)).scalar() or 0.0
+
+    completed_runs = (
+        db.query(func.count(Run.id)).filter(Run.status == "complete").scalar() or 0
+    )
+    runs_with_feedback = (
+        db.query(func.count(func.distinct(Feedback.run_id))).scalar() or 0
+    )
+    feedback_rate = (
+        (runs_with_feedback / completed_runs * 100) if completed_runs > 0 else 0.0
+    )
+
+    return AdminStats(
+        total_runs=total_runs,
+        active_users=active_users,
+        total_cost=round(total_cost, 4),
+        feedback_rate=round(feedback_rate, 1),
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/users
+# ---------------------------------------------------------------------------
+@router.get("/admin/users", response_model=list[AdminUser])
+async def get_users(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Return all users with per-user stats."""
+    users = db.query(User).order_by(User.created_at.desc()).all()
+
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    result = []
+    for u in users:
+        runs_today = (
+            db.query(func.count(Run.id))
+            .filter(Run.user_id == u.id, Run.started_at >= today_start)
+            .scalar()
+            or 0
+        )
+        total_runs = (
+            db.query(func.count(Run.id)).filter(Run.user_id == u.id).scalar() or 0
+        )
+        total_cost = (
+            db.query(func.sum(Run.total_cost)).filter(Run.user_id == u.id).scalar()
+            or 0.0
+        )
+        feedback_count = (
+            db.query(func.count(Feedback.id))
+            .filter(Feedback.user_id == u.id)
+            .scalar()
+            or 0
+        )
+        completed_run_count = (
+            db.query(func.count(Run.id))
+            .filter(Run.user_id == u.id, Run.status == "complete")
+            .scalar()
+            or 0
+        )
+
+        result.append(
+            AdminUser(
+                id=u.id,
+                email=u.email,
+                display_name=u.display_name,
+                role=u.role,
+                status=u.status,
+                daily_limit=u.daily_limit,
+                monthly_limit=u.monthly_limit,
+                runs_today=runs_today,
+                total_runs=total_runs,
+                total_cost=round(total_cost, 4),
+                feedback_count=feedback_count,
+                completed_run_count=completed_run_count,
+                last_active_at=u.last_active_at,
+                created_at=u.created_at,
+            )
+        )
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/admin/users/{user_id}
+# ---------------------------------------------------------------------------
+@router.put("/admin/users/{user_id}", response_model=AdminUser)
+async def update_user(
+    user_id: int,
+    body: AdminUserUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Update a user's role, status, or limits."""
+    target = db.query(User).filter(User.id == user_id).first()
+    if not target:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "not_found", "message": "User not found."},
+        )
+
+    changes = {}
+
+    # Validate: can't remove last admin
+    if body.role is not None and body.role != target.role:
+        if target.role == "admin" and body.role == "user":
+            admin_count = (
+                db.query(func.count(User.id))
+                .filter(User.role == "admin", User.status == "active")
+                .scalar()
+            )
+            if admin_count <= 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "validation_error",
+                        "message": "Cannot remove the last admin.",
+                    },
+                )
+        changes["role"] = {"old": target.role, "new": body.role}
+        target.role = body.role
+
+    # Validate: can't disable yourself
+    if body.status is not None and body.status != target.status:
+        if target.id == admin.id and body.status == "disabled":
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "validation_error",
+                    "message": "Cannot disable your own account.",
+                },
+            )
+        # If disabling the last admin, block it
+        if target.role == "admin" and body.status == "disabled":
+            active_admin_count = (
+                db.query(func.count(User.id))
+                .filter(
+                    User.role == "admin",
+                    User.status == "active",
+                    User.id != target.id,
+                )
+                .scalar()
+            )
+            if active_admin_count < 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "validation_error",
+                        "message": "Cannot disable the last active admin.",
+                    },
+                )
+        changes["status"] = {"old": target.status, "new": body.status}
+        target.status = body.status
+
+    if body.daily_limit is not None:
+        changes["daily_limit"] = {"old": target.daily_limit, "new": body.daily_limit}
+        target.daily_limit = body.daily_limit if body.daily_limit > 0 else None
+
+    if body.monthly_limit is not None:
+        changes["monthly_limit"] = {
+            "old": target.monthly_limit,
+            "new": body.monthly_limit,
+        }
+        target.monthly_limit = body.monthly_limit if body.monthly_limit > 0 else None
+
+    db.commit()
+    db.refresh(target)
+
+    if changes:
+        logger.info(
+            "admin_user_updated: admin=%s target_user=%s changes=%s",
+            admin.email,
+            target.email,
+            json.dumps(changes),
+        )
+
+    # Re-fetch stats for updated user
+    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    runs_today = (
+        db.query(func.count(Run.id))
+        .filter(Run.user_id == target.id, Run.started_at >= today_start)
+        .scalar()
+        or 0
+    )
+    total_runs = (
+        db.query(func.count(Run.id)).filter(Run.user_id == target.id).scalar() or 0
+    )
+    total_cost = (
+        db.query(func.sum(Run.total_cost)).filter(Run.user_id == target.id).scalar()
+        or 0.0
+    )
+    feedback_count = (
+        db.query(func.count(Feedback.id))
+        .filter(Feedback.user_id == target.id)
+        .scalar()
+        or 0
+    )
+    completed_run_count = (
+        db.query(func.count(Run.id))
+        .filter(Run.user_id == target.id, Run.status == "complete")
+        .scalar()
+        or 0
+    )
+
+    return AdminUser(
+        id=target.id,
+        email=target.email,
+        display_name=target.display_name,
+        role=target.role,
+        status=target.status,
+        daily_limit=target.daily_limit,
+        monthly_limit=target.monthly_limit,
+        runs_today=runs_today,
+        total_runs=total_runs,
+        total_cost=round(total_cost, 4),
+        feedback_count=feedback_count,
+        completed_run_count=completed_run_count,
+        last_active_at=target.last_active_at,
+        created_at=target.created_at,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/runs
+# ---------------------------------------------------------------------------
+@router.get("/admin/runs", response_model=AdminRunsResponse)
+async def get_runs(
+    offset: int = Query(0, ge=0),
+    limit: int = Query(20, ge=1, le=100),
+    user: Optional[str] = Query(None, description="Filter by user email"),
+    status: Optional[str] = Query(None, description="Filter by run status"),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Return all runs paginated, with optional filters."""
+    query = db.query(Run, User).outerjoin(User, Run.user_id == User.id)
+
+    if user:
+        query = query.filter(User.email.ilike(f"%{user}%"))
+
+    if status:
+        query = query.filter(Run.status == status)
+
+    total = query.count()
+    rows = query.order_by(Run.started_at.desc()).offset(offset).limit(limit).all()
+
+    # Build run entries with feedback status
+    run_ids = [r.id for r, _ in rows]
+    feedback_run_ids = set()
+    if run_ids:
+        feedback_rows = (
+            db.query(Feedback.run_id)
+            .filter(Feedback.run_id.in_(run_ids))
+            .distinct()
+            .all()
+        )
+        feedback_run_ids = {row.run_id for row in feedback_rows}
+
+    entries = []
+    for run, run_user in rows:
+        duration = None
+        if run.started_at and run.completed_at:
+            duration = int((run.completed_at - run.started_at).total_seconds())
+
+        entries.append(
+            AdminRunEntry(
+                run_id=run.id,
+                user_email=run_user.email if run_user else None,
+                user_display_name=run_user.display_name if run_user else None,
+                filename=run.filename,
+                status=run.status,
+                duration_seconds=duration,
+                total_cost=round(run.total_cost or 0, 4),
+                started_at=run.started_at,
+                has_feedback=run.id in feedback_run_ids,
+            )
+        )
+
+    return AdminRunsResponse(
+        runs=entries,
+        total=total,
+        has_more=(offset + limit) < total,
+        offset=offset,
+        limit=limit,
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/config
+# ---------------------------------------------------------------------------
+@router.get("/admin/config", response_model=AdminConfigResponse)
+async def get_config(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Return current system configuration values."""
+    configs = db.query(SystemConfig).all()
+    config_dict = {}
+    for c in configs:
+        config_dict[c.key] = json.loads(c.value)
+
+    return AdminConfigResponse(
+        allowed_users=config_dict.get("allowed_users", []),
+        admin_users=config_dict.get("admin_users", []),
+        rate_limit_daily=config_dict.get("rate_limit_daily", 10),
+        rate_limit_monthly=config_dict.get("rate_limit_monthly", 50),
+        consent_version=config_dict.get("consent_version", "1.0"),
+        auth_mode=config_dict.get("auth_mode", "simple"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# PUT /api/admin/config
+# ---------------------------------------------------------------------------
+@router.put("/admin/config", response_model=AdminConfigResponse)
+async def update_config(
+    body: AdminConfigUpdate,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Update system configuration values."""
+    changes = {}
+
+    def _update_key(key: str, new_value) -> None:
+        """Update a SystemConfig row, logging old/new."""
+        row = db.query(SystemConfig).filter(SystemConfig.key == key).first()
+        if row:
+            old_value = json.loads(row.value)
+            if old_value != new_value:
+                changes[key] = {"old": old_value, "new": new_value}
+                row.value = json.dumps(new_value)
+                row.updated_by = admin.id
+        else:
+            changes[key] = {"old": None, "new": new_value}
+            db.add(
+                SystemConfig(
+                    key=key, value=json.dumps(new_value), updated_by=admin.id
+                )
+            )
+
+    if body.allowed_users is not None:
+        _update_key("allowed_users", body.allowed_users)
+
+    if body.admin_users is not None:
+        # Validate: at least one admin must remain
+        if len(body.admin_users) < 1:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "validation_error",
+                    "message": "At least one admin user is required.",
+                },
+            )
+        # Ensure all admin users are in allowed users list
+        allowed = body.allowed_users
+        if allowed is None:
+            # Use current allowed list
+            row = (
+                db.query(SystemConfig)
+                .filter(SystemConfig.key == "allowed_users")
+                .first()
+            )
+            allowed = json.loads(row.value) if row else []
+
+        for admin_email in body.admin_users:
+            if admin_email.lower() not in [a.lower() for a in allowed]:
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "error": "validation_error",
+                        "message": f"Admin user {admin_email} must also be in the allowed users list.",
+                    },
+                )
+        _update_key("admin_users", body.admin_users)
+
+    if body.rate_limit_daily is not None:
+        if body.rate_limit_daily < 1:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "validation_error",
+                    "message": "Daily rate limit must be positive.",
+                },
+            )
+        _update_key("rate_limit_daily", body.rate_limit_daily)
+
+    if body.rate_limit_monthly is not None:
+        if body.rate_limit_monthly < 1:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "validation_error",
+                    "message": "Monthly rate limit must be positive.",
+                },
+            )
+        _update_key("rate_limit_monthly", body.rate_limit_monthly)
+
+    if body.consent_version is not None:
+        _update_key("consent_version", body.consent_version)
+
+    db.commit()
+
+    if changes:
+        logger.info(
+            "admin_config_changed: admin=%s changes=%s",
+            admin.email,
+            json.dumps(changes),
+        )
+
+    # Return updated config
+    return await get_config(db=db, admin=admin)
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/export/{export_type}
+# ---------------------------------------------------------------------------
+@router.get("/admin/export/{export_type}")
+async def export_csv(
+    export_type: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Export data as CSV. Supported types: runs, users, consent, feedback."""
+    if export_type not in ("runs", "users", "consent", "feedback"):
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "validation_error",
+                "message": f"Invalid export type: {export_type}. Must be one of: runs, users, consent, feedback.",
+            },
+        )
+
+    logger.info(
+        "admin_export: admin=%s export_type=%s", admin.email, export_type
+    )
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    if export_type == "runs":
+        writer.writerow([
+            "run_id", "user_email", "filename", "file_type", "status",
+            "started_at", "completed_at", "total_cost", "total_tokens",
+            "input_tokens", "output_tokens", "submission_type", "error_message",
+        ])
+        rows = (
+            db.query(Run, User)
+            .outerjoin(User, Run.user_id == User.id)
+            .order_by(Run.started_at.desc())
+            .all()
+        )
+        for run, run_user in rows:
+            writer.writerow([
+                run.id,
+                run_user.email if run_user else "",
+                run.filename,
+                run.file_type,
+                run.status,
+                run.started_at.isoformat() if run.started_at else "",
+                run.completed_at.isoformat() if run.completed_at else "",
+                run.total_cost,
+                run.total_tokens,
+                run.input_tokens,
+                run.output_tokens,
+                run.submission_type or "",
+                run.error_message or "",
+            ])
+
+    elif export_type == "users":
+        writer.writerow([
+            "id", "email", "display_name", "role", "status",
+            "daily_limit", "monthly_limit", "consent_version",
+            "consent_date", "created_at", "last_active_at",
+        ])
+        users = db.query(User).order_by(User.created_at.desc()).all()
+        for u in users:
+            writer.writerow([
+                u.id,
+                u.email,
+                u.display_name,
+                u.role,
+                u.status,
+                u.daily_limit or "",
+                u.monthly_limit or "",
+                u.consent_version or "",
+                u.consent_date.isoformat() if u.consent_date else "",
+                u.created_at.isoformat() if u.created_at else "",
+                u.last_active_at.isoformat() if u.last_active_at else "",
+            ])
+
+    elif export_type == "consent":
+        writer.writerow([
+            "id", "user_id", "user_email", "consent_version",
+            "consent_text_hash", "ip_address", "user_agent", "timestamp",
+        ])
+        rows = (
+            db.query(Consent, User)
+            .outerjoin(User, Consent.user_id == User.id)
+            .order_by(Consent.timestamp.desc())
+            .all()
+        )
+        for consent, consent_user in rows:
+            writer.writerow([
+                consent.id,
+                consent.user_id,
+                consent_user.email if consent_user else "",
+                consent.consent_version,
+                consent.consent_text_hash,
+                consent.ip_address or "",
+                consent.user_agent or "",
+                consent.timestamp.isoformat() if consent.timestamp else "",
+            ])
+
+    elif export_type == "feedback":
+        writer.writerow([
+            "id", "run_id", "user_email", "reviewer_role",
+            "overall_accuracy", "overall_completeness", "overall_usefulness",
+            "manual_conversion_effort", "correction_effort",
+            "enrichment_quality", "summary_generated", "summary_quality",
+            "issue_missing_content", "issue_split_merged", "issue_wrong_section",
+            "issue_inaccurate", "issue_ai_enrichment", "issue_formatting",
+            "issue_locations", "biggest_issue", "likelihood_to_recommend",
+            "submitted_at",
+        ])
+        rows = (
+            db.query(Feedback, User)
+            .outerjoin(User, Feedback.user_id == User.id)
+            .order_by(Feedback.submitted_at.desc())
+            .all()
+        )
+        for fb, fb_user in rows:
+            writer.writerow([
+                fb.id,
+                fb.run_id,
+                fb_user.email if fb_user else "",
+                fb.reviewer_role,
+                fb.overall_accuracy,
+                fb.overall_completeness,
+                fb.overall_usefulness,
+                fb.manual_conversion_effort,
+                fb.correction_effort,
+                fb.enrichment_quality,
+                fb.summary_generated,
+                fb.summary_quality,
+                fb.issue_missing_content or "",
+                fb.issue_split_merged or "",
+                fb.issue_wrong_section or "",
+                fb.issue_inaccurate or "",
+                fb.issue_ai_enrichment or "",
+                fb.issue_formatting or "",
+                fb.issue_locations or "",
+                fb.biggest_issue or "",
+                fb.likelihood_to_recommend,
+                fb.submitted_at.isoformat() if fb.submitted_at else "",
+            ])
+
+    output.seek(0)
+
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="cviche_{export_type}_{datetime.now().strftime("%Y%m%d")}.csv"'
+        },
+    )

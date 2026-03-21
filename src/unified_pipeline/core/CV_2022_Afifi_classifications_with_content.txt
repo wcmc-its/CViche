@@ -1,0 +1,222 @@
+TAXONOMY CLASSIFICATIONS WITH FULL CONTENT
+================================================================================
+
+[1] → Institutional / Hospital Affiliation (G) - Confidence: 0.85
+
+Department of Community and Behavioral Health
+
+--------------------------------------------------------------------------------
+
+[2] → Education (B) - Confidence: 0.85
+
+University of Iowa
+
+--------------------------------------------------------------------------------
+
+[3] → Personal Data / Contact Information (A) - Confidence: 0.95
+
+Tel: + 1-319- Email: ORCID ID: 0000-0003-3154-3617
+
+--------------------------------------------------------------------------------
+
+[4] → Institutional / Hospital Affiliation (G) - Confidence: 0.85
+
+Department of Community and Behavioral Health
+
+--------------------------------------------------------------------------------
+
+[5] → Professional Positions & Employment (D) - Confidence: 0.95
+
+University of Iowa Adjunct professor
+
+--------------------------------------------------------------------------------
+
+[6] → Research (M) - Confidence: 0.85
+
+June 13-14 2019 P50 Implementation Science for Cancer Control – Developing Centers RFA CA-19-005 / Advanced Centers RFA CA-19-006 April 2 2020 D43 Chronic, Non-Communicable Diseases and Disorders Across the Lifespan: Fogarty International Research Training Award (NCD-LIFESPAN) RFA PAR-18-901 Sept. 23-25, 2020 Ad Hoc Reviewer. Community Influences on Health Behavior Study Section, Healthcare Delivery and Methodologies Integrated Review Group. Correa A, Bucklin B, Pham H, Sewell D, Afifi RA. Resident Assistant Stress and Well-Being in the Time of COVID-19. Afifi RA, Calderon J, Pham H, Sewell D, Teahen P, Vander Weg M, Zarate-Sada S. COVID-19 Last Responders: Stress, Coping, Stigma, and Wellbeing. Dubey P, EL Boukhari N, Vander Weg M, Ortiz E, Afifi R. Determinants of e-cigarettes use among adolescents and young adults: A systematic scoping review of qualitative studies. Nakkash R (corresponding), Tabaja F, Afifi R, Alameddine M, Ghandour L, Halabi A, Dagher J, Becker, A. Maalouf F. Using implementation science to understand the factors influencing effectiveness of My FRIENDS; a school-based mental health intervention in Lebanon.
+
+--------------------------------------------------------------------------------
+
+[7] → Invitations to Speak/Present (R) - Confidence: 0.95
+
+2017 Afifi RA, Irani A, Ali A, Mokdad A. Inequities in young peoples’ health across the Arab World. Oral presentation at the first International Association of Adolescent Health MENA region conference. May 12-14, 2017. Cairo, Egypt. Afifi RA, Nakkash R, Bteddini D, Mahfoud A, Lotfi T. Testing the impact of a nation-wide school based program on waterpipe tobacco smoking (WTS) prevention among 6th and 7th graders in Lebanon: A randomized control trial design. Oral presentation at the first International Association of Adolescent Health MENA region conference. May 12-14, 2017. Cairo, Egypt. (DB presented) Ghandour L, Anouti S, Afifi R, Maalouf F, Rady A. Mental health Well-being of Arab Adolescents: Findings from 19 multi-country Global School-based Health Surveys. Oral presentation at the first International Association of Adolescent Health MENA region conference. May 12-14, 2017. Cairo, Egypt. (SA presented) .
+
+2016 Afifi RA. Enabling systems for Adolescent Wellbeing. Oral presentation at the conference on Adolescent Adolescent and youth wellbeing in the Arab region: Challenges and promises of the second decade of life - A partnership for and with youth. December 13-14, 2016, Beirut, Lebanon. Afifi RA, Armoush S. Documenting ‘good practices’ in adolescent programming for the MENA region: Interventions for Palestinian youth. At the Lancet Palestinian Health Alliance 7th conference: Health of Palestinians inside and outside of the Palestinian Occupied Territories. March 7-8, Amman, Jordan. Afifi RA, Gemani A, Armoush S, Mendonca V, Martinez K. Documenting ‘Good Practices’ in Adolescent Programming for the MENA region: Are adolescents involved? Collaboration for Community Change: Insight, Innovation, and Impact. March 24-26, Cairo, Egypt. (AG presented)
+
+--------------------------------------------------------------------------------
+
+[8] → Invitations to Speak/Present (R) - Confidence: 0.95
+
+2020 Afifi RA. Invited presentation. Community-Based Participatory Research. Obermann Center workgroup on Scholarship of Public Engagement. April 24, 2020. Iowa City, Iowa.
+
+2019 Afifi RA. Invited Keynote. Iowa Refugee Alliance Summit. Creating environments conducive to wellbeing: Cross-sectoral strength-based approaches to working with refugees. Oct. 9, 2019. Des Moines, Iowa.
+
+2018 Afifi RA. Invited lecture. College of Nursing Research Series. Critical reflections on research and practice in contexts of protracted uncertainty. Nov. 9, 2018. Iowa City, Iowa. Afifi RA. Invited panelist. Member of 3-person panel on ‘The Secrets of Making the Science of Health Equity Work: Community and Academic Perspectives on Ensuring Health Equity’ at the 2nd Annual Science of Health Equity Summit. April 5, 2018. Iowa City, Iowa.
+
+2017 Afifi RA. Social Norms and Attitudes Linked to Waterpipe Use in the Eastern Mediterranean Region. Institute for Clinical & Translational Science lecture series on Qualitative Research. Nov. 15, 2017. Iowa City, Iowa. Afifi RA. College of Public Health Spotlight series. More good than harm? A critical analysis of working in contexts of protracted uncertainty. Sept. 2017. Iowa City, Iowa.
+
+--------------------------------------------------------------------------------
+
+[9] → Educational Contributions (K) - Confidence: 0.95
+
+At the University of Iowa, College of Public Health
+
+2021-2022 CBH:6205 Designing and Implementing Interventions (3ch) (26 students) - Fall / Graduate CBH:6205 Designing and Implementing Interventions (3ch) (TBD students) - Spring / Graduate CBH: Independent Study (3ch) (1 student)- Fall/Graduate
+
+2020-2021 CBH:6205 Designing and Implementing Interventions (3ch) (16 students) - Fall / Graduate CBH: 5235 Community-Based Participatory Research (3ch) (26 students) – Spring /Graduate CPH: Undergraduate research CPH: Undergraduate Experiential Learning (2 students)
+
+2019-2020 CPH: 1400 Fundamentals of Public Health (3ch) (300 students) – Fall / Undergraduate CPH: 4990 Mentored independent research in public health (1 student) – Spring/ Undergraduate CBH: 7505 Thesis/Dissertation – Fall/Spring (1 student)
+
+2018-2019 GHS: 3700 Development in a Global Context 2 (3 ch) (1 student) – Fall / Undergraduate CPH: 2600 Introduction to Public Health Methods (3 ch) (73 students) – Fall (co-taught with Jeff Dawson) / Undergraduate CPH: 7270 Principles of Scholarly Integrity: Public Health – Fall / Graduate CPH: 4105 Introduction to Health Promotion and Disease Prevention (3ch) (21 students) – Spring / Graduate (co-taught with Sato Sashida) CPH: 6401 Global Health Equity (3ch) (12 students) – Spring / Undergraduate and Graduate (co-taught with Paul Gilbert)
+
+2017-2018 CPH 2600: Introduction to Public Health Methods (3 ch) – Fall (co-taught with Jeff Dawson) / Undergraduate GHS: 3600 Development in a global context 1 – (3ch) (3 students) - Spring / Undergraduate CPH: 6500 Independent study in public health (1 students) - Summer / Graduate CPH: 330 Undergraduate independent study in public health (7 students) – Summer / Undergraduate
+
+--------------------------------------------------------------------------------
+
+[10] → Educational Contributions (K) - Confidence: 0.95
+
+2016-2017 Research Project I and II in Health Promotion and Community Health (2 ch) – Fall & Spring (3 students) /Graduate Tutorial in Health Promotion and Community Health (1 ch) – Fall (1 student) / Graduate Research Design and Development with medical 2 students ( 2ch) – Fall & Spring (7 students) /Graduate Evaluation of Health Promotion Programs (3 ch) – Spring (co-taught) / Graduate Research Project I and II in Health Promotion and Community Health (2 ch) – Summer (2 students) / Graduate
+
+2015-2016 Fall – on research leave Practicum in Health Promotion & Community Health (3ch) –Spring / Graduate (2 students)
+
+2014-2015 Foundations of Public Health (3ch) – Fall (co-taught) / Graduate Social and Behavioral Foundations of Public Health (3ch) – Fall (co-taught) / Graduate Practicum in Health Promotion & Community Health (3ch) –Spring / Graduate (1 student) Evaluation of Health Promotion Programs (2ch) – Spring Seminar in Health Promotion and Community Health (0ch) – Spring / Graduate
+
+2013-2014 Foundations of Public Health (3ch) – Fall (co-taught) / Graduate Practicum in Health Promotion & Community Health (3ch) – Fall and Spring / Graduate (1 student) Culminating Experience Seminar (1 ch) – Spring (coordinator) / Graduate Evaluation of Health Promotion Programs (2ch) – Spring (co-taught)
+
+2012-2013 Foundations of Public health (3ch) – Fall (co-taught) / Graduate Research Project in Health Promotion and Community Health (2 ch) – Fall (2 students) Health Communication (2ch) – Spring (co-taught) / Graduate Practicum in Health Promotion & Community Health (3ch) - Spring / Graduate (1 student)
+
+2011-2012 Culminating Experience Seminar (1 ch) – Fall and Spring; (coordinator) and Summer (facilitator) / Graduate Health Communication (2ch) – Spring (co-taught) / Graduate Practicum in Health Promotion & Community Health (3ch) - Spring / Graduate (1 student) Research Project in Health Promotion and Community Health (2 ch) – Spring & Summer/ Graduate (3 students)
+
+2010-2011 Culminating Experience Seminar (1 ch) – Fall (coordinator) / Graduate Tutorial in Health Promotion and Community Health (topic: Public Health Ethics) (2 ch) – Fall / Graduate Practicum in Health Promotion& Community Health (3ch) - Spring / Graduate (1 student)
+
+2009-2010 Culminating Experience Seminar (1 ch) – Fall (coordinator) / Graduate Design and Evaluation of Health Programs (2ch) – Spring / Graduate Exploring the context of interventions in public health (2ch) – Spring / Graduate
+
+2008-2009 Culminating Experience Seminar (1 ch) – Fall (coordinator) / Graduate Design and Evaluation of Health Programs (2ch) – Spring / Graduate Seminar in Health Behavior and Education (0ch) – Spring / Graduate Practicum in Health Behavior and Education (3ch) – Spring / Graduate (1 student)
+
+2007-2008 Introduction to Health and Environment 1 (3 ch) – Fall (coordinator and co-taught) / Graduate Culminating Experience Seminar (1 ch) – Fall (coordinator) / Graduate Practicum in Health Behavior and Education (3ch) – Fall / Graduate (3 students) Design and Evaluation of Health Programs (2ch) – Spring / Graduate Seminar in Health Behavior and Education (0ch) – Spring / Graduate
+
+2006-2007 Fall – on research leave Design and Evaluation of Health Programs (3 ch) – Spring / Graduate Health Awareness (3 ch) – Spring (co-taught 1 credit hour) / Undergraduate Research project in Health Behavior and Education – Spring / Graduate (2 students) Practicum in Health Behavior and Education (4ch) – Spring / Graduate (1 student) Culminating Experience Seminar (0 ch) – Spring (coordinator) / Graduate
+
+2005-2006 Introduction to Health and Environment 1 (3 ch) – Fall (coordinator) /Graduate Practicum in Health Behavior and Education (4ch) – Fall / Graduate (1 student) Design and Evaluation of Health Programs (3 ch) – Spring / Graduate Research project in Health Behavior and Education – Spring / Graduate (3 students)
+
+2004-2005 Introduction to Health and Environment 1 (3 ch) – Fall (coordinator and co-taught) / Graduate Theories of Health Behavior (2 ch) – Spring (co-taught) / Graduate Design and Evaluation of Health Programs (3 ch) – Spring /Graduate
+
+2003-2004 Introduction to Health and Environment 1 (3 ch) – Fall (coordinator and co-taught) / Graduate Theories of Health Behavior (2 ch) – Spring (coordinator and co-taught) / Graduate Design and Evaluation of Health Programs (3 ch) – Spring /Graduate
+
+2002-‏2003 Introduction to Health and Environment I (3 ch) – Fall (coordinator and co-taught) / Graduate Theories of Health Behavior (2 ch) – Spring (coordinator and co-taught) / Graduate Design and Evaluation of Health Programs (3 ch) – Spring / Graduate
+
+2001-2002 Introduction to Public Health (1ch) – Fall & Spring / Undergraduate Tutorial in Health Behavior and Education (3 ch) – Fall & Spring / Graduate Program evaluation (3 ch) – Spring / Graduate
+
+2000-2001 Practicum in Health Behavior and Education (5 ch) – Fall and Spring / Graduate Program evaluation (3 ch) – Fall & Spring / Graduate Tutorial in Health Behavior and Education (3 ch) – Spring / Graduate
+
+1999-2000 Communication for the health professions (3 ch) – Fall / Graduate Program Evaluation (3 ch) – Fall / Graduate Health Education and Behavior Change (3 ch) – Spring / Graduate Theories and Methods of Health Education II (3 ch) – Spring / Undergraduate
+
+1998-1999 Communication for the health professions (3 ch) – Fall / Graduate Program Evaluation (3 ch) – Fall and Spring / Graduate Health Education and Behavior Change (3 ch) – Spring / Graduate Michaela Curran – postdoctoral fellow, department of Community and Behavioral Health, College of Public Health University of Iowa. 2020-2022 Martha Carvour – assistant professor, department of Internal Medicine, Carver College of Medicine, University of Iowa. 2020-
+
+--------------------------------------------------------------------------------
+
+[11] → Education (B) - Confidence: 0.85
+
+2021 Priyanka Dubey University of Iowa
+
+--------------------------------------------------------------------------------
+
+[12] → Mentoring (N) - Confidence: 0.95
+
+BS/BA Honors in the major research project mentor
+
+2020-2021 Noah Wick: Barriers to PrEP uptake among college-attending men who have sex with men. BS in Public Health, University of Iowa.
+
+2020-2021 Anna Correa: Resident assistants and COVID-19 wellbeing study. BS in Public Health, University of Iowa.
+
+--------------------------------------------------------------------------------
+
+[13] → Institutional Administrative Activities (P) - Confidence: 0.85
+
+July-Nov. 2018 Lead author – Section 8.1 - Diversity and Cultural Competence - of the FHS Graduate Public Health Program self-study report for the Council on education for Public Health (CEPH).
+
+--------------------------------------------------------------------------------
+
+[14] → Extramural Professional Responsibilities (Q) - Confidence: 0.85
+
+April-Oct 2016 Member of Advisory Board to review the Policy Brief on Addressing the Challenges of Health Professional Education: Opportunities to Accelerate Progress Towards Universal Health Coverage for the World Innovations for Health (WISH) Summit, Doha, Qatar, 2016
+
+--------------------------------------------------------------------------------
+
+[15] → Institutional Administrative Activities (P) - Confidence: 0.85
+
+March 2015 Review of BS in Public Health Program (with Jocelyn DeJong)
+
+--------------------------------------------------------------------------------
+
+[16] → Institutional Administrative Activities (P) - Confidence: 0.85
+
+March 2015 Reviewer of the proposed MPH in Public Health King Saud bin Abdelaziz University for Health Sciences - Feb 2015 Promotion File Reviewer - For a faculty member up for promotion to Associate Professor
+
+--------------------------------------------------------------------------------
+
+[17] → Institutional Leadership Activities (O) - Confidence: 0.85
+
+June-Aug 2014 Promotion file reviewer – for two faculty members up for promotion to professor.
+
+--------------------------------------------------------------------------------
+
+[18] → Extramural Professional Responsibilities (Q) - Confidence: 0.85
+
+March 2013 Accreditation site visitor - University of California, Fresno (Public Health Program)
+
+--------------------------------------------------------------------------------
+
+[19] → Institutional Administrative Activities (P) - Confidence: 0.85
+
+May 2012 Reviewer of the proposed MS in Child Health
+
+--------------------------------------------------------------------------------
+
+[20] → Institutional Administrative Activities (P) - Confidence: 0.85
+
+June 2012 Reviewer of the proposed BS in Public Health US Aid For International Development – Democratic Republic of the Congo April - May 2010 Consultant – review of MPH academic program of the Kinshasa School of Public Health. Oct 2010-June 2011 Coordinator of the Faculty wide collaboration to revise the MPH curriculum, of the Kinshasa school of Public Health
+
+--------------------------------------------------------------------------------
+
+[21] → Bibliography (S) - Confidence: 0.95
+
+Innovations in Global Medical & Health Education journal. 2014-2017 Journal of Adolescent health. March 2020-current
+
+--------------------------------------------------------------------------------
+
+[22] → Extramural Professional Responsibilities (Q) - Confidence: 0.85
+
+Manuscript review for the following journals Reviewer for Journal of Mental Health 2009 Reviewer for Education for Health 2005-2017 Reviewer for Reproductive Health Matters 2005 Reviewer Health Education and Behavior 2004-2012 Reviewer Bulletin of the World Health Organization 2003-2012, 2019, 2021 Reviewer – International Journal of Health Geographics 2007
+
+--------------------------------------------------------------------------------
+
+[23] → Extramural Professional Responsibilities (Q) - Confidence: 0.85
+
+Reviewer for Lebanese Medical Journal 2002, 2005, 2008, 2010 Reviewer for Health Education Research 2013 Reviewer for Journal of Public Health 2013, 2017, 2019 Reviewer for the Lancet 2014
+
+--------------------------------------------------------------------------------
+
+[24] → Extramural Professional Responsibilities (Q) - Confidence: 0.95
+
+Reviewer for Nicotine and Tobacco Research 2014-2016 Reviewer for Global Public Health 2014, 2016 Reviewer for International Journal of Drug Policy 2015 Reviewer for BMC Public Health 2015 Reviewer for American Journal of Public Health 2016 Reviewer for Health Promotion International 2016
+
+--------------------------------------------------------------------------------
+
+[25] → Extramural Professional Responsibilities (Q) - Confidence: 0.85
+
+Reviewer European Journal of Public Health 2018, 2019 Reviewer Reproductive Health 2019, 2020
+
+--------------------------------------------------------------------------------
+
+[26] → Extramural Professional Responsibilities (Q) - Confidence: 0.85
+
+Reviewer Journal of Adolescent Research 2020, 2021 Reviewer Annals of Global Health 2020 Reviewer Journal of Immigrant and Minority Health 2020 Reviewer European Journal of Development 2021 Reviewer Journal of Occupational & Environmental Hygiene 2020, 2021 Reviewer FHS URB grant - 2004 Reviewer for FEA URB grant proposal – 2003 and 2004 and 2006 Reviewer for FAFS URB grant proposal – 2002 and 2007 Reviewer for FM URB grant proposal – 2010, 2016 Reviewer for FAS URB grant proposal -2013 Reviewer for Gender and Adolescence: Global Evidence (GAGE) Responsive Research and Evaluation Fund - Sept 2017 Reviewer for Research for Health in Humanitarian Crises (R2HC) – ELRHA –Jan. 2018 Reviewer - Medical Research Council UKRI Grand Challenges Research Fund (GCRF) Health and Context call – Dec. 2019 Reviewer – University of Iowa Greater Plains Center for Agricultural Health, pilot grant proposals – July 2019; August 2020, April 2021 Reviewer – University of Nebraska Great Plains IDeA-Clinical & Translational Research pilot grant proposal – Dec. 2019 Reviewer – Business Leadership Network, small grant proposals – Feb. 2021 Reviewer – Iowa Department of Public Health, Tobacco control grants – Feb. 2021 Abstract reviewer 14th World Conference on Tobacco or Health – March 2009 India WFPHA 12th World Congress on Public Health – April 2009 Turkey SOPHE’s 2009 Midyear Scientific Conference – May 2009 USA UICC (International Union Against Cancer) World Cancer Congress – August 2010 APHA Annual meeting – 2011 TEPHINET -2011, 2012 15th World Conference on Tobacco or Health – March 2012 Singapore International Union of Health Promotion and Education – June 2013 Singapore SOPHE annual meeting, 2013 APHA Annual meeting, Public Health Promotion and Health Education section, 2013, 2014, 2015 APHA Annual meeting, Academic Public Health Caucus, 2013, 2014, 2015, 2016, 2017 APHA Annual meeting, Ethics section, 2018 APHA Annual meeting, Caucus on Refugee and Immigrant Health, 2020 American University of Cairo’s Conference on: Collaboration for Community Change: Insight, Innovation, and Impact –2016 Consortium of Universities for Global Health annual meeting (abstract and panel reviewer), 2016 World Congress on Public Health, 2016
+
+--------------------------------------------------------------------------------
+
+[27] → Extramural Professional Responsibilities (Q) - Confidence: 0.85
+
+Third International Conference on Waterpipe Tobacco Smoking Research, 2017 Lancet Palestinian Health Alliance, 2016, 2018, 2020 Society for Adolescent Health and Medicine Annual Meeting, 2020 Poster judge Innovations in Global Medical & Health Education conference, January 18, 2015. Lancet Palestinian Health Alliance 7th Conference, Health of Palestinians inside and outside the occupied Palestinian territory, March 6-7, 2016
+
+--------------------------------------------------------------------------------

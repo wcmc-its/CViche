@@ -1,0 +1,17 @@
+fastapi
+uvicorn
+sqlalchemy
+pydantic
+openai
+pdfplumber
+pdf2image
+requests
+tiktoken
+python-multipart
+websockets
+alembic
+python-docx
+pymysql
+itsdangerous
+pyyaml
+boto3

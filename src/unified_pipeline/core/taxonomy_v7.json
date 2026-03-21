@@ -1,0 +1,1864 @@
+{
+  "meta": {
+    "version": "7.5",
+    "last_updated": "2025-11-28",
+    "total_valid_codes": 60,
+    "parent_codes": ["A", "C", "E", "G", "H", "I", "J", "O", "P", "R", "T"],
+    "child_codes": [
+      "B1", "B2",
+      "D1", "D2", "D3",
+      "F1", "F2",
+      "K1", "K2", "K3", "K4", "K5",
+      "L1", "L2", "L3",
+      "M1", "M2", "M3", "M4",
+      "N1", "N2", "N3", "N4",
+      "Q1", "Q2", "Q3", "Q4",
+      "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"
+    ],
+    "sub_child_codes": [
+      "M2A", "M2B", "M2C",
+      "M4A", "M4B", "M4C",
+      "N3A", "N3B",
+      "Q4A", "Q4B", "Q4C", "Q4D"
+    ],
+    "category_groups": {
+      "Identity & Background": ["A", "B1", "B2"],
+      "Training & Positions": ["C", "D1", "D2", "D3"],
+      "Credentials & Recognition": ["E", "F1", "F2", "G", "H"],
+      "Professional Activities": ["I", "J"],
+      "Educational Contributions": ["K1", "K2", "K3", "K4", "K5"],
+      "Clinical Activities": ["L1", "L2", "L3"],
+      "Research & Scholarship": [
+        "M1", "M2", "M2A", "M2B", "M2C", "M3", "M4", "M4A", "M4B", "M4C",
+        "N1", "N2", "N3", "N3A", "N3B", "N4",
+        "O", "P",
+        "Q1", "Q2", "Q3", "Q4", "Q4A", "Q4B", "Q4C", "Q4D",
+        "R",
+        "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"
+      ],
+      "Other": ["T"]
+    }
+  },
+  "disambiguation_principles": {
+    "primary_purpose": {
+      "H": "Recognition (honors/awards)",
+      "L": "Service delivery (clinical practice/innovation/leadership)",
+      "K": "Education/teaching",
+      "M": "Research (projects, funding, trials, IP)",
+      "O_or_Q1": "Governance/leadership (internal vs external)"
+    },
+    "documentation_signals": {
+      "grant_number": "M2/M2A/M2B/M2C",
+      "nct_number": "M4/M4A/M4B/M4C",
+      "isbn": "S3 (books) or S4 (chapters)",
+      "patent_number": "M3 (patents & inventions)"
+    },
+    "relationship_test": {
+      "cv_owner_work": "Use the appropriate primary category (research, clinical, education, etc.)",
+      "cv_owner_supervises_someone": "Use N-codes (mentoring/advising)",
+      "peer_or_colleague_service": "Use Q-codes (extramural responsibilities)"
+    },
+    "authority_test": {
+      "executive_power_internal": "O (institutional leadership)",
+      "executive_power_external": "Q1 (external leadership)",
+      "job_title_without_governance": "D1/D2/D3 (positions & employment)"
+    },
+    "dual_documentation_examples": [
+      "Training grants should be documented in both M2 and N2.",
+      "Clinical trial conduct should be documented in M4 and resulting trial papers in S1.",
+      "Textbooks that are course materials can appear in both S3 and K."
+    ]
+  },
+  "legacy_mappings": {
+    "T1_Community_Public_Engagement": ["T", "K5"],
+    "T2_Technology_Transfer": ["M3"],
+    "T3_Professional_Development": ["B2"],
+    "T4_References": ["T"]
+  },
+  "invalid_codes": {
+    "codes": ["Q5", "S10", "S11", "S12", "S13", "S14", "S15"],
+    "note": "These are not valid CV taxonomy endpoints and must not be used in final classification output."
+  },
+  "disambiguation_notes": {
+    "chair": {
+      "summary": "The word 'Chair' has multiple meanings in academia. Use context to distinguish.",
+      "mappings": {
+        "Endowed Chair / Named Chair / [Name] Chair in [Field]": "D1 - This is a prestigious faculty appointment, not a leadership role",
+        "Chair, Department of X / Division Chair / Section Chief": "O - This is administrative leadership with authority over people/programs",
+        "Committee Chair (internal to institution)": "O - Leadership of institutional committee",
+        "Committee Chair (external organization)": "Q1 - Leadership in extramural organization"
+      }
+    },
+    "fellow": {
+      "summary": "The word 'Fellow' and 'Fellowship' have multiple meanings. Use context to distinguish trainee vs membership vs honor vs funding.",
+      "mappings": {
+        "Postdoctoral Fellow / Clinical Fellow / Research Fellow (trainee position)": "C - Training position where CV owner is the trainee",
+        "Graduate Fellow / Pre-doctoral Fellow / Doctoral Fellowship (multi-year funding tied to enrollment)": "C - Training funding, not an honor",
+        "Fellowship, School of X (multi-year institutional funding for graduate study)": "C - Doctoral training support",
+        "FACP / FAHA / Fellow of [Professional Society] (membership status)": "I - Ongoing membership/fellowship in professional society",
+        "Fellow, National Academy of Sciences / National Academy of Medicine (rare elected honor)": "H - Pure honor, elected recognition",
+        "Honorary Fellow / Honorary Research Fellow (external, no duties)": "H - Pure honor with no employment relationship",
+        "Travel Award / Conference Fellowship (one-time)": "H - One-time award, not training"
+      }
+    },
+    "professor": {
+      "summary": "Distinguish between appointments, leadership roles, and pure honors.",
+      "mappings": {
+        "Assistant/Associate/Full Professor": "D1 - Standard faculty rank",
+        "Clinical Professor / Adjunct Professor / Voluntary Professor": "D1 - Faculty appointment even if unpaid",
+        "Visiting Professor / Professor of Practice": "D1 - Temporary or practice-track appointment",
+        "Distinguished Professor / Regents' Professor / University Professor / Named Professorship": "D1 - Prestigious faculty appointment (honorific character but still an appointment)",
+        "Professor Emeritus / Emerita": "D1 - Retired with retained rank",
+        "Honorary Professor (at external institution, no duties)": "H - Pure honor, no employment relationship"
+      }
+    },
+    "director": {
+      "summary": "Distinguish between leadership roles and grant roles.",
+      "mappings": {
+        "Program Director (academic/clinical unit)": "O - Administrative leadership over educational or clinical program",
+        "Center Director / Institute Director": "O - Leadership with institutional authority",
+        "Project Director (on a grant)": "M2 - Role on funded research, not institutional leadership",
+        "Director of [Field School / Lab / Research Program]": "O if administrative authority, M1 if primarily research activity"
+      }
+    },
+    "curator": {
+      "summary": "Museum appointments are academic appointments.",
+      "mappings": {
+        "Curator / Associate Curator / Curatorial Affiliate": "D1 - Museum appointment equivalent to faculty",
+        "Research Associate (museum or research institute)": "D1 - Scholarly appointment at non-university institution"
+      }
+    },
+    "affiliated": {
+      "summary": "Affiliated/Associate Faculty are formal appointments, not memberships.",
+      "mappings": {
+        "Affiliated Faculty / Associate Faculty (in center or interdisciplinary program)": "D1 - Formal appointment with HR record, committee review, and expectations",
+        "Member, Center for X / Institute Y (no faculty title)": "G - Institutional affiliation without appointment"
+      }
+    },
+    "chief": {
+      "summary": "The word 'Chief' indicates leadership (O), not faculty appointment (D1).",
+      "mappings": {
+        "Chief, Statistical Unit / Chief, Clinical Unit / Chief, Section of X": "O - Administrative leadership within a division or department",
+        "Division Chief / Section Chief / Unit Chief": "O - Leadership over a clinical or academic unit",
+        "Chief Medical Officer / Chief Scientific Officer": "O - Executive leadership",
+        "Chief Resident": "C - Senior trainee role, not leadership"
+      }
+    },
+    "editor": {
+      "summary": "Editorial roles are professional service (Q4 family), not honors (H) or other (T).",
+      "mappings": {
+        "Editor-in-Chief / Co-Editor / Senior Editor": "Q4A - Top editorial leadership",
+        "Associate Editor / Section Editor / Deputy Editor": "Q4B - Named editorial role below Editor-in-Chief",
+        "Editorial Board Member / Editorial Advisory Board": "Q4C - Board membership",
+        "Ad hoc Reviewer / Peer Reviewer (journals)": "Q4D - Manuscript reviewing",
+        "Guest Editor (special issue)": "Q4B - Temporary editorial role for specific project"
+      }
+    },
+    "grant": {
+      "summary": "Grants and funding are ALWAYS M2, regardless of CV section header.",
+      "mappings": {
+        "Active/Current grant (ongoing funding)": "M2A - Current research funding",
+        "Completed/Past grant (funding ended)": "M2B - Past research funding",
+        "Pending/Submitted grant (under review)": "M2C - Pending research funding",
+        "Internal/Pilot/Seed grant": "M2A or M2B depending on status",
+        "Travel award (competitive)": "H - Not M2; this is an honor",
+        "Professional development funding (non-competitive)": "B2 - Not M2; this is training/development"
+      }
+    },
+    "research_interests": {
+      "summary": "Research interest statements and thematic descriptions are ALWAYS M1, never T.",
+      "mappings": {
+        "Topical research interest phrase": "M1 - Research activity description",
+        "Research theme or area": "M1 - Research activity description",
+        "Lab focus or research program description": "M1 - Research activity description",
+        "Field of study or specialization": "M1 - Research activity description"
+      },
+      "examples": [
+        "Occupational health and safety in healthcare settings → M1",
+        "Exposure assessment for airborne hazards → M1",
+        "Epidemiology of work-related respiratory disease → M1",
+        "Cancer genomics and precision medicine → M1"
+      ]
+    },
+    "community_service": {
+      "summary": "Community and volunteer service is ALWAYS P or Q2, never T.",
+      "mappings": {
+        "Volunteer, [Organization]": "P or Q2 - Service role",
+        "Member, [Community Committee/Board]": "Q2 - External committee service",
+        "Grants written on behalf of [community organization]": "P or Q2 - Service (NOT M2, since CV owner is providing service, not receiving funding)",
+        "Pro bono consulting": "Q2 - External professional service",
+        "Community advisory board": "Q2 - External committee service"
+      },
+      "key_distinction": "Grants written FOR community organizations (as service) are P/Q2. Grants received BY the CV owner (as funding) are M2."
+    },
+    "teaching_codes": {
+      "summary": "Teaching codes (K1-K4) must be carefully distinguished based on CONTEXT and AUDIENCE, not just section headers.",
+      "mappings": {
+        "K1 - Didactic Teaching": "Formal classroom instruction: courses, lectures, seminars in educational settings",
+        "K2 - Research Mentoring & Clinical Teaching": "Research mentorship, thesis supervision, lab rotations, clinical precepting, bedside teaching",
+        "K3 - Educational Program Leadership": "Program director roles, curriculum leadership, educational administration",
+        "K4 - CME & Professional Education": "CME courses, grand rounds, professional development, lectures to practicing professionals"
+      },
+      "decision_tree": [
+        "1. Is this about RUNNING a program (director, coordinator, curriculum chair)? → K3",
+        "2. Is the audience practicing professionals or for CME credit? → K4",
+        "3. Is this research mentoring, thesis work, or lab supervision? → K2",
+        "4. Is this clinical teaching (precepting, rounds, bedside)? → K2",
+        "5. Is this formal classroom/didactic teaching? → K1",
+        "6. Is this community/patient education? → K5"
+      ],
+      "common_mistakes": [
+        "Classifying all teaching under 'TEACHING' section as K1 - must distinguish by type",
+        "Mixing research mentoring (K2) with classroom teaching (K1)",
+        "Putting grand rounds or CME lectures under K1 instead of K4",
+        "Not recognizing program leadership (K3) vs direct teaching (K1/K2)"
+      ]
+    },
+    "researcher_profile": {
+      "summary": "Researcher identifiers and bibliometric summaries are ALWAYS S0, regardless of CV section.",
+      "identifier_signals": [
+        "ORCID (0000-000X-XXXX-XXXX pattern)",
+        "Google Scholar profile URL",
+        "ResearchGate profile URL",
+        "Scopus Author ID",
+        "Web of Science ResearcherID",
+        "Publons profile"
+      ],
+      "bibliometric_signals": [
+        "h-index, g-index, i10-index",
+        "Citation counts ('total citations', 'times cited')",
+        "Publication volume summaries ('over X publications')"
+      ],
+      "NOT_S0": [
+        "Course numbers (HIST 201, BIO 412)",
+        "Grant numbers (R01, U54, R21, T32)",
+        "Patent numbers (US 10,234,567)",
+        "Clinical trial numbers (NCT-XXXX)",
+        "DOIs (10.XXXX/XXXX)",
+        "Employee/student ID numbers"
+      ],
+      "placement": "S0 entries logically precede S1-S9 publication lists. They describe the scholarly profile, not individual publications."
+    }
+  },
+  "codes": [
+    {
+      "code": "A",
+      "label": "Personal/Contact Information",
+      "parent": null,
+      "family": "A",
+      "group": "Identity & Background",
+      "purpose": "Core identifying information for the CV owner.",
+      "description": "Top-of-CV identity block containing contact info and basic identifiers.",
+      "typical_entries": [
+        "Full name and degrees (e.g., Jane Doe, MD, PhD)",
+        "Institutional title line and department affiliation",
+        "Email, phone number, office address",
+        "ORCID or other researcher identifiers",
+        "Very short research or professional statement at top of CV"
+      ],
+      "common_confusions": [
+        "Confusion with D1/D2 positions when people add titles here instead of in the Positions section."
+      ],
+      "key_rules": [
+        "Use only for identity/contact content.",
+        "Do not include detailed positions, degrees, memberships, or outputs.",
+        "If the line primarily describes a job/role, classify under D rather than A."
+      ]
+    },
+    {
+      "code": "B1",
+      "label": "Academic Degrees",
+      "parent": "B",
+      "family": "B",
+      "group": "Identity & Background",
+      "purpose": "Capture formal degree-granting education.",
+      "description": "All completed and in-progress degree programs with institutions, dates, and fields of study.",
+      "typical_entries": [
+        "MD, Harvard Medical School, 2012",
+        "PhD in Molecular Biology, University X, 2010 (Dissertation: 'Title')",
+        "MS, MPH, MBA, or similar degree listings with institution and year"
+      ],
+      "common_confusions": [
+        "Postdoctoral fellowships incorrectly listed as degrees (should be C).",
+        "Certificate programs or short courses incorrectly mapped to B1 instead of B2."
+      ],
+      "key_rules": [
+        "Degree-bearing programs → B1.",
+        "If a degree is awarded or in progress as part of a formal program, use B1.",
+        "Post-degree residencies or fellowships belong in C, not B1.",
+        "Short-term non-degree or certificate programs belong in B2."
+      ]
+    },
+    {
+      "code": "B2",
+      "label": "Other Educational Experiences",
+      "parent": "B",
+      "family": "B",
+      "group": "Identity & Background",
+      "purpose": "Capture non-degree educational experiences and professional development.",
+      "description": "Structured educational experiences that do not result in an academic degree.",
+      "typical_entries": [
+        "Leadership development programs at a university or health system",
+        "Extended certificate programs (e.g., Clinical Research Certificate Program)",
+        "Professional development programs (legacy T3 content)"
+      ],
+      "common_confusions": [
+        "Postdoctoral training positions mistakenly mapped to B2 instead of C.",
+        "Short workshops or single-day CME sessions that belong in K4 rather than B2."
+      ],
+      "key_rules": [
+        "Non-degree extended training or certificate programs → B2.",
+        "Professional development (legacy T3) routes to B2.",
+        "Formal postdoctoral training with mentor attribution → C, not B2."
+      ]
+    },
+    {
+      "code": "C",
+      "label": "Postdoctoral Training",
+      "parent": null,
+      "family": "C",
+      "group": "Training & Positions",
+      "purpose": "Capture training positions AFTER the terminal degree (MD, PhD, etc.) that are not regular employment.",
+      "description": "Residencies, clinical fellowships, postdoctoral research fellowships, and other training roles AFTER completion of the terminal degree. Does NOT include graduate assistantships (those go in D3).",
+      "typical_entries": [
+        "Resident, Internal Medicine, Hospital Y, 2013–2016",
+        "Clinical Fellow, Cardiology, Institution X, 2016–2019",
+        "Postdoctoral Research Fellow, Lab of Dr. Smith, 2010–2013",
+        "Research Fellow (postdoctoral trainee position)",
+        "Postdoctoral Associate, Department of X",
+        "Postdoctoral Research Associate, University Y, 2019–2021"
+      ],
+      "common_confusions": [
+        "Degree programs incorrectly tagged as C instead of B1.",
+        "Faculty appointments mistakenly classified as C instead of D1.",
+        "Mentees' training history mistakenly listed as C rather than under N3.",
+        "FACP/FAHA fellowship (membership) misclassified as C instead of I.",
+        "Fellow of National Academy (honor) misclassified as C instead of H.",
+        "Graduate Research/Teaching Assistantships (pre-doctoral) misclassified as C instead of D3."
+      ],
+      "key_rules": [
+        "C is ONLY for training positions AFTER the terminal degree (MD, PhD, etc.).",
+        "Postdoctoral Fellow / Clinical Fellow / Research Fellow (after terminal degree) → C.",
+        "Residency / Clinical Fellowship (after MD) → C.",
+        "Graduate Research Assistant / Graduate Teaching Assistant → D3 (pre-doctoral work experience).",
+        "Pre-doctoral fellowships (T32, F31) that are funding for degree programs → B1 or D3, not C.",
+        "If the position occurred BEFORE the terminal degree, use D3.",
+        "Degree programs belong in B1; graduate assistantships belong in D3.",
+        "Training of others (mentees) belongs in N rather than C.",
+        "FACP, FAHA, or similar professional society 'Fellow' status → I (membership), not C.",
+        "Fellow of National Academy of Sciences → H (honor), not C."
+      ]
+    },
+    {
+      "code": "D1",
+      "label": "Academic Appointments",
+      "parent": "D",
+      "family": "D",
+      "group": "Training & Positions",
+      "purpose": "Capture academic faculty and research staff titles at universities, museums, and research institutions.",
+      "description": "All academic titles held by the CV owner, including faculty ranks, endowed chairs, emeritus status, and appointments at museums or research institutes.",
+      "typical_entries": [
+        "Assistant Professor of Medicine, University Z, 2019–present",
+        "Associate Professor of Pediatrics, Institution Y",
+        "Professor Emeritus of Biology",
+        "Distinguished Professor / Regents' Professor / University Professor",
+        "John Q. Smith Endowed Chair in Anthropology",
+        "Clinical Professor / Adjunct Professor / Voluntary Faculty",
+        "Visiting Professor / Professor of Practice",
+        "Affiliated Faculty, Center for X / Interdisciplinary Program Y",
+        "Associate Faculty, Institute for Z",
+        "Research Associate, Smithsonian Institution",
+        "Curator / Curatorial Affiliate, Field Museum",
+        "Research Scientist, Max Planck Institute"
+      ],
+      "common_confusions": [
+        "Department Chair (administrative leadership) misclassified as D1 instead of O.",
+        "Endowed Chair (prestigious appointment) misclassified as O instead of D1.",
+        "Honorary Professor (external, no duties) misclassified as D1 instead of H.",
+        "Museum appointments incorrectly classified as T instead of D1.",
+        "Affiliated Faculty / Associate Faculty misclassified as I (membership) instead of D1.",
+        "Non-faculty research staff (Biostatistician, Research Analyst) misclassified as D1 instead of D3.",
+        "Graduate Research Assistant misclassified as D1 instead of D3.",
+        "Consultant roles (e.g., Consultant – Grant Writer) misclassified as D1 instead of D3."
+      ],
+      "key_rules": [
+        "Academic job titles (faculty or research) → D1.",
+        "Endowed chairs and named professorships → D1 (these are prestigious appointments, not leadership roles).",
+        "Distinguished/Regents'/University Professor → D1 (appointment with honorific character).",
+        "Professor Emeritus/Emerita → D1 (retired with retained rank).",
+        "Voluntary, adjunct, clinical, or courtesy faculty → D1 (even if unpaid).",
+        "Affiliated Faculty / Associate Faculty in interdisciplinary programs or centers → D1 (these are formal appointments with HR records, not memberships).",
+        "Museum appointments (Curator, Research Associate at Smithsonian, Field Museum, etc.) → D1.",
+        "Department Chair / Division Chief → O, not D1 (that is administrative leadership).",
+        "Honorary Professor at external institution → H, not D1 (no employment relationship).",
+        "Consultant roles → D3, not D1 (not an academic appointment).",
+        "Graduate Research Assistant / Graduate Teaching Assistant → D3, not D1."
+      ]
+    },
+    {
+      "code": "D2",
+      "label": "Hospital Appointments",
+      "parent": "D",
+      "family": "D",
+      "group": "Training & Positions",
+      "purpose": "Capture clinical appointments in hospitals or clinical systems.",
+      "description": "Positions indicating hospital-based roles or privileges distinct from academic appointments.",
+      "typical_entries": [
+        "Attending Physician, Department of Cardiology, Hospital X",
+        "Consulting Psychiatrist, Hospital Y",
+        "Hospitalist, Medical Center Z"
+      ],
+      "common_confusions": [
+        "Descriptions of clinical work incorrectly categorized as L1 instead of positions in D2.",
+        "Institutional affiliations without position titles (which should be G instead)."
+      ],
+      "key_rules": [
+        "Position/appointment lines at hospitals → D2.",
+        "Narrative about clinical duties and workload goes to L1, not D2.",
+        "If the appointment doubles as an academic title, use D1 instead."
+      ]
+    },
+    {
+      "code": "D3",
+      "label": "Other Professional Positions & Employment",
+      "parent": "D",
+      "family": "D",
+      "group": "Training & Positions",
+      "purpose": "Capture non-faculty professional employment roles, including research staff positions and pre-doctoral work experience.",
+      "description": "Professional employment positions that are not faculty appointments (D1) or hospital clinical appointments (D2). Includes research staff, statisticians, analysts, industry positions, AND pre-doctoral work experience such as graduate assistantships and consulting roles held before the terminal degree.",
+      "typical_entries": [
+        "Senior Scientist, PharmaCorp Inc., 2010–2015",
+        "Medical Director, HealthTech Startup, 2017–2019",
+        "Consultant, World Health Organization, 2014–2016",
+        "Biostatistician, Center for Health Disparities",
+        "Research Analyst, Office of Policy and Planning",
+        "Data Scientist, Department of Epidemiology",
+        "Programmer/Analyst, Research Computing",
+        "Staff Scientist (non-faculty track)",
+        "Graduate Research Assistant, Department of X, 2015–2019",
+        "Graduate Teaching Assistant, University Y, 2016–2018",
+        "Research Assistant, Lab of Dr. Smith, 2014–2017",
+        "Consultant – Grant Writer, 2020–2021"
+      ],
+      "common_confusions": [
+        "Leadership in external organizations incorrectly coded as D3 instead of Q1.",
+        "Short-term consulting service incorrectly mapped to Q2 instead of D3 when it is employment-like.",
+        "Non-faculty research staff (Biostatistician, Research Analyst) incorrectly coded as D1 instead of D3.",
+        "Graduate Research/Teaching Assistantships incorrectly coded as C instead of D3.",
+        "Consultant roles incorrectly coded as D1 instead of D3."
+      ],
+      "key_rules": [
+        "Any job that pays salary and is not a faculty or hospital appointment → D3.",
+        "Non-faculty research staff (Biostatistician, Research Analyst, Data Scientist, Programmer/Analyst) → D3.",
+        "Staff Scientist or Research Scientist without faculty rank → D3.",
+        "Graduate Research Assistant / Graduate Teaching Assistant → D3 (pre-doctoral work experience).",
+        "Consultant roles (including grant writing consultants) → D3, not D1.",
+        "Any position held BEFORE the terminal degree (PhD, MD) → D3.",
+        "If the role is clearly within a professional society with governance authority, prefer Q1.",
+        "Non-paid committee/board service should be Q2 or Q3, not D3."
+      ]
+    },
+    {
+      "code": "E",
+      "label": "Employment Status",
+      "parent": null,
+      "family": "E",
+      "group": "Credentials & Recognition",
+      "purpose": "Capture the formal classification of current employment status.",
+      "description": "High-level label describing how the person is employed (e.g., full-time, part-time, emeritus).",
+      "typical_entries": [
+        "Full-time faculty",
+        "Part-time faculty",
+        "Emeritus Professor of Medicine"
+      ],
+      "common_confusions": [
+        "Mixing detailed job titles into E instead of D1/D2/D3."
+      ],
+      "key_rules": [
+        "Use E only for explicit employment status lines.",
+        "Positions and titles still belong in D, not E.",
+        "If E is not explicitly present on the CV, it can be omitted."
+      ]
+    },
+    {
+      "code": "F1",
+      "label": "Licensure",
+      "parent": "F",
+      "family": "F",
+      "group": "Credentials & Recognition",
+      "purpose": "Capture professional licenses required for practice.",
+      "description": "State, national, or other professional licensure information.",
+      "typical_entries": [
+        "Medical License, State of New York, 2010–present",
+        "Nursing License, California Board of Registered Nursing",
+        "Licensed Clinical Psychologist, State X"
+      ],
+      "common_confusions": [
+        "Confusing board certification with licensure (board certifications belong in F2)."
+      ],
+      "key_rules": [
+        "Licensure is a regulatory prerequisite to practice → F1.",
+        "Do not put board certifications in F1; they belong in F2.",
+        "Expired licenses may still be listed historically under F1 with dates."
+      ]
+    },
+    {
+      "code": "F2",
+      "label": "Board Certification",
+      "parent": "F",
+      "family": "F",
+      "group": "Credentials & Recognition",
+      "purpose": "Capture specialty certification granted by professional boards.",
+      "description": "Certification that recognizes specialty expertise (e.g., ABIM, specialty boards).",
+      "typical_entries": [
+        "Board Certified in Internal Medicine, ABIM, 2012–present",
+        "Board Certified in Pediatrics, American Board of Pediatrics"
+      ],
+      "common_confusions": [
+        "Treating board certification as an honor (H) instead of a credential.",
+        "Listing board certification under licensure (F1)."
+      ],
+      "key_rules": [
+        "Specialty board certifications → F2.",
+        "Regulatory licenses → F1, not F2.",
+        "Do not double-count F2 entries as honors unless clearly framed as an honorific award."
+      ]
+    },
+    {
+      "code": "G",
+      "label": "Institutional & Hospital Affiliations",
+      "parent": null,
+      "family": "G",
+      "group": "Credentials & Recognition",
+      "purpose": "Capture formal institutional or hospital relationships beyond basic appointments.",
+      "description": "Memberships and affiliations at centers, institutes, or hospitals that are not strictly job titles.",
+      "typical_entries": [
+        "Member, Cardiovascular Research Institute, Institution X",
+        "Affiliated Faculty, Center for Health Policy",
+        "Hospital privileges at Hospital Y"
+      ],
+      "common_confusions": [
+        "Mislabeling academic appointments as affiliations (those belong in D1/D2).",
+        "Confusing center membership with committee service (P) or leadership (O/Q1)."
+      ],
+      "key_rules": [
+        "Affiliations and privileges that are not explicitly positions → G.",
+        "Job titles should be captured in D1/D2/D3.",
+        "Committee or administrative service at a center belongs in P or Q2 as appropriate."
+      ]
+    },
+    {
+      "code": "H",
+      "label": "Honors & Awards",
+      "parent": null,
+      "family": "H",
+      "group": "Credentials & Recognition",
+      "purpose": "Capture one-time recognitions such as awards, prizes, elective honors, honorary titles, and major distinctions.",
+      "description": "All non-salary recognitions that highlight achievement or distinction, including honorary titles conferred without employment relationship or duties.",
+      "typical_entries": [
+        "Young Investigator Award, Society X, 2020",
+        "Best Paper Award, Conference Y, 2019",
+        "Election to National Academy of Sciences / National Academy of Medicine",
+        "Fellow, National Academy of Sciences (rare elected honor)",
+        "Teaching Excellence Award, Medical School Z",
+        "Honorary Professor, University of X (external, no duties)",
+        "Honorary Fellow, Royal College of X (honorific, not membership)"
+      ],
+      "common_confusions": [
+        "Professional society fellowships (FACP, FAHA, FRCP) incorrectly coded as H instead of I.",
+        "Endowed chairs and named professorships incorrectly coded as H instead of D1.",
+        "Large funded grants misclassified as H instead of M2.",
+        "Leadership roles in societies (President, Chair) misclassified as H instead of Q1.",
+        "Named lectureships that are both honors and invited talks (H vs R).",
+        "Distinguished Professor or University Professor incorrectly coded as H instead of D1."
+      ],
+      "key_rules": [
+        "One-time recognition or award → H.",
+        "Honorary Professor (at external institution, no employment, no duties) → H.",
+        "Fellow of National Academy of Sciences or National Academy of Medicine (rare elected honor) → H.",
+        "Endowed Chair / Named Chair / Distinguished Professor → D1, NOT H (these are appointments, not pure honors).",
+        "Ongoing professional society memberships or fellowship status (FACP, FAHA) with 'since YEAR' → I, not H.",
+        "Grants with substantial funding and grant numbers → M2 rather than H.",
+        "Leadership roles (President, Chair, Board Member) → Q1.",
+        "Named lectures can reasonably appear in both H (honor) and R (invited presentation).",
+        "The key test: If the university issued a formal appointment letter with HR entry → D1. If it's purely honorific with no employment → H."
+      ]
+    },
+    {
+      "code": "I",
+      "label": "Professional Organizations & Society Memberships",
+      "parent": null,
+      "family": "I",
+      "group": "Professional Activities",
+      "purpose": "Capture ongoing memberships and fellowship status in professional societies.",
+      "description": "Membership and fellowship status in professional organizations, including post-nominal designations that indicate ongoing affiliation.",
+      "typical_entries": [
+        "Member, American Medical Association, 2010–present",
+        "Fellow, American College of Physicians (FACP), since 2015",
+        "Fellow, American Heart Association (FAHA)",
+        "Fellow, Royal College of Physicians (FRCP)",
+        "Fellow, American Association for the Advancement of Science (FAAAS)",
+        "Member, Society for Epidemiologic Research"
+      ],
+      "common_confusions": [
+        "One-time awards or prizes incorrectly listed under memberships instead of H.",
+        "Leadership roles (President, Chair) incorrectly classified as I instead of Q1.",
+        "Trainee fellow positions (Postdoctoral Fellow, Clinical Fellow) incorrectly classified as I instead of C.",
+        "Elected honors like National Academy membership incorrectly classified as I instead of H."
+      ],
+      "key_rules": [
+        "Ongoing membership or fellowship with 'since' language → I.",
+        "Professional society fellowship status (FACP, FAHA, FRCP, FAAAS) → I.",
+        "One-time recognition, prize, or elected honor → H.",
+        "Officer or executive role in organizations → Q1, not I.",
+        "Post-nominals like FACP/FRCP/FAHA map to I, not H.",
+        "Trainee positions (Postdoctoral Fellow, Clinical Fellow, Research Fellow) → C, not I.",
+        "Fellow of National Academy of Sciences or National Academy of Medicine → H (rare elected honor, not ongoing membership)."
+      ]
+    },
+    {
+      "code": "J",
+      "label": "Percent Effort & Institutional Responsibilities",
+      "parent": null,
+      "family": "J",
+      "group": "Professional Activities",
+      "purpose": "Capture overall time allocation and broad institutional responsibilities.",
+      "description": "High-level breakdown of effort across major missions and any formal statements of roles.",
+      "typical_entries": [
+        "Clinical: 40% FTE; Research: 30%; Teaching: 20%; Administration: 10%",
+        "Summary of responsibilities such as 'Vice Chair for Education: oversees all residency and fellowship programs.'"
+      ],
+      "common_confusions": [
+        "Duplicating detailed content from other sections instead of providing a summary.",
+        "Trying to encode every service activity here instead of P/O/L/K."
+      ],
+      "key_rules": [
+        "Use J for high-level effort distribution and responsibilities statements.",
+        "Do not duplicate specific jobs, grants, or teaching events here.",
+        "If it is already detailed in D, L, M, or K, J should only provide a summarized overview."
+      ]
+    },
+    {
+      "code": "K1",
+      "label": "Didactic Teaching",
+      "parent": "K",
+      "family": "K",
+      "group": "Educational Contributions",
+      "purpose": "Capture formal classroom/didactic teaching at all learner levels (undergraduate, graduate, medical students, residents in classroom settings).",
+      "description": "Formal classroom-based instruction including lectures, seminars, courses, and small group facilitation. This is teaching that occurs in structured educational settings (classrooms, lecture halls, seminar rooms) rather than clinical, research, or continuing education contexts.",
+      "typical_entries": [
+        "Course Director, 'Introduction to Genomics', 2018–present",
+        "Lecture: 'Genetic Epidemiology', Medical School Core Curriculum",
+        "Small group facilitator for first-year medical student course",
+        "Guest lecturer, Undergraduate Biology course",
+        "Faculty instructor for graduate seminar series",
+        "Didactic instructor for resident classroom curriculum"
+      ],
+      "common_confusions": [
+        "Textbooks or chapters used in teaching incorrectly coded as K1 instead of S3/S4.",
+        "Research mentorship (supervising lab research, thesis committees) misclassified as K1 instead of K2 or N3.",
+        "CME/professional education for practicing clinicians misclassified as K1 instead of K4.",
+        "Clinical bedside teaching misclassified as K1 instead of K2."
+      ],
+      "key_rules": [
+        "Formal didactic teaching in classroom settings (courses, lectures, seminars) → K1.",
+        "Published teaching materials (books, chapters) → S3/S4; they may be referenced in K but live in S.",
+        "Research mentoring and thesis supervision → K2 or N3, NOT K1.",
+        "Teaching practicing professionals (CME, continuing education) → K4, NOT K1.",
+        "Clinical environment teaching with direct patient care → use clinical precepting context to decide K2 vs L1.",
+        "The key distinction: K1 = DIDACTIC (classroom). Teaching that happens in a research lab or clinical unit is NOT K1."
+      ]
+    },
+    {
+      "code": "K2",
+      "label": "Research Mentoring & Clinical Teaching",
+      "parent": "K",
+      "family": "K",
+      "group": "Educational Contributions",
+      "purpose": "Capture research mentoring, thesis supervision, and clinical teaching activities.",
+      "description": "Teaching and supervision that occurs in research or clinical contexts rather than classrooms. Includes research mentorship (lab rotations, thesis committees, research supervision), clinical precepting (bedside teaching, attending rounds), and hands-on training of trainees in non-classroom settings.",
+      "typical_entries": [
+        "Research mentor for graduate student lab rotation",
+        "Thesis committee member for PhD student",
+        "Faculty advisor for undergraduate research project",
+        "Supervisor of postdoctoral research fellow's project",
+        "Preceptor, Internal Medicine Clinic, supervising residents and students",
+        "Attending physician teaching rounds with residents and fellows",
+        "Supervision of medical students on inpatient service",
+        "Research advisor for medical student's scholarly project"
+      ],
+      "common_confusions": [
+        "Formal classroom lectures misclassified as K2 instead of K1.",
+        "CME/professional education misclassified as K2 instead of K4.",
+        "Pure clinical service without teaching emphasis misclassified as K2 instead of L1.",
+        "Longitudinal career mentorship with named individuals may overlap with N3 (use N3 for named mentee lists, K2 for the activity itself)."
+      ],
+      "key_rules": [
+        "Research mentoring and supervision (lab rotations, thesis work, research projects) → K2.",
+        "Clinical teaching of trainees (precepting, rounds, bedside teaching) → K2.",
+        "Formal classroom/didactic teaching → K1, NOT K2.",
+        "CME/continuing education for practicing professionals → K4, NOT K2.",
+        "Service-only clinical work without explicit teaching emphasis → L1.",
+        "Named lists of mentees with current/past status → N3A/N3B (but the mentoring activity itself can be K2).",
+        "The key distinction: K2 = hands-on mentoring in research/clinical contexts. Classroom lectures are K1."
+      ]
+    },
+    {
+      "code": "K3",
+      "label": "Educational Program Leadership",
+      "parent": "K",
+      "family": "K",
+      "group": "Educational Contributions",
+      "purpose": "Capture leadership, design, and administration of educational programs and curricula.",
+      "description": "Administrative roles focused on designing, directing, or coordinating educational programs. This includes program director roles, curriculum development leadership, and educational committee leadership. K3 is about RUNNING educational programs, not directly teaching.",
+      "typical_entries": [
+        "Clerkship Director, Internal Medicine",
+        "Residency Program Director, Pediatrics",
+        "Director, Medical Student Research Curriculum",
+        "Course Coordinator for multi-instructor course",
+        "Chair, Curriculum Committee",
+        "Director of Graduate Education",
+        "Associate Dean for Medical Education",
+        "Fellowship Program Director"
+      ],
+      "common_confusions": [
+        "Broad institutional leadership (e.g., Department Chair) incorrectly placed in K3 instead of O.",
+        "Direct teaching activities misclassified as K3 instead of K1/K2.",
+        "Research mentoring misclassified as K3 instead of K2 or N3.",
+        "CME course organization misclassified as K3 instead of K4."
+      ],
+      "key_rules": [
+        "Leadership/administration of educational programs and curriculum → K3.",
+        "Program Director, Clerkship Director, Fellowship Director roles → K3.",
+        "Institution-wide governance or multi-mission leadership → O, not K3.",
+        "Individual teaching events (giving lectures, mentoring students) → K1/K2, not K3.",
+        "CME program organization → K4, not K3.",
+        "The key distinction: K3 = PROGRAM LEADERSHIP (running programs). Direct teaching is K1/K2."
+      ]
+    },
+    {
+      "code": "K4",
+      "label": "Continuing Medical Education (CME) & Professional Education",
+      "parent": "K",
+      "family": "K",
+      "group": "Educational Contributions",
+      "purpose": "Capture continuing education for professionals already in practice, including CME and lectures to professional trainees (residents, fellows) outside of formal curriculum.",
+      "description": "Design or delivery of CME and other professional education activities targeted at practicing clinicians, residents, fellows, and other healthcare professionals. Includes grand rounds, CME courses, professional development lectures, and educational sessions aimed at already-credentialed or advanced trainees.",
+      "typical_entries": [
+        "Organizer, Annual CME Course in Cardiology",
+        "CME-accredited webinar series for practicing physicians",
+        "Continuing education course for nurse practitioners",
+        "Grand Rounds presentation to faculty and residents",
+        "Invited lecture at resident/fellow educational conference",
+        "Professional development workshop for clinical staff",
+        "Noon conference lecture for internal medicine residents",
+        "Journal club facilitator for fellows"
+      ],
+      "common_confusions": [
+        "Formal curriculum-based teaching (didactic) misclassified as K4 instead of K1.",
+        "Research mentoring misclassified as K4 instead of K2.",
+        "Community or patient education misclassified as K4 instead of K5.",
+        "Invited external talks misclassified as K4 instead of R."
+      ],
+      "key_rules": [
+        "CME courses and professional development for practicing professionals → K4.",
+        "Grand rounds and professional lectures to mixed audiences (faculty, residents, fellows) → K4.",
+        "Formal degree-program curriculum teaching (didactic) → K1, NOT K4.",
+        "Research mentoring and thesis supervision → K2, NOT K4.",
+        "Invited presentations at external institutions or conferences → R (unless specifically CME).",
+        "Community/patient-facing educational activities → K5, NOT K4.",
+        "The key distinction: K4 = CME and professional education for PRACTICING professionals or advanced trainees. Undergraduate/medical student didactic teaching is K1."
+      ]
+    },
+    {
+      "code": "K5",
+      "label": "Community Education or Patient Outreach",
+      "parent": "K",
+      "family": "K",
+      "group": "Educational Contributions",
+      "purpose": "Capture educational activities directed toward patients or the general public.",
+      "description": "Educational outreach to lay audiences or specific patient populations.",
+      "typical_entries": [
+        "Public lecture on heart health for community members",
+        "Patient education workshop on managing diabetes",
+        "Health literacy classes offered to the public"
+      ],
+      "common_confusions": [
+        "Non-educational community engagement (e.g., volunteer work without teaching) that belongs in T.",
+        "Professional-targeted CE events misclassified as K5 instead of K4."
+      ],
+      "key_rules": [
+        "Educational content for patient or lay community audiences → K5.",
+        "Non-educational community engagement that does not focus on teaching may go to T (legacy T1).",
+        "Professional education activities should be coded as K4, not K5."
+      ]
+    },
+    {
+      "code": "L1",
+      "label": "Clinical Practice",
+      "parent": "L",
+      "family": "L",
+      "group": "Clinical Activities",
+      "purpose": "Capture descriptions of patient care workload and clinical responsibilities.",
+      "description": "Narrative or tabular descriptions of clinical work (FTE, practice settings, patient populations).",
+      "typical_entries": [
+        "Outpatient primary care practice 0.6 FTE",
+        "Inpatient attending on general medicine service 12 weeks per year",
+        "Consult service duties in cardiology clinic"
+      ],
+      "common_confusions": [
+        "Clinical teaching activities incorrectly mapped to L1 instead of K2.",
+        "Quality improvement projects misclassified as L1 instead of L2.",
+        "Research activities embedded in clinical care misclassified as L1 instead of M1/M4."
+      ],
+      "key_rules": [
+        "Pure patient care/service activities → L1.",
+        "Teaching in clinical setting → K2.",
+        "Quality improvement work → L2.",
+        "IRB-based research in clinical settings → M1 or M4."
+      ]
+    },
+    {
+      "code": "L2",
+      "label": "Clinical Innovations",
+      "parent": "L",
+      "family": "L",
+      "group": "Clinical Activities",
+      "purpose": "Capture local quality improvement and clinical innovation projects that are not full research studies.",
+      "description": "Projects to improve clinical care processes, workflows, or outcomes, usually at local sites.",
+      "typical_entries": [
+        "Implemented new triage protocol for emergency department",
+        "Quality improvement project reducing catheter-associated infections",
+        "Development of a new clinic workflow for high-risk patients"
+      ],
+      "common_confusions": [
+        "Formal research studies with IRB approval and publications misclassified as L2 instead of M1.",
+        "Routine clinical duties misclassified as L2 instead of L1.",
+        "Committee membership (e.g., Infection Control Committee) misclassified as L2 instead of P."
+      ],
+      "key_rules": [
+        "Local QI/innovation without formal research protocol → L2.",
+        "Systematic evaluation with IRB and intent to publish → M1.",
+        "Clinical trials belong in M4, not L2.",
+        "Committee membership or service on clinical committees → P, not L2."
+      ]
+    },
+    {
+      "code": "L3",
+      "label": "Clinical Leadership",
+      "parent": "L",
+      "family": "L",
+      "group": "Clinical Activities",
+      "purpose": "Capture leadership roles focused on clinical services and operations.",
+      "description": "Roles that oversee clinical programs or services, with responsibility for clinical operations.",
+      "typical_entries": [
+        "Medical Director, Cardiac ICU",
+        "Director, Outpatient Diabetes Clinic",
+        "Chief of Hospital Medicine Service"
+      ],
+      "common_confusions": [
+        "Department- or institution-wide leadership misclassified as L3 instead of O.",
+        "Routine clinical duties misclassified as L3 instead of L1.",
+        "Committee membership (e.g., Care Path committee member) misclassified as L3 instead of P."
+      ],
+      "key_rules": [
+        "Leadership specific to clinical operations → L3.",
+        "Leadership that spans multiple missions or entire departments/institutions → O.",
+        "Clinical duties without leadership responsibility → L1.",
+        "Committee member roles without direct program authority → P, not L3."
+      ]
+    },
+    {
+      "code": "M1",
+      "label": "Research Activities",
+      "parent": "M",
+      "family": "M",
+      "group": "Research & Scholarship",
+      "purpose": "Capture narratives and structured descriptions of research programs, projects, fieldwork, and research interests/themes.",
+      "description": "High-level summary of research themes, interests, projects, lab leadership, and field-based research activities. This includes research interest statements and topical research area descriptions.",
+      "typical_entries": [
+        "Description of PI's lab focus on cancer genomics",
+        "Summary of ongoing epidemiologic cohort studies",
+        "Overview of translational research program",
+        "Archaeological fieldwork / excavations (e.g., 'Field Director, Tel Hazor excavations')",
+        "Field research expeditions (e.g., 'Principal Investigator, Amazonian biodiversity survey')",
+        "Research station work (e.g., 'Summer research at Woods Hole Marine Biological Laboratory')",
+        "Research interest bullet: 'Occupational health and safety in healthcare settings'",
+        "Research theme: 'Exposure assessment for airborne hazards'",
+        "Research area description: 'Epidemiology of work-related respiratory disease'"
+      ],
+      "common_confusions": [
+        "Quality improvement work misclassified as research activities (should be L2).",
+        "Individual grants misclassified as M1 instead of M2.",
+        "Publications misclassified as M1 instead of S1–S9.",
+        "Fieldwork / excavations misclassified as T instead of M1.",
+        "Research interest statements misclassified as T instead of M1."
+      ],
+      "key_rules": [
+        "Use M1 for summary descriptions of research programs, not for grants or outputs.",
+        "RESEARCH INTERESTS AND THEMES → M1. Topical research-interest phrases describing research areas are M1, NEVER T.",
+        "Fieldwork, excavations, and field research expeditions → M1.",
+        "Funded support should go to M2; trials go to M4; publications go to S1–S9.",
+        "If the work is primarily local QI without research protocol, use L2 instead."
+      ]
+    },
+    {
+      "code": "M2",
+      "label": "Research Support (All Grants/Funding)",
+      "parent": "M",
+      "family": "M",
+      "group": "Research & Scholarship",
+      "purpose": "Capture all forms of research and training grant funding.",
+      "description": "Parent container for research support, with lifecycle specified by M2A, M2B, M2C. Grant entries should ALWAYS be classified as M2 regardless of what CV section they appear in.",
+      "typical_entries": [
+        "NIH R01 grant listing with number and dates",
+        "Foundation research grant supporting a specific project",
+        "Industry-sponsored clinical research grants",
+        "Internal institutional research grants",
+        "Pilot project funding",
+        "Seed grants"
+      ],
+      "common_confusions": [
+        "Small monetary awards misclassified as M2 rather than H.",
+        "Training grants recorded only in N2 and omitted from M2.",
+        "Contracts or service agreements misclassified as grants.",
+        "Grants appearing under 'Teaching' or other sections misclassified based on section header instead of content."
+      ],
+      "key_rules": [
+        "Any formal research funding with a grant number → M2 family.",
+        "CRITICAL: Grant entries should ALWAYS be M2 regardless of CV section header. Content overrides hierarchy for grants.",
+        "Major training grants should be listed in both M2 and N2.",
+        "Use subcodes M2A (current), M2B (past), M2C (pending) to reflect status.",
+        "Internal institutional grants and pilot funding → M2."
+      ]
+    },
+    {
+      "code": "M2A",
+      "label": "Current Research Funding",
+      "parent": "M2",
+      "family": "M",
+      "group": "Research & Scholarship",
+      "purpose": "Capture currently active research funding.",
+      "description": "Grants that are ongoing and currently providing support.",
+      "typical_entries": [
+        "Active NIH R01 grant with current dates",
+        "Current foundation grant supporting a research project",
+        "Ongoing training grant in which the CV owner is PI or co-PI"
+      ],
+      "common_confusions": [
+        "Recently completed grants not moved to M2B.",
+        "Pending grants incorrectly classified as M2A instead of M2C."
+      ],
+      "key_rules": [
+        "Ongoing, active grants → M2A.",
+        "If the grant has ended, it should be in M2B.",
+        "If the grant is submitted and awaiting decision, use M2C."
+      ]
+    },
+    {
+      "code": "M2B",
+      "label": "Past (Completed) Research Funding",
+      "parent": "M2",
+      "family": "M",
+      "group": "Research & Scholarship",
+      "purpose": "Capture grants that have ended.",
+      "description": "Research support that is no longer active.",
+      "typical_entries": [
+        "Former NIH R01 that ended in 2018",
+        "Completed foundation grant from 2015–2017",
+        "Previously held training grant that has expired"
+      ],
+      "common_confusions": [
+        "Continuing grants left in M2A beyond their end dates.",
+        "Past grants omitted entirely instead of being recorded as completed."
+      ],
+      "key_rules": [
+        "Use M2B for grants whose funding period has ended.",
+        "Do not list them under current funding once they have expired."
+      ]
+    },
+    {
+      "code": "M2C",
+      "label": "Pending Research Funding",
+      "parent": "M2",
+      "family": "M",
+      "group": "Research & Scholarship",
+      "purpose": "Capture grants that are submitted but not yet awarded or declined.",
+      "description": "Under-review grants and funding applications.",
+      "typical_entries": [
+        "Pending NIH R01 application under review",
+        "Foundation grant application submitted and awaiting decision",
+        "Resubmitted grant in review cycle"
+      ],
+      "common_confusions": [
+        "Pending grants accidentally marked as current (M2A).",
+        "Applications not clearly separated as pending vs funded."
+      ],
+      "key_rules": [
+        "Submitted but not yet decided → M2C.",
+        "Move to M2A once awarded; remove from M2C.",
+        "If declined and not retained historically, it can be removed or archived separately."
+      ]
+    },
+    {
+      "code": "M3",
+      "label": "Patents & Inventions",
+      "parent": "M",
+      "family": "M",
+      "group": "Research & Scholarship",
+      "purpose": "Capture intellectual property and technology transfer outputs.",
+      "description": "Patents, patent applications, and inventions associated with the CV owner.",
+      "typical_entries": [
+        "US Patent 1234567, 'Title of Invention'",
+        "Patent application filed for novel diagnostic technology",
+        "Licensed intellectual property generating royalties"
+      ],
+      "common_confusions": [
+        "Publications about devices or patents misclassified as M3 instead of S1–S5.",
+        "Legacy technology transfer entries (T2) not mapped to M3."
+      ],
+      "key_rules": [
+        "Patents and formal inventions → M3.",
+        "Legacy Technology Transfer content (T2) routes to M3.",
+        "Publications describing the invention remain in S1–S5."
+      ]
+    },
+    {
+      "code": "M4",
+      "label": "Clinical Trials (All)",
+      "parent": "M",
+      "family": "M",
+      "group": "Research & Scholarship",
+      "purpose": "Capture clinical trial conduct, with subtype specified by M4A/M4B/M4C.",
+      "description": "Listing of clinical trials in which the CV owner has a significant role.",
+      "typical_entries": [
+        "PI on NCT01234567: Phase III trial of Drug X",
+        "Co-investigator on observational registry for disease Y",
+        "Lead investigator on device study evaluating new diagnostic tool"
+      ],
+      "common_confusions": [
+        "Clinical service activities misclassified as M4 instead of L1/L2.",
+        "Trial publications misclassified as M4 instead of S1.",
+        "Registry QI projects misclassified as trials when they lack true trial structure."
+      ],
+      "key_rules": [
+        "Use M4 when there is explicit trial structure (often with NCT number).",
+        "Publications about trials belong in S1; a given trial can be linked from M4.",
+        "Use M4A for interventional trials, M4B for observational/registry, and M4C for device/diagnostic trials."
+      ]
+    },
+    {
+      "code": "M4A",
+      "label": "Interventional Clinical Trials",
+      "parent": "M4",
+      "family": "M",
+      "group": "Research & Scholarship",
+      "purpose": "Capture clinical trials involving interventions such as drugs or behavioral treatments.",
+      "description": "Trials testing interventions, usually randomized or controlled.",
+      "typical_entries": [
+        "Phase III randomized trial of new chemotherapy regimen",
+        "Trial of behavioral intervention to improve adherence",
+        "Interventional study evaluating new therapeutic device in a controlled fashion"
+      ],
+      "common_confusions": [
+        "Observational registries mislabeled as interventional trials.",
+        "QI projects with minor interventions misclassified as M4A instead of L2."
+      ],
+      "key_rules": [
+        "Interventional, randomized, or treatment trials → M4A.",
+        "Ensure that the trial involves systematic intervention and outcome measurement beyond routine care."
+      ]
+    },
+    {
+      "code": "M4B",
+      "label": "Observational/Registry Clinical Trials",
+      "parent": "M4",
+      "family": "M",
+      "group": "Research & Scholarship",
+      "purpose": "Capture cohort, registry, and other observational clinical studies.",
+      "description": "Non-interventional clinical research that collects clinical or outcomes data.",
+      "typical_entries": [
+        "Prospective registry of patients with heart failure",
+        "Longitudinal observational cohort study of asthma outcomes",
+        "Multi-center registry for rare disease tracking"
+      ],
+      "common_confusions": [
+        "Registries misclassified as M4A when they are not interventional.",
+        "Pure quality improvement projects mislabeled as M4B instead of L2."
+      ],
+      "key_rules": [
+        "Observational/registry clinical studies with research intent → M4B.",
+        "Local operational data monitoring with no research framing → L2, not M4B."
+      ]
+    },
+    {
+      "code": "M4C",
+      "label": "Device/Diagnostic Clinical Trials",
+      "parent": "M4",
+      "family": "M",
+      "group": "Research & Scholarship",
+      "purpose": "Capture clinical trials focused on devices or diagnostic tools.",
+      "description": "Device or diagnostic-focused clinical studies (interventional or observational).",
+      "typical_entries": [
+        "Clinical trial evaluating new imaging device",
+        "Diagnostic accuracy study of a novel biomarker assay",
+        "Device trial testing a new implantable cardiac device"
+      ],
+      "common_confusions": [
+        "Device publications misclassified as M4C instead of S1/S5.",
+        "Routine clinical adoption of a device misclassified as M4C instead of L1/L2."
+      ],
+      "key_rules": [
+        "Device or diagnostic trials with research design → M4C.",
+        "Routine clinical use of devices without research protocol → L1 or L2."
+      ]
+    },
+    {
+      "code": "N1",
+      "label": "Leadership and Mentoring in Programs",
+      "parent": "N",
+      "family": "N",
+      "group": "Research & Scholarship",
+      "purpose": "Capture leadership roles in mentoring programs and mentorship infrastructure.",
+      "description": "Program-level leadership for mentorship-related initiatives.",
+      "typical_entries": [
+        "Director, Faculty Mentoring Program",
+        "Co-Director, Junior Investigator Mentoring Initiative",
+        "Chair, Institution-wide Mentoring Committee"
+      ],
+      "common_confusions": [
+        "General educational leadership misclassified as N1 instead of K3.",
+        "Institution-wide leadership with broad scope misclassified as N1 instead of O."
+      ],
+      "key_rules": [
+        "Leadership of programs whose primary focus is mentoring → N1.",
+        "Educational program leadership with curriculum focus → K3.",
+        "Broad institutional leadership not centered on mentoring → O."
+      ]
+    },
+    {
+      "code": "N2",
+      "label": "Institutional Training Grants and Mentored Trainee Grants",
+      "parent": "N",
+      "family": "N",
+      "group": "Research & Scholarship",
+      "purpose": "Capture roles in training grants that support trainees, often with structured mentoring components.",
+      "description": "Institutional or mentored trainee awards that fund training programs or individual mentees.",
+      "typical_entries": [
+        "PI or Co-PI on NIH T32 institutional training grant",
+        "K12 institutional mentored career development award",
+        "Program Director for a mentored K-type grant"
+      ],
+      "common_confusions": [
+        "Training grants recorded only in M2 and omitted from N2.",
+        "Non-training research grants misclassified as N2 instead of M2."
+      ],
+      "key_rules": [
+        "Training-focused grants → N2 and M2.",
+        "Research-only grants without trainee structure → M2 only.",
+        "Do not duplicate non-training grants in N2."
+      ]
+    },
+    {
+      "code": "N3",
+      "label": "Mentees (All)",
+      "parent": "N",
+      "family": "N",
+      "group": "Research & Scholarship",
+      "purpose": "Capture named mentees supervised by the CV owner.",
+      "description": "List of individuals mentored, separated by current vs past in N3A vs N3B.",
+      "typical_entries": [
+        "List of current PhD students and fellows with years mentored",
+        "List of past mentees with current positions",
+        "Named trainees such as medical students or residents mentored over defined periods"
+      ],
+      "common_confusions": [
+        "Ad hoc teaching of learners misclassified as mentees instead of K2.",
+        "Supervising colleagues in a managerial context misclassified as mentoring."
+      ],
+      "key_rules": [
+        "Use N3 when there is a longitudinal mentoring relationship with named individuals.",
+        "Ongoing mentees → N3A; completed mentees → N3B.",
+        "Short-term teaching interactions without long-term mentoring are better classified under K1/K2."
+      ]
+    },
+    {
+      "code": "N3A",
+      "label": "Current Mentees",
+      "parent": "N3",
+      "family": "N",
+      "group": "Research & Scholarship",
+      "purpose": "Capture mentees currently under active mentorship.",
+      "description": "Individuals whom the CV owner is currently mentoring.",
+      "typical_entries": [
+        "Current PhD students with expected graduation dates",
+        "Current residents or fellows being mentored on research or career development",
+        "Junior faculty mentees currently in active mentoring relationships"
+      ],
+      "common_confusions": [
+        "Past mentees not moved to N3B.",
+        "Listing mentees without clear mentoring context, which might be K2 teaching instead."
+      ],
+      "key_rules": [
+        "Active, ongoing mentee relationships → N3A.",
+        "Move mentees to N3B when the relationship is clearly concluded.",
+        "If no longitudinal mentoring is present, do not use N3A."
+      ]
+    },
+    {
+      "code": "N3B",
+      "label": "Past Mentees",
+      "parent": "N3",
+      "family": "N",
+      "group": "Research & Scholarship",
+      "purpose": "Capture mentees previously supervised by the CV owner.",
+      "description": "Individuals whose mentoring relationship has ended, often with outcomes or current positions noted.",
+      "typical_entries": [
+        "Former PhD student, now Assistant Professor at Institution Y",
+        "Past fellow now at Industry X",
+        "Former resident mentee now attending at Hospital Z"
+      ],
+      "common_confusions": [
+        "Leaving graduated mentees in N3A instead of moving them to N3B."
+      ],
+      "key_rules": [
+        "Completed mentoring relationships with outcomes → N3B.",
+        "Ongoing mentoring remains in N3A.",
+        "Include current positions when possible to show impact of mentorship."
+      ]
+    },
+    {
+      "code": "N4",
+      "label": "Scholarly Outputs Resulting From Mentorship",
+      "parent": "N",
+      "family": "N",
+      "group": "Research & Scholarship",
+      "purpose": "Capture entries in a dedicated CV section that highlights outputs arising from mentorship.",
+      "description": "Use N4 only when the CV has a dedicated section listing mentorship outputs. Publications in the main Bibliography with mentee annotations (e.g., †) should remain coded as S1-S9, not N4.",
+      "typical_entries": [
+        "Dedicated 'Mentorship Outputs' or 'Trainee Publications' section listing papers with mentees",
+        "Awards or recognitions earned by mentees",
+        "Grants obtained by mentees under supervision",
+        "New clinical programs developed with/by mentees",
+        "New courses or curricula developed through mentorship collaboration",
+        "Mentee dissertations or theses supervised"
+      ],
+      "common_confusions": [
+        "Publications in the main Bibliography annotated with † (mentee symbol) incorrectly coded as N4 instead of S1-S9.",
+        "Own publications misclassified as N4 instead of S1–S9.",
+        "Courses developed independently (without mentee involvement) misclassified as N4 instead of K1/K3."
+      ],
+      "key_rules": [
+        "Use N4 ONLY when there is a dedicated CV section for mentorship outputs.",
+        "Publications in the main Bibliography with mentee annotations (†, *, etc.) → S1-S9, NOT N4.",
+        "If the same publication appears in both a mentorship section AND the Bibliography, code based on where the entry appears.",
+        "Clinical programs or courses developed through mentorship (in a mentorship section) → N4.",
+        "Do not list the CV owner's independent work in N4.",
+        "Courses developed without mentee involvement belong in K1/K3, not N4."
+      ]
+    },
+    {
+      "code": "O",
+      "label": "Institutional Leadership Activities",
+      "parent": null,
+      "family": "O",
+      "group": "Research & Scholarship",
+      "purpose": "Capture high-level leadership roles at the home institution with executive authority over people, programs, or budgets.",
+      "description": "Roles involving responsibility for budgets, personnel, or major institutional programs. This includes department chairs, division chiefs, and major committee chairs.",
+      "typical_entries": [
+        "Chair, Department of Medicine",
+        "Division Chief, Division of Cardiology",
+        "Section Chief, Section of Infectious Diseases",
+        "Vice Chair for Research, Department of Pediatrics",
+        "Director, Comprehensive Cancer Center with institutional authority",
+        "Program Director (academic/clinical unit with administrative authority)",
+        "Head or Chair of a major institutional committee (e.g., Curriculum Committee, Academic Affairs)",
+        "Chair, Institutional Review Board"
+      ],
+      "common_confusions": [
+        "Endowed Chair / Named Chair (prestigious appointment) misclassified as O instead of D1.",
+        "Academic titles without executive authority misclassified as O instead of D1.",
+        "External organizational leadership misclassified as O instead of Q1.",
+        "Committee membership (without chair/head role) misclassified as O instead of P."
+      ],
+      "key_rules": [
+        "Leadership with budget/personnel/programmatic authority at the home institution → O.",
+        "Department Chair / Division Chief / Section Chief (administrative leadership over a unit) → O.",
+        "Endowed Chair / Named Chair / [Name] Chair in [Field] → D1, NOT O (that is a prestigious appointment, not leadership).",
+        "If the leadership is within an external society or organization → Q1.",
+        "Basic academic titles without explicit executive authority belong in D1.",
+        "Committee chair, head, or director roles (especially college-wide or institution-wide) → O.",
+        "Committee member roles without leadership → P.",
+        "The key distinction: Department Chair = O (runs the department). Endowed Chair = D1 (holds a named professorship)."
+      ]
+    },
+    {
+      "code": "P",
+      "label": "Institutional Administrative Activities",
+      "parent": null,
+      "family": "P",
+      "group": "Research & Scholarship",
+      "purpose": "Capture internal administrative and committee service that is not executive leadership.",
+      "description": "Membership and participation in internal committees, task forces, and other administrative roles.",
+      "typical_entries": [
+        "Member, Institutional Review Board (IRB)",
+        "Member, Departmental Promotions Committee",
+        "Service on institutional task forces or working groups",
+        "Member, Infection Control Committee",
+        "Member, Care Path Committee",
+        "Committee member roles on clinical, QI, or operational committees"
+      ],
+      "common_confusions": [
+        "External committee work misclassified as P instead of Q2.",
+        "Committee chair/head roles misclassified as P instead of O.",
+        "Clinical committee membership misclassified as L2/L3 instead of P."
+      ],
+      "key_rules": [
+        "Internal committees and administrative service → P.",
+        "External committees → Q2.",
+        "Committee chair, head, or director roles → O, not P.",
+        "Committee member roles (without leadership) → P.",
+        "Clinical or QI committee membership (without project ownership) → P, not L2/L3."
+      ]
+    },
+    {
+      "code": "Q1",
+      "label": "Leadership in Extramural Organizations",
+      "parent": "Q",
+      "family": "Q",
+      "group": "Research & Scholarship",
+      "purpose": "Capture leadership roles in organizations and societies outside the home institution.",
+      "description": "Executive-level positions in professional or scientific organizations.",
+      "typical_entries": [
+        "President, National Society of X",
+        "Chair, Board of Directors, Foundation Y",
+        "Vice President or Treasurer of an international professional organization"
+      ],
+      "common_confusions": [
+        "Regular membership misclassified as Q1 instead of I.",
+        "Internal institutional leadership misclassified as Q1 instead of O.",
+        "Awards received from societies misclassified as Q1 instead of H."
+      ],
+      "key_rules": [
+        "Executive leadership in external organizations → Q1.",
+        "Non-leadership membership status → I.",
+        "Internal institutional leadership → O, not Q1."
+      ]
+    },
+    {
+      "code": "Q2",
+      "label": "Service on Boards/Committees",
+      "parent": "Q",
+      "family": "Q",
+      "group": "Research & Scholarship",
+      "purpose": "Capture non-leadership service roles on external boards and committees.",
+      "description": "Committee membership and advisory board roles in external organizations.",
+      "typical_entries": [
+        "Member, Scientific Advisory Committee for Society X",
+        "Member, External Advisory Board of Foundation Y",
+        "Committee member for professional organization Z",
+        "External grant reviewer for another institution (single grant or ad hoc review)",
+        "Reviewer for another university's internal grant program"
+      ],
+      "common_confusions": [
+        "Internal committee service misclassified as Q2 instead of P.",
+        "Leadership roles on external boards misclassified as Q2 instead of Q1.",
+        "Reviewing for another institution's internal grants misclassified as P (should be Q2 since it's external)."
+      ],
+      "key_rules": [
+        "External board/committee service without executive leadership → Q2.",
+        "Internal institutional committees → P.",
+        "Officer-level leadership in external committees → Q1.",
+        "Reviewing grants for another institution (not your home institution) → Q2.",
+        "Ad hoc or single-grant external reviews → Q2, not Q3."
+      ]
+    },
+    {
+      "code": "Q3",
+      "label": "Grant Reviewing / Study Sections",
+      "parent": "Q",
+      "family": "Q",
+      "group": "Research & Scholarship",
+      "purpose": "Capture formal service on standing grant review panels or study sections.",
+      "description": "Roles evaluating multiple grant applications as part of standing panels or formal study sections.",
+      "typical_entries": [
+        "Member, NIH Study Section X",
+        "Reviewer, NSF grant panels",
+        "Standing member, DoD grant review panel",
+        "Special Emphasis Panel member reviewing multiple applications"
+      ],
+      "common_confusions": [
+        "Internal grant review panels misclassified as Q3 instead of P (if purely internal).",
+        "Editorial board roles misclassified as Q3 instead of Q4C.",
+        "Ad hoc single-grant reviews for another institution misclassified as Q3 instead of Q2."
+      ],
+      "key_rules": [
+        "Standing study sections or multi-application review panels (NIH, NSF, DoD, major foundations) → Q3.",
+        "Ad hoc or single-grant external reviews for another institution → Q2, not Q3.",
+        "Internal institutional grant review → P.",
+        "Editorial manuscript review for journals → Q4D, not Q3."
+      ]
+    },
+    {
+      "code": "Q4",
+      "label": "Editorial Activities (All)",
+      "parent": "Q",
+      "family": "Q",
+      "group": "Research & Scholarship",
+      "purpose": "Capture editorial responsibilities, with specific roles specified under Q4A–Q4D.",
+      "description": "Parent container for editorial roles in journals, books, and other scholarly outlets.",
+      "typical_entries": [
+        "Editor-in-Chief or Co-Editor positions",
+        "Editorial board memberships",
+        "Journal article reviewing"
+      ],
+      "common_confusions": [
+        "Treating editorial positions as honors (H) instead of service.",
+        "Conflating editorial board membership (Q4C) with journal reviewing (Q4D)."
+      ],
+      "key_rules": [
+        "Use Q4 family codes for editorial work.",
+        "Choose Q4A–Q4D according to the specific nature of the editorial role."
+      ]
+    },
+    {
+      "code": "Q4A",
+      "label": "Editor/Co-Editor",
+      "parent": "Q4",
+      "family": "Q",
+      "group": "Research & Scholarship",
+      "purpose": "Capture top editorial leadership roles.",
+      "description": "Editor-in-Chief, Co-Editor, or equivalent high-level editorial leadership.",
+      "typical_entries": [
+        "Editor-in-Chief, Journal of X",
+        "Co-Editor, Annual Review of Y",
+        "Senior Editor for a major journal or book series"
+      ],
+      "common_confusions": [
+        "Editorial board members misclassified as Q4A instead of Q4C.",
+        "Editorial advisors with limited responsibility misclassified as Q4A instead of Q4B or Q4C."
+      ],
+      "key_rules": [
+        "Use Q4A for Editor-in-Chief, Co-Editor, or clearly equivalent editor-level roles.",
+        "Board membership without editor title → Q4C.",
+        "Textbook or book series editorial roles may be Q4B."
+      ]
+    },
+    {
+      "code": "Q4B",
+      "label": "Editorial Roles for Journals/Textbooks/Books",
+      "parent": "Q4",
+      "family": "Q",
+      "group": "Research & Scholarship",
+      "purpose": "Capture named editorial roles that are not Editor-in-Chief but are above simple board membership.",
+      "description": "Editorial roles such as associate editor or section editor for journals or books.",
+      "typical_entries": [
+        "Associate Editor, Journal of X",
+        "Section Editor, Journal of Y",
+        "Editorial role in a textbook or book series"
+      ],
+      "common_confusions": [
+        "Board-only roles misclassified as Q4B instead of Q4C.",
+        "Ad hoc reviewing misclassified as Q4B instead of Q4D."
+      ],
+      "key_rules": [
+        "Associate editor or similar editorial role with named responsibilities → Q4B.",
+        "Simple board membership → Q4C.",
+        "Journal reviewing without formal editorial title → Q4D."
+      ]
+    },
+    {
+      "code": "Q4C",
+      "label": "Editorial Board Membership",
+      "parent": "Q4",
+      "family": "Q",
+      "group": "Research & Scholarship",
+      "purpose": "Capture membership on editorial boards.",
+      "description": "Serving as a board member for journals, book series, or similar outlets.",
+      "typical_entries": [
+        "Editorial Board Member, Journal of X",
+        "Board of Editors, Journal Y",
+        "Editorial Advisory Board member"
+      ],
+      "common_confusions": [
+        "Board members misclassified as Q4A or Q4B.",
+        "Journal reviewers misclassified as Q4C instead of Q4D."
+      ],
+      "key_rules": [
+        "Named membership on an editorial board → Q4C.",
+        "Top leadership editors → Q4A.",
+        "Ad hoc reviewing without board membership → Q4D."
+      ]
+    },
+    {
+      "code": "Q4D",
+      "label": "Journal Reviewing / Ad hoc Reviewing",
+      "parent": "Q4",
+      "family": "Q",
+      "group": "Research & Scholarship",
+      "purpose": "Capture manuscript peer review activities.",
+      "description": "Ad hoc or recurring reviewing of manuscripts or scholarly outputs.",
+      "typical_entries": [
+        "Ad hoc reviewer for Journal X",
+        "Regular peer reviewer for multiple journals",
+        "Formal listing of manuscript review activities"
+      ],
+      "common_confusions": [
+        "Editorial board membership misclassified as Q4D instead of Q4C.",
+        "Grant reviewing misclassified as Q4D instead of Q3."
+      ],
+      "key_rules": [
+        "Manuscript peer review → Q4D.",
+        "Editorial board roles → Q4C.",
+        "Grant reviewing → Q3, not Q4D."
+      ]
+    },
+    {
+      "code": "R",
+      "label": "Invitations to Speak/Present",
+      "parent": null,
+      "family": "R",
+      "group": "Research & Scholarship",
+      "purpose": "Capture invited talks, named lectures, and invited scientific participation.",
+      "description": "Invited presentations at external institutions or meetings, including keynotes, grand rounds, and invited participation in scientific sessions.",
+      "typical_entries": [
+        "Keynote address at National Conference of X",
+        "Invited Grand Rounds at Institution Y",
+        "Named lectureship such as 'Jerry Dolovich Memorial Lecture'",
+        "Invited Participant at NIH scientific workshop or state-of-the-art session",
+        "Invited speaker at professional society meeting"
+      ],
+      "common_confusions": [
+        "Contributed talks based on abstract review misclassified as R instead of S8.",
+        "Named lectureships treated only as honors (H) without indicating the invited talk.",
+        "Internal teaching lectures misclassified as R instead of K1.",
+        "'Invited Participant' at scientific sessions misclassified as T instead of R."
+      ],
+      "key_rules": [
+        "Explicitly invited talks, keynotes, plenaries, or grand rounds → R.",
+        "Abstract-driven contributed talks → S8.",
+        "Named lectureships may be dual-coded as H (honor) and R (talk).",
+        "'Invited Participant' or 'Invited State-of-the-Art Presenter' at scientific meetings (e.g., NIH workshops) → R.",
+        "Community or lay-audience talks may be K5 instead of R."
+      ]
+    },
+    {
+      "code": "S0",
+      "label": "Researcher Profile & Bibliometric Summary",
+      "parent": "S",
+      "family": "S",
+      "group": "Research & Scholarship",
+      "purpose": "Capture researcher identifiers (ORCID, Scopus, etc.) and bibliometric summaries (h-index, citation counts) that precede publication lists.",
+      "description": "Profile links, author identifiers, and publication metrics that describe the CV owner's scholarly identity and impact. These entries logically precede the detailed publication list (S1-S9).",
+      "typical_entries": [
+        "ORCID: 0000-0002-7462-5678",
+        "Google Scholar: https://scholar.google.com/citations?user=XXXXX",
+        "ResearchGate: https://www.researchgate.net/profile/Name",
+        "Scopus Author ID: 12345678901",
+        "h-index: 23 (Google Scholar), 19 (Scopus)",
+        "Total citations: 4,632",
+        "Over 85 peer-reviewed publications",
+        "Publications: 45 articles, 3 books, 12 book chapters",
+        "Web of Science ResearcherID: A-1234-5678"
+      ],
+      "detection_signals": {
+        "identifier_keywords": [
+          "ORCID", "ORCiD", "ORCID iD",
+          "ResearchGate", "Google Scholar", "Scopus ID", "Scopus Author ID",
+          "Web of Science ResearcherID", "ResearcherID", "Publons",
+          "Loop Profile", "Semantic Scholar", "Dimensions ID",
+          "Mendeley Profile", "Academia.edu"
+        ],
+        "identifier_url_patterns": [
+          "orcid.org/",
+          "researchgate.net/profile/",
+          "scholar.google.com/",
+          "scopus.com/authid/",
+          "publons.com/researcher/",
+          "semanticscholar.org/author/",
+          "dimensions.ai/",
+          "loop.frontiersin.org/",
+          "academia.edu/"
+        ],
+        "bibliometric_keywords": [
+          "h-index", "h index", "g-index", "i10-index", "i-10 index",
+          "citations", "total citations", "times cited", "citation impact",
+          "field-weighted citation impact", "FWCI",
+          "Scopus metrics", "Web of Science metrics", "ISI metrics"
+        ],
+        "summary_phrases": [
+          "over X peer-reviewed publications",
+          "published more than",
+          "authored X books",
+          "summary of scholarly output",
+          "bibliometric summary",
+          "research output summary",
+          "publication metrics"
+        ],
+        "orcid_pattern": "0000-000[0-9]-[0-9]{4}-[0-9]{3}[0-9X]"
+      },
+      "common_confusions": [
+        "Research profile links misclassified as T (other/appendix) instead of S0.",
+        "h-index statements misclassified as A (personal info) instead of S0.",
+        "Publication count summaries misclassified as M1 (research activities) instead of S0."
+      ],
+      "key_rules": [
+        "Any ORCID, ResearchGate, Google Scholar, Scopus ID, or similar researcher identifier → S0.",
+        "Any h-index, citation count, or bibliometric metric statement → S0.",
+        "Any summary of publication volume ('Over X publications') → S0.",
+        "S0 entries logically precede S1-S9 publication lists.",
+        "Do NOT classify course numbers, grant numbers, patent numbers, or DOIs as S0.",
+        "Ignore section headers — classify based solely on content signals."
+      ]
+    },
+    {
+      "code": "S1",
+      "label": "Peer-reviewed Research Articles",
+      "parent": "S",
+      "family": "S",
+      "group": "Research & Scholarship",
+      "purpose": "Capture original research articles in peer-reviewed journals.",
+      "description": "Primary research publications reporting original scientific findings.",
+      "typical_entries": [
+        "Randomized trial results published in New England Journal of Medicine",
+        "Basic science research article in Nature or Science",
+        "Observational cohort study published in a peer-reviewed journal"
+      ],
+      "common_confusions": [
+        "Review articles or editorials misclassified as S1 instead of S2.",
+        "Non-peer-reviewed reports misclassified as S1 instead of S5.",
+        "Trial conduct misclassified as S1 instead of M4 (for the trial record)."
+      ],
+      "key_rules": [
+        "Original peer-reviewed research article → S1.",
+        "Narrative or systematic reviews → S2.",
+        "Non-peer-reviewed research outputs → S5."
+      ]
+    },
+    {
+      "code": "S2",
+      "label": "Reviews and Editorials",
+      "parent": "S",
+      "family": "S",
+      "group": "Research & Scholarship",
+      "purpose": "Capture reviews, editorials, perspectives, and commentaries.",
+      "description": "Non-original research manuscripts focused on summarizing or interpreting existing literature.",
+      "typical_entries": [
+        "Narrative review article in a journal",
+        "Systematic review without new primary data collection",
+        "Editorial or commentary in a scientific journal"
+      ],
+      "common_confusions": [
+        "Review articles misclassified as S1.",
+        "Book chapters misclassified as S2 instead of S4."
+      ],
+      "key_rules": [
+        "Any article whose primary intent is review or commentary → S2.",
+        "If it is a book chapter, use S4 instead.",
+        "Original data-driven research → S1."
+      ]
+    },
+    {
+      "code": "S3",
+      "label": "Books",
+      "parent": "S",
+      "family": "S",
+      "group": "Research & Scholarship",
+      "purpose": "Capture authored or edited books with ISBN.",
+      "description": "Book-length works or monographs, including textbooks and edited volumes.",
+      "typical_entries": [
+        "Authored textbook with ISBN",
+        "Monograph on a specialized topic",
+        "Edited volume with multiple contributed chapters"
+      ],
+      "common_confusions": [
+        "Book chapters misclassified as S3 instead of S4.",
+        "Course syllabi or non-ISBN materials misclassified as S3 instead of K1/K3 or S5."
+      ],
+      "key_rules": [
+        "ISBN-bearing book or monograph → S3.",
+        "Single-chapter contributions → S4.",
+        "Books used as course texts may be cross-referenced in K but remain S3."
+      ]
+    },
+    {
+      "code": "S4",
+      "label": "Chapters",
+      "parent": "S",
+      "family": "S",
+      "group": "Research & Scholarship",
+      "purpose": "Capture chapters contributed to books and edited volumes.",
+      "description": "Individual chapter contributions in multi-author volumes.",
+      "typical_entries": [
+        "Chapter in a multi-author textbook on cardiology",
+        "Contribution to a handbook or reference volume",
+        "Book chapter on a specific methodological topic"
+      ],
+      "common_confusions": [
+        "Entire books misclassified as S4 instead of S3.",
+        "Journal review articles misclassified as S4 instead of S2."
+      ],
+      "key_rules": [
+        "Standalone chapter in a book or edited volume → S4.",
+        "Entire books → S3.",
+        "Journal-based reviews/editorials → S2."
+      ]
+    },
+    {
+      "code": "S5",
+      "label": "Non-peer-reviewed Research Publications",
+      "parent": "S",
+      "family": "S",
+      "group": "Research & Scholarship",
+      "purpose": "Capture research-related publications that are not formally peer reviewed.",
+      "description": "Reports, white papers, and technical documents disseminating research content without peer review.",
+      "typical_entries": [
+        "Technical report published by a government agency",
+        "White paper for a professional organization",
+        "Non-peer-reviewed journal article or newsletter piece reporting research findings"
+      ],
+      "common_confusions": [
+        "Non-peer-reviewed outputs misclassified as S1.",
+        "Internal memos that are not intended as publications incorrectly placed in S5."
+      ],
+      "key_rules": [
+        "Research content without formal peer review → S5.",
+        "If the venue conducts peer review, use S1/S2 as appropriate.",
+        "Internal, non-public documents typically should not be coded as S5 unless they function as formal reports."
+      ]
+    },
+    {
+      "code": "S6",
+      "label": "Case Reports",
+      "parent": "S",
+      "family": "S",
+      "group": "Research & Scholarship",
+      "purpose": "Capture case reports and case series publications.",
+      "description": "Clinical publications focusing on one or a few cases.",
+      "typical_entries": [
+        "Single-patient case report published in a clinical journal",
+        "Short case series report of rare disease presentation",
+        "Case report highlighting unusual side effects"
+      ],
+      "common_confusions": [
+        "Case series with substantial data analysis misclassified as S1 instead of S6.",
+        "Non-published case descriptions misclassified as S6 instead of L1/L2."
+      ],
+      "key_rules": [
+        "Published clinical case reports/series → S6.",
+        "Large series with extensive analytics may be S1 if they function as full research studies.",
+        "Unpublished case descriptions in clinical notes do not belong in S6."
+      ]
+    },
+    {
+      "code": "S7",
+      "label": "In Review / Submitted / In Preparation",
+      "parent": "S",
+      "family": "S",
+      "group": "Research & Scholarship",
+      "purpose": "Capture manuscripts that have not yet been accepted.",
+      "description": "Manuscripts that are submitted, under review, or in preparation.",
+      "typical_entries": [
+        "Manuscript submitted to Journal X, currently under review",
+        "Manuscript in preparation for submission",
+        "Revised manuscript under second review"
+      ],
+      "common_confusions": [
+        "Accepted but not yet published papers left in S7 instead of being promoted to S1/S2/S6.",
+        "Informal draft notes misclassified as S7."
+      ],
+      "key_rules": [
+        "Not yet accepted → S7.",
+        "Move entries to S1–S6 once accepted and published.",
+        "Use S7 for manuscripts; other types of in-progress outputs may belong elsewhere or not be listed."
+      ]
+    },
+    {
+      "code": "S8",
+      "label": "Abstracts & Conference Proceedings",
+      "parent": "S",
+      "family": "S",
+      "group": "Research & Scholarship",
+      "purpose": "Capture conference abstracts, posters, and proceedings entries.",
+      "description": "Outputs generated for scientific meetings based on abstract acceptance.",
+      "typical_entries": [
+        "Poster presentation at national conference based on accepted abstract",
+        "Oral presentation selected from submitted abstracts",
+        "Published conference proceedings paper"
+      ],
+      "common_confusions": [
+        "Invited talks misclassified as S8 instead of R.",
+        "Full-length papers in proceedings misclassified as S8 instead of S1/S5."
+      ],
+      "key_rules": [
+        "Abstract-driven or proceedings-based contributions → S8.",
+        "Explicitly invited talks (keynotes, plenaries) → R.",
+        "If a peer-reviewed full paper appears in proceedings, consider S1 instead of S8."
+      ]
+    },
+    {
+      "code": "S9",
+      "label": "Other Media",
+      "parent": "S",
+      "family": "S",
+      "group": "Research & Scholarship",
+      "purpose": "Capture non-traditional scholarly media outputs.",
+      "description": "Podcasts, blogs, videos, and other media related to scholarly or professional work.",
+      "typical_entries": [
+        "Scholarly podcast episode",
+        "Expert blog post for a widely read site",
+        "Educational YouTube video or recorded webinar"
+      ],
+      "common_confusions": [
+        "Internal teaching videos misclassified as S9 instead of K1/K5.",
+        "Formal journal content misclassified as S9 instead of S1–S2."
+      ],
+      "key_rules": [
+        "Public-facing media outputs with scholarly content → S9.",
+        "If the primary function is teaching within a course, K1/K5 may be more appropriate.",
+        "Traditional journal articles should remain in S1–S2, not S9."
+      ]
+    },
+    {
+      "code": "T",
+      "label": "Appendix/Other",
+      "parent": null,
+      "family": "T",
+      "group": "Other",
+      "purpose": "Capture appendix material or items that do not clearly fit any other category.",
+      "description": "Residual category for content that is legitimately part of the CV but does not map cleanly elsewhere. Use sparingly.",
+      "typical_entries": [
+        "Reference list or contact information for references (legacy T4)",
+        "Certain types of community or public engagement (legacy T1) that are not clearly educational",
+        "Miscellaneous materials that cannot be confidently assigned to other codes"
+      ],
+      "common_confusions": [
+        "Overuse of T instead of finding a more specific code.",
+        "Professional titles (Professor, Chair, Director) misclassified as T instead of D1/O.",
+        "Educational outreach misclassified as T instead of K5.",
+        "Technology transfer items left in T instead of being mapped to M3.",
+        "'Invited Participant' at scientific meetings misclassified as T instead of R.",
+        "Committee membership misclassified as T instead of P or Q2.",
+        "Fieldwork or excavations misclassified as T instead of M1.",
+        "Museum appointments misclassified as T instead of D1.",
+        "Editorial roles (Editor, Associate Editor, Editorial Board) misclassified as T instead of Q4A/Q4B/Q4C.",
+        "Grants and funding misclassified as T instead of M2 (regardless of CV section header).",
+        "Travel awards misclassified as T instead of H (if competitive) or B2 (if professional development)."
+      ],
+      "key_rules": [
+        "Use T sparingly as a last resort when no other code applies.",
+        "Professional titles and positions should NEVER go to T. Check D1, D2, D3, O first.",
+        "Editorial roles (Editor, Associate Editor, Editorial Board) should NEVER go to T. Use Q4A/Q4B/Q4C.",
+        "Grants and funding should NEVER go to T. Use M2A/M2B/M2C regardless of what section header they appear under.",
+        "Legacy mappings: T1 (community/public engagement) → T or K5; T2 (technology transfer) → M3; T3 (professional development) → B2; T4 (references) → T.",
+        "Before using T, systematically check whether A–S codes could apply more specifically.",
+        "If the entry says 'Invited' anything at a scientific venue → check R first.",
+        "If the entry is committee/board service → check P, Q2, Q3 first.",
+        "If the entry is fieldwork/excavations → M1.",
+        "If the entry is a museum or research institute appointment → D1.",
+        "Competitive travel awards → H. Non-competitive professional development funding → B2.",
+        "T should only be used for genuinely miscellaneous items that truly have no better home."
+      ]
+    }
+  ]
+}

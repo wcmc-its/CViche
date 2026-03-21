@@ -1,0 +1,98 @@
+# docker-compose.yml -- Local development
+# Usage: docker compose up --build
+version: "3.9"
+
+services:
+  # --- MariaDB ---
+  db:
+    image: mariadb:11
+    restart: unless-stopped
+    environment:
+      MARIADB_ROOT_PASSWORD: cviche_dev
+      MARIADB_DATABASE: cviche
+      MARIADB_CHARACTER_SET_SERVER: utf8mb4
+      MARIADB_COLLATION_SERVER: utf8mb4_unicode_ci
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # --- Backend (FastAPI) ---
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    environment:
+      # Database
+      CVICHE_DATABASE_URL: "mysql+pymysql://root:cviche_dev@db:3306/cviche"
+      # Session (random for dev -- sessions lost on restart, as expected)
+      CVICHE_SESSION_SECRET: "dev-secret-change-in-production"
+      # Cookies: no TLS in local dev
+      CVICHE_SECURE_COOKIES: "false"
+      # CORS: allow frontend dev server and nginx
+      CVICHE_ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:5173,http://localhost:80,http://localhost"
+      # Storage: local filesystem for dev
+      CVICHE_STORAGE_BACKEND: "local"
+      # OpenAI API key -- read from host environment
+      OPENAI_API_KEY_WORK: "${OPENAI_API_KEY_WORK}"
+    volumes:
+      # Hot-reload: mount source code
+      - ./backend/app:/app/app:ro
+      - ./backend/auth_config.yaml:/app/auth_config.yaml:ro
+      - ./backend/consent_text.md:/app/consent_text.md:ro
+      # Persist uploads and outputs across restarts
+      - backend_uploads:/app/uploads
+      - backend_outputs:/app/outputs
+      - backend_prompt_logs:/app/prompt_logs
+    # Override entrypoint for dev: add --reload flag to uvicorn
+    command: ["--reload", "--reload-dir", "/app/app"]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # --- Frontend (Vite dev server for hot-reload) ---
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: build
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      NODE_ENV: development
+    volumes:
+      # Hot-reload: mount source code (exclude node_modules)
+      - ./frontend/src:/app/src:ro
+      - ./frontend/public:/app/public:ro
+      - ./frontend/index.html:/app/index.html:ro
+      - ./frontend/vite.config.ts:/app/vite.config.ts:ro
+      - ./frontend/tailwind.config.js:/app/tailwind.config.js:ro
+      - ./frontend/postcss.config.js:/app/postcss.config.js:ro
+      - ./frontend/tsconfig.json:/app/tsconfig.json:ro
+    # In dev mode, run Vite dev server instead of nginx
+    command: ["npx", "vite", "--host", "0.0.0.0", "--port", "3000"]
+
+volumes:
+  mariadb_data:
+  backend_uploads:
+  backend_outputs:
+  backend_prompt_logs:
