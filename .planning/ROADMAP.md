@@ -44,7 +44,7 @@ Plans:
 **Plans:** 3 plans
 
 Plans:
-- [ ] 02-01-PLAN.md -- Pre-BFG cleanup: fix HEAD, install BFG, create safety backup
+- [x] 02-01-PLAN.md -- Pre-BFG cleanup: fix HEAD, install BFG, create safety backup
 - [ ] 02-02-PLAN.md -- Execute BFG on mirror clone, gc/repack, replace .git
 - [ ] 02-03-PLAN.md -- Verify clean history, human approval, apply v1.0.0 tag
 
@@ -72,5 +72,5 @@ Phases execute in numeric order: 1 -> 2 -> 3
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Working Tree Sanitization | 2/2 | Complete | 2026-03-22 |
-| 2. History Rewrite and Tagging | 0/3 | Not started | - |
+| 2. History Rewrite and Tagging | 1/3 | In Progress | - |
 | 3. Documentation and Test Data | 0/? | Not started | - |

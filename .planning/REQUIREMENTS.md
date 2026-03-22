@@ -60,7 +60,7 @@
 |-------------|-------|--------|
 | GIT-01 | Phase 1 | Complete |
 | GIT-02 | Phase 1 | Complete |
-| GIT-03 | Phase 2 | Pending |
+| GIT-03 | Phase 2 | In Progress |
 | GIT-04 | Phase 1 | Complete |
 | DOC-01 | Phase 3 | Pending |
 | DOC-02 | Phase 3 | Pending |
