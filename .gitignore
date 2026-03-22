@@ -1,0 +1,74 @@
+# OS artifacts
+.DS_Store
+Thumbs.db
+Desktop.ini
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+
+# IDE/Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+.eggs/
+
+# Environment
+.env
+.env.*
+venv/
+.venv/
+
+# Data and CVs (PII)
+data/
+web_interface/uploads/
+
+# Key files (PII in real CVs, keep template)
+key_files/
+!key_files/wcm_cv_template_faculty_october_2022_final.docx
+
+# Archive (legacy code, backups, processed outputs)
+archive/
+
+# Prompt logs (contain CV text sent to LLM)
+**/prompt_logs/
+
+# Pipeline outputs (runtime artifacts)
+**/outputs/
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Auth config (contains real emails)
+web_interface/backend/auth_config.yaml
+
+# Node.js
+node_modules/
+web_interface/frontend/dist/
+
+# Logs
+*.log
+
+# Temp and analysis artifacts
+.temp_analysis/
+.superpowers/
+
+# Misc
+*.tar.gz
+*.zip
