@@ -27,11 +27,11 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. A comprehensive .gitignore exists and correctly ignores all categories of sensitive/generated content (CVs, logs, databases, node_modules, __pycache__, .env, OS artifacts)
   3. auth_config.yaml.example exists with placeholder values, and the real auth_config.yaml is gitignored
   4. A top-level requirements.txt exists listing all Python dependencies needed to run the pipeline
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] 01-01: TBD
-- [ ] 01-02: TBD
+- [ ] 01-01-PLAN.md -- Create .gitignore, auth_config.yaml.example, and requirements.txt
+- [ ] 01-02-PLAN.md -- Execute git rm --cached, move legacy to archive, atomic commit, and audit
 
 ### Phase 2: History Rewrite and Tagging
 **Goal**: The git history contains zero PII and the clean state is tagged as the v1.0.0 release point
@@ -69,6 +69,6 @@ Phases execute in numeric order: 1 -> 2 -> 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Working Tree Sanitization | 0/? | Not started | - |
+| 1. Working Tree Sanitization | 0/2 | Planned | - |
 | 2. History Rewrite and Tagging | 0/? | Not started | - |
 | 3. Documentation and Test Data | 0/? | Not started | - |
