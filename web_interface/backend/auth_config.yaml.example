@@ -1,0 +1,15 @@
+auth:
+  mode: simple  # "simple" or "saml"
+
+allowed_users:
+  - user@example.com
+
+admin_users:
+  - admin@example.com
+
+rate_limits:
+  daily: 10
+  monthly: 50
+
+consent:
+  version: "1.0"
