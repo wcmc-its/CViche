@@ -66,6 +66,8 @@ web_interface/frontend/dist/
 
 # Logs
 *.log
+*.jsonl
+src/logs/
 
 # Temp and analysis artifacts
 .temp_analysis/
