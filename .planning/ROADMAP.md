@@ -12,7 +12,7 @@ Transform the CViche repository from a private development workspace (60,374 tra
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: Working Tree Sanitization** - Remove sensitive files from tracking, establish .gitignore, create config examples and dependency manifest
+- [x] **Phase 1: Working Tree Sanitization** - Remove sensitive files from tracking, establish .gitignore, create config examples and dependency manifest
 - [ ] **Phase 2: History Rewrite and Tagging** - Purge all PII from git history, verify the repo is clean, apply v1.0.0 tag
 - [ ] **Phase 3: Documentation and Test Data** - Add README, LICENSE, CHANGELOG, versioning infrastructure, and synthetic sample CV
 
@@ -31,7 +31,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 Plans:
 - [x] 01-01-PLAN.md -- Create .gitignore, auth_config.yaml.example, and requirements.txt
-- [ ] 01-02-PLAN.md -- Execute git rm --cached, move legacy to archive, atomic commit, and audit
+- [x] 01-02-PLAN.md -- Execute git rm --cached, move legacy to archive, atomic commit, and audit
 
 ### Phase 2: History Rewrite and Tagging
 **Goal**: The git history contains zero PII and the clean state is tagged as the v1.0.0 release point
@@ -69,6 +69,6 @@ Phases execute in numeric order: 1 -> 2 -> 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Working Tree Sanitization | 1/2 | In Progress | - |
+| 1. Working Tree Sanitization | 2/2 | Complete | 2026-03-22 |
 | 2. History Rewrite and Tagging | 0/? | Not started | - |
 | 3. Documentation and Test Data | 0/? | Not started | - |

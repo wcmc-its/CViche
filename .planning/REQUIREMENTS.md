@@ -8,7 +8,7 @@
 ### Git Hygiene
 
 - [x] **GIT-01**: Comprehensive .gitignore covering sample CVs, prompt logs, databases, node_modules, build artifacts, __pycache__, .env files, and OS artifacts
-- [ ] **GIT-02**: All files matching .gitignore patterns removed from git tracking via git rm --cached
+- [x] **GIT-02**: All files matching .gitignore patterns removed from git tracking via git rm --cached
 - [ ] **GIT-03**: Git history rewritten to purge PII (faculty CVs, prompt logs with CV text, SQLite databases with user data, auth config with real emails) using BFG Repo Cleaner or git filter-repo
 - [x] **GIT-04**: auth_config.yaml replaced with auth_config.yaml.example containing placeholder values; real auth_config.yaml gitignored
 
@@ -59,7 +59,7 @@
 | Requirement | Phase | Status |
 |-------------|-------|--------|
 | GIT-01 | Phase 1 | Complete |
-| GIT-02 | Phase 1 | Pending |
+| GIT-02 | Phase 1 | Complete |
 | GIT-03 | Phase 2 | Pending |
 | GIT-04 | Phase 1 | Complete |
 | DOC-01 | Phase 3 | Pending |
