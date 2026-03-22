@@ -46,9 +46,11 @@ archive/
 
 # Prompt logs (contain CV text sent to LLM)
 **/prompt_logs/
+**/prompt_logs_debug/
 
 # Pipeline outputs (runtime artifacts)
 **/outputs/
+**/.outputs/
 
 # Databases
 *.db
@@ -68,6 +70,14 @@ web_interface/frontend/dist/
 # Temp and analysis artifacts
 .temp_analysis/
 .superpowers/
+
+# Deprecated and backup files
+*_DEPRECATED*
+*_backup*
+
+# Pipeline runtime artifacts in core/ (operational logs, not source docs)
+src/unified_pipeline/core/*.txt
+src/unified_pipeline/core/*.md
 
 # Misc
 *.tar.gz
