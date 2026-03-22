@@ -41,10 +41,12 @@ Plans:
   1. Running BFG or git filter-repo confirms all targeted file types (PDFs, .docx CVs, prompt logs, .sqlite/.db files, auth_config.yaml) are purged from every commit in history
   2. The .git directory is under 50 MB after repacking
   3. A `git tag v1.0.0` exists on the final clean commit
-**Plans**: TBD
+**Plans:** 3 plans
 
 Plans:
-- [ ] 02-01: TBD
+- [ ] 02-01-PLAN.md -- Pre-BFG cleanup: fix HEAD, install BFG, create safety backup
+- [ ] 02-02-PLAN.md -- Execute BFG on mirror clone, gc/repack, replace .git
+- [ ] 02-03-PLAN.md -- Verify clean history, human approval, apply v1.0.0 tag
 
 ### Phase 3: Documentation and Test Data
 **Goal**: A new user can clone the repo, understand what CViche does, set it up, and run the pipeline against a sample CV without any external guidance
@@ -70,5 +72,5 @@ Phases execute in numeric order: 1 -> 2 -> 3
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Working Tree Sanitization | 2/2 | Complete | 2026-03-22 |
-| 2. History Rewrite and Tagging | 0/? | Not started | - |
+| 2. History Rewrite and Tagging | 0/3 | Not started | - |
 | 3. Documentation and Test Data | 0/? | Not started | - |
