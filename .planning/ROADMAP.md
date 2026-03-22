@@ -30,7 +30,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans:** 2 plans
 
 Plans:
-- [ ] 01-01-PLAN.md -- Create .gitignore, auth_config.yaml.example, and requirements.txt
+- [x] 01-01-PLAN.md -- Create .gitignore, auth_config.yaml.example, and requirements.txt
 - [ ] 01-02-PLAN.md -- Execute git rm --cached, move legacy to archive, atomic commit, and audit
 
 ### Phase 2: History Rewrite and Tagging
@@ -69,6 +69,6 @@ Phases execute in numeric order: 1 -> 2 -> 3
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Working Tree Sanitization | 0/2 | Planned | - |
+| 1. Working Tree Sanitization | 1/2 | In Progress | - |
 | 2. History Rewrite and Tagging | 0/? | Not started | - |
 | 3. Documentation and Test Data | 0/? | Not started | - |

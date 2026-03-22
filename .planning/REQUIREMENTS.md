@@ -7,17 +7,17 @@
 
 ### Git Hygiene
 
-- [ ] **GIT-01**: Comprehensive .gitignore covering sample CVs, prompt logs, databases, node_modules, build artifacts, __pycache__, .env files, and OS artifacts
+- [x] **GIT-01**: Comprehensive .gitignore covering sample CVs, prompt logs, databases, node_modules, build artifacts, __pycache__, .env files, and OS artifacts
 - [ ] **GIT-02**: All files matching .gitignore patterns removed from git tracking via git rm --cached
 - [ ] **GIT-03**: Git history rewritten to purge PII (faculty CVs, prompt logs with CV text, SQLite databases with user data, auth config with real emails) using BFG Repo Cleaner or git filter-repo
-- [ ] **GIT-04**: auth_config.yaml replaced with auth_config.yaml.example containing placeholder values; real auth_config.yaml gitignored
+- [x] **GIT-04**: auth_config.yaml replaced with auth_config.yaml.example containing placeholder values; real auth_config.yaml gitignored
 
 ### Documentation
 
 - [ ] **DOC-01**: README.md with setup instructions — clone, install Python dependencies, configure OpenAI API key, run pipeline CLI, run web interface (both dev and Docker)
 - [ ] **DOC-02**: Apache 2.0 LICENSE file at repository root
 - [ ] **DOC-03**: CHANGELOG.md starting from v1.0.0 summarizing current capabilities
-- [ ] **DOC-04**: Top-level requirements.txt for pipeline Python dependencies (currently only web_interface/backend/ has one)
+- [x] **DOC-04**: Top-level requirements.txt for pipeline Python dependencies (currently only web_interface/backend/ has one)
 
 ### Versioning
 
@@ -58,14 +58,14 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| GIT-01 | Phase 1 | Pending |
+| GIT-01 | Phase 1 | Complete |
 | GIT-02 | Phase 1 | Pending |
 | GIT-03 | Phase 2 | Pending |
-| GIT-04 | Phase 1 | Pending |
+| GIT-04 | Phase 1 | Complete |
 | DOC-01 | Phase 3 | Pending |
 | DOC-02 | Phase 3 | Pending |
 | DOC-03 | Phase 3 | Pending |
-| DOC-04 | Phase 1 | Pending |
+| DOC-04 | Phase 1 | Complete |
 | VER-01 | Phase 3 | Pending |
 | VER-02 | Phase 2 | Pending |
 | VER-03 | Phase 3 | Pending |
