@@ -1,6 +1,3 @@
-# Planning (internal GSD infrastructure)
-.planning/
-
 # OS artifacts
 .DS_Store
 Thumbs.db
@@ -36,7 +33,7 @@ build/
 venv/
 .venv/
 
-# Data and CVs (PII)
+# Data (real CVs contain PII — only sample CV is tracked)
 data/*
 !data/sample_cvs/
 data/sample_cvs/*
@@ -45,18 +42,18 @@ data/sample_cvs/word/*
 !data/sample_cvs/word/sample_vasquez_cv.docx
 web_interface/uploads/
 
-# Key files (PII in real CVs, keep template)
+# Templates
 key_files/
 !key_files/wcm_cv_template_faculty_october_2022_final.docx
 
-# Archive (legacy code, backups, processed outputs)
+# Archive
 archive/
 
-# Prompt logs (contain CV text sent to LLM)
+# Prompt logs
 **/prompt_logs/
 **/prompt_logs_debug/
 
-# Pipeline outputs (runtime artifacts)
+# Pipeline outputs
 **/outputs/
 **/.outputs/
 
@@ -65,7 +62,7 @@ archive/
 *.sqlite
 *.sqlite3
 
-# Auth config (contains real emails)
+# Auth config
 web_interface/backend/auth_config.yaml
 
 # Node.js
@@ -77,15 +74,15 @@ web_interface/frontend/dist/
 *.jsonl
 src/logs/
 
-# Temp and analysis artifacts
+# Temp artifacts
 .temp_analysis/
-.superpowers/
+.planning/
 
-# Deprecated and backup files
+# Deprecated files
 *_DEPRECATED*
 *_backup*
 
-# Pipeline runtime artifacts in core/ (operational logs, not source docs)
+# Pipeline runtime artifacts
 src/unified_pipeline/core/*.txt
 src/unified_pipeline/core/*.md
 
