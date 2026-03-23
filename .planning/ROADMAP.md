@@ -14,7 +14,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Working Tree Sanitization** - Remove sensitive files from tracking, establish .gitignore, create config examples and dependency manifest
 - [x] **Phase 2: History Rewrite and Tagging** - Purge all PII from git history, verify the repo is clean, apply v1.0.0 tag (completed 2026-03-23)
-- [ ] **Phase 3: Documentation and Test Data** - Add README, LICENSE, CHANGELOG, versioning infrastructure, and synthetic sample CV
+- [x] **Phase 3: Documentation and Test Data** - Add README, LICENSE, CHANGELOG, versioning infrastructure, and synthetic sample CV (completed 2026-03-23)
 
 ## Phase Details
 
@@ -64,7 +64,7 @@ Plans:
 Plans:
 - [x] 03-01-PLAN.md -- Create LICENSE, CHANGELOG.md, __version__, synthetic sample CV, and .gitignore negation
 - [x] 03-02-PLAN.md -- Reorganize docs/ directory (move internal specs to .planning/docs/, fix cross-references)
-- [ ] 03-03-PLAN.md -- Create README.md with setup instructions, pipeline overview, and screenshots
+- [x] 03-03-PLAN.md -- Create README.md with setup instructions, pipeline overview, and screenshots
 
 ## Progress
 
@@ -75,4 +75,4 @@ Phases execute in numeric order: 1 -> 2 -> 3
 |-------|----------------|--------|-----------|
 | 1. Working Tree Sanitization | 2/2 | Complete | 2026-03-22 |
 | 2. History Rewrite and Tagging | 4/4 | Complete   | 2026-03-23 |
-| 3. Documentation and Test Data | 2/3 | In Progress | - |
+| 3. Documentation and Test Data | 3/3 | Complete | 2026-03-23 |
