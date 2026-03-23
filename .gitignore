@@ -1,3 +1,6 @@
+# Planning (internal GSD infrastructure)
+.planning/
+
 # OS artifacts
 .DS_Store
 Thumbs.db
