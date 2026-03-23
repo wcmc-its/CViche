@@ -1,6 +1,6 @@
 # Stage 3: Taxonomy Mapping - Architecture Deep Dive
 
-> **Note**: This is a detailed deep dive into Stage 3 (taxonomy classification). For the full pipeline overview, see [PIPELINE_README.md](PIPELINE_README.md).
+> **Note**: This is a detailed deep dive into Stage 3 (taxonomy classification). For the full pipeline overview, see [PIPELINE_README.md](../../docs/PIPELINE_README.md).
 
 **Status**: Production Ready (gpt-5.1)
 **Version**: V10.2
