@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { Clock, DollarSign, FileText, CheckCircle2, Loader2, XCircle, AlertCircle, ChevronDown, MessageSquare } from 'lucide-react'
 
 interface RunSummary {
@@ -36,6 +37,7 @@ function StatusIcon({ status }: { status: string }) {
 }
 
 export default function RunHistory({ onSelectRun }: RunHistoryProps) {
+  const navigate = useNavigate()
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [loadingMore, setLoadingMore] = useState(false)
@@ -158,10 +160,18 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                       Feedback given
                     </span>
                   ) : (
-                    <span className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[11px] font-medium">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        navigate(`/run/${run.run_id}#feedback`)
+                      }}
+                      className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 text-[11px] font-medium hover:bg-amber-200 transition-colors cursor-pointer"
+                      title="Go to feedback form"
+                    >
                       <MessageSquare className="w-3 h-3" aria-hidden="true" />
                       Needs feedback
-                    </span>
+                    </button>
                   )
                 )}
               </div>
