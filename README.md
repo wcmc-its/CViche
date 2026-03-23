@@ -12,11 +12,11 @@ python3 run_full_pipeline.py sample_vasquez_cv
 
 ## Visual Overview
 
-<!-- Screenshot: Pipeline viewer showing real-time stage progress -- TODO: capture when dev server is running -->
+![Upload Page](docs/images/upload-page.png)
 
-<!-- Screenshot: Upload page with file upload area -- TODO: capture when dev server is running -->
+![Pipeline Viewer](docs/images/pipeline-viewer.png)
 
-<!-- Screenshot: Side-by-side input CV vs WCM output comparison -- TODO: capture when dev server is running -->
+![Before and After](docs/images/before-after.png)
 
 ## Pipeline Stages
 
