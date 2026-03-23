@@ -22,7 +22,7 @@
 ### Versioning
 
 - [ ] **VER-01**: Semantic versioning policy documented — major = architecture changes, minor = model switches or new stages, patch = prompt tuning and bug fixes
-- [ ] **VER-02**: Git tag v1.0.0 applied to the clean public release commit
+- [x] **VER-02**: Git tag v1.0.0 applied to the clean public release commit
 - [ ] **VER-03**: __version__ variable accessible in the package (e.g., src/unified_pipeline/__init__.py or similar)
 
 ### Test Data
@@ -67,7 +67,7 @@
 | DOC-03 | Phase 3 | Pending |
 | DOC-04 | Phase 1 | Complete |
 | VER-01 | Phase 3 | Pending |
-| VER-02 | Phase 2 | Pending |
+| VER-02 | Phase 2 | Complete |
 | VER-03 | Phase 3 | Pending |
 | TEST-01 | Phase 3 | Pending |
 
@@ -78,4 +78,4 @@
 
 ---
 *Requirements defined: 2026-03-22*
-*Last updated: 2026-03-22 after 02-02 completion (GIT-03 complete)*
+*Last updated: 2026-03-22 after 02-03 completion (VER-02 complete)*
