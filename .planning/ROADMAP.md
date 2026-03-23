@@ -59,11 +59,12 @@ Plans:
   3. CHANGELOG.md exists starting from v1.0.0 with a summary of current capabilities
   4. The versioning policy (major/minor/patch definitions) is documented and a __version__ variable is accessible in the package
   5. A synthetic sample CV (.docx) is included in the repo and can be processed by the pipeline to demonstrate functionality
-**Plans**: TBD
+**Plans:** 3 plans
 
 Plans:
-- [ ] 03-01: TBD
-- [ ] 03-02: TBD
+- [ ] 03-01-PLAN.md -- Create LICENSE, CHANGELOG.md, __version__, synthetic sample CV, and .gitignore negation
+- [ ] 03-02-PLAN.md -- Reorganize docs/ directory (move internal specs to .planning/docs/, fix cross-references)
+- [ ] 03-03-PLAN.md -- Create README.md with setup instructions, pipeline overview, and screenshots
 
 ## Progress
 
@@ -74,4 +75,4 @@ Phases execute in numeric order: 1 -> 2 -> 3
 |-------|----------------|--------|-----------|
 | 1. Working Tree Sanitization | 2/2 | Complete | 2026-03-22 |
 | 2. History Rewrite and Tagging | 4/4 | Complete   | 2026-03-23 |
-| 3. Documentation and Test Data | 0/? | Not started | - |
+| 3. Documentation and Test Data | 0/3 | Planning complete | - |
