@@ -7,6 +7,7 @@ import PromptLogViewer from './PromptLogViewer'
 import OutputFiles from './OutputFiles'
 import JsonViewerModal from './JsonViewerModal'
 import ErrorBanner from './ErrorBanner'
+import FeedbackForm from './FeedbackForm'
 
 interface PipelineViewerProps {
   runId: string
@@ -88,6 +89,20 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   const [stepStartCosts, setStepStartCosts] = useState<Record<number, number>>({})
   const [isCancelling, setIsCancelling] = useState(false)
   const [isRestarting, setIsRestarting] = useState(false)
+
+  // Auto-scroll to feedback section when URL has #feedback hash
+  useEffect(() => {
+    if (window.location.hash === '#feedback' && runStatus?.status === 'complete') {
+      // Wait for FeedbackForm to mount and render
+      const timer = setTimeout(() => {
+        const el = document.getElementById('feedback-section')
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth' })
+        }
+      }, 500)
+      return () => clearTimeout(timer)
+    }
+  }, [runStatus?.status])
   const [apiError, setApiError] = useState<string | null>(null)
   const [cvInsights, setCvInsights] = useState<{
     cv_owner?: { full_name?: string; last_name?: string };
@@ -714,6 +729,13 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                   step={currentStepData}
                   onOpenJson={openJsonViewer}
                 />
+              )}
+
+              {/* Feedback Form -- only for completed runs */}
+              {runStatus?.status === 'complete' && (
+                <section id="feedback-section" className="mt-6">
+                  <FeedbackForm runId={runId} />
+                </section>
               )}
             </section>
           )}
