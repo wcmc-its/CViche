@@ -14,7 +14,7 @@
 
 ### Documentation
 
-- [ ] **DOC-01**: README.md with setup instructions — clone, install Python dependencies, configure OpenAI API key, run pipeline CLI, run web interface (both dev and Docker)
+- [x] **DOC-01**: README.md with setup instructions — clone, install Python dependencies, configure OpenAI API key, run pipeline CLI, run web interface (both dev and Docker)
 - [ ] **DOC-02**: Apache 2.0 LICENSE file at repository root
 - [ ] **DOC-03**: CHANGELOG.md starting from v1.0.0 summarizing current capabilities
 - [x] **DOC-04**: Top-level requirements.txt for pipeline Python dependencies (currently only web_interface/backend/ has one)
@@ -62,7 +62,7 @@
 | GIT-02 | Phase 1 | Complete |
 | GIT-03 | Phase 2 | Complete |
 | GIT-04 | Phase 1 | Complete |
-| DOC-01 | Phase 3 | Pending |
+| DOC-01 | Phase 3 | Complete |
 | DOC-02 | Phase 3 | Pending |
 | DOC-03 | Phase 3 | Pending |
 | DOC-04 | Phase 1 | Complete |
