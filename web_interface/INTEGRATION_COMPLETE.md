@@ -346,7 +346,7 @@ python3 -c "from pathlib import Path; print(Path.cwd().parent.parent)"
 If you see `ValueError: OpenAI API key not found`:
 ```bash
 # Check your environment
-echo $OPENAI_API_KEY_WORK
+echo $OPENAI_API_KEY
 echo $OPENAI_API_KEY
 
 # Or set in backend/.env

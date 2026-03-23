@@ -37,9 +37,9 @@ class CVSegmenter:
         Args:
             api_key: OpenAI API key (defaults to env var)
         """
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY_WORK") or os.getenv("OPENAI_API_KEY")
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY_WORK")
         if not self.api_key:
-            raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY_WORK or OPENAI_API_KEY")
+            raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable")
 
     def detect_format(self, file_path: str) -> str:
         """

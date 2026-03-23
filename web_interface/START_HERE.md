@@ -209,9 +209,9 @@ python3 -c "from pathlib import Path; print(Path.cwd().parent.parent)"
 
 ### OpenAI API key missing
 ```bash
-echo $OPENAI_API_KEY_WORK
+echo $OPENAI_API_KEY
 # If empty, set it:
-export OPENAI_API_KEY_WORK="your-key-here"
+export OPENAI_API_KEY="your-key-here"
 ```
 
 ---

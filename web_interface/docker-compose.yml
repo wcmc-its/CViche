@@ -46,7 +46,7 @@ services:
       # Storage: local filesystem for dev
       CVICHE_STORAGE_BACKEND: "local"
       # OpenAI API key -- read from host environment
-      OPENAI_API_KEY_WORK: "${OPENAI_API_KEY_WORK}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
     volumes:
       # Hot-reload: mount source code
       - ./backend/app:/app/app:ro

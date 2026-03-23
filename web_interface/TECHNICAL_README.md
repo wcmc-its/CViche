@@ -88,7 +88,7 @@ This starts three services:
 - **backend:** FastAPI on port 8000 (with hot-reload, runs Alembic migrations on startup)
 - **frontend:** Vite dev server on port 3000 (with hot-reload)
 
-The `OPENAI_API_KEY_WORK` environment variable must be set in your host shell before running `docker compose up`. All other environment variables have development defaults.
+The `OPENAI_API_KEY` environment variable must be set in your host shell before running `docker compose up`. All other environment variables have development defaults.
 
 To stop: `docker compose down`
 
@@ -155,7 +155,7 @@ The frontend runs on port 3000 by default and proxies `/api` and `/ws` requests 
 | `CVICHE_STORAGE_BACKEND` | No | `local` | `local` for filesystem storage (dev), `s3` for S3 storage (production). |
 | `CVICHE_S3_BUCKET` | If `s3` | -- | S3 bucket name. Required when `CVICHE_STORAGE_BACKEND=s3`. |
 | `CVICHE_S3_PREFIX` | No | `cviche` | Key prefix within the S3 bucket. Allows sharing a bucket across environments. |
-| `OPENAI_API_KEY_WORK` | Yes | -- | OpenAI API key for all LLM calls in the pipeline. |
+| `OPENAI_API_KEY` | Yes | -- | OpenAI API key for all LLM calls in the pipeline. |
 | `CVICHE_LOCAL_STORAGE_DIR` | No | `web_interface/uploads/` | Override the default local storage directory for uploads and outputs. Only applies when `CVICHE_STORAGE_BACKEND=local`. |
 
 ---
@@ -664,7 +664,7 @@ web_interface/
 
 **Cause:** Varies by stage. Common issues:
 
-- **Stage 1a (Hierarchy Extraction):** OpenAI API timeout or rate limit. Check `OPENAI_API_KEY_WORK` is valid and has sufficient quota.
+- **Stage 1a (Hierarchy Extraction):** OpenAI API timeout or rate limit. Check `OPENAI_API_KEY` is valid and has sufficient quota.
 - **Stage 2 (Entry Extraction):** Corrupt or password-protected document. Try converting to .docx first.
 - **Stages 3a/3b (Taxonomy Mapping):** LLM response parsing error. Check step logs for the raw LLM response.
 - **Stage 4 (Field Extraction):** Token limit exceeded for very large CVs. The step logs will show a `finish_reason: length` warning.

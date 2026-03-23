@@ -68,13 +68,13 @@ Pipeline behavior can be tuned via `config.yaml`, which controls taxonomy settin
 python3 run_full_pipeline.py path/to/cv.docx
 
 # Run full pipeline using document UID
-python3 run_full_pipeline.py 2097_Upton_Cv
+python3 run_full_pipeline.py sample_vasquez_cv
 
 # Run a single stage
-python3 run_full_pipeline.py 2097_Upton_Cv --stage 3b
+python3 run_full_pipeline.py sample_vasquez_cv --stage 3b
 
 # Specify LLM model
-python3 run_full_pipeline.py 2097_Upton_Cv --model gpt-5.1
+python3 run_full_pipeline.py sample_vasquez_cv --model gpt-4.1
 ```
 
 Stage outputs are written to `src/unified_pipeline/outputs/stage_*/`, with each stage producing a JSON file named by the document UID.
@@ -96,7 +96,7 @@ This starts three services:
 | Backend | 8000 | FastAPI API server |
 | Frontend | 3000 | React web application |
 
-Set the `OPENAI_API_KEY_WORK` environment variable before running `docker compose` so the backend can access the OpenAI API.
+Set the `OPENAI_API_KEY` environment variable before running `docker compose` so the backend can access the OpenAI API.
 
 ### Development Mode (without Docker)
 

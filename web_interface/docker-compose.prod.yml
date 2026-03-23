@@ -15,7 +15,7 @@ services:
       CVICHE_STORAGE_BACKEND: "s3"
       CVICHE_S3_BUCKET: "${CVICHE_S3_BUCKET}"
       CVICHE_S3_PREFIX: "${CVICHE_S3_PREFIX:-cviche}"
-      OPENAI_API_KEY_WORK: "${OPENAI_API_KEY_WORK}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
     volumes: []  # No hot-reload mounts in production
     # Production: no --reload flag, add workers
     command: ["--workers", "4"]

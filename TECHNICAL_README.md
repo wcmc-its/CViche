@@ -503,7 +503,7 @@ zustand@4              # State management
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `OPENAI_API_KEY_WORK` | Alternative OpenAI API key. Used as fallback if `OPENAI_API_KEY` is not set. | None |
+| `OPENAI_API_KEY_WORK` | Legacy alias for `OPENAI_API_KEY`. Supported as fallback. | None |
 | `SEGMENTATION_MODEL` | Override the default segmentation model for Stage 1b. | `gpt-4.1-mini` |
 | `CV_HIERARCHY_ASSISTANT_ID` | OpenAI Assistants API ID for CV hierarchy processing. Required only if using Assistants API mode. | None |
 | `CV_DIRECT_FILE_ASSISTANT_ID` | OpenAI Assistants API ID for direct file processing. Required only if using Assistants API mode. | None |
@@ -754,7 +754,7 @@ pip install -r requirements.txt
 
 # Create .env file
 cp .env.example .env
-# Edit .env and add: OPENAI_API_KEY_WORK=sk-...
+# Edit .env and add: OPENAI_API_KEY=sk-...
 ```
 
 **Frontend Setup**:
@@ -864,7 +864,7 @@ The SQLite database (`cviche.db`) tracks:
 **Backend won't start**:
 - Check port 8000 availability: `lsof -i :8000`
 - Verify Python dependencies: `pip install -r requirements.txt`
-- Check `.env` file has `OPENAI_API_KEY_WORK` set
+- Check `.env` file has `OPENAI_API_KEY` set
 
 **Frontend won't start**:
 - Check port 3000 availability

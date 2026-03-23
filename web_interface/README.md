@@ -48,7 +48,7 @@ A modern web interface for CViche with real-time progress tracking, cost monitor
    cd backend
    pip install -r requirements.txt
    cp .env.example .env
-   # Edit .env and add your OPENAI_API_KEY_WORK
+   # Edit .env and add your OPENAI_API_KEY
    ```
 
 3. **Frontend setup:**
