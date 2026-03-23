@@ -142,6 +142,10 @@ This project follows [Semantic Versioning](https://semver.org/):
 
 See [CHANGELOG.md](CHANGELOG.md) for version history.
 
+## Support
+
+See the [FAQ & Support page](docs/SUPPORT.md) for common questions, troubleshooting, and guidance on adapting CViche for other institutions.
+
 ## License
 
 This project is licensed under the Apache License 2.0 -- see the [LICENSE](LICENSE) file for details.
