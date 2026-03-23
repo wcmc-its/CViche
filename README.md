@@ -28,7 +28,7 @@ python3 run_full_pipeline.py sample_vasquez_cv
 6. **Stage 4 -- Field Extraction**: Extracts structured fields from classified entries using domain-specific parsers
 7. **Stage 4.5 -- Research Summary**: Generates a biosketch-style research summary (NIH M1 format)
 8. **Stage 5 -- PubMed Enrichment**: Enriches publications with PubMed metadata via NCBI E-utilities
-9. **Stage 5b -- Institution Enrichment**: Adds city/state to institutional affiliations via ROR API
+9. **Stage 5b -- Institution Enrichment**: Adds city/state to institutional affiliations via LLM
 10. **Stage 5c -- Teaching Formatter**: Reformats teaching entries for consistent presentation
 11. **Stage 5d -- Citation Formatter**: Reformats non-enriched citations to Vancouver style
 12. **Stage 6 -- Word Output**: Generates the final formatted Word document using the WCM template
