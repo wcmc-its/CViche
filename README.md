@@ -4,7 +4,9 @@ AI-powered CV parsing pipeline that transforms unstructured academic CVs into st
 
 ## What It Does
 
-CViche takes unstructured academic CVs in Word (.docx) or PDF format and runs them through a 12-stage AI pipeline. The output is a standardized Word document formatted to the Weill Cornell Medicine (WCM) curriculum vitae template. Stages range from document segmentation and entry extraction to PubMed enrichment and citation formatting -- all orchestrated through a single CLI command or web interface.
+CViche takes unstructured academic CVs in Word (.docx) format and runs them through a 12-stage AI pipeline. The output is a standardized Word document formatted to the Weill Cornell Medicine (WCM) curriculum vitae template. Stages range from document segmentation and entry extraction to PubMed enrichment and citation formatting -- all orchestrated through a single CLI command or web interface.
+
+Word documents are required because `.docx` heading styles and paragraph structure provide critical signals for segmentation and entry boundary detection that plain text or PDF extraction cannot reliably reproduce.
 
 ```bash
 python3 run_full_pipeline.py sample_vasquez_cv
@@ -38,7 +40,6 @@ python3 run_full_pipeline.py sample_vasquez_cv
 ### Prerequisites
 
 - Python 3.11+
-- `poppler-utils` system package (required for PDF processing)
 - OpenAI API key
 
 ### Installation
@@ -115,6 +116,21 @@ python3 run_full_pipeline.py sample_vasquez_cv
 ```
 
 The sample CV belongs to Dr. Elena M. Vasquez, a fabricated mid-career physician-scientist at Weill Cornell Medicine. It exercises all 12 pipeline stages, including PubMed enrichment (uses real journal names with fabricated articles). The file is located at `data/sample_cvs/word/sample_vasquez_cv.docx`.
+
+## Feedback Collection
+
+The web interface includes built-in feedback collection. After each pipeline run, users can flag individual stages or the overall output for review. Feedback is stored in the database and visible in the admin dashboard, making it straightforward to identify systematic extraction errors and prioritize prompt improvements.
+
+## Adapting for Other Institutions
+
+CViche was built for Weill Cornell Medicine's CV format, but the architecture is designed to be adaptable. To use it at another institution, you would need to modify:
+
+- **Taxonomy codes** -- The WCM taxonomy (`src/unified_pipeline/core/valid_taxonomy_codes.py`) maps CV sections to institution-specific codes (e.g., S1 for peer-reviewed articles, K1 for teaching). Replace these with your institution's section categories.
+- **Word output template** -- Stage 6 fills a WCM-specific Word template (`key_files/wcm_cv_template_*.docx`). Replace this with your institution's CV template and update the section-to-table mapping in `stage_6_word_template.py`.
+- **Classification prompts** -- The LLM prompts in Stages 3a/3b reference WCM taxonomy definitions. Update these to describe your institution's section structure.
+- **Post-classification validators** -- The 43 validator modules in `src/unified_pipeline/core/validators/` encode WCM-specific rules (e.g., distinguishing regional vs. national presentations). Review and adjust for your taxonomy.
+
+This has not been tested outside WCM. The pipeline stages themselves (segmentation, entry extraction, field parsing, PubMed enrichment) are institution-agnostic -- only the taxonomy mapping and output formatting are WCM-specific.
 
 ## Versioning
 
