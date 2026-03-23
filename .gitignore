@@ -34,7 +34,12 @@ venv/
 .venv/
 
 # Data and CVs (PII)
-data/
+data/*
+!data/sample_cvs/
+data/sample_cvs/*
+!data/sample_cvs/word/
+data/sample_cvs/word/*
+!data/sample_cvs/word/sample_vasquez_cv.docx
 web_interface/uploads/
 
 # Key files (PII in real CVs, keep template)
