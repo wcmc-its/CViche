@@ -62,8 +62,8 @@ Plans:
 **Plans:** 3 plans
 
 Plans:
-- [ ] 03-01-PLAN.md -- Create LICENSE, CHANGELOG.md, __version__, synthetic sample CV, and .gitignore negation
-- [ ] 03-02-PLAN.md -- Reorganize docs/ directory (move internal specs to .planning/docs/, fix cross-references)
+- [x] 03-01-PLAN.md -- Create LICENSE, CHANGELOG.md, __version__, synthetic sample CV, and .gitignore negation
+- [x] 03-02-PLAN.md -- Reorganize docs/ directory (move internal specs to .planning/docs/, fix cross-references)
 - [ ] 03-03-PLAN.md -- Create README.md with setup instructions, pipeline overview, and screenshots
 
 ## Progress
@@ -75,4 +75,4 @@ Phases execute in numeric order: 1 -> 2 -> 3
 |-------|----------------|--------|-----------|
 | 1. Working Tree Sanitization | 2/2 | Complete | 2026-03-22 |
 | 2. History Rewrite and Tagging | 4/4 | Complete   | 2026-03-23 |
-| 3. Documentation and Test Data | 0/3 | Planning complete | - |
+| 3. Documentation and Test Data | 2/3 | In Progress | - |

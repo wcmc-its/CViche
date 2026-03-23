@@ -15,19 +15,19 @@
 ### Documentation
 
 - [x] **DOC-01**: README.md with setup instructions — clone, install Python dependencies, configure OpenAI API key, run pipeline CLI, run web interface (both dev and Docker)
-- [ ] **DOC-02**: Apache 2.0 LICENSE file at repository root
-- [ ] **DOC-03**: CHANGELOG.md starting from v1.0.0 summarizing current capabilities
+- [x] **DOC-02**: Apache 2.0 LICENSE file at repository root
+- [x] **DOC-03**: CHANGELOG.md starting from v1.0.0 summarizing current capabilities
 - [x] **DOC-04**: Top-level requirements.txt for pipeline Python dependencies (currently only web_interface/backend/ has one)
 
 ### Versioning
 
 - [ ] **VER-01**: Semantic versioning policy documented — major = architecture changes, minor = model switches or new stages, patch = prompt tuning and bug fixes
 - [x] **VER-02**: Git tag v1.0.0 applied to the clean public release commit
-- [ ] **VER-03**: __version__ variable accessible in the package (e.g., src/unified_pipeline/__init__.py or similar)
+- [x] **VER-03**: __version__ variable accessible in the package (e.g., src/unified_pipeline/__init__.py or similar)
 
 ### Test Data
 
-- [ ] **TEST-01**: Synthetic sample CV (.docx) included in repo for pipeline testing — fabricated faculty data, not a real person
+- [x] **TEST-01**: Synthetic sample CV (.docx) included in repo for pipeline testing — fabricated faculty data, not a real person
 
 ## v2 Requirements
 
@@ -63,13 +63,13 @@
 | GIT-03 | Phase 2 | Complete |
 | GIT-04 | Phase 1 | Complete |
 | DOC-01 | Phase 3 | Complete |
-| DOC-02 | Phase 3 | Pending |
-| DOC-03 | Phase 3 | Pending |
+| DOC-02 | Phase 3 | Complete |
+| DOC-03 | Phase 3 | Complete |
 | DOC-04 | Phase 1 | Complete |
 | VER-01 | Phase 3 | Pending |
 | VER-02 | Phase 2 | Complete |
-| VER-03 | Phase 3 | Pending |
-| TEST-01 | Phase 3 | Pending |
+| VER-03 | Phase 3 | Complete |
+| TEST-01 | Phase 3 | Complete |
 
 **Coverage:**
 - v1 requirements: 12 total
