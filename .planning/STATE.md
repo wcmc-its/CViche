@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Web Interface UX
 status: completed
-stopped_at: Phase 5 context gathered
-last_updated: "2026-03-24T00:03:42.554Z"
-last_activity: 2026-03-23 -- Completed 04-02 FeedbackForm integration into PipelineViewer and RunHistory
+stopped_at: Completed 05-01-PLAN.md - Phase 5 complete
+last_updated: "2026-03-24T01:28:47.161Z"
+last_activity: 2026-03-24 -- Completed 05-01 RunHistory table redesign with sorting and pagination
 progress:
   total_phases: 3
-  completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
+  completed_phases: 2
+  total_plans: 3
+  completed_plans: 3
   percent: 100
 ---
 
@@ -25,12 +25,12 @@ See: .planning/PROJECT.md (updated 2026-03-23)
 
 ## Current Position
 
-Phase: 4 of 6 (Feedback Form) -- complete
-Plan: 2 of 2 complete
-Status: Phase 4 complete
-Last activity: 2026-03-23 -- Completed 04-02 FeedbackForm integration into PipelineViewer and RunHistory
+Phase: 5 of 6 (Run History Redesign) -- complete
+Plan: 1 of 1 complete
+Status: Phase 5 complete
+Last activity: 2026-03-24 -- Completed 05-01 RunHistory table redesign with sorting and pagination
 
-Progress: [||||||||||] 100% (2/2 plans complete in current phase)
+Progress: [||||||||||] 100% (1/1 plans complete in current phase)
 
 ## Performance Metrics
 
@@ -48,6 +48,7 @@ Progress: [||||||||||] 100% (2/2 plans complete in current phase)
 | 3 | 3 | -- | -- |
 | Phase 04 P01 | 3min | 1 tasks | 1 files |
 | Phase 04 P02 | 35min | 3 tasks | 2 files |
+| Phase 05 P01 | N/A | 2 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -63,6 +64,10 @@ Progress: [||||||||||] 100% (2/2 plans complete in current phase)
 - [Phase 04]: FeedbackForm uses CSS opacity transition for step changes, respecting prefers-reduced-motion
 - [Phase 04]: Used hash-based auto-scroll (#feedback) for RunHistory badge-to-form navigation with 500ms mount delay
 - [Phase 04]: Changed "Needs feedback" badge from span to button with stopPropagation for nested interactive element pattern
+- [Phase 05]: Used semantic HTML table for RunHistory instead of div-based grid for screen reader support
+- [Phase 05]: Client-side sorting only (no API re-fetch) since page size is 100 rows
+- [Phase 05]: Index-based zebra stripes instead of CSS pseudo-classes to support running-row blue tint override
+- [Phase 05]: Cost formatted to 2 decimal places (changed from 3 in original implementation)
 
 ### Pending Todos
 
@@ -71,10 +76,9 @@ None yet.
 ### Blockers/Concerns
 
 - HELP-01/HELP-02 scope needs UI/UX review during phase planning (what help content, where it lives)
-- RH-01/RH-02 may benefit from UI/UX review for table design
 
 ## Session Continuity
 
-Last session: 2026-03-24T00:03:42.552Z
-Stopped at: Phase 5 context gathered
-Resume file: .planning/phases/05-run-history-redesign/05-CONTEXT.md
+Last session: 2026-03-24T01:28:47.159Z
+Stopped at: Completed 05-01-PLAN.md - Phase 5 complete
+Resume file: None
