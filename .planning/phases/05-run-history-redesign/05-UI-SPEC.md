@@ -33,13 +33,14 @@ Declared values (must be multiples of 4):
 |-------|-------|-------|
 | xs | 4px | Icon-to-text gaps inside table cells, inline badge padding vertical |
 | sm | 8px | Cell horizontal padding, gap between badge icon and label |
+| cell | 12px | Table cell padding (px-3 py-3) -- density exception for scannable row height |
 | md | 16px | Table cell vertical padding, container inner padding sides |
 | lg | 24px | Container top/bottom padding, section heading margin-bottom |
 | xl | 32px | Not used in this phase |
-| 2xl | 48px | Not used in this phase |
+| 2xl | 48px | Empty state vertical padding |
 | 3xl | 64px | Not used in this phase |
 
-Exceptions: none
+Exceptions: 12px (`cell` token) is a valid multiple of 4, declared explicitly for table cell density. Standard 8px is too cramped for data rows; 16px wastes vertical space when displaying 100 rows. 12px provides the optimal balance for scannable table density.
 
 ---
 
@@ -48,11 +49,11 @@ Exceptions: none
 | Role | Size | Weight | Line Height | Usage in this phase |
 |------|------|--------|-------------|---------------------|
 | Body | 14px (text-sm) | 400 (normal) | 1.5 | Table cell text, pagination summary |
-| Label | 12px (text-xs) | 500 (medium) | 1.5 | Column headers, feedback badge text, page numbers |
+| Label | 12px (text-xs) | 400 (normal) | 1.5 | Column headers, feedback badge text, page numbers |
 | Heading | 14px (text-sm) | 600 (semibold) | 1.5 | Section title "Previous Runs" |
 | Display | not used | -- | -- | -- |
 
-Rationale: The existing RunHistory uses text-sm (14px) for body and text-xs (12px) for secondary info. This phase stays consistent with the established type scale. The section heading matches the current `text-sm font-semibold` pattern.
+Rationale: The existing RunHistory uses text-sm (14px) for body and text-xs (12px) for secondary info. This phase stays consistent with the established type scale. The section heading matches the current `text-sm font-semibold` pattern. Label uses 400 weight (not 500) because the size difference (12px vs 14px) already distinguishes Label from Body without a separate weight.
 
 ---
 
@@ -95,6 +96,14 @@ Accent reserved for: active sort chevron icon, keyboard focus rings (outline), a
 
 ---
 
+## Visual Hierarchy
+
+Primary focal point: status column color coding (draws the eye first via chromatic contrast against the neutral table).
+Secondary focal point: filename text (largest flex column, natural reading position).
+Tertiary focal point: pagination controls (bottom of card, accessed after scanning rows).
+
+---
+
 ## Component Inventory
 
 ### Table Container
@@ -125,14 +134,14 @@ Accent reserved for: active sort chevron icon, keyboard focus rings (outline), a
 - Inactive columns: no icon by default; on hover show ChevronDown in gray-400 at 12x12
 - Cursor: `cursor-pointer` on all header buttons
 - Click cycles: ascending -> descending (for the same column); clicking a new column sets it as ascending (except Date which defaults to descending)
-- Header text: `text-xs font-medium text-gray-500 uppercase tracking-wider`
+- Header text: `text-xs font-normal text-gray-500 uppercase tracking-wider`
 
 ### Table Row
 - Each `<tr>` wrapped in an interactive element: use `onClick` on `<tr>` with `cursor-pointer` and `role="link"`
 - Hover: `bg-gray-100` transition-colors
 - Zebra: odd rows get `bg-gray-50`, even rows get `bg-white`
 - Running rows: `bg-primary-50` (overrides zebra)
-- Cell padding: `px-3 py-3` (12px horizontal, 12px vertical -- nearest to 8pt grid while matching table density)
+- Cell padding: `px-3 py-3` (12px horizontal, 12px vertical -- uses `cell` spacing token for table density)
 - Row border: `border-b border-gray-100` between rows
 
 ### Status Cell Content
@@ -152,13 +161,13 @@ Accent reserved for: active sort chevron icon, keyboard focus rings (outline), a
 - Layout: flex row, items-center, justify-between
 - Left side: "Showing 1-100 of 247 runs" in text-sm text-gray-500
 - Right side: page number buttons
-- Previous button: `<` (ChevronLeft icon, 16x16)
-- Next button: `>` (ChevronRight icon, 16x16)
+- Previous button: ChevronLeft icon (16x16) with `aria-label="Previous page"`
+- Next button: ChevronRight icon (16x16) with `aria-label="Next page"`
 - Page numbers: `1 2 3 ... N` with ellipsis when total pages > 7
 - Active page: `bg-primary-600 text-white` rounded-md px-3 py-1
 - Inactive page: `text-gray-600 hover:bg-gray-100` rounded-md px-3 py-1
 - Disabled prev/next: `text-gray-300 cursor-not-allowed`
-- All page buttons: `text-sm font-medium`, min-width 32px, height 32px
+- All page buttons: `text-sm font-normal`, min-width 32px, height 32px
 - Margin-top from table: 16px (md spacing)
 - Pagination only renders when total > 100 (page size)
 
@@ -170,7 +179,7 @@ Accent reserved for: active sort chevron icon, keyboard focus rings (outline), a
 - Currently RunHistory returns `null` when empty. The table redesign adds a proper empty state.
 - Centered within the card container
 - Icon: FileText at 48x48 in gray-300
-- Heading: "No runs yet" in text-sm font-medium text-gray-900
+- Heading: "No runs yet" in text-sm font-semibold text-gray-900
 - Body: "Upload a CV above to start your first pipeline run." in text-sm text-gray-500, max-width 280px, centered
 - Vertical padding: 48px top and bottom (2xl spacing)
 
@@ -206,6 +215,8 @@ Accent reserved for: active sort chevron icon, keyboard focus rings (outline), a
 | Column header: duration | Duration |
 | Column header: cost | Cost |
 | Column header: feedback | Feedback |
+| Pagination previous button | aria-label="Previous page" (icon-only) |
+| Pagination next button | aria-label="Next page" (icon-only) |
 
 No destructive actions in this phase. No primary CTA (this is a read-only data display with navigation).
 
@@ -271,6 +282,7 @@ No destructive actions in this phase. No primary CTA (this is a read-only data d
 - Table rows with `role="link"` and `tabindex="0"` for keyboard navigation
 - Status icons have `aria-hidden="true"` (text label provides the information)
 - Feedback badges have descriptive `title` attributes
+- Pagination Previous/Next buttons have `aria-label="Previous page"` and `aria-label="Next page"` respectively
 - `prefers-reduced-motion`: Loader2 spin animation disabled (existing global CSS rule)
 - Focus visible: 2px solid #3b82f6 outline (existing global rule in index.css)
 - Color is never the sole indicator -- every status has both icon + text label
