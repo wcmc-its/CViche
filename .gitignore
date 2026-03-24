@@ -89,3 +89,4 @@ src/unified_pipeline/core/*.md
 # Misc
 *.tar.gz
 *.zip
+.superpowers/
