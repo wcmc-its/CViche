@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.1
 milestone_name: Web Interface UX
 status: completed
-stopped_at: Completed 05-01-PLAN.md - Phase 5 complete
-last_updated: "2026-03-24T02:00:47.360Z"
-last_activity: 2026-03-24 -- Completed 05-01 RunHistory table redesign with sorting and pagination
+stopped_at: Completed 06-01-PLAN.md -- v1.1 milestone complete
+last_updated: "2026-03-24T11:25:16.321Z"
+last_activity: 2026-03-24 -- Completed 06-01 End-User Help Page; v1.1 milestone complete
 progress:
   total_phases: 3
-  completed_phases: 2
-  total_plans: 3
-  completed_plans: 3
+  completed_phases: 3
+  total_plans: 4
+  completed_plans: 4
   percent: 100
 ---
 
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-03-23)
 
 ## Current Position
 
-Phase: 5 of 6 (Run History Redesign) -- complete
+Phase: 6 of 6 (End-User Help) -- complete
 Plan: 1 of 1 complete
-Status: Phase 5 complete
-Last activity: 2026-03-24 -- Completed 05-01 RunHistory table redesign with sorting and pagination
+Status: Phase 6 complete -- v1.1 milestone complete
+Last activity: 2026-03-24 -- Completed 06-01 End-User Help Page; v1.1 milestone complete
 
 Progress: [||||||||||] 100% (1/1 plans complete in current phase)
 
@@ -49,6 +49,7 @@ Progress: [||||||||||] 100% (1/1 plans complete in current phase)
 | Phase 04 P01 | 3min | 1 tasks | 1 files |
 | Phase 04 P02 | 35min | 3 tasks | 2 files |
 | Phase 05 P01 | N/A | 2 tasks | 1 files |
+| Phase 06 P01 | 8min | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -68,6 +69,9 @@ Progress: [||||||||||] 100% (1/1 plans complete in current phase)
 - [Phase 05]: Client-side sorting only (no API re-fetch) since page size is 100 rows
 - [Phase 05]: Index-based zebra stripes instead of CSS pseudo-classes to support running-row blue tint override
 - [Phase 05]: Cost formatted to 2 decimal places (changed from 3 in original implementation)
+- [Phase 06]: Used Link component from react-router-dom instead of useNavigate for help icons and back link -- proper <a> semantics for accessibility
+- [Phase 06]: All FAQ answers visible (no accordion) -- faculty/staff should see all content without extra interaction
+- [Phase 06]: Static help content only (no API) -- help text hardcoded in HelpPage.tsx, no backend dependency
 
 ### Pending Todos
 
@@ -75,10 +79,10 @@ None yet.
 
 ### Blockers/Concerns
 
-- HELP-01/HELP-02 scope needs UI/UX review during phase planning (what help content, where it lives)
+None -- all v1.1 blockers resolved.
 
 ## Session Continuity
 
-Last session: 2026-03-24T01:28:47.159Z
-Stopped at: Completed 05-01-PLAN.md - Phase 5 complete
+Last session: 2026-03-24T11:25:16.319Z
+Stopped at: Completed 06-01-PLAN.md -- v1.1 milestone complete
 Resume file: None
