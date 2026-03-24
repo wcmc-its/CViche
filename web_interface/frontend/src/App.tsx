@@ -5,6 +5,7 @@ import PipelineViewer from './components/PipelineViewer'
 import LoginPage from './components/LoginPage'
 import ConsentPage from './components/ConsentPage'
 import AdminDashboard from './components/AdminDashboard'
+import HelpPage from './components/HelpPage'
 import { Loader2 } from 'lucide-react'
 
 /**
@@ -168,6 +169,16 @@ function App() {
               <RequireAuth>
                 <RequireConsent>
                   <PipelineRoute />
+                </RequireConsent>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/help"
+            element={
+              <RequireAuth>
+                <RequireConsent>
+                  <HelpPage />
                 </RequireConsent>
               </RequireAuth>
             }

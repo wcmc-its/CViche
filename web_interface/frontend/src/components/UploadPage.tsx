@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Upload, FileText, Loader2, Shield } from 'lucide-react'
+import { useNavigate, Link } from 'react-router-dom'
+import { Upload, FileText, Loader2, Shield, HelpCircle } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import ErrorBanner from './ErrorBanner'
 import RunHistory from './RunHistory'
@@ -133,6 +133,14 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
         </div>
 
         <section className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6 md:p-8 relative">
+          <Link
+            to="/help"
+            aria-label="Help and support"
+            title="Help and support"
+            className="absolute top-4 right-4 text-gray-400 hover:text-primary-600 transition-colors"
+          >
+            <HelpCircle className="h-5 w-5" />
+          </Link>
           <h1 className="sr-only">Upload CV for Processing</h1>
           <p className="text-gray-600 mb-8 italic">Upload a CV in any format. Get back a document in WCM institutional format.</p>
 

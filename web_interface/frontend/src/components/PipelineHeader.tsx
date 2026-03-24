@@ -1,4 +1,5 @@
-import { ArrowLeft } from 'lucide-react'
+import { ArrowLeft, HelpCircle } from 'lucide-react'
+import { Link } from 'react-router-dom'
 
 interface PipelineHeaderProps {
   runId: string
@@ -97,6 +98,16 @@ export default function PipelineHeader({
             <span className="text-gray-700">Out:</span>{' '}
             <span className="font-semibold text-gray-900">{outputTokens.toLocaleString()}</span>
           </div>
+
+          {/* Help link */}
+          <Link
+            to="/help"
+            aria-label="Help and support"
+            title="Help and support"
+            className="text-gray-500 hover:text-primary-600 transition-colors"
+          >
+            <HelpCircle className="h-5 w-5" />
+          </Link>
 
           {/* Status badge */}
           <span className={`px-3 py-1 rounded-full text-xs font-medium ${badgeClass}`}>
