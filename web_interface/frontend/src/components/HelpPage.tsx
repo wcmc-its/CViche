@@ -113,7 +113,7 @@ export default function HelpPage() {
               </p>
               <p>
                 The estimated cost per run is displayed before you confirm the upload. This is the AI processing cost
-                only and is covered by the CViche pilot program{'\u2014'}there is no charge to you.
+                only and is covered by the Library{'\u2014'}there is no charge to you.
               </p>
             </div>
           </section>
@@ -168,7 +168,7 @@ export default function HelpPage() {
               <div>
                 <p className="text-sm font-semibold text-gray-900 mb-1">Does it cost me anything?</p>
                 <p>
-                  No. The AI processing costs are covered by the CViche pilot program. The cost shown on your run page
+                  No. The AI processing costs are covered by the Library. The cost shown on your run page
                   is for informational purposes only.
                 </p>
               </div>
@@ -182,9 +182,11 @@ export default function HelpPage() {
               <div>
                 <p className="text-sm font-semibold text-gray-900 mb-1">Is my data secure?</p>
                 <p>
-                  Your CV is processed on secure servers and is only accessible to you and CViche administrators. Files
-                  are not shared with third parties. The AI processing uses OpenAI's API, which does not use your data
-                  for training.
+                  Your uploaded CV is stored on a secure WCM server and is only accessible to you and CViche
+                  administrators. However, CV content is sent to OpenAI for AI processing. Do not include sensitive
+                  personal information such as Social Security numbers or dates of birth in your CV. By using CViche,
+                  you acknowledge that your CV content will be processed by OpenAI. If this is not acceptable, please
+                  do not use the service.
                 </p>
               </div>
               <div>
