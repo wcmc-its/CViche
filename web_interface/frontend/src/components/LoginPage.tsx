@@ -8,6 +8,8 @@ const SAML_ERROR_MESSAGES: Record<string, string> = {
   auth_failed: "Authentication failed. Please try again or contact IT support.",
   missing_attributes: "Your account is missing required information. Contact your IT administrator.",
   saml_not_enabled: "SSO login is not available. Please use the standard sign-in form.",
+  not_authorized: "You are not authorized to use CViche. Contact Paul Albert at paa2013@med.cornell.edu to request access.",
+  directory_unavailable: "Unable to verify group membership. The directory service may be temporarily unavailable. Please try again in a few minutes.",
 }
 
 export default function LoginPage() {

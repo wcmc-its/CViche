@@ -1,4 +1,5 @@
 """Tests for Enterprise Directory group membership check module."""
+import os
 import time
 from unittest.mock import patch, MagicMock
 
@@ -201,3 +202,186 @@ class TestDnComparison:
             search_base="dc=weill,dc=cornell,dc=edu",
         )
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: ACS handler ED wiring
+# ---------------------------------------------------------------------------
+
+from app.models import User
+from app.auth import create_session_cookie, COOKIE_NAME
+
+
+def _mock_saml_client(identity_dict):
+    """Create a mock Saml2Client with pre-configured ACS response."""
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.get_identity.return_value = identity_dict
+    mock_client.parse_authn_request_response.return_value = mock_response
+    return mock_client
+
+
+_ED_ENV = {
+    "ED_LDAP_URL": "ldaps://ed.weill.cornell.edu:636",
+    "ED_LDAP_BIND_DN": "cn=svc-cviche,ou=ServiceAccounts,dc=weill,dc=cornell,dc=edu",
+    "ED_LDAP_BIND_PASSWORD": "test-password",
+}
+
+_SAML_IDENTITY = {
+    "urn:oid:0.9.2342.19200300.100.1.3": ["test@med.cornell.edu"],
+    "urn:oid:2.16.840.1.113730.3.1.241": ["Test User"],
+    "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["test@cornell.edu"],
+}
+
+
+class TestACSGroupCheck:
+    """Integration tests for ACS handler ED group authorization wiring."""
+
+    @patch.dict(os.environ, _ED_ENV)
+    @patch("app.api.saml_routes.check_ed_membership")
+    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.api.saml_routes.extract_user_attrs")
+    def test_user_not_in_access_group_denied(
+        self, mock_extract, mock_get_client, mock_check_ed, client, seed_ed_enabled
+    ):
+        """User not in ED access group gets redirected to /login?error=not_authorized."""
+        clear_cache()
+        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+        mock_extract.return_value = {"email": "test@med.cornell.edu", "display_name": "Test User"}
+        mock_check_ed.return_value = {"in_access_group": False, "in_admin_group": False}
+
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "dummy", "RelayState": "/"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert "error=not_authorized" in response.headers["location"]
+
+    @patch.dict(os.environ, _ED_ENV)
+    @patch("app.api.saml_routes.check_ed_membership")
+    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.api.saml_routes.extract_user_attrs")
+    def test_user_in_access_group_allowed(
+        self, mock_extract, mock_get_client, mock_check_ed, client, seed_ed_enabled
+    ):
+        """User in ED access group proceeds normally -- 302 to / with session cookie."""
+        clear_cache()
+        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+        mock_extract.return_value = {"email": "test@med.cornell.edu", "display_name": "Test User"}
+        mock_check_ed.return_value = {"in_access_group": True, "in_admin_group": False}
+
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "dummy", "RelayState": "/"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert response.headers["location"] == "/"
+        cookies = {c.name: c for c in response.cookies.jar}
+        assert COOKIE_NAME in cookies
+
+    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.api.saml_routes.extract_user_attrs")
+    def test_ed_disabled_skips_check(
+        self, mock_extract, mock_get_client, client, seed_saml_mode
+    ):
+        """When ed_enabled is false, ACS skips ED check and proceeds normally."""
+        clear_cache()
+        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+        mock_extract.return_value = {"email": "test@med.cornell.edu", "display_name": "Test User"}
+
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "dummy", "RelayState": "/"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert response.headers["location"] == "/"
+
+    @patch.dict(os.environ, _ED_ENV)
+    @patch("app.api.saml_routes.check_ed_membership")
+    @patch("app.api.saml_routes.get_saml_client")
+    @patch("app.api.saml_routes.extract_user_attrs")
+    def test_ldap_unavailable_at_login(
+        self, mock_extract, mock_get_client, mock_check_ed, client, seed_ed_enabled
+    ):
+        """ED unavailable at login time redirects to /login?error=directory_unavailable."""
+        clear_cache()
+        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+        mock_extract.return_value = {"email": "test@med.cornell.edu", "display_name": "Test User"}
+        mock_check_ed.side_effect = EdUnavailableError("Connection refused")
+
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "dummy", "RelayState": "/"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert "error=directory_unavailable" in response.headers["location"]
+
+
+# ---------------------------------------------------------------------------
+# Integration tests: Per-request ED re-check in get_current_user
+# ---------------------------------------------------------------------------
+
+
+class TestPerRequestCheck:
+    """Integration tests for get_current_user ED group re-check."""
+
+    def test_cached_member_allowed(self, client, db, seed_ed_enabled):
+        """SAML user with cached in_access_group=True gets 200 on /api/auth/me."""
+        clear_cache()
+        user = User(
+            email="test@med.cornell.edu",
+            display_name="Test User",
+            role="user",
+            auth_method="saml",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        set_cached_membership("test@med.cornell.edu", {"in_access_group": True, "in_admin_group": False})
+        token = create_session_cookie(user)
+
+        response = client.get("/api/auth/me", cookies={COOKIE_NAME: token})
+        assert response.status_code == 200
+
+    def test_removed_user_denied(self, client, db, seed_ed_enabled):
+        """SAML user with cached in_access_group=False gets 401 on /api/auth/me."""
+        clear_cache()
+        user = User(
+            email="test@med.cornell.edu",
+            display_name="Test User",
+            role="user",
+            auth_method="saml",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        set_cached_membership("test@med.cornell.edu", {"in_access_group": False, "in_admin_group": False})
+        token = create_session_cookie(user)
+
+        response = client.get("/api/auth/me", cookies={COOKIE_NAME: token})
+        assert response.status_code == 401
+
+    def test_simple_mode_skips_ed(self, client, db, seed_simple_mode):
+        """Simple mode user bypasses ED check entirely."""
+        clear_cache()
+        # Add user email to allowed_users (already done in seed_simple_mode fixture)
+        user = User(
+            email="test@example.com",
+            display_name="Test User",
+            role="user",
+            auth_method="simple",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        token = create_session_cookie(user)
+
+        response = client.get("/api/auth/me", cookies={COOKIE_NAME: token})
+        assert response.status_code == 200
