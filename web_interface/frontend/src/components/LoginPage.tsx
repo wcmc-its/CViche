@@ -2,7 +2,7 @@ import { useState, FormEvent, useEffect } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import ErrorBanner from './ErrorBanner'
-import { LogIn, Loader2 } from 'lucide-react'
+import { LogIn, Loader2, Shield } from 'lucide-react'
 
 const SAML_ERROR_MESSAGES: Record<string, string> = {
   auth_failed: "Authentication failed. Please try again or contact IT support.",
@@ -13,7 +13,7 @@ const SAML_ERROR_MESSAGES: Record<string, string> = {
 }
 
 export default function LoginPage() {
-  const { login } = useAuth()
+  const { login, authConfig } = useAuth()
   const [searchParams] = useSearchParams()
   const navigate = useNavigate()
   const [displayName, setDisplayName] = useState('')
@@ -21,6 +21,7 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null)
   const [samlError, setSamlError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [redirecting, setRedirecting] = useState(false)
 
   // Read SAML error from URL query params on mount
   useEffect(() => {
@@ -46,6 +47,27 @@ export default function LoginPage() {
     }
   }
 
+  const handleSSOLogin = () => {
+    setRedirecting(true)
+    window.location.href = '/api/saml/login'
+  }
+
+  if (!authConfig) {
+    return (
+      <main
+        className="flex items-center justify-center min-h-screen p-4"
+        style={{
+          backgroundImage: 'url(/headerbg.png)',
+          backgroundSize: 'cover',
+          backgroundPosition: 'center',
+          backgroundRepeat: 'no-repeat',
+        }}
+      >
+        <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+      </main>
+    )
+  }
+
   return (
     <main
       className="flex items-center justify-center min-h-screen p-4"
@@ -69,7 +91,9 @@ export default function LoginPage() {
         <section className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6 md:p-8">
           <h1 className="text-xl font-semibold text-gray-900 mb-2">Sign In</h1>
           <p className="text-gray-600 mb-6 italic">
-            Enter your name and WCM email to get started.
+            {authConfig.mode === 'saml'
+              ? 'Use your Weill Cornell Medicine credentials to sign in.'
+              : 'Enter your name and WCM email to get started.'}
           </p>
 
           {samlError && (
@@ -78,68 +102,95 @@ export default function LoginPage() {
             </div>
           )}
 
-          <form onSubmit={handleSubmit} className="space-y-5">
-            <div>
-              <label
-                htmlFor="display-name"
-                className="block text-sm font-semibold text-gray-900 mb-1"
+          {authConfig.mode === 'saml' ? (
+            <>
+              <button
+                type="button"
+                onClick={handleSSOLogin}
+                disabled={redirecting}
+                className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none"
+                style={{ touchAction: 'manipulation' }}
               >
-                Full Name
-              </label>
-              <input
-                id="display-name"
-                type="text"
-                required
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                placeholder="Jane Smith"
-                autoComplete="name"
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-400 focus:border-primary-500 focus:ring-2 focus:ring-primary-500 focus:outline-none transition-colors"
-              />
-            </div>
+                {redirecting ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
+                    Redirecting to WCM sign-in...
+                  </span>
+                ) : (
+                  <span className="flex items-center justify-center gap-2">
+                    <Shield className="h-5 w-5" aria-hidden="true" />
+                    Sign in with WCM SSO
+                  </span>
+                )}
+              </button>
+              <p className="text-center text-sm text-gray-500 mt-3">
+                You will be redirected to Weill Cornell Medicine sign-in
+              </p>
+            </>
+          ) : (
+            <form onSubmit={handleSubmit} className="space-y-5">
+              <div>
+                <label
+                  htmlFor="display-name"
+                  className="block text-sm font-semibold text-gray-900 mb-1"
+                >
+                  Full Name
+                </label>
+                <input
+                  id="display-name"
+                  type="text"
+                  required
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                  placeholder="Jane Smith"
+                  autoComplete="name"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-400 focus:border-primary-500 focus:ring-2 focus:ring-primary-500 focus:outline-none transition-colors"
+                />
+              </div>
 
-            <div>
-              <label
-                htmlFor="email"
-                className="block text-sm font-semibold text-gray-900 mb-1"
-              >
-                WCM Email
-              </label>
-              <input
-                id="email"
-                type="email"
-                required
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="jas9999@med.cornell.edu"
-                autoComplete="email"
-                className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-400 focus:border-primary-500 focus:ring-2 focus:ring-primary-500 focus:outline-none transition-colors"
-              />
-            </div>
+              <div>
+                <label
+                  htmlFor="email"
+                  className="block text-sm font-semibold text-gray-900 mb-1"
+                >
+                  WCM Email
+                </label>
+                <input
+                  id="email"
+                  type="email"
+                  required
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="jas9999@med.cornell.edu"
+                  autoComplete="email"
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2 text-gray-900 placeholder-gray-400 focus:border-primary-500 focus:ring-2 focus:ring-primary-500 focus:outline-none transition-colors"
+                />
+              </div>
 
-            {error && (
-              <ErrorBanner message={error} onDismiss={() => setError(null)} />
-            )}
-
-            <button
-              type="submit"
-              disabled={submitting || !displayName.trim() || !email.trim()}
-              className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none"
-              style={{ touchAction: 'manipulation' }}
-            >
-              {submitting ? (
-                <span className="flex items-center justify-center gap-2">
-                  <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
-                  Signing in...
-                </span>
-              ) : (
-                <span className="flex items-center justify-center gap-2">
-                  <LogIn className="h-5 w-5" aria-hidden="true" />
-                  Sign In
-                </span>
+              {error && (
+                <ErrorBanner message={error} onDismiss={() => setError(null)} />
               )}
-            </button>
-          </form>
+
+              <button
+                type="submit"
+                disabled={submitting || !displayName.trim() || !email.trim()}
+                className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none"
+                style={{ touchAction: 'manipulation' }}
+              >
+                {submitting ? (
+                  <span className="flex items-center justify-center gap-2">
+                    <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
+                    Signing in...
+                  </span>
+                ) : (
+                  <span className="flex items-center justify-center gap-2">
+                    <LogIn className="h-5 w-5" aria-hidden="true" />
+                    Sign In
+                  </span>
+                )}
+              </button>
+            </form>
+          )}
         </section>
       </div>
     </main>
