@@ -8,8 +8,8 @@ from app.database import Base, get_db
 from app.main import app
 from app.models import SystemConfig
 
-# In-memory SQLite for tests
-TEST_DATABASE_URL = "sqlite:///file::memory:?cache=shared"
+# In-memory SQLite for tests (shared cache so TestClient and db fixture see same data)
+TEST_DATABASE_URL = "sqlite://"
 engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

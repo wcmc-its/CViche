@@ -16,6 +16,7 @@ class User(Base):
     daily_limit = Column(Integer, nullable=True)
     monthly_limit = Column(Integer, nullable=True)
     default_submission_type = Column(String(50), nullable=True)
+    auth_method = Column(String(20), nullable=True, server_default="simple")  # "simple" or "saml"
     consent_version = Column(String(50), nullable=True)
     consent_date = Column(DateTime, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
