@@ -110,6 +110,28 @@ def seed_saml_mode(db):
 # --- SAML test fixtures ---
 
 @pytest.fixture
+def seed_ed_enabled(db):
+    """Seed SystemConfig with ED group authorization enabled."""
+    _upsert_config(db, {
+        "auth_mode": json.dumps("saml"),
+        "allowed_users": json.dumps([]),
+        "admin_users": json.dumps([]),
+        "rate_limit_daily": json.dumps(10),
+        "rate_limit_monthly": json.dumps(50),
+        "consent_version": json.dumps("1.0"),
+        "saml_entity_id": json.dumps("https://cviche.med.cornell.edu/shibboleth"),
+        "saml_idp_metadata_url": json.dumps("https://shibboleth.weill.cornell.edu/idp/metadata"),
+        "saml_discovery_url": json.dumps("https://login.weill.cornell.edu/discovery"),
+        "saml_cert_dir": json.dumps("/etc/cviche/certs"),
+        "ed_enabled": json.dumps(True),
+        "ed_access_group": json.dumps("cn=App-CViche-Users,ou=Groups,dc=weill,dc=cornell,dc=edu"),
+        "ed_admin_group": json.dumps("cn=App-CViche-Admins,ou=Groups,dc=weill,dc=cornell,dc=edu"),
+        "ed_contact_name": json.dumps("Paul Albert"),
+        "ed_contact_email": json.dumps("paa2013@med.cornell.edu"),
+    })
+
+
+@pytest.fixture
 def mock_saml_identity():
     """Mock SAML assertion identity dict with OID-keyed attributes."""
     return {

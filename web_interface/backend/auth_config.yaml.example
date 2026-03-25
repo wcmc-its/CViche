@@ -19,3 +19,10 @@ rate_limits:
 
 consent:
   version: "1.0"
+
+ed:
+  enabled: false  # Toggle ED group check independently of SAML mode
+  access_group: ""  # DN of access group, e.g., "cn=App-CViche-Users,ou=Groups,dc=weill,dc=cornell,dc=edu"
+  admin_group: ""   # DN of admin group, e.g., "cn=App-CViche-Admins,ou=Groups,dc=weill,dc=cornell,dc=edu"
+  contact_name: ""  # Name shown in access denial message
+  contact_email: "" # Email shown in access denial message

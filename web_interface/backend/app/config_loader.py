@@ -27,6 +27,12 @@ def seed_system_config(db: Session) -> None:
         "saml_idp_metadata_url": json.dumps(config.get("saml", {}).get("idp_metadata_url", "")),
         "saml_discovery_url": json.dumps(config.get("saml", {}).get("discovery_url", "")),
         "saml_cert_dir": json.dumps(config.get("saml", {}).get("cert_dir", "")),
+        # ED group authorization config (Phase 9)
+        "ed_enabled": json.dumps(config.get("ed", {}).get("enabled", False)),
+        "ed_access_group": json.dumps(config.get("ed", {}).get("access_group", "")),
+        "ed_admin_group": json.dumps(config.get("ed", {}).get("admin_group", "")),
+        "ed_contact_name": json.dumps(config.get("ed", {}).get("contact_name", "")),
+        "ed_contact_email": json.dumps(config.get("ed", {}).get("contact_email", "")),
     }
     for key, value in defaults.items():
         existing = db.query(SystemConfig).filter(SystemConfig.key == key).first()
