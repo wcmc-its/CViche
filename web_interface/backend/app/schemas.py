@@ -173,6 +173,12 @@ class LoginResponse(BaseModel):
         from_attributes = True
 
 
+class AuthConfigResponse(BaseModel):
+    """Public auth configuration for frontend mode detection."""
+    mode: str  # "simple" or "saml"
+    discovery_url: Optional[str] = None  # Only present when mode is "saml"
+
+
 class QuotaInfo(BaseModel):
     """Rate limit quota information."""
     daily_limit: Optional[int] = None  # None = unlimited

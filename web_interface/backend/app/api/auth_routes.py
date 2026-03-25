@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
-from app.schemas import LoginRequest, LoginResponse, MeResponse, QuotaInfo
+from app.schemas import LoginRequest, LoginResponse, AuthConfigResponse, MeResponse, QuotaInfo
 from app.auth import create_session_cookie, get_cookie_settings, get_current_user, COOKIE_NAME
 from app.config_loader import get_config_value
 from app.rate_limiter import get_quota
@@ -40,11 +40,37 @@ def _check_rate_limit(ip: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# GET /api/auth/config
+# ---------------------------------------------------------------------------
+@router.get("/auth/config", response_model=AuthConfigResponse, response_model_exclude_none=True)
+async def get_auth_config(db: Session = Depends(get_db)):
+    """Return public auth configuration for frontend mode detection.
+    This endpoint requires NO authentication -- the frontend needs it
+    before the user has logged in."""
+    mode = get_config_value(db, "auth_mode") or "simple"
+    response = {"mode": mode}
+    if mode == "saml":
+        response["discovery_url"] = get_config_value(db, "saml_discovery_url") or ""
+    return response
+
+
+# ---------------------------------------------------------------------------
 # POST /api/auth/login
 # ---------------------------------------------------------------------------
 @router.post("/auth/login")
 async def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     """Authenticate a user by email against the allowed_users list."""
+    # Mode guard: reject simple login when SAML is active
+    auth_mode = get_config_value(db, "auth_mode") or "simple"
+    if auth_mode != "simple":
+        return JSONResponse(
+            status_code=403,
+            content={
+                "error": "sso_required",
+                "message": "This instance uses SSO. Please use the SSO login button.",
+            },
+        )
+
     client_ip = request.client.host if request.client else "unknown"
 
     if not _check_rate_limit(client_ip):
@@ -77,11 +103,13 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
     if user:
         user.display_name = body.display_name.strip()
         user.role = role
+        user.auth_method = "simple"
     else:
         user = User(
             email=email_lower,
             display_name=body.display_name.strip(),
             role=role,
+            auth_method="simple",
         )
         db.add(user)
     db.commit()

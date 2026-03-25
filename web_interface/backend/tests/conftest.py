@@ -1,16 +1,19 @@
 import pytest
 import json
-from sqlalchemy import create_engine
+from unittest.mock import patch
+from sqlalchemy import create_engine, StaticPool
 from sqlalchemy.orm import sessionmaker
 from fastapi.testclient import TestClient
 
 from app.database import Base, get_db
-from app.main import app
 from app.models import SystemConfig
 
-# In-memory SQLite for tests (shared cache so TestClient and db fixture see same data)
-TEST_DATABASE_URL = "sqlite://"
-engine = create_engine(TEST_DATABASE_URL, connect_args={"check_same_thread": False})
+# In-memory SQLite for tests -- StaticPool ensures all connections share one DB
+engine = create_engine(
+    "sqlite://",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
 TestingSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
@@ -32,24 +35,48 @@ def db():
         session.close()
 
 
+def _upsert_config(db, configs: dict):
+    """Insert or update SystemConfig rows (handles lifespan pre-seeding)."""
+    for key, value in configs.items():
+        existing = db.query(SystemConfig).filter(SystemConfig.key == key).first()
+        if existing:
+            existing.value = value
+        else:
+            db.add(SystemConfig(key=key, value=value))
+    db.commit()
+
+
 @pytest.fixture
 def client(db):
-    """Provide a FastAPI TestClient with overridden DB dependency."""
+    """Provide a FastAPI TestClient with overridden DB dependency.
+
+    Patches the database module so that the app lifespan (which creates
+    its own SessionLocal) also talks to the same in-memory test DB.
+    """
+    from app.main import app
+
     def override_get_db():
         try:
             yield db
         finally:
             pass
+
     app.dependency_overrides[get_db] = override_get_db
-    with TestClient(app) as c:
-        yield c
+
+    # Patch the SessionLocal used by the lifespan so seed_system_config
+    # and check_consent_integrity talk to the test DB, not the real one.
+    with patch("app.database.SessionLocal", TestingSessionLocal), \
+         patch("app.database.engine", engine):
+        with TestClient(app) as c:
+            yield c
+
     app.dependency_overrides.clear()
 
 
 @pytest.fixture
 def seed_simple_mode(db):
     """Seed SystemConfig for simple auth mode."""
-    configs = {
+    _upsert_config(db, {
         "auth_mode": json.dumps("simple"),
         "allowed_users": json.dumps(["test@example.com"]),
         "admin_users": json.dumps(["admin@example.com"]),
@@ -60,16 +87,13 @@ def seed_simple_mode(db):
         "saml_idp_metadata_url": json.dumps(""),
         "saml_discovery_url": json.dumps(""),
         "saml_cert_dir": json.dumps(""),
-    }
-    for key, value in configs.items():
-        db.add(SystemConfig(key=key, value=value))
-    db.commit()
+    })
 
 
 @pytest.fixture
 def seed_saml_mode(db):
     """Seed SystemConfig for SAML auth mode."""
-    configs = {
+    _upsert_config(db, {
         "auth_mode": json.dumps("saml"),
         "allowed_users": json.dumps(["test@example.com"]),
         "admin_users": json.dumps([]),
@@ -80,7 +104,4 @@ def seed_saml_mode(db):
         "saml_idp_metadata_url": json.dumps("https://shibboleth.weill.cornell.edu/idp/metadata"),
         "saml_discovery_url": json.dumps("https://login.weill.cornell.edu/discovery"),
         "saml_cert_dir": json.dumps("/etc/cviche/certs"),
-    }
-    for key, value in configs.items():
-        db.add(SystemConfig(key=key, value=value))
-    db.commit()
+    })
