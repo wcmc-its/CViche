@@ -107,56 +107,229 @@ class TestFindXmlsec1:
                     _find_xmlsec1()
 
 
-# --- Stub test classes for Plan 02 (SAML endpoints) ---
+# --- SAML endpoint tests (Plan 02) ---
+
+from app.models import User
+from app.auth import COOKIE_NAME
 
 
-@pytest.mark.skip(reason="Plan 02 -- SAML login endpoint")
+def _mock_saml_client(identity_dict=None):
+    """Create a mock Saml2Client with pre-configured responses."""
+    mock_client = MagicMock()
+    mock_client.prepare_for_authenticate.return_value = (
+        "req_id",
+        {"headers": [("Location", "https://idp.example.com/sso?SAMLRequest=abc123")]},
+    )
+    if identity_dict is not None:
+        mock_response = MagicMock()
+        mock_response.get_identity.return_value = identity_dict
+        mock_client.parse_authn_request_response.return_value = mock_response
+    else:
+        mock_client.parse_authn_request_response.return_value = None
+    mock_client.config.create_metadata_string.return_value = b"<EntityDescriptor>test</EntityDescriptor>"
+    return mock_client
+
+
 class TestSamlLogin:
     """SAML login redirect endpoint tests (SAML-01)."""
 
-    def test_login_redirects_to_idp(self, client, seed_saml_mode):
-        pass
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_login_redirects_to_idp(self, mock_get_client, client, seed_saml_mode):
+        """GET /api/saml/login in SAML mode returns 302 redirect to IdP."""
+        mock_get_client.return_value = _mock_saml_client()
+        response = client.get("/api/saml/login", follow_redirects=False)
+        assert response.status_code == 302
+        assert "idp.example.com" in response.headers["location"]
 
     def test_login_blocked_in_simple_mode(self, client, seed_simple_mode):
-        pass
+        """GET /api/saml/login in simple mode redirects to /login?error=saml_not_enabled."""
+        response = client.get("/api/saml/login", follow_redirects=False)
+        assert response.status_code == 302
+        assert "error=saml_not_enabled" in response.headers["location"]
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_login_relay_state_from_next_param(self, mock_get_client, client, seed_saml_mode):
+        """GET /api/saml/login?next=/runs/ABC passes relay_state to prepare_for_authenticate."""
+        mock_get_client.return_value = _mock_saml_client()
+        response = client.get("/api/saml/login?next=/runs/ABC", follow_redirects=False)
+        assert response.status_code == 302
+        mock_get_client.return_value.prepare_for_authenticate.assert_called_once()
+        call_kwargs = mock_get_client.return_value.prepare_for_authenticate.call_args
+        assert call_kwargs[1]["relay_state"] == "/runs/ABC"
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_login_error_redirects_to_login(self, mock_get_client, client, seed_saml_mode):
+        """GET /api/saml/login when client raises redirects to /login?error=auth_failed."""
+        mock_get_client.side_effect = Exception("config error")
+        response = client.get("/api/saml/login", follow_redirects=False)
+        assert response.status_code == 302
+        assert "error=auth_failed" in response.headers["location"]
 
 
-@pytest.mark.skip(reason="Plan 02 -- SAML ACS endpoint")
 class TestSamlACS:
     """SAML Assertion Consumer Service tests (SAML-01)."""
 
-    def test_acs_valid_assertion_sets_cookie(self, client, seed_saml_mode):
-        pass
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_valid_assertion_sets_cookie(self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity):
+        """POST /api/saml/acs with valid assertion returns 302 and sets cviche_session cookie."""
+        mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data", "RelayState": "/"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        # Check cookie is set
+        cookies = {c.name: c for c in response.cookies.jar}
+        assert COOKIE_NAME in cookies
 
-    def test_acs_invalid_assertion_redirects_error(self, client, seed_saml_mode):
-        pass
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_invalid_assertion_redirects_error(self, mock_get_client, client, seed_saml_mode):
+        """POST /api/saml/acs with None authn_response redirects to /login?error=auth_failed."""
+        mock_get_client.return_value = _mock_saml_client(identity_dict=None)
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "baddata"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert "error=auth_failed" in response.headers["location"]
 
-    def test_acs_missing_attributes_redirects_error(self, client, seed_saml_mode):
-        pass
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_missing_attributes_redirects_error(self, mock_get_client, client, seed_saml_mode, mock_saml_identity_no_mail):
+        """POST /api/saml/acs with missing mail redirects to /login?error=missing_attributes."""
+        mock_get_client.return_value = _mock_saml_client(mock_saml_identity_no_mail)
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert "error=missing_attributes" in response.headers["location"]
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_relay_state_preserved(self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity):
+        """POST /api/saml/acs with RelayState=/runs/ABC123 redirects to that URL."""
+        mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data", "RelayState": "/runs/ABC123"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert response.headers["location"] == "/runs/ABC123"
+
+    def test_acs_blocked_in_simple_mode(self, client, seed_simple_mode):
+        """POST /api/saml/acs in simple mode redirects to /login?error=saml_not_enabled."""
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert "error=saml_not_enabled" in response.headers["location"]
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_general_exception_redirects_error(self, mock_get_client, client, seed_saml_mode):
+        """POST /api/saml/acs when client raises redirects to /login?error=auth_failed."""
+        mock_get_client.side_effect = Exception("pysaml2 error")
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert "error=auth_failed" in response.headers["location"]
 
 
-@pytest.mark.skip(reason="Plan 02 -- SAML metadata endpoint")
 class TestSamlMetadata:
     """SAML SP metadata endpoint tests (SAML-02)."""
 
-    def test_metadata_returns_xml(self, client, seed_saml_mode):
-        pass
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_metadata_returns_xml(self, mock_get_client, client, seed_saml_mode):
+        """GET /api/saml/metadata in SAML mode returns 200 with application/xml content."""
+        mock_get_client.return_value = _mock_saml_client()
+        response = client.get("/api/saml/metadata")
+        assert response.status_code == 200
+        assert "application/xml" in response.headers["content-type"]
+        assert b"EntityDescriptor" in response.content
+
+    def test_metadata_404_in_simple_mode(self, client, seed_simple_mode):
+        """GET /api/saml/metadata in simple mode returns 404."""
+        response = client.get("/api/saml/metadata")
+        assert response.status_code == 404
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_metadata_error_returns_500(self, mock_get_client, client, seed_saml_mode):
+        """GET /api/saml/metadata when client raises returns 500."""
+        mock_get_client.side_effect = Exception("config error")
+        response = client.get("/api/saml/metadata")
+        assert response.status_code == 500
 
 
-@pytest.mark.skip(reason="Plan 02 -- SAML user provisioning")
 class TestSamlUserProvisioning:
     """SAML user auto-provisioning tests (SAML-03)."""
 
-    def test_new_user_created(self, client, db, seed_saml_mode):
-        pass
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_new_user_created(self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity):
+        """ACS flow creates new User with auth_method=saml and role=user."""
+        mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data", "RelayState": "/"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        user = db.query(User).filter(User.email == "testuser@med.cornell.edu").first()
+        assert user is not None
+        assert user.display_name == "Test User"
+        assert user.role == "user"
+        assert user.auth_method == "saml"
 
-    def test_existing_user_updated(self, client, db, seed_saml_mode):
-        pass
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_existing_user_updated(self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity):
+        """ACS flow updates existing user's display_name and auth_method to saml."""
+        # Pre-create user with old data
+        existing = User(
+            email="testuser@med.cornell.edu",
+            display_name="Old Name",
+            role="user",
+            auth_method="simple",
+        )
+        db.add(existing)
+        db.commit()
+
+        mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data", "RelayState": "/"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+
+        db.expire_all()
+        user = db.query(User).filter(User.email == "testuser@med.cornell.edu").first()
+        assert user is not None
+        assert user.display_name == "Test User"
+        assert user.auth_method == "saml"
 
 
-@pytest.mark.skip(reason="Plan 02 -- SAML logout endpoint")
 class TestSamlLogout:
     """SAML logout endpoint tests (SAML-04)."""
 
-    def test_logout_clears_cookie(self, client, seed_saml_mode):
-        pass
+    def test_logout_post_clears_cookie(self, client):
+        """POST /api/saml/logout returns 302 to /login and clears cviche_session."""
+        response = client.post("/api/saml/logout", follow_redirects=False)
+        assert response.status_code == 302
+        assert "/login" in response.headers["location"]
+        # Check that the cookie is being cleared (set-cookie with max-age=0 or expires in past)
+        set_cookie = response.headers.get("set-cookie", "")
+        assert COOKIE_NAME in set_cookie
+
+    def test_logout_get_clears_cookie(self, client):
+        """GET /api/saml/logout returns 302 to /login and clears cviche_session."""
+        response = client.get("/api/saml/logout", follow_redirects=False)
+        assert response.status_code == 302
+        assert "/login" in response.headers["location"]
+        set_cookie = response.headers.get("set-cookie", "")
+        assert COOKIE_NAME in set_cookie
