@@ -128,7 +128,7 @@ Plans:
 - [ ] **Phase 7: Config & Model Foundation** - Extend auth config for dual-mode switching and prepare the User model for SAML
 - [ ] **Phase 8: SAML SP Client & Endpoints** - Implement SAML 2.0 Service Provider with IdP redirect, assertion consumer, and metadata endpoints
 - [ ] **Phase 9: ED Group Authorization** - Gate user access by Enterprise Directory group membership via LDAP
-- [ ] **Phase 10: Frontend Auth Flow** - Adapt login UI to render SSO or email form based on configured auth mode
+- [x] **Phase 10: Frontend Auth Flow** - Adapt login UI to render SSO or email form based on configured auth mode (completed 2026-03-25)
 - [ ] **Phase 11: Testing, Docs & Skill Extraction** - Validate full auth flow with mock IdP, document SP registration, extract reusable auth skill
 
 ## Phase Details
@@ -186,7 +186,7 @@ Plans:
   1. In SAML mode, the login page shows an SSO login button that initiates the SAML flow -- no email form is visible
   2. In simple mode, the login page shows the existing email form -- no SSO button is visible
   3. SAML authentication errors (IdP unreachable, assertion failed, not in group) display as user-friendly messages on the login page
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
 - [ ] 10-01-PLAN.md -- Add mode detection to AuthContext, conditional SSO button/email form rendering to LoginPage
@@ -221,5 +221,5 @@ Phases 7-11 execute sequentially. Phase 10 depends on Phases 7 and 8 (not 9), so
 | 7. Config & Model Foundation | v1.2 | 0/1 | Not started | - |
 | 8. SAML SP Client & Endpoints | v1.2 | 0/2 | Not started | - |
 | 9. ED Group Authorization | v1.2 | 0/2 | Not started | - |
-| 10. Frontend Auth Flow | v1.2 | 0/1 | Not started | - |
+| 10. Frontend Auth Flow | 1/1 | Complete   | 2026-03-25 | - |
 | 11. Testing, Docs & Skill Extraction | v1.2 | 0/2 | Not started | - |

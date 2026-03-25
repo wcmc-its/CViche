@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Auth & Access Control
-status: completed
-stopped_at: Phase 10 context gathered
-last_updated: "2026-03-25T12:49:47.759Z"
-last_activity: 2026-03-25 -- Executed 09-02 ED group authorization wiring
+status: in-progress
+stopped_at: Completed 10-01-PLAN.md
+last_updated: "2026-03-25T16:21:23Z"
+last_activity: 2026-03-25 -- Executed 10-01 frontend auth flow
 progress:
   total_phases: 5
-  completed_phases: 3
-  total_plans: 5
-  completed_plans: 5
+  completed_phases: 4
+  total_plans: 6
+  completed_plans: 6
   percent: 100
 ---
 
@@ -21,21 +21,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-24)
 
 **Core value:** Faculty can upload a CV and get back a correctly formatted WCM document without manual reformatting
-**Current focus:** Phase 9 complete -- ED Group Authorization fully wired; ready for Phase 10
+**Current focus:** Phase 10 complete -- Frontend Auth Flow wired; ready for Phase 11
 
 ## Current Position
 
-Phase: 9 of 11 (ED Group Authorization) -- COMPLETE
-Plan: 2 of 2 in current phase (All plans complete)
-Status: Phase 9 complete, ready for Phase 10
-Last activity: 2026-03-25 -- Executed 09-02 ED group authorization wiring
+Phase: 10 of 11 (Frontend Auth Flow) -- COMPLETE
+Plan: 1 of 1 in current phase (All plans complete)
+Status: Phase 10 complete, ready for Phase 11
+Last activity: 2026-03-25 -- Executed 10-01 frontend auth flow
 
 Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 18 (v1.0: 9, v1.1: 4, v1.2: 5)
+- Total plans completed: 19 (v1.0: 9, v1.1: 4, v1.2: 6)
 - Average duration: --
 - Total execution time: --
 
@@ -55,6 +55,7 @@ Progress: [██████████] 100%
 | Phase 08 P02 | 4min | 3 tasks | 4 files |
 | Phase 09 P01 | 3min | 2 tasks | 6 files |
 | Phase 09 P02 | 4min | 2 tasks | 4 files |
+| Phase 10 P01 | 2min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,9 @@ Progress: [██████████] 100%
 - [Phase 09]: ED check in ACS uses redirect-on-denial pattern matching existing SAML error flow
 - [Phase 09]: Per-request ED revalidation: cache-first, LDAP on miss, stale on outage, 401 on removal
 - [Phase 09]: user_role=None when ED disabled preserves existing roles; simple mode bypasses ED entirely
+- [Phase 10]: Config fetch failure defaults to simple mode -- email form always accessible
+- [Phase 10]: SSO button redirects to /api/saml/login (not discovery_url) -- backend constructs AuthnRequest
+- [Phase 10]: Loading guard on same background image prevents flash of wrong form
 
 ### Pending Todos
 
@@ -93,6 +97,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-25T12:49:47.754Z
-Stopped at: Phase 10 context gathered
-Resume file: .planning/phases/10-frontend-auth-flow/10-CONTEXT.md
+Last session: 2026-03-25T16:21:23Z
+Stopped at: Completed 10-01-PLAN.md
+Resume file: .planning/phases/10-frontend-auth-flow/10-01-SUMMARY.md
