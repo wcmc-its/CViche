@@ -16,9 +16,15 @@ interface ConsentStatus {
   current_hash: string
 }
 
+interface AuthConfig {
+  mode: 'simple' | 'saml'
+  discovery_url?: string
+}
+
 interface AuthContextType {
   user: User | null
   loading: boolean
+  authConfig: AuthConfig | null
   consentStatus: ConsentStatus | null
   consentLoading: boolean
   needsConsent: boolean
@@ -35,6 +41,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true)
   const [consentStatus, setConsentStatus] = useState<ConsentStatus | null>(null)
   const [consentLoading, setConsentLoading] = useState(false)
+  const [authConfig, setAuthConfig] = useState<AuthConfig | null>(null)
+
+  const fetchConfig = async () => {
+    try {
+      const res = await fetch('/api/auth/config')
+      if (res.ok) {
+        setAuthConfig(await res.json())
+      } else {
+        setAuthConfig({ mode: 'simple' })
+      }
+    } catch {
+      setAuthConfig({ mode: 'simple' })
+    }
+  }
 
   const refreshUser = async () => {
     try {
@@ -66,6 +86,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   useEffect(() => {
+    fetchConfig()
     refreshUser()
   }, [])
 
@@ -107,6 +128,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     <AuthContext.Provider value={{
       user,
       loading,
+      authConfig,
       consentStatus,
       consentLoading,
       needsConsent,

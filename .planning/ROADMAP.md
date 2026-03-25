@@ -189,7 +189,7 @@ Plans:
 **Plans:** 1 plan
 
 Plans:
-- [ ] 10-01: Update AuthContext.tsx and LoginPage.tsx with mode detection, conditional rendering, SSO redirect, and error display
+- [ ] 10-01-PLAN.md -- Add mode detection to AuthContext, conditional SSO button/email form rendering to LoginPage
 
 ### Phase 11: Testing, Docs & Skill Extraction
 **Goal**: The complete auth flow is validated against a mock IdP, SP registration is documented, and the auth pattern is captured as a reusable skill
