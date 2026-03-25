@@ -65,6 +65,9 @@ archive/
 # Auth config
 web_interface/backend/auth_config.yaml
 
+# SAML SP certificates (auto-generated)
+web_interface/backend/certs/
+
 # Node.js
 node_modules/
 web_interface/frontend/dist/

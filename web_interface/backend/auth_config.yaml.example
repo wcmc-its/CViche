@@ -5,7 +5,7 @@ saml:
   entity_id: ""                    # SP entity ID (e.g., "https://cviche.med.cornell.edu/shibboleth")
   idp_metadata_url: ""             # IdP metadata URL
   discovery_url: ""                # WAYF discovery service URL
-  cert_dir: ""                     # Directory containing SP key/cert files
+  cert_dir: "certs"                # Directory containing SP key/cert files (auto-generated if missing)
 
 allowed_users:
   - user@example.com
