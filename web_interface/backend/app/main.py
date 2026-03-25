@@ -8,7 +8,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 
 from app.database import init_db
-from app.api import upload, runs, steps, websocket, auth_routes, consent_routes, feedback_routes, admin_routes
+from app.api import upload, runs, steps, websocket, auth_routes, consent_routes, feedback_routes, admin_routes, saml_routes
 
 # ---------------------------------------------------------------------------
 # Allowed origins (env-configurable, comma-separated)
@@ -25,12 +25,18 @@ _allowed_origins = [
 # ---------------------------------------------------------------------------
 # CSRF protection middleware
 # ---------------------------------------------------------------------------
+CSRF_EXEMPT_PATHS = {"/api/saml/acs"}
+
+
 class CSRFMiddleware(BaseHTTPMiddleware):
     """Reject cross-origin state-changing requests whose Origin header
     does not match the allowed origins list."""
 
     async def dispatch(self, request, call_next):
         if request.method in ("POST", "PUT", "DELETE", "PATCH"):
+            # Skip CSRF for SAML ACS (IdP posts from external origin)
+            if request.url.path in CSRF_EXEMPT_PATHS:
+                return await call_next(request)
             origin = request.headers.get("origin") or ""
             if origin and not any(origin.startswith(o) for o in _allowed_origins):
                 return JSONResponse(
@@ -92,6 +98,7 @@ app.include_router(runs.router, prefix="/api", tags=["runs"])
 app.include_router(steps.router, prefix="/api", tags=["steps"])
 app.include_router(feedback_routes.router, prefix="/api", tags=["feedback"])
 app.include_router(admin_routes.router, prefix="/api", tags=["admin"])
+app.include_router(saml_routes.router, prefix="/api", tags=["saml"])
 app.include_router(websocket.router, tags=["websocket"])
 
 
