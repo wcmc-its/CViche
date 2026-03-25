@@ -1,14 +1,35 @@
-import { useState, FormEvent } from 'react'
+import { useState, FormEvent, useEffect } from 'react'
+import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import ErrorBanner from './ErrorBanner'
 import { LogIn, Loader2 } from 'lucide-react'
 
+const SAML_ERROR_MESSAGES: Record<string, string> = {
+  auth_failed: "Authentication failed. Please try again or contact IT support.",
+  missing_attributes: "Your account is missing required information. Contact your IT administrator.",
+  saml_not_enabled: "SSO login is not available. Please use the standard sign-in form.",
+}
+
 export default function LoginPage() {
   const { login } = useAuth()
+  const [searchParams] = useSearchParams()
+  const navigate = useNavigate()
   const [displayName, setDisplayName] = useState('')
   const [email, setEmail] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [samlError, setSamlError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+
+  // Read SAML error from URL query params on mount
+  useEffect(() => {
+    const errorCode = searchParams.get('error')
+    if (errorCode) {
+      const message = SAML_ERROR_MESSAGES[errorCode] || "Something went wrong during sign-in. Please try again."
+      setSamlError(message)
+      // Clean URL -- remove error param so it doesn't persist on refresh
+      navigate(window.location.pathname, { replace: true })
+    }
+  }, [searchParams, navigate])
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -48,6 +69,12 @@ export default function LoginPage() {
           <p className="text-gray-600 mb-6 italic">
             Enter your name and WCM email to get started.
           </p>
+
+          {samlError && (
+            <div className="mb-4">
+              <ErrorBanner message={samlError} onDismiss={() => setSamlError(null)} />
+            </div>
+          )}
 
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>
