@@ -11,6 +11,14 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
+from app.config_loader import get_config_value
+from app.ed_group_lookup import (
+    get_cached_membership,
+    set_cached_membership,
+    get_stale_membership,
+    check_ed_membership,
+    EdUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +83,55 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
             status_code=401,
             detail={"error": "account_disabled", "message": "Your account has been disabled. Contact an administrator."}
         )
+
+    # ED group re-check for SAML users (if enabled)
+    if user.auth_method == "saml":
+        ed_enabled = get_config_value(db, "ed_enabled")
+        if ed_enabled:
+            membership = get_cached_membership(user.email)
+            if membership is None:
+                # Cache miss -- query ED
+                ed_access_group = get_config_value(db, "ed_access_group") or ""
+                ed_admin_group = get_config_value(db, "ed_admin_group") or ""
+                ldap_url = os.environ.get("ED_LDAP_URL", "")
+                bind_dn = os.environ.get("ED_LDAP_BIND_DN", "")
+                bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
+                try:
+                    membership = check_ed_membership(
+                        email=user.email,
+                        access_group=ed_access_group,
+                        admin_group=ed_admin_group,
+                        ldap_url=ldap_url,
+                        bind_dn=bind_dn,
+                        bind_password=bind_password,
+                    )
+                    set_cached_membership(user.email, membership)
+                except EdUnavailableError:
+                    # ED unreachable -- use stale cache
+                    logger.warning("ED unavailable during per-request check for %s", user.email)
+                    membership = get_stale_membership(user.email)
+                    if membership is None:
+                        # No stale data available -- cannot verify membership
+                        raise HTTPException(
+                            status_code=401,
+                            detail={"error": "directory_unavailable",
+                                    "message": "Unable to verify group membership. Please try again later."}
+                        )
+
+            if not membership["in_access_group"]:
+                # User removed from access group -- deny
+                logger.warning("Per-request ED check: %s no longer in access group", user.email)
+                raise HTTPException(
+                    status_code=401,
+                    detail={"error": "not_authorized",
+                            "message": "You are no longer authorized to use CViche."}
+                )
+
+            # Sync role from ED group membership
+            new_role = "admin" if membership.get("in_admin_group") else "user"
+            if user.role != new_role:
+                user.role = new_role
+                db.commit()
 
     # Debounced last_active_at update (once per 60s)
     now = datetime.now()

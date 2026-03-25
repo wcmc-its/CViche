@@ -1,5 +1,6 @@
 """SAML 2.0 Service Provider endpoints."""
 import logging
+import os
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse, Response
@@ -10,6 +11,7 @@ from app.models import User
 from app.auth import create_session_cookie, get_cookie_settings, COOKIE_NAME
 from app.config_loader import get_config_value
 from app.saml_client import get_saml_client, extract_user_attrs
+from app.ed_group_lookup import check_ed_membership, set_cached_membership, EdUnavailableError
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -84,16 +86,56 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
         logger.error("SAML ACS processing failed", exc_info=True)
         return RedirectResponse("/login?error=auth_failed", status_code=302)
 
+    # ED group authorization check (if enabled)
+    ed_enabled = get_config_value(db, "ed_enabled")
+    membership = None
+    if ed_enabled:
+        ed_access_group = get_config_value(db, "ed_access_group") or ""
+        ed_admin_group = get_config_value(db, "ed_admin_group") or ""
+        ldap_url = os.environ.get("ED_LDAP_URL", "")
+        bind_dn = os.environ.get("ED_LDAP_BIND_DN", "")
+        bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
+
+        if not ldap_url or not bind_dn:
+            logger.error("ED LDAP credentials not configured (ED_LDAP_URL, ED_LDAP_BIND_DN)")
+            return RedirectResponse("/login?error=directory_unavailable", status_code=302)
+
+        try:
+            membership = check_ed_membership(
+                email=attrs["email"],
+                access_group=ed_access_group,
+                admin_group=ed_admin_group,
+                ldap_url=ldap_url,
+                bind_dn=bind_dn,
+                bind_password=bind_password,
+            )
+            if not membership["in_access_group"]:
+                logger.warning("SAML ACS: user %s not in ED access group", attrs["email"])
+                return RedirectResponse("/login?error=not_authorized", status_code=302)
+            # Cache the result for per-request checks
+            set_cached_membership(attrs["email"], membership)
+        except EdUnavailableError:
+            logger.error("ED unavailable during SAML login for %s", attrs["email"], exc_info=True)
+            return RedirectResponse("/login?error=directory_unavailable", status_code=302)
+
+    # Determine role based on ED groups (if enabled) or preserve existing
+    if ed_enabled and membership:
+        user_role = "admin" if membership.get("in_admin_group") else "user"
+    else:
+        user_role = None  # Don't override existing role when ED not enabled
+
     # JIT User Provisioning (upsert)
     user = db.query(User).filter(User.email == attrs["email"]).first()
     if user:
         user.display_name = attrs["display_name"]
         user.auth_method = "saml"
+        if user_role is not None:
+            user.role = user_role
     else:
         user = User(
             email=attrs["email"],
             display_name=attrs["display_name"],
-            role="user",
+            role=user_role or "user",
             auth_method="saml",
         )
         db.add(user)
