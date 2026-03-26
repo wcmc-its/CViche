@@ -54,7 +54,7 @@
 
 ### Security — Critical
 
-- [ ] **SEC-01**: File download endpoint rejects absolute paths and restricts access to run output directories only
+- [x] **SEC-01**: File download endpoint rejects absolute paths and restricts access to run output directories only
 - [x] **SEC-02**: SAML assertions require valid IdP signatures (`want_assertions_signed: True`)
 - [x] **SEC-03**: Application refuses to start without explicit `CVICHE_SESSION_SECRET` environment variable
 
@@ -131,7 +131,7 @@
 | TEST-01 | Phase 11 | Complete |
 | DOC-01 | Phase 11 | Complete |
 | SKILL-01 | Phase 11 | Complete |
-| SEC-01 | Phase 12 | Pending |
+| SEC-01 | Phase 12 | Complete |
 | SEC-02 | Phase 12 | Complete |
 | SEC-03 | Phase 12 | Complete |
 | SEC-04 | Phase 13 | Pending |

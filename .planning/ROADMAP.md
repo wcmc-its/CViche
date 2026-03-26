@@ -209,7 +209,7 @@ Plans:
 
 **Milestone Goal:** Fix critical security vulnerabilities, harden the web interface, and refactor backend/frontend architecture for proper separation of concerns.
 
-- [ ] **Phase 12: Critical Security Fixes** - Patch path traversal, SAML signature validation, and session secret vulnerabilities
+- [x] **Phase 12: Critical Security Fixes** - Patch path traversal, SAML signature validation, and session secret vulnerabilities (completed 2026-03-26)
 - [ ] **Phase 13: Security Hardening** - Upload validation, error sanitization, HTTP security headers, CORS lockdown
 - [ ] **Phase 14: Backend Service Layer** - Extract service functions from route handlers, deduplicate shared logic, centralize config
 - [ ] **Phase 15: Frontend Architecture** - Centralized API client, shared types, environment config, formatting utilities
@@ -224,7 +224,7 @@ Plans:
   1. Requesting a file download with `../` path components or an absolute path returns a 400 error and never accesses files outside the run output directory
   2. A SAML assertion with a missing or invalid IdP signature is rejected at the ACS endpoint -- the user is not logged in
   3. The application fails to start (raises an error at boot) if `CVICHE_SESSION_SECRET` is not set as an environment variable
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [ ] 12-01-PLAN.md -- Enforce session secret requirement, enable SAML signature validation, add SEC-02/SEC-03 regression tests
@@ -291,7 +291,7 @@ Phases 12-15 execute sequentially. Phase 12 (critical security) is highest prior
 | 9. ED Group Authorization | v1.2 | 2/2 | Complete | 2026-03-25 |
 | 10. Frontend Auth Flow | v1.2 | 1/1 | Complete | 2026-03-25 |
 | 11. Testing, Docs & Skill Extraction | v1.2 | 2/2 | Complete | 2026-03-26 |
-| 12. Critical Security Fixes | 1/2 | In Progress|  | - |
+| 12. Critical Security Fixes | 2/2 | Complete   | 2026-03-26 | - |
 | 13. Security Hardening | v1.3 | 0/TBD | Not started | - |
 | 14. Backend Service Layer | v1.3 | 0/TBD | Not started | - |
 | 15. Frontend Architecture | v1.3 | 0/TBD | Not started | - |
