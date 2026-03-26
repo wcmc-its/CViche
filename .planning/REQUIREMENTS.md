@@ -61,9 +61,9 @@
 ### Security — Hardening
 
 - [ ] **SEC-04**: File uploads validated by MIME type and magic bytes; filenames sanitized to random IDs
-- [ ] **SEC-05**: Error responses contain no internal file paths, stack traces, or implementation details
-- [ ] **SEC-06**: HTTP security headers set on all responses (CSP, X-Frame-Options, HSTS, X-Content-Type-Options)
-- [ ] **SEC-07**: CORS explicitly lists allowed methods and headers instead of wildcards
+- [x] **SEC-05**: Error responses contain no internal file paths, stack traces, or implementation details
+- [x] **SEC-06**: HTTP security headers set on all responses (CSP, X-Frame-Options, HSTS, X-Content-Type-Options)
+- [x] **SEC-07**: CORS explicitly lists allowed methods and headers instead of wildcards
 
 ### Backend Architecture
 
@@ -135,9 +135,9 @@
 | SEC-02 | Phase 12 | Complete |
 | SEC-03 | Phase 12 | Complete |
 | SEC-04 | Phase 13 | Pending |
-| SEC-05 | Phase 13 | Pending |
-| SEC-06 | Phase 13 | Pending |
-| SEC-07 | Phase 13 | Pending |
+| SEC-05 | Phase 13 | Complete |
+| SEC-06 | Phase 13 | Complete |
+| SEC-07 | Phase 13 | Complete |
 | ARCH-01 | Phase 14 | Pending |
 | ARCH-02 | Phase 14 | Pending |
 | ARCH-03 | Phase 14 | Pending |

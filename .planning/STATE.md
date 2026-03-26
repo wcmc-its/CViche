@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.3
 milestone_name: Code Quality & Security
-status: completed
-stopped_at: Phase 13 context gathered
-last_updated: "2026-03-26T13:08:16.315Z"
-last_activity: 2026-03-26 -- Completed 12-02 path traversal fix with _resolve_safe_path and regression tests
+status: in-progress
+stopped_at: Completed 13-01-PLAN.md
+last_updated: "2026-03-26T19:42:58Z"
+last_activity: 2026-03-26 -- Completed 13-01 error sanitization, security headers, CORS lockdown
 progress:
   total_phases: 4
   completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
-  percent: 100
+  total_plans: 4
+  completed_plans: 3
+  percent: 75
 ---
 
 # Project State
@@ -21,21 +21,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** Faculty can upload a CV and get back a correctly formatted WCM document without manual reformatting
-**Current focus:** Phase 12 -- Critical Security Fixes
+**Current focus:** Phase 13 -- Security Hardening
 
 ## Current Position
 
-Phase: 12 of 15 (Critical Security Fixes) -- COMPLETE
-Plan: 2 of 2 complete
-Status: Phase Complete
-Last activity: 2026-03-26 -- Completed 12-02 path traversal fix with _resolve_safe_path and regression tests
+Phase: 13 of 15 (Security Hardening) -- IN PROGRESS
+Plan: 1 of 2 complete
+Status: In Progress
+Last activity: 2026-03-26 -- Completed 13-01 error sanitization, security headers, CORS lockdown
 
-Progress: [██████████] 100%
+Progress: [███████░░░] 75%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 21 (v1.0: 9, v1.1: 4, v1.2: 8)
+- Total plans completed: 22 (v1.0: 9, v1.1: 4, v1.2: 8, v1.3: 1)
 - Average duration: ~5 min/plan (v1.2 average)
 - Total execution time: --
 
@@ -57,6 +57,7 @@ Progress: [██████████] 100%
 | Phase 11 P02 | 6min | 2 tasks | 4 files |
 | Phase 12 P01 | 3min | 2 tasks | 5 files |
 | Phase 12 P02 | 5min | 2 tasks | 2 files |
+| Phase 13 P01 | 4min | 2 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -67,6 +68,7 @@ Progress: [██████████] 100%
 - Phase ordering: critical security first, then hardening, then backend refactor, then frontend
 - 12-01: Session secret enforced via RuntimeError; SAML signature validation enabled; [SECURITY] log prefix established
 - 12-02: Path traversal eliminated via _resolve_safe_path(); URL-encoded traversal tested; error responses sanitized
+- 13-01: SecurityHeadersMiddleware + global exception handler + CORS lockdown; exception handling in middleware dispatch for Starlette 0.52+ compatibility
 
 ### Pending Todos
 
@@ -78,6 +80,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-26T13:08:16.312Z
-Stopped at: Phase 13 context gathered
-Resume file: .planning/phases/13-security-hardening/13-CONTEXT.md
+Last session: 2026-03-26T19:42:58Z
+Stopped at: Completed 13-01-PLAN.md
+Resume file: .planning/phases/13-security-hardening/13-02-PLAN.md
