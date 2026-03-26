@@ -32,6 +32,51 @@ _allowed_origins = [
 CSRF_EXEMPT_PATHS = {"/api/saml/acs"}
 
 
+def _build_error_response(request, exc: Exception) -> JSONResponse:
+    """Build a sanitized error response, with optional debug traceback."""
+    logger.error(
+        "Unhandled exception on %s %s: %s",
+        request.method,
+        request.url.path,
+        str(exc),
+        exc_info=True,
+    )
+    if os.environ.get("CVICHE_DEBUG", "").lower() == "true":
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "internal_error",
+                "message": str(exc),
+                "traceback": traceback.format_exception(exc),
+            },
+        )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "internal_error",
+            "message": "An unexpected error occurred.",
+        },
+    )
+
+
+def _add_security_headers(response: JSONResponse) -> JSONResponse:
+    """Add security headers to a response."""
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self' 'unsafe-inline'; "
+        "img-src 'self' data:; "
+        "font-src 'self'; "
+        "connect-src 'self' ws: wss:; "
+        "frame-ancestors 'none'"
+    )
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    return response
+
+
 class CSRFMiddleware(BaseHTTPMiddleware):
     """Reject cross-origin state-changing requests whose Origin header
     does not match the allowed origins list."""
@@ -54,20 +99,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add security headers to all HTTP responses."""
 
     async def dispatch(self, request, call_next):
-        response = await call_next(request)
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; "
-            "script-src 'self'; "
-            "style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; "
-            "font-src 'self'; "
-            "connect-src 'self' ws: wss:; "
-            "frame-ancestors 'none'"
-        )
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            response = _build_error_response(request, exc)
+        _add_security_headers(response)
         return response
 
 
@@ -121,29 +157,7 @@ app.add_middleware(CSRFMiddleware)
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Catch-all: log full traceback server-side, return sanitized response to client."""
-    logger.error(
-        "Unhandled exception on %s %s: %s",
-        request.method,
-        request.url.path,
-        str(exc),
-        exc_info=True,
-    )
-    if os.environ.get("CVICHE_DEBUG", "").lower() == "true":
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": "internal_error",
-                "message": str(exc),
-                "traceback": traceback.format_exception(exc),
-            },
-        )
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "internal_error",
-            "message": "An unexpected error occurred.",
-        },
-    )
+    return _build_error_response(request, exc)
 
 
 # Include API routers
