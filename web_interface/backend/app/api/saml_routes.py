@@ -82,8 +82,15 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
         # Missing required attribute (e.g., mail)
         logger.warning("SAML ACS: missing attributes -- %s", str(e))
         return RedirectResponse("/login?error=missing_attributes", status_code=302)
-    except Exception:
-        logger.error("SAML ACS processing failed", exc_info=True)
+    except Exception as e:
+        # SEC-02: Log signature/validation failures with [SECURITY] prefix
+        err_msg = str(e).lower()
+        if "signature" in err_msg or "signed" in err_msg:
+            logger.warning(
+                "[SECURITY] SAML signature validation failed: %s", str(e)
+            )
+        else:
+            logger.error("SAML ACS processing failed", exc_info=True)
         return RedirectResponse("/login?error=auth_failed", status_code=302)
 
     # ED group authorization check (if enabled)

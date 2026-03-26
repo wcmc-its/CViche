@@ -126,7 +126,7 @@ def get_saml_client(db: Session) -> Saml2Client:
                 },
                 "allow_unsolicited": True,
                 "authn_requests_signed": False,
-                "want_assertions_signed": False,
+                "want_assertions_signed": True,  # SEC-02: reject unsigned SAML assertions
             }
         },
         "metadata": {
