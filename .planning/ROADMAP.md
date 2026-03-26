@@ -199,7 +199,7 @@ Plans:
   1. A mock IdP (MockSAML or equivalent) enables end-to-end SAML flow testing locally without WCM infrastructure
   2. An SP registration guide documents the exact metadata URL, attribute requirements, and steps needed to register CViche with the WCM IdP
   3. A Claude Code skill file captures the SAML + ED group auth pattern in a form that can be applied to other FastAPI projects
-**Plans:** 2 plans
+**Plans:** 1/2 plans executed
 
 Plans:
 - [ ] 11-01-PLAN.md -- Set up mock IdP Docker config, create integration test suite for SAML flow and error paths
@@ -222,4 +222,4 @@ Phases 7-11 execute sequentially. Phase 10 depends on Phases 7 and 8 (not 9), so
 | 8. SAML SP Client & Endpoints | v1.2 | 0/2 | Not started | - |
 | 9. ED Group Authorization | v1.2 | 0/2 | Not started | - |
 | 10. Frontend Auth Flow | 1/1 | Complete    | 2026-03-25 | - |
-| 11. Testing, Docs & Skill Extraction | v1.2 | 0/2 | Not started | - |
+| 11. Testing, Docs & Skill Extraction | 1/2 | In Progress|  | - |

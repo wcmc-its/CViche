@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Auth & Access Control
 status: completed
-stopped_at: Phase 11 UI-SPEC approved
-last_updated: "2026-03-25T23:37:27.114Z"
-last_activity: 2026-03-25 -- Executed 10-01 frontend auth flow
+stopped_at: Completed 11-01-PLAN.md
+last_updated: "2026-03-26T00:04:59.835Z"
+last_activity: 2026-03-26 -- Executed 11-01 mock IdP and auth integration tests
 progress:
   total_phases: 5
   completed_phases: 4
-  total_plans: 6
-  completed_plans: 6
-  percent: 100
+  total_plans: 8
+  completed_plans: 7
+  percent: 88
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-24)
 
 **Core value:** Faculty can upload a CV and get back a correctly formatted WCM document without manual reformatting
-**Current focus:** Phase 10 complete -- Frontend Auth Flow wired; ready for Phase 11
+**Current focus:** Phase 11 in progress -- Testing, docs & skill extraction
 
 ## Current Position
 
-Phase: 10 of 11 (Frontend Auth Flow) -- COMPLETE
-Plan: 1 of 1 in current phase (All plans complete)
-Status: Phase 10 complete, ready for Phase 11
-Last activity: 2026-03-25 -- Executed 10-01 frontend auth flow
+Phase: 11 of 11 (Testing, Docs & Skill Extraction)
+Plan: 2 of 2 in current phase
+Status: Phase 11 Plan 01 complete, ready for Plan 02
+Last activity: 2026-03-26 -- Executed 11-01 mock IdP and auth integration tests
 
-Progress: [██████████] 100%
+Progress: [████████░░] 88%
 
 ## Performance Metrics
 
@@ -56,6 +56,7 @@ Progress: [██████████] 100%
 | Phase 09 P01 | 3min | 2 tasks | 6 files |
 | Phase 09 P02 | 4min | 2 tasks | 4 files |
 | Phase 10 P01 | 2min | 2 tasks | 2 files |
+| Phase 11 P01 | 4min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -86,6 +87,9 @@ Progress: [██████████] 100%
 - [Phase 10]: Config fetch failure defaults to simple mode -- email form always accessible
 - [Phase 10]: SSO button redirects to /api/saml/login (not discovery_url) -- backend constructs AuthnRequest
 - [Phase 10]: Loading guard on same background image prevents flash of wrong form
+- [Phase 11]: requires_mock_idp skipif decorator with httpx probe for graceful Docker-absent skip
+- [Phase 11]: Inline _upsert_config in test files since pytest conftest not importable as module
+- [Phase 11]: ACS end-to-end with real IdP deferred; httpx tests validate SP metadata + mocked ACS
 
 ### Pending Todos
 
@@ -97,6 +101,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-25T23:37:27.111Z
-Stopped at: Phase 11 UI-SPEC approved
-Resume file: .planning/phases/11-testing-docs-skill-extraction/11-UI-SPEC.md
+Last session: 2026-03-26T00:04:59.833Z
+Stopped at: Completed 11-01-PLAN.md
+Resume file: None
