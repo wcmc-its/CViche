@@ -177,3 +177,109 @@ class TestErrorHelpers:
     def test_bad_request_custom_error_code(self):
         err = bad_request("test", error_code="custom_code")
         assert err.detail["error"] == "custom_code"
+
+
+# ============================================================
+# Admin Service Tests (ARCH-05)
+# ============================================================
+
+from app.services.admin_service import get_users_with_stats, get_single_user_stats
+from app.models import Run, Feedback
+from datetime import datetime
+
+
+class TestAdminService:
+    """ARCH-05: Admin stats use aggregation, not N+1."""
+
+    def test_get_users_with_stats_empty(self, db):
+        """No users returns empty list."""
+        result = get_users_with_stats(db)
+        assert result == []
+
+    def test_get_users_with_stats_no_runs(self, db):
+        """User with no runs has zero stats."""
+        user = User(email="norun@example.com", display_name="No Runs", role="user", auth_method="simple")
+        db.add(user)
+        db.commit()
+
+        result = get_users_with_stats(db)
+        assert len(result) == 1
+        assert result[0].total_runs == 0
+        assert result[0].total_cost == 0.0
+        assert result[0].feedback_count == 0
+        assert result[0].completed_run_count == 0
+        assert result[0].runs_today == 0
+
+    def test_get_users_with_stats_with_data(self, db):
+        """User with runs and feedback has correct aggregated stats."""
+        user = User(email="active@example.com", display_name="Active", role="user", auth_method="simple")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        # Add runs
+        now = datetime.now()
+        run1 = Run(id="RUN001", filename="cv1.docx", file_type="docx", status="complete",
+                    user_id=user.id, total_cost=0.15, started_at=now)
+        run2 = Run(id="RUN002", filename="cv2.docx", file_type="docx", status="running",
+                    user_id=user.id, total_cost=0.10, started_at=now)
+        db.add_all([run1, run2])
+        db.commit()
+
+        # Add feedback
+        fb = Feedback(run_id="RUN001", user_id=user.id, reviewer_role="faculty",
+                      overall_usefulness=4, manual_conversion_effort="moderate",
+                      correction_effort="moderate", likelihood_to_recommend=4)
+        db.add(fb)
+        db.commit()
+
+        result = get_users_with_stats(db)
+        assert len(result) == 1
+        assert result[0].total_runs == 2
+        assert result[0].total_cost == 0.25
+        assert result[0].completed_run_count == 1
+        assert result[0].feedback_count == 1
+        assert result[0].runs_today == 2  # Both started today
+
+    def test_get_users_with_stats_multiple_users(self, db):
+        """Multiple users each get their own stats (no cross-contamination)."""
+        u1 = User(email="u1@example.com", display_name="U1", role="user", auth_method="simple")
+        u2 = User(email="u2@example.com", display_name="U2", role="user", auth_method="simple")
+        db.add_all([u1, u2])
+        db.commit()
+        db.refresh(u1)
+        db.refresh(u2)
+
+        now = datetime.now()
+        run1 = Run(id="RUN001", filename="cv.docx", file_type="docx", status="complete",
+                    user_id=u1.id, total_cost=0.20, started_at=now)
+        db.add(run1)
+        db.commit()
+
+        result = get_users_with_stats(db)
+        # Results ordered by created_at desc, so u2 first (created second)
+        stats_map = {r.email: r for r in result}
+        assert stats_map["u1@example.com"].total_runs == 1
+        assert stats_map["u1@example.com"].total_cost == 0.20
+        assert stats_map["u2@example.com"].total_runs == 0
+        assert stats_map["u2@example.com"].total_cost == 0.0
+
+    def test_get_single_user_stats(self, db):
+        """get_single_user_stats returns correct stats for one user."""
+        user = User(email="single@example.com", display_name="Single", role="user", auth_method="simple")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        now = datetime.now()
+        run = Run(id="RUN001", filename="cv.docx", file_type="docx", status="complete",
+                  user_id=user.id, total_cost=0.30, started_at=now)
+        db.add(run)
+        db.commit()
+
+        stats = get_single_user_stats(user, db)
+        assert stats["total_runs"] == 1
+        assert stats["total_cost"] == 0.30
+        assert stats["completed_run_count"] == 1
+        assert stats["feedback_count"] == 0
+        assert stats["runs_today"] == 1
