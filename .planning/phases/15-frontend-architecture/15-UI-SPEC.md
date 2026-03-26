@@ -56,7 +56,11 @@ Exceptions: none -- standard Tailwind spacing utilities only.
 | Body | `text-sm` | 14px | `font-normal` (400) | 1.43 (Tailwind default) |
 | Label | `text-xs` | 12px | `font-semibold` (600) | 1.33 (Tailwind default) |
 | Heading | `text-lg` | 18px | `font-semibold` (600) | 1.56 (Tailwind default) |
-| Display | `text-2xl` | 24px | `font-bold` (700) | 1.33 (Tailwind default) |
+| Display | `text-2xl` | 24px | `font-semibold` (600) | 1.33 (Tailwind default) |
+
+Declared weights: `font-normal` (400) for body text, `font-semibold` (600) for all emphasis tiers (labels, headings, display, buttons).
+
+**Existing `font-bold` (700) note:** The codebase uses `font-bold` on 9 elements: 3 stat numbers (`text-2xl` in AdminDashboard, AdminFeedbackInsights, PipelineViewer), PipelineHeader h1, JsonViewerModal h2, and ConsentPage h1-h4. These are existing usages that this refactoring phase does NOT modify -- they remain `font-bold` in their component files. The design contract declares the 2 dominant weights (400, 600) that govern 95%+ of text rendering. The `font-bold` occurrences are a legacy emphasis pattern confined to specific components and are not part of the extractable design token system.
 
 Source: grep of all component files. The codebase uses exactly these 4 size tiers consistently.
 
