@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User, Run, Feedback, SystemConfig, Consent
 from app.auth import require_admin
+from app.errors import not_found, validation_error
 from app.schemas import (
     AdminStats,
     AdminUser,
@@ -23,6 +24,7 @@ from app.schemas import (
     AdminConfigUpdate,
     AdminUserUpdate,
 )
+from app.services.admin_service import get_users_with_stats, get_single_user_stats
 
 logger = logging.getLogger(__name__)
 
@@ -77,58 +79,7 @@ async def get_users(
     admin: User = Depends(require_admin),
 ):
     """Return all users with per-user stats."""
-    users = db.query(User).order_by(User.created_at.desc()).all()
-
-    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-
-    result = []
-    for u in users:
-        runs_today = (
-            db.query(func.count(Run.id))
-            .filter(Run.user_id == u.id, Run.started_at >= today_start)
-            .scalar()
-            or 0
-        )
-        total_runs = (
-            db.query(func.count(Run.id)).filter(Run.user_id == u.id).scalar() or 0
-        )
-        total_cost = (
-            db.query(func.sum(Run.total_cost)).filter(Run.user_id == u.id).scalar()
-            or 0.0
-        )
-        feedback_count = (
-            db.query(func.count(Feedback.id))
-            .filter(Feedback.user_id == u.id)
-            .scalar()
-            or 0
-        )
-        completed_run_count = (
-            db.query(func.count(Run.id))
-            .filter(Run.user_id == u.id, Run.status == "complete")
-            .scalar()
-            or 0
-        )
-
-        result.append(
-            AdminUser(
-                id=u.id,
-                email=u.email,
-                display_name=u.display_name,
-                role=u.role,
-                status=u.status,
-                daily_limit=u.daily_limit,
-                monthly_limit=u.monthly_limit,
-                runs_today=runs_today,
-                total_runs=total_runs,
-                total_cost=round(total_cost, 4),
-                feedback_count=feedback_count,
-                completed_run_count=completed_run_count,
-                last_active_at=u.last_active_at,
-                created_at=u.created_at,
-            )
-        )
-
-    return result
+    return get_users_with_stats(db)
 
 
 # ---------------------------------------------------------------------------
@@ -144,10 +95,7 @@ async def update_user(
     """Update a user's role, status, or limits."""
     target = db.query(User).filter(User.id == user_id).first()
     if not target:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": "not_found", "message": "User not found."},
-        )
+        raise not_found("User not found.")
 
     changes = {}
 
@@ -160,26 +108,14 @@ async def update_user(
                 .scalar()
             )
             if admin_count <= 1:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "validation_error",
-                        "message": "Cannot remove the last admin.",
-                    },
-                )
+                raise validation_error("Cannot remove the last admin.")
         changes["role"] = {"old": target.role, "new": body.role}
         target.role = body.role
 
     # Validate: can't disable yourself
     if body.status is not None and body.status != target.status:
         if target.id == admin.id and body.status == "disabled":
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "validation_error",
-                    "message": "Cannot disable your own account.",
-                },
-            )
+            raise validation_error("Cannot disable your own account.")
         # If disabling the last admin, block it
         if target.role == "admin" and body.status == "disabled":
             active_admin_count = (
@@ -192,13 +128,7 @@ async def update_user(
                 .scalar()
             )
             if active_admin_count < 1:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "validation_error",
-                        "message": "Cannot disable the last active admin.",
-                    },
-                )
+                raise validation_error("Cannot disable the last active admin.")
         changes["status"] = {"old": target.status, "new": body.status}
         target.status = body.status
 
@@ -224,33 +154,8 @@ async def update_user(
             json.dumps(changes),
         )
 
-    # Re-fetch stats for updated user
-    today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    runs_today = (
-        db.query(func.count(Run.id))
-        .filter(Run.user_id == target.id, Run.started_at >= today_start)
-        .scalar()
-        or 0
-    )
-    total_runs = (
-        db.query(func.count(Run.id)).filter(Run.user_id == target.id).scalar() or 0
-    )
-    total_cost = (
-        db.query(func.sum(Run.total_cost)).filter(Run.user_id == target.id).scalar()
-        or 0.0
-    )
-    feedback_count = (
-        db.query(func.count(Feedback.id))
-        .filter(Feedback.user_id == target.id)
-        .scalar()
-        or 0
-    )
-    completed_run_count = (
-        db.query(func.count(Run.id))
-        .filter(Run.user_id == target.id, Run.status == "complete")
-        .scalar()
-        or 0
-    )
+    # Re-fetch stats for updated user using service
+    stats = get_single_user_stats(target, db)
 
     return AdminUser(
         id=target.id,
@@ -260,11 +165,11 @@ async def update_user(
         status=target.status,
         daily_limit=target.daily_limit,
         monthly_limit=target.monthly_limit,
-        runs_today=runs_today,
-        total_runs=total_runs,
-        total_cost=round(total_cost, 4),
-        feedback_count=feedback_count,
-        completed_run_count=completed_run_count,
+        runs_today=stats["runs_today"],
+        total_runs=stats["total_runs"],
+        total_cost=stats["total_cost"],
+        feedback_count=stats["feedback_count"],
+        completed_run_count=stats["completed_run_count"],
         last_active_at=target.last_active_at,
         created_at=target.created_at,
     )
@@ -394,13 +299,7 @@ async def update_config(
     if body.admin_users is not None:
         # Validate: at least one admin must remain
         if len(body.admin_users) < 1:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "validation_error",
-                    "message": "At least one admin user is required.",
-                },
-            )
+            raise validation_error("At least one admin user is required.")
         # Ensure all admin users are in allowed users list
         allowed = body.allowed_users
         if allowed is None:
@@ -414,35 +313,17 @@ async def update_config(
 
         for admin_email in body.admin_users:
             if admin_email.lower() not in [a.lower() for a in allowed]:
-                raise HTTPException(
-                    status_code=400,
-                    detail={
-                        "error": "validation_error",
-                        "message": f"Admin user {admin_email} must also be in the allowed users list.",
-                    },
-                )
+                raise validation_error(f"Admin user {admin_email} must also be in the allowed users list.")
         _update_key("admin_users", body.admin_users)
 
     if body.rate_limit_daily is not None:
         if body.rate_limit_daily < 1:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "validation_error",
-                    "message": "Daily rate limit must be positive.",
-                },
-            )
+            raise validation_error("Daily rate limit must be positive.")
         _update_key("rate_limit_daily", body.rate_limit_daily)
 
     if body.rate_limit_monthly is not None:
         if body.rate_limit_monthly < 1:
-            raise HTTPException(
-                status_code=400,
-                detail={
-                    "error": "validation_error",
-                    "message": "Monthly rate limit must be positive.",
-                },
-            )
+            raise validation_error("Monthly rate limit must be positive.")
         _update_key("rate_limit_monthly", body.rate_limit_monthly)
 
     if body.consent_version is not None:
@@ -472,13 +353,7 @@ async def export_csv(
 ):
     """Export data as CSV. Supported types: runs, users, consent, feedback."""
     if export_type not in ("runs", "users", "consent", "feedback"):
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "validation_error",
-                "message": f"Invalid export type: {export_type}. Must be one of: runs, users, consent, feedback.",
-            },
-        )
+        raise validation_error(f"Invalid export type: {export_type}. Must be one of: runs, users, consent, feedback.")
 
     logger.info(
         "admin_export: admin=%s export_type=%s", admin.email, export_type
