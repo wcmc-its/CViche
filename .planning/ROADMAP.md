@@ -211,7 +211,7 @@ Plans:
 
 - [x] **Phase 12: Critical Security Fixes** - Patch path traversal, SAML signature validation, and session secret vulnerabilities (completed 2026-03-26)
 - [x] **Phase 13: Security Hardening** - Upload validation, error sanitization, HTTP security headers, CORS lockdown (completed 2026-03-26)
-- [ ] **Phase 14: Backend Service Layer** - Extract service functions from route handlers, deduplicate shared logic, centralize config
+- [x] **Phase 14: Backend Service Layer** - Extract service functions from route handlers, deduplicate shared logic, centralize config (completed 2026-03-26)
 - [ ] **Phase 15: Frontend Architecture** - Centralized API client, shared types, environment config, formatting utilities
 
 ## Phase Details
@@ -255,7 +255,7 @@ Plans:
   3. User provisioning from login (create-or-update) is a single shared function used by both simple auth and SAML ACS flows
   4. Hardcoded values (rate limits, cost-per-token rates, session TTL) live in config or environment variables, not scattered as literals in route handlers
   5. The admin user stats endpoint completes in O(1) queries (aggregation), not O(N) queries (one per user)
-**Plans:** 2/3 plans executed
+**Plans:** 3/3 plans complete
 
 Plans:
 - [ ] 14-01-PLAN.md -- Create service layer foundation: errors.py, config_service.py, run_service.py, user_service.py, and test suite
@@ -296,5 +296,5 @@ Phases 12-15 execute sequentially. Phase 12 (critical security) is highest prior
 | 11. Testing, Docs & Skill Extraction | v1.2 | 2/2 | Complete | 2026-03-26 |
 | 12. Critical Security Fixes | v1.3 | 2/2 | Complete | 2026-03-26 |
 | 13. Security Hardening | v1.3 | 2/2 | Complete | 2026-03-26 |
-| 14. Backend Service Layer | 2/3 | In Progress|  | - |
+| 14. Backend Service Layer | 3/3 | Complete   | 2026-03-26 | - |
 | 15. Frontend Architecture | v1.3 | 0/TBD | Not started | - |

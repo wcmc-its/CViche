@@ -3,8 +3,8 @@ gsd_state_version: 1.0
 milestone: v1.3
 milestone_name: Code Quality & Security
 status: executing
-stopped_at: Completed 14-03-PLAN.md
-last_updated: "2026-03-26T23:09:07Z"
+stopped_at: Completed 14-02-PLAN.md
+last_updated: "2026-03-26T23:20:06.892Z"
 last_activity: 2026-03-26 -- Completed 14-03 admin service O(1) aggregation queries
 progress:
   total_phases: 4
@@ -61,6 +61,7 @@ Progress: [██████████] 100%
 | Phase 13 P02 | 3min | 2 tasks | 3 files |
 | Phase 14 P01 | 2min | 2 tasks | 6 files |
 | Phase 14 P03 | 4min | 2 tasks | 3 files |
+| Phase 14 P02 | 14min | 2 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,7 @@ Progress: [██████████] 100%
 - 13-02: Magic bytes upload validation (PDF header, DOCX ZIP+word/document.xml); 50 MB size limit; filename randomization {run_id}.{ext}; validation on /estimate too
 - [Phase 14]: 14-01: Service layer foundation -- errors.py factory pattern, config_service env var overrides, check_run_access/provision_user extracted into services/
 - [Phase 14]: 14-03: Admin service -- O(1) subquery aggregation replacing N+1 per-user loop; error helper migration in admin routes
+- [Phase 14]: 14-02: Wired all non-admin routes to service layer (check_run_access, provision_user, config_service, error factories); security-opaque errors left as plain strings
 
 ### Pending Todos
 
@@ -86,6 +88,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-26T23:09:07Z
-Stopped at: Completed 14-03-PLAN.md
+Last session: 2026-03-26T23:20:06.890Z
+Stopped at: Completed 14-02-PLAN.md
 Resume file: None
