@@ -4,7 +4,8 @@
 
 - v1.0 Public Release - Phases 1-3 (shipped 2026-03-23)
 - v1.1 Web Interface UX - Phases 4-6 (shipped 2026-03-24)
-- v1.2 Auth & Access Control - Phases 7-11 (in progress)
+- v1.2 Auth & Access Control - Phases 7-11 (shipped 2026-03-26)
+- v1.3 Code Quality & Security - Phases 12-15 (in progress)
 
 ## Phases
 
@@ -121,17 +122,14 @@ Plans:
 
 </details>
 
-### v1.2 Auth & Access Control (In Progress)
+<details>
+<summary>v1.2 Auth & Access Control (Phases 7-11) - SHIPPED 2026-03-26</summary>
 
-**Milestone Goal:** Build dual-mode authentication (simple email + SAML SSO) and Enterprise Directory group-based authorization into CViche, ready to activate when approved. Extract a reusable auth skill for other projects.
-
-- [ ] **Phase 7: Config & Model Foundation** - Extend auth config for dual-mode switching and prepare the User model for SAML
-- [ ] **Phase 8: SAML SP Client & Endpoints** - Implement SAML 2.0 Service Provider with IdP redirect, assertion consumer, and metadata endpoints
-- [ ] **Phase 9: ED Group Authorization** - Gate user access by Enterprise Directory group membership via LDAP
-- [x] **Phase 10: Frontend Auth Flow** - Adapt login UI to render SSO or email form based on configured auth mode (completed 2026-03-25)
-- [x] **Phase 11: Testing, Docs & Skill Extraction** - Validate full auth flow with mock IdP, document SP registration, extract reusable auth skill (completed 2026-03-26)
-
-## Phase Details
+- [x] **Phase 7: Config & Model Foundation** - Extend auth config for dual-mode switching and prepare the User model for SAML
+- [x] **Phase 8: SAML SP Client & Endpoints** - Implement SAML 2.0 Service Provider with IdP redirect, assertion consumer, and metadata endpoints
+- [x] **Phase 9: ED Group Authorization** - Gate user access by Enterprise Directory group membership via LDAP
+- [x] **Phase 10: Frontend Auth Flow** - Adapt login UI to render SSO or email form based on configured auth mode
+- [x] **Phase 11: Testing, Docs & Skill Extraction** - Validate full auth flow with mock IdP, document SP registration, extract reusable auth skill
 
 ### Phase 7: Config & Model Foundation
 **Goal**: The auth system supports dual-mode configuration and the database is ready to track how users authenticate
@@ -145,7 +143,7 @@ Plans:
 **Plans:** 1 plan
 
 Plans:
-- [ ] 07-01-PLAN.md -- Extend auth_config.yaml schema, add Alembic migration for auth_method column, create config endpoint and mode guard
+- [x] 07-01-PLAN.md -- Extend auth_config.yaml schema, add Alembic migration for auth_method column, create config endpoint and mode guard
 
 ### Phase 8: SAML SP Client & Endpoints
 **Goal**: Users can authenticate through WCM's SAML IdP and receive a CViche session identical to simple-mode login
@@ -160,8 +158,8 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 08-01-PLAN.md -- Create saml_client.py factory (pysaml2 config, cert auto-gen, xmlsec1 detection, attribute extraction), test infrastructure
-- [ ] 08-02-PLAN.md -- Create saml_routes.py (login/ACS/metadata/logout endpoints), CSRF ACS exemption, complete tests, LoginPage error display
+- [x] 08-01-PLAN.md -- Create saml_client.py factory (pysaml2 config, cert auto-gen, xmlsec1 detection, attribute extraction), test infrastructure
+- [x] 08-02-PLAN.md -- Create saml_routes.py (login/ACS/metadata/logout endpoints), CSRF ACS exemption, complete tests, LoginPage error display
 
 ### Phase 9: ED Group Authorization
 **Goal**: Only users who belong to a designated Enterprise Directory group can access CViche in SAML mode
@@ -175,8 +173,8 @@ Plans:
 **Plans:** 2 plans
 
 Plans:
-- [ ] 09-01-PLAN.md -- Create ed_group_lookup.py with LDAP membership check, TTL cache, stale-on-error fallback, config seeding, and test suite
-- [ ] 09-02-PLAN.md -- Wire ED check into ACS handler and get_current_user, add frontend error messages, integration tests
+- [x] 09-01-PLAN.md -- Create ed_group_lookup.py with LDAP membership check, TTL cache, stale-on-error fallback, config seeding, and test suite
+- [x] 09-02-PLAN.md -- Wire ED check into ACS handler and get_current_user, add frontend error messages, integration tests
 
 ### Phase 10: Frontend Auth Flow
 **Goal**: The login page adapts to the configured auth mode, showing either an SSO button or the existing email form
@@ -189,7 +187,7 @@ Plans:
 **Plans:** 1/1 plans complete
 
 Plans:
-- [ ] 10-01-PLAN.md -- Add mode detection to AuthContext, conditional SSO button/email form rendering to LoginPage
+- [x] 10-01-PLAN.md -- Add mode detection to AuthContext, conditional SSO button/email form rendering to LoginPage
 
 ### Phase 11: Testing, Docs & Skill Extraction
 **Goal**: The complete auth flow is validated against a mock IdP, SP registration is documented, and the auth pattern is captured as a reusable skill
@@ -202,13 +200,83 @@ Plans:
 **Plans:** 2/2 plans complete
 
 Plans:
-- [ ] 11-01-PLAN.md -- Set up mock IdP Docker config, create integration test suite for SAML flow and error paths
-- [ ] 11-02-PLAN.md -- Write SP registration guide for WCM IT and extract reusable auth skill
+- [x] 11-01-PLAN.md -- Set up mock IdP Docker config, create integration test suite for SAML flow and error paths
+- [x] 11-02-PLAN.md -- Write SP registration guide for WCM IT and extract reusable auth skill
+
+</details>
+
+### v1.3 Code Quality & Security (In Progress)
+
+**Milestone Goal:** Fix critical security vulnerabilities, harden the web interface, and refactor backend/frontend architecture for proper separation of concerns.
+
+- [ ] **Phase 12: Critical Security Fixes** - Patch path traversal, SAML signature validation, and session secret vulnerabilities
+- [ ] **Phase 13: Security Hardening** - Upload validation, error sanitization, HTTP security headers, CORS lockdown
+- [ ] **Phase 14: Backend Service Layer** - Extract service functions from route handlers, deduplicate shared logic, centralize config
+- [ ] **Phase 15: Frontend Architecture** - Centralized API client, shared types, environment config, formatting utilities
+
+## Phase Details
+
+### Phase 12: Critical Security Fixes
+**Goal**: The three highest-severity security vulnerabilities are eliminated before any other work proceeds
+**Depends on**: Phase 11 (v1.2 complete)
+**Requirements**: SEC-01, SEC-02, SEC-03
+**Success Criteria** (what must be TRUE):
+  1. Requesting a file download with `../` path components or an absolute path returns a 400 error and never accesses files outside the run output directory
+  2. A SAML assertion with a missing or invalid IdP signature is rejected at the ACS endpoint -- the user is not logged in
+  3. The application fails to start (raises an error at boot) if `CVICHE_SESSION_SECRET` is not set as an environment variable
+**Plans:** 2 plans
+
+Plans:
+- [ ] 12-01-PLAN.md -- Enforce session secret requirement, enable SAML signature validation, add SEC-02/SEC-03 regression tests
+- [ ] 12-02-PLAN.md -- Fix path traversal in file download endpoints with shared _resolve_safe_path utility and regression tests
+
+### Phase 13: Security Hardening
+**Goal**: The web interface follows defense-in-depth security practices for uploads, error handling, headers, and CORS
+**Depends on**: Phase 12
+**Requirements**: SEC-04, SEC-05, SEC-06, SEC-07
+**Success Criteria** (what must be TRUE):
+  1. Uploading a file with a spoofed extension (e.g., .docx extension but PDF magic bytes) is rejected; uploaded files are stored with randomized filenames, not the user-provided name
+  2. Error responses from any endpoint contain no internal file paths, Python stack traces, or implementation details -- only a user-facing message and an error code
+  3. Every HTTP response includes CSP, X-Frame-Options, Strict-Transport-Security, and X-Content-Type-Options headers
+  4. CORS configuration explicitly lists allowed origins, methods, and headers instead of using wildcards
+**Plans**: TBD
+
+Plans:
+- [ ] 13-01: TBD
+
+### Phase 14: Backend Service Layer
+**Goal**: Route handlers are thin dispatchers that delegate to testable service functions, with shared logic defined once
+**Depends on**: Phase 13
+**Requirements**: ARCH-01, ARCH-02, ARCH-03, ARCH-04, ARCH-05, ARCH-06
+**Success Criteria** (what must be TRUE):
+  1. No route handler file contains direct database queries -- all data access goes through service functions in a `services/` directory
+  2. Run access control (checking if a user owns a run) is defined in one place and imported by all endpoints that need it -- grep finds zero duplicate implementations
+  3. User provisioning from login (create-or-update) is a single shared function used by both simple auth and SAML ACS flows
+  4. Hardcoded values (rate limits, cost-per-token rates, session TTL) live in config or environment variables, not scattered as literals in route handlers
+  5. The admin user stats endpoint completes in O(1) queries (aggregation), not O(N) queries (one per user)
+**Plans**: TBD
+
+Plans:
+- [ ] 14-01: TBD
+
+### Phase 15: Frontend Architecture
+**Goal**: The frontend has a single source of truth for API communication, types, environment config, and formatting utilities
+**Depends on**: Phase 14
+**Requirements**: FE-01, FE-02, FE-03, FE-04
+**Success Criteria** (what must be TRUE):
+  1. All API calls go through a centralized client module (`src/api/` or similar) with typed functions -- no component directly constructs fetch URLs
+  2. The WebSocket URL is derived from an environment variable or the centralized config, not hardcoded to `localhost` or any specific host
+  3. API response types are defined in `src/types/` and imported by components -- grep finds zero inline type definitions that duplicate the shared ones
+  4. Formatting utilities (time duration, dates, status labels) are defined once in `src/utils/` and imported wherever needed
+**Plans**: TBD
+
+Plans:
+- [ ] 15-01: TBD
 
 ## Progress
 
 **Execution Order:**
-Phases 7-11 execute sequentially. Phase 10 depends on Phases 7 and 8 (not 9), so it could theoretically overlap with Phase 9, but sequential execution is simpler.
+Phases 12-15 execute sequentially. Phase 12 (critical security) is highest priority and must complete before any other v1.3 work.
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
@@ -218,8 +286,12 @@ Phases 7-11 execute sequentially. Phase 10 depends on Phases 7 and 8 (not 9), so
 | 4. Feedback Form | v1.1 | 2/2 | Complete | 2026-03-23 |
 | 5. Run History Redesign | v1.1 | 1/1 | Complete | 2026-03-24 |
 | 6. End-User Help | v1.1 | 1/1 | Complete | 2026-03-24 |
-| 7. Config & Model Foundation | v1.2 | 0/1 | Not started | - |
-| 8. SAML SP Client & Endpoints | v1.2 | 0/2 | Not started | - |
-| 9. ED Group Authorization | v1.2 | 0/2 | Not started | - |
-| 10. Frontend Auth Flow | 1/1 | Complete    | 2026-03-25 | - |
-| 11. Testing, Docs & Skill Extraction | 2/2 | Complete    | 2026-03-26 | - |
+| 7. Config & Model Foundation | v1.2 | 1/1 | Complete | 2026-03-25 |
+| 8. SAML SP Client & Endpoints | v1.2 | 2/2 | Complete | 2026-03-25 |
+| 9. ED Group Authorization | v1.2 | 2/2 | Complete | 2026-03-25 |
+| 10. Frontend Auth Flow | v1.2 | 1/1 | Complete | 2026-03-25 |
+| 11. Testing, Docs & Skill Extraction | v1.2 | 2/2 | Complete | 2026-03-26 |
+| 12. Critical Security Fixes | v1.3 | 0/2 | Planned | - |
+| 13. Security Hardening | v1.3 | 0/TBD | Not started | - |
+| 14. Backend Service Layer | v1.3 | 0/TBD | Not started | - |
+| 15. Frontend Architecture | v1.3 | 0/TBD | Not started | - |

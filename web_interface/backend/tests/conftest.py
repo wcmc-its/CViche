@@ -1,3 +1,6 @@
+import os
+os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
+
 import pytest
 import json
 from unittest.mock import patch

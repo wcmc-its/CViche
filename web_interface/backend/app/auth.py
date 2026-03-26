@@ -1,7 +1,6 @@
 """Authentication middleware using itsdangerous signed cookies."""
 import os
 import time
-import secrets
 import logging
 from datetime import datetime
 
@@ -27,10 +26,9 @@ COOKIE_NAME = "cviche_session"
 
 _secret = os.environ.get("CVICHE_SESSION_SECRET")
 if not _secret:
-    _secret = secrets.token_hex(32)
-    logger.warning(
-        "CVICHE_SESSION_SECRET not set — using random key. "
-        "Sessions will not survive server restarts."
+    raise RuntimeError(
+        "CVICHE_SESSION_SECRET environment variable is required. "
+        'Generate one with: python -c "import secrets; print(secrets.token_hex(32))"'
     )
 
 _serializer = URLSafeTimedSerializer(_secret)
