@@ -1,5 +1,6 @@
 """Step details and data API endpoints."""
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
@@ -10,6 +11,8 @@ from app.database import get_db
 from app.models import Step, Log, Run, User
 from app.schemas import StepDetail, LogEntry, OutputPreview
 from app.auth import get_current_user
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -94,6 +97,56 @@ async def get_step_detail(
     )
 
 
+def _resolve_safe_path(filename: str, run_id: str) -> Path:
+    """Resolve filename to a validated path within run output directories.
+
+    Uses Path.resolve() + is_relative_to() for containment checking.
+    Rejects absolute paths and directory traversal attempts.
+
+    Raises:
+        HTTPException(400): Invalid or malicious filename
+        HTTPException(404): File not found in any allowed directory
+    """
+    # Reject absolute paths outright
+    if filename.startswith('/'):
+        logger.warning(
+            "[SECURITY] Blocked absolute path in file request: %s (run: %s)",
+            filename, run_id,
+        )
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    # Check for traversal attempts (belt-and-suspenders; resolve+is_relative_to is the real guard)
+    if ".." in filename:
+        logger.warning(
+            "[SECURITY] Blocked path traversal attempt: %s (run: %s)",
+            filename, run_id,
+        )
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    # Candidate 1: web_interface/outputs/{run_id}/
+    output_dir = (Path(__file__).parent.parent.parent.parent / "outputs" / run_id).resolve()
+    candidate = (output_dir / filename).resolve()
+
+    if candidate.is_relative_to(output_dir) and candidate.exists():
+        return candidate
+
+    # Candidate 2: src/unified_pipeline/outputs/ (search all stage subdirectories)
+    pipeline_dir = (
+        Path(__file__).parent.parent.parent.parent.parent
+        / "src" / "unified_pipeline" / "outputs"
+    ).resolve()
+
+    if pipeline_dir.exists():
+        base_filename = Path(filename).name
+        for stage_dir in pipeline_dir.iterdir():
+            if stage_dir.is_dir():
+                candidate = (stage_dir / base_filename).resolve()
+                if candidate.is_relative_to(pipeline_dir) and candidate.exists():
+                    return candidate
+
+    raise HTTPException(status_code=404, detail="File not found")
+
+
 @router.get("/run/{run_id}/data/{filename:path}")
 async def get_data_file(
     run_id: str,
@@ -106,41 +159,7 @@ async def get_data_file(
 
     _check_run_access(run_id, current_user, db)
 
-    # The filename can be an absolute path from the pipeline output directories
-    # or a relative path from web_interface/outputs/{run_id}
-
-    file_path = None
-
-    # First, check if filename is an absolute path that exists
-    if filename.startswith('/') and Path(filename).exists():
-        file_path = Path(filename)
-    else:
-        # Security: only allow relative paths, no parent directory traversal
-        if ".." in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-
-        # Check web_interface/outputs/{run_id} first
-        output_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
-        candidate = output_dir / filename
-
-        if candidate.exists():
-            file_path = candidate
-        else:
-            # Check the main pipeline output directories (src/unified_pipeline/outputs)
-            pipeline_output_dir = Path(__file__).parent.parent.parent.parent.parent / "src" / "unified_pipeline" / "outputs"
-
-            # Try to find the file in any stage output folder
-            for stage_dir in pipeline_output_dir.iterdir():
-                if stage_dir.is_dir():
-                    # Extract just the filename without path
-                    base_filename = Path(filename).name
-                    candidate = stage_dir / base_filename
-                    if candidate.exists():
-                        file_path = candidate
-                        break
-
-    if not file_path or not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+    file_path = _resolve_safe_path(filename, run_id)
 
     # Extract just the base filename for download
     download_filename = file_path.name
@@ -289,38 +308,7 @@ async def get_json_content(
 
     _check_run_access(run_id, current_user, db)
 
-    file_path = None
-
-    # First, check if filename is an absolute path that exists
-    if filename.startswith('/') and Path(filename).exists():
-        file_path = Path(filename)
-    else:
-        # Security: only allow relative paths, no parent directory traversal
-        if ".." in filename:
-            raise HTTPException(status_code=400, detail="Invalid filename")
-
-        # Check web_interface/outputs/{run_id} first
-        output_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
-        candidate = output_dir / filename
-
-        if candidate.exists():
-            file_path = candidate
-        else:
-            # Check the main pipeline output directories (src/unified_pipeline/outputs)
-            pipeline_output_dir = Path(__file__).parent.parent.parent.parent.parent / "src" / "unified_pipeline" / "outputs"
-
-            # Try to find the file in any stage output folder
-            for stage_dir in pipeline_output_dir.iterdir():
-                if stage_dir.is_dir():
-                    # Extract just the filename without path
-                    base_filename = Path(filename).name
-                    candidate = stage_dir / base_filename
-                    if candidate.exists():
-                        file_path = candidate
-                        break
-
-    if not file_path or not file_path.exists():
-        raise HTTPException(status_code=404, detail=f"File not found: {filename}")
+    file_path = _resolve_safe_path(filename, run_id)
 
     if not str(file_path).endswith(".json"):
         raise HTTPException(status_code=400, detail="Only JSON files can be viewed")
@@ -335,7 +323,7 @@ async def get_json_content(
             "content": data
         })
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error reading JSON: {str(e)}")
+        raise HTTPException(status_code=500, detail="Error reading file")
 
 
 # Mapping of stage IDs to filename patterns in prompt logs
