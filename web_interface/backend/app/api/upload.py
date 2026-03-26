@@ -1,5 +1,8 @@
 """File upload API endpoint."""
+import io
+import logging
 import secrets
+import zipfile
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -14,6 +17,29 @@ from app.pipeline.step_registry import STEP_REGISTRY
 from app.auth import get_current_user
 from app.rate_limiter import check_rate_limit
 from app.config_loader import get_config_value
+
+logger = logging.getLogger(__name__)
+
+MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
+PDF_MAGIC = b"%PDF-"
+ZIP_MAGIC = b"PK\x03\x04"
+
+
+def _validate_pdf_magic(content: bytes) -> bool:
+    """Check if content starts with PDF magic bytes."""
+    return content[:5] == PDF_MAGIC
+
+
+def _validate_docx_magic(content: bytes) -> bool:
+    """Check if content is a ZIP archive containing Word document structure."""
+    if content[:4] != ZIP_MAGIC:
+        return False
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            return "word/document.xml" in zf.namelist()
+    except (zipfile.BadZipFile, Exception):
+        return False
+
 
 router = APIRouter()
 
@@ -75,13 +101,36 @@ async def upload_cv(
     if rate_limit_error:
         raise HTTPException(status_code=429, detail=rate_limit_error)
 
-    # Generate run ID
+    # Read file content first for validation
+    content = await file.read()
+
+    # Check file size (50 MB limit)
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large ({len(content) // (1024*1024)} MB). Maximum size is 50 MB.",
+        )
+
+    # Validate magic bytes match claimed extension
+    if file_ext == ".pdf" and not _validate_pdf_magic(content):
+        logger.warning("[SECURITY] Rejected upload: file claims .pdf but magic bytes do not match (user=%s)", current_user.email)
+        raise HTTPException(
+            status_code=400,
+            detail="File content does not match .pdf format. The file may be corrupted or mislabeled.",
+        )
+    elif file_ext == ".docx" and not _validate_docx_magic(content):
+        logger.warning("[SECURITY] Rejected upload: file claims .docx but magic bytes do not match (user=%s)", current_user.email)
+        raise HTTPException(
+            status_code=400,
+            detail="File content does not match .docx format. The file may be corrupted or mislabeled.",
+        )
+
+    # Generate run ID (after validation so rejected uploads don't waste IDs)
     run_id = generate_run_id()
 
-    # Save uploaded file
-    file_path = UPLOAD_DIR / f"{run_id}_{file.filename}"
+    # Save with randomized filename (no user-provided text on filesystem)
+    file_path = UPLOAD_DIR / f"{run_id}.{file_ext.lstrip('.')}"
     with open(file_path, "wb") as f:
-        content = await file.read()
         f.write(content)
 
     # Create run record
@@ -148,6 +197,28 @@ async def estimate_processing(
 
     # Read file content
     content = await file.read()
+
+    # Check file size
+    if len(content) > MAX_UPLOAD_SIZE:
+        raise HTTPException(
+            status_code=400,
+            detail=f"File too large ({len(content) // (1024*1024)} MB). Maximum size is 50 MB.",
+        )
+
+    # Validate magic bytes
+    if file_ext == ".pdf" and not _validate_pdf_magic(content):
+        logger.warning("[SECURITY] Rejected estimate: file claims .pdf but magic bytes do not match")
+        raise HTTPException(
+            status_code=400,
+            detail="File content does not match .pdf format. The file may be corrupted or mislabeled.",
+        )
+    elif file_ext == ".docx" and not _validate_docx_magic(content):
+        logger.warning("[SECURITY] Rejected estimate: file claims .docx but magic bytes do not match")
+        raise HTTPException(
+            status_code=400,
+            detail="File content does not match .docx format. The file may be corrupted or mislabeled.",
+        )
+
     file_size_kb = len(content) / 1024
 
     # Extract actual text from document to estimate tokens

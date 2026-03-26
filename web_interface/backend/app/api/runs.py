@@ -154,7 +154,7 @@ async def start_run(
 
     # Get the uploaded file path
     upload_dir = Path(__file__).parent.parent.parent.parent / "uploads"
-    file_path = upload_dir / f"{run_id}_{run.filename}"
+    file_path = upload_dir / f"{run_id}.{run.file_type}"
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Uploaded file not found")
@@ -240,7 +240,7 @@ async def restart_run(
     original_run = _check_run_access(run_id, current_user, db)
 
     # Locate the original uploaded file
-    original_file = UPLOAD_DIR / f"{run_id}_{original_run.filename}"
+    original_file = UPLOAD_DIR / f"{run_id}.{original_run.file_type}"
     if not original_file.exists():
         raise HTTPException(
             status_code=404,
@@ -252,7 +252,7 @@ async def restart_run(
 
     # Generate new run and copy file
     new_run_id = generate_run_id()
-    new_file = UPLOAD_DIR / f"{new_run_id}_{original_run.filename}"
+    new_file = UPLOAD_DIR / f"{new_run_id}.{original_run.file_type}"
     shutil.copy2(str(original_file), str(new_file))
 
     # Create new Run record, inheriting submission_type from original
