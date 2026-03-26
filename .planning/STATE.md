@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.3
 milestone_name: Code Quality & Security
-status: completed
-stopped_at: Completed 13-02-PLAN.md
-last_updated: "2026-03-26T19:53:48.400Z"
-last_activity: 2026-03-26 -- Completed 13-02 magic bytes upload validation, filename randomization
+status: executing
+stopped_at: Completed 14-01-PLAN.md
+last_updated: "2026-03-26T20:51:01.367Z"
+last_activity: 2026-03-26 -- Completed 14-01 service layer foundation (errors, config, run/user services)
 progress:
   total_phases: 4
   completed_phases: 2
-  total_plans: 4
-  completed_plans: 4
-  percent: 100
+  total_plans: 7
+  completed_plans: 5
+  percent: 71
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** Faculty can upload a CV and get back a correctly formatted WCM document without manual reformatting
-**Current focus:** Phase 13 -- Security Hardening
+**Current focus:** Phase 14 -- Backend Service Layer
 
 ## Current Position
 
-Phase: 13 of 15 (Security Hardening) -- COMPLETE
-Plan: 2 of 2 complete
-Status: Phase Complete
-Last activity: 2026-03-26 -- Completed 13-02 magic bytes upload validation, filename randomization
+Phase: 14 of 15 (Backend Service Layer) -- IN PROGRESS
+Plan: 1 of 3 complete
+Status: Executing
+Last activity: 2026-03-26 -- Completed 14-01 service layer foundation (errors, config, run/user services)
 
-Progress: [██████████] 100%
+Progress: [███████░░░] 71%
 
 ## Performance Metrics
 
@@ -59,6 +59,7 @@ Progress: [██████████] 100%
 | Phase 12 P02 | 5min | 2 tasks | 2 files |
 | Phase 13 P01 | 4min | 2 tasks | 3 files |
 | Phase 13 P02 | 3min | 2 tasks | 3 files |
+| Phase 14 P01 | 2min | 2 tasks | 6 files |
 
 ## Accumulated Context
 
@@ -71,6 +72,7 @@ Progress: [██████████] 100%
 - 12-02: Path traversal eliminated via _resolve_safe_path(); URL-encoded traversal tested; error responses sanitized
 - 13-01: SecurityHeadersMiddleware + global exception handler + CORS lockdown; exception handling in middleware dispatch for Starlette 0.52+ compatibility
 - 13-02: Magic bytes upload validation (PDF header, DOCX ZIP+word/document.xml); 50 MB size limit; filename randomization {run_id}.{ext}; validation on /estimate too
+- [Phase 14]: 14-01: Service layer foundation -- errors.py factory pattern, config_service env var overrides, check_run_access/provision_user extracted into services/
 
 ### Pending Todos
 
@@ -82,6 +84,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-26T19:50:50.606Z
-Stopped at: Completed 13-02-PLAN.md
+Last session: 2026-03-26T20:51:01.365Z
+Stopped at: Completed 14-01-PLAN.md
 Resume file: None
