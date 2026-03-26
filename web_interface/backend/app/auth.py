@@ -18,10 +18,11 @@ from app.ed_group_lookup import (
     check_ed_membership,
     EdUnavailableError,
 )
+from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
 
 logger = logging.getLogger(__name__)
 
-SESSION_TTL = 7 * 24 * 3600  # 7 days
+SESSION_TTL = _CFG_SESSION_TTL
 COOKIE_NAME = "cviche_session"
 
 _secret = os.environ.get("CVICHE_SESSION_SECRET")

@@ -12,6 +12,7 @@ from app.auth import create_session_cookie, get_cookie_settings, COOKIE_NAME
 from app.config_loader import get_config_value
 from app.saml_client import get_saml_client, extract_user_attrs
 from app.ed_group_lookup import check_ed_membership, set_cached_membership, EdUnavailableError
+from app.services.user_service import provision_user
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -132,22 +133,13 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
         user_role = None  # Don't override existing role when ED not enabled
 
     # JIT User Provisioning (upsert)
-    user = db.query(User).filter(User.email == attrs["email"]).first()
-    if user:
-        user.display_name = attrs["display_name"]
-        user.auth_method = "saml"
-        if user_role is not None:
-            user.role = user_role
-    else:
-        user = User(
-            email=attrs["email"],
-            display_name=attrs["display_name"],
-            role=user_role or "user",
-            auth_method="saml",
-        )
-        db.add(user)
-    db.commit()
-    db.refresh(user)
+    user = provision_user(
+        db=db,
+        email=attrs["email"],
+        display_name=attrs["display_name"],
+        auth_method="saml",
+        role=user_role,
+    )
 
     # Build redirect response with session cookie
     response = RedirectResponse(relay_state or "/", status_code=302)

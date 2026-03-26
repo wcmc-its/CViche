@@ -9,6 +9,7 @@ from app.database import get_db
 from app.models import User, Consent
 from app.auth import get_current_user
 from app.config_loader import get_config_value
+from app.errors import validation_error
 from app.consent import get_consent_text, get_consent_hash
 from app.schemas import ConsentStatus, ConsentSubmit
 
@@ -49,13 +50,7 @@ async def submit_consent(
     """Record consent and update user record."""
     # Validate submission type
     if body.default_submission_type not in ("own_cv", "authorized_admin"):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "validation_error",
-                "message": "default_submission_type must be 'own_cv' or 'authorized_admin'.",
-            },
-        )
+        raise validation_error("default_submission_type must be 'own_cv' or 'authorized_admin'.")
 
     current_version = str(get_config_value(db, "consent_version") or "1.0")
     text_hash = get_consent_hash()

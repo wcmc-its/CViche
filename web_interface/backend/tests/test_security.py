@@ -464,7 +464,7 @@ class TestUploadValidation:
             files={"file": ("resume.docx", pdf_content, "application/octet-stream")},
         )
         assert response.status_code == 400
-        assert "does not match .docx format" in response.json()["detail"]
+        assert "does not match .docx format" in response.json()["detail"]["message"]
 
     def test_spoofed_pdf_with_zip_content_rejected(self, client, db, seed_simple_mode):
         """A file with .pdf extension but ZIP magic bytes is rejected."""
@@ -475,7 +475,7 @@ class TestUploadValidation:
             files={"file": ("resume.pdf", zip_content, "application/octet-stream")},
         )
         assert response.status_code == 400
-        assert "does not match .pdf format" in response.json()["detail"]
+        assert "does not match .pdf format" in response.json()["detail"]["message"]
 
     def test_valid_pdf_accepted(self, client, db, seed_simple_mode, tmp_path):
         """A legitimate PDF file is accepted."""
@@ -504,7 +504,7 @@ class TestUploadValidation:
                 files={"file": ("big.pdf", big_content, "application/pdf")},
             )
         assert response.status_code == 400
-        assert "too large" in response.json()["detail"].lower()
+        assert "too large" in response.json()["detail"]["message"].lower()
 
     def test_randomized_filename_on_disk(self, client, db, seed_simple_mode, tmp_path):
         """Uploaded files are stored with randomized names, not the user-provided filename."""
@@ -545,7 +545,7 @@ class TestUploadValidation:
             files={"file": ("resume.docx", pdf_content, "application/octet-stream")},
         )
         assert response.status_code == 400
-        assert "does not match .docx format" in response.json()["detail"]
+        assert "does not match .docx format" in response.json()["detail"]["message"]
 
     def test_random_bytes_rejected(self, client, db, seed_simple_mode):
         """A file with random bytes (not matching any format) is rejected."""

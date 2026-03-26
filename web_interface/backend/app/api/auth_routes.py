@@ -13,6 +13,8 @@ from app.schemas import LoginRequest, LoginResponse, AuthConfigResponse, MeRespo
 from app.auth import create_session_cookie, get_cookie_settings, get_current_user, COOKIE_NAME
 from app.config_loader import get_config_value
 from app.rate_limiter import get_quota
+from app.services.user_service import provision_user
+from app.services.config_service import LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +24,6 @@ router = APIRouter()
 # In-memory rate limiter: {ip: [timestamp, ...]}
 # ---------------------------------------------------------------------------
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
-RATE_LIMIT_MAX = 10
-RATE_LIMIT_WINDOW = 60  # seconds
 
 
 def _check_rate_limit(ip: str) -> bool:
@@ -31,9 +31,9 @@ def _check_rate_limit(ip: str) -> bool:
     now = time.time()
     # Prune entries older than the window
     _rate_limit_store[ip] = [
-        ts for ts in _rate_limit_store[ip] if now - ts < RATE_LIMIT_WINDOW
+        ts for ts in _rate_limit_store[ip] if now - ts < LOGIN_RATE_LIMIT_WINDOW
     ]
-    if len(_rate_limit_store[ip]) >= RATE_LIMIT_MAX:
+    if len(_rate_limit_store[ip]) >= LOGIN_RATE_LIMIT_MAX:
         return False
     _rate_limit_store[ip].append(now)
     return True
@@ -99,21 +99,13 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
     role = "admin" if email_lower in admin_lower else "user"
 
     # Create or update User record
-    user = db.query(User).filter(User.email == email_lower).first()
-    if user:
-        user.display_name = body.display_name.strip()
-        user.role = role
-        user.auth_method = "simple"
-    else:
-        user = User(
-            email=email_lower,
-            display_name=body.display_name.strip(),
-            role=role,
-            auth_method="simple",
-        )
-        db.add(user)
-    db.commit()
-    db.refresh(user)
+    user = provision_user(
+        db=db,
+        email=email_lower,
+        display_name=body.display_name.strip(),
+        auth_method="simple",
+        role=role,
+    )
 
     # Build response
     response_data = LoginResponse(

@@ -17,10 +17,10 @@ from app.pipeline.step_registry import STEP_REGISTRY
 from app.auth import get_current_user
 from app.rate_limiter import check_rate_limit
 from app.config_loader import get_config_value
+from app.services.config_service import MAX_UPLOAD_SIZE, COST_PER_1K_TOKENS, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS
+from app.errors import bad_request
 
 logger = logging.getLogger(__name__)
-
-MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
 PDF_MAGIC = b"%PDF-"
 ZIP_MAGIC = b"PK\x03\x04"
 
@@ -87,14 +87,11 @@ async def upload_cv(
 
     # Validate file type
     if not file.filename:
-        raise HTTPException(status_code=400, detail="No filename provided")
+        raise bad_request("No filename provided")
 
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in [".docx", ".pdf"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type: {file_ext}. Only .docx and .pdf are supported."
-        )
+        raise bad_request(f"Unsupported file type: {file_ext}. Only .docx and .pdf are supported.")
 
     # Check rate limit (after file validation so bad uploads don't count)
     rate_limit_error = check_rate_limit(current_user, db)
@@ -104,26 +101,17 @@ async def upload_cv(
     # Read file content first for validation
     content = await file.read()
 
-    # Check file size (50 MB limit)
+    # Check file size
     if len(content) > MAX_UPLOAD_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large ({len(content) // (1024*1024)} MB). Maximum size is 50 MB.",
-        )
+        raise bad_request(f"File too large ({len(content) // (1024*1024)} MB). Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.")
 
     # Validate magic bytes match claimed extension
     if file_ext == ".pdf" and not _validate_pdf_magic(content):
         logger.warning("[SECURITY] Rejected upload: file claims .pdf but magic bytes do not match (user=%s)", current_user.email)
-        raise HTTPException(
-            status_code=400,
-            detail="File content does not match .pdf format. The file may be corrupted or mislabeled.",
-        )
+        raise bad_request("File content does not match .pdf format. The file may be corrupted or mislabeled.")
     elif file_ext == ".docx" and not _validate_docx_magic(content):
         logger.warning("[SECURITY] Rejected upload: file claims .docx but magic bytes do not match (user=%s)", current_user.email)
-        raise HTTPException(
-            status_code=400,
-            detail="File content does not match .docx format. The file may be corrupted or mislabeled.",
-        )
+        raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
 
     # Generate run ID (after validation so rejected uploads don't waste IDs)
     run_id = generate_run_id()
@@ -186,38 +174,26 @@ async def estimate_processing(
 
     # Validate file type
     if not file.filename:
-        raise HTTPException(status_code=400, detail="No filename provided")
+        raise bad_request("No filename provided")
 
     file_ext = Path(file.filename).suffix.lower()
     if file_ext not in [".docx", ".pdf"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type: {file_ext}. Only .docx and .pdf are supported."
-        )
+        raise bad_request(f"Unsupported file type: {file_ext}. Only .docx and .pdf are supported.")
 
     # Read file content
     content = await file.read()
 
     # Check file size
     if len(content) > MAX_UPLOAD_SIZE:
-        raise HTTPException(
-            status_code=400,
-            detail=f"File too large ({len(content) // (1024*1024)} MB). Maximum size is 50 MB.",
-        )
+        raise bad_request(f"File too large ({len(content) // (1024*1024)} MB). Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.")
 
     # Validate magic bytes
     if file_ext == ".pdf" and not _validate_pdf_magic(content):
         logger.warning("[SECURITY] Rejected estimate: file claims .pdf but magic bytes do not match")
-        raise HTTPException(
-            status_code=400,
-            detail="File content does not match .pdf format. The file may be corrupted or mislabeled.",
-        )
+        raise bad_request("File content does not match .pdf format. The file may be corrupted or mislabeled.")
     elif file_ext == ".docx" and not _validate_docx_magic(content):
         logger.warning("[SECURITY] Rejected estimate: file claims .docx but magic bytes do not match")
-        raise HTTPException(
-            status_code=400,
-            detail="File content does not match .docx format. The file may be corrupted or mislabeled.",
-        )
+        raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
 
     file_size_kb = len(content) / 1024
 
@@ -284,7 +260,7 @@ async def estimate_processing(
     # field extraction, research summary, enrichment stages, and Word document generation
 
     # Use empirical cost rate (based on actual runs)
-    cost_per_1k_tokens = 0.075  # ~$0.075 per 1000 document tokens
+    cost_per_1k_tokens = COST_PER_1K_TOKENS
     base_cost = (estimated_tokens / 1000) * cost_per_1k_tokens
 
     # Add variation buffer for different CV complexities
@@ -295,8 +271,8 @@ async def estimate_processing(
     # Actual processing observed: ~8 minutes for 3500 tokens
     # Time is highly variable due to API latency and document complexity
     # Use conservative estimates to avoid misleading users
-    base_overhead_seconds = 60  # Fixed overhead per run (API init, retries, etc.)
-    time_per_1k_tokens = 30  # ~30 seconds per 1000 document tokens (accounts for multiple LLM calls)
+    base_overhead_seconds = BASE_OVERHEAD_SECONDS
+    time_per_1k_tokens = TIME_PER_1K_TOKENS
 
     base_time = base_overhead_seconds + (estimated_tokens / 1000) * time_per_1k_tokens
     num_stages = len(STEP_REGISTRY)
