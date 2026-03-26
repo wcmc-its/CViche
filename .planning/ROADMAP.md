@@ -255,7 +255,7 @@ Plans:
   3. User provisioning from login (create-or-update) is a single shared function used by both simple auth and SAML ACS flows
   4. Hardcoded values (rate limits, cost-per-token rates, session TTL) live in config or environment variables, not scattered as literals in route handlers
   5. The admin user stats endpoint completes in O(1) queries (aggregation), not O(N) queries (one per user)
-**Plans:** 1/3 plans executed
+**Plans:** 2/3 plans executed
 
 Plans:
 - [ ] 14-01-PLAN.md -- Create service layer foundation: errors.py, config_service.py, run_service.py, user_service.py, and test suite
@@ -296,5 +296,5 @@ Phases 12-15 execute sequentially. Phase 12 (critical security) is highest prior
 | 11. Testing, Docs & Skill Extraction | v1.2 | 2/2 | Complete | 2026-03-26 |
 | 12. Critical Security Fixes | v1.3 | 2/2 | Complete | 2026-03-26 |
 | 13. Security Hardening | v1.3 | 2/2 | Complete | 2026-03-26 |
-| 14. Backend Service Layer | 1/3 | In Progress|  | - |
+| 14. Backend Service Layer | 2/3 | In Progress|  | - |
 | 15. Frontend Architecture | v1.3 | 0/TBD | Not started | - |

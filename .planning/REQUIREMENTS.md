@@ -67,11 +67,11 @@
 
 ### Backend Architecture
 
-- [ ] **ARCH-01**: Route handlers delegate to service functions; no direct DB queries in route files
+- [x] **ARCH-01**: Route handlers delegate to service functions; no direct DB queries in route files
 - [x] **ARCH-02**: Run access control (`_check_run_access`) defined once in a shared module, not duplicated across 3 files
 - [x] **ARCH-03**: User provisioning logic (create/update from login) defined once, used by both simple and SAML auth flows
 - [x] **ARCH-04**: Hardcoded values (rate limits, cost rates, session TTL) moved to config or environment variables
-- [ ] **ARCH-05**: Admin user stats endpoint uses aggregation queries instead of N+1 per-user loop
+- [x] **ARCH-05**: Admin user stats endpoint uses aggregation queries instead of N+1 per-user loop
 - [x] **ARCH-06**: Error responses follow a single consistent format across all endpoints
 
 ### Frontend Architecture
@@ -138,11 +138,11 @@
 | SEC-05 | Phase 13 | Complete |
 | SEC-06 | Phase 13 | Complete |
 | SEC-07 | Phase 13 | Complete |
-| ARCH-01 | Phase 14 | Pending |
+| ARCH-01 | Phase 14 | Complete |
 | ARCH-02 | Phase 14 | Complete |
 | ARCH-03 | Phase 14 | Complete |
 | ARCH-04 | Phase 14 | Complete |
-| ARCH-05 | Phase 14 | Pending |
+| ARCH-05 | Phase 14 | Complete |
 | ARCH-06 | Phase 14 | Complete |
 | FE-01 | Phase 15 | Pending |
 | FE-02 | Phase 15 | Pending |
