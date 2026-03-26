@@ -348,7 +348,7 @@ async def get_data_quality(
     outputs_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
 
     if not outputs_dir.exists():
-        raise HTTPException(status_code=404, detail="Output directory not found")
+        raise HTTPException(status_code=404, detail="Run output not available")
 
     # Complete WCM section mapping (all 71 sections)
     ALL_WCM_SECTIONS = {

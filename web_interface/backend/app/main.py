@@ -1,11 +1,15 @@
 """Main FastAPI application."""
+import logging
 import os
+import traceback
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
+
+logger = logging.getLogger(__name__)
 
 from app.database import init_db
 from app.api import upload, runs, steps, websocket, auth_routes, consent_routes, feedback_routes, admin_routes, saml_routes
@@ -46,6 +50,27 @@ class CSRFMiddleware(BaseHTTPMiddleware):
         return await call_next(request)
 
 
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all HTTP responses."""
+
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; "
+            "font-src 'self'; "
+            "connect-src 'self' ws: wss:; "
+            "frame-ancestors 'none'"
+        )
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        return response
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
@@ -83,12 +108,43 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=["Content-Type", "Authorization", "X-Requested-With"],
 )
+
+# Security headers middleware (after CORS so headers apply to all responses)
+app.add_middleware(SecurityHeadersMiddleware)
 
 # CSRF middleware (must be added after CORS so CORS pre-flight passes first)
 app.add_middleware(CSRFMiddleware)
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Catch-all: log full traceback server-side, return sanitized response to client."""
+    logger.error(
+        "Unhandled exception on %s %s: %s",
+        request.method,
+        request.url.path,
+        str(exc),
+        exc_info=True,
+    )
+    if os.environ.get("CVICHE_DEBUG", "").lower() == "true":
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": "internal_error",
+                "message": str(exc),
+                "traceback": traceback.format_exception(exc),
+            },
+        )
+    return JSONResponse(
+        status_code=500,
+        content={
+            "error": "internal_error",
+            "message": "An unexpected error occurred.",
+        },
+    )
+
 
 # Include API routers
 app.include_router(auth_routes.router, prefix="/api", tags=["auth"])

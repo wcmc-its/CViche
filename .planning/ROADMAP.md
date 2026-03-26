@@ -239,10 +239,11 @@ Plans:
   2. Error responses from any endpoint contain no internal file paths, Python stack traces, or implementation details -- only a user-facing message and an error code
   3. Every HTTP response includes CSP, X-Frame-Options, Strict-Transport-Security, and X-Content-Type-Options headers
   4. CORS configuration explicitly lists allowed origins, methods, and headers instead of using wildcards
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] 13-01: TBD
+- [ ] 13-01-PLAN.md -- Error sanitization (global exception handler), HTTP security headers middleware, CORS lockdown
+- [ ] 13-02-PLAN.md -- Upload magic bytes validation, file size limit, filename randomization
 
 ### Phase 14: Backend Service Layer
 **Goal**: Route handlers are thin dispatchers that delegate to testable service functions, with shared logic defined once
@@ -291,7 +292,7 @@ Phases 12-15 execute sequentially. Phase 12 (critical security) is highest prior
 | 9. ED Group Authorization | v1.2 | 2/2 | Complete | 2026-03-25 |
 | 10. Frontend Auth Flow | v1.2 | 1/1 | Complete | 2026-03-25 |
 | 11. Testing, Docs & Skill Extraction | v1.2 | 2/2 | Complete | 2026-03-26 |
-| 12. Critical Security Fixes | 2/2 | Complete    | 2026-03-26 | - |
-| 13. Security Hardening | v1.3 | 0/TBD | Not started | - |
+| 12. Critical Security Fixes | v1.3 | 2/2 | Complete | 2026-03-26 |
+| 13. Security Hardening | v1.3 | 0/2 | Not started | - |
 | 14. Backend Service Layer | v1.3 | 0/TBD | Not started | - |
 | 15. Frontend Architecture | v1.3 | 0/TBD | Not started | - |
