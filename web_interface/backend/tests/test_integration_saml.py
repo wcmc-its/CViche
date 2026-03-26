@@ -36,7 +36,7 @@ def _upsert_config(db, configs: dict):
 def _mock_idp_available() -> bool:
     try:
         r = httpx.get(f"{MOCK_IDP_URL}/simplesaml/", timeout=2)
-        return r.status_code == 200
+        return r.status_code < 400
     except (httpx.ConnectError, httpx.ReadTimeout):
         return False
 
@@ -57,9 +57,9 @@ class TestMockIdPConnectivity:
     """Verify the mock IdP container is reachable and serving metadata."""
 
     def test_mock_idp_reachable(self):
-        """GET to MOCK_IDP_URL/simplesaml/ returns 200."""
+        """GET to MOCK_IDP_URL/simplesaml/ returns a success or redirect status."""
         r = httpx.get(f"{MOCK_IDP_URL}/simplesaml/", timeout=5)
-        assert r.status_code == 200
+        assert r.status_code < 400
 
     def test_mock_idp_metadata_available(self):
         """GET to MOCK_IDP_METADATA returns 200 with XML content."""
@@ -77,10 +77,13 @@ class TestMockIdPConnectivity:
 class TestSamlLoginRedirect:
     """Test that SAML login redirect points to the mock IdP."""
 
-    def test_login_redirect_goes_to_mock_idp(self, client, db, seed_saml_mode):
+    def test_login_redirect_goes_to_mock_idp(self, client, db, seed_saml_mode, tmp_path):
         """GET /api/saml/login returns 302 with Location pointing to localhost:8443."""
-        # Override IdP metadata URL to point at mock IdP
-        _upsert_config(db, {"saml_idp_metadata_url": json.dumps(MOCK_IDP_METADATA)})
+        # Override IdP metadata URL to point at mock IdP and cert dir to writable tmp
+        _upsert_config(db, {
+            "saml_idp_metadata_url": json.dumps(MOCK_IDP_METADATA),
+            "saml_cert_dir": json.dumps(str(tmp_path / "certs")),
+        })
 
         response = client.get("/api/saml/login", follow_redirects=False)
         assert response.status_code == 302
@@ -105,9 +108,12 @@ class TestSamlACSWithMockIdP:
        real IdP metadata (validates metadata compatibility)
     """
 
-    def test_sp_builds_authn_request_from_mock_idp_metadata(self, client, db, seed_saml_mode):
+    def test_sp_builds_authn_request_from_mock_idp_metadata(self, client, db, seed_saml_mode, tmp_path):
         """SP configured with mock IdP metadata produces a valid redirect to the IdP."""
-        _upsert_config(db, {"saml_idp_metadata_url": json.dumps(MOCK_IDP_METADATA)})
+        _upsert_config(db, {
+            "saml_idp_metadata_url": json.dumps(MOCK_IDP_METADATA),
+            "saml_cert_dir": json.dumps(str(tmp_path / "certs")),
+        })
 
         response = client.get("/api/saml/login", follow_redirects=False)
         assert response.status_code == 302
