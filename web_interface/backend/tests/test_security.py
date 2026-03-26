@@ -1,8 +1,9 @@
-"""Security regression tests for SEC-02 and SEC-03."""
+"""Security regression tests for SEC-01, SEC-02 and SEC-03."""
 import logging
 import os
 import importlib
 import pytest
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 
@@ -144,3 +145,119 @@ class TestSamlSignature:
             ]
             assert len(error_logs) >= 1, \
                 f"Expected ERROR log for non-signature failure. Got logs: {[(r.levelname, r.getMessage()) for r in caplog.records]}"
+
+
+class TestPathTraversal:
+    """SEC-01: File download endpoints reject path traversal and absolute paths."""
+
+    def _create_test_user_and_run(self, db):
+        """Helper to create a user and run for file access tests."""
+        from app.models import User, Run
+        user = User(email="test@example.com", display_name="Test User", role="user")
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+
+        run = Run(
+            id="test-run-123",
+            user_id=user.id,
+            status="completed",
+            filename="test.docx",
+            file_type="docx",
+        )
+        db.add(run)
+        db.commit()
+        return user, run
+
+    def _auth_cookie(self, client, user):
+        """Set a valid session cookie on the test client."""
+        from app.auth import create_session_cookie, COOKIE_NAME
+        cookie_value = create_session_cookie(user)
+        client.cookies.set(COOKIE_NAME, cookie_value)
+
+    def test_absolute_path_rejected(self, client, db, seed_simple_mode):
+        """GET /run/{id}/data//etc/passwd returns 400."""
+        user, run = self._create_test_user_and_run(db)
+        self._auth_cookie(client, user)
+
+        response = client.get(f"/api/run/{run.id}/data//etc/passwd")
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Invalid filename"
+
+    def test_traversal_rejected(self, client, db, seed_simple_mode):
+        """URL-encoded traversal (..%2F) in filename returns 400.
+
+        Note: literal ../../ in the URL path is resolved by the HTTP framework
+        before reaching the route handler, so we test the URL-encoded form
+        which does reach _resolve_safe_path.
+        """
+        user, run = self._create_test_user_and_run(db)
+        self._auth_cookie(client, user)
+
+        response = client.get(f"/api/run/{run.id}/data/..%2F..%2Fetc%2Fpasswd")
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Invalid filename"
+
+    def test_json_endpoint_absolute_path_rejected(self, client, db, seed_simple_mode):
+        """GET /run/{id}/data//etc/passwd/json returns 400."""
+        user, run = self._create_test_user_and_run(db)
+        self._auth_cookie(client, user)
+
+        response = client.get(f"/api/run/{run.id}/data//etc/passwd/json")
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Invalid filename"
+
+    def test_json_endpoint_traversal_rejected(self, client, db, seed_simple_mode):
+        """URL-encoded traversal in JSON endpoint returns 400."""
+        user, run = self._create_test_user_and_run(db)
+        self._auth_cookie(client, user)
+
+        response = client.get(f"/api/run/{run.id}/data/..%2F..%2Fetc%2Fpasswd/json")
+        assert response.status_code == 400
+        assert response.json()["detail"] == "Invalid filename"
+
+    def test_valid_relative_path_returns_404_when_file_missing(self, client, db, seed_simple_mode):
+        """A valid relative path that doesn't exist returns 404, not 400."""
+        user, run = self._create_test_user_and_run(db)
+        self._auth_cookie(client, user)
+
+        response = client.get(f"/api/run/{run.id}/data/nonexistent.json")
+        assert response.status_code == 404
+
+    def test_error_message_reveals_no_internal_paths(self, client, db, seed_simple_mode):
+        """Error responses contain no internal file paths."""
+        user, run = self._create_test_user_and_run(db)
+        self._auth_cookie(client, user)
+
+        # Absolute path attempt
+        response = client.get(f"/api/run/{run.id}/data//etc/passwd")
+        body = response.json()
+        assert "/etc/passwd" not in str(body)
+        assert "outputs" not in str(body).lower()
+
+        # Traversal attempt (URL-encoded)
+        response = client.get(f"/api/run/{run.id}/data/..%2F..%2Fetc%2Fpasswd")
+        body = response.json()
+        assert "/etc" not in str(body)
+
+    def test_security_log_emitted_on_absolute_path(self, client, db, seed_simple_mode, caplog):
+        """Blocked absolute path attempts are logged with [SECURITY] prefix."""
+        user, run = self._create_test_user_and_run(db)
+        self._auth_cookie(client, user)
+
+        with caplog.at_level(logging.WARNING):
+            client.get(f"/api/run/{run.id}/data//etc/passwd")
+
+        security_logs = [r for r in caplog.records if "[SECURITY]" in r.getMessage()]
+        assert len(security_logs) >= 1, "Expected [SECURITY] log for blocked absolute path"
+
+    def test_security_log_emitted_on_traversal(self, client, db, seed_simple_mode, caplog):
+        """Blocked traversal attempts are logged with [SECURITY] prefix."""
+        user, run = self._create_test_user_and_run(db)
+        self._auth_cookie(client, user)
+
+        with caplog.at_level(logging.WARNING):
+            client.get(f"/api/run/{run.id}/data/..%2F..%2Fetc%2Fpasswd")
+
+        security_logs = [r for r in caplog.records if "[SECURITY]" in r.getMessage()]
+        assert len(security_logs) >= 1, "Expected [SECURITY] log for blocked traversal"
