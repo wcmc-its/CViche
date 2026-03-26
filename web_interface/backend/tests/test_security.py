@@ -432,3 +432,127 @@ class TestCorsLockdown:
         )
         allowed_headers = response.headers.get("access-control-allow-headers", "")
         assert "content-type" in allowed_headers.lower()
+
+
+class TestUploadValidation:
+    """SEC-04: Upload validation by magic bytes, size limit, and filename sanitization."""
+
+    def _create_auth_user(self, client, db):
+        """Create a user with consent and set auth cookie."""
+        from app.models import User
+        from app.auth import create_session_cookie, COOKIE_NAME
+
+        user = User(
+            email="test@example.com",
+            display_name="Test User",
+            role="user",
+            consent_version="1.0",
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        cookie_value = create_session_cookie(user)
+        client.cookies.set(COOKIE_NAME, cookie_value)
+        return user
+
+    def test_spoofed_docx_with_pdf_content_rejected(self, client, db, seed_simple_mode):
+        """A file with .docx extension but PDF magic bytes is rejected."""
+        self._create_auth_user(client, db)
+        pdf_content = b"%PDF-1.4 fake pdf content that is definitely not a docx"
+        response = client.post(
+            "/api/upload",
+            files={"file": ("resume.docx", pdf_content, "application/octet-stream")},
+        )
+        assert response.status_code == 400
+        assert "does not match .docx format" in response.json()["detail"]
+
+    def test_spoofed_pdf_with_zip_content_rejected(self, client, db, seed_simple_mode):
+        """A file with .pdf extension but ZIP magic bytes is rejected."""
+        self._create_auth_user(client, db)
+        zip_content = b"PK\x03\x04" + b"\x00" * 100
+        response = client.post(
+            "/api/upload",
+            files={"file": ("resume.pdf", zip_content, "application/octet-stream")},
+        )
+        assert response.status_code == 400
+        assert "does not match .pdf format" in response.json()["detail"]
+
+    def test_valid_pdf_accepted(self, client, db, seed_simple_mode, tmp_path):
+        """A legitimate PDF file is accepted."""
+        self._create_auth_user(client, db)
+        # Minimal valid PDF
+        pdf_content = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF"
+        # Patch UPLOAD_DIR to tmp_path so we don't pollute real uploads
+        with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+            response = client.post(
+                "/api/upload",
+                files={"file": ("my_cv.pdf", pdf_content, "application/pdf")},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["filename"] == "my_cv.pdf"
+        assert data["file_type"] == "pdf"
+
+    def test_oversized_file_rejected(self, client, db, seed_simple_mode):
+        """Files exceeding the size limit are rejected."""
+        self._create_auth_user(client, db)
+        pdf_header = b"%PDF-1.4"
+        with patch("app.api.upload.MAX_UPLOAD_SIZE", 100):  # Set limit to 100 bytes for test
+            big_content = pdf_header + b"\x00" * 200  # 208 bytes > 100 byte limit
+            response = client.post(
+                "/api/upload",
+                files={"file": ("big.pdf", big_content, "application/pdf")},
+            )
+        assert response.status_code == 400
+        assert "too large" in response.json()["detail"].lower()
+
+    def test_randomized_filename_on_disk(self, client, db, seed_simple_mode, tmp_path):
+        """Uploaded files are stored with randomized names, not the user-provided filename."""
+        self._create_auth_user(client, db)
+        pdf_content = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF"
+        with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+            response = client.post(
+                "/api/upload",
+                files={"file": ("John_Doe_CV_2024.pdf", pdf_content, "application/pdf")},
+            )
+        assert response.status_code == 200
+        run_id = response.json()["run_id"]
+        # File on disk should be {run_id}.pdf, NOT contain "John_Doe"
+        saved_files = list(tmp_path.iterdir())
+        assert len(saved_files) == 1
+        saved_name = saved_files[0].name
+        assert saved_name == f"{run_id}.pdf"
+        assert "John_Doe" not in saved_name
+
+    def test_security_log_on_spoofed_upload(self, client, db, seed_simple_mode, caplog):
+        """Spoofed upload attempts are logged with [SECURITY] prefix at WARNING level."""
+        self._create_auth_user(client, db)
+        pdf_content = b"%PDF-1.4 not a docx"
+        with caplog.at_level(logging.WARNING):
+            client.post(
+                "/api/upload",
+                files={"file": ("resume.docx", pdf_content, "application/octet-stream")},
+            )
+        security_logs = [r for r in caplog.records if "[SECURITY]" in r.getMessage()]
+        assert len(security_logs) >= 1, "Expected [SECURITY] log for spoofed upload"
+
+    def test_estimate_rejects_spoofed_file(self, client, db, seed_simple_mode):
+        """The /estimate endpoint also validates magic bytes."""
+        self._create_auth_user(client, db)
+        pdf_content = b"%PDF-1.4 not a docx"
+        response = client.post(
+            "/api/estimate",
+            files={"file": ("resume.docx", pdf_content, "application/octet-stream")},
+        )
+        assert response.status_code == 400
+        assert "does not match .docx format" in response.json()["detail"]
+
+    def test_random_bytes_rejected(self, client, db, seed_simple_mode):
+        """A file with random bytes (not matching any format) is rejected."""
+        self._create_auth_user(client, db)
+        random_content = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09" * 100
+        response = client.post(
+            "/api/upload",
+            files={"file": ("resume.pdf", random_content, "application/pdf")},
+        )
+        assert response.status_code == 400
