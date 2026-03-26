@@ -1,4 +1,5 @@
-"""Security regression tests for SEC-01, SEC-02 and SEC-03."""
+"""Security regression tests for SEC-01 through SEC-07."""
+import json
 import logging
 import os
 import importlib
@@ -261,3 +262,173 @@ class TestPathTraversal:
 
         security_logs = [r for r in caplog.records if "[SECURITY]" in r.getMessage()]
         assert len(security_logs) >= 1, "Expected [SECURITY] log for blocked traversal"
+
+
+class TestErrorSanitization:
+    """SEC-05: Error responses contain no internal details."""
+
+    def test_unhandled_exception_returns_generic_error(self, client, db, seed_simple_mode):
+        """Unhandled exceptions return sanitized JSON, not stack traces."""
+        from app.main import app
+
+        @app.get("/test-500-trigger")
+        async def trigger_error():
+            raise RuntimeError("Internal detail: /usr/local/lib/python3.14/secret.py line 42")
+
+        response = client.get("/test-500-trigger")
+        assert response.status_code == 500
+        body = response.json()
+        assert body["error"] == "internal_error"
+        assert body["message"] == "An unexpected error occurred."
+
+    def test_no_traceback_in_production_error(self, client, db, seed_simple_mode):
+        """Production error responses contain no traceback, file paths, or .py references."""
+        from app.main import app
+
+        @app.get("/test-500-no-trace")
+        async def trigger_error_trace():
+            raise ValueError("something broke in /app/secret.py")
+
+        with patch.dict(os.environ, {"CVICHE_DEBUG": ""}, clear=False):
+            response = client.get("/test-500-no-trace")
+        body_str = json.dumps(response.json())
+        assert "Traceback" not in body_str
+        assert "File " not in body_str
+        assert ".py" not in body_str
+
+    def test_debug_mode_includes_traceback(self, client, db, seed_simple_mode):
+        """With CVICHE_DEBUG=true, error responses include traceback."""
+        from app.main import app
+
+        @app.get("/test-500-debug")
+        async def trigger_debug_error():
+            raise RuntimeError("debug test error")
+
+        with patch.dict(os.environ, {"CVICHE_DEBUG": "true"}, clear=False):
+            response = client.get("/test-500-debug")
+        body = response.json()
+        assert body["error"] == "internal_error"
+        assert "traceback" in body
+        assert "debug test error" in body["message"]
+
+    def test_http_exception_not_swallowed(self, client, db, seed_simple_mode):
+        """FastAPI HTTPException still returns its own status and detail."""
+        response = client.get("/api/nonexistent-route-xyz")
+        assert response.status_code in (404, 405)
+        body = response.json()
+        assert body.get("error") != "internal_error"
+
+
+class TestSecurityHeaders:
+    """SEC-06: HTTP security headers on all responses."""
+
+    def test_csp_header_present(self, client, db, seed_simple_mode):
+        """All responses include Content-Security-Policy header."""
+        response = client.get("/health")
+        assert "content-security-policy" in {k.lower() for k in response.headers.keys()}
+        csp = response.headers["content-security-policy"]
+        assert "default-src 'self'" in csp
+
+    def test_csp_allows_websockets(self, client, db, seed_simple_mode):
+        """CSP connect-src allows WebSocket protocols."""
+        response = client.get("/health")
+        csp = response.headers["content-security-policy"]
+        assert "connect-src" in csp
+        assert "ws:" in csp
+        assert "wss:" in csp
+
+    def test_csp_blocks_inline_scripts(self, client, db, seed_simple_mode):
+        """CSP script-src does NOT allow unsafe-inline."""
+        response = client.get("/health")
+        csp = response.headers["content-security-policy"]
+        for directive in csp.split(";"):
+            if "script-src" in directive:
+                assert "unsafe-inline" not in directive
+                break
+
+    def test_x_frame_options_deny(self, client, db, seed_simple_mode):
+        """X-Frame-Options is DENY."""
+        response = client.get("/health")
+        assert response.headers["x-frame-options"] == "DENY"
+
+    def test_x_content_type_options_nosniff(self, client, db, seed_simple_mode):
+        """X-Content-Type-Options is nosniff."""
+        response = client.get("/health")
+        assert response.headers["x-content-type-options"] == "nosniff"
+
+    def test_hsts_header_present(self, client, db, seed_simple_mode):
+        """Strict-Transport-Security header is present with max-age."""
+        response = client.get("/health")
+        hsts = response.headers["strict-transport-security"]
+        assert "max-age=31536000" in hsts
+
+    def test_hsts_no_preload(self, client, db, seed_simple_mode):
+        """HSTS header does NOT include preload (premature for pre-production app)."""
+        response = client.get("/health")
+        hsts = response.headers["strict-transport-security"]
+        assert "preload" not in hsts
+
+    def test_referrer_policy(self, client, db, seed_simple_mode):
+        """Referrer-Policy is strict-origin-when-cross-origin."""
+        response = client.get("/health")
+        assert response.headers["referrer-policy"] == "strict-origin-when-cross-origin"
+
+    def test_headers_on_error_responses(self, client, db, seed_simple_mode):
+        """Security headers are present even on 404 error responses."""
+        response = client.get("/nonexistent-page")
+        assert "x-frame-options" in {k.lower() for k in response.headers.keys()}
+        assert "x-content-type-options" in {k.lower() for k in response.headers.keys()}
+
+
+class TestCorsLockdown:
+    """SEC-07: CORS uses explicit methods and headers, not wildcards."""
+
+    def test_cors_methods_not_wildcard(self, client, db, seed_simple_mode):
+        """CORS preflight does not return wildcard for allowed methods."""
+        response = client.options(
+            "/api/upload",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        allowed_methods = response.headers.get("access-control-allow-methods", "")
+        assert "*" not in allowed_methods
+
+    def test_cors_headers_not_wildcard(self, client, db, seed_simple_mode):
+        """CORS preflight does not return wildcard for allowed headers."""
+        response = client.options(
+            "/api/upload",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "Content-Type",
+            },
+        )
+        allowed_headers = response.headers.get("access-control-allow-headers", "")
+        assert "*" not in allowed_headers
+
+    def test_cors_allows_post_method(self, client, db, seed_simple_mode):
+        """CORS preflight allows POST method (needed for uploads)."""
+        response = client.options(
+            "/api/upload",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+        allowed_methods = response.headers.get("access-control-allow-methods", "")
+        assert "POST" in allowed_methods
+
+    def test_cors_allows_content_type_header(self, client, db, seed_simple_mode):
+        """CORS preflight allows Content-Type header."""
+        response = client.options(
+            "/api/upload",
+            headers={
+                "Origin": "http://localhost:3000",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "Content-Type",
+            },
+        )
+        allowed_headers = response.headers.get("access-control-allow-headers", "")
+        assert "content-type" in allowed_headers.lower()
