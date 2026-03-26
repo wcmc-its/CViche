@@ -50,6 +50,37 @@
 - [x] **HELP-01**: End users can access contextual help/support content within the web interface
 - [x] **HELP-02**: Help content is written for faculty/staff audience (not developers) -- explains what CViche does, what to expect, how to interpret results
 
+## v1.3 Requirements
+
+### Security — Critical
+
+- [ ] **SEC-01**: File download endpoint rejects absolute paths and restricts access to run output directories only
+- [x] **SEC-02**: SAML assertions require valid IdP signatures (`want_assertions_signed: True`)
+- [x] **SEC-03**: Application refuses to start without explicit `CVICHE_SESSION_SECRET` environment variable
+
+### Security — Hardening
+
+- [ ] **SEC-04**: File uploads validated by MIME type and magic bytes; filenames sanitized to random IDs
+- [ ] **SEC-05**: Error responses contain no internal file paths, stack traces, or implementation details
+- [ ] **SEC-06**: HTTP security headers set on all responses (CSP, X-Frame-Options, HSTS, X-Content-Type-Options)
+- [ ] **SEC-07**: CORS explicitly lists allowed methods and headers instead of wildcards
+
+### Backend Architecture
+
+- [ ] **ARCH-01**: Route handlers delegate to service functions; no direct DB queries in route files
+- [ ] **ARCH-02**: Run access control (`_check_run_access`) defined once in a shared module, not duplicated across 3 files
+- [ ] **ARCH-03**: User provisioning logic (create/update from login) defined once, used by both simple and SAML auth flows
+- [ ] **ARCH-04**: Hardcoded values (rate limits, cost rates, session TTL) moved to config or environment variables
+- [ ] **ARCH-05**: Admin user stats endpoint uses aggregation queries instead of N+1 per-user loop
+- [ ] **ARCH-06**: Error responses follow a single consistent format across all endpoints
+
+### Frontend Architecture
+
+- [ ] **FE-01**: All API calls go through a centralized client with typed functions, base URL from environment
+- [ ] **FE-02**: WebSocket URL derived from environment config, not hardcoded to localhost
+- [ ] **FE-03**: API response types defined in shared `src/types/` directory, not duplicated per component
+- [ ] **FE-04**: Shared formatting utilities (time, date, status) defined once in `src/utils/`
+
 ## v2+ Requirements
 
 ### Code Quality
@@ -70,14 +101,12 @@
 | Feature | Reason |
 |---------|--------|
 | Live SSO deployment | CViche not yet approved for SAML integration |
-| Creating ED access group | Pending approval; code handles any group name via config |
-| SP registration with IdP | Pending approval; docs cover what's needed |
-| OIDC/OAuth support | SAML is the WCM standard; no need for OIDC |
-| Password-based auth | WCM uses SSO; simple mode uses email allow-list |
-| Multi-IdP support | CViche is WCM-only; discovery service handles federation |
-| SCIM user provisioning | JIT from SAML assertions is sufficient |
-| Admin dashboard improvements | Separate milestone |
+| CSRF token implementation | Origin-header CSRF is sufficient for same-origin SPA; tokens add complexity without benefit for this architecture |
+| Thread-safe module-level caches | FastAPI runs single-threaded per worker; asyncio concurrency doesn't cause race conditions on dict mutation |
+| PipelineViewer refactor (useReducer) | Large but functional; cosmetic refactor deferred to avoid risk |
+| API versioning (/api/v1/) | Single-deployment app with coordinated frontend/backend; versioning adds overhead without benefit |
 | Pipeline architecture refactoring | Separate workstream |
+| Admin dashboard improvements | Separate milestone |
 
 ## Traceability
 
@@ -102,11 +131,29 @@
 | TEST-01 | Phase 11 | Complete |
 | DOC-01 | Phase 11 | Complete |
 | SKILL-01 | Phase 11 | Complete |
+| SEC-01 | Phase 12 | Pending |
+| SEC-02 | Phase 12 | Complete |
+| SEC-03 | Phase 12 | Complete |
+| SEC-04 | Phase 13 | Pending |
+| SEC-05 | Phase 13 | Pending |
+| SEC-06 | Phase 13 | Pending |
+| SEC-07 | Phase 13 | Pending |
+| ARCH-01 | Phase 14 | Pending |
+| ARCH-02 | Phase 14 | Pending |
+| ARCH-03 | Phase 14 | Pending |
+| ARCH-04 | Phase 14 | Pending |
+| ARCH-05 | Phase 14 | Pending |
+| ARCH-06 | Phase 14 | Pending |
+| FE-01 | Phase 15 | Pending |
+| FE-02 | Phase 15 | Pending |
+| FE-03 | Phase 15 | Pending |
+| FE-04 | Phase 15 | Pending |
 
 **Coverage:**
-- v1.2 requirements: 12 total
-- Mapped to phases: 12
+- v1.3 requirements: 17 total
+- Mapped to phases: 17/17
 - Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-24*
+*Last updated: 2026-03-26 after v1.3 roadmap creation*
