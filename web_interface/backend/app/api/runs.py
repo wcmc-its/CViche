@@ -12,24 +12,10 @@ from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.auth import get_current_user
 from app.api.upload import generate_run_id, UPLOAD_DIR
+from app.services.run_service import check_run_access
+from app.errors import not_found, bad_request
 
 router = APIRouter()
-
-
-def _check_run_access(run_id: str, current_user: User, db: Session) -> Run:
-    """Verify run exists and user has access. Returns the Run."""
-    run = db.query(Run).filter(Run.id == run_id).first()
-    if not run:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": "not_found", "message": "Run not found"},
-        )
-    if run.user_id and run.user_id != current_user.id and current_user.role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail={"error": "forbidden", "message": "Access denied"},
-        )
-    return run
 
 
 @router.get("/runs", response_model=PaginatedRuns)
@@ -81,7 +67,7 @@ async def get_run_status(
 ):
     """Get the current status of a pipeline run."""
 
-    run = _check_run_access(run_id, current_user, db)
+    run = check_run_access(run_id, current_user, db)
 
     # Get all steps for this run
     steps = db.query(Step).filter(Step.run_id == run_id).order_by(Step.step_number).all()
@@ -140,13 +126,10 @@ async def start_run(
 ):
     """Start executing a pipeline run."""
 
-    run = _check_run_access(run_id, current_user, db)
+    run = check_run_access(run_id, current_user, db)
 
     if run.status not in ["created", "paused"]:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot start run in status: {run.status}"
-        )
+        raise bad_request(f"Cannot start run in status: {run.status}")
 
     # Update status
     run.status = "running"
@@ -157,7 +140,7 @@ async def start_run(
     file_path = upload_dir / f"{run_id}.{run.file_type}"
 
     if not file_path.exists():
-        raise HTTPException(status_code=404, detail="Uploaded file not found")
+        raise not_found("Uploaded file not found")
 
     # Start pipeline execution in background
     def run_pipeline():
@@ -185,13 +168,10 @@ async def pause_run(
 ):
     """Pause a running pipeline."""
 
-    run = _check_run_access(run_id, current_user, db)
+    run = check_run_access(run_id, current_user, db)
 
     if run.status != "running":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot pause run in status: {run.status}"
-        )
+        raise bad_request(f"Cannot pause run in status: {run.status}")
 
     run.status = "paused"
     db.commit()
@@ -208,13 +188,10 @@ async def cancel_run(
     """Cancel a running pipeline."""
     from app.pipeline.orchestrator import cancel_run as orchestrator_cancel
 
-    run = _check_run_access(run_id, current_user, db)
+    run = check_run_access(run_id, current_user, db)
 
     if run.status != "running":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot cancel run in status: {run.status}"
-        )
+        raise bad_request(f"Cannot cancel run in status: {run.status}")
 
     # Signal cancellation to orchestrator
     orchestrator_cancel(run_id)
@@ -237,7 +214,7 @@ async def restart_run(
 ):
     """Create a new run using the same uploaded file as a previous run."""
 
-    original_run = _check_run_access(run_id, current_user, db)
+    original_run = check_run_access(run_id, current_user, db)
 
     # Locate the original uploaded file
     original_file = UPLOAD_DIR / f"{run_id}.{original_run.file_type}"
@@ -293,7 +270,7 @@ async def retry_step(
 ):
     """Retry a failed step."""
 
-    _check_run_access(run_id, current_user, db)
+    check_run_access(run_id, current_user, db)
 
     step = db.query(Step).filter(
         Step.run_id == run_id,
@@ -301,16 +278,10 @@ async def retry_step(
     ).first()
 
     if not step:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Step {step_number} not found for run {run_id}"
-        )
+        raise not_found(f"Step {step_number} not found for run {run_id}")
 
     if step.status != "error":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Can only retry failed steps. Step {step_number} status: {step.status}"
-        )
+        raise bad_request(f"Can only retry failed steps. Step {step_number} status: {step.status}")
 
     # Reset step status
     step.status = "pending"
@@ -342,13 +313,13 @@ async def get_data_quality(
     """
     import json
 
-    run = _check_run_access(run_id, current_user, db)
+    run = check_run_access(run_id, current_user, db)
 
     # Get output directory for this run
     outputs_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
 
     if not outputs_dir.exists():
-        raise HTTPException(status_code=404, detail="Run output not available")
+        raise not_found("Run output not available")
 
     # Complete WCM section mapping (all 71 sections)
     ALL_WCM_SECTIONS = {

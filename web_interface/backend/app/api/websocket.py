@@ -1,13 +1,14 @@
 """WebSocket endpoint for real-time pipeline updates."""
 from http.cookies import SimpleCookie
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Run, User
 from app.auth import decode_session_cookie, COOKIE_NAME
 from app.pipeline.event_emitter import event_emitter
+from app.services.run_service import check_run_access
 
 router = APIRouter()
 
@@ -46,15 +47,14 @@ async def websocket_stream(websocket: WebSocket, run_id: str):
             return
 
         # Verify run exists and user has access
-        run = db.query(Run).filter(Run.id == run_id).first()
-        if not run:
+        try:
+            run = check_run_access(run_id, user, db)
+        except HTTPException as exc:
             await websocket.accept()
-            await websocket.close(code=1008, reason=f"Run {run_id} not found")
-            return
-
-        if run.user_id and run.user_id != user.id and user.role != "admin":
-            await websocket.accept()
-            await websocket.close(code=4003, reason="Access denied")
+            if exc.status_code == 404:
+                await websocket.close(code=1008, reason=f"Run {run_id} not found")
+            else:
+                await websocket.close(code=4003, reason="Access denied")
             return
     finally:
         db.close()

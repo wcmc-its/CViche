@@ -10,26 +10,11 @@ from app.database import get_db
 from app.models import Run, Step, Feedback, User
 from app.schemas import FeedbackSubmit, FeedbackResponse, RunFeedbackStatus
 from app.auth import get_current_user
+from app.services.run_service import check_run_access
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _check_run_access(run_id: str, current_user: User, db: Session) -> Run:
-    """Verify run exists and user has access. Returns the Run."""
-    run = db.query(Run).filter(Run.id == run_id).first()
-    if not run:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": "not_found", "message": "Run not found"},
-        )
-    if run.user_id and run.user_id != current_user.id and current_user.role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail={"error": "forbidden", "message": "Access denied"},
-        )
-    return run
 
 
 # Complete WCM section mapping (matches runs.py)
@@ -168,7 +153,7 @@ async def get_feedback(
     Returns the user's feedback (or null if none submitted), along with
     which pipeline stages completed and which WCM sections are populated.
     """
-    run = _check_run_access(run_id, current_user, db)
+    run = check_run_access(run_id, current_user, db)
 
     # Get existing feedback for this user on this run
     feedback = db.query(Feedback).filter(
@@ -239,7 +224,7 @@ async def submit_feedback(
 
     Returns 409 if the user has already submitted feedback for this run.
     """
-    _check_run_access(run_id, current_user, db)
+    check_run_access(run_id, current_user, db)
 
     # Check for existing feedback
     existing = db.query(Feedback).filter(

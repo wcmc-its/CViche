@@ -11,26 +11,12 @@ from app.database import get_db
 from app.models import Step, Log, Run, User
 from app.schemas import StepDetail, LogEntry, OutputPreview
 from app.auth import get_current_user
+from app.services.run_service import check_run_access
+from app.errors import bad_request, not_found, internal_error
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-def _check_run_access(run_id: str, current_user: User, db: Session) -> Run:
-    """Verify run exists and user has access. Returns the Run."""
-    run = db.query(Run).filter(Run.id == run_id).first()
-    if not run:
-        raise HTTPException(
-            status_code=404,
-            detail={"error": "not_found", "message": "Run not found"},
-        )
-    if run.user_id and run.user_id != current_user.id and current_user.role != "admin":
-        raise HTTPException(
-            status_code=403,
-            detail={"error": "forbidden", "message": "Access denied"},
-        )
-    return run
 
 
 @router.get("/run/{run_id}/step/{step_number}", response_model=StepDetail)
@@ -42,7 +28,7 @@ async def get_step_detail(
 ):
     """Get detailed information about a specific step."""
 
-    _check_run_access(run_id, current_user, db)
+    check_run_access(run_id, current_user, db)
 
     step = db.query(Step).filter(
         Step.run_id == run_id,
@@ -50,10 +36,7 @@ async def get_step_detail(
     ).first()
 
     if not step:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Step {step_number} not found for run {run_id}"
-        )
+        raise not_found(f"Step {step_number} not found for run {run_id}")
 
     # Get logs for this step
     logs = db.query(Log).filter(
@@ -157,7 +140,7 @@ async def get_data_file(
 ):
     """Download or preview a data file."""
 
-    _check_run_access(run_id, current_user, db)
+    check_run_access(run_id, current_user, db)
 
     file_path = _resolve_safe_path(filename, run_id)
 
@@ -306,12 +289,12 @@ async def get_json_content(
 ):
     """Get raw JSON content for display in viewer."""
 
-    _check_run_access(run_id, current_user, db)
+    check_run_access(run_id, current_user, db)
 
     file_path = _resolve_safe_path(filename, run_id)
 
     if not str(file_path).endswith(".json"):
-        raise HTTPException(status_code=400, detail="Only JSON files can be viewed")
+        raise bad_request("Only JSON files can be viewed")
 
     try:
         with open(file_path, "r") as f:
@@ -323,7 +306,7 @@ async def get_json_content(
             "content": data
         })
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Error reading file")
+        raise internal_error("Error reading file")
 
 
 # Mapping of stage IDs to filename patterns in prompt logs
@@ -364,7 +347,7 @@ async def get_prompt_logs(
     """Get prompt logs for a specific step, filtered to only show logs from this run."""
 
     # Verify access and get the run
-    run_record = _check_run_access(run_id, current_user, db)
+    run_record = check_run_access(run_id, current_user, db)
     if not run_record.started_at:
         return JSONResponse(content={"logs": [], "error": "Run has no start time"})
 
