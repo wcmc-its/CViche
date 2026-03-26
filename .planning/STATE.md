@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.2
 milestone_name: Auth & Access Control
 status: completed
-stopped_at: Completed 11-01-PLAN.md
-last_updated: "2026-03-26T00:04:59.835Z"
-last_activity: 2026-03-26 -- Executed 11-01 mock IdP and auth integration tests
+stopped_at: Completed 11-02-PLAN.md
+last_updated: "2026-03-26T00:06:38.985Z"
+last_activity: 2026-03-26 -- Executed 11-02 docs and skill extraction
 progress:
   total_phases: 5
-  completed_phases: 4
+  completed_phases: 5
   total_plans: 8
-  completed_plans: 7
-  percent: 88
+  completed_plans: 8
+  percent: 100
 ---
 
 # Project State
@@ -21,21 +21,21 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-24)
 
 **Core value:** Faculty can upload a CV and get back a correctly formatted WCM document without manual reformatting
-**Current focus:** Phase 11 in progress -- Testing, docs & skill extraction
+**Current focus:** Phase 11 complete -- Testing, docs & skill extraction finished; v1.2 milestone complete
 
 ## Current Position
 
-Phase: 11 of 11 (Testing, Docs & Skill Extraction)
-Plan: 2 of 2 in current phase
-Status: Phase 11 Plan 01 complete, ready for Plan 02
-Last activity: 2026-03-26 -- Executed 11-01 mock IdP and auth integration tests
+Phase: 11 of 11 (Testing, Docs & Skill Extraction) -- COMPLETE
+Plan: 2 of 2 in current phase (All plans complete)
+Status: Phase 11 complete, v1.2 milestone complete
+Last activity: 2026-03-26 -- Executed 11-02 docs and skill extraction
 
-Progress: [████████░░] 88%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 19 (v1.0: 9, v1.1: 4, v1.2: 6)
+- Total plans completed: 21 (v1.0: 9, v1.1: 4, v1.2: 8)
 - Average duration: --
 - Total execution time: --
 
@@ -57,6 +57,7 @@ Progress: [████████░░] 88%
 | Phase 09 P02 | 4min | 2 tasks | 4 files |
 | Phase 10 P01 | 2min | 2 tasks | 2 files |
 | Phase 11 P01 | 4min | 2 tasks | 4 files |
+| Phase 11 P02 | 6min | 2 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -90,6 +91,8 @@ Progress: [████████░░] 88%
 - [Phase 11]: requires_mock_idp skipif decorator with httpx probe for graceful Docker-absent skip
 - [Phase 11]: Inline _upsert_config in test files since pytest conftest not importable as module
 - [Phase 11]: ACS end-to-end with real IdP deferred; httpx tests validate SP metadata + mocked ACS
+- [Phase 11]: SP registration guide written for IT admin audience -- no Python code, only config values and URLs
+- [Phase 11]: Auth skill generalized from CViche -- no CViche-specific references in implementation steps, 412 lines
 
 ### Pending Todos
 
@@ -101,6 +104,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-26T00:04:59.833Z
-Stopped at: Completed 11-01-PLAN.md
+Last session: 2026-03-26T00:06:38.983Z
+Stopped at: Completed 11-02-PLAN.md
 Resume file: None

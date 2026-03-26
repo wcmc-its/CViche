@@ -26,11 +26,11 @@
 ### Testing & Docs
 
 - [x] **TEST-01**: Mock IdP enables full SAML flow testing without live WCM infrastructure
-- [ ] **DOC-01**: SP registration guide documents what's needed to register CViche with WCM IdP
+- [x] **DOC-01**: SP registration guide documents what's needed to register CViche with WCM IdP
 
 ### Skill
 
-- [ ] **SKILL-01**: Reusable Claude Code auth skill captures SAML + ED group auth patterns for other projects
+- [x] **SKILL-01**: Reusable Claude Code auth skill captures SAML + ED group auth patterns for other projects
 
 ## v1.1 Requirements (Complete)
 
@@ -100,8 +100,8 @@
 | ED-03 | Phase 9 | Complete |
 | MODE-02 | Phase 10 | Complete |
 | TEST-01 | Phase 11 | Complete |
-| DOC-01 | Phase 11 | Pending |
-| SKILL-01 | Phase 11 | Pending |
+| DOC-01 | Phase 11 | Complete |
+| SKILL-01 | Phase 11 | Complete |
 
 **Coverage:**
 - v1.2 requirements: 12 total

@@ -129,7 +129,7 @@ Plans:
 - [ ] **Phase 8: SAML SP Client & Endpoints** - Implement SAML 2.0 Service Provider with IdP redirect, assertion consumer, and metadata endpoints
 - [ ] **Phase 9: ED Group Authorization** - Gate user access by Enterprise Directory group membership via LDAP
 - [x] **Phase 10: Frontend Auth Flow** - Adapt login UI to render SSO or email form based on configured auth mode (completed 2026-03-25)
-- [ ] **Phase 11: Testing, Docs & Skill Extraction** - Validate full auth flow with mock IdP, document SP registration, extract reusable auth skill
+- [x] **Phase 11: Testing, Docs & Skill Extraction** - Validate full auth flow with mock IdP, document SP registration, extract reusable auth skill (completed 2026-03-26)
 
 ## Phase Details
 
@@ -199,7 +199,7 @@ Plans:
   1. A mock IdP (MockSAML or equivalent) enables end-to-end SAML flow testing locally without WCM infrastructure
   2. An SP registration guide documents the exact metadata URL, attribute requirements, and steps needed to register CViche with the WCM IdP
   3. A Claude Code skill file captures the SAML + ED group auth pattern in a form that can be applied to other FastAPI projects
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [ ] 11-01-PLAN.md -- Set up mock IdP Docker config, create integration test suite for SAML flow and error paths
@@ -222,4 +222,4 @@ Phases 7-11 execute sequentially. Phase 10 depends on Phases 7 and 8 (not 9), so
 | 8. SAML SP Client & Endpoints | v1.2 | 0/2 | Not started | - |
 | 9. ED Group Authorization | v1.2 | 0/2 | Not started | - |
 | 10. Frontend Auth Flow | 1/1 | Complete    | 2026-03-25 | - |
-| 11. Testing, Docs & Skill Extraction | 1/2 | In Progress|  | - |
+| 11. Testing, Docs & Skill Extraction | 2/2 | Complete   | 2026-03-26 | - |
