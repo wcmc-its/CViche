@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Clock, FileText, CheckCircle2, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, MessageSquare } from 'lucide-react'
+import { formatRelativeDate } from '../utils'
 import ErrorBanner from './ErrorBanner'
 
 interface RunSummary {
@@ -206,12 +207,6 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const startIndex = currentPage * PAGE_SIZE
   const endIndex = Math.min(startIndex + PAGE_SIZE, total)
 
-  const formatDate = (dateStr: string) => {
-    const d = new Date(dateStr)
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
-      ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-  }
-
   const formatDuration = (seconds: number | null) => {
     if (seconds === null) return '\u2014'
     const mins = Math.floor(seconds / 60)
@@ -292,7 +287,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                       <SortIcon field="filename" />
                     </button>
                   </th>
-                  <th className="px-3 py-3 text-left min-w-[140px]" aria-sort={getAriaSortValue('started_at')}>
+                  <th className="px-3 py-3 text-left min-w-[170px]" aria-sort={getAriaSortValue('started_at')}>
                     <button
                       type="button"
                       onClick={() => handleSort('started_at')}
@@ -358,7 +353,10 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                       {run.filename}
                     </td>
                     <td className="px-3 py-3 text-left text-sm text-gray-500">
-                      {formatDate(run.started_at)}
+                      {(() => {
+                        const { display, tooltip } = formatRelativeDate(run.started_at)
+                        return <span title={tooltip}>{display}</span>
+                      })()}
                     </td>
                     <td className="px-3 py-3 text-right text-sm text-gray-500">
                       {formatDuration(run.total_duration_seconds)}
