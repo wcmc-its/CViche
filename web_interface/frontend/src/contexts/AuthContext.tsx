@@ -1,25 +1,7 @@
 import { createContext, useContext, useState, useEffect, ReactNode } from 'react'
-
-interface User {
-  user_id: number
-  email: string
-  display_name: string
-  role: string
-  consent_version: string | null
-  default_submission_type: string | null
-}
-
-interface ConsentStatus {
-  text: string
-  version: string
-  user_has_consented: boolean
-  current_hash: string
-}
-
-interface AuthConfig {
-  mode: 'simple' | 'saml'
-  discovery_url?: string
-}
+import type { User, ConsentStatus, AuthConfig } from '../types'
+import * as authApi from '../api/auth'
+import { getConsentStatus as fetchConsentStatus } from '../api/consent'
 
 interface AuthContextType {
   user: User | null
@@ -45,12 +27,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const fetchConfig = async () => {
     try {
-      const res = await fetch('/api/auth/config')
-      if (res.ok) {
-        setAuthConfig(await res.json())
-      } else {
-        setAuthConfig({ mode: 'simple' })
-      }
+      setAuthConfig(await authApi.getAuthConfig())
     } catch {
       setAuthConfig({ mode: 'simple' })
     }
@@ -58,12 +35,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const refreshUser = async () => {
     try {
-      const res = await fetch('/api/auth/me')
-      if (res.ok) {
-        setUser(await res.json())
-      } else {
-        setUser(null)
-      }
+      setUser(await authApi.getCurrentUser())
     } catch {
       setUser(null)
     } finally {
@@ -74,10 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refreshConsent = async () => {
     setConsentLoading(true)
     try {
-      const res = await fetch('/api/consent')
-      if (res.ok) {
-        setConsentStatus(await res.json())
-      }
+      setConsentStatus(await fetchConsentStatus())
     } catch {
       // If consent check fails, don't block -- user will see consent page on next load
     } finally {
@@ -100,20 +69,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [user])
 
   const login = async (email: string, displayName: string) => {
-    const res = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, display_name: displayName }),
-    })
-    if (!res.ok) {
-      const err = await res.json()
-      throw new Error(err.detail?.message || err.detail || 'Login failed')
+    try {
+      await authApi.login(email, displayName)
+    } catch (err: any) {
+      throw new Error(err.message || 'Login failed')
     }
     await refreshUser()
   }
 
   const logout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST' })
+    await authApi.logout()
     setUser(null)
     setConsentStatus(null)
   }

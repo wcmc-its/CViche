@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { Loader2, ShieldCheck } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import { submitConsent } from '../api/consent'
 import ErrorBanner from './ErrorBanner'
 
 export default function ConsentPage() {
@@ -20,21 +21,12 @@ export default function ConsentPage() {
     setError(null)
 
     try {
-      const res = await fetch('/api/consent', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ default_submission_type: submissionType }),
-      })
-
-      if (!res.ok) {
-        const err = await res.json()
-        throw new Error(err.detail?.message || err.message || 'Failed to submit consent')
-      }
+      await submitConsent(submissionType)
 
       // Refresh both consent status and user data so the app re-evaluates
       await Promise.all([refreshConsent(), refreshUser()])
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to submit consent')
+    } catch (err: any) {
+      setError(err.message || 'Failed to submit consent')
     } finally {
       setSubmitting(false)
     }

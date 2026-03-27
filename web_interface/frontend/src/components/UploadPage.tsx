@@ -2,23 +2,15 @@ import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
 import { Upload, FileText, Loader2, Shield, HelpCircle } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
+import type { Estimate } from '../types'
+import { getEstimate, uploadFile } from '../api/upload'
+import { startRun } from '../api/runs'
+import { formatDuration, formatCost } from '../utils'
 import ErrorBanner from './ErrorBanner'
 import RunHistory from './RunHistory'
 
 interface UploadPageProps {
   onUploadSuccess: (runId: string) => void
-}
-
-interface Estimate {
-  document_tokens: number
-  text_characters: number
-  estimated_cost_min: number
-  estimated_cost_max: number
-  estimated_time_seconds_min: number
-  estimated_time_seconds_max: number
-  num_steps: number
-  filename: string
-  file_size_kb: number
 }
 
 export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
@@ -41,19 +33,9 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
 
         setEstimating(true)
         try {
-          const formData = new FormData()
-          formData.append('file', selectedFile)
-
-          const response = await fetch('/api/estimate', {
-            method: 'POST',
-            body: formData,
-          })
-
-          if (response.ok) {
-            const data = await response.json()
-            setEstimate(data)
-          }
-        } catch (err) {
+          const data = await getEstimate(selectedFile)
+          setEstimate(data)
+        } catch (err: any) {
           console.error('Estimation failed:', err)
         } finally {
           setEstimating(false)
@@ -72,44 +54,20 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
     setUploading(true)
     setError(null)
 
-    const formData = new FormData()
-    formData.append('file', file)
-
     try {
-      const response = await fetch('/api/upload', {
-        method: 'POST',
-        body: formData,
-      })
-
-      if (!response.ok) {
-        const errData = await response.json().catch(() => null)
-        if (errData?.detail?.error === 'consent_required') {
-          navigate('/consent')
-          return
-        }
-        throw new Error(errData?.detail?.message || 'Upload failed')
-      }
-
-      const data = await response.json()
-
-      await fetch(`/api/run/${data.run_id}/start`, {
-        method: 'POST',
-      })
-
+      const data = await uploadFile(file)
+      await startRun(data.run_id)
       onUploadSuccess(data.run_id)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to upload file. Please try again.')
+    } catch (err: any) {
+      if (err.message?.includes('consent_required') || err.status === 403) {
+        navigate('/consent')
+        return
+      }
+      setError(err.message || 'Failed to upload file. Please try again.')
       console.error(err)
     } finally {
       setUploading(false)
     }
-  }
-
-  const formatTime = (seconds: number) => {
-    if (seconds < 60) return `${seconds}s`
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`
   }
 
   return (
@@ -199,13 +157,13 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                   <div className="flex justify-between">
                     <dt className="text-gray-600">Estimated time:</dt>
                     <dd className="font-medium">
-                      {formatTime(estimate.estimated_time_seconds_min)} - {formatTime(estimate.estimated_time_seconds_max)}
+                      {formatDuration(estimate.estimated_time_seconds_min)} - {formatDuration(estimate.estimated_time_seconds_max)}
                     </dd>
                   </div>
                   <div className="flex justify-between">
                     <dt className="text-gray-600">Estimated cost:</dt>
                     <dd className="font-medium text-success-700">
-                      ${estimate.estimated_cost_min.toFixed(2)} - ${estimate.estimated_cost_max.toFixed(2)}
+                      {formatCost(estimate.estimated_cost_min)} - {formatCost(estimate.estimated_cost_max)}
                     </dd>
                   </div>
                 </dl>
