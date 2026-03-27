@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.3
 milestone_name: Code Quality & Security
 status: executing
-stopped_at: Phase 15 UI-SPEC approved
-last_updated: "2026-03-26T23:53:37.146Z"
-last_activity: 2026-03-26 -- Completed 14-03 admin service O(1) aggregation queries
+stopped_at: Completed 15-01-PLAN.md
+last_updated: "2026-03-27T00:32:13.917Z"
+last_activity: 2026-03-27 -- Completed 15-01 shared foundation modules
 progress:
   total_phases: 4
   completed_phases: 3
-  total_plans: 7
-  completed_plans: 7
-  percent: 100
+  total_plans: 9
+  completed_plans: 8
+  percent: 89
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-26)
 
 **Core value:** Faculty can upload a CV and get back a correctly formatted WCM document without manual reformatting
-**Current focus:** Phase 14 -- Backend Service Layer
+**Current focus:** Phase 15 -- Frontend Architecture
 
 ## Current Position
 
-Phase: 14 of 15 (Backend Service Layer) -- COMPLETE
-Plan: 3 of 3 complete
+Phase: 15 of 15 (Frontend Architecture)
+Plan: 1 of 2 complete
 Status: Executing
-Last activity: 2026-03-26 -- Completed 14-03 admin service O(1) aggregation queries
+Last activity: 2026-03-27 -- Completed 15-01 shared foundation modules
 
-Progress: [██████████] 100%
+Progress: [████████░░] 89%
 
 ## Performance Metrics
 
@@ -62,6 +62,7 @@ Progress: [██████████] 100%
 | Phase 14 P01 | 2min | 2 tasks | 6 files |
 | Phase 14 P03 | 4min | 2 tasks | 3 files |
 | Phase 14 P02 | 14min | 2 tasks | 10 files |
+| Phase 15 P01 | 4min | 3 tasks | 20 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,7 @@ Progress: [██████████] 100%
 - [Phase 14]: 14-01: Service layer foundation -- errors.py factory pattern, config_service env var overrides, check_run_access/provision_user extracted into services/
 - [Phase 14]: 14-03: Admin service -- O(1) subquery aggregation replacing N+1 per-user loop; error helper migration in admin routes
 - [Phase 14]: 14-02: Wired all non-admin routes to service layer (check_run_access, provision_user, config_service, error factories); security-opaque errors left as plain strings
+- [Phase 15]: 15-01: Shared foundation -- types/api/utils/StatusIcon modules; API client defaults to empty VITE_API_URL for Vite proxy; getRuns normalizes array/paginated; submitFeedback returns raw Response
 
 ### Pending Todos
 
@@ -88,6 +90,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-26T23:53:37.144Z
-Stopped at: Phase 15 UI-SPEC approved
-Resume file: .planning/phases/15-frontend-architecture/15-UI-SPEC.md
+Last session: 2026-03-27T00:32:13.915Z
+Stopped at: Completed 15-01-PLAN.md
+Resume file: None

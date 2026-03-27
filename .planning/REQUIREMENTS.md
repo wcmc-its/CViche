@@ -76,10 +76,10 @@
 
 ### Frontend Architecture
 
-- [ ] **FE-01**: All API calls go through a centralized client with typed functions, base URL from environment
-- [ ] **FE-02**: WebSocket URL derived from environment config, not hardcoded to localhost
-- [ ] **FE-03**: API response types defined in shared `src/types/` directory, not duplicated per component
-- [ ] **FE-04**: Shared formatting utilities (time, date, status) defined once in `src/utils/`
+- [x] **FE-01**: All API calls go through a centralized client with typed functions, base URL from environment
+- [x] **FE-02**: WebSocket URL derived from environment config, not hardcoded to localhost
+- [x] **FE-03**: API response types defined in shared `src/types/` directory, not duplicated per component
+- [x] **FE-04**: Shared formatting utilities (time, date, status) defined once in `src/utils/`
 
 ## v2+ Requirements
 
@@ -144,10 +144,10 @@
 | ARCH-04 | Phase 14 | Complete |
 | ARCH-05 | Phase 14 | Complete |
 | ARCH-06 | Phase 14 | Complete |
-| FE-01 | Phase 15 | Pending |
-| FE-02 | Phase 15 | Pending |
-| FE-03 | Phase 15 | Pending |
-| FE-04 | Phase 15 | Pending |
+| FE-01 | Phase 15 | Complete |
+| FE-02 | Phase 15 | Complete |
+| FE-03 | Phase 15 | Complete |
+| FE-04 | Phase 15 | Complete |
 
 **Coverage:**
 - v1.3 requirements: 17 total
