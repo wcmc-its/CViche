@@ -1,12 +1,23 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { FileText, Loader2, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, MessageSquare } from 'lucide-react'
-import type { RunSummary } from '../types'
-import { getRuns, getFeedbackStatuses } from '../api/runs'
-import { formatDate, formatDuration, formatCost } from '../utils'
-import { statusLabel, statusLabelColor } from '../utils'
-import StatusIcon from './shared/StatusIcon'
+import { Clock, FileText, CheckCircle2, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, MessageSquare } from 'lucide-react'
+import { formatRelativeDate } from '../utils'
 import ErrorBanner from './ErrorBanner'
+
+interface RunSummary {
+  run_id: string
+  filename: string
+  status: string
+  started_at: string
+  completed_at: string | null
+  total_cost: number
+  total_duration_seconds: number | null
+}
+
+interface FeedbackStatus {
+  run_id: string
+  has_feedback: boolean
+}
 
 interface RunHistoryProps {
   onSelectRun: (runId: string) => void
@@ -16,6 +27,51 @@ type SortField = 'status' | 'filename' | 'started_at' | 'total_duration_seconds'
 type SortDir = 'asc' | 'desc'
 
 const PAGE_SIZE = 100
+
+function StatusIcon({ status }: { status: string }) {
+  switch (status) {
+    case 'complete':
+      return <CheckCircle2 className="w-4 h-4 text-green-600" aria-hidden="true" />
+    case 'running':
+      return <Loader2 className="w-4 h-4 text-blue-600 animate-spin" aria-hidden="true" />
+    case 'failed':
+      return <XCircle className="w-4 h-4 text-red-600" aria-hidden="true" />
+    case 'cancelled':
+      return <AlertCircle className="w-4 h-4 text-orange-600" aria-hidden="true" />
+    default:
+      return <Clock className="w-4 h-4 text-gray-400" aria-hidden="true" />
+  }
+}
+
+function statusLabelColor(status: string): string {
+  switch (status) {
+    case 'complete':
+      return 'text-green-600'
+    case 'running':
+      return 'text-blue-600'
+    case 'failed':
+      return 'text-red-600'
+    case 'cancelled':
+      return 'text-orange-600'
+    default:
+      return 'text-gray-500'
+  }
+}
+
+function statusLabel(status: string): string {
+  switch (status) {
+    case 'complete':
+      return 'Complete'
+    case 'running':
+      return 'Running'
+    case 'failed':
+      return 'Failed'
+    case 'cancelled':
+      return 'Cancelled'
+    default:
+      return 'Pending'
+  }
+}
 
 function getPageNumbers(currentPage: number, totalPages: number): (number | 'ellipsis')[] {
   if (totalPages <= 7) {
@@ -63,10 +119,13 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
 
   const fetchFeedbackStatus = async () => {
     try {
-      const data = await getFeedbackStatuses()
-      const map: Record<string, boolean> = {}
-      data.forEach((item) => { map[item.run_id] = item.has_feedback })
-      setFeedbackMap(map)
+      const res = await fetch('/api/runs/feedback-status')
+      if (res.ok) {
+        const data: FeedbackStatus[] = await res.json()
+        const map: Record<string, boolean> = {}
+        data.forEach((item) => { map[item.run_id] = item.has_feedback })
+        setFeedbackMap(map)
+      }
     } catch (err) {
       console.error('Error fetching feedback status:', err)
     }
@@ -75,10 +134,17 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const fetchRuns = useCallback(async (offset: number) => {
     try {
       setError(null)
-      const data = await getRuns(offset, PAGE_SIZE)
-      setRuns(data.runs)
-      setTotal(data.total)
-    } catch (err: any) {
+      const res = await fetch(`/api/runs?offset=${offset}&limit=${PAGE_SIZE}`)
+      if (res.ok) {
+        const data = await res.json()
+        // Handle both paginated response { runs, total, has_more } and legacy array response
+        const runsList = Array.isArray(data) ? data : (data.runs || [])
+        setRuns(runsList)
+        setTotal(data.total || runsList.length)
+      } else {
+        setError('Unable to load run history. Please refresh the page to try again.')
+      }
+    } catch (err) {
       console.error('Error fetching runs:', err)
       setError('Unable to load run history. Please refresh the page to try again.')
     }
@@ -140,6 +206,14 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const totalPages = Math.ceil(total / PAGE_SIZE)
   const startIndex = currentPage * PAGE_SIZE
   const endIndex = Math.min(startIndex + PAGE_SIZE, total)
+
+  const formatDuration = (seconds: number | null) => {
+    if (seconds === null) return '\u2014'
+    const mins = Math.floor(seconds / 60)
+    const secs = seconds % 60
+    if (mins > 0) return `${mins}m ${secs}s`
+    return `${secs}s`
+  }
 
   const getAriaSortValue = (field: SortField): 'ascending' | 'descending' | 'none' => {
     if (sortField !== field) return 'none'
@@ -213,7 +287,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                       <SortIcon field="filename" />
                     </button>
                   </th>
-                  <th className="px-3 py-3 text-left min-w-[140px]" aria-sort={getAriaSortValue('started_at')}>
+                  <th className="px-3 py-3 text-left min-w-[170px]" aria-sort={getAriaSortValue('started_at')}>
                     <button
                       type="button"
                       onClick={() => handleSort('started_at')}
@@ -279,13 +353,16 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                       {run.filename}
                     </td>
                     <td className="px-3 py-3 text-left text-sm text-gray-500">
-                      {formatDate(run.started_at)}
+                      {(() => {
+                        const { display, tooltip } = formatRelativeDate(run.started_at)
+                        return <span title={tooltip}>{display}</span>
+                      })()}
                     </td>
                     <td className="px-3 py-3 text-right text-sm text-gray-500">
                       {formatDuration(run.total_duration_seconds)}
                     </td>
                     <td className="px-3 py-3 text-right text-sm text-gray-700">
-                      {run.total_cost > 0 ? formatCost(run.total_cost) : '\u2014'}
+                      {run.total_cost > 0 ? `$${run.total_cost.toFixed(2)}` : '\u2014'}
                     </td>
                     <td className="px-3 py-3 text-center">
                       {run.status === 'complete' && feedbackMap[run.run_id] === true && (
