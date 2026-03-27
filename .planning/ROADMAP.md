@@ -212,7 +212,7 @@ Plans:
 - [x] **Phase 12: Critical Security Fixes** - Patch path traversal, SAML signature validation, and session secret vulnerabilities (completed 2026-03-26)
 - [x] **Phase 13: Security Hardening** - Upload validation, error sanitization, HTTP security headers, CORS lockdown (completed 2026-03-26)
 - [x] **Phase 14: Backend Service Layer** - Extract service functions from route handlers, deduplicate shared logic, centralize config (completed 2026-03-26)
-- [ ] **Phase 15: Frontend Architecture** - Centralized API client, shared types, environment config, formatting utilities
+- [x] **Phase 15: Frontend Architecture** - Centralized API client, shared types, environment config, formatting utilities (completed 2026-03-27)
 
 ## Phase Details
 
@@ -271,11 +271,11 @@ Plans:
   2. The WebSocket URL is derived from an environment variable or the centralized config, not hardcoded to `localhost` or any specific host
   3. API response types are defined in `src/types/` and imported by components -- grep finds zero inline type definitions that duplicate the shared ones
   4. Formatting utilities (time duration, dates, status labels) are defined once in `src/utils/` and imported wherever needed
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
-- [ ] 15-01-PLAN.md -- Create shared foundation: types in src/types/, API client in src/api/, utilities in src/utils/, StatusIcon in src/components/shared/
-- [ ] 15-02-PLAN.md -- Migrate all 13 component/context files to import from shared modules, remove all inline fetch/types/formatting
+- [x] 15-01-PLAN.md -- Create shared foundation: types in src/types/, API client in src/api/, utilities in src/utils/, StatusIcon in src/components/shared/
+- [x] 15-02-PLAN.md -- Migrate all 13 component/context files to import from shared modules, remove all inline fetch/types/formatting
 
 ## Progress
 
@@ -298,4 +298,4 @@ Phases 12-15 execute sequentially. Phase 12 (critical security) is highest prior
 | 12. Critical Security Fixes | v1.3 | 2/2 | Complete | 2026-03-26 |
 | 13. Security Hardening | v1.3 | 2/2 | Complete | 2026-03-26 |
 | 14. Backend Service Layer | v1.3 | 3/3 | Complete | 2026-03-26 |
-| 15. Frontend Architecture | 1/2 | In Progress|  | - |
+| 15. Frontend Architecture | 1/2 | 2/2 | Complete   | 2026-03-27 |
