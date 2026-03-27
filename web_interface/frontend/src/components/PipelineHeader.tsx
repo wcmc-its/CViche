@@ -1,5 +1,6 @@
 import { ArrowLeft, HelpCircle } from 'lucide-react'
 import { Link } from 'react-router-dom'
+import { formatCost } from '../utils'
 
 interface PipelineHeaderProps {
   runId: string
@@ -86,7 +87,7 @@ export default function PipelineHeader({
 
           <div>
             <span className="text-gray-700">Cost:</span>{' '}
-            <span className="font-semibold text-gray-900">${totalCost.toFixed(3)}</span>
+            <span className="font-semibold text-gray-900">{formatCost(totalCost, 3)}</span>
           </div>
 
           {/* Token metrics - hidden below lg */}

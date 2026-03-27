@@ -1,4 +1,5 @@
 import { CheckCircle2, Loader2, XCircle, Circle, ChevronRight } from 'lucide-react'
+import { formatCost } from '../utils'
 
 interface StepInfo {
   step_number: number
@@ -51,9 +52,9 @@ export default function StepSidebar({
 
   const formatStepCost = (step: StepInfo) => {
     if (step.status === 'running') {
-      return `$${((totalCost || 0) - (stepStartCosts[step.step_number] || 0)).toFixed(3)}`
+      return formatCost((totalCost || 0) - (stepStartCosts[step.step_number] || 0), 3)
     }
-    return `$${step.cost.toFixed(3)}`
+    return formatCost(step.cost, 3)
   }
 
   return (

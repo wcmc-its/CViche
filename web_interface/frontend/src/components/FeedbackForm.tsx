@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { CheckCircle2, Loader2 } from 'lucide-react'
+import type { FeedbackFormData, WcmSection } from '../types'
+import { getFeedback, submitFeedback } from '../api/feedback'
 import ErrorBanner from './ErrorBanner'
 
 // ---------------------------------------------------------------------------
@@ -8,33 +10,6 @@ import ErrorBanner from './ErrorBanner'
 
 interface FeedbackFormProps {
   runId: string
-}
-
-interface FeedbackFormData {
-  reviewer_role: string
-  reviewer_role_other: string
-  overall_usefulness: number | null
-  overall_accuracy: number | null
-  overall_completeness: number | null
-  issue_missing_content: string | null
-  issue_split_merged: string | null
-  issue_wrong_section: string | null
-  issue_inaccurate: string | null
-  issue_ai_enrichment: string | null
-  issue_formatting: string | null
-  issue_locations: string[]
-  biggest_issue: string
-  manual_conversion_effort: string
-  correction_effort: string
-  enrichment_quality: number | null
-  summary_generated: boolean | null
-  summary_quality: number | null
-  likelihood_to_recommend: number | null
-}
-
-interface WcmSection {
-  section_id: string
-  section_name: string
 }
 
 // ---------------------------------------------------------------------------
@@ -258,9 +233,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
 
     async function loadFeedback() {
       try {
-        const res = await fetch(`/api/run/${runId}/feedback`)
-        if (!res.ok) throw new Error('fetch-failed')
-        const data = await res.json()
+        const data = await getFeedback(runId)
 
         if (cancelled) return
 
@@ -323,11 +296,7 @@ export default function FeedbackForm({ runId }: FeedbackFormProps) {
     }
 
     try {
-      const res = await fetch(`/api/run/${runId}/feedback`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-      })
+      const res = await submitFeedback(runId, payload as unknown as FeedbackFormData)
 
       if (res.status === 201) {
         setSubmitted(true)

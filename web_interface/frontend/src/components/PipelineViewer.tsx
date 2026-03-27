@@ -1,5 +1,9 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { MapPin, CheckCircle2, XCircle, AlertCircle, Clock } from 'lucide-react'
+import type { RunStatus } from '../types'
+import { getRunStatus, getRunStep, getPromptLogs, getRunDataJson, cancelRun, restartRun } from '../api/runs'
+import { getWebSocketUrl } from '../api/websocket'
+import { formatCost } from '../utils'
 import PipelineHeader from './PipelineHeader'
 import StepSidebar from './StepSidebar'
 import LogViewer from './LogViewer'
@@ -13,16 +17,6 @@ interface PipelineViewerProps {
   runId: string
   onBack: () => void
   onNavigateToRun?: (runId: string) => void
-}
-
-interface StepSummary {
-  step_number: number
-  stage_id?: string
-  step_name: string
-  status: string
-  duration_seconds?: number
-  cost: number
-  output_files?: string
 }
 
 // Stage descriptions for the UI
@@ -57,19 +51,6 @@ const STEP_WEIGHTS: Record<string, { weight: number; estimated_seconds: number }
   '6': { weight: 3, estimated_seconds: 15 },
 }
 const TOTAL_WEIGHT = Object.values(STEP_WEIGHTS).reduce((sum, s) => sum + s.weight, 0)
-
-interface RunStatus {
-  run_id: string
-  filename: string
-  status: string
-  total_cost: number
-  total_tokens: number
-  input_tokens: number
-  output_tokens: number
-  total_duration_seconds?: number
-  error_message?: string
-  steps: StepSummary[]
-}
 
 export default function PipelineViewer({ runId, onBack, onNavigateToRun }: PipelineViewerProps) {
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null)
@@ -125,14 +106,10 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
 
     setIsCancelling(true)
     try {
-      const res = await fetch(`/api/run/${runId}/cancel`, { method: 'POST' })
-      if (!res.ok) {
-        const error = await res.json()
-        setApiError(`Failed to cancel: ${error.detail || 'Unknown error'}`)
-      }
-    } catch (err) {
+      await cancelRun(runId)
+    } catch (err: any) {
       console.error('Error cancelling run:', err)
-      setApiError('Failed to cancel run. Please try again.')
+      setApiError(`Failed to cancel: ${err.message || 'Unknown error'}`)
     } finally {
       setIsCancelling(false)
     }
@@ -143,20 +120,13 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     if (isRestarting) return
     setIsRestarting(true)
     try {
-      const res = await fetch(`/api/run/${runId}/restart`, { method: 'POST' })
-      if (res.ok) {
-        const data = await res.json()
-        if (onNavigateToRun) {
-          onNavigateToRun(data.run_id)
-        }
-      } else {
-        const error = await res.json()
-        const msg = error.detail?.message || error.detail || 'Unknown error'
-        setApiError(`Failed to restart: ${msg}`)
+      const data = await restartRun(runId)
+      if (onNavigateToRun) {
+        onNavigateToRun(data.new_run_id)
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Error restarting run:', err)
-      setApiError('Failed to restart run. Please try again.')
+      setApiError(`Failed to restart: ${err.message || 'Unknown error'}`)
     } finally {
       setIsRestarting(false)
     }
@@ -202,16 +172,15 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   useEffect(() => {
     const fetchStatus = async () => {
       try {
-        const res = await fetch(`/api/run/${runId}/status`)
-        if (!res.ok) throw new Error(`Status fetch failed: ${res.status}`)
-        const data = await res.json()
+        const data = await getRunStatus(runId)
         setRunStatus(data)
-      } catch (err) {
-        console.error('Error fetching run status:', err)
-        setApiError('Failed to fetch pipeline status. The server may be unavailable.')
+      } catch {
+        // Transient failure -- polling will retry
       }
     }
-    fetchStatus()
+    fetchStatus().catch(() => {
+      setApiError('Failed to fetch pipeline status. The server may be unavailable.')
+    })
     const interval = setInterval(fetchStatus, 2000)
     return () => clearInterval(interval)
   }, [runId])
@@ -220,15 +189,12 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   useEffect(() => {
     const fetchStepLogs = async () => {
       try {
-        const res = await fetch(`/api/run/${runId}/step/${currentStep}`)
-        if (res.ok) {
-          const data = await res.json()
-          if (data.logs && data.logs.length > 0) {
-            setLogs((prev) => ({
-              ...prev,
-              [currentStep]: data.logs.map((log: any) => `[${log.time}] ${log.message}`)
-            }))
-          }
+        const data = await getRunStep(runId, currentStep)
+        if (data.logs && data.logs.length > 0) {
+          setLogs((prev) => ({
+            ...prev,
+            [currentStep]: data.logs.map((log: any) => `[${log.time}] ${log.message}`)
+          }))
         }
       } catch (err) {
         console.error('Error fetching step logs:', err)
@@ -250,17 +216,14 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   // Fetch prompt logs for current step
   const fetchPromptLogs = useCallback(async () => {
     try {
-      const res = await fetch(`/api/run/${runId}/prompt-logs?step=${currentStep}`)
-      if (res.ok) {
-        const data = await res.json()
-        setPromptLogs(data.logs || [])
-        setPromptLogsMessage(data.message || null)
-        setShowPromptLogs(true)
-        if (data.logs && data.logs.length > 0) {
-          setSelectedPromptLog(data.logs[0].filename)
-        } else {
-          setSelectedPromptLog(null)
-        }
+      const data = await getPromptLogs(runId, currentStep)
+      setPromptLogs(data.logs || [])
+      setPromptLogsMessage(data.message || null)
+      setShowPromptLogs(true)
+      if (data.logs && data.logs.length > 0) {
+        setSelectedPromptLog(data.logs[0].filename)
+      } else {
+        setSelectedPromptLog(null)
       }
     } catch (err) {
       console.error('Error fetching prompt logs:', err)
@@ -341,15 +304,12 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
       if (!fieldsJson) return
 
       try {
-        const res = await fetch(`/api/run/${runId}/data/${fieldsJson}/json`)
-        if (res.ok) {
-          const data = await res.json()
-          if (data.content) {
-            setCvInsights({
-              cv_owner: data.content.cv_owner,
-              cv_owner_location: data.content.cv_owner_location
-            })
-          }
+        const data = await getRunDataJson(runId, fieldsJson)
+        if (data.content) {
+          setCvInsights({
+            cv_owner: data.content.cv_owner,
+            cv_owner_location: data.content.cv_owner_location
+          })
         }
       } catch (err) {
         console.error('Error loading CV insights:', err)
@@ -362,13 +322,10 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   // Open JSON viewer
   const openJsonViewer = async (filename: string) => {
     try {
-      const res = await fetch(`/api/run/${runId}/data/${filename}/json`)
-      if (res.ok) {
-        const data = await res.json()
-        setJsonContent(data.content)
-        setJsonFilename(filename)
-        setJsonViewerOpen(true)
-      }
+      const data = await getRunDataJson(runId, filename)
+      setJsonContent(data.content)
+      setJsonFilename(filename)
+      setJsonViewerOpen(true)
     } catch (err) {
       console.error('Error loading JSON:', err)
       setApiError('Failed to load JSON file.')
@@ -377,7 +334,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
 
   // WebSocket connection
   useEffect(() => {
-    const wsUrl = `ws://localhost:8000/ws/run/${runId}/stream`
+    const wsUrl = getWebSocketUrl(`/ws/run/${runId}/stream`)
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
 
@@ -515,7 +472,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
           <div className="flex items-center gap-3 max-w-full">
             <CheckCircle2 className="h-5 w-5 text-success-600 flex-shrink-0" aria-hidden="true" />
             <p className="text-sm font-medium text-success-800">
-              Pipeline completed successfully in {runStatus.total_duration_seconds}s — Cost: ${runStatus.total_cost.toFixed(3)}
+              Pipeline completed successfully in {runStatus.total_duration_seconds}s — Cost: {formatCost(runStatus.total_cost, 3)}
             </p>
           </div>
         </div>
@@ -598,8 +555,8 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                   <span className="hidden md:inline" aria-hidden="true">·</span>
                   <span>Cost: <strong>{
                     currentStepData.status === 'running'
-                      ? `$${((runStatus.total_cost || 0) - (stepStartCosts[currentStep] || 0)).toFixed(3)}`
-                      : `$${currentStepData.cost.toFixed(3)}`
+                      ? formatCost((runStatus.total_cost || 0) - (stepStartCosts[currentStep] || 0), 3)
+                      : formatCost(currentStepData.cost, 3)
                   }</strong></span>
                 </div>
 
