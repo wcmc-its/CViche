@@ -1,22 +1,8 @@
 import { useState, useEffect } from 'react'
 import { Loader2, Shield, User as UserIcon, Ban, Check, Pencil, X } from 'lucide-react'
-
-interface AdminUser {
-  id: number
-  email: string
-  display_name: string
-  role: string
-  status: string
-  daily_limit: number | null
-  monthly_limit: number | null
-  runs_today: number
-  total_runs: number
-  total_cost: number
-  feedback_count: number
-  completed_run_count: number
-  last_active_at: string | null
-  created_at: string | null
-}
+import type { AdminUser } from '../types'
+import { getAdminUsers, updateAdminUser } from '../api/admin'
+import { formatDateShort, formatCost } from '../utils'
 
 export default function AdminUsers() {
   const [users, setUsers] = useState<AdminUser[]>([])
@@ -27,10 +13,7 @@ export default function AdminUsers() {
 
   const fetchUsers = async () => {
     try {
-      const res = await fetch('/api/admin/users')
-      if (res.ok) {
-        setUsers(await res.json())
-      }
+      setUsers(await getAdminUsers())
     } catch (err) {
       console.error('Failed to fetch users:', err)
     } finally {
@@ -46,20 +29,10 @@ export default function AdminUsers() {
     setError(null)
     const newStatus = user.status === 'active' ? 'disabled' : 'active'
     try {
-      const res = await fetch(`/api/admin/users/${user.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: newStatus }),
-      })
-      if (res.ok) {
-        const updated = await res.json()
-        setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)))
-      } else {
-        const err = await res.json()
-        setError(err.detail?.message || 'Failed to update user status')
-      }
-    } catch {
-      setError('Failed to update user status')
+      const updated = await updateAdminUser(user.id, { status: newStatus })
+      setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)))
+    } catch (err: any) {
+      setError(err.message || 'Failed to update user status')
     }
   }
 
@@ -82,31 +55,15 @@ export default function AdminUsers() {
     }
 
     try {
-      const res = await fetch(`/api/admin/users/${user.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          daily_limit: daily,
-          monthly_limit: monthly,
-        }),
+      const updated = await updateAdminUser(user.id, {
+        daily_limit: daily,
+        monthly_limit: monthly,
       })
-      if (res.ok) {
-        const updated = await res.json()
-        setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)))
-        setEditingId(null)
-      } else {
-        const err = await res.json()
-        setError(err.detail?.message || 'Failed to update limits')
-      }
-    } catch {
-      setError('Failed to update limits')
+      setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)))
+      setEditingId(null)
+    } catch (err: any) {
+      setError(err.message || 'Failed to update limits')
     }
-  }
-
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return '--'
-    const d = new Date(dateStr)
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
   }
 
   if (loading) {
@@ -189,7 +146,7 @@ export default function AdminUsers() {
                       {user.runs_today}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-right text-sm text-gray-700">
-                      ${user.total_cost.toFixed(2)}
+                      {formatCost(user.total_cost)}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-right text-sm">
                       {feedbackRate !== null ? (
@@ -202,7 +159,7 @@ export default function AdminUsers() {
                       )}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
-                      {formatDate(user.last_active_at)}
+                      {formatDateShort(user.last_active_at)}
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-center">
                       {user.status === 'active' ? (

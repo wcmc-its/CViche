@@ -9,15 +9,8 @@ import {
   ShieldCheck,
   ShieldOff,
 } from 'lucide-react'
-
-interface SystemConfig {
-  allowed_users: string[]
-  admin_users: string[]
-  rate_limit_daily: number
-  rate_limit_monthly: number
-  consent_version: string
-  auth_mode: string
-}
+import type { SystemConfig } from '../types'
+import { getAdminConfig, updateAdminConfig } from '../api/admin'
 
 export default function AdminConfig() {
   const [config, setConfig] = useState<SystemConfig | null>(null)
@@ -34,14 +27,11 @@ export default function AdminConfig() {
 
   const fetchConfig = async () => {
     try {
-      const res = await fetch('/api/admin/config')
-      if (res.ok) {
-        const data: SystemConfig = await res.json()
-        setConfig(data)
-        setRateLimitDaily(data.rate_limit_daily.toString())
-        setRateLimitMonthly(data.rate_limit_monthly.toString())
-        setConsentVersion(data.consent_version)
-      }
+      const data = await getAdminConfig()
+      setConfig(data)
+      setRateLimitDaily(data.rate_limit_daily.toString())
+      setRateLimitMonthly(data.rate_limit_monthly.toString())
+      setConsentVersion(data.consent_version)
     } catch (err) {
       console.error('Failed to fetch config:', err)
     } finally {
@@ -58,25 +48,17 @@ export default function AdminConfig() {
     setError(null)
     setSuccess(null)
     try {
-      const res = await fetch('/api/admin/config', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updates),
-      })
-      if (res.ok) {
-        const data = await res.json()
-        setConfig(data)
-        setRateLimitDaily(data.rate_limit_daily.toString())
-        setRateLimitMonthly(data.rate_limit_monthly.toString())
-        setConsentVersion(data.consent_version)
-        setSuccess('Configuration saved.')
-        setTimeout(() => setSuccess(null), 3000)
-      } else {
-        const err = await res.json()
-        setError(err.detail?.message || 'Failed to save config')
-      }
-    } catch {
-      setError('Failed to save config')
+      await updateAdminConfig(updates)
+      // Re-fetch to get the updated config from the server
+      const data = await getAdminConfig()
+      setConfig(data)
+      setRateLimitDaily(data.rate_limit_daily.toString())
+      setRateLimitMonthly(data.rate_limit_monthly.toString())
+      setConsentVersion(data.consent_version)
+      setSuccess('Configuration saved.')
+      setTimeout(() => setSuccess(null), 3000)
+    } catch (err: any) {
+      setError(err.message || 'Failed to save config')
     } finally {
       setSaving(false)
     }

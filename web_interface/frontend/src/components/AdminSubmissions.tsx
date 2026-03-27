@@ -2,37 +2,17 @@ import { useState, useEffect, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import {
   Loader2,
-  CheckCircle2,
-  XCircle,
-  AlertCircle,
   Clock,
-  DollarSign,
   FileText,
   MessageSquare,
   ChevronDown,
   ChevronUp,
   Search,
 } from 'lucide-react'
-
-interface AdminRun {
-  run_id: string
-  user_email: string | null
-  user_display_name: string | null
-  filename: string
-  status: string
-  duration_seconds: number | null
-  total_cost: number
-  started_at: string | null
-  has_feedback: boolean
-}
-
-interface AdminRunsResponse {
-  runs: AdminRun[]
-  total: number
-  has_more: boolean
-  offset: number
-  limit: number
-}
+import type { AdminRun } from '../types'
+import { getAdminRuns } from '../api/admin'
+import { formatDate, formatDuration, formatCost } from '../utils'
+import StatusIcon from './shared/StatusIcon'
 
 type SortField = 'started_at' | 'total_cost' | 'duration_seconds' | 'filename' | 'status'
 type SortDir = 'asc' | 'desc'
@@ -58,17 +38,14 @@ export default function AdminSubmissions() {
     if (filterStatus) params.set('status', filterStatus)
 
     try {
-      const res = await fetch(`/api/admin/runs?${params}`)
-      if (res.ok) {
-        const data: AdminRunsResponse = await res.json()
-        if (append) {
-          setRuns((prev) => [...prev, ...data.runs])
-        } else {
-          setRuns(data.runs)
-        }
-        setTotal(data.total)
-        setHasMore(data.has_more)
+      const data = await getAdminRuns(params.toString())
+      if (append) {
+        setRuns((prev) => [...prev, ...data.runs])
+      } else {
+        setRuns(data.runs)
       }
+      setTotal(data.total)
+      setHasMore(data.has_more)
     } catch (err) {
       console.error('Failed to fetch admin runs:', err)
     }
@@ -117,24 +94,6 @@ export default function AdminSubmissions() {
     return sortDir === 'asc' ? cmp : -cmp
   })
 
-  const formatDate = (dateStr: string | null) => {
-    if (!dateStr) return '--'
-    const d = new Date(dateStr)
-    return (
-      d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
-      ' ' +
-      d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
-    )
-  }
-
-  const formatDuration = (seconds: number | null) => {
-    if (seconds === null) return '--'
-    const mins = Math.floor(seconds / 60)
-    const secs = seconds % 60
-    if (mins > 0) return `${mins}m ${secs}s`
-    return `${secs}s`
-  }
-
   const SortIcon = ({ field }: { field: SortField }) => {
     if (sortField !== field) return null
     return sortDir === 'asc' ? (
@@ -142,21 +101,6 @@ export default function AdminSubmissions() {
     ) : (
       <ChevronDown className="w-3 h-3 inline ml-0.5" aria-hidden="true" />
     )
-  }
-
-  const StatusIcon = ({ status }: { status: string }) => {
-    switch (status) {
-      case 'complete':
-        return <CheckCircle2 className="w-4 h-4 text-green-600" aria-hidden="true" />
-      case 'running':
-        return <Loader2 className="w-4 h-4 text-blue-600 animate-spin" aria-hidden="true" />
-      case 'failed':
-        return <XCircle className="w-4 h-4 text-red-600" aria-hidden="true" />
-      case 'cancelled':
-        return <AlertCircle className="w-4 h-4 text-orange-600" aria-hidden="true" />
-      default:
-        return <Clock className="w-4 h-4 text-gray-400" aria-hidden="true" />
-    }
   }
 
   return (
@@ -283,8 +227,7 @@ export default function AdminSubmissions() {
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-right text-sm text-gray-700">
                       <span className="inline-flex items-center gap-1">
-                        <DollarSign className="w-3 h-3" aria-hidden="true" />
-                        {run.total_cost.toFixed(3)}
+                        {formatCost(run.total_cost, 3)}
                       </span>
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">

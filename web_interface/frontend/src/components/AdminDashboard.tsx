@@ -1,17 +1,13 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { BarChart3, Users, DollarSign, MessageSquare, ArrowLeft, Loader2 } from 'lucide-react'
+import type { Stats } from '../types'
+import { getAdminStats } from '../api/admin'
+import { formatCost } from '../utils'
 import AdminUsers from './AdminUsers'
 import AdminSubmissions from './AdminSubmissions'
 import AdminFeedbackInsights from './AdminFeedbackInsights'
 import AdminConfig from './AdminConfig'
-
-interface Stats {
-  total_runs: number
-  active_users: number
-  total_cost: number
-  feedback_rate: number
-}
 
 const TABS = ['Users', 'All Submissions', 'Feedback Insights', 'Config'] as const
 type TabName = typeof TABS[number]
@@ -24,10 +20,7 @@ export default function AdminDashboard() {
 
   const fetchStats = async () => {
     try {
-      const res = await fetch('/api/admin/stats')
-      if (res.ok) {
-        setStats(await res.json())
-      }
+      setStats(await getAdminStats())
     } catch (err) {
       console.error('Failed to fetch admin stats:', err)
     } finally {
@@ -100,7 +93,7 @@ export default function AdminDashboard() {
             icon={<DollarSign className="h-4 w-4" />}
             iconBg="bg-amber-50 text-amber-600"
             label="Total Cost"
-            value={`$${stats?.total_cost.toFixed(2) ?? '0.00'}`}
+            value={stats ? formatCost(stats.total_cost) : '$0.00'}
           />
           <StatCard
             icon={<MessageSquare className="h-4 w-4" />}

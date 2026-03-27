@@ -1,26 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Loader2, Download, MessageSquare } from 'lucide-react'
-
-interface FeedbackData {
-  id: number
-  run_id: string
-  user_email: string
-  reviewer_role: string
-  overall_accuracy: number | null
-  overall_completeness: number | null
-  overall_usefulness: number
-  manual_conversion_effort: string
-  correction_effort: string
-  likelihood_to_recommend: number
-  submitted_at: string
-}
-
-interface AggregatedScores {
-  accuracy: { avg: number; count: number }
-  completeness: { avg: number; count: number }
-  usefulness: { avg: number; count: number }
-  recommend: { avg: number; count: number }
-}
+import type { FeedbackData, AggregatedScores } from '../types'
+import { exportFeedbackCsv } from '../api/admin'
 
 const EFFORT_LABELS: Record<string, string> = {
   '< 5 minutes': '< 5 min',
@@ -58,12 +39,7 @@ export default function AdminFeedbackInsights() {
 
   const fetchFeedback = async () => {
     try {
-      // Use the CSV export endpoint to get all feedback data, then parse
-      // Actually, we need structured data. Let's use the runs endpoint to get feedback info.
-      // We'll fetch a large page of runs and feedback via admin/runs, but that doesn't have feedback detail.
-      // Instead, we can export CSV and parse, or add a simple approach:
-      // Download the CSV and parse it on the client. This is the simplest approach.
-      const res = await fetch('/api/admin/export/feedback')
+      const res = await exportFeedbackCsv()
       if (res.ok) {
         const csvText = await res.text()
         const parsed = parseCSV(csvText)
