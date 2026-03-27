@@ -58,7 +58,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 ### v1.4 Docs & UX Polish
 
 - [x] **Phase 16: Environment Fixes** - Commit CORS and Vite proxy fixes discovered during v1.3 verification (completed 2026-03-27)
-- [ ] **Phase 17: Run History UX** - Feedback indicator, relative dates, and column width fix on Previous Runs table
+- [x] **Phase 17: Run History UX** - Feedback indicator, relative dates, and column width fix on Previous Runs table (completed 2026-03-27)
 - [ ] **Phase 18: Documentation** - README architecture update and developer handoff document
 
 ## Phase Details
@@ -86,7 +86,9 @@ Plans:
   2. Runs less than 24 hours old display relative time (e.g., "5 minutes ago", "3 hours ago") instead of a full date
   3. Runs older than 24 hours display the full date
   4. The date column is wide enough that no date text is clipped or truncated
-**Plans**: TBD
+**Plans**: 1 plan
+Plans:
+- [ ] 17-01-PLAN.md -- Relative date formatting, column width fix, and tooltip support
 
 ### Phase 18: Documentation
 **Goal**: A new developer can understand the codebase architecture, security model, and deployment path
@@ -119,6 +121,6 @@ Plans:
 | 13. Security Hardening | v1.3 | 2/2 | Complete | 2026-03-26 |
 | 14. Backend Service Layer | v1.3 | 3/3 | Complete | 2026-03-26 |
 | 15. Frontend Architecture | v1.3 | 2/2 | Complete | 2026-03-27 |
-| 16. Environment Fixes | v1.4 | 1/1 | Complete   | 2026-03-27 |
-| 17. Run History UX | v1.4 | 0/0 | Not started | - |
+| 16. Environment Fixes | v1.4 | 1/1 | Complete    | 2026-03-27 |
+| 17. Run History UX | v1.4 | 0/1 | Complete    | 2026-03-27 |
 | 18. Documentation | v1.4 | 0/0 | Not started | - |
