@@ -40,7 +40,8 @@ python3 run_full_pipeline.py sample_vasquez_cv
 ### Prerequisites
 
 - Python 3.11+
-- OpenAI API key
+- OpenAI API key (get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys))
+- Node.js 18+ (for the web frontend)
 
 ### Installation
 
@@ -58,9 +59,200 @@ Set your OpenAI API key as an environment variable:
 export OPENAI_API_KEY=your-key-here
 ```
 
-Get an API key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys).
+Pipeline behavior can be tuned via `config.yaml`, which controls taxonomy settings, PDF processing parameters, and LLM model selection. See [Environment Variables](#environment-variables) for the full list of configuration options.
 
-Pipeline behavior can be tuned via `config.yaml`, which controls taxonomy settings, PDF processing parameters, and LLM model selection.
+## Architecture
+
+```mermaid
+graph TB
+    subgraph "CV Parsing Pipeline"
+        CLI["CLI Entry Point<br/>run_full_pipeline.py"]
+        Stages["12-Stage LLM Pipeline<br/>src/unified_pipeline/"]
+        CLI --> Stages
+    end
+
+    subgraph "Web Backend"
+        API["FastAPI REST API<br/>web_interface/backend/app/"]
+        WS["WebSocket Server"]
+        Services["Service Layer<br/>services/"]
+        DB[(MariaDB / SQLite)]
+        API --> Services
+        API --> WS
+        Services --> DB
+    end
+
+    subgraph "Web Frontend"
+        SPA["React 18 SPA<br/>web_interface/frontend/src/"]
+        APIClient["Centralized API Client<br/>8 typed modules"]
+        SPA --> APIClient
+    end
+
+    APIClient -->|REST| API
+    APIClient -->|WebSocket| WS
+    API -->|Orchestrates| Stages
+```
+
+CViche has three layers:
+
+- **CV Parsing Pipeline** (`src/unified_pipeline/`): A 12-stage LLM pipeline where each stage produces JSON consumed by the next stage. Entry points are the CLI (`run_full_pipeline.py`) and the web backend's pipeline orchestrator.
+
+- **Web Backend** (`web_interface/backend/app/`): A FastAPI REST API with WebSocket support for real-time pipeline progress. Uses SQLAlchemy ORM with MariaDB (production) or SQLite (development). Follows a service layer pattern with dedicated modules for access control, configuration, user provisioning, and admin queries.
+
+- **Web Frontend** (`web_interface/frontend/src/`): A React 18 single-page application built with Vite and Tailwind CSS. Communicates with the backend through a centralized API client with typed functions. Displays real-time pipeline progress via WebSocket.
+
+The system supports two execution modes: **CLI** for batch processing and **web** for interactive use with real-time progress tracking. File storage is abstracted behind a backend that supports both local filesystem (development) and S3 (production).
+
+For pipeline internals, data schemas, and API details, see [Technical Documentation](docs/TECHNICAL_README.md).
+
+## Web Interface
+
+### Docker (Recommended)
+
+```bash
+cd web_interface
+docker compose up --build
+```
+
+| Service  | Port | Description            |
+|----------|------|------------------------|
+| MariaDB  | 3306 | Database               |
+| Backend  | 8000 | FastAPI API server     |
+| Frontend | 3000 | React web application  |
+
+Set the `OPENAI_API_KEY` environment variable before running `docker compose` so the backend can access the OpenAI API.
+
+### Local Development (without Docker)
+
+**Backend:**
+
+```bash
+cd web_interface/backend
+pip install -r requirements.txt
+uvicorn app.main:app --port 5002 --reload
+```
+
+**Frontend:**
+
+```bash
+cd web_interface/frontend
+npm install
+npm run dev    # Starts on port 3001, proxies API to :5002
+```
+
+| Mode      | Backend Port | Frontend Port | Database              |
+|-----------|-------------|---------------|-----------------------|
+| Docker    | 8000        | 3000          | MariaDB (container)   |
+| Local dev | 5002        | 3001          | SQLite (file)         |
+
+## Service Layer
+
+The backend follows a service layer pattern: thin route handlers delegate business logic to dedicated service modules in `web_interface/backend/app/services/`.
+
+| Module | Purpose |
+|--------|---------|
+| `config_service.py` | Centralized application constants with `CVICHE_*` environment variable overrides |
+| `run_service.py` | Run access control (owner-or-admin authorization) |
+| `user_service.py` | User provisioning for both auth modes (email and SAML) |
+| `admin_service.py` | Aggregation queries for the admin dashboard (O(1) complexity via database queries) |
+
+Related centralized backend modules:
+
+| Module | Purpose |
+|--------|---------|
+| `errors.py` | Structured error response factories (no stack traces in production) |
+| `rate_limiter.py` | Per-user daily and monthly run limits, per-IP login attempt limiting |
+| `auth.py` | Session management and authentication middleware |
+
+## Authentication
+
+CViche supports two authentication modes, config-gated via `auth_config.yaml`:
+
+- **Simple mode (default):** Email-based login with an allowed-users list defined in `auth_config.yaml`. Suitable for development and small deployments.
+
+- **SAML mode:** pysaml2-based SAML 2.0 Service Provider with auto-generated self-signed certificates. Supports federated login via an institutional Identity Provider and ED group-based authorization for role assignment.
+
+The active auth mode is set in `auth_config.yaml` via the `auth.mode` field. SAML mode is fully implemented and config-gated; simple mode remains the default until WCM IdP registration is approved.
+
+Session management uses signed cookies via itsdangerous with a configurable secure flag. The same session cookie authenticates both REST API requests and WebSocket connections. Sessions include per-request database checks for user status and role synchronization.
+
+## Security
+
+CViche implements defense-in-depth security practices:
+
+- **Security headers:** Content Security Policy, X-Frame-Options, X-Content-Type-Options, HSTS, and Referrer-Policy applied to all responses
+- **CORS:** Restricted to configured origins via `CVICHE_ALLOWED_ORIGINS`
+- **CSRF protection:** Origin header validation middleware on state-changing requests
+- **Rate limiting:** Per-user daily and monthly run caps; per-IP login attempt limiting
+- **Error sanitization:** Structured error responses with no stack traces or internal paths exposed to clients
+- **Upload validation:** File type verification via magic bytes and configurable size limits
+- **Session security:** Signed cookies with configurable secure flag and expiration
+
+## Frontend Architecture
+
+The frontend uses a centralized API client pattern. Eight modules in `web_interface/frontend/src/api/` provide typed functions for all backend communication:
+
+| Module | Scope |
+|--------|-------|
+| `admin.ts` | Admin dashboard queries |
+| `auth.ts` | Login, logout, session check |
+| `client.ts` | Base HTTP client with error handling |
+| `consent.ts` | Consent form management |
+| `feedback.ts` | Feedback submission |
+| `runs.ts` | Pipeline run CRUD and history |
+| `upload.ts` | File upload with progress |
+| `websocket.ts` | Real-time pipeline progress |
+
+Key patterns:
+
+- **Shared type definitions** in `src/types/` ensure type safety across components
+- **Environment-derived API URLs** -- no hardcoded endpoints; the base URL is read from `VITE_API_URL` (defaults to empty for Vite proxy in development)
+- **AuthContext** provides session state management across the application
+- **React Router** handles client-side navigation
+
+## Environment Variables
+
+All backend configuration uses `CVICHE_*` prefixed environment variables with sensible defaults for local development. Only `OPENAI_API_KEY` is required to get started.
+
+### External API Keys
+
+| Variable | Description | Required |
+|----------|-------------|----------|
+| `OPENAI_API_KEY` | OpenAI API key for LLM pipeline stages | Yes |
+| `NCBI_API_KEY` | NCBI API key for faster PubMed queries | No |
+
+### Database and Storage
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CVICHE_DATABASE_URL` | Database connection URL | SQLite (`sqlite:///./cviche_dev.db`) |
+| `CVICHE_STORAGE_BACKEND` | Storage backend: `local` or `s3` | `local` |
+| `CVICHE_S3_BUCKET` | S3 bucket name (required when storage backend is `s3`) | -- |
+| `CVICHE_S3_PREFIX` | S3 key prefix | `cviche` |
+
+### Authentication and Sessions
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `CVICHE_SESSION_SECRET` | Cookie signing key (random fallback if unset -- sessions lost on restart) | Random |
+| `CVICHE_SECURE_COOKIES` | Enable secure cookie flag | `true` |
+
+### Security (values not shown)
+
+These variables control security-sensitive thresholds. They have sensible defaults; see the source code for details.
+
+| Variable | Description |
+|----------|-------------|
+| `CVICHE_SESSION_TTL` | Session expiration duration |
+| `CVICHE_LOGIN_RATE_LIMIT` | Login attempt limit per window |
+| `CVICHE_LOGIN_RATE_WINDOW` | Login rate limit window duration |
+| `CVICHE_MAX_UPLOAD_MB` | Maximum upload file size |
+| `CVICHE_ALLOWED_ORIGINS` | Comma-separated CORS allowed origins |
+
+### Frontend
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `VITE_API_URL` | Backend API base URL (frontend) | Empty (uses Vite proxy) |
 
 ## Running the Pipeline (CLI)
 
@@ -79,33 +271,6 @@ python3 run_full_pipeline.py sample_vasquez_cv --model gpt-4.1
 ```
 
 Stage outputs are written to `src/unified_pipeline/outputs/stage_*/`, with each stage producing a JSON file named by the document UID.
-
-## Web Interface
-
-### Docker (Recommended)
-
-```bash
-cd web_interface
-docker compose up --build
-```
-
-This starts three services:
-
-| Service | Port | Description |
-|---------|------|-------------|
-| MariaDB | 3306 | Database |
-| Backend | 8000 | FastAPI API server |
-| Frontend | 3000 | React web application |
-
-Set the `OPENAI_API_KEY` environment variable before running `docker compose` so the backend can access the OpenAI API.
-
-### Development Mode (without Docker)
-
-The backend is a FastAPI application served by Uvicorn, and the frontend is a Vite dev server (React + Tailwind CSS). Install backend dependencies separately:
-
-```bash
-pip install -r web_interface/backend/requirements.txt
-```
 
 ## Sample CV
 
@@ -145,6 +310,8 @@ See [CHANGELOG.md](CHANGELOG.md) for version history.
 ## Support
 
 See the [FAQ & Support page](docs/SUPPORT.md) for common questions, troubleshooting, and guidance on adapting CViche for other institutions.
+
+For pipeline internals, data schemas, and API endpoint details, see [Technical Documentation](docs/TECHNICAL_README.md).
 
 ## License
 
