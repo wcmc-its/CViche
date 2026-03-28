@@ -1,16 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.1
-milestone_name: Web Interface UX
-status: completed
-stopped_at: Completed 06-01-PLAN.md -- v1.1 milestone complete
-last_updated: "2026-03-24T11:25:16.321Z"
-last_activity: 2026-03-24 -- Completed 06-01 End-User Help Page; v1.1 milestone complete
+milestone: v1.4
+milestone_name: Docs & UX Polish
+status: in_progress
+stopped_at: Completed 18-03-PLAN.md -- developer handoff document
+last_updated: "2026-03-28T02:16:01Z"
+last_activity: 2026-03-27 -- Completed 18-03 Developer Handoff Document (HANDOFF.md, local-only)
 progress:
   total_phases: 3
   completed_phases: 3
-  total_plans: 4
-  completed_plans: 4
+  total_plans: 3
+  completed_plans: 3
   percent: 100
 ---
 
@@ -18,19 +18,19 @@ progress:
 
 ## Project Reference
 
-See: .planning/PROJECT.md (updated 2026-03-23)
+See: .planning/PROJECT.md (updated 2026-03-27)
 
 **Core value:** Faculty can upload a CV and get back a correctly formatted WCM document without manual reformatting
-**Current focus:** Web interface UX -- feedback form, run history redesign, end-user help
+**Current focus:** Documentation -- README, TECHNICAL_README, developer handoff
 
 ## Current Position
 
-Phase: 6 of 6 (End-User Help) -- complete
-Plan: 1 of 1 complete
-Status: Phase 6 complete -- v1.1 milestone complete
-Last activity: 2026-03-24 -- Completed 06-01 End-User Help Page; v1.1 milestone complete
+Phase: 18 of 18 (Documentation) -- plan 3 of 3 complete
+Plan: 3 of 3 complete
+Status: Phase 18 plan 03 complete -- developer handoff document created
+Last activity: 2026-03-27 -- Completed 18-03 Developer Handoff Document (HANDOFF.md, local-only)
 
-Progress: [||||||||||] 100% (1/1 plans complete in current phase)
+Progress: [||||||||||] 100% (3/3 plans complete in current phase)
 
 ## Performance Metrics
 
@@ -50,6 +50,7 @@ Progress: [||||||||||] 100% (1/1 plans complete in current phase)
 | Phase 04 P02 | 35min | 3 tasks | 2 files |
 | Phase 05 P01 | N/A | 2 tasks | 1 files |
 | Phase 06 P01 | 8min | 3 tasks | 4 files |
+| Phase 18 P03 | 4min | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -72,17 +73,19 @@ Progress: [||||||||||] 100% (1/1 plans complete in current phase)
 - [Phase 06]: Used Link component from react-router-dom instead of useNavigate for help icons and back link -- proper <a> semantics for accessibility
 - [Phase 06]: All FAQ answers visible (no accordion) -- faculty/staff should see all content without extra interaction
 - [Phase 06]: Static help content only (no API) -- help text hardcoded in HelpPage.tsx, no backend dependency
+- [Phase 18]: HANDOFF.md structured with 6 major sections; all security threshold values sourced from source code
+- [Phase 18]: Security information split pattern: public docs describe mechanisms, local-only HANDOFF.md has specific values
 
 ### Pending Todos
 
-None yet.
+None.
 
 ### Blockers/Concerns
 
-None -- all v1.1 blockers resolved.
+None.
 
 ## Session Continuity
 
-Last session: 2026-03-24T11:25:16.319Z
-Stopped at: Completed 06-01-PLAN.md -- v1.1 milestone complete
+Last session: 2026-03-28T02:16:01Z
+Stopped at: Completed 18-03-PLAN.md -- developer handoff document
 Resume file: None
