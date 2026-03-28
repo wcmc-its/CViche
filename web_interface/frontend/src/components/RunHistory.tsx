@@ -264,10 +264,10 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
       {runs.length > 0 && (
         <>
           <div className="overflow-x-auto">
-            <table className="min-w-[640px] w-full">
+            <table className="w-full table-fixed">
               <thead className="sticky top-0 z-header bg-white border-b-2 border-gray-200">
                 <tr>
-                  <th className="px-3 py-3 text-left min-w-[120px]" aria-sort={getAriaSortValue('status')}>
+                  <th className="px-2 py-3 text-left w-[90px]" aria-sort={getAriaSortValue('status')}>
                     <button
                       type="button"
                       onClick={() => handleSort('status')}
@@ -277,7 +277,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                       <SortIcon field="status" />
                     </button>
                   </th>
-                  <th className="px-3 py-3 text-left" aria-sort={getAriaSortValue('filename')}>
+                  <th className="px-2 py-3 text-left" aria-sort={getAriaSortValue('filename')}>
                     <button
                       type="button"
                       onClick={() => handleSort('filename')}
@@ -287,7 +287,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                       <SortIcon field="filename" />
                     </button>
                   </th>
-                  <th className="px-3 py-3 text-left min-w-[170px]" aria-sort={getAriaSortValue('started_at')}>
+                  <th className="px-2 py-3 text-left w-[130px]" aria-sort={getAriaSortValue('started_at')}>
                     <button
                       type="button"
                       onClick={() => handleSort('started_at')}
@@ -297,7 +297,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                       <SortIcon field="started_at" />
                     </button>
                   </th>
-                  <th className="px-3 py-3 text-right min-w-[88px]" aria-sort={getAriaSortValue('total_duration_seconds')}>
+                  <th className="px-2 py-3 text-right w-[72px]" aria-sort={getAriaSortValue('total_duration_seconds')}>
                     <button
                       type="button"
                       onClick={() => handleSort('total_duration_seconds')}
@@ -307,7 +307,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                       <SortIcon field="total_duration_seconds" />
                     </button>
                   </th>
-                  <th className="px-3 py-3 text-right min-w-[72px]" aria-sort={getAriaSortValue('total_cost')}>
+                  <th className="px-2 py-3 text-right w-[56px]" aria-sort={getAriaSortValue('total_cost')}>
                     <button
                       type="button"
                       onClick={() => handleSort('total_cost')}
@@ -317,7 +317,7 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                       <SortIcon field="total_cost" />
                     </button>
                   </th>
-                  <th className="px-3 py-3 text-center min-w-[140px]" aria-sort={getAriaSortValue('feedback')}>
+                  <th className="px-2 py-3 text-center w-[110px]" aria-sort={getAriaSortValue('feedback')}>
                     <button
                       type="button"
                       onClick={() => handleSort('feedback')}
@@ -343,28 +343,28 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
                       hover:bg-gray-100
                     `}
                   >
-                    <td className="px-3 py-3 text-left">
+                    <td className="px-2 py-3 text-left">
                       <span className="inline-flex items-center gap-1">
                         <StatusIcon status={run.status} />
                         <span className={`text-sm ${statusLabelColor(run.status)}`}>{statusLabel(run.status)}</span>
                       </span>
                     </td>
-                    <td className="px-3 py-3 text-left text-sm text-gray-900">
+                    <td className="px-2 py-3 text-left text-sm text-gray-900 truncate" title={run.filename}>
                       {run.filename}
                     </td>
-                    <td className="px-3 py-3 text-left text-sm text-gray-500">
+                    <td className="px-2 py-3 text-left text-sm text-gray-500">
                       {(() => {
                         const { display, tooltip } = formatRelativeDate(run.started_at)
                         return <span title={tooltip}>{display}</span>
                       })()}
                     </td>
-                    <td className="px-3 py-3 text-right text-sm text-gray-500">
+                    <td className="px-2 py-3 text-right text-sm text-gray-500">
                       {formatDuration(run.total_duration_seconds)}
                     </td>
-                    <td className="px-3 py-3 text-right text-sm text-gray-700">
+                    <td className="px-2 py-3 text-right text-sm text-gray-700">
                       {run.total_cost > 0 ? `$${run.total_cost.toFixed(2)}` : '\u2014'}
                     </td>
-                    <td className="px-3 py-3 text-center">
+                    <td className="px-2 py-3 text-center">
                       {run.status === 'complete' && feedbackMap[run.run_id] === true && (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-[11px] font-medium">
                           <MessageSquare className="w-3 h-3" aria-hidden="true" />

@@ -80,7 +80,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
         backgroundRepeat: 'no-repeat'
       }}
     >
-      <div className="w-full max-w-md">
+      <div className="w-full max-w-3xl">
         {/* Logo */}
         <div className="flex justify-center mb-6">
           <img
@@ -90,7 +90,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
           />
         </div>
 
-        <section className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6 md:p-8 relative">
+        <section className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6 md:p-8 relative max-w-md mx-auto">
           <Link
             to="/help"
             aria-label="Help and support"
