@@ -59,7 +59,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 16: Environment Fixes** - Commit CORS and Vite proxy fixes discovered during v1.3 verification (completed 2026-03-27)
 - [x] **Phase 17: Run History UX** - Feedback indicator, relative dates, and column width fix on Previous Runs table (completed 2026-03-27)
-- [ ] **Phase 18: Documentation** - README architecture update and developer handoff document
+- [x] **Phase 18: Documentation** - README architecture update and developer handoff document (completed 2026-03-28)
 
 ## Phase Details
 
@@ -102,7 +102,7 @@ Plans:
 Plans:
 - [x] 18-01-PLAN.md -- Comprehensive README.md rewrite and .gitignore update
 - [ ] 18-02-PLAN.md -- TECHNICAL_README.md update and docs/guides/ refresh
-- [ ] 18-03-PLAN.md -- Developer handoff document (HANDOFF.md, local-only)
+- [x] 18-03-PLAN.md -- Developer handoff document (HANDOFF.md, local-only)
 
 **Note:** DOC-06 (developer handoff document) is NOT committed to the repository -- it contains sensitive operational details. It will be created as a local-only file.
 
@@ -127,4 +127,4 @@ Plans:
 | 15. Frontend Architecture | v1.3 | 2/2 | Complete | 2026-03-27 |
 | 16. Environment Fixes | v1.4 | 1/1 | Complete    | 2026-03-27 |
 | 17. Run History UX | v1.4 | 0/1 | Complete    | 2026-03-27 |
-| 18. Documentation | v1.4 | 1/3 | In progress | - |
+| 18. Documentation | v1.4 | 3/3 | Complete    | 2026-03-28 |
