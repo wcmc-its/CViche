@@ -1,10 +1,12 @@
 # CViche - Technical Documentation
 
-**Version**: 15.0
-**Last Updated**: 2025-12-03
+**Version**: 16.0
+**Last Updated**: 2026-03-27
 **Status**: Production
 
-CViche is a multi-stage LLM pipeline for extracting structured data from faculty CVs and converting them to Weill Cornell Medicine (WCM) template format.
+> For a high-level overview and getting started guide, see the [README](../README.md).
+
+CViche is a multi-stage LLM pipeline for extracting structured data from faculty CVs and converting them to Weill Cornell Medicine (WCM) template format. It includes a web interface for uploading CVs, monitoring pipeline progress in real time, and downloading results, secured with defense-in-depth practices and a clean service-layer backend architecture.
 
 ---
 
@@ -14,16 +16,20 @@ CViche is a multi-stage LLM pipeline for extracting structured data from faculty
 2. [Architecture](#architecture)
 3. [Pipeline Stages](#pipeline-stages)
 4. [Taxonomy System](#taxonomy-system)
-5. [Technical Requirements](#technical-requirements)
-6. [Installation](#installation)
-7. [Usage](#usage)
-8. [Web Interface](#web-interface)
-9. [Configuration](#configuration)
-10. [Output Formats](#output-formats)
-11. [External API Integrations](#external-api-integrations)
-12. [Cost Management](#cost-management)
-13. [Validators & Post-Processing](#validators--post-processing)
-14. [Development](#development)
+5. [Web Backend Architecture](#web-backend-architecture)
+6. [Authentication & Authorization](#authentication--authorization)
+7. [Security Implementation](#security-implementation)
+8. [Frontend Architecture](#frontend-architecture)
+9. [Technical Requirements](#technical-requirements)
+10. [Installation](#installation)
+11. [Usage](#usage)
+12. [Web Interface](#web-interface)
+13. [Configuration](#configuration)
+14. [Output Formats](#output-formats)
+15. [External API Integrations](#external-api-integrations)
+16. [Cost Management](#cost-management)
+17. [Validators & Post-Processing](#validators--post-processing)
+18. [Development](#development)
 
 ---
 
@@ -91,7 +97,7 @@ This pipeline automates the conversion of faculty CVs (Word/PDF) into:
 | Method | Description | Use Case |
 |--------|-------------|----------|
 | **CLI** | `run_full_pipeline.py` | Batch processing, automation |
-| **Web App** | React + FastAPI | Interactive use, real-time feedback |
+| **Web App** | React + Vite + Tailwind CSS frontend, FastAPI + MariaDB backend | Interactive use, real-time feedback |
 | **Python API** | Direct module import | Integration into other systems |
 
 ### Directory Structure
@@ -425,6 +431,244 @@ The WCM CV taxonomy consists of **60 valid codes** organized into **20 top-level
 
 ---
 
+## Web Backend Architecture
+
+The web backend is a FastAPI application that wraps the core CV parsing pipeline with upload management, real-time progress streaming, user authentication, and administrative features.
+
+### Application Structure
+
+**Entry point:** `web_interface/backend/app/main.py`
+
+The FastAPI app registers routers, middleware, and lifespan events:
+
+| Router | Prefix | Purpose |
+|--------|--------|---------|
+| `auth_routes` | `/api` | Login, logout, session check |
+| `consent_routes` | `/api` | Consent acceptance tracking |
+| `upload` | `/api` | CV file upload and pipeline trigger |
+| `runs` | `/api` | Run status, history, downloads |
+| `steps` | `/api` | Individual step details and logs |
+| `feedback_routes` | `/api` | Post-run feedback submission |
+| `admin_routes` | `/api` | User management, system config, stats |
+| `saml_routes` | `/api` | SAML SSO endpoints (ACS, metadata) |
+| `websocket` | `/ws` | Real-time pipeline event streaming |
+
+### Middleware Stack
+
+Middleware is applied in this order (outermost first):
+
+1. **CORSMiddleware** -- Restricts cross-origin requests to configured origins (`CVICHE_ALLOWED_ORIGINS`)
+2. **SecurityHeadersMiddleware** -- Adds CSP, X-Frame-Options, HSTS, and other security headers to all responses; catches unhandled exceptions and returns sanitized error responses
+3. **CSRFMiddleware** -- Validates `Origin` header on state-changing requests (POST, PUT, DELETE, PATCH); SAML ACS endpoint is exempt since the IdP posts from an external origin
+
+### Service Layer
+
+Route handlers are kept thin, delegating business logic to dedicated service modules in `web_interface/backend/app/services/`:
+
+| Module | Purpose |
+|--------|---------|
+| `config_service.py` | Centralized constants with `CVICHE_*` environment variable overrides (session TTL, upload limits, rate limit config, cost estimation parameters) |
+| `run_service.py` | Run access control -- verifies run existence and ownership (owner or admin) |
+| `admin_service.py` | O(1) aggregation queries for the admin dashboard (user stats, run counts, costs) using SQL subqueries instead of N+1 loops |
+| `user_service.py` | User provisioning for both auth modes -- create-or-update with role resolution |
+
+Related centralized modules outside `services/`:
+
+| Module | Purpose |
+|--------|---------|
+| `errors.py` | HTTPException factory functions (`not_found`, `bad_request`, `forbidden`, `rate_limited`, `unauthorized`, etc.) ensuring a uniform `{"error": "<code>", "message": "<text>"}` response envelope |
+| `rate_limiter.py` | Per-user daily and monthly run limits with admin exemption; system defaults from `SystemConfig` table, per-user overrides from `User` model |
+| `config_loader.py` | Reads `SystemConfig` table values with typed getters |
+
+### Database
+
+**ORM:** SQLAlchemy with Alembic migrations (`web_interface/backend/alembic/`)
+
+**Models** (in `web_interface/backend/app/models.py`):
+
+| Model | Purpose |
+|-------|---------|
+| `Run` | Pipeline run metadata (status, timestamps, cost, user, file info) |
+| `Step` | Per-stage execution record (status, duration, cost, output files, error) |
+| `Log` | Captured stdout/stderr per step |
+| `LLMUsage` | Per-call token and cost tracking with prompt version hash |
+| `User` | User accounts with role, status, per-user rate limit overrides |
+| `Consent` | Audit trail for consent acceptance (version, hash, IP, timestamp) |
+| `Feedback` | Post-run feedback (15+ fields: accuracy, completeness, usefulness, issues) |
+| `SystemConfig` | Key-value system settings (rate limits, admin users) |
+| `RunMetrics` | Aggregated run performance metrics |
+
+**Pydantic schemas** (`web_interface/backend/app/schemas.py`) validate all request/response payloads.
+
+**Environments:** SQLite for local development, MariaDB for production (Docker and EKS).
+
+### Pipeline Orchestrator
+
+`web_interface/backend/app/pipeline/orchestrator.py` manages pipeline execution:
+
+1. Launches the 12-stage pipeline in a **background thread** (not async -- the pipeline uses synchronous I/O)
+2. Captures `stdout`/`stderr` via `redirect_stdout`/`redirect_stderr`
+3. Parses captured output with regex patterns to detect progress (e.g., "Processing 5 of 10 sections") and converts to structured WebSocket events
+4. Persists step state (`Step` model) to the database at each transition
+5. Emits events through `event_emitter.py` (singleton `EventEmitter`) to all WebSocket connections registered for a `run_id`
+
+**Event types:** `STEP_START`, `LOG`, `PROGRESS`, `COST_UPDATE`, `STEP_COMPLETE`, `STEP_ERROR`, `RUN_COMPLETE`
+
+**Step definitions** are centralized in `web_interface/backend/app/pipeline/step_registry.py` (`STEP_REGISTRY`) with metadata: name, LLM usage flag, weight, estimated seconds.
+
+### Storage Abstraction
+
+**Interface:** `web_interface/backend/app/storage/base.py` (`RunStorage` ABC)
+
+| Implementation | Location | Use Case |
+|----------------|----------|----------|
+| `LocalRunStorage` | `storage/local_storage.py` | Local development |
+| `S3RunStorage` | `storage/s3_storage.py` | Production (EKS) |
+
+**Factory:** `storage/factory.py` creates a singleton instance based on `CVICHE_STORAGE_BACKEND` (default `"local"`, set `"s3"` for production).
+
+---
+
+## Authentication & Authorization
+
+CViche supports two authentication modes, switched via `auth.mode` in `web_interface/backend/auth_config.yaml`.
+
+### Simple Mode (Default)
+
+- Email-based login: user enters email, backend checks against `allowed_users` list in `auth_config.yaml`
+- Cookie-based session using `itsdangerous.URLSafeTimedSerializer`
+- Cookie name: `cviche_session`
+- Per-request DB lookup via `get_current_user` FastAPI dependency to sync role and check account status
+- Suitable for development and small deployments
+
+### SAML Mode
+
+- Full SAML 2.0 SP implementation using `pysaml2`
+- Endpoints: `/api/saml/login` (AuthnRequest), `/api/saml/acs` (Assertion Consumer Service), `/api/saml/metadata` (SP metadata)
+- Auto-generated self-signed certificates for SP signing (stored in configurable `cert_dir`)
+- Config-gated: changing `auth.mode` from `simple` to `saml` in `auth_config.yaml` activates SSO
+- Implementation: `web_interface/backend/app/saml_client.py`
+
+### ED Group Authorization
+
+- After SAML authentication, ED group membership is checked via LDAP (`web_interface/backend/app/ed_group_lookup.py`)
+- Group-to-role mapping: configurable which ED groups grant `admin` vs `user` role
+- TTL-based in-memory cache to avoid excessive LDAP queries
+- Uses `ldap3` library for LDAP communication
+
+### Session Implementation
+
+- Signed cookies via `itsdangerous.URLSafeTimedSerializer`
+- Cookie payload: `user_id`, `email`, `role`, `issued_at`
+- Configurable session lifetime via `CVICHE_SESSION_TTL` environment variable
+- Secure cookie flag controlled by `CVICHE_SECURE_COOKIES` (default `true`, set `false` for local dev without HTTPS)
+- WebSocket authentication: same `cviche_session` cookie extracted from WebSocket upgrade request headers
+
+---
+
+## Security Implementation
+
+CViche implements defense-in-depth security across the backend. Per project policy, this section describes mechanisms and architecture without exposing specific threshold values.
+
+### Security Headers
+
+The `SecurityHeadersMiddleware` in `main.py` adds these headers to every response:
+
+| Header | Purpose |
+|--------|---------|
+| `Content-Security-Policy` | Restricts script, style, image, font, and connection sources to `'self'`; blocks framing via `frame-ancestors 'none'` |
+| `X-Frame-Options` | `DENY` -- prevents embedding in iframes (clickjacking protection) |
+| `X-Content-Type-Options` | `nosniff` -- prevents MIME-type sniffing attacks |
+| `Strict-Transport-Security` | Enforces HTTPS with `includeSubDomains` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` -- limits referrer information leakage |
+
+### CORS
+
+- `CORSMiddleware` with configurable allowed origins via `CVICHE_ALLOWED_ORIGINS` environment variable
+- Credentials allowed (for session cookies)
+- Explicit method and header allowlists (not wildcard in production)
+
+### CSRF Protection
+
+- Custom `CSRFMiddleware` validates the `Origin` header on all state-changing HTTP methods
+- Requests with an `Origin` not in the allowed origins list are rejected with 403
+- SAML ACS endpoint (`/api/saml/acs`) is exempt since the Identity Provider posts from an external origin
+
+### Error Sanitization
+
+- `errors.py` provides factory functions for consistent error responses: `{"error": "<code>", "message": "<human-readable text>"}`
+- Global exception handler catches unhandled exceptions, logs full tracebacks server-side, returns sanitized "An unexpected error occurred" to the client
+- Debug mode (`CVICHE_DEBUG=true`) optionally includes tracebacks in responses for development
+
+### Upload Validation
+
+- Magic bytes verification to confirm file content matches the declared extension
+- File extension allowlist (`.docx`, `.pdf`)
+- Configurable maximum upload size via `CVICHE_MAX_UPLOAD_MB`
+
+### Rate Limiting
+
+- **Run rate limiting:** Per-user daily and monthly caps on pipeline runs, tracked in the database. Admins are exempt. System defaults configurable via admin dashboard; per-user overrides available.
+- **Login rate limiting:** In-memory per-IP attempt tracking with configurable window and threshold via `CVICHE_LOGIN_RATE_LIMIT` and `CVICHE_LOGIN_RATE_WINDOW`.
+
+---
+
+## Frontend Architecture
+
+The web frontend is a React single-page application built with Vite and styled with Tailwind CSS.
+
+### Stack
+
+| Technology | Version | Purpose |
+|------------|---------|---------|
+| React | 18 | UI framework |
+| TypeScript | 5.3 | Type safety |
+| Vite | 5.0 | Build tool and dev server |
+| Tailwind CSS | 3.3 | Utility-first CSS |
+| React Router DOM | 6 | Client-side routing |
+| Lucide React | 0.577 | Icon library |
+
+### Component Structure
+
+**Pages** (top-level routes):
+- `UploadPage` -- CV upload, real-time pipeline viewer, run history, output downloads
+- `AdminDashboard` -- User management, system configuration, usage statistics
+- `HelpPage` -- FAQ, getting started guide, support information
+- `LoginPage` -- Email login form (simple mode) or SSO redirect (SAML mode)
+
+**Shared components** in `web_interface/frontend/src/components/shared/` provide reusable UI elements (status icons, formatted dates, etc.).
+
+### Centralized API Client
+
+Eight typed API modules in `web_interface/frontend/src/api/`:
+
+| Module | Functions | Purpose |
+|--------|-----------|---------|
+| `client.ts` | Base `fetchApi` | Shared fetch wrapper with credentials and error handling |
+| `auth.ts` | `login`, `logout`, `checkSession` | Authentication |
+| `upload.ts` | `uploadCV` | File upload |
+| `runs.ts` | `getRuns`, `getRunStatus`, `downloadOutput` | Run management |
+| `admin.ts` | `getUsers`, `updateUser`, `getSystemConfig` | Admin operations |
+| `consent.ts` | `getConsentStatus`, `acceptConsent` | Consent tracking |
+| `feedback.ts` | `submitFeedback`, `getFeedback` | Feedback submission |
+| `websocket.ts` | `connectWebSocket` | Real-time pipeline streaming |
+
+All functions are fully typed with TypeScript interfaces from `web_interface/frontend/src/types/`.
+
+### State Management
+
+- **AuthContext** (`src/contexts/AuthContext.tsx`): User identity, session state, login/logout, consent tracking
+- No Redux or Zustand -- component-local state via `useState` with React Router for navigation
+- Environment-derived API base URL via `VITE_API_URL` (defaults to empty string for Vite proxy in development)
+
+### WebSocket Integration
+
+- Frontend connects to `ws://.../ws/run/{run_id}/stream` immediately after upload
+- Receives real-time events: step transitions, log messages, progress updates, cost tracking
+- Pipeline viewer updates step status icons, progress bars, and log panels in real time
+
+---
+
 ## Technical Requirements
 
 ### System Requirements
@@ -465,7 +709,7 @@ jinja2                 # Template rendering
 ```
 fastapi                # Web framework
 uvicorn                # ASGI server
-sqlalchemy             # ORM for SQLite
+sqlalchemy             # ORM (SQLite dev / MariaDB prod)
 python-multipart       # File upload handling
 websockets             # Real-time communication
 ```
@@ -479,8 +723,7 @@ react-router-dom@6     # Client-side routing
 typescript@5           # Type safety
 vite@5                 # Build tool
 tailwindcss@3          # CSS framework
-zustand@4              # State management
-@tanstack/react-table  # Data tables
+lucide-react           # Icon library
 ```
 
 ### External Services
@@ -624,16 +867,16 @@ python3 run_full_pipeline.py 2097_Upton_Cv --model gpt-4o-mini
 ### Web Application
 
 ```bash
-# Start backend
+# Start backend (local dev)
 cd web_interface/backend
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 5002
 
 # Start frontend (new terminal)
 cd web_interface/frontend
 npm install  # First time only
-npm start
+npm run dev
 
-# Open http://localhost:3000
+# Open http://localhost:3001
 ```
 
 ### Python API
@@ -681,20 +924,19 @@ The pipeline includes a modern web application ("CViche Pipeline Viewer") for in
 │                           WEB INTERFACE                                      │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │                                                                             │
-│  FRONTEND (React + TypeScript + Vite)                                       │
-│  ├── React 18 with TypeScript                                               │
-│  ├── Tailwind CSS for styling                                               │
-│  ├── Vite for development/bundling                                          │
-│  ├── Zustand for state management                                           │
-│  ├── TanStack Table for data viewing                                        │
-│  └── WebSocket client for real-time updates                                 │
+│  FRONTEND (React 18 + TypeScript + Vite + Tailwind CSS)                     │
+│  ├── AuthContext for session state management                               │
+│  ├── 8 typed API client modules (auth, upload, runs, admin, etc.)           │
+│  ├── Shared TypeScript types (src/types/)                                   │
+│  └── WebSocket client for real-time pipeline updates                        │
 │                                                                             │
-│  BACKEND (FastAPI + SQLite)                                                 │
-│  ├── FastAPI server (port 8000)                                             │
-│  ├── SQLite database for run/step tracking                                  │
-│  ├── WebSocket server for real-time events                                  │
-│  ├── Pipeline orchestrator                                                  │
-│  └── RESTful API endpoints                                                  │
+│  BACKEND (FastAPI + SQLAlchemy + MariaDB)                                   │
+│  ├── Service layer (config, run, admin, user services)                      │
+│  ├── Dual-mode auth (email + SAML) with session cookies                     │
+│  ├── Security middleware (CORS, CSRF, headers, error sanitization)          │
+│  ├── Pipeline orchestrator with WebSocket event streaming                   │
+│  ├── Storage abstraction (local filesystem / S3)                            │
+│  └── Rate limiting (per-user run caps, per-IP login limits)                 │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -709,35 +951,54 @@ web_interface/
 │   │   │   ├── upload.py             # File upload handling
 │   │   │   ├── runs.py               # Run management
 │   │   │   ├── steps.py              # Step details
-│   │   │   └── websocket.py          # Real-time streaming
+│   │   │   ├── websocket.py          # Real-time streaming
+│   │   │   ├── auth_routes.py        # Login, logout, session
+│   │   │   ├── saml_routes.py        # SAML SSO endpoints
+│   │   │   ├── admin_routes.py       # Admin dashboard API
+│   │   │   ├── consent_routes.py     # Consent tracking
+│   │   │   └── feedback_routes.py    # Feedback submission
 │   │   ├── pipeline/                 # Pipeline orchestration
-│   │   │   ├── orchestrator.py       # Main executor
-│   │   │   ├── step_registry.py      # Step definitions
-│   │   │   └── event_emitter.py      # WebSocket events
-│   │   ├── database.py               # SQLAlchemy setup
-│   │   ├── models.py                 # DB models (runs, steps, logs)
-│   │   ├── schemas.py                # Pydantic schemas
-│   │   └── main.py                   # FastAPI application
-│   ├── cviche.db                     # SQLite database
-│   ├── requirements.txt              # Python dependencies
-│   └── prompt_logs/                  # LLM prompt logging
+│   │   │   ├── orchestrator.py       # Background thread executor
+│   │   │   ├── step_registry.py      # Step definitions + metadata
+│   │   │   └── event_emitter.py      # WebSocket event broadcasting
+│   │   ├── services/                 # Business logic layer
+│   │   │   ├── config_service.py     # CVICHE_* centralized config
+│   │   │   ├── run_service.py        # Run access control
+│   │   │   ├── admin_service.py      # O(1) aggregation queries
+│   │   │   └── user_service.py       # User provisioning
+│   │   ├── storage/                  # Storage abstraction
+│   │   │   ├── base.py              # RunStorage ABC
+│   │   │   ├── local_storage.py     # Local filesystem (dev)
+│   │   │   ├── s3_storage.py        # S3 (production)
+│   │   │   └── factory.py           # Singleton factory
+│   │   ├── auth.py                   # Session cookie auth
+│   │   ├── saml_client.py           # pysaml2 SAML SP
+│   │   ├── ed_group_lookup.py       # LDAP/ED group lookup
+│   │   ├── errors.py                # HTTPException factories
+│   │   ├── rate_limiter.py          # Per-user run rate limits
+│   │   ├── database.py              # SQLAlchemy setup
+│   │   ├── models.py                # DB models (9 tables)
+│   │   ├── schemas.py               # Pydantic schemas
+│   │   └── main.py                  # FastAPI app + middleware
+│   ├── alembic/                     # Database migrations
+│   ├── auth_config.yaml             # Auth mode config
+│   └── requirements.txt             # Python dependencies
 │
 ├── frontend/
 │   ├── src/
-│   │   ├── components/
-│   │   │   ├── UploadPage.tsx        # Upload interface
-│   │   │   └── PipelineViewer.tsx    # Pipeline progress viewer
-│   │   ├── App.tsx                   # Main application
-│   │   ├── main.tsx                  # Entry point
-│   │   └── index.css                 # Tailwind styles
-│   ├── package.json                  # Node dependencies
-│   ├── vite.config.ts                # Vite configuration
-│   └── tailwind.config.js            # Tailwind configuration
+│   │   ├── api/                     # Typed API client (8 modules)
+│   │   ├── components/              # React components + shared/
+│   │   ├── contexts/                # AuthContext
+│   │   ├── types/                   # Shared TypeScript interfaces
+│   │   ├── App.tsx                  # Router and layout
+│   │   ├── main.tsx                 # Entry point
+│   │   └── index.css                # Tailwind styles
+│   ├── package.json                 # Node dependencies
+│   ├── vite.config.ts               # Dev server (port 3001), API proxy
+│   └── tailwind.config.js           # Custom color palette
 │
-├── uploads/                          # Uploaded CV files
-├── outputs/                          # Pipeline outputs (by run_id)
-├── start.sh                          # Startup script
-└── README.md                         # Web interface documentation
+├── docker-compose.yml               # Dev (MariaDB, backend, frontend)
+└── docker-compose.prod.yml          # Production (S3, nginx, workers)
 ```
 
 ### Installation & Setup
@@ -765,24 +1026,29 @@ npm install
 
 ### Running the Web Interface
 
-**Option A: Separate Terminals**
+**Option A: Local Dev (Separate Terminals)**
 ```bash
-# Terminal 1: Start backend
+# Terminal 1: Start backend on port 5002
 cd web_interface/backend
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 5002
 
-# Terminal 2: Start frontend
+# Terminal 2: Start frontend on port 3001
 cd web_interface/frontend
 npm run dev
 ```
 
-**Option B: Startup Script**
+**Option B: Docker**
 ```bash
 cd web_interface
-./start.sh
+docker compose up    # Backend on 8000, frontend on 3000
 ```
 
-**Access Points**:
+**Access Points (local dev without Docker)**:
+- Frontend: http://localhost:3001 (Vite dev server)
+- Backend API: http://localhost:5002
+- API Documentation: http://localhost:5002/docs (Swagger UI)
+
+**Access Points (Docker)**:
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:8000
 - API Documentation: http://localhost:8000/docs (Swagger UI)
@@ -831,14 +1097,19 @@ The web interface visualizes 9 processing steps:
 
 ### Database Schema
 
-The SQLite database (`cviche.db`) tracks:
+The database (SQLite in development, MariaDB in production) tracks:
 
 | Table | Purpose |
 |-------|---------|
-| `runs` | Pipeline run metadata (status, timestamps, costs) |
+| `users` | User accounts, roles, per-user rate limit overrides |
+| `runs` | Pipeline run metadata (status, timestamps, costs, user) |
 | `steps` | Individual step execution (status, duration, outputs) |
 | `logs` | Execution logs per step |
 | `llm_usage` | LLM API usage and token costs |
+| `consent` | Audit trail for consent acceptance |
+| `feedback` | Post-run feedback (15+ fields) |
+| `system_config` | Key-value system settings |
+| `run_metrics` | Aggregated performance metrics |
 
 ### Frontend Dependencies
 
@@ -848,8 +1119,7 @@ The SQLite database (`cviche.db`) tracks:
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-router-dom": "^6.20.0",
-    "zustand": "^4.4.7",
-    "@tanstack/react-table": "^8.11.2"
+    "lucide-react": "^0.577.0"
   },
   "devDependencies": {
     "typescript": "^5.3.3",
@@ -862,18 +1132,20 @@ The SQLite database (`cviche.db`) tracks:
 ### Troubleshooting
 
 **Backend won't start**:
-- Check port 8000 availability: `lsof -i :8000`
+- Check port availability: `lsof -i :5002` (local dev) or `lsof -i :8000` (Docker)
 - Verify Python dependencies: `pip install -r requirements.txt`
-- Check `.env` file has `OPENAI_API_KEY` set
+- Ensure `OPENAI_API_KEY` is set in the environment
+- Ensure `CVICHE_SESSION_SECRET` is set (warning logged if missing, sessions will not survive restarts)
 
 **Frontend won't start**:
-- Check port 3000 availability
+- Check port availability: `lsof -i :3001` (local dev) or `lsof -i :3000` (Docker)
 - Reinstall dependencies: `rm -rf node_modules && npm install`
 
 **WebSocket connection fails**:
-- Ensure backend is running on port 8000
+- Ensure backend is running on the expected port
 - Check browser console for CORS errors
-- Verify `vite.config.ts` proxy settings
+- Verify `CVICHE_ALLOWED_ORIGINS` includes the frontend origin
+- Verify `vite.config.ts` proxy target matches backend port
 
 ---
 

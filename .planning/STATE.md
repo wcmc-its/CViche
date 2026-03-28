@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.4
 milestone_name: Docs & UX Polish
 status: executing
-stopped_at: Completed 18-01-PLAN.md
-last_updated: "2026-03-28T02:01:28.372Z"
-last_activity: 2026-03-28 -- Phase 18 plan 01 complete
+stopped_at: Completed 18-01 and 18-02
+last_updated: "2026-03-28T02:08:00.000Z"
+last_activity: 2026-03-28 -- Phase 18 plans 01+02 complete
 progress:
   total_phases: 3
   completed_phases: 2
   total_plans: 5
-  completed_plans: 3
-  percent: 60
+  completed_plans: 4
+  percent: 80
 ---
 
 # Project State
@@ -26,22 +26,23 @@ See: .planning/PROJECT.md (updated 2026-03-27)
 ## Current Position
 
 Phase: 18 (documentation) -- EXECUTING
-Plan: 2 of 3
-Status: Plan 01 complete, continuing phase 18
-Last activity: 2026-03-28 -- Completed 18-01-PLAN.md
+Plan: 3 of 3
+Status: Plans 01 and 02 complete, plan 03 remaining (Wave 2)
+Last activity: 2026-03-28 -- Completed 18-01 and 18-02
 
-Progress: [||||||....] 60% (3/5 plans complete)
+Progress: [||||||||..] 80% (4/5 plans complete)
 
 ## Performance Metrics
 
 **Velocity:**
 
 - Total plans completed: 30 (across v1.0-v1.3)
-- v1.4 plans completed: 3
+- v1.4 plans completed: 4
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
 | Phase 18 P01 | 3min | 2 tasks | 2 files |
+| Phase 18 P02 | 8min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -52,6 +53,8 @@ Progress: [||||||....] 60% (3/5 plans complete)
 - [Phase 18-01]: Used Mermaid for architecture diagram (GitHub renders natively)
 - [Phase 18-01]: Grouped env vars by category with security-sensitive defaults omitted
 - [Phase 18-01]: README expanded from 152 to 318 lines covering full system architecture
+- [Phase 18-02]: TECHNICAL_README.md updated to v16.0 as deep-dive companion to README; preserved pipeline stage docs, added web architecture sections
+- [Phase 18-02]: docs/guides/ files: WEB_APP_INTEGRATION.md and word_segmentation_production.md updated in place; visual_enhancements.md and INTEGRATION_COMPLETE.md marked as historical records
 
 ### Pending Todos
 
@@ -63,6 +66,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-28T02:01:28Z
-Stopped at: Completed 18-01-PLAN.md
-Resume file: .planning/phases/18-documentation/18-01-SUMMARY.md
+Last session: 2026-03-28T02:08:00Z
+Stopped at: Completed 18-01 and 18-02
+Resume file: .planning/phases/18-documentation/18-02-SUMMARY.md
