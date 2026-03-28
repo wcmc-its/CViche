@@ -21,13 +21,14 @@ Faculty can upload a CV and get back a correctly formatted WCM document without 
 
 ## Current State
 
-**Latest release:** v1.3 (shipped 2026-03-27)
+**Latest release:** v1.4 (shipped 2026-03-28)
 
-Four milestones shipped across 15 phases (30 plans):
+Five milestones shipped across 18 phases (35 plans):
 - v1.0: Repository sanitized, documented, public on GitHub
 - v1.1: Feedback form, run history table, end-user help
 - v1.2: Dual-mode auth (simple + SAML), ED group authorization, mock IdP testing
 - v1.3: Security hardening (7 fixes), backend service layer (6 modules), frontend architecture (28 typed API functions, 17 shared types)
+- v1.4: Environment fixes, run history UX, comprehensive documentation (README rewrite, TECHNICAL_README v16.0, developer handoff)
 
 **Tech stack:** React + Vite + Tailwind CSS (frontend), FastAPI + MariaDB (backend), 132+ passing tests
 
@@ -53,10 +54,12 @@ Four milestones shipped across 15 phases (30 plans):
 
 - ENV-01, ENV-02: CORS and Vite proxy port fixes -- v1.4
 - UX-01 through UX-03: Run history UX (feedback indicator, relative dates, column width) -- v1.4
+- DOC-05: README architecture update and documentation refresh -- v1.4
+- DOC-06: Developer handoff document (local-only) -- v1.4
 
 ### Active
 
-See REQUIREMENTS.md for remaining v1.4 requirements.
+None -- all v1.4 requirements validated.
 
 ### Out of Scope
 
@@ -69,7 +72,7 @@ See REQUIREMENTS.md for remaining v1.4 requirements.
 
 ## Context
 
-- v1.0-v1.3 shipped: 15 phases, 30 plans, 68 files changed in v1.3 alone (+3,696 / -1,014 lines)
+- v1.0-v1.4 shipped: 18 phases, 35 plans
 - Web interface is production-ready: upload, real-time pipeline viewer, download, feedback, help, dual-mode auth, security hardening
 - Backend has clean service layer: 7 service modules, centralized config with CVICHE_* env overrides, structured error responses
 - Frontend has single source of truth: 28 typed API functions, 17 shared interfaces, environment-derived URLs, shared formatting utilities
@@ -106,4 +109,4 @@ See REQUIREMENTS.md for remaining v1.4 requirements.
 | VITE_API_URL defaults to empty for Vite proxy | Dev works without .env, prod uses explicit URL | ✓ Good |
 
 ---
-*Last updated: 2026-03-27 after Phase 17 (run-history-ux) complete*
+*Last updated: 2026-03-28 after Phase 18 (documentation) complete — v1.4 milestone shipped*
