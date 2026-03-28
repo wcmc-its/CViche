@@ -98,7 +98,11 @@ Plans:
   1. README.md describes the current architecture: pipeline stages, web stack (React + Vite + Tailwind / FastAPI + MariaDB), service layer modules, security measures, and auth modes
   2. README.md is committed to the repository and visible on GitHub
   3. A developer handoff document exists covering SAML activation steps, ED group setup, deployment checklist, and known pending items
-**Plans**: TBD
+**Plans**: 3 plans
+Plans:
+- [x] 18-01-PLAN.md -- Comprehensive README.md rewrite and .gitignore update
+- [ ] 18-02-PLAN.md -- TECHNICAL_README.md update and docs/guides/ refresh
+- [ ] 18-03-PLAN.md -- Developer handoff document (HANDOFF.md, local-only)
 
 **Note:** DOC-06 (developer handoff document) is NOT committed to the repository -- it contains sensitive operational details. It will be created as a local-only file.
 
@@ -123,4 +127,4 @@ Plans:
 | 15. Frontend Architecture | v1.3 | 2/2 | Complete | 2026-03-27 |
 | 16. Environment Fixes | v1.4 | 1/1 | Complete    | 2026-03-27 |
 | 17. Run History UX | v1.4 | 0/1 | Complete    | 2026-03-27 |
-| 18. Documentation | v1.4 | 0/0 | Not started | - |
+| 18. Documentation | v1.4 | 1/3 | In progress | - |

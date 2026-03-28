@@ -7,7 +7,7 @@
 
 ### Documentation
 
-- [ ] **DOC-05**: Update existing README.md with current architecture (pipeline stages, web stack, service layer, security measures, auth modes)
+- [x] **DOC-05**: Update existing README.md with current architecture (pipeline stages, web stack, service layer, security measures, auth modes)
 - [ ] **DOC-06**: Create a developer handoff document (NOT committed) covering SAML activation steps, ED group setup, deployment checklist, and known pending items
 
 ### Run History UX
@@ -35,7 +35,7 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| DOC-05 | Phase 18 | Pending |
+| DOC-05 | Phase 18 | Complete |
 | DOC-06 | Phase 18 | Pending |
 | UX-01 | Phase 17 | Pending |
 | UX-02 | Phase 17 | Pending |

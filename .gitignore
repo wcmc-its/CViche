@@ -65,6 +65,9 @@ archive/
 # Auth config
 web_interface/backend/auth_config.yaml
 
+# Developer handoff (contains sensitive operational details)
+docs/HANDOFF.md
+
 # SAML SP certificates (auto-generated)
 web_interface/backend/certs/
 
