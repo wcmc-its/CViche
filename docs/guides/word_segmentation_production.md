@@ -1,5 +1,7 @@
 # Word CV Segmentation - Production Guide
 
+**Last updated:** 2026-03-27. For overall pipeline documentation, see the [README](../../README.md) and [Technical Documentation](../TECHNICAL_README.md).
+
 **Status**: Production-Ready for 1000+ CVs
 **Cost**: ~$0.10-0.20 per CV
 **Speed**: ~30-60 seconds per CV
@@ -9,12 +11,12 @@
 
 ## Problem Solved
 
-**Before**: `word_cv_segmentation.py` tried to send entire CV in single API call
+**Before**: The original segmenter tried to send entire CV in single API call
 - Large CVs (>170KB) would send **85,456 tokens** in one request
 - OpenAI rate limit: **30,000 TPM**
 - Result: **429 Rate Limit Error** - Pipeline BLOCKED
 
-**After**: `word_cv_segmentation_chunked.py` uses three-pass chunking
+**After**: The chunked approach (`src/unified_pipeline/segmentation/chunked_chat_hierarchy_extractor.py`) uses three-pass chunking
 - Detects section headers first (Pass 1)
 - Processes each section independently in <12K char chunks (Pass 2)
 - Merges results into final JSON (Pass 3)
@@ -26,33 +28,24 @@
 
 ### Basic Usage
 
-```bash
-cd cv_pipeline
-
-python3 word_cv_segmentation_chunked.py <docx_file> [output_dir]
-```
-
-### Examples
+The chunked segmentation is now integrated as Stage 1a of the unified pipeline. Run it via the CLI:
 
 ```bash
-# Process single CV (output to same directory)
-python3 word_cv_segmentation_chunked.py "/path/to/cv.docx"
+# Full pipeline (includes chunked segmentation as Stage 1a)
+python3 run_full_pipeline.py data/sample_cvs/word/2097_Upton_Cv.docx
 
-# Process with custom output directory
-python3 word_cv_segmentation_chunked.py "/path/to/cv.docx" "./outputs"
-
-# Real example from testing
-python3 word_cv_segmentation_chunked.py \
-  "../outputs/stage_0_sample_cvs/word/2009_Mucci_March.docx" \
-  "./test_outputs"
+# Stage 1a only (segmentation)
+python3 run_full_pipeline.py data/sample_cvs/word/2097_Upton_Cv.docx --stage 1a
 ```
+
+Or via the web interface by uploading a CV at `http://localhost:3001` (local dev) or `http://localhost:3000` (Docker).
 
 ### Batch Processing
 
 ```bash
-# Process all CVs in a directory
-for cv in /path/to/cvs/*.docx; do
-    python3 word_cv_segmentation_chunked.py "$cv" "./batch_outputs"
+# Process all CVs in a directory via CLI
+for cv in data/sample_cvs/word/*.docx; do
+    python3 run_full_pipeline.py "$cv"
 done
 ```
 
@@ -278,18 +271,18 @@ For production batches, spot-check every 10th CV:
 **Solution**: Add credits to OpenAI account or use different API key
 
 ```python
-# In word_cv_segmentation_chunked.py, line 26:
+# The pipeline uses the standard OpenAI client:
 client = OpenAI()  # Uses OPENAI_API_KEY env variable
 ```
 
-### Error: "Module not found: docx_structure_extractor"
+### Error: "Module not found"
 
-**Cause**: Script run from wrong directory
-**Solution**: Always run from `cv_pipeline/` directory
+**Cause**: Script run from wrong directory or missing dependencies
+**Solution**: Run from the project root and ensure dependencies are installed
 
 ```bash
-cd cv_pipeline
-python3 word_cv_segmentation_chunked.py <file>
+pip install -r requirements.txt
+python3 run_full_pipeline.py data/sample_cvs/word/test.docx --stage 1a
 ```
 
 ### Low-Quality Output
@@ -313,54 +306,28 @@ python3 word_cv_segmentation_chunked.py <file>
 
 ---
 
-## Integration with Existing Pipeline
+## Integration with Pipeline
 
-### Replace Old Segmentation
+The chunked segmentation is fully integrated as Stage 1a of the unified pipeline. It runs automatically when processing any CV:
 
-**Option 1**: Update `cv_segmenter.py` to use chunked approach
+```bash
+# Full pipeline (Stage 1a runs automatically)
+python3 run_full_pipeline.py data/sample_cvs/word/cv.docx
 
-```python
-# cv_segmenter.py
-from word_cv_segmentation_chunked import segment_word_cv_chunked
-
-def segment_cv(cv_path):
-    if cv_path.endswith('.docx'):
-        return segment_word_cv_chunked(cv_path)
-    elif cv_path.endswith('.pdf'):
-        return segment_pdf_cv(cv_path)  # existing
-```
-
-**Option 2**: Use directly in pipeline scripts
-
-```python
-from word_cv_segmentation_chunked import segment_word_cv_chunked
-
-result = segment_word_cv_chunked(
-    docx_path="/path/to/cv.docx",
-    output_dir="./stage_1_outputs"
-)
-
-print(f"Processed {result['num_sections']} sections")
-print(f"Extracted {result['total_entries']} entries")
-print(f"Saved to {result['output_file']}")
+# Web interface triggers the same pipeline via the orchestrator
+# (web_interface/backend/app/pipeline/orchestrator.py)
 ```
 
 ### Downstream Processing
 
-Chunked output is compatible with existing Stage 1B/1C/2A pipeline:
+Stage 1a output feeds directly into the subsequent stages:
 
-```bash
-# Stage 1A: Segmentation (new chunked approach)
-python3 word_cv_segmentation_chunked.py cv.docx ./stage_1_outputs
-
-# Stage 1B: Enrichment (existing)
-python3 stage_1b_enrichment/enrich_from_word.py \
-  --docx cv.docx \
-  --segmented stage_1_outputs/cv_segmented.json \
-  --output stage_1b_outputs/cv_enriched.json
-
-# Continue with existing pipeline...
-```
+| Stage | Input | Output |
+|-------|-------|--------|
+| **1a** (Segmentation) | `.docx` or `.pdf` | `{uid}_segmented.json` |
+| **1b** (Hierarchy Mapping) | 1a output + original doc | `{uid}_hierarchy_mapped.json` |
+| **2** (Entry Extraction) | 1b output + original doc | `{uid}_entries.json` |
+| ... | ... | ... |
 
 ---
 
@@ -414,7 +381,7 @@ python3 stage_1b_enrichment/enrich_from_word.py \
 
 ### Automated Process (New)
 
-**Tool**: `word_cv_segmentation_chunked.py`
+**Tool**: `chunked_chat_hierarchy_extractor.py`
 **Process**:
 1. Run script on CV
 2. Automatic header detection
@@ -465,13 +432,13 @@ python3 stage_1b_enrichment/enrich_from_word.py \
 ## Support & Contact
 
 **Issues**: Report to project maintainer
-**Documentation**: See `/cv_pipeline/README.md` for full pipeline documentation
-**Gold Standards**: See `/outputs/cv_pipeline/stage_1_segmentation/outputs/` for validated examples
+**Documentation**: See the [README](../../README.md) and [Technical Documentation](../TECHNICAL_README.md)
+**Outputs**: Pipeline outputs are stored in `src/unified_pipeline/outputs/stage_1a_segmentation/`
 
 **Key Files**:
-- `word_cv_segmentation_chunked.py` - Main script
-- `docx_structure_extractor.py` - Word structure extraction
-- `three_pass_vision_segmentation.py` - PDF equivalent (reference implementation)
+- `src/unified_pipeline/segmentation/chunked_chat_hierarchy_extractor.py` - Main chunked segmentation (Stage 1a)
+- `src/unified_pipeline/segmentation/word_chunked.py` - Word chunking utilities
+- `src/unified_pipeline/segmentation/pdf_vision.py` - PDF vision-based segmentation
 
 ---
 
@@ -504,6 +471,6 @@ python3 stage_1b_enrichment/enrich_from_word.py \
 
 ---
 
-**Document Version**: 1.0
-**Last Updated**: 2025-11-01
-**Status**: Production-Ready
+**Document Version**: 1.1
+**Last Updated**: 2026-03-27
+**Status**: Production-Ready (integrated into unified pipeline as Stage 1a)

@@ -1,7 +1,9 @@
+**Historical Note:** This document records header detection enhancement decisions from November 2025. The composite visual scoring approach described here remains the current implementation in `src/unified_pipeline/segmentation/chunked_chat_hierarchy_extractor.py`. For current architecture documentation, see the [README](../../README.md) and [Technical Documentation](../TECHNICAL_README.md).
+
 # Visual Enhancement Summary - Header Detection
 
 **Date**: 2025-11-01
-**Script**: `word_cv_segmentation_chunked.py`
+**Current location**: `src/unified_pipeline/segmentation/chunked_chat_hierarchy_extractor.py` (formerly `word_cv_segmentation_chunked.py`)
 **Enhancement**: Composite visual scoring for header detection
 
 ---
@@ -331,7 +333,7 @@ if confidence >= 0.70:  # Line 151
 
 ### Adjust Signal Weights
 
-Edit confidence boosts in `word_cv_segmentation_chunked.py:95-145`:
+Edit confidence boosts in `src/unified_pipeline/segmentation/chunked_chat_hierarchy_extractor.py`:
 
 ```python
 # Increase centered weight (very important for your CVs)
