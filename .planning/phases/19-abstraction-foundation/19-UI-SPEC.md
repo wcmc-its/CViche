@@ -89,7 +89,7 @@ Exceptions: none
 | Role | Size | Weight | Line Height |
 |------|------|--------|-------------|
 | Body | 14px (text-sm) | 400 (font-normal) | 1.5 |
-| Label | 12px (text-xs) | 500 (font-medium) | 1.5 |
+| Label | 12px (text-xs) | 400 (font-normal) | 1.5 |
 | Heading | 18px (text-lg) | 700 (font-bold) | 1.2 |
 | Display | 20px (text-xl) | 700 (font-bold) | 1.2 |
 
@@ -135,7 +135,7 @@ No new copywriting elements in Phase 19. All user-facing text changes are backen
 - [ ] Dimension 1 Copywriting: PASS (no new copy -- backend phase)
 - [ ] Dimension 2 Visuals: PASS (no visual changes -- backend phase)
 - [ ] Dimension 3 Color: PASS (no color changes -- backend phase)
-- [ ] Dimension 4 Typography: PASS (no typography changes -- backend phase)
+- [ ] Dimension 4 Typography: PASS (2 weights declared: 400 and 700)
 - [ ] Dimension 5 Spacing: PASS (no spacing changes -- backend phase)
 - [ ] Dimension 6 Registry Safety: PASS (no registry additions -- backend phase)
 
