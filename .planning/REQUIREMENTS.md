@@ -15,7 +15,7 @@
 ### Bedrock Provider
 
 - [ ] **BED-01**: AWS Bedrock is supported as an LLM provider via boto3 bedrock-runtime (Claude, Llama, Mistral models)
-- [ ] **BED-02**: Bedrock authentication uses IAM credentials (env vars or instance roles) — no hardcoded keys
+- [ ] **BED-02**: Bedrock authentication uses IAM credentials (env vars or instance roles) -- no hardcoded keys
 
 ### Configuration
 
@@ -41,22 +41,22 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| LLM-01 | TBD | Pending |
-| LLM-02 | TBD | Pending |
-| LLM-03 | TBD | Pending |
-| LLM-04 | TBD | Pending |
-| BED-01 | TBD | Pending |
-| BED-02 | TBD | Pending |
-| CFG-01 | TBD | Pending |
-| CFG-02 | TBD | Pending |
-| CFG-03 | TBD | Pending |
-| TEST-01 | TBD | Pending |
-| TEST-02 | TBD | Pending |
+| LLM-01 | Phase 19 | Pending |
+| LLM-02 | Phase 19 | Pending |
+| LLM-03 | Phase 20 | Pending |
+| LLM-04 | Phase 19 | Pending |
+| BED-01 | Phase 21 | Pending |
+| BED-02 | Phase 21 | Pending |
+| CFG-01 | Phase 19 | Pending |
+| CFG-02 | Phase 19 | Pending |
+| CFG-03 | Phase 19 | Pending |
+| TEST-01 | Phase 21 | Pending |
+| TEST-02 | Phase 21 | Pending |
 
 **Coverage:**
 - v1.5 requirements: 11 total
-- Mapped to phases: 0/11 (pending roadmap)
-- Unmapped: 11
+- Mapped to phases: 11/11
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-29*
