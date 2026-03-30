@@ -8,16 +8,17 @@ CViche is an AI-powered pipeline that converts unstructured academic CVs (.docx)
 
 Faculty can upload a CV and get back a correctly formatted WCM document without manual reformatting.
 
-## Current Milestone: v1.4 Docs & UX Polish
+## Current Milestone: v1.5 LLM Provider Abstraction
 
-**Goal:** Developer handoff documentation, run history UX improvements, and environment fixes discovered during verification.
+**Goal:** Pipeline stages can run on any supported LLM provider (OpenAI, AWS Bedrock), configurable per deployment, without breaking existing OpenAI-only setups.
 
 **Target features:**
-- Technical README update for developer handoff (architecture, security, SAML setup, deployment)
-- Feedback indicator on the Previous Runs table (upload page)
-- Relative date display for runs < 24h, full date for older
-- Fix clipped date column width on Previous Runs
-- CORS and Vite proxy port fixes
+- LLM provider abstraction layer (unified interface for all pipeline LLM calls)
+- AWS Bedrock provider implementation (boto3 bedrock-runtime, Claude/Llama/Mistral)
+- Per-stage model configuration (different models for different pipeline stages if desired)
+- Global default + per-stage override config pattern
+- OpenAI remains the default — zero changes for existing deployments
+- Cost tracking across providers (existing LLMUsage table extended with provider field)
 
 ## Current State
 
@@ -59,7 +60,7 @@ Five milestones shipped across 18 phases (35 plans):
 
 ### Active
 
-None -- all v1.4 requirements validated.
+See REQUIREMENTS.md for v1.5 requirements.
 
 ### Out of Scope
 
@@ -109,4 +110,4 @@ None -- all v1.4 requirements validated.
 | VITE_API_URL defaults to empty for Vite proxy | Dev works without .env, prod uses explicit URL | ✓ Good |
 
 ---
-*Last updated: 2026-03-28 after Phase 18 (documentation) complete — v1.4 milestone shipped*
+*Last updated: 2026-03-29 after v1.4 archived — v1.5 LLM Provider Abstraction started*

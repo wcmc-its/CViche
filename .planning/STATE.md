@@ -1,7 +1,7 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.5
-milestone_name: TBD
+milestone_name: LLM Provider Abstraction
 status: defining
 stopped_at: Milestone v1.4 archived, starting v1.5 discussion
 last_updated: "2026-03-29T00:00:00.000Z"
