@@ -62,6 +62,6 @@ Plans:
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 19. Abstraction Foundation | v1.5 | 3/3 | Complete   | 2026-03-31 |
+| 19. Abstraction Foundation | v1.5 | 3/3 | Complete    | 2026-03-31 |
 | 20. Pipeline Migration | v1.5 | 0/? | Not started | - |
 | 21. Bedrock Provider & Validation | v1.5 | 0/? | Not started | - |
