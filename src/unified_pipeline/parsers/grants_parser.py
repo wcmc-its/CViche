@@ -12,21 +12,11 @@ Strategy:
 Output: Structured grant records ready for database insertion
 """
 
-import os
-import re
 import json
-import time
 from pathlib import Path
 from typing import Dict, List, Any, Optional
-from openai import OpenAI
 
-# Import prompt logger
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "core"))
-from prompt_logger import log_prompt_before_call, log_prompt_response, get_caller_info
-
-# Use default environment context to avoid expensive SKU mapping
-client = OpenAI()
+from unified_pipeline.llm_client import call_llm
 
 
 # Grant schema for Structured Outputs
@@ -178,34 +168,10 @@ Extract all available fields following the schema."""
         }
     }
 
-    # Log prompt before API call
-    log_id = log_prompt_before_call(
-        messages=messages,
-        model="gpt-4o-mini",
-        temperature=0.1,
-        max_tokens=500,
-        response_format=response_format,
-        purpose="grant_parsing",
-        context={"text_length": len(text)},
-        caller_file=get_caller_info()
-    )
-
-    # Call GPT-4o-mini with Structured Outputs
-    start_time = time.time()
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        response_format=response_format,
-        temperature=0.1,
-        max_tokens=500
-    )
-    elapsed_time = time.time() - start_time
-
-    # Log response
-    log_prompt_response(log_id, response, "grant_parsing", elapsed_time)
+    result = call_llm(stage="parser_grants", messages=messages, response_format=response_format)
 
     # Parse response
-    grant = json.loads(response.choices[0].message.content)
+    grant = json.loads(result["content"])
 
     # Add source metadata if available
     if element_metadata:

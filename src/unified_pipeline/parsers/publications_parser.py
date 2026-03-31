@@ -14,21 +14,12 @@ Strategy:
 Output: Structured publication records ready for database insertion
 """
 
-import os
 import re
 import json
-import time
 from pathlib import Path
 from typing import Dict, List, Any, Optional
-from openai import OpenAI
 
-# Import prompt logger
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "core"))
-from prompt_logger import log_prompt_before_call, log_prompt_response, get_caller_info
-
-# Use default environment context to avoid expensive SKU mapping
-client = OpenAI()
+from unified_pipeline.llm_client import call_llm
 
 
 # Publication schema for Structured Outputs
@@ -218,7 +209,6 @@ Return structured JSON matching the schema."""
 
 Extract all available fields following the schema."""
 
-    # Log the EXACT prompt before API call
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
@@ -232,40 +222,15 @@ Extract all available fields following the schema."""
         }
     }
 
-    log_id = log_prompt_before_call(
-        messages=messages,
-        model="gpt-4o-mini",
-        temperature=0.1,
-        max_tokens=1000,
-        response_format=response_format,
-        purpose="publication_parsing",
-        context={"text_length": len(text)},
-        caller_file=get_caller_info()
-    )
-
-    # Call GPT-4o-mini with Structured Outputs
-    start_time = time.time()
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        response_format=response_format,
-        temperature=0.1,
-        max_tokens=1000
-    )
-    elapsed_time = time.time() - start_time
-
-    # Log the response
-    log_prompt_response(log_id, response, "publication_parsing", elapsed_time)
+    result = call_llm(stage="parser_publications", messages=messages, response_format=response_format)
 
     # Parse response
-    publication = json.loads(response.choices[0].message.content)
+    publication = json.loads(result["content"])
 
-    # Capture token usage from API response
-    usage = response.usage
     publication['token_usage'] = {
-        'prompt_tokens': usage.prompt_tokens,
-        'completion_tokens': usage.completion_tokens,
-        'total_tokens': usage.total_tokens
+        'prompt_tokens': result["prompt_tokens"],
+        'completion_tokens': result["completion_tokens"],
+        'total_tokens': result["total_tokens"]
     }
 
     # Step 3: Merge regex identifiers with LLM output (prefer regex for identifiers)

@@ -6,20 +6,10 @@ Extracts structured data from medical licensure entries using GPT-4o-mini.
 Output: Structured licensure records ready for table insertion
 """
 
-import os
 import json
-import time
 from typing import Dict, List, Any
-from openai import OpenAI
-from pathlib import Path
 
-# Import prompt logger
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "core"))
-from prompt_logger import log_prompt_before_call, log_prompt_response, get_caller_info
-
-# Use default environment context to avoid expensive SKU mapping
-client = OpenAI()
+from unified_pipeline.llm_client import call_llm
 
 
 LICENSURE_SCHEMA = {
@@ -110,33 +100,13 @@ Extract all fields."""
         }
     }
 
-    log_id = log_prompt_before_call(
-        messages=messages,
-        model="gpt-4o-mini",
-        temperature=0.1,
-        max_tokens=300,
-        response_format=response_format,
-        purpose="licensure_parsing",
-        context={"text_length": len(text)},
-        caller_file=get_caller_info()
-    )
+    result = call_llm(stage="parser_licensure", messages=messages, response_format=response_format)
 
-    start_time = time.time()
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        response_format=response_format,
-        temperature=0.1,
-        max_tokens=300
-    )
-    elapsed_time = time.time() - start_time
-    log_prompt_response(log_id, response, "licensure_parsing", elapsed_time)
-
-    licensure = json.loads(response.choices[0].message.content)
+    licensure = json.loads(result["content"])
     licensure['token_usage'] = {
-        'prompt_tokens': response.usage.prompt_tokens,
-        'completion_tokens': response.usage.completion_tokens,
-        'total_tokens': response.usage.total_tokens
+        'prompt_tokens': result["prompt_tokens"],
+        'completion_tokens': result["completion_tokens"],
+        'total_tokens': result["total_tokens"]
     }
 
     return licensure

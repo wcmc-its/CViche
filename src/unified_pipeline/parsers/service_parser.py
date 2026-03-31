@@ -10,20 +10,10 @@ Extracts structured data from service entries including:
 Output: Structured service records ready for table insertion
 """
 
-import os
 import json
-import time
 from typing import Dict, List, Any
-from openai import OpenAI
-from pathlib import Path
 
-# Import prompt logger
-import sys
-sys.path.insert(0, str(Path(__file__).parent.parent / "core"))
-from prompt_logger import log_prompt_before_call, log_prompt_response, get_caller_info
-
-# Use default environment context to avoid expensive SKU mapping
-client = OpenAI()
+from unified_pipeline.llm_client import call_llm
 
 
 SERVICE_SCHEMA = {
@@ -162,33 +152,13 @@ Extract all fields."""
         }
     }
 
-    log_id = log_prompt_before_call(
-        messages=messages,
-        model="gpt-4o-mini",
-        temperature=0.1,
-        max_tokens=400,
-        response_format=response_format,
-        purpose="service_parsing",
-        context={"text_length": len(text)},
-        caller_file=get_caller_info()
-    )
+    result = call_llm(stage="parser_service", messages=messages, response_format=response_format)
 
-    start_time = time.time()
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        response_format=response_format,
-        temperature=0.1,
-        max_tokens=400
-    )
-    elapsed_time = time.time() - start_time
-    log_prompt_response(log_id, response, "service_parsing", elapsed_time)
-
-    service = json.loads(response.choices[0].message.content)
+    service = json.loads(result["content"])
     service['token_usage'] = {
-        'prompt_tokens': response.usage.prompt_tokens,
-        'completion_tokens': response.usage.completion_tokens,
-        'total_tokens': response.usage.total_tokens
+        'prompt_tokens': result["prompt_tokens"],
+        'completion_tokens': result["completion_tokens"],
+        'total_tokens': result["total_tokens"]
     }
 
     # Convert to WCM format for compatibility with legacy template populator
