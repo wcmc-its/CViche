@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.5
 milestone_name: LLM Provider Abstraction
-status: ready_to_plan
-stopped_at: Roadmap created, ready to plan Phase 19
-last_updated: "2026-03-29T00:00:00.000Z"
-last_activity: 2026-03-29 -- v1.5 roadmap created (3 phases, 11 requirements)
+status: executing
+stopped_at: Completed 19-02-PLAN.md
+last_updated: "2026-03-31T17:13:35Z"
+last_activity: 2026-03-31 -- Plan 19-02 complete (provider column, migration, cost events)
 progress:
   total_phases: 3
   completed_phases: 0
-  total_plans: 0
-  completed_plans: 0
-  percent: 0
+  total_plans: 3
+  completed_plans: 1
+  percent: 11
 ---
 
 # Project State
@@ -26,16 +26,20 @@ See: .planning/PROJECT.md (updated 2026-03-29)
 ## Current Position
 
 Phase: 19 of 21 (Abstraction Foundation) -- first phase of v1.5
-Plan: --
-Status: Ready to plan
-Last activity: 2026-03-29 -- v1.5 roadmap created
+Plan: 2 of 3 complete
+Status: Executing
+Last activity: 2026-03-31 -- Plan 19-02 complete (provider column, migration, cost events)
 
-Progress: [..........] 0%
+Progress: [#.........] 11%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 35 (across v1.0-v1.4)
+- Total plans completed: 36 (35 v1.0-v1.4 + 1 v1.5)
+
+| Phase | Plan | Duration | Tasks | Files |
+|-------|------|----------|-------|-------|
+| 19 | 02 | 9min | 2 | 4 |
 
 ## Accumulated Context
 
@@ -43,6 +47,8 @@ Progress: [..........] 0%
 
 - v1.0-v1.4 completed: 18 phases, 35 plans across 5 milestones
 - Full decision log in PROJECT.md Key Decisions table
+- 19-02: Used server_default='openai' + nullable=True for provider column backward compatibility
+- 19-02: Provider parameter added as last kwarg with default 'openai' for zero-change existing callers
 
 ### Pending Todos
 
@@ -55,6 +61,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-29
-Stopped at: v1.5 roadmap created, ready to plan Phase 19
-Resume file: .planning/ROADMAP.md
+Last session: 2026-03-31
+Stopped at: Completed 19-02-PLAN.md
+Resume file: .planning/phases/19-abstraction-foundation/19-02-SUMMARY.md
