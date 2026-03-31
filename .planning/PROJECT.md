@@ -23,8 +23,9 @@ Faculty can upload a CV and get back a correctly formatted WCM document without 
 ## Current State
 
 **Latest release:** v1.4 (shipped 2026-03-28)
+**In progress:** v1.5 Phase 19 complete — config system, LLM client, and cost tracking layer built
 
-Five milestones shipped across 18 phases (35 plans):
+Six milestones in progress across 19 phases (38 plans):
 - v1.0: Repository sanitized, documented, public on GitHub
 - v1.1: Feedback form, run history table, end-user help
 - v1.2: Dual-mode auth (simple + SAML), ED group authorization, mock IdP testing
@@ -58,9 +59,12 @@ Five milestones shipped across 18 phases (35 plans):
 - DOC-05: README architecture update and documentation refresh -- v1.4
 - DOC-06: Developer handoff document (local-only) -- v1.4
 
+- CFG-01, CFG-02, CFG-03: YAML config system with per-stage overrides and env var integration -- v1.5 (Phase 19)
+- LLM-01, LLM-02, LLM-04: Centralized LLM client with retries, cost tracking, provider column -- v1.5 (Phase 19)
+
 ### Active
 
-See REQUIREMENTS.md for v1.5 requirements.
+See REQUIREMENTS.md for v1.5 requirements (LLM-03 and remaining items).
 
 ### Out of Scope
 
@@ -73,11 +77,11 @@ See REQUIREMENTS.md for v1.5 requirements.
 
 ## Context
 
-- v1.0-v1.4 shipped: 18 phases, 35 plans
+- v1.0-v1.4 shipped: 18 phases, 35 plans; v1.5 Phase 19 complete (3 plans)
 - Web interface is production-ready: upload, real-time pipeline viewer, download, feedback, help, dual-mode auth, security hardening
 - Backend has clean service layer: 7 service modules, centralized config with CVICHE_* env overrides, structured error responses
 - Frontend has single source of truth: 28 typed API functions, 17 shared interfaces, environment-derived URLs, shared formatting utilities
-- Test suite: 132+ tests passing (security: 39, service layer: 26, auth: 72+)
+- Test suite: 159+ tests passing (security: 39, service layer: 26, auth: 72+, LLM abstraction: 27)
 - SAML code is complete and config-gated; simple email auth remains default until WCM approval
 
 ## Constraints
