@@ -45,9 +45,9 @@ Plans:
   1. Zero pipeline files import openai directly (all go through the LLM client)
   2. The sample CV pipeline completes with identical output quality after migration
   3. Per-stage model overrides from config are respected during pipeline execution
-**Plans:** 4 plans
+**Plans:** 1/4 plans executed
 Plans:
-- [ ] 20-01-PLAN.md -- Migrate 10 parser files to call_llm()
+- [x] 20-01-PLAN.md -- Migrate 10 parser files to call_llm()
 - [ ] 20-02-PLAN.md -- Migrate 10 segmentation files to call_llm() (excl. 2 Assistants API exceptions)
 - [ ] 20-03-PLAN.md -- Migrate 8 core files to call_llm(), update prompt_logger for dict responses
 - [ ] 20-04-PLAN.md -- Migrate 15 stage/cv_parser/validator files, final migration audit
@@ -68,5 +68,5 @@ Plans:
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 19. Abstraction Foundation | v1.5 | 3/3 | Complete    | 2026-03-31 |
-| 20. Pipeline Migration | v1.5 | 0/4 | Not started | - |
+| 20. Pipeline Migration | v1.5 | 1/4 | In Progress|  |
 | 21. Bedrock Provider & Validation | v1.5 | 0/? | Not started | - |
