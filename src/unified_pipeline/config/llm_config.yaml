@@ -1,0 +1,20 @@
+# LLM provider and model configuration
+# All values can be overridden by CVICHE_* environment variables
+# If this file is absent, defaults to openai / gpt-4o-mini
+
+default:
+  provider: openai
+  model: gpt-4o-mini
+  temperature: 0
+  retry_count: 3
+
+stages:
+  stage_4:
+    provider: openai
+    model: gpt-4o
+  stage_4_5:
+    model: gpt-4o
+  # stage_3b:          # Example: uncomment to use Bedrock for entry classification
+  #   provider: bedrock
+  #   model: claude-3-haiku
+  #   temperature: 0.2

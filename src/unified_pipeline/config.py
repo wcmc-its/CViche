@@ -9,7 +9,9 @@ This module provides configuration settings used by:
 Single source of truth for all paths, settings, and feature flags.
 """
 from pathlib import Path
+import logging
 import os
+import yaml
 
 # ============================================================================
 # Project Structure
@@ -60,17 +62,29 @@ SEGMENTATION_MODEL = "gpt-4o-mini"
 TAXONOMY_MODEL = "gpt-4o-mini"
 PARSING_MODEL = "gpt-4o-mini"
 
-# OpenAI API pricing (per 1M tokens)
+# LLM API pricing (per 1M tokens) -- nested by provider
 PRICING = {
-    "gpt-4o-mini": {
-        "input": 0.150,  # $0.150 per 1M input tokens
-        "output": 0.600  # $0.600 per 1M output tokens
+    "openai": {
+        "gpt-4o-mini": {
+            "input": 0.150,   # per 1M tokens
+            "output": 0.600,
+        },
+        "gpt-4o": {
+            "input": 2.50,
+            "output": 10.00,
+        },
+        "gpt-5.1": {
+            "input": 2.50,
+            "output": 10.00,
+        },
     },
-    "gpt-4o": {
-        "input": 2.50,
-        "output": 10.00
-    }
+    "bedrock": {
+        # Placeholder -- populated in Phase 21
+    },
 }
+
+# Backward compatibility: flat dict for existing pipeline code
+PRICING_FLAT = PRICING["openai"]
 
 # ============================================================================
 # Pipeline Features (Best of Both Worlds)
@@ -121,7 +135,8 @@ def get_template_path() -> Path:
     )
 
 
-def calculate_cost(prompt_tokens: int, completion_tokens: int, model: str = None) -> float:
+def calculate_cost(prompt_tokens: int, completion_tokens: int,
+                   model: str = None, provider: str = "openai") -> float:
     """
     Calculate cost for LLM API call.
 
@@ -129,21 +144,114 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int, model: str = None
         prompt_tokens: Number of input tokens
         completion_tokens: Number of output tokens
         model: Model name (default: DEFAULT_MODEL)
+        provider: LLM provider name (default: "openai")
 
     Returns:
         float: Cost in USD
     """
     model = model or DEFAULT_MODEL
 
-    if model not in PRICING:
-        # Fallback to gpt-4o-mini pricing
+    provider_pricing = PRICING.get(provider, PRICING.get("openai", {}))
+    if model not in provider_pricing:
+        # Fallback to openai gpt-4o-mini pricing
+        provider_pricing = PRICING.get("openai", {})
         model = "gpt-4o-mini"
 
-    pricing = PRICING[model]
-    cost = (prompt_tokens * pricing["input"] / 1_000_000 +
+    if model not in provider_pricing:
+        return 0.0
+
+    pricing = provider_pricing[model]
+    return (prompt_tokens * pricing["input"] / 1_000_000 +
             completion_tokens * pricing["output"] / 1_000_000)
 
-    return cost
+
+# ============================================================================
+# LLM Config Resolution (YAML + env var overrides)
+# ============================================================================
+
+# Config cache
+_cached_config = None
+
+logger = logging.getLogger(__name__)
+
+
+def _load_yaml_config() -> dict:
+    """Load llm_config.yaml with caching. Returns empty dict on failure."""
+    global _cached_config
+    if _cached_config is not None:
+        return _cached_config
+
+    config_path = Path(__file__).parent / "config" / "llm_config.yaml"
+    if not config_path.exists():
+        _cached_config = {}
+        return _cached_config
+
+    try:
+        with open(config_path) as f:
+            _cached_config = yaml.safe_load(f) or {}
+    except Exception as e:
+        logger.warning(f"Failed to load llm_config.yaml: {e}. Using defaults.")
+        _cached_config = {}
+
+    return _cached_config
+
+
+def get_stage_config(stage: str) -> dict:
+    """
+    Resolve LLM config for a pipeline stage.
+
+    Resolution order (later overrides earlier):
+    1. Hardcoded defaults (openai / gpt-4o-mini / temperature 0)
+    2. YAML default block
+    3. YAML stage-specific overrides
+    4. CVICHE_LLM_PROVIDER / CVICHE_LLM_MODEL env vars (only for keys
+       NOT explicitly set in the stage-specific YAML block)
+
+    Args:
+        stage: Pipeline stage name (e.g., "stage_2", "stage_4")
+
+    Returns:
+        dict with keys: provider, model, temperature, max_tokens, retry_count
+    """
+    config = _load_yaml_config()
+
+    # Layer 1: hardcoded defaults
+    effective = {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "temperature": 0,
+        "max_tokens": None,
+        "retry_count": 3,
+    }
+
+    # Layer 2: YAML default block
+    if config and "default" in config:
+        effective.update({k: v for k, v in config["default"].items() if v is not None})
+
+    # Layer 3: YAML stage-specific overrides
+    if config and "stages" in config and stage in config["stages"]:
+        effective.update({k: v for k, v in config["stages"][stage].items() if v is not None})
+
+    # Layer 4: Env var overrides apply to global default ONLY (not stage-specific overrides)
+    # If stage has explicit YAML override for a key, env vars do NOT override that key
+    has_stage_override = (config and "stages" in config and stage in config["stages"])
+    stage_keys = set(config.get("stages", {}).get(stage, {}).keys()) if has_stage_override else set()
+
+    env_provider = os.environ.get("CVICHE_LLM_PROVIDER")
+    env_model = os.environ.get("CVICHE_LLM_MODEL")
+
+    if env_provider and "provider" not in stage_keys:
+        effective["provider"] = env_provider
+    if env_model and "model" not in stage_keys:
+        effective["model"] = env_model
+
+    return effective
+
+
+def reload_config():
+    """Clear the cached config so the next get_stage_config() re-reads YAML."""
+    global _cached_config
+    _cached_config = None
 
 
 def validate_setup() -> dict:
