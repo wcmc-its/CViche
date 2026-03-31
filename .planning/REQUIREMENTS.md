@@ -19,9 +19,9 @@
 
 ### Configuration
 
-- [ ] **CFG-01**: A deployment config file sets the global default LLM provider and model (OpenAI remains default)
-- [ ] **CFG-02**: Individual pipeline stages can override the global default with a stage-specific model
-- [ ] **CFG-03**: The pipeline runs correctly with only `OPENAI_API_KEY` set (no AWS credentials required)
+- [x] **CFG-01**: A deployment config file sets the global default LLM provider and model (OpenAI remains default)
+- [x] **CFG-02**: Individual pipeline stages can override the global default with a stage-specific model
+- [x] **CFG-03**: The pipeline runs correctly with only `OPENAI_API_KEY` set (no AWS credentials required)
 
 ### Testing
 
@@ -47,9 +47,9 @@
 | LLM-04 | Phase 19 | Pending |
 | BED-01 | Phase 21 | Pending |
 | BED-02 | Phase 21 | Pending |
-| CFG-01 | Phase 19 | Pending |
-| CFG-02 | Phase 19 | Pending |
-| CFG-03 | Phase 19 | Pending |
+| CFG-01 | Phase 19 | Complete |
+| CFG-02 | Phase 19 | Complete |
+| CFG-03 | Phase 19 | Complete |
 | TEST-01 | Phase 21 | Pending |
 | TEST-02 | Phase 21 | Pending |
 

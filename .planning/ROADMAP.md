@@ -62,6 +62,6 @@ Plans:
 
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
-| 19. Abstraction Foundation | v1.5 | 0/3 | Planning complete | - |
+| 19. Abstraction Foundation | v1.5 | 1/3 | Executing | - |
 | 20. Pipeline Migration | v1.5 | 0/? | Not started | - |
 | 21. Bedrock Provider & Validation | v1.5 | 0/? | Not started | - |
