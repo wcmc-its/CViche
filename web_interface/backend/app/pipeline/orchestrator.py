@@ -212,7 +212,8 @@ class PipelineOrchestrator:
         await event_emitter.emit_log(self.run_id, step_number, message, level)
 
     async def update_cost(self, step_number: int, cost_delta: float, tokens_delta: int = 0,
-                          input_tokens_delta: int = 0, output_tokens_delta: int = 0):
+                          input_tokens_delta: int = 0, output_tokens_delta: int = 0,
+                          provider: str = "openai"):
         """Update run costs in real-time and emit cost update event."""
         run = self.db.query(Run).filter(Run.id == self.run_id).first()
         if not run:
@@ -235,7 +236,8 @@ class PipelineOrchestrator:
             input_tokens_delta,
             output_tokens_delta,
             run.input_tokens,
-            run.output_tokens
+            run.output_tokens,
+            provider=provider
         )
 
     async def update_progress(self, step_number: int, current: int, total: int, message: str = ""):

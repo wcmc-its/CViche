@@ -77,7 +77,8 @@ class EventEmitter:
     async def emit_cost_update(self, run_id: str, step_number: int, cost_delta: float, total_cost: float,
                                 tokens_delta: int = 0, total_tokens: int = 0,
                                 input_tokens_delta: int = 0, output_tokens_delta: int = 0,
-                                input_tokens_total: int = 0, output_tokens_total: int = 0):
+                                input_tokens_total: int = 0, output_tokens_total: int = 0,
+                                provider: str = "openai"):
         """Emit real-time cost updates as LLM calls complete."""
         await self.emit(run_id, {
             "event": "COST_UPDATE",
@@ -89,7 +90,8 @@ class EventEmitter:
             "input_tokens_delta": input_tokens_delta,
             "output_tokens_delta": output_tokens_delta,
             "input_tokens": input_tokens_total,
-            "output_tokens": output_tokens_total
+            "output_tokens": output_tokens_total,
+            "provider": provider,
         })
 
 
