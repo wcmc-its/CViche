@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.5
 milestone_name: LLM Provider Abstraction
 status: executing
-stopped_at: Completed 19-01-PLAN.md
-last_updated: "2026-03-31T17:13:34.000Z"
-last_activity: 2026-03-31 -- 19-01 YAML config system completed (3 files, 13 tests)
+stopped_at: Completed 19-01 and 19-02 (Wave 1)
+last_updated: "2026-03-31T17:14:00.000Z"
+last_activity: 2026-03-31 -- Wave 1 complete (19-01 config system, 19-02 provider column)
 progress:
   total_phases: 3
   completed_phases: 0
   total_plans: 3
-  completed_plans: 1
-  percent: 11
+  completed_plans: 2
+  percent: 22
 ---
 
 # Project State
@@ -26,20 +26,21 @@ See: .planning/PROJECT.md (updated 2026-03-29)
 ## Current Position
 
 Phase: 19 of 21 (Abstraction Foundation) -- first phase of v1.5
-Plan: 1 of 3 complete
+Plan: 2 of 3 complete
 Status: Executing
-Last activity: 2026-03-31 -- 19-01 YAML config system completed
+Last activity: 2026-03-31 -- Wave 1 complete (19-01 config system, 19-02 provider column)
 
-Progress: [#.........] 11%
+Progress: [##........] 22%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 36 (35 across v1.0-v1.4, 1 in v1.5)
+- Total plans completed: 37 (35 across v1.0-v1.4, 2 in v1.5)
 
 | Phase | Plan | Duration | Tasks | Files |
 |-------|------|----------|-------|-------|
 | 19 | 01 | 9min | 2 | 3 |
+| 19 | 02 | 9min | 2 | 4 |
 
 ## Accumulated Context
 
@@ -50,6 +51,8 @@ Progress: [#.........] 11%
 - 19-01: Env vars override global defaults but NOT stage-specific YAML overrides
 - 19-01: PRICING_FLAT = PRICING["openai"] for zero-change backward compat
 - 19-01: Config cached at module level with reload_config() for test isolation
+- 19-02: Used server_default='openai' + nullable=True for provider column backward compatibility
+- 19-02: Provider parameter added as last kwarg with default 'openai' for zero-change existing callers
 
 ### Pending Todos
 
@@ -63,5 +66,5 @@ None.
 ## Session Continuity
 
 Last session: 2026-03-31
-Stopped at: Completed 19-01-PLAN.md
-Resume file: .planning/phases/19-abstraction-foundation/19-01-SUMMARY.md
+Stopped at: Completed Wave 1 (19-01, 19-02)
+Resume file: .planning/phases/19-abstraction-foundation/19-02-SUMMARY.md
