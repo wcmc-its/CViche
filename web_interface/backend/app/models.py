@@ -149,6 +149,7 @@ class LLMUsage(Base):
     finish_reason = Column(String(50), nullable=True)  # stop, length, content_filter
     retry_count = Column(Integer, default=0)
     prompt_version = Column(String(64), nullable=True)  # SHA-256 hash of prompt template
+    provider = Column(String(50), server_default="openai", nullable=True)  # LLM provider: "openai", "bedrock", etc.
 
 
 class RunMetrics(Base):
