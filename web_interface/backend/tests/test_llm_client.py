@@ -7,7 +7,7 @@ Covers requirements: LLM-01, LLM-02, LLM-04
 import sys
 import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, mock_open
 
 import pytest
 
@@ -36,49 +36,43 @@ def _make_mock_response(content="test response", prompt_tokens=100,
     return mock_response
 
 
-def _yaml_with_stage_4_override():
-    """YAML content with stage_4 overriding model to gpt-4o."""
-    return """
-default:
-  provider: openai
-  model: gpt-4o-mini
-  temperature: 0
-  retry_count: 3
-stages:
-  stage_4:
-    model: gpt-4o
-"""
+def _default_config():
+    """Return a default stage config dict for mocking get_stage_config."""
+    return {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "temperature": 0,
+        "max_tokens": None,
+        "retry_count": 3,
+    }
 
 
-def _yaml_defaults_only():
-    """YAML content with defaults only (no stage overrides)."""
-    return """
-default:
-  provider: openai
-  model: gpt-4o-mini
-  temperature: 0
-  retry_count: 3
-stages: {}
-"""
+def _stage_4_config():
+    """Return a stage_4 config dict (model overridden to gpt-4o)."""
+    return {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "temperature": 0,
+        "max_tokens": None,
+        "retry_count": 3,
+    }
 
 
-def _yaml_bedrock_provider():
-    """YAML content with bedrock as default provider."""
-    return """
-default:
-  provider: bedrock
-  model: claude-3-haiku
-  temperature: 0
-  retry_count: 3
-stages: {}
-"""
+def _bedrock_config():
+    """Return a config dict with bedrock as provider."""
+    return {
+        "provider": "bedrock",
+        "model": "claude-3-haiku",
+        "temperature": 0,
+        "max_tokens": None,
+        "retry_count": 3,
+    }
 
 
 @pytest.fixture(autouse=True)
 def reset_state():
     """Reset config cache and OpenAI client before each test."""
     reload_config()
-    # Reset the lazy-initialized client
     import unified_pipeline.llm_client as mod
     mod._openai_client = None
     yield
@@ -95,15 +89,9 @@ def test_call_llm_openai():
     from unified_pipeline.llm_client import call_llm
 
     mock_response = _make_mock_response()
-    yaml_content = _yaml_defaults_only()
 
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))), \
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
          patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
-        reload_config()
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -127,15 +115,9 @@ def test_call_llm_params():
     from unified_pipeline.llm_client import call_llm
 
     mock_response = _make_mock_response()
-    yaml_content = _yaml_with_stage_4_override()
 
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))), \
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_stage_4_config()), \
          patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
-        reload_config()
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -144,9 +126,8 @@ def test_call_llm_params():
         call_llm("stage_4", messages, response_format={"type": "json_object"})
 
         call_kwargs = mock_client.chat.completions.create.call_args
-        assert call_kwargs[1]["model"] == "gpt-4o" or call_kwargs.kwargs.get("model") == "gpt-4o"
-        # Check response_format was passed through
-        passed_kwargs = call_kwargs[1] if call_kwargs[1] else call_kwargs.kwargs
+        passed_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
+        assert passed_kwargs["model"] == "gpt-4o"
         assert passed_kwargs["response_format"] == {"type": "json_object"}
 
 
@@ -155,15 +136,9 @@ def test_call_llm_temperature():
     from unified_pipeline.llm_client import call_llm
 
     mock_response = _make_mock_response()
-    yaml_content = _yaml_defaults_only()
 
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))), \
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
          patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
-        reload_config()
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -171,7 +146,7 @@ def test_call_llm_temperature():
         call_llm("stage_2", [{"role": "user", "content": "test"}])
 
         call_kwargs = mock_client.chat.completions.create.call_args
-        passed_kwargs = call_kwargs[1] if call_kwargs[1] else call_kwargs.kwargs
+        passed_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
         assert passed_kwargs["temperature"] == 0
 
 
@@ -180,15 +155,9 @@ def test_call_llm_kwargs_override():
     from unified_pipeline.llm_client import call_llm
 
     mock_response = _make_mock_response()
-    yaml_content = _yaml_defaults_only()
 
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))), \
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
          patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
-        reload_config()
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -197,7 +166,7 @@ def test_call_llm_kwargs_override():
                           model="gpt-4o", temperature=0.5)
 
         call_kwargs = mock_client.chat.completions.create.call_args
-        passed_kwargs = call_kwargs[1] if call_kwargs[1] else call_kwargs.kwargs
+        passed_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
         assert passed_kwargs["model"] == "gpt-4o"
         assert passed_kwargs["temperature"] == 0.5
         # Result should reflect the overridden model
@@ -219,15 +188,9 @@ def test_normalized_response():
         total_tokens=280,
         finish_reason="stop",
     )
-    yaml_content = _yaml_defaults_only()
 
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))), \
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
          patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
-        reload_config()
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -252,15 +215,9 @@ def test_normalized_response_cost():
     from unified_pipeline.config import calculate_cost
 
     mock_response = _make_mock_response(prompt_tokens=1000, completion_tokens=500, total_tokens=1500)
-    yaml_content = _yaml_defaults_only()
 
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))), \
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
          patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
-        reload_config()
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -276,15 +233,9 @@ def test_normalized_response_latency():
     from unified_pipeline.llm_client import call_llm
 
     mock_response = _make_mock_response()
-    yaml_content = _yaml_defaults_only()
 
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))), \
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
          patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
-        reload_config()
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -305,7 +256,6 @@ def test_call_llm_retry_on_rate_limit():
     from openai import RateLimitError
 
     mock_response = _make_mock_response()
-    yaml_content = _yaml_defaults_only()
 
     rate_limit_error = RateLimitError(
         "rate limited",
@@ -313,14 +263,9 @@ def test_call_llm_retry_on_rate_limit():
         body=None,
     )
 
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))), \
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
          patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls, \
          patch("unified_pipeline.llm_client.time.sleep"):  # skip actual sleep
-        reload_config()
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = [
             rate_limit_error,
@@ -340,22 +285,15 @@ def test_call_llm_retry_exhausted():
     from unified_pipeline.llm_client import call_llm
     from openai import RateLimitError
 
-    yaml_content = _yaml_defaults_only()
-
     rate_limit_error = RateLimitError(
         "rate limited",
         response=MagicMock(status_code=429, headers={}),
         body=None,
     )
 
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))), \
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
          patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls, \
          patch("unified_pipeline.llm_client.time.sleep"):
-        reload_config()
         mock_client = MagicMock()
         # retry_count=3 means 4 total attempts (initial + 3 retries)
         mock_client.chat.completions.create.side_effect = [
@@ -377,22 +315,15 @@ def test_call_llm_no_retry_on_auth_error():
     from unified_pipeline.llm_client import call_llm
     from openai import AuthenticationError
 
-    yaml_content = _yaml_defaults_only()
-
     auth_error = AuthenticationError(
         "invalid api key",
         response=MagicMock(status_code=401, headers={}),
         body=None,
     )
 
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))), \
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
          patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls, \
          patch("unified_pipeline.llm_client.time.sleep"):
-        reload_config()
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = auth_error
         mock_openai_cls.return_value = mock_client
@@ -412,15 +343,7 @@ def test_call_llm_unsupported_provider():
     """call_llm raises ValueError for unsupported provider."""
     from unified_pipeline.llm_client import call_llm
 
-    yaml_content = _yaml_bedrock_provider()
-
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))):
-        reload_config()
-
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_bedrock_config()):
         with pytest.raises(ValueError, match="Unsupported provider"):
             call_llm("stage_2", [{"role": "user", "content": "test"}])
 
@@ -437,15 +360,9 @@ def test_openai_client_lazy_init():
     assert mod._openai_client is None
 
     mock_response = _make_mock_response()
-    yaml_content = _yaml_defaults_only()
 
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))), \
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
          patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
-        reload_config()
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -464,16 +381,10 @@ def test_response_format_passthrough():
     from unified_pipeline.llm_client import call_llm
 
     mock_response = _make_mock_response()
-    yaml_content = _yaml_defaults_only()
     rf = {"type": "json_object"}
 
-    with patch("unified_pipeline.config.Path.exists", return_value=True), \
-         patch("builtins.open", MagicMock(return_value=MagicMock(
-             __enter__=MagicMock(return_value=MagicMock(read=MagicMock(return_value=yaml_content))),
-             __exit__=MagicMock(return_value=False)
-         ))), \
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
          patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
-        reload_config()
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -482,7 +393,7 @@ def test_response_format_passthrough():
                  response_format=rf)
 
         call_kwargs = mock_client.chat.completions.create.call_args
-        passed_kwargs = call_kwargs[1] if call_kwargs[1] else call_kwargs.kwargs
+        passed_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
         assert passed_kwargs["response_format"] == {"type": "json_object"}
 
 
@@ -493,7 +404,6 @@ def test_response_format_passthrough():
 def test_llm_usage_provider_column():
     """LLMUsage model has a provider column with server_default='openai'."""
     # This test verifies Plan 02 output is present
-    # Import from the web app models (requires the backend path)
     backend_path = str(Path(__file__).parent.parent)
     if backend_path not in sys.path:
         sys.path.insert(0, backend_path)
