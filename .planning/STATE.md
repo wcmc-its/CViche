@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.5
 milestone_name: LLM Provider Abstraction
 status: executing
-stopped_at: Phase 20 context gathered
-last_updated: "2026-03-31T22:00:55.522Z"
-last_activity: 2026-03-31 -- Phase 20 execution started
+stopped_at: Completed 20-02-PLAN.md
+last_updated: "2026-04-01T13:15:05.564Z"
+last_activity: 2026-04-01
 progress:
   total_phases: 3
   completed_phases: 1
   total_plans: 7
-  completed_plans: 3
+  completed_plans: 5
   percent: 0
 ---
 
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-03-29)
 ## Current Position
 
 Phase: 20 (pipeline-migration) — EXECUTING
-Plan: 1 of 4
-Status: Executing Phase 20
-Last activity: 2026-03-31 -- Phase 20 execution started
+Plan: 2 of 4
+Status: Ready to execute
+Last activity: 2026-04-01
 
 Progress: [..........] 0%
 
@@ -44,6 +44,7 @@ Progress: [..........] 0%
 
 - v1.0-v1.4 completed: 18 phases, 35 plans across 5 milestones
 - Full decision log in PROJECT.md Key Decisions table
+- [Phase 20]: Removed model parameters from segmentation function signatures -- call_llm() resolves model from YAML config
 
 ### Pending Todos
 
@@ -56,6 +57,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-03-31T20:17:03.129Z
-Stopped at: Phase 20 context gathered
-Resume file: .planning/phases/20-pipeline-migration/20-CONTEXT.md
+Last session: 2026-04-01T13:15:05.562Z
+Stopped at: Completed 20-02-PLAN.md
+Resume file: None
