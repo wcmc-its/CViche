@@ -18,11 +18,10 @@ Speed: ~30-60 seconds per CV
 Scale: Unlimited (no rate limit issues)
 """
 
-import os
 import json
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Optional
-from openai import OpenAI
+from unified_pipeline.llm_client import call_llm
 
 # Handle both relative and absolute imports for flexible usage
 try:
@@ -30,9 +29,6 @@ try:
 except (ImportError, ValueError):
     # Fallback to absolute import when called from batch scripts
     from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
-
-# Use default environment context to avoid expensive SKU mapping
-client = OpenAI()
 
 # Chunking thresholds
 MAX_CHARS_PER_SECTION = 12000  # Conservative to stay under token limits
@@ -486,9 +482,9 @@ def table_to_text(table_elem: Dict[str, Any]) -> str:
     return '\n'.join(lines)
 
 
-def segment_chunk_with_llm(chunk: List[Dict], section_label: str, section_level: int, segmentation_model: str = "gpt-5.1") -> Dict[str, Any]:
+def segment_chunk_with_llm(chunk: List[Dict], section_label: str, section_level: int) -> Dict[str, Any]:
     """
-    Pass 2: Use specified model (default: gpt-5.1) to segment a chunk into entries.
+    Pass 2: Use LLM to segment a chunk into entries.
 
     Since chunks are <12K chars, we can safely process with API.
     Uses structured outputs for guaranteed valid JSON.
@@ -497,7 +493,6 @@ def segment_chunk_with_llm(chunk: List[Dict], section_label: str, section_level:
         chunk: List of document elements (paragraphs/tables) to segment
         section_label: Human-readable section name (e.g., "Publications")
         section_level: Hierarchy level (1, 2, or 3)
-        segmentation_model: OpenAI model to use (default: gpt-5.1 - full model for best segmentation)
 
     Returns segmented entries for this chunk.
     """
@@ -664,72 +659,34 @@ Content:
 Please segment into individual entries."""
 
     try:
-        # GPT-5+ models use max_completion_tokens instead of max_tokens
-        api_params = {
-            "model": segmentation_model,
-            "messages": [
+        llm_result = call_llm(
+            stage="segmentation_word_chunked",
+            messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            "response_format": {
+            response_format={
                 "type": "json_schema",
                 "json_schema": {
                     "name": "chunk_segmentation",
                     "strict": True,
                     "schema": CHUNK_SCHEMA
                 }
-            }
-        }
+            },
+            max_tokens=8000,
+            temperature=0.1
+        )
 
-        # Model-specific parameter handling
-        if segmentation_model.startswith('gpt-5') or segmentation_model.startswith('o1') or segmentation_model.startswith('o3'):
-            api_params['max_completion_tokens'] = 8000
-            # gpt-5-mini only supports temperature=1 (default), other GPT-5+ models support custom temperatures
-            if segmentation_model != 'gpt-5-mini':
-                api_params['temperature'] = 0.1
-        else:
-            api_params['max_tokens'] = 8000
-            api_params['temperature'] = 0.1
+        result = json.loads(llm_result["content"])
 
-        response = client.chat.completions.create(**api_params)
-
-        result = json.loads(response.choices[0].message.content)
-
-        # Capture token usage from API response
-        usage = response.usage
         result['token_usage'] = {
-            'prompt_tokens': usage.prompt_tokens,
-            'completion_tokens': usage.completion_tokens,
-            'total_tokens': usage.total_tokens
+            'prompt_tokens': llm_result["prompt_tokens"],
+            'completion_tokens': llm_result["completion_tokens"],
+            'total_tokens': llm_result["total_tokens"]
         }
 
-        # Calculate cost (approximate pricing as of 2025-11)
-        input_cost_per_1m = {
-            'gpt-4o-mini': 0.15,
-            'gpt-4o': 2.50,
-            'gpt-5-mini': 1.00,  # Estimated
-            'gpt-5.1': 5.00,  # Estimated
-            'gpt-5': 5.00,  # Estimated
-            'o1': 15.00,  # Estimated
-            'o3-mini': 1.10  # Estimated
-        }
-        output_cost_per_1m = {
-            'gpt-4o-mini': 0.60,
-            'gpt-4o': 10.00,
-            'gpt-5-mini': 4.00,  # Estimated
-            'gpt-5.1': 15.00,  # Estimated
-            'gpt-5': 15.00,  # Estimated
-            'o1': 60.00,  # Estimated
-            'o3-mini': 4.40  # Estimated
-        }
-
-        model_key = segmentation_model
-        input_cost = (usage.prompt_tokens / 1_000_000) * input_cost_per_1m.get(model_key, 0)
-        output_cost = (usage.completion_tokens / 1_000_000) * output_cost_per_1m.get(model_key, 0)
-        total_cost = input_cost + output_cost
-
-        result['cost'] = total_cost
-        result['model_used'] = response.model
+        result['cost'] = llm_result["cost"]
+        result['model_used'] = llm_result["model"]
 
         # Note: entry_type removed in V6 - classification happens in Stage 2 (taxonomy mapping)
         # segmentation_confidence is now provided by the model (required in schema)
@@ -748,9 +705,9 @@ Please segment into individual entries."""
 
         # Log segmentation metrics
         print(f"      Segmented: {len(result['entries'])} entries")
-        print(f"      Model: {response.model}")
-        print(f"      Tokens: {usage.prompt_tokens} in, {usage.completion_tokens} out")
-        print(f"      Cost: ${total_cost:.4f}")
+        print(f"      Model: {llm_result['model']}")
+        print(f"      Tokens: {llm_result['prompt_tokens']} in, {llm_result['completion_tokens']} out")
+        print(f"      Cost: ${llm_result['cost']:.4f}")
 
         if entry_texts:  # Only show uniqueness stats if there are entries
             print(f"      Unique: {len(unique_texts)}/{len(entry_texts)} ({duplication_ratio:.1%})")
@@ -773,7 +730,6 @@ Please segment into individual entries."""
 
     except Exception as e:
         print(f"Error segmenting chunk: {e}")
-        print(f"Model used: {segmentation_model}")
         print(f"Section: {section_label}")
         # Return fallback: treat entire chunk as one entry (no confidence score - we don't know)
         return {
@@ -784,7 +740,7 @@ Please segment into individual entries."""
             }],
             'token_usage': {'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0},
             'cost': 0.0,
-            'model_used': segmentation_model,
+            'model_used': 'fallback',
             'duplication_stats': {
                 'total_entries': 1,
                 'unique_entries': 1,
@@ -961,14 +917,13 @@ def build_hierarchy(flat_groups: List[Dict]) -> List[Dict]:
     return hierarchical
 
 
-def segment_word_cv_chunked(docx_path: str, output_dir: str = None, segmentation_model: str = None) -> Dict[str, Any]:
+def segment_word_cv_chunked(docx_path: str, output_dir: str = None) -> Dict[str, Any]:
     """
     Main entry point: Segment a Word CV using three-pass chunked approach.
 
     Args:
         docx_path: Path to Word document to segment
         output_dir: Optional output directory for JSON
-        segmentation_model: Model to use for segmentation (default: env var or gpt-5.1)
 
     Returns dictionary with:
     - num_sections: Number of top-level sections identified
@@ -976,12 +931,6 @@ def segment_word_cv_chunked(docx_path: str, output_dir: str = None, segmentation
     - output_file: Path to output JSON
     - processing_stats: Detailed statistics
     """
-
-    # Allow model override via environment variable
-    if segmentation_model is None:
-        segmentation_model = os.getenv('SEGMENTATION_MODEL', 'gpt-5.1')
-
-    print(f"Using model: {segmentation_model}")
 
     print("="*80)
     print("WORD CV SEGMENTATION - CHUNKED APPROACH (Scalable)")
@@ -1021,7 +970,6 @@ def segment_word_cv_chunked(docx_path: str, output_dir: str = None, segmentation
             sections=headers,
             batch_size=20,
             use_llm=True,
-            model='gpt-5.1'
         )
 
         # Update headers with filtered list
@@ -1033,7 +981,6 @@ def segment_word_cv_chunked(docx_path: str, output_dir: str = None, segmentation
         # Store validation metadata for final JSON output
         validation_metadata = {
             'validation_applied': True,
-            'validation_model': 'gpt-5.1',
             'headers_detected': stats['total_headers_input'],
             'headers_locked': stats['locked_headers'],
             'headers_removed_regex': stats['removed_by_regex'],
@@ -1102,7 +1049,7 @@ def segment_word_cv_chunked(docx_path: str, output_dir: str = None, segmentation
             chunk_chars = sum(len(e.get('text', '')) for e in chunk)
             print(f"       Chunk {chunk_idx+1}: {len(chunk)} elements, {chunk_chars:,} characters")
 
-            result = segment_chunk_with_llm(chunk, section_label, header['level'], segmentation_model)
+            result = segment_chunk_with_llm(chunk, section_label, header['level'])
             chunk_results.append(result)
             total_chunks_processed += 1
 

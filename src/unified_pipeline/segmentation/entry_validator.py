@@ -6,10 +6,7 @@ A lightweight classifier that detects segmentation errors and enables auto-repai
 
 import json
 from typing import List, Dict, Optional, Literal
-from openai import OpenAI
-
-# Initialize OpenAI client
-client = OpenAI()
+from unified_pipeline.llm_client import call_llm
 
 # JSON schema for validator output
 VALIDATOR_SCHEMA = {
@@ -61,7 +58,6 @@ def validate_entry(
     original_block: str,
     previous_entry: Optional[Dict] = None,
     next_entry: Optional[Dict] = None,
-    validator_model: str = "gpt-4o-mini"
 ) -> Dict:
     """
     Validate a single entry to detect segmentation errors.
@@ -71,7 +67,6 @@ def validate_entry(
         original_block: The full text of the original section before segmentation
         previous_entry: The previous entry in the section (if any)
         next_entry: The next entry in the section (if any)
-        validator_model: Model to use for validation (default: gpt-4o-mini - cheap and effective)
 
     Returns:
         Dict with keys: judgment, confidence, reason, cost, tokens
@@ -95,8 +90,8 @@ def validate_entry(
     user_prompt = "".join(context_parts)
 
     try:
-        response = client.chat.completions.create(
-            model=validator_model,
+        llm_result = call_llm(
+            stage="segmentation_entry_validator",
             messages=[
                 {"role": "system", "content": VALIDATOR_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt}
@@ -112,25 +107,15 @@ def validate_entry(
             temperature=0.1
         )
 
-        result = json.loads(response.choices[0].message.content)
+        result = json.loads(llm_result["content"])
 
-        # Add metadata
-        usage = response.usage
-
-        # Cost calculation for gpt-4o-mini
-        # https://openai.com/api/pricing/
-        # gpt-4o-mini: $0.150/1M input, $0.600/1M output
-        prompt_cost = (usage.prompt_tokens / 1_000_000) * 0.150
-        completion_cost = (usage.completion_tokens / 1_000_000) * 0.600
-        total_cost = prompt_cost + completion_cost
-
-        result['cost'] = total_cost
+        result['cost'] = llm_result["cost"]
         result['tokens'] = {
-            'prompt': usage.prompt_tokens,
-            'completion': usage.completion_tokens,
-            'total': usage.total_tokens
+            'prompt': llm_result["prompt_tokens"],
+            'completion': llm_result["completion_tokens"],
+            'total': llm_result["total_tokens"]
         }
-        result['model_used'] = response.model
+        result['model_used'] = llm_result["model"]
 
         return result
 
@@ -142,7 +127,7 @@ def validate_entry(
             'reason': f'Validation failed: {str(e)}',
             'cost': 0.0,
             'tokens': {'prompt': 0, 'completion': 0, 'total': 0},
-            'model_used': validator_model,
+            'model_used': 'unknown',
             'error': str(e)
         }
 
@@ -150,7 +135,6 @@ def validate_entry(
 def validate_section_entries(
     entries: List[Dict],
     original_text: str,
-    validator_model: str = "gpt-4o-mini"
 ) -> List[Dict]:
     """
     Validate all entries in a section.
@@ -158,7 +142,6 @@ def validate_section_entries(
     Args:
         entries: List of entries from segmentation (each with 'text_snippet')
         original_text: The original section text before segmentation
-        validator_model: Model to use for validation
 
     Returns:
         List of validation results (one per entry)
@@ -175,7 +158,6 @@ def validate_section_entries(
             original_block=original_text,
             previous_entry=prev_entry,
             next_entry=next_entry,
-            validator_model=validator_model
         )
 
         validations.append(validation)
@@ -248,7 +230,6 @@ def repair_oversplit_entries(entries: List[Dict], validations: List[Dict]) -> Li
 
 def validate_and_repair_group(
     group: Dict,
-    validator_model: str = "gpt-4o-mini",
     auto_repair: bool = True,
     confidence_threshold: float = 0.7
 ) -> Dict:
@@ -257,7 +238,6 @@ def validate_and_repair_group(
 
     Args:
         group: A section group with 'entries' and optionally 'original_text'
-        validator_model: Model to use for validation
         auto_repair: Whether to auto-repair oversplit entries
         confidence_threshold: Minimum confidence to trigger auto-repair
 
@@ -280,7 +260,6 @@ def validate_and_repair_group(
     validations = validate_section_entries(
         entries=entries,
         original_text=original_text,
-        validator_model=validator_model
     )
 
     # Add validation metadata to group
@@ -293,7 +272,6 @@ def validate_and_repair_group(
         'oversplit_detected': oversplit_count,
         'undersplit_detected': undersplit_count,
         'validation_cost': total_cost,
-        'validator_model': validator_model
     }
 
     # Attach validation results to entries

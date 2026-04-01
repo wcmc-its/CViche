@@ -21,12 +21,10 @@ import os
 import sys
 from typing import List, Dict, Tuple
 from dataclasses import dataclass, field
-from openai import OpenAI
-from openai import RateLimitError
+from unified_pipeline.llm_client import call_llm
 import re
 from docx import Document
 import tiktoken
-import time
 
 # Add parent directory to path to import from signature_based_segmentation
 sys.path.insert(0, os.path.dirname(__file__))
@@ -63,11 +61,8 @@ def format_hierarchy_outline(hierarchy: List[Dict]) -> str:
     return "\n".join(lines)
 
 
-# Initialize OpenAI client
-client = OpenAI()
-
 # Initialize tiktoken encoder for token counting
-encoder = tiktoken.encoding_for_model("gpt-4o")
+encoder = tiktoken.get_encoding("o200k_base")
 
 
 @dataclass
@@ -169,7 +164,7 @@ def split_into_chunks(paragraphs: List[str], max_tokens: int = 10000) -> List[st
     return chunks
 
 
-def extract_headers_from_chunk(chunk_text: str, chunk_num: int, total_chunks: int, model: str = "gpt-5.1") -> str:
+def extract_headers_from_chunk(chunk_text: str, chunk_num: int, total_chunks: int) -> str:
     """
     Extract CV headers from a single chunk of text.
 
@@ -177,7 +172,6 @@ def extract_headers_from_chunk(chunk_text: str, chunk_num: int, total_chunks: in
         chunk_text: Text content of this chunk
         chunk_num: Chunk number (1-indexed)
         total_chunks: Total number of chunks
-        model: OpenAI model to use
 
     Returns:
         Text outline in [H1]/[H2]/[H3] format for this chunk
@@ -222,46 +216,22 @@ Do not add any explanatory text, just the outline."""
 CHUNK CONTENT:
 {chunk_text}"""
 
-    # Retry logic with exponential backoff for rate limits
-    max_retries = 5
-    base_delay = 1
+    result = call_llm(
+        stage="segmentation_chunked_hierarchy",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        temperature=0.0,
+    )
 
-    for attempt in range(max_retries):
-        try:
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.0,  # Deterministic output
-            )
+    outline_text = result["content"].strip()
 
-            outline_text = response.choices[0].message.content.strip()
+    # Clean up any markdown code fences
+    outline_text = re.sub(r'^```[^\n]*\n', '', outline_text, flags=re.MULTILINE)
+    outline_text = re.sub(r'\n```$', '', outline_text)
 
-            # Clean up any markdown code fences
-            outline_text = re.sub(r'^```[^\n]*\n', '', outline_text, flags=re.MULTILINE)
-            outline_text = re.sub(r'\n```$', '', outline_text)
-
-            return outline_text
-
-        except RateLimitError as e:
-            if attempt < max_retries - 1:
-                # Extract wait time from error message if available
-                error_msg = str(e)
-                wait_time = base_delay * (2 ** attempt)  # Exponential backoff
-
-                # Try to parse wait time from error message
-                import re as re_module
-                match = re_module.search(r'try again in ([\d.]+)s', error_msg)
-                if match:
-                    wait_time = float(match.group(1)) + 1  # Add 1 second buffer
-
-                print(f"    ⚠️  Rate limit hit, waiting {wait_time:.1f}s before retry {attempt + 1}/{max_retries}...")
-                time.sleep(wait_time)
-            else:
-                # Final attempt failed, re-raise
-                raise
+    return outline_text
 
 
 def parse_outline_to_hierarchy(outline_text: str) -> List[Dict]:
@@ -298,13 +268,12 @@ def parse_outline_to_hierarchy(outline_text: str) -> List[Dict]:
     return hierarchy
 
 
-def get_cv_hierarchy_chunked(cv_path: str, model: str = "gpt-5.1", max_chunk_tokens: int = 10000) -> Tuple[List[Dict], Dict]:
+def get_cv_hierarchy_chunked(cv_path: str, max_chunk_tokens: int = 10000) -> Tuple[List[Dict], Dict]:
     """
     Extract CV header hierarchy from a DOCX file using chunked processing and normalization.
 
     Args:
         cv_path: Path to the CV DOCX file
-        model: OpenAI model to use (default: gpt-4o)
         max_chunk_tokens: Maximum tokens per chunk (default: 10000)
 
     Returns:
@@ -314,7 +283,6 @@ def get_cv_hierarchy_chunked(cv_path: str, model: str = "gpt-5.1", max_chunk_tok
     print(f"CHUNKED CV HIERARCHY EXTRACTION")
     print(f"{'='*80}")
     print(f"File: {cv_path}")
-    print(f"Model: {model}")
     print(f"Max chunk size: {max_chunk_tokens} tokens\n")
 
     # Step 1: Extract paragraphs and tables
@@ -341,7 +309,7 @@ def get_cv_hierarchy_chunked(cv_path: str, model: str = "gpt-5.1", max_chunk_tok
 
     for i, chunk in enumerate(chunks, 1):
         print(f"  Processing chunk {i}/{len(chunks)}...", end=" ")
-        outline = extract_headers_from_chunk(chunk, i, len(chunks), model=model)
+        outline = extract_headers_from_chunk(chunk, i, len(chunks))
         chunk_outlines.append(outline)
 
         # Estimate tokens (rough approximation)
@@ -408,17 +376,15 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python chunked_chat_hierarchy_extractor.py <cv_file.docx> [model] [max_chunk_tokens]")
-        print("  model: Optional, defaults to gpt-4o")
+        print("Usage: python chunked_chat_hierarchy_extractor.py <cv_file.docx> [max_chunk_tokens]")
         print("  max_chunk_tokens: Optional, defaults to 10000")
         sys.exit(1)
 
     cv_path = sys.argv[1]
-    model = sys.argv[2] if len(sys.argv) > 2 else "gpt-5.1"
-    max_chunk_tokens = int(sys.argv[3]) if len(sys.argv) > 3 else 10000
+    max_chunk_tokens = int(sys.argv[2]) if len(sys.argv) > 2 else 10000
 
     # Extract hierarchy
-    final_hierarchy, stats = get_cv_hierarchy_chunked(cv_path, model=model, max_chunk_tokens=max_chunk_tokens)
+    final_hierarchy, stats = get_cv_hierarchy_chunked(cv_path, max_chunk_tokens=max_chunk_tokens)
 
     # Display results
     print("\nFINAL CV HIERARCHY:")

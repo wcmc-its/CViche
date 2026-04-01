@@ -15,11 +15,8 @@ import math
 from pathlib import Path
 from pdf2image import convert_from_path
 from io import BytesIO
-from openai import OpenAI
+from unified_pipeline.llm_client import call_llm
 import base64
-
-# Use default environment context to avoid expensive SKU mapping
-client = OpenAI()
 
 # Thresholds for chunking decisions
 MAX_ENTRIES_PER_CALL = 40  # Never extract more than this in one call
@@ -114,9 +111,9 @@ Focus on STRUCTURE, not content."""
             }
         })
 
-    print("Sending to GPT-4o...")
-    response = client.chat.completions.create(
-        model="gpt-4o",
+    print("Sending to LLM...")
+    result = call_llm(
+        stage="segmentation_pdf_vision",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content}
@@ -126,7 +123,7 @@ Focus on STRUCTURE, not content."""
     )
 
     # Parse response
-    response_text = response.choices[0].message.content
+    response_text = result["content"]
 
     # Extract JSON
     if "```json" in response_text:
@@ -199,18 +196,18 @@ How many distinct items are in this section?"""
             }
         })
 
-    response = client.chat.completions.create(
-        model="gpt-4o",
+    result = call_llm(
+        stage="segmentation_pdf_vision",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content}
         ],
-        max_tokens=500,  # Very small - just need a count
+        max_tokens=500,
         temperature=0.1
     )
 
     # Parse response
-    response_text = response.choices[0].message.content
+    response_text = result["content"]
 
     if "```json" in response_text:
         json_start = response_text.find("```json") + 7
@@ -324,8 +321,8 @@ Return granular JSON with EVERY individual item."""
             }
         })
 
-    response = client.chat.completions.create(
-        model="gpt-4o",
+    result = call_llm(
+        stage="segmentation_pdf_vision",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": content}
@@ -335,7 +332,7 @@ Return granular JSON with EVERY individual item."""
     )
 
     # Parse response
-    response_text = response.choices[0].message.content
+    response_text = result["content"]
 
     if "```json" in response_text:
         json_start = response_text.find("```json") + 7

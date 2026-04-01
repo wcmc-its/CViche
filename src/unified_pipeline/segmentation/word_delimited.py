@@ -16,16 +16,13 @@ import os
 import json
 from pathlib import Path
 from typing import List, Dict, Any
-from openai import OpenAI
+from unified_pipeline.llm_client import call_llm
 
 # Handle both relative and absolute imports for flexible usage
 try:
     from ..core.docx_structure_extractor import extract_docx_structure, create_simplified_layout_json
 except (ImportError, ValueError):
     from core.docx_structure_extractor import extract_docx_structure, create_simplified_layout_json
-
-# Use default environment context to avoid expensive SKU mapping
-client = OpenAI()
 
 
 # Same schema as original
@@ -210,8 +207,8 @@ Return complete hierarchical segmentation following the JSON schema."""
     # Step 3: Call GPT-4o with Structured Outputs
     print("\nStep 3: Calling GPT-4o with Structured Outputs (delimiter-aware)...")
 
-    response = client.chat.completions.create(
-        model="gpt-4o",
+    result = call_llm(
+        stage="segmentation_word_delimited",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
@@ -229,7 +226,7 @@ Return complete hierarchical segmentation following the JSON schema."""
     )
 
     # Parse response
-    segmentation = json.loads(response.choices[0].message.content)
+    segmentation = json.loads(result["content"])
 
     # Add document_uid if not present
     if "document_uid" not in segmentation or not segmentation["document_uid"]:

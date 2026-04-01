@@ -15,15 +15,13 @@ But KEEPS intentional organizational headers like:
 
 import re
 from typing import List, Dict
-from openai import OpenAI
+from unified_pipeline.llm_client import call_llm
 
 # Import comprehensive locked headers list (~850+ headers)
 try:
     from .locked_headers_v6 import LOCKED_CV_HEADERS
 except (ImportError, ValueError):
     from locked_headers_v6 import LOCKED_CV_HEADERS
-
-client = OpenAI()
 
 # Regex patterns for obvious non-headers (metadata/identifiers)
 # NOTE: These should be VERY conservative - only match clear technical identifiers
@@ -92,14 +90,12 @@ def is_metadata_pattern(text: str) -> bool:
 
 def validate_headers_batch(
     headers: List[str],
-    model: str = "gpt-5.1"
 ) -> List[Dict]:
     """
     Validate a batch of detected headers using LLM.
 
     Args:
         headers: List of header texts to validate
-        model: Model to use (default: gpt-5.1)
 
     Returns:
         List of validation results: [{"header_index": 0, "is_valid_header": True/False, "reason": "..."}]
@@ -231,8 +227,10 @@ For each header, return:
 Return a validation for each header indicating whether it's a valid section header or metadata/identifier."""
 
     try:
-        response = client.chat.completions.create(
-            model=model,
+        import json
+
+        llm_result = call_llm(
+            stage="segmentation_header_validator",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
@@ -248,37 +246,17 @@ Return a validation for each header indicating whether it's a valid section head
             temperature=0.1
         )
 
-        import json
-        result = json.loads(response.choices[0].message.content)
-
-        # Add cost metadata (model-specific pricing)
-        usage = response.usage
-
-        # Pricing per 1M tokens (as of 2025-01)
-        if model == "gpt-5.1":
-            input_price_per_1m = 1.00   # $1.00 per 1M input tokens
-            output_price_per_1m = 4.00  # $4.00 per 1M output tokens
-        elif model == "gpt-4o-mini":
-            input_price_per_1m = 0.150  # $0.15 per 1M input tokens
-            output_price_per_1m = 0.600 # $0.60 per 1M output tokens
-        else:
-            # Default to gpt-4o-mini pricing if unknown
-            input_price_per_1m = 0.150
-            output_price_per_1m = 0.600
-
-        input_cost = (usage.prompt_tokens / 1_000_000) * input_price_per_1m
-        output_cost = (usage.completion_tokens / 1_000_000) * output_price_per_1m
-        total_cost = input_cost + output_cost
+        result = json.loads(llm_result["content"])
 
         return {
             'validations': result['validations'],
-            'cost': total_cost,
+            'cost': llm_result["cost"],
             'tokens': {
-                'prompt': usage.prompt_tokens,
-                'completion': usage.completion_tokens,
-                'total': usage.total_tokens
+                'prompt': llm_result["prompt_tokens"],
+                'completion': llm_result["completion_tokens"],
+                'total': llm_result["total_tokens"]
             },
-            'model_used': response.model
+            'model_used': llm_result["model"]
         }
 
     except Exception as e:
@@ -291,7 +269,7 @@ Return a validation for each header indicating whether it's a valid section head
             ],
             'cost': 0.0,
             'tokens': {'prompt': 0, 'completion': 0, 'total': 0},
-            'model_used': model,
+            'model_used': 'unknown',
             'error': str(e)
         }
 
@@ -300,7 +278,6 @@ def filter_false_headers(
     sections: List[Dict],
     batch_size: int = 20,
     use_llm: bool = True,
-    model: str = "gpt-5.1"
 ) -> Dict:
     """
     Filter out false section headers from detected sections.
@@ -309,7 +286,6 @@ def filter_false_headers(
         sections: List of section dicts from detect_section_headers()
         batch_size: How many headers to validate per LLM call
         use_llm: Whether to use LLM for validation (False = regex only)
-        model: Which model to use for LLM validation (default: gpt-5.1)
 
     Returns:
         {
@@ -384,7 +360,7 @@ def filter_false_headers(
 
             print(f"  Batch {i//batch_size + 1}: Validating {len(batch_headers)} headers...")
 
-            result = validate_headers_batch(batch_headers, model=model)
+            result = validate_headers_batch(batch_headers)
             total_cost += result.get('cost', 0.0)
 
             # Process results

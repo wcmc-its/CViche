@@ -10,13 +10,11 @@ import json
 import sys
 from pathlib import Path
 from typing import List, Dict, Tuple, Any
-from openai import OpenAI
+from unified_pipeline.llm_client import call_llm
 
 # Import existing Word structure extraction
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from core.docx_structure_extractor import extract_docx_structure, create_simplified_layout_json
-
-client = OpenAI()
 
 
 SYSTEM_PROMPT = """You are an expert CV parser specialized in identifying entry boundaries.
@@ -217,7 +215,7 @@ def extract_section_layout(full_structure: List[Dict], section_header: str,
 
 
 def extract_entries_from_section(section_layout: List[Dict], section_header: str,
-                                 section_id: str, model: str = "gpt-5.1") -> Dict[str, Any]:
+                                 section_id: str) -> Dict[str, Any]:
     """
     Extract entries from a single CV section.
 
@@ -225,7 +223,6 @@ def extract_entries_from_section(section_layout: List[Dict], section_header: str
         section_layout: Structured layout JSON for this section
         section_header: Section name (e.g., "PUBLICATIONS")
         section_id: Unique section identifier (e.g., "publications_1")
-        model: OpenAI model to use
 
     Returns:
         Dictionary with entries, metadata, and statistics
@@ -235,8 +232,7 @@ def extract_entries_from_section(section_layout: List[Dict], section_header: str
     print(f"{'='*80}")
     print(f"Section: {section_header}")
     print(f"Section ID: {section_id}")
-    print(f"Elements: {len(section_layout)}")
-    print(f"Model: {model}\n")
+    print(f"Elements: {len(section_layout)}\n")
 
     # Create compact layout JSON
     layout_json = json.dumps(section_layout, separators=(',', ':'))
@@ -251,7 +247,7 @@ LAYOUT JSON:
 
 Return entries following the specification above."""
 
-    print(f"Step 1: Sending section to {model}...")
+    print(f"Step 1: Sending section to LLM...")
     print(f"  Layout size: {len(layout_json):,} characters")
     print(f"  Estimated input tokens: ~{len(layout_json) // 4:,}")
 
@@ -291,9 +287,8 @@ Return entries following the specification above."""
         "additionalProperties": False
     }
 
-    # Call GPT-5.1
-    response = client.chat.completions.create(
-        model=model,
+    llm_result = call_llm(
+        stage="segmentation_entry_extractor",
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt}
@@ -309,7 +304,7 @@ Return entries following the specification above."""
         temperature=0.1
     )
 
-    result = json.loads(response.choices[0].message.content)
+    result = json.loads(llm_result["content"])
 
     print(f"  ✓ Extraction completed")
     print(f"  Entries found: {result['metadata']['total_entries']}")
@@ -317,19 +312,16 @@ Return entries following the specification above."""
 
     # Add token usage stats
     result['token_usage'] = {
-        'input': response.usage.prompt_tokens,
-        'output': response.usage.completion_tokens,
-        'total': response.usage.total_tokens
+        'input': llm_result["prompt_tokens"],
+        'output': llm_result["completion_tokens"],
+        'total': llm_result["total_tokens"]
     }
 
-    # Calculate cost (GPT-5.1 pricing: $2.50/1M input, $10.00/1M output)
-    cost = (response.usage.prompt_tokens * 2.50 / 1_000_000) + \
-           (response.usage.completion_tokens * 10.00 / 1_000_000)
-    result['cost'] = cost
+    result['cost'] = llm_result["cost"]
 
-    print(f"  Input tokens: {response.usage.prompt_tokens:,}")
-    print(f"  Output tokens: {response.usage.completion_tokens:,}")
-    print(f"  Cost: ${cost:.4f}")
+    print(f"  Input tokens: {llm_result['prompt_tokens']:,}")
+    print(f"  Output tokens: {llm_result['completion_tokens']:,}")
+    print(f"  Cost: ${llm_result['cost']:.4f}")
 
     # Save raw output to outputs directory
     output_dir = Path(__file__).parent.parent / "outputs" / "stage_2_extraction"
@@ -348,14 +340,13 @@ Return entries following the specification above."""
     return result
 
 
-def test_stage2_on_section(cv_path: str, section_name: str = None, model: str = "gpt-5.1"):
+def test_stage2_on_section(cv_path: str, section_name: str = None):
     """
     Test Stage 2 entry extraction on a single section from a CV.
 
     Args:
         cv_path: Path to CV DOCX file
         section_name: Optional section name to test (if None, uses first H1)
-        model: Model to use for extraction
     """
     # Import Stage 1 hierarchy extractor (only needed for testing)
     from chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked, format_hierarchy_outline
@@ -363,12 +354,11 @@ def test_stage2_on_section(cv_path: str, section_name: str = None, model: str = 
     print(f"\n{'='*80}")
     print(f"STAGE 2 ENTRY EXTRACTION TEST")
     print(f"{'='*80}")
-    print(f"CV: {cv_path}")
-    print(f"Model: {model}\n")
+    print(f"CV: {cv_path}\n")
 
     # Step 1: Get hierarchy from Stage 1
     print("Step 1: Running Stage 1 hierarchy extraction...")
-    hierarchy, stats = get_cv_hierarchy_chunked(cv_path, model=model)
+    hierarchy, stats = get_cv_hierarchy_chunked(cv_path)
 
     # Step 2: Extract full Word structure
     print("\nStep 2: Extracting full Word document structure...")
@@ -410,7 +400,6 @@ def test_stage2_on_section(cv_path: str, section_name: str = None, model: str = 
         section_layout,
         target_section['text'],
         section_id=target_section['text'].lower().replace(' ', '_'),
-        model=model
     )
 
     # Step 6: Display results
@@ -446,13 +435,11 @@ def test_stage2_on_section(cv_path: str, section_name: str = None, model: str = 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python stage2_entry_extractor.py <cv_file.docx> [section_name] [model]")
+        print("Usage: python stage2_entry_extractor.py <cv_file.docx> [section_name]")
         print("  section_name: Optional section to test (e.g., 'publications', 'grants')")
-        print("  model: Optional model (default: gpt-5.1)")
         sys.exit(1)
 
     cv_path = sys.argv[1]
     section_name = sys.argv[2] if len(sys.argv) > 2 else None
-    model = sys.argv[3] if len(sys.argv) > 3 else "gpt-5.1"
 
-    result = test_stage2_on_section(cv_path, section_name, model)
+    result = test_stage2_on_section(cv_path, section_name)

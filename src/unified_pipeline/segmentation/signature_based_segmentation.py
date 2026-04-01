@@ -20,16 +20,13 @@ from dataclasses import dataclass, asdict
 from docx import Document
 from docx.shared import RGBColor, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
-from openai import OpenAI
+from unified_pipeline.llm_client import call_llm
 
 # Import locked headers for secondary confidence boost
 try:
     from .locked_headers_v6 import LOCKED_CV_HEADERS
 except ImportError:
     from locked_headers_v6 import LOCKED_CV_HEADERS
-
-# Use default environment context
-client = OpenAI()
 
 
 # ============================================================================
@@ -731,8 +728,8 @@ Classify each group based on FORMATTING ONLY."""
         "additionalProperties": False
     }
 
-    response = client.chat.completions.create(
-        model="gpt-4o",
+    llm_result = call_llm(
+        stage="segmentation_signature",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
@@ -748,7 +745,7 @@ Classify each group based on FORMATTING ONLY."""
         temperature=0.1
     )
 
-    result = json.loads(response.choices[0].message.content)
+    result = json.loads(llm_result["content"])
 
     # Build mapping from LLM classifications
     classifications = {
@@ -1230,24 +1227,24 @@ OUTPUT
 Output ONLY the corrected outline.
 No commentary."""
 
-    print(f"\nStep {7 if pass_number == 1 else 9}: Normalizing hierarchy with GPT-5.1...")
+    print(f"\nStep {7 if pass_number == 1 else 9}: Normalizing hierarchy with LLM...")
     print(f"  Input hierarchy ({len(input_lines)} lines)")
-    print("\n========== INPUT TO GPT-5.1 ==========")
+    print("\n========== INPUT TO LLM ==========")
     print(input_text)
     print("========== END INPUT ==========\n")
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-5.1",
+        llm_result = call_llm(
+            stage="segmentation_signature",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": input_text}
             ]
         )
 
-        corrected_text = response.choices[0].message.content.strip()
+        corrected_text = llm_result["content"].strip()
 
-        print(f"\n========== OUTPUT FROM GPT-5.1 ==========")
+        print(f"\n========== OUTPUT FROM LLM ==========")
         print(corrected_text)
         print(f"========== END OUTPUT ==========\n")
 
@@ -1460,19 +1457,19 @@ Do NOT add extra commentary."""
 
     input_text = "Classify the following lines as headers or entries according to the rules:\n\n" + "\n".join(input_lines)
 
-    print("\nStep 8: Validating headers vs entries with GPT-5.1...")
+    print("\nStep 8: Validating headers vs entries with LLM...")
     print(f"  Input: {len(input_lines)} headers to validate")
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-5.1",
+        llm_result = call_llm(
+            stage="segmentation_signature",
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": input_text}
             ]
         )
 
-        output_text = response.choices[0].message.content.strip()
+        output_text = llm_result["content"].strip()
 
         # Parse the output to extract likelihoods
         # Format expected:

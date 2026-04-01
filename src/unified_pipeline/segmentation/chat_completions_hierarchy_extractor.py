@@ -19,13 +19,9 @@ Cost estimate: ~$0.25-$0.60 per CV (50-120k tokens at GPT-4o rates)
 import os
 from typing import List, Dict
 from dataclasses import dataclass, field
-from openai import OpenAI
+from unified_pipeline.llm_client import call_llm
 import re
 from docx import Document
-
-
-# Initialize OpenAI client
-client = OpenAI()
 
 
 @dataclass
@@ -65,13 +61,12 @@ def extract_text_from_docx(docx_path: str) -> str:
     return "\n".join(paragraphs)
 
 
-def get_hierarchy_from_text(cv_text: str, model: str = "gpt-4o") -> str:
+def get_hierarchy_from_text(cv_text: str) -> str:
     """
     Extract CV header hierarchy from full document text using Chat Completions API.
 
     Args:
         cv_text: Full CV text content
-        model: OpenAI model to use (default: gpt-4o)
 
     Returns:
         Text outline in [H1]/[H2]/[H3] format
@@ -128,38 +123,34 @@ Remember to include '[H1] Personal Data:' as the first header.
 CV CONTENT:
 {cv_text}"""
 
-    response = client.chat.completions.create(
-        model=model,
+    result = call_llm(
+        stage="segmentation_chat_hierarchy",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        temperature=0.0,  # Deterministic output
+        temperature=0.0,
     )
 
-    outline_text = response.choices[0].message.content.strip()
+    outline_text = result["content"].strip()
 
     # Clean up any markdown code fences
     outline_text = re.sub(r'^```[^\n]*\n', '', outline_text, flags=re.MULTILINE)
     outline_text = re.sub(r'\n```$', '', outline_text)
 
-    # Log token usage
-    usage = response.usage
     print(f"  ✓ Extraction completed")
-    print(f"  Tokens: {usage.prompt_tokens} input + {usage.completion_tokens} output = {usage.total_tokens} total")
-    estimated_cost = (usage.prompt_tokens * 2.50 / 1_000_000) + (usage.completion_tokens * 10.00 / 1_000_000)
-    print(f"  Estimated cost: ${estimated_cost:.4f}")
+    print(f"  Tokens: {result['prompt_tokens']} input + {result['completion_tokens']} output = {result['total_tokens']} total")
+    print(f"  Estimated cost: ${result['cost']:.4f}")
 
     return outline_text
 
 
-def get_cv_hierarchy(cv_path: str, model: str = "gpt-4o") -> str:
+def get_cv_hierarchy(cv_path: str) -> str:
     """
     Extract CV header hierarchy from a DOCX file.
 
     Args:
         cv_path: Path to the CV DOCX file
-        model: OpenAI model to use (default: gpt-4o)
 
     Returns:
         Text outline in [H1]/[H2]/[H3] format
@@ -169,7 +160,7 @@ def get_cv_hierarchy(cv_path: str, model: str = "gpt-4o") -> str:
     cv_text = extract_text_from_docx(cv_path)
 
     # Step 2: Extract hierarchy using Chat Completions API
-    outline_text = get_hierarchy_from_text(cv_text, model=model)
+    outline_text = get_hierarchy_from_text(cv_text)
 
     return outline_text
 
@@ -242,15 +233,13 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) < 2:
-        print("Usage: python chat_completions_hierarchy_extractor.py <cv_file.docx> [model]")
-        print("  model: Optional, defaults to gpt-4o. Can also use gpt-4o-mini for faster/cheaper results.")
+        print("Usage: python chat_completions_hierarchy_extractor.py <cv_file.docx>")
         sys.exit(1)
 
     cv_path = sys.argv[1]
-    model = sys.argv[2] if len(sys.argv) > 2 else "gpt-4o"
 
     # Extract hierarchy
-    outline_text = get_cv_hierarchy(cv_path, model=model)
+    outline_text = get_cv_hierarchy(cv_path)
 
     print("\n" + "="*80)
     print("CV HIERARCHY OUTLINE (Chat Completions API)")
