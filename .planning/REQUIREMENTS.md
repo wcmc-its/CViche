@@ -14,8 +14,8 @@
 
 ### Bedrock Provider
 
-- [ ] **BED-01**: AWS Bedrock is supported as an LLM provider via boto3 bedrock-runtime (Claude, Llama, Mistral models)
-- [ ] **BED-02**: Bedrock authentication uses IAM credentials (env vars or instance roles) -- no hardcoded keys
+- [x] **BED-01**: AWS Bedrock is supported as an LLM provider via boto3 bedrock-runtime (Claude, Llama, Mistral models)
+- [x] **BED-02**: Bedrock authentication uses IAM credentials (env vars or instance roles) -- no hardcoded keys
 
 ### Configuration
 
@@ -45,8 +45,8 @@
 | LLM-02 | Phase 19 | Complete |
 | LLM-03 | Phase 20 | Complete |
 | LLM-04 | Phase 19 | Complete |
-| BED-01 | Phase 21 | Pending |
-| BED-02 | Phase 21 | Pending |
+| BED-01 | Phase 21 | Complete |
+| BED-02 | Phase 21 | Complete |
 | CFG-01 | Phase 19 | Complete |
 | CFG-02 | Phase 19 | Complete |
 | CFG-03 | Phase 19 | Complete |
