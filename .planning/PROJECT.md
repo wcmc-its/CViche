@@ -23,7 +23,7 @@ Faculty can upload a CV and get back a correctly formatted WCM document without 
 ## Current State
 
 **Latest release:** v1.4 (shipped 2026-03-28)
-**In progress:** v1.5 Phase 20 complete — entire pipeline migrated to call_llm() abstraction
+**In progress:** v1.5 complete — LLM provider abstraction with OpenAI + AWS Bedrock support
 
 Six milestones in progress across 19 phases (38 plans):
 - v1.0: Repository sanitized, documented, public on GitHub
@@ -62,10 +62,12 @@ Six milestones in progress across 19 phases (38 plans):
 - CFG-01, CFG-02, CFG-03: YAML config system with per-stage overrides and env var integration -- v1.5 (Phase 19)
 - LLM-01, LLM-02, LLM-04: Centralized LLM client with retries, cost tracking, provider column -- v1.5 (Phase 19)
 - LLM-03: All pipeline stages migrated to call_llm() — zero direct OpenAI SDK calls (43 files) -- v1.5 (Phase 20)
+- BED-01, BED-02: AWS Bedrock provider via Converse API, default credential chain, 9 models priced -- v1.5 (Phase 21)
+- TEST-01, TEST-02: 14 Bedrock unit tests + E2E pipeline smoke test with pytest.mark.e2e marker -- v1.5 (Phase 21)
 
 ### Active
 
-See REQUIREMENTS.md for v1.5 requirements (remaining items).
+No active requirements — v1.5 milestone complete.
 
 ### Out of Scope
 
@@ -78,11 +80,11 @@ See REQUIREMENTS.md for v1.5 requirements (remaining items).
 
 ## Context
 
-- v1.0-v1.4 shipped: 18 phases, 35 plans; v1.5 Phases 19-20 complete (7 plans)
+- v1.0-v1.4 shipped: 18 phases, 35 plans; v1.5 complete: 3 phases, 9 plans
 - Web interface is production-ready: upload, real-time pipeline viewer, download, feedback, help, dual-mode auth, security hardening
 - Backend has clean service layer: 7 service modules, centralized config with CVICHE_* env overrides, structured error responses
 - Frontend has single source of truth: 28 typed API functions, 17 shared interfaces, environment-derived URLs, shared formatting utilities
-- Test suite: 159+ tests passing (security: 39, service layer: 26, auth: 72+, LLM abstraction: 27)
+- Test suite: 173+ tests passing (security: 39, service layer: 26, auth: 72+, LLM abstraction: 41)
 - SAML code is complete and config-gated; simple email auth remains default until WCM approval
 
 ## Constraints
@@ -115,4 +117,4 @@ See REQUIREMENTS.md for v1.5 requirements (remaining items).
 | VITE_API_URL defaults to empty for Vite proxy | Dev works without .env, prod uses explicit URL | ✓ Good |
 
 ---
-*Last updated: 2026-03-31 after Phase 20 complete — full pipeline migrated to call_llm()*
+*Last updated: 2026-04-03 after Phase 21 complete — v1.5 milestone complete (OpenAI + AWS Bedrock providers, 41 LLM tests)*
