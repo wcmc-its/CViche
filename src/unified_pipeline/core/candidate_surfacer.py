@@ -22,23 +22,8 @@ Architecture:
 import json
 import time
 from typing import List, Dict, Any, Optional, Tuple
-from openai import OpenAI
 
-# Import prompt logger
-try:
-    from .prompt_logger import log_prompt_before_call, log_prompt_response
-except ImportError:
-    try:
-        from prompt_logger import log_prompt_before_call, log_prompt_response
-    except ImportError:
-        # Fallback if prompt logger not available
-        def log_prompt_before_call(*args, **kwargs):
-            return None
-        def log_prompt_response(*args, **kwargs):
-            pass
-
-# Initialize OpenAI client
-client = OpenAI()
+from unified_pipeline.llm_client import call_llm
 
 
 # =============================================================================
@@ -378,60 +363,27 @@ IMPORTANT:
         }
     }
 
-    # Call OpenAI API
+    # Call LLM
     try:
-        # gpt-5.1 uses max_completion_tokens; older models use max_tokens
-        token_param = "max_completion_tokens" if "gpt-5" in model else "max_tokens"
-        api_params = {
-            "model": model,
-            "messages": messages,
-            "response_format": response_schema,
-            "temperature": 0.1,  # Low temperature for consistent analysis
-            token_param: 1500
-        }
-
-        # Log prompt before API call
-        log_id = log_prompt_before_call(
+        result_llm = call_llm(
+            stage="core_candidate_surfacer",
             messages=messages,
-            model=model,
-            purpose="candidate_surfacing",
-            temperature=0.1,
             response_format=response_schema,
-            context={
-                "section_header": section_header,
-                "subsection_header": subsection_header,
-                "sample_count": len(sample_entries),
-                "max_candidates": max_candidates
-            },
-            caller_file="candidate_surfacer.py"
-        )
-
-        api_start_time = time.time()
-        response = client.chat.completions.create(**api_params)
-        elapsed_api_time = time.time() - api_start_time
-
-        # Log response
-        log_prompt_response(
-            log_id=log_id,
-            response=response,
-            purpose="candidate_surfacing",
-            elapsed_time=elapsed_api_time
+            max_tokens=1500,
         )
 
         # Parse response
-        content = response.choices[0].message.content
-        result = json.loads(content)
+        result = json.loads(result_llm["content"])
 
         # Add metadata
         result['token_usage'] = {
-            'prompt_tokens': response.usage.prompt_tokens,
-            'completion_tokens': response.usage.completion_tokens,
-            'total_tokens': response.usage.total_tokens
+            'prompt_tokens': result_llm["prompt_tokens"],
+            'completion_tokens': result_llm["completion_tokens"],
+            'total_tokens': result_llm["total_tokens"]
         }
         result['elapsed_time'] = time.time() - start_time
-        result['model'] = model
+        result['model'] = result_llm["model"]
         result['success'] = True
-        result['log_id'] = log_id
 
         return result
 

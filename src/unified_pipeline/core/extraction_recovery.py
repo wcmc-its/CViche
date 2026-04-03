@@ -12,23 +12,19 @@ Based on the excellent extract_unextracted_fallback.py pattern.
 import json
 import time
 from typing import Dict, List, Optional, Any
-from openai import OpenAI
 import os
+
+from unified_pipeline.llm_client import call_llm
 
 # Import supporting modules
 try:
     from .narrative_detector import detect_narrative_content, preserve_as_narrative
     from .taxonomy_contexts import get_section_context
     from .confusion_detector import detect_confusion_triggers
-    from .prompt_logger import log_prompt_before_call, log_prompt_response, get_caller_info
 except ImportError:
     from narrative_detector import detect_narrative_content, preserve_as_narrative
     from taxonomy_contexts import get_section_context
     from confusion_detector import detect_confusion_triggers
-    from prompt_logger import log_prompt_before_call, log_prompt_response, get_caller_info
-
-# Use default environment context to avoid expensive SKU mapping
-client = OpenAI()
 
 
 # JSON schema for re-classification
@@ -277,10 +273,6 @@ def recover_from_extraction_failure(
         structural_headers=structural_headers
     )
 
-    # Choose model (upgrade if requested)
-    model = "gpt-4o" if upgrade_model else "gpt-4o-mini"
-
-    # Log prompt
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
@@ -294,38 +286,16 @@ def recover_from_extraction_failure(
         }
     }
 
-    log_id = log_prompt_before_call(
+    # Call LLM
+    result_llm = call_llm(
+        stage="core_extraction_recovery",
         messages=messages,
-        model=model,
-        temperature=0.1,
+        response_format=response_format,
         max_tokens=800,
-        response_format=response_format,
-        purpose="extraction_recovery",
-        context={
-            "original_section_id": original_classification.get('section_id'),
-            "original_confidence": original_classification.get('confidence'),
-            "extraction_failure_reason": extraction_failure.get('reason'),
-            "narrative_detection_confidence": narrative_detection['confidence']
-        },
-        caller_file=get_caller_info()
     )
-
-    # Call API
-    start_time = time.time()
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        response_format=response_format,
-        temperature=0.1,
-        max_tokens=800
-    )
-    elapsed_time = time.time() - start_time
-
-    # Log response
-    log_prompt_response(log_id, response, "extraction_recovery", elapsed_time)
 
     # Parse result
-    result = json.loads(response.choices[0].message.content)
+    result = json.loads(result_llm["content"])
 
     # Handle based on action
     recovery_action = result['action']
@@ -349,9 +319,9 @@ def recover_from_extraction_failure(
         "preserved_data": None,  # Only set if PRESERVE_NARRATIVE from Tier 1
         "extraction_guidance": result.get('extraction_guidance'),
         "token_usage": {
-            'prompt_tokens': response.usage.prompt_tokens,
-            'completion_tokens': response.usage.completion_tokens,
-            'total_tokens': response.usage.total_tokens,
-            'model_used': model
+            'prompt_tokens': result_llm["prompt_tokens"],
+            'completion_tokens': result_llm["completion_tokens"],
+            'total_tokens': result_llm["total_tokens"],
+            'model_used': result_llm["model"]
         }
     }

@@ -193,28 +193,43 @@ def log_prompt_response(
 
     try:
         # Handle different response types
-        if hasattr(response, 'choices'):
-            response_record["response"]["choices"] = [
-                {
-                    "index": choice.index,
-                    "message": {
-                        "role": choice.message.role,
-                        "content": choice.message.content
-                    },
-                    "finish_reason": choice.finish_reason
-                }
-                for choice in response.choices
-            ]
-
-        if hasattr(response, 'usage'):
+        if isinstance(response, dict):
+            # Handle call_llm() normalized response dict
+            response_record["response"]["choices"] = [{
+                "index": 0,
+                "message": {"role": "assistant", "content": response.get("content", "")},
+                "finish_reason": response.get("finish_reason", "")
+            }]
             response_record["response"]["usage"] = {
-                "prompt_tokens": response.usage.prompt_tokens,
-                "completion_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens
+                "prompt_tokens": response.get("prompt_tokens", 0),
+                "completion_tokens": response.get("completion_tokens", 0),
+                "total_tokens": response.get("total_tokens", 0)
             }
+            response_record["response"]["model"] = response.get("model", "")
+        else:
+            # Handle OpenAI SDK response objects (exception files)
+            if hasattr(response, 'choices'):
+                response_record["response"]["choices"] = [
+                    {
+                        "index": choice.index,
+                        "message": {
+                            "role": choice.message.role,
+                            "content": choice.message.content
+                        },
+                        "finish_reason": choice.finish_reason
+                    }
+                    for choice in response.choices
+                ]
 
-        if hasattr(response, 'model'):
-            response_record["response"]["model"] = response.model
+            if hasattr(response, 'usage'):
+                response_record["response"]["usage"] = {
+                    "prompt_tokens": response.usage.prompt_tokens,
+                    "completion_tokens": response.usage.completion_tokens,
+                    "total_tokens": response.usage.total_tokens
+                }
+
+            if hasattr(response, 'model'):
+                response_record["response"]["model"] = response.model
 
         # Save response
         filename = f"{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}_{purpose}_{log_id}_RESPONSE.json"

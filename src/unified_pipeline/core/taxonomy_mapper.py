@@ -24,17 +24,12 @@ import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Any, Optional
-from openai import OpenAI
+
+from unified_pipeline.llm_client import call_llm
 
 # Import WCM taxonomy
 from ..cv_parser.cv_taxonomy_wcm import CV_SECTIONS
 from ..cv_parser.taxonomy_utils import get_sections_by_wcm_number, get_section_by_id
-
-# Import prompt logger
-from .prompt_logger import log_prompt_before_call, log_prompt_response, get_caller_info
-
-# Use default environment context to avoid expensive SKU mapping
-client = OpenAI()
 
 
 # JSON schema for Structured Outputs
@@ -238,7 +233,6 @@ AVAILABLE WCM TAXONOMY SECTIONS:
 Based on the section label and sample entries, identify the BEST matching WCM taxonomy section.
 Return structured JSON with your classification and confidence score."""
 
-    # Log the EXACT prompt before API call
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
@@ -252,36 +246,16 @@ Return structured JSON with your classification and confidence score."""
         }
     }
 
-    log_id = log_prompt_before_call(
+    # Call LLM
+    result_llm = call_llm(
+        stage="core_taxonomy_mapper",
         messages=messages,
-        model="gpt-4o-mini",
-        temperature=0.1,
+        response_format=response_format,
         max_tokens=1000,
-        response_format=response_format,
-        purpose="taxonomy_mapping",
-        context={
-            "section_label": section_label,
-            "num_entries": len(sample_entries)
-        },
-        caller_file=get_caller_info()
     )
-
-    # Call GPT-4o-mini with Structured Outputs
-    start_time = time.time()
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        messages=messages,
-        response_format=response_format,
-        temperature=0.1,
-        max_tokens=1000
-    )
-    elapsed_time = time.time() - start_time
-
-    # Log the response
-    log_prompt_response(log_id, response, "taxonomy_mapping", elapsed_time)
 
     # Parse response - guaranteed valid JSON
-    mapping = json.loads(response.choices[0].message.content)
+    mapping = json.loads(result_llm["content"])
 
     # Normalize the mapped_section_id (convert WCM numbers to section IDs)
     original_id = mapping['mapped_section_id']
@@ -290,12 +264,11 @@ Return structured JSON with your classification and confidence score."""
         mapping['mapped_section_id'] = normalized_id
         mapping['original_mapped_id'] = original_id  # Keep for debugging
 
-    # Capture token usage from API response
-    usage = response.usage
+    # Capture token usage
     mapping['token_usage'] = {
-        'prompt_tokens': usage.prompt_tokens,
-        'completion_tokens': usage.completion_tokens,
-        'total_tokens': usage.total_tokens
+        'prompt_tokens': result_llm["prompt_tokens"],
+        'completion_tokens': result_llm["completion_tokens"],
+        'total_tokens': result_llm["total_tokens"]
     }
 
     return mapping

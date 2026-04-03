@@ -24,13 +24,8 @@ import time
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 from docx import Document
-from openai import OpenAI
 
-# Import prompt logger
-from .prompt_logger import log_prompt_before_call, log_prompt_response, get_caller_info
-
-# Use default environment context to avoid expensive SKU mapping
-client = OpenAI()
+from unified_pipeline.llm_client import call_llm
 
 # Schema for Structured Outputs
 PERSONAL_INFO_SCHEMA = {
@@ -349,7 +344,6 @@ IMPORTANT:
 """
 
     try:
-        # Log the EXACT prompt before API call
         messages = [
             {
                 "role": "system",
@@ -369,36 +363,17 @@ IMPORTANT:
             }
         }
 
-        log_id = log_prompt_before_call(
-            messages=messages,
-            model="gpt-4o-mini",
-            temperature=0,
-            response_format=response_format,
-            purpose="personal_info_extraction",
-            context={
-                "emails_found": emails_found,
-                "phones_found": phones_found
-            },
-            caller_file=get_caller_info()
-        )
-
-        start_time = time.time()
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
+        result = call_llm(
+            stage="core_personal_info",
             messages=messages,
             response_format=response_format,
-            temperature=0
         )
-        elapsed_time = time.time() - start_time
-
-        # Log the response
-        log_prompt_response(log_id, response, "personal_info_extraction", elapsed_time)
 
         import json
-        return json.loads(response.choices[0].message.content)
+        return json.loads(result["content"])
 
     except Exception as e:
-        print(f"⚠️  LLM extraction failed: {str(e)[:100]}")
+        print(f"LLM extraction failed: {str(e)[:100]}")
         print(f"   Falling back to regex-only extraction...")
         return None  # Signal to use regex fallback
 
