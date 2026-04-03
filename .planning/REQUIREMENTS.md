@@ -25,8 +25,8 @@
 
 ### Testing
 
-- [ ] **TEST-01**: Unit tests verify the abstraction layer works with both OpenAI and Bedrock providers
-- [ ] **TEST-02**: The sample CV pipeline completes successfully using the default (OpenAI) configuration
+- [x] **TEST-01**: Unit tests verify the abstraction layer works with both OpenAI and Bedrock providers
+- [x] **TEST-02**: The sample CV pipeline completes successfully using the default (OpenAI) configuration
 
 ## Out of Scope
 
@@ -50,8 +50,8 @@
 | CFG-01 | Phase 19 | Complete |
 | CFG-02 | Phase 19 | Complete |
 | CFG-03 | Phase 19 | Complete |
-| TEST-01 | Phase 21 | Pending |
-| TEST-02 | Phase 21 | Pending |
+| TEST-01 | Phase 21 | Complete |
+| TEST-02 | Phase 21 | Complete |
 
 **Coverage:**
 - v1.5 requirements: 11 total

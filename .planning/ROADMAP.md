@@ -17,7 +17,7 @@
 
 - [x] **Phase 19: Abstraction Foundation** - Config system, centralized LLM client, and cost tracking layer (completed 2026-03-31)
 - [x] **Phase 20: Pipeline Migration** - Migrate all 43 pipeline files from direct OpenAI calls to the LLM client (completed 2026-04-03)
-- [ ] **Phase 21: Bedrock Provider & Validation** - AWS Bedrock provider implementation and end-to-end test coverage
+- [x] **Phase 21: Bedrock Provider & Validation** - AWS Bedrock provider implementation and end-to-end test coverage (completed 2026-04-03)
 
 ## Phase Details
 
@@ -61,10 +61,10 @@ Plans:
   2. Bedrock authentication uses IAM credentials from environment or instance roles (no hardcoded keys)
   3. Unit tests verify the abstraction layer dispatches correctly to both OpenAI and Bedrock providers
   4. The sample CV pipeline completes end-to-end using the default OpenAI configuration
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 Plans:
 - [x] 21-01-PLAN.md -- Bedrock provider implementation: pricing, _call_bedrock(), Converse API, JSON validation
-- [ ] 21-02-PLAN.md -- Test coverage: Bedrock unit tests, JSON validation tests, E2E pipeline smoke test
+- [x] 21-02-PLAN.md -- Test coverage: Bedrock unit tests, JSON validation tests, E2E pipeline smoke test
 
 ## Progress
 
@@ -72,4 +72,4 @@ Plans:
 |-------|-----------|----------------|--------|-----------|
 | 19. Abstraction Foundation | v1.5 | 3/3 | Complete    | 2026-03-31 |
 | 20. Pipeline Migration | v1.5 | 4/4 | Complete    | 2026-04-03 |
-| 21. Bedrock Provider & Validation | v1.5 | 1/2 | In Progress|  |
+| 21. Bedrock Provider & Validation | v1.5 | 2/2 | Complete    | 2026-04-03 |

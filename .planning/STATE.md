@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.5
 milestone_name: LLM Provider Abstraction
-status: executing
-stopped_at: Completed 21-01-PLAN.md
-last_updated: "2026-04-03T15:40:01.438Z"
+status: complete
+stopped_at: Completed 21-02-PLAN.md
+last_updated: "2026-04-03T15:47:00.000Z"
 last_activity: 2026-04-03
 progress:
   total_phases: 3
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 9
-  completed_plans: 8
-  percent: 89
+  completed_plans: 9
+  percent: 100
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-29)
 
 **Core value:** Faculty can upload a CV and get back a correctly formatted WCM document without manual reformatting
-**Current focus:** Phase 21 — bedrock-provider-validation
+**Current focus:** v1.5 milestone complete
 
 ## Current Position
 
-Phase: 21 (Plan 1 of 2 complete)
-Plan: 21-01 complete
-Status: Executing
+Phase: 21 (Plan 2 of 2 complete)
+Plan: 21-02 complete
+Status: Complete
 Last activity: 2026-04-03
 
-Progress: [█████████░] 89%
+Progress: [██████████] 100%
 
 ## Performance Metrics
 
@@ -49,6 +49,8 @@ Progress: [█████████░] 89%
 - [Phase 21]: Lazy boto3 import in _get_bedrock_client() to avoid ImportError when only OpenAI is used
 - [Phase 21]: Guarded botocore.ClientError import with type(None) fallback for RETRYABLE_ERRORS tuple
 - [Phase 21]: JSON validation retry appends user message with stronger hint, accumulates token usage
+- [Phase 21]: Fixed _call_with_retry to check ClientError error codes against BEDROCK_RETRYABLE_CODES before retrying
+- [Phase 21]: E2E pipeline smoke test gated behind @pytest.mark.e2e marker, deselected by default
 
 ### Pending Todos
 
@@ -61,6 +63,6 @@ None.
 
 ## Session Continuity
 
-Last session: 2026-04-03T15:39:55.483Z
-Stopped at: Completed 21-01-PLAN.md
+Last session: 2026-04-03T15:47:00.000Z
+Stopped at: Completed 21-02-PLAN.md -- v1.5 milestone complete
 Resume file: None
