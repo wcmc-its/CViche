@@ -24,8 +24,10 @@ import sys
 import time
 from pathlib import Path
 from typing import Dict, List, Any, Optional
-from openai import OpenAI
 from collections import defaultdict
+
+from unified_pipeline.llm_client import call_llm
+from unified_pipeline.config import calculate_cost as _centralized_calculate_cost
 
 # Import candidate surfacing (for TAXONOMY_CODES_CONDENSED enum constraint)
 from .candidate_surfacer import TAXONOMY_CODES_CONDENSED
@@ -40,96 +42,6 @@ from .candidate_surfacer import (
     extract_parent_code,
     has_subsections
 )
-
-# ============================================================================
-# MODEL PRICING (USD per 1M tokens)
-# Updated as of 2025-01 - check OpenAI pricing page for latest rates
-# ============================================================================
-MODEL_PRICING = {
-    # GPT-4o family
-    'gpt-4o': {
-        'prompt': 2.50,      # $2.50 per 1M prompt tokens
-        'completion': 10.00  # $10.00 per 1M completion tokens
-    },
-    'gpt-4o-mini': {
-        'prompt': 0.150,     # $0.15 per 1M prompt tokens
-        'completion': 0.600  # $0.60 per 1M completion tokens
-    },
-
-    # GPT-5 family
-    'gpt-5.1': {
-        'prompt': 2.00,      # $2.00 per 1M prompt tokens
-        'completion': 8.00   # $8.00 per 1M completion tokens
-    },
-
-    # o1 reasoning models (if/when used)
-    'o1-preview': {
-        'prompt': 15.00,     # $15.00 per 1M prompt tokens
-        'completion': 60.00  # $60.00 per 1M completion tokens
-    },
-    'o1-mini': {
-        'prompt': 3.00,      # $3.00 per 1M prompt tokens
-        'completion': 12.00  # $12.00 per 1M completion tokens
-    },
-
-    # o3/o4 reasoning models (for confidence-based escalation)
-    'o3-mini': {
-        'prompt': 1.10,      # $1.10 per 1M prompt tokens
-        'completion': 4.40   # $4.40 per 1M completion tokens
-    },
-    'o4-mini': {
-        'prompt': 1.10,      # $1.10 per 1M prompt tokens (same as o3-mini)
-        'completion': 4.40   # $4.40 per 1M completion tokens (better for non-STEM tasks)
-    },
-
-    # GPT-5.1 (for validation and potential production use - Phase 1)
-    # Using gpt-4o pricing as placeholder until GPT-5.1 officially released
-    # Based on research: estimated ~$1/1M input, ~$3/1M output
-    'gpt-5.1': {
-        'prompt': 1.00,      # $1.00 per 1M prompt tokens (estimated)
-        'completion': 3.00   # $3.00 per 1M completion tokens (estimated)
-    },
-    'gpt-5-1': {
-        'prompt': 1.00,      # Same as gpt-5.1 (estimated, alternative naming)
-        'completion': 3.00
-    },
-    'gpt-5.1-preview': {
-        'prompt': 1.00,      # Preview version
-        'completion': 3.00
-    },
-
-    # Legacy models (fallback)
-    'gpt-4': {
-        'prompt': 30.00,
-        'completion': 60.00
-    },
-    'gpt-3.5-turbo': {
-        'prompt': 0.50,
-        'completion': 1.50
-    }
-}
-
-def calculate_cost(prompt_tokens: int, completion_tokens: int, model: str) -> float:
-    """
-    Calculate cost in USD for given token usage and model.
-
-    Args:
-        prompt_tokens: Number of prompt tokens
-        completion_tokens: Number of completion tokens
-        model: Model name (e.g., 'gpt-4o-mini')
-
-    Returns:
-        Cost in USD
-    """
-    if model not in MODEL_PRICING:
-        # Unknown model - use gpt-4o pricing as conservative estimate
-        model = 'gpt-4o'
-
-    pricing = MODEL_PRICING[model]
-    prompt_cost = (prompt_tokens / 1_000_000) * pricing['prompt']
-    completion_cost = (completion_tokens / 1_000_000) * pricing['completion']
-
-    return prompt_cost + completion_cost
 
 # Import taxonomy contexts and confusion detection
 try:
@@ -146,7 +58,6 @@ try:
         get_subsection_examples,
         compute_structural_hints
     )
-    from .prompt_logger import log_prompt_before_call, log_prompt_response, get_caller_info
     from .s7_validator import validate_s7_assignment
     from .valid_taxonomy_codes import (
         VALID_PARENT_CODES,
@@ -170,7 +81,6 @@ except ImportError:
         get_subsection_examples,
         compute_structural_hints
     )
-    from prompt_logger import log_prompt_before_call, log_prompt_response, get_caller_info
     from s7_validator import validate_s7_assignment
     from valid_taxonomy_codes import (
         VALID_PARENT_CODES,
@@ -179,10 +89,6 @@ except ImportError:
         validate_taxonomy_code,
         get_valid_children
     )
-
-# Use default environment context to avoid expensive SKU mapping
-client = OpenAI()
-
 
 # PHASE 2 FIX #23: Personal Information vs Employment disambiguation guidance
 PERSONAL_INFO_VS_EMPLOYMENT_GUIDANCE = """
@@ -1956,43 +1862,22 @@ Based on the section label and sample entries:
         }
     }
 
-    log_id = log_prompt_before_call(
+    # Call LLM
+    result_llm = call_llm(
+        stage="core_taxonomy_v2",
         messages=messages,
-        model="gpt-5.1",
-        temperature=0.1,
+        response_format=response_format,
         max_tokens=500,
-        response_format=response_format,
-        purpose="taxonomy_mapping_pass1",
-        context={
-            "section_label": section_label,
-            "num_entries": len(sample_entries),
-            "hierarchical_position": hierarchical_position
-        },
-        caller_file=get_caller_info()
     )
-
-    # Call API
-    start_time = time.time()
-    response = client.chat.completions.create(
-        model="gpt-5.1",
-        messages=messages,
-        response_format=response_format,
-        temperature=0.1,
-        max_completion_tokens=500
-    )
-    elapsed_time = time.time() - start_time
-
-    # Log response
-    log_prompt_response(log_id, response, "taxonomy_mapping_pass1", elapsed_time)
 
     # Parse result
-    result = json.loads(response.choices[0].message.content)
+    result = json.loads(result_llm["content"])
 
     # Add token usage
     result['token_usage'] = {
-        'prompt_tokens': response.usage.prompt_tokens,
-        'completion_tokens': response.usage.completion_tokens,
-        'total_tokens': response.usage.total_tokens
+        'prompt_tokens': result_llm["prompt_tokens"],
+        'completion_tokens': result_llm["completion_tokens"],
+        'total_tokens': result_llm["total_tokens"]
     }
 
     return result
@@ -2625,50 +2510,23 @@ CURRENT ENTRY:
         }
     }
 
-    # Always use gpt-5.1 for consistent quality
-    model = "gpt-5.1"
-
-    log_id = log_prompt_before_call(
+    # Call LLM
+    result_llm = call_llm(
+        stage="core_taxonomy_v2",
         messages=messages,
-        model=model,
-        temperature=0.1,
+        response_format=response_format,
         max_tokens=800,
-        response_format=response_format,
-        purpose="taxonomy_mapping_pass2",
-        context={
-            "parent_section_id": parent_section_id,
-            "section_label": section_label,
-            "triggers_detected": triggers,
-            "confusion_risk": confusion_risk,
-            "show_full_examples": show_full_examples,
-            "previous_entry": previous_entry_context is not None
-        },
-        caller_file=get_caller_info()
     )
-
-    # Call API
-    start_time = time.time()
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        response_format=response_format,
-        temperature=0.1,
-        max_completion_tokens=800
-    )
-    elapsed_time = time.time() - start_time
-
-    # Log response
-    log_prompt_response(log_id, response, "taxonomy_mapping_pass2", elapsed_time)
 
     # Parse result
-    result = json.loads(response.choices[0].message.content)
+    result = json.loads(result_llm["content"])
 
     # Add token usage
     result['token_usage'] = {
-        'prompt_tokens': response.usage.prompt_tokens,
-        'completion_tokens': response.usage.completion_tokens,
-        'total_tokens': response.usage.total_tokens,
-        'model_used': model
+        'prompt_tokens': result_llm["prompt_tokens"],
+        'completion_tokens': result_llm["completion_tokens"],
+        'total_tokens': result_llm["total_tokens"],
+        'model_used': result_llm["model"]
     }
 
     return result
@@ -2976,116 +2834,52 @@ Your task: Classify each entry to the MOST SPECIFIC subsection, using hierarchic
         }
     }
 
-    # Log prompt
-    log_id = log_prompt_before_call(
-        messages=messages,
-        model=model,
-        temperature=0.1,
-        max_tokens=2000,
-        response_format=response_format,
-        purpose="taxonomy_mapping_pass2_batch",
-        context={
-            "parent_section_id": parent_section_id,
-            "parent_confidence": parent_confidence,
-            "section_header": section_header,
-            "subsection_header": subsection_header,
-            "num_entries": len(entries),
-            "triggers_detected": trigger_info['triggers'],
-            "confusion_risk": trigger_info['confusion_risk'],
-            "show_alternatives": show_alternatives
-        },
-        caller_file=get_caller_info()
-    )
-
-    # Call API
+    # Call LLM
     try:
         start_time = time.time()
 
-        # O-series models (o1-mini, o3-mini, o4-mini, o1-preview) require different parameters
-        is_o_series = model.startswith('o') and any(model.endswith(suffix) for suffix in ['mini', 'preview'])
-        is_gpt51 = model in ['gpt-5.1', 'gpt-5-1', 'gpt-5.1-preview']
-
-        if is_o_series:
-            # O-series: use max_completion_tokens, no temperature
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                response_format=response_format,
-                max_completion_tokens=2000
-            )
-        elif is_gpt51:
-            # GPT-5.1: supports reasoning_effort parameter
-            # low = faster/cheaper, medium = balanced, high = most thorough
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                response_format=response_format,
-                reasoning_effort="medium",  # Can be "low", "medium", or "high"
-                max_completion_tokens=2000
-            )
-        else:
-            # GPT models: use max_tokens and temperature
-            response = client.chat.completions.create(
-                model=model,
-                messages=messages,
-                response_format=response_format,
-                temperature=0.1,
-                max_tokens=2000
-            )
+        result_llm = call_llm(
+            stage="core_taxonomy_v2",
+            messages=messages,
+            response_format=response_format,
+            max_tokens=2000,
+        )
 
         elapsed_time = time.time() - start_time
 
-        # Log response
-        log_prompt_response(log_id, response, "taxonomy_mapping_pass2_batch", elapsed_time)
-
         # Parse result with robust error handling
-        raw_content = response.choices[0].message.content
+        raw_content = result_llm["content"]
 
         # Try to parse JSON directly first
         try:
             result = json.loads(raw_content)
             classifications = result['entries']
         except json.JSONDecodeError as e:
-            # GPT-5.1 may include reasoning text before JSON
+            # Some models may include reasoning text before JSON
             # Try to extract JSON from response
-            if is_gpt51:
-                # Look for JSON object in response
-                import re
-                # Find first { and last }
-                json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
-                if json_match:
-                    try:
-                        result = json.loads(json_match.group(0))
-                        classifications = result['entries']
-                        print(f"      [JSON RECOVERY] Extracted JSON from GPT-5.1 response with reasoning text")
-                    except json.JSONDecodeError:
-                        # Still can't parse, return error
-                        return {
-                            'success': False,
-                            'classifications': [],
-                            'avg_confidence': 0.0,
-                            'token_usage': {},
-                            'elapsed_time': elapsed_time,
-                            'error': f'JSON parsing failed: {str(e)}'
-                        }
-                else:
+            json_match = re.search(r'\{.*\}', raw_content, re.DOTALL)
+            if json_match:
+                try:
+                    result = json.loads(json_match.group(0))
+                    classifications = result['entries']
+                    print(f"      [JSON RECOVERY] Extracted JSON from response with reasoning text")
+                except json.JSONDecodeError:
                     return {
                         'success': False,
                         'classifications': [],
                         'avg_confidence': 0.0,
                         'token_usage': {},
                         'elapsed_time': elapsed_time,
-                        'error': f'No JSON found in GPT-5.1 response: {raw_content[:200]}'
+                        'error': f'JSON parsing failed: {str(e)}'
                     }
             else:
-                # Not GPT-5.1, this is an actual error
                 return {
                     'success': False,
                     'classifications': [],
                     'avg_confidence': 0.0,
                     'token_usage': {},
                     'elapsed_time': elapsed_time,
-                    'error': f'JSON parsing failed: {str(e)}'
+                    'error': f'No JSON found in response: {raw_content[:200]}'
                 }
 
         # POST-VALIDATION: Check for violations and apply corrections
@@ -3171,10 +2965,10 @@ Your task: Classify each entry to the MOST SPECIFIC subsection, using hierarchic
             'classifications': classifications,
             'avg_confidence': avg_confidence,
             'token_usage': {
-                'prompt_tokens': response.usage.prompt_tokens,
-                'completion_tokens': response.usage.completion_tokens,
-                'total_tokens': response.usage.total_tokens,
-                'model_used': model
+                'prompt_tokens': result_llm["prompt_tokens"],
+                'completion_tokens': result_llm["completion_tokens"],
+                'total_tokens': result_llm["total_tokens"],
+                'model_used': result_llm["model"]
             },
             'elapsed_time': elapsed_time,
             'error': None,
@@ -3661,7 +3455,7 @@ def map_cv_sections_v2(segmented_cv_path: str, output_path: Optional[str] = None
     by_model_summary = {}
     total_cost = 0.0
     for model, usage in token_usage_by_model.items():
-        cost = calculate_cost(usage['prompt'], usage['completion'], model)
+        cost = _centralized_calculate_cost(usage['prompt'], usage['completion'], model=model)
         by_model_summary[model] = {
             'prompt_tokens': usage['prompt'],
             'completion_tokens': usage['completion'],
@@ -3870,9 +3664,6 @@ def classify_with_surfaced_candidates(
     """
     start_time = time.time()
 
-    # Initialize OpenAI client
-    client = OpenAI()
-
     # Format candidates for prompt
     formatted_candidates = format_candidates_for_prompt(
         primary_candidates=primary_candidates,
@@ -3995,40 +3786,17 @@ IMPORTANT:
         }
     }
 
-    # Call OpenAI API
+    # Call LLM
     try:
-        # Log prompt before call
-        context = {
-            "section_header": section_header,
-            "subsection_header": subsection_header,
-            "num_entries": len(entries),
-            "num_primary_candidates": len(primary_candidates),
-            "num_secondary_candidates": len(secondary_candidates)
-        }
-        log_id = log_prompt_before_call(
+        result_llm = call_llm(
+            stage="core_taxonomy_v2",
             messages=messages,
-            model=model,
-            purpose="taxonomy_mapping_guided",
-            temperature=0.1,
             response_format=response_schema,
-            context=context
+            max_tokens=2500,
         )
 
-        # gpt-5.1 uses max_completion_tokens; older models use max_tokens
-        token_param = "max_completion_tokens" if "gpt-5" in model else "max_tokens"
-        api_params = {
-            "model": model,
-            "messages": messages,
-            "response_format": response_schema,
-            "temperature": 0.1,  # Low temperature for consistent classification
-            token_param: 2500
-        }
-
-        response = client.chat.completions.create(**api_params)
-
         # Parse response
-        content = response.choices[0].message.content
-        result = json.loads(content)
+        result = json.loads(result_llm["content"])
         classifications = result.get('classifications', [])
 
         # Low-confidence routing: Remap entries with confidence < threshold to "T" (Appendix/Other)
@@ -4042,23 +3810,12 @@ IMPORTANT:
                 classification['reasoning'] = f"Low confidence ({conf:.2f} < {low_confidence_threshold}) - routed to T. Original: {classification.get('reasoning', 'N/A')}"
                 routed_to_t += 1
 
-        # Log prompt response
-        elapsed_api_time = time.time() - start_time
-        log_prompt_response(log_id, response, "taxonomy_mapping_guided", elapsed_api_time)
-
         # Calculate metrics
         confidences = [c.get('confidence', 0.0) for c in classifications]
         avg_confidence = sum(confidences) / len(confidences) if confidences else 0.0
 
         escape_hatch_usage = sum(
             1 for c in classifications if c.get('used_escape_hatch', False)
-        )
-
-        # Calculate cost
-        cost = calculate_cost(
-            response.usage.prompt_tokens,
-            response.usage.completion_tokens,
-            model
         )
 
         elapsed_time = time.time() - start_time
@@ -4070,10 +3827,10 @@ IMPORTANT:
             'escape_hatch_usage': escape_hatch_usage,
             'routed_to_t': routed_to_t,
             'token_usage': {
-                'prompt_tokens': response.usage.prompt_tokens,
-                'completion_tokens': response.usage.completion_tokens,
-                'total_tokens': response.usage.total_tokens,
-                'cost': cost
+                'prompt_tokens': result_llm["prompt_tokens"],
+                'completion_tokens': result_llm["completion_tokens"],
+                'total_tokens': result_llm["total_tokens"],
+                'cost': result_llm["cost"]
             },
             'elapsed_time': elapsed_time,
             'error': None

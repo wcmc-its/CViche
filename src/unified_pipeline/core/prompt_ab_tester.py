@@ -27,15 +27,13 @@ import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Any
-from openai import OpenAI
 from datetime import datetime
 import hashlib
 
+from unified_pipeline.llm_client import call_llm
+
 # Default prompt log directory
 PROMPT_LOG_DIR = Path(os.getenv("PROMPT_LOG_DIR", "prompt_logs"))
-
-# Use default environment context to avoid expensive SKU mapping
-client = OpenAI()
 
 
 class PromptABTester:
@@ -134,33 +132,30 @@ class PromptABTester:
         messages = prompt['messages']
         api_params = prompt['api_parameters']
 
-        # Prepare API call
-        call_params = {
-            'model': api_params.get('model', 'gpt-4o-mini'),
-            'messages': messages,
-            'temperature': api_params.get('temperature', 0.1)
-        }
-
-        if api_params.get('max_tokens'):
-            call_params['max_tokens'] = api_params['max_tokens']
-
-        # Only include response_format if it's a complete schema
+        # Determine response_format
+        response_format = None
         if api_params.get('response_format'):
             rf = api_params['response_format']
-            # Check if it has the required structure for structured outputs
             if rf.get('type') == 'json_schema' and rf.get('json_schema'):
-                call_params['response_format'] = rf
+                response_format = rf
             elif rf.get('type') == 'json_object':
-                call_params['response_format'] = {"type": "json_object"}
+                response_format = {"type": "json_object"}
 
-        # Run API call
+        # Run LLM call via centralized client with kwargs passthrough
         start_time = time.time()
         try:
-            response = client.chat.completions.create(**call_params)
+            result_llm = call_llm(
+                stage="tool_ab_tester",
+                messages=messages,
+                response_format=response_format,
+                model=api_params.get('model'),
+                temperature=api_params.get('temperature'),
+                max_tokens=api_params.get('max_tokens'),
+            )
             elapsed_time = time.time() - start_time
 
             # Parse response
-            content = response.choices[0].message.content
+            content = result_llm["content"]
 
             # Try to parse as JSON for structured outputs
             try:
@@ -174,28 +169,27 @@ class PromptABTester:
                 'response': parsed_content,
                 'elapsed_time': elapsed_time,
                 'usage': {
-                    'prompt_tokens': response.usage.prompt_tokens,
-                    'completion_tokens': response.usage.completion_tokens,
-                    'total_tokens': response.usage.total_tokens
+                    'prompt_tokens': result_llm["prompt_tokens"],
+                    'completion_tokens': result_llm["completion_tokens"],
+                    'total_tokens': result_llm["total_tokens"]
                 },
-                'model': response.model,
-                'finish_reason': response.choices[0].finish_reason,
+                'model': result_llm["model"],
+                'finish_reason': result_llm["finish_reason"],
                 'variation_description': prompt.get('variation_description', 'Original')
             }
 
             # Extract confidence if present
             if 'confidence' in parsed_content:
                 result['confidence'] = parsed_content['confidence']
-                conf_emoji = "✅" if parsed_content['confidence'] >= 0.8 else "⚠️" if parsed_content['confidence'] >= 0.6 else "❌"
-                print(f"    {conf_emoji} Confidence: {parsed_content['confidence']:.3f} | Tokens: {response.usage.total_tokens} | Time: {elapsed_time:.2f}s")
+                print(f"    Confidence: {parsed_content['confidence']:.3f} | Tokens: {result_llm['total_tokens']} | Time: {elapsed_time:.2f}s")
             else:
-                print(f"    ✓ Tokens: {response.usage.total_tokens} | Time: {elapsed_time:.2f}s")
+                print(f"    Tokens: {result_llm['total_tokens']} | Time: {elapsed_time:.2f}s")
 
             return result
 
         except Exception as e:
             elapsed_time = time.time() - start_time
-            print(f"    ❌ Error: {e}")
+            print(f"    Error: {e}")
 
             return {
                 'test_name': test_name,
