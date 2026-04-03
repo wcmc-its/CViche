@@ -28,6 +28,8 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple, Set
 from copy import deepcopy
+
+from unified_pipeline.llm_client import call_llm
 from datetime import datetime
 
 
@@ -4166,11 +4168,6 @@ def llm_context_repair_for_unknowns(
         - Cost: ~$0.01-0.03 per CV with many unknowns
         - Uses ~50 tokens per unknown section
     """
-    from openai import OpenAI
-
-    # Use default environment context (per project CLAUDE.md)
-    client = OpenAI()
-
     unknown_groups = []
     other_groups = []
 
@@ -4235,14 +4232,9 @@ Classify this section as one of:
 Respond with just the section name."""
 
         try:
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                max_tokens=50
-            )
+            result = call_llm(stage="core_repair_segmentation", messages=[{"role": "user", "content": prompt}])
 
-            suggested_label = response.choices[0].message.content.strip()
+            suggested_label = result["content"].strip()
             llm_calls += 1
 
             # Update group with LLM suggestion

@@ -20,6 +20,8 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 
+from unified_pipeline.llm_client import call_llm
+
 # Add legacy production scripts to path
 LEGACY_PRODUCTION = Path(__file__).parent.parent.parent / "legacy" / "stage_based_extraction" / "scripts" / "production"
 sys.path.insert(0, str(LEGACY_PRODUCTION))
@@ -603,10 +605,6 @@ class SectionExtractionOrchestrator:
 
     def _review_failed_group(self, group: Dict, taxonomy_context: str, verbose: bool) -> Optional[Dict]:
         """Review a failed group with LLM and determine action."""
-        import os
-        from openai import OpenAI
-        import time
-
         group_id = group.get('id')
         current_type = group.get('wcm_section_type')
         label = group.get('label', group.get('label_inferred', 'N/A'))
@@ -648,20 +646,9 @@ Respond in JSON format:
 }}"""
 
         try:
-            # Use default environment context to avoid expensive SKU mapping
-            client = OpenAI()
+            result_raw = call_llm(stage="core_section_orchestrator", messages=[{"role": "user", "content": prompt}], response_format={"type": "json_object"})
 
-            # Add small delay to avoid rate limits
-            time.sleep(1)
-
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.1,
-                response_format={"type": "json_object"}
-            )
-
-            result = json.loads(response.choices[0].message.content)
+            result = json.loads(result_raw["content"])
 
             if verbose:
                 action = result.get('action')
