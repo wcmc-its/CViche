@@ -92,6 +92,15 @@ src/logs/
 src/unified_pipeline/core/*.txt
 src/unified_pipeline/core/*.md
 
+# Claude Code
+.claude/
+
+# Playwright MCP
+.playwright-mcp/
+
+# Runtime caches
+src/unified_pipeline/config/institution_cache.json
+
 # Misc
 *.tar.gz
 *.zip
