@@ -169,3 +169,8 @@ def mock_saml_identity_no_mail():
         "urn:oid:2.16.840.1.113730.3.1.241": ["Test User"],
         "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["testuser@cornell.edu"],
     }
+
+
+def pytest_configure(config):
+    """Register custom pytest markers."""
+    config.addinivalue_line("markers", "e2e: end-to-end tests requiring OPENAI_API_KEY (deselected by default)")
