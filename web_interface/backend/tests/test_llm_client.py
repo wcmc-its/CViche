@@ -343,7 +343,14 @@ def test_call_llm_unsupported_provider():
     """call_llm raises ValueError for unsupported provider."""
     from unified_pipeline.llm_client import call_llm
 
-    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_bedrock_config()):
+    unsupported_config = {
+        "provider": "azure",
+        "model": "gpt-4o-mini",
+        "temperature": 0,
+        "max_tokens": None,
+        "retry_count": 3,
+    }
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=unsupported_config):
         with pytest.raises(ValueError, match="Unsupported provider"):
             call_llm("stage_2", [{"role": "user", "content": "test"}])
 
