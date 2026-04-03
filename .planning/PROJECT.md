@@ -23,7 +23,7 @@ Faculty can upload a CV and get back a correctly formatted WCM document without 
 ## Current State
 
 **Latest release:** v1.4 (shipped 2026-03-28)
-**In progress:** v1.5 Phase 19 complete — config system, LLM client, and cost tracking layer built
+**In progress:** v1.5 Phase 20 complete — entire pipeline migrated to call_llm() abstraction
 
 Six milestones in progress across 19 phases (38 plans):
 - v1.0: Repository sanitized, documented, public on GitHub
@@ -61,10 +61,11 @@ Six milestones in progress across 19 phases (38 plans):
 
 - CFG-01, CFG-02, CFG-03: YAML config system with per-stage overrides and env var integration -- v1.5 (Phase 19)
 - LLM-01, LLM-02, LLM-04: Centralized LLM client with retries, cost tracking, provider column -- v1.5 (Phase 19)
+- LLM-03: All pipeline stages migrated to call_llm() — zero direct OpenAI SDK calls (43 files) -- v1.5 (Phase 20)
 
 ### Active
 
-See REQUIREMENTS.md for v1.5 requirements (LLM-03 and remaining items).
+See REQUIREMENTS.md for v1.5 requirements (remaining items).
 
 ### Out of Scope
 
@@ -77,7 +78,7 @@ See REQUIREMENTS.md for v1.5 requirements (LLM-03 and remaining items).
 
 ## Context
 
-- v1.0-v1.4 shipped: 18 phases, 35 plans; v1.5 Phase 19 complete (3 plans)
+- v1.0-v1.4 shipped: 18 phases, 35 plans; v1.5 Phases 19-20 complete (7 plans)
 - Web interface is production-ready: upload, real-time pipeline viewer, download, feedback, help, dual-mode auth, security hardening
 - Backend has clean service layer: 7 service modules, centralized config with CVICHE_* env overrides, structured error responses
 - Frontend has single source of truth: 28 typed API functions, 17 shared interfaces, environment-derived URLs, shared formatting utilities
@@ -114,4 +115,4 @@ See REQUIREMENTS.md for v1.5 requirements (LLM-03 and remaining items).
 | VITE_API_URL defaults to empty for Vite proxy | Dev works without .env, prod uses explicit URL | ✓ Good |
 
 ---
-*Last updated: 2026-03-29 after v1.4 archived — v1.5 LLM Provider Abstraction started*
+*Last updated: 2026-03-31 after Phase 20 complete — full pipeline migrated to call_llm()*
