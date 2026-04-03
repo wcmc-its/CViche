@@ -1,22 +1,54 @@
+# Python artifacts
 __pycache__
 *.pyc
 *.pyo
-.env
-.env.*
-*.db
-*.sqlite3
-cviche.db
-pipeline.db
-prompt_logs/
-.git
-.gitignore
-.DS_Store
-venv/
-.venv/
 *.egg-info
 dist/
 build/
 .pytest_cache/
 .mypy_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# Environment files
+.env
+.env.*
+
+# Databases
+*.db
+*.sqlite3
+cviche.db
+pipeline.db
+
+# Test suite (not needed in production image)
+tests/
+
+# Logs and outputs (runtime-generated, not build artifacts)
+prompt_logs/
+prompt_logs_debug/
+outputs/
+
+# Git
+.git
+.gitignore
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Node (from frontend, shouldn't be here)
 node_modules/
+
+# Documentation
 README.md
+*.md
+
+# Docker files (avoid recursive copy -- keep docker-entrypoint.sh, it's needed)
+Dockerfile
+.dockerignore
+
+# Planning artifacts
+.planning/

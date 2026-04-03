@@ -1,9 +1,32 @@
+# Dependencies (reinstalled via npm ci in build stage)
 node_modules
+
+# Build output (rebuilt in build stage)
 dist
-.DS_Store
-.git
-.gitignore
-*.md
-.vscode
+
+# Environment files
 .env
 .env.*
+
+# Git
+.git
+.gitignore
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Documentation
+*.md
+
+# Docker files (keep nginx.conf -- needed by production stage)
+Dockerfile
+.dockerignore
+
+# Test artifacts
+coverage/
+.playwright-mcp/
+
+# Planning artifacts
+.planning/
