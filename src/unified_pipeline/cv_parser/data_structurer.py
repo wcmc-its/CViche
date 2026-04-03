@@ -4,8 +4,8 @@ Data structurer - Extract and structure entities from CV sections
 import json
 import logging
 from typing import Dict, List, Optional, Any
-from openai import OpenAI
 
+from unified_pipeline.llm_client import call_llm
 from .config import ENTITY_EXTRACTION_PROMPT
 from .utils import extract_dates, extract_email, is_likely_publication
 
@@ -24,9 +24,6 @@ class DataStructurer:
             use_llm: Whether to use LLM for entity extraction
         """
         self.use_llm = use_llm
-        if use_llm:
-            # Use default OpenAI client (environment context)
-            self.client = OpenAI()
 
     def structure_sections(self, merged_sections: Dict[str, List[Dict]]) -> Dict[str, Any]:
         """
@@ -255,8 +252,8 @@ class DataStructurer:
         )
 
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
+            llm_result = call_llm(
+                stage="cv_parser_structurer",
                 messages=[
                     {"role": "system", "content": "You are a CV data extraction assistant. Extract structured data and return ONLY valid JSON."},
                     {"role": "user", "content": prompt}
@@ -265,7 +262,7 @@ class DataStructurer:
                 max_tokens=1500
             )
 
-            result_text = response.choices[0].message.content.strip()
+            result_text = llm_result["content"].strip()
 
             # Try to parse as JSON
             # Remove markdown code blocks if present
@@ -307,8 +304,8 @@ Return ONLY valid JSON.
 """
 
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
+            llm_result = call_llm(
+                stage="cv_parser_structurer",
                 messages=[
                     {"role": "system", "content": "You are a publication citation parser. Return ONLY valid JSON."},
                     {"role": "user", "content": prompt}
@@ -317,7 +314,7 @@ Return ONLY valid JSON.
                 max_tokens=500
             )
 
-            result_text = response.choices[0].message.content.strip()
+            result_text = llm_result["content"].strip()
 
             # Clean markdown
             if result_text.startswith('```'):

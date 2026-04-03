@@ -4,8 +4,8 @@ Section classifier - Identify and classify CV sections
 import re
 import logging
 from typing import Dict, List, Optional
-from openai import OpenAI
 
+from unified_pipeline.llm_client import call_llm
 from .config import (
     WCM_SECTIONS,
     SECTION_ALIASES,
@@ -29,9 +29,6 @@ class SectionClassifier:
             use_llm: Whether to use LLM for ambiguous cases
         """
         self.use_llm = use_llm
-        if use_llm:
-            # Use default OpenAI client (environment context)
-            self.client = OpenAI()
 
     def parse_sections(self, text: str, preliminary_sections: List[Dict] = None) -> List[Dict]:
         """
@@ -203,8 +200,8 @@ class SectionClassifier:
         )
 
         try:
-            response = self.client.chat.completions.create(
-                model="gpt-4o-mini",
+            llm_result = call_llm(
+                stage="cv_parser_classifier",
                 messages=[
                     {"role": "system", "content": "You are a CV section classifier. Respond with only the section name."},
                     {"role": "user", "content": prompt}
@@ -213,7 +210,7 @@ class SectionClassifier:
                 max_tokens=50
             )
 
-            result = response.choices[0].message.content.strip()
+            result = llm_result["content"].strip()
 
             # Validate result is in WCM_SECTIONS
             if result in WCM_SECTIONS:

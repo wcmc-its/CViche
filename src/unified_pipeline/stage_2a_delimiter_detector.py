@@ -16,13 +16,12 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 from docx import Document
-from openai import OpenAI
 
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+from unified_pipeline.llm_client import call_llm
 from core.output_manager import OutputManager
-from core.prompt_logger import log_prompt_before_call, log_prompt_response
 
 
 def get_hierarchy_path(node: Dict, current_path: List[str] = None) -> List[str]:
@@ -95,7 +94,6 @@ def detect_delimiters_for_section(
     doc: Document,
     start_para_idx: int,
     end_para_idx: int,
-    client: OpenAI,
     document_uid: str = None,
     header_indices: set = None
 ) -> Tuple[List[Dict], Dict]:
@@ -211,49 +209,18 @@ Respond **only** with a JSON array containing the identified entries. If no entr
         {"role": "user", "content": user_prompt}
     ]
 
-    # Log prompt before API call
-    log_id = log_prompt_before_call(
-        messages=messages,
-        model="gpt-5.1",
-        purpose="stage_2a_delimiter_detection",
-        temperature=0.1,
-        response_format={"type": "json_object"},
-        context={
-            "document_uid": document_uid,
-            "section_hierarchy": section_hierarchy,
-            "start_para_idx": start_para_idx,
-            "end_para_idx": end_para_idx,
-            "paragraph_count": len(section_paragraphs)
-        },
-        caller_file="stage_2a_delimiter_detector.py"
-    )
-
     try:
-        start_time = time.time()
-        response = client.chat.completions.create(
-            model="gpt-5.1",
+        llm_result = call_llm(
+            stage="stage_2a",
             messages=messages,
             response_format={"type": "json_object"},
             temperature=0.1
         )
-        elapsed_time = time.time() - start_time
 
-        # Log the response
-        log_prompt_response(
-            log_id=log_id,
-            response=response,
-            purpose="stage_2a_delimiter_detection",
-            elapsed_time=elapsed_time
-        )
-
-        result_text = response.choices[0].message.content
+        result_text = llm_result["content"]
         result = json.loads(result_text)
 
-        # Calculate cost (gpt-5.1 pricing: $1.00/1M input, $2.00/1M output)
-        usage = response.usage
-        input_cost = (usage.prompt_tokens / 1_000_000) * 1.00
-        output_cost = (usage.completion_tokens / 1_000_000) * 2.00
-        total_cost = input_cost + output_cost
+        total_cost = llm_result["cost"]
 
         # Extract delimiters array - LLM may return in different keys
         if isinstance(result, dict):
@@ -291,16 +258,15 @@ Respond **only** with a JSON array containing the identified entries. If no entr
         # Return delimiters and cost info
         cost_info = {
             "cost": total_cost,
-            "tokens": usage.total_tokens,
-            "prompt_tokens": usage.prompt_tokens,
-            "completion_tokens": usage.completion_tokens,
-            "log_id": log_id
+            "tokens": llm_result["total_tokens"],
+            "prompt_tokens": llm_result["prompt_tokens"],
+            "completion_tokens": llm_result["completion_tokens"],
         }
         return validated_delimiters, cost_info
 
     except Exception as e:
         print(f"  ⚠ Error detecting delimiters for '{section_name}': {e}")
-        return [], {"cost": 0, "tokens": 0, "log_id": log_id}
+        return [], {"cost": 0, "tokens": 0}
 
 
 def run_stage_2a(docx_path: str, hierarchy_json_path: str = None):
@@ -321,7 +287,6 @@ def run_stage_2a(docx_path: str, hierarchy_json_path: str = None):
 
     # Setup
     om = OutputManager(docx_path)
-    client = OpenAI()  # Uses default env context per project guidelines
 
     # Load Stage 1b hierarchy with boundaries
     if hierarchy_json_path is None:
@@ -375,7 +340,6 @@ def run_stage_2a(docx_path: str, hierarchy_json_path: str = None):
             doc,
             start_idx,
             end_idx + 1,  # end_idx is inclusive, so add 1 for range
-            client,
             document_uid=document_uid,
             header_indices=header_indices
         )

@@ -11,6 +11,8 @@ from pathlib import Path
 import logging
 from collections import Counter
 
+from unified_pipeline.llm_client import call_llm
+
 # Import taxonomy
 try:
     from cv_taxonomy import CV_SECTIONS, build_taxonomy_index
@@ -1476,8 +1478,6 @@ class PhasedCVExtractor:
         except ImportError:
             from llm_section_evaluator import evaluate_section_header
 
-        from openai import OpenAI
-
         # Basic exclusion patterns
         exclusion_patterns = [
             r'^Funding:\s*\$',
@@ -1585,8 +1585,7 @@ class PhasedCVExtractor:
 
         # Step 4: Evaluate borderline cases with LLM
         if borderline:
-            logger.info(f"Step 4: Evaluating {len(borderline)} borderline cases with GPT-4o-mini")
-            client = OpenAI()
+            logger.info(f"Step 4: Evaluating {len(borderline)} borderline cases with LLM")
 
             for i, candidate in enumerate(borderline):
                 if (i + 1) % 10 == 0:
@@ -1600,7 +1599,6 @@ class PhasedCVExtractor:
                     is_caps=candidate['is_caps'],
                     has_colon=candidate['has_colon'],
                     is_centered=candidate['is_centered'],
-                    client=client
                 )
 
                 # Accept if LLM confirms with confidence ≥ 70

@@ -25,21 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
-# OpenAI for LLM-mediated formatting
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
-
-# Import prompt logger for tracking LLM calls
-try:
-    from core.prompt_logger import log_prompt_before_call, log_prompt_response
-except ImportError:
-    def log_prompt_before_call(*args, **kwargs):
-        return None
-    def log_prompt_response(*args, **kwargs):
-        pass
+from unified_pipeline.llm_client import call_llm
 
 # Paths
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5d_citation_formatted"
@@ -206,81 +192,39 @@ def parse_llm_output(llm_output: str, id_to_entry: Dict[str, Dict], verbose: boo
     return id_to_formatted
 
 
-def call_llm_formatter(raw_content: str, model: str = "gpt-5.1", verbose: bool = True) -> tuple:
+def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
     """
-    Call OpenAI LLM to reformat citations.
+    Call LLM to reformat citations.
 
     Args:
         raw_content: Raw content string with entry IDs
-        model: OpenAI model to use
         verbose: Whether to print progress
 
     Returns:
         Tuple of (LLM response string, usage dict) or (None, None) if failed
     """
-    if not OPENAI_AVAILABLE:
-        if verbose:
-            print("  Warning: OpenAI not available, skipping LLM formatting")
-        return None, None
-
     try:
-        import time
-        client = OpenAI()
-
         prompt = CITATION_FORMATTER_PROMPT.format(raw_content=raw_content)
         messages = [{"role": "user", "content": prompt}]
 
         if verbose:
             print(f"  Calling LLM for citation formatting...")
 
-        # Log prompt before call
-        log_id = log_prompt_before_call(
+        llm_result = call_llm(
+            stage="stage_5d",
             messages=messages,
-            model=model,
-            purpose="stage_5d_citation_formatting",
-            temperature=0.2
+            temperature=0.2,
+            response_format={"type": "json_object"},
+            max_tokens=8000
         )
 
-        start_time = time.time()
+        result_text = llm_result["content"]
 
-        # Build API call parameters
-        api_params = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.2,  # Low temperature for consistent formatting
-            "response_format": {"type": "json_object"},  # Request JSON output
+        usage = {
+            'prompt_tokens': llm_result["prompt_tokens"],
+            'completion_tokens': llm_result["completion_tokens"],
+            'total_tokens': llm_result["total_tokens"]
         }
-
-        # Use max_completion_tokens for newer models
-        if model.startswith('gpt-5') or model.startswith('o'):
-            api_params["max_completion_tokens"] = 8000
-        else:
-            api_params["max_tokens"] = 8000
-
-        response = client.chat.completions.create(**api_params)
-
-        elapsed_time = time.time() - start_time
-        result_text = response.choices[0].message.content
-
-        # Extract usage info
-        usage = {}
-        if response.usage:
-            usage = {
-                'prompt_tokens': response.usage.prompt_tokens,
-                'completion_tokens': response.usage.completion_tokens,
-                'total_tokens': response.usage.total_tokens
-            }
-
-        # Log response (wrap in try-except to not fail on logging issues)
-        try:
-            log_prompt_response(
-                log_id,
-                result_text,
-                purpose="stage_5d_citation_formatting",
-                elapsed_time=elapsed_time
-            )
-        except Exception:
-            pass  # Don't fail on logging issues
 
         return result_text, usage
 
@@ -363,7 +307,7 @@ def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1
         raw_content, id_to_entry = build_raw_content(batch)
 
         # Call LLM
-        llm_output, usage = call_llm_formatter(raw_content, model=model, verbose=verbose)
+        llm_output, usage = call_llm_formatter(raw_content, verbose=verbose)
 
         # Accumulate costs
         if usage:

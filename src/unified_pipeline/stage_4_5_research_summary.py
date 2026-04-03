@@ -18,20 +18,11 @@ import os
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-from openai import OpenAI
 
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_4_5_research_summary"
 
-# Import prompt logger
-try:
-    from core.prompt_logger import log_prompt_before_call, log_prompt_response
-except ImportError:
-    # Fallback if prompt logger not available
-    def log_prompt_before_call(*args, **kwargs):
-        return None
-    def log_prompt_response(*args, **kwargs):
-        pass
+from unified_pipeline.llm_client import call_llm
 
 # Section weights for biosketch relevance (0 = essential, -1 = not useful)
 # Based on NIH biosketch requirements
@@ -85,11 +76,6 @@ ENTRY_LIMITS = {
 # Seniority bonuses
 PI_BONUS = 0.15           # Bonus for PI role on grants
 SENIOR_AUTHOR_BONUS = 0.1  # Bonus for senior/first author on pubs
-
-
-def get_openai_client() -> OpenAI:
-    """Get OpenAI client using default environment context."""
-    return OpenAI()
 
 
 def score_entry_seniority(entry: Dict, taxonomy_code: str, cv_owner_name: str = '') -> float:
@@ -310,7 +296,7 @@ def build_context_string(weighted_entries: List[Tuple[str, Dict, float]], max_to
     return '\n'.join(context_parts)
 
 
-def score_existing_m1(m1_content: str, client: OpenAI) -> Tuple[float, str, dict]:
+def score_existing_m1(m1_content: str) -> Tuple[float, str, dict]:
     """
     Score existing M1 content for biosketch summary quality.
 
@@ -347,34 +333,20 @@ Respond with JSON only:
 
     messages = [{"role": "user", "content": prompt}]
 
-    # Log the prompt
-    log_id = log_prompt_before_call(
-        messages=messages,
-        model="gpt-5.1",
-        purpose="4.5_m1_scoring",
-        context={"content_length": len(m1_content)}
-    )
-
-    response = client.chat.completions.create(
-        model="gpt-5.1",
+    llm_result = call_llm(
+        stage="stage_4_5",
         messages=messages,
         temperature=0.1,
-        max_completion_tokens=200
+        max_tokens=200
     )
 
-    result_text = response.choices[0].message.content.strip()
+    result_text = llm_result["content"].strip()
 
-    # Extract usage info
-    usage = {}
-    if response.usage:
-        usage = {
-            'prompt_tokens': response.usage.prompt_tokens,
-            'completion_tokens': response.usage.completion_tokens,
-            'total_tokens': response.usage.total_tokens
-        }
-
-    # Log the response
-    log_prompt_response(log_id, result_text, purpose="4.5_m1_scoring")
+    usage = {
+        'prompt_tokens': llm_result["prompt_tokens"],
+        'completion_tokens': llm_result["completion_tokens"],
+        'total_tokens': llm_result["total_tokens"]
+    }
 
     # Parse JSON response
     try:
@@ -391,7 +363,7 @@ Respond with JSON only:
         return 0.0, "Failed to parse response", usage
 
 
-def generate_research_summary(context: str, cv_owner_name: str, client: OpenAI) -> Tuple[str, dict]:
+def generate_research_summary(context: str, cv_owner_name: str) -> Tuple[str, dict]:
     """
     Generate a biosketch-style research summary from CV context.
 
@@ -417,34 +389,20 @@ Generate only the research summary paragraph (150-200 words max), no additional 
 
     messages = [{"role": "user", "content": prompt}]
 
-    # Log the prompt
-    log_id = log_prompt_before_call(
-        messages=messages,
-        model="gpt-5.1",
-        purpose="4.5_summary_generation",
-        context={"cv_owner": cv_owner_name, "context_length": len(context)}
-    )
-
-    response = client.chat.completions.create(
-        model="gpt-5.1",
+    llm_result = call_llm(
+        stage="stage_4_5",
         messages=messages,
         temperature=0.3,
-        max_completion_tokens=350
+        max_tokens=350
     )
 
-    result_text = response.choices[0].message.content.strip()
+    result_text = llm_result["content"].strip()
 
-    # Extract usage info
-    usage = {}
-    if response.usage:
-        usage = {
-            'prompt_tokens': response.usage.prompt_tokens,
-            'completion_tokens': response.usage.completion_tokens,
-            'total_tokens': response.usage.total_tokens
-        }
-
-    # Log the response
-    log_prompt_response(log_id, result_text, purpose="4.5_summary_generation")
+    usage = {
+        'prompt_tokens': llm_result["prompt_tokens"],
+        'completion_tokens': llm_result["completion_tokens"],
+        'total_tokens': llm_result["total_tokens"]
+    }
 
     return result_text, usage
 
@@ -506,9 +464,6 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
         print(f"Total entries: {len(data.get('entries', []))}")
         print(f"Taxonomy codes: {sorted(entries_by_code.keys())}")
 
-    # Initialize OpenAI client
-    client = get_openai_client()
-
     # Step 1: Check and score existing M1 content
     m1_entries = entries_by_code.get('M1', [])
     existing_m1_content = '\n'.join([e.get('text', '') for e in m1_entries])
@@ -524,7 +479,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
         if verbose:
             print(f"\nScoring existing M1 content ({len(m1_entries)} entries)...")
 
-        m1_score, score_reasoning, score_usage = score_existing_m1(existing_m1_content, client)
+        m1_score, score_reasoning, score_usage = score_existing_m1(existing_m1_content)
 
         # Track usage from scoring call
         if score_usage:
@@ -575,7 +530,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
             print(f"  Context length: {len(context)} chars")
 
         # Generate summary
-        research_summary, gen_usage = generate_research_summary(context, cv_owner_name, client)
+        research_summary, gen_usage = generate_research_summary(context, cv_owner_name)
         generation_method = "llm_generated"
 
         # Track usage from generation call

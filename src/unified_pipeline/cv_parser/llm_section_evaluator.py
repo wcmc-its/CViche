@@ -7,7 +7,8 @@ is a CV section header using an LLM, replacing complex heuristic scoring.
 import json
 import logging
 from typing import Dict, List, Optional, Any
-from openai import OpenAI
+
+from unified_pipeline.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +56,10 @@ def evaluate_section_header(
     is_caps: bool = False,
     has_colon: bool = False,
     is_centered: bool = False,
-    client: Optional[OpenAI] = None
+    client=None
 ) -> Dict[str, Any]:
     """
-    Evaluate whether a line is a CV section header using GPT-4o-mini.
+    Evaluate whether a line is a CV section header using LLM.
 
     Args:
         line_text: The text of the line to evaluate
@@ -68,13 +69,11 @@ def evaluate_section_header(
         is_caps: Whether the line is all caps
         has_colon: Whether the line ends with a colon
         is_centered: Whether the line is centered
-        client: OpenAI client (created if not provided)
+        client: Deprecated, ignored (kept for backward compatibility)
 
     Returns:
         Dict with keys: is_header (bool), confidence (int), reasoning (str), error (str if failed)
     """
-    if client is None:
-        client = OpenAI()
 
     # Format the prompt
     prompt = SECTION_HEADER_PROMPT.format(
@@ -88,15 +87,15 @@ def evaluate_section_header(
     )
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
+        llm_result = call_llm(
+            stage="cv_parser_evaluator",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             temperature=0.0,
             max_tokens=200
         )
 
-        content = response.choices[0].message.content
+        content = llm_result["content"]
         result = json.loads(content)
 
         # Validate and normalize response
@@ -145,13 +144,11 @@ def evaluate_batch(
     Returns:
         List of candidates with added llm_result key containing evaluation
     """
-    client = OpenAI()
-
     results = []
     for i, candidate in enumerate(candidates):
         logger.info(f"Evaluating candidate {i+1}/{len(candidates)}: {candidate.get('text', '')[:60]}")
 
-        llm_result = evaluate_section_header(
+        eval_result = evaluate_section_header(
             line_text=candidate.get('text', ''),
             font_size=candidate.get('font_size', body_size),
             body_size=body_size,
@@ -159,15 +156,14 @@ def evaluate_batch(
             is_caps=candidate.get('is_caps', False),
             has_colon=candidate.get('text', '').endswith(':'),
             is_centered=candidate.get('is_centered', False),
-            client=client
         )
 
         # Add LLM result to candidate
-        candidate['llm_result'] = llm_result
+        candidate['llm_result'] = eval_result
         candidate['llm_accepted'] = (
-            llm_result['is_header'] and
-            llm_result['confidence'] >= min_confidence and
-            llm_result['error'] is None
+            eval_result['is_header'] and
+            eval_result['confidence'] >= min_confidence and
+            eval_result['error'] is None
         )
 
         results.append(candidate)

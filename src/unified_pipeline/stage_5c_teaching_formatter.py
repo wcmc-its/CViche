@@ -27,22 +27,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
-# OpenAI for LLM-mediated formatting
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
-
-# Import prompt logger for tracking LLM calls
-try:
-    from core.prompt_logger import log_prompt_before_call, log_prompt_response
-except ImportError:
-    # Fallback if prompt logger not available
-    def log_prompt_before_call(*args, **kwargs):
-        return None
-    def log_prompt_response(*args, **kwargs):
-        pass
+from unified_pipeline.llm_client import call_llm
 
 # Paths
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5c_teaching_formatted"
@@ -268,77 +253,38 @@ def parse_llm_output(llm_output: str, id_to_entry: Dict[str, Dict]) -> Dict[str,
     return id_to_formatted
 
 
-def call_llm_formatter(raw_content: str, model: str = "gpt-4o-mini", verbose: bool = True) -> tuple:
+def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
     """
-    Call OpenAI LLM to reformat the educational contributions.
+    Call LLM to reformat the educational contributions.
 
     Args:
         raw_content: Raw content string with entry IDs
-        model: OpenAI model to use
         verbose: Whether to print progress
 
     Returns:
         Tuple of (formatted_text, usage_dict) or (None, None) if failed
     """
-    if not OPENAI_AVAILABLE:
-        if verbose:
-            print("  Warning: OpenAI not available, skipping LLM formatting")
-        return None, None
-
     try:
-        import time
-        client = OpenAI()
-
         prompt = EDUCATIONAL_CONTRIBUTIONS_PROMPT.format(raw_content=raw_content)
         messages = [{"role": "user", "content": prompt}]
 
         if verbose:
             print(f"  Calling LLM for educational contributions formatting...")
 
-        # Log prompt before call
-        log_id = log_prompt_before_call(
+        llm_result = call_llm(
+            stage="stage_5c",
             messages=messages,
-            model=model,
-            purpose="stage_5c_teaching_formatting",
-            temperature=0.3
+            temperature=0.3,
+            max_tokens=8000
         )
 
-        start_time = time.time()
+        result_text = llm_result["content"]
 
-        # Build API call parameters
-        api_params = {
-            "model": model,
-            "messages": messages,
-            "temperature": 0.3,  # Lower temperature for more consistent formatting
+        usage = {
+            'prompt_tokens': llm_result["prompt_tokens"],
+            'completion_tokens': llm_result["completion_tokens"],
+            'total_tokens': llm_result["total_tokens"]
         }
-
-        # Use max_completion_tokens for newer models, max_tokens for older ones
-        if model.startswith('gpt-5') or model.startswith('o'):
-            api_params["max_completion_tokens"] = 8000
-        else:
-            api_params["max_tokens"] = 8000
-
-        response = client.chat.completions.create(**api_params)
-
-        elapsed_time = time.time() - start_time
-        result_text = response.choices[0].message.content
-
-        # Extract usage info
-        usage = {}
-        if response.usage:
-            usage = {
-                'prompt_tokens': response.usage.prompt_tokens,
-                'completion_tokens': response.usage.completion_tokens,
-                'total_tokens': response.usage.total_tokens
-            }
-
-        # Log response
-        log_prompt_response(
-            log_id,
-            result_text,
-            purpose="stage_5c_teaching_formatting",
-            elapsed_time=elapsed_time
-        )
 
         return result_text, usage
 
@@ -406,7 +352,7 @@ def run_stage_5c(input_path: str, output_path: str = None, model: str = "gpt-4o-
     raw_content, id_to_entry = build_raw_content(entries_by_k_code)
 
     # Call LLM for formatting
-    llm_output, usage = call_llm_formatter(raw_content, model=model, verbose=verbose)
+    llm_output, usage = call_llm_formatter(raw_content, verbose=verbose)
 
     # Copy all data forward and update K-code entries with formatting
     # Each stage output is self-contained with complete state

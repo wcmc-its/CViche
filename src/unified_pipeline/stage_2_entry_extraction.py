@@ -16,13 +16,12 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 from docx import Document
-from openai import OpenAI
 
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
+from unified_pipeline.llm_client import call_llm
 from core.output_manager import OutputManager
-from core.prompt_logger import log_prompt_before_call, log_prompt_response
 from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
 
 
@@ -339,7 +338,6 @@ def detect_entries_for_section(
     doc_elements: List[Dict],
     start_elem_idx: int,
     end_elem_idx: int,
-    client: OpenAI,
     document_uid: str = None,
     header_indices: set = None,
     element_index_map: Dict = None
@@ -352,7 +350,6 @@ def detect_entries_for_section(
         doc_elements: List of elements from extract_docx_structure (paragraphs + tables)
         start_elem_idx: Starting element index for this section
         end_elem_idx: Ending element index for this section (before next section)
-        client: OpenAI client
         document_uid: Document identifier for logging
         header_indices: Set of element indices that are section/subsection headers (to exclude)
         element_index_map: Map from element index to element data
@@ -587,7 +584,6 @@ def detect_entries_for_section(
     total_tokens = 0
     prompt_tokens = 0
     completion_tokens = 0
-    log_ids = []
 
     num_batches = (len(section_elements) + BATCH_SIZE - 1) // BATCH_SIZE
 
@@ -703,54 +699,22 @@ Respond **only** with a JSON array containing the identified entries. If no entr
             {"role": "user", "content": user_prompt}
         ]
 
-        # Log prompt before API call
-        log_id = log_prompt_before_call(
-            messages=messages,
-            model="gpt-5.1",
-            purpose="stage_2_entry_extraction",
-            temperature=0.1,
-            response_format={"type": "json_object"},
-            context={
-                "document_uid": document_uid,
-                "section_hierarchy": section_hierarchy,
-                "start_elem_idx": start_elem_idx,
-                "end_elem_idx": end_elem_idx,
-                "element_count": len(section_elements),
-                "batch": f"{batch_idx + 1}/{num_batches}" if num_batches > 1 else None
-            },
-            caller_file="stage_2_entry_extraction.py"
-        )
-        log_ids.append(log_id)
-
         try:
-            start_time = time.time()
-            response = client.chat.completions.create(
-                model="gpt-5.1",
+            llm_result = call_llm(
+                stage="stage_2",
                 messages=messages,
                 response_format={"type": "json_object"},
                 temperature=0.1
             )
-            elapsed_time = time.time() - start_time
 
-            # Log the response
-            log_prompt_response(
-                log_id=log_id,
-                response=response,
-                purpose="stage_2_entry_extraction",
-                elapsed_time=elapsed_time
-            )
-
-            result_text = response.choices[0].message.content
+            result_text = llm_result["content"]
             result = json.loads(result_text)
 
-            # Accumulate cost (gpt-5.1 pricing: $1.00/1M input, $2.00/1M output)
-            usage = response.usage
-            input_cost = (usage.prompt_tokens / 1_000_000) * 1.00
-            output_cost = (usage.completion_tokens / 1_000_000) * 2.00
-            total_cost += input_cost + output_cost
-            total_tokens += usage.total_tokens
-            prompt_tokens += usage.prompt_tokens
-            completion_tokens += usage.completion_tokens
+            # Accumulate cost
+            total_cost += llm_result["cost"]
+            total_tokens += llm_result["total_tokens"]
+            prompt_tokens += llm_result["prompt_tokens"]
+            completion_tokens += llm_result["completion_tokens"]
 
             # Extract delimiters array - LLM may return in different keys
             if isinstance(result, dict):
@@ -850,7 +814,6 @@ Respond **only** with a JSON array containing the identified entries. If no entr
         "tokens": total_tokens,
         "prompt_tokens": prompt_tokens,
         "completion_tokens": completion_tokens,
-        "log_ids": log_ids if len(log_ids) > 1 else (log_ids[0] if log_ids else None)
     }
     return all_validated_entries, cost_info
 
@@ -870,7 +833,6 @@ def run_stage_2(docx_path: str, hierarchy_json_path: str = None):
 
     # Setup
     om = OutputManager(docx_path)
-    client = OpenAI()  # Uses default env context per project guidelines
 
     # Load Stage 1b hierarchy with boundaries
     if hierarchy_json_path is None:
@@ -1007,7 +969,6 @@ def run_stage_2(docx_path: str, hierarchy_json_path: str = None):
             doc_elements,  # Now passing doc_elements instead of doc
             start_idx,
             end_idx + 1,  # end_idx is inclusive, so add 1 for range
-            client,
             document_uid=document_uid,
             header_indices=header_indices,
             element_index_map=element_index_map  # New parameter

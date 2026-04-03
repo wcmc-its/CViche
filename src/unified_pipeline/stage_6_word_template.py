@@ -41,6 +41,8 @@ except ImportError:
     print("Error: python-docx not installed. Install with: pip install python-docx lxml")
     sys.exit(1)
 
+from unified_pipeline.llm_client import call_llm
+
 # XML namespaces for Word documents
 WORD_NAMESPACE = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 W14_NAMESPACE = 'http://schemas.microsoft.com/office/word/2010/wordml'
@@ -1294,9 +1296,6 @@ class WCMTemplateGenerator:
 
         # Use LLM to classify
         try:
-            from openai import OpenAI
-            client = OpenAI()
-
             prompt = f"""Classify the geographic scope of this academic activity relative to the CV owner's institution(s).
 
 **CV Owner's Institution(s)**: {'; '.join(owner_institutions)}
@@ -1315,8 +1314,8 @@ class WCMTemplateGenerator:
 
 Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}}"""
 
-            response = client.chat.completions.create(
-                model="gpt-5.1",
+            llm_result = call_llm(
+                stage="stage_6",
                 messages=[
                     {"role": "system", "content": "You are a geographic classification system. Use your knowledge of institution locations to classify scope. Return only valid JSON."},
                     {"role": "user", "content": prompt}
@@ -1325,7 +1324,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 response_format={"type": "json_object"}
             )
 
-            result = json.loads(response.choices[0].message.content)
+            result = json.loads(llm_result["content"])
             scope = result.get('scope', 'National')
 
             # Validate response
@@ -6966,8 +6965,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         Returns list of (segment_text, taxonomy_code) tuples.
         """
-        from openai import OpenAI
-
         # Build a condensed taxonomy reference for relevant codes
         taxonomy_hint = """
 K1: Didactic Teaching (courses, lectures)
@@ -7016,9 +7013,8 @@ O: Acting Chairman of Pathology (October-December, 2006)
 Now analyze the text above:"""
 
         try:
-            client = OpenAI()
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",  # Use fast model for segmentation
+            llm_result = call_llm(
+                stage="stage_6",
                 messages=[
                     {"role": "system", "content": "You are an expert at analyzing academic CV content and classifying it into standard CV taxonomy categories."},
                     {"role": "user", "content": prompt}
@@ -7027,7 +7023,7 @@ Now analyze the text above:"""
                 max_tokens=1000
             )
 
-            result_text = response.choices[0].message.content.strip()
+            result_text = llm_result["content"].strip()
 
             # Parse the response
             segments = []

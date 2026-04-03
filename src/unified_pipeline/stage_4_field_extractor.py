@@ -27,64 +27,10 @@ import os
 import time
 from pathlib import Path
 from typing import Dict, List, Any, Optional
-from openai import OpenAI
-
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
-try:
-    from core.prompt_logger import log_prompt_before_call, log_prompt_response
-except ImportError:
-    # Fallback if prompt logger not available
-    def log_prompt_before_call(*args, **kwargs):
-        return None
-    def log_prompt_response(*args, **kwargs):
-        pass
-
-# Initialize OpenAI client
-client = OpenAI()
-
-# ============================================================================
-# Model Pricing (USD per 1M tokens) - Updated 2025-01
-# ============================================================================
-MODEL_PRICING = {
-    "gpt-4o": {
-        "input": 2.50,
-        "output": 10.00
-    },
-    "gpt-4o-mini": {
-        "input": 0.150,
-        "output": 0.600
-    },
-    "gpt-4-turbo": {
-        "input": 10.00,
-        "output": 30.00
-    },
-    "gpt-4": {
-        "input": 30.00,
-        "output": 60.00
-    },
-    "o3-mini": {
-        "input": 1.10,
-        "output": 4.40
-    },
-    "o4-mini": {
-        "input": 1.10,
-        "output": 4.40
-    },
-    "gpt-5.1": {
-        "input": 1.00,
-        "output": 3.00
-    },
-}
-
-
-def calculate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Calculate cost for a given model and token counts."""
-    # Get pricing for model, default to gpt-5.1 if not found
-    pricing = MODEL_PRICING.get(model, MODEL_PRICING.get("gpt-5.1", {"input": 1.00, "output": 3.00}))
-    cost = (input_tokens * pricing["input"] / 1_000_000) + (output_tokens * pricing["output"] / 1_000_000)
-    return cost
+from unified_pipeline.llm_client import call_llm
 
 
 # ============================================================================
@@ -926,9 +872,8 @@ def attempt_llm_recovery(
 }}"""
 
     try:
-        client = OpenAI()
-        response = client.chat.completions.create(
-            model=model,
+        llm_result = call_llm(
+            stage="stage_4",
             messages=[
                 {"role": "system", "content": "You are an expert at parsing messy document structures. Extract structured data even from poorly formatted tables and lists."},
                 {"role": "user", "content": prompt}
@@ -937,18 +882,15 @@ def attempt_llm_recovery(
             response_format={"type": "json_object"}
         )
 
-        result_text = response.choices[0].message.content
+        result_text = llm_result["content"]
         result = json.loads(result_text)
 
         recovered = result.get("recovered_entries", [])
         recovery_notes = result.get("recovery_notes", "")
 
-        # Calculate cost
-        input_tokens = response.usage.prompt_tokens
-        output_tokens = response.usage.completion_tokens
-        cost = calculate_cost(model, input_tokens, output_tokens)
+        cost = llm_result["cost"]
 
-        print(f"    🔧 LLM Recovery: {len(recovered)} entries recovered | ${cost:.4f}")
+        print(f"    LLM Recovery: {len(recovered)} entries recovered | ${cost:.4f}")
         if recovery_notes:
             print(f"       Notes: {recovery_notes[:100]}...")
 
@@ -1216,54 +1158,23 @@ Return JSON with format:
                 {"role": "user", "content": prompt}
             ]
 
-            # Log before call
-            start_time = time.time()
-            log_id = log_prompt_before_call(
-                messages=messages,
-                model=model,  # Use actual model being called
-                temperature=0.0,
-                purpose=f"field_extraction_batch_{code}",
-                context={
-                    "taxonomy_code": code,
-                    "entry_count": len(code_entries),
-                    "batch_idx": batch_idx,
-                    "total_batches": total_batches
-                },
-                caller_file="stage_4_field_extractor.py"
-            )
-
-            response = client.chat.completions.create(
-                model=model,
+            llm_result = call_llm(
+                stage="stage_4",
                 messages=messages,
                 temperature=0.0,
                 response_format={"type": "json_object"}
             )
 
-            elapsed_time = time.time() - start_time
-
-            # Log response
-            log_prompt_response(
-                log_id=log_id,
-                response=response,
-                purpose=f"field_extraction_batch_{code}",
-                elapsed_time=elapsed_time
-            )
-
             # Parse response
-            content = response.choices[0].message.content
+            content = llm_result["content"]
             result = json.loads(content)
 
-            # Extract cost/tokens using model-aware pricing
-            usage = response.usage
-            input_tokens = usage.prompt_tokens
-            output_tokens = usage.completion_tokens
-            cost = calculate_cost(model, input_tokens, output_tokens)
-
+            cost = llm_result["cost"]
             total_cost += cost
-            total_tokens += (input_tokens + output_tokens)
+            total_tokens += llm_result["total_tokens"]
 
             # Log cost for this call
-            print(f"    [{code}] {len(code_entries)} entries | {input_tokens + output_tokens:,} tokens | ${cost:.4f}")
+            print(f"    [{code}] {len(code_entries)} entries | {llm_result['total_tokens']:,} tokens | ${cost:.4f}")
 
             # Merge extracted fields back with entries
             # CRITICAL: Use entry_index from LLM response to match correctly
@@ -1806,13 +1717,13 @@ Return JSON with:
 If you cannot determine a field, return an empty string for it."""
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-5-mini",
+        llm_result = call_llm(
+            stage="stage_4",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"}
         )
 
-        response_text = response.choices[0].message.content
+        response_text = llm_result["content"]
         parsed = json.loads(response_text)
 
         result['first_name'] = parsed.get('first_name', '').strip()
@@ -1978,17 +1889,17 @@ Focus on positions with end_date="present" or most recent dates.
 Return ONLY valid JSON, no explanation."""
 
     try:
-        response = client.chat.completions.create(
-            model=model,
+        llm_result = call_llm(
+            stage="stage_4",
             messages=[
                 {"role": "system", "content": "You extract location information from CV data. Return only valid JSON."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
-            max_completion_tokens=500
+            max_tokens=500
         )
 
-        response_text = response.choices[0].message.content.strip()
+        response_text = llm_result["content"].strip()
 
         # Clean up response (remove markdown code blocks if present)
         if response_text.startswith('```'):
@@ -2002,12 +1913,8 @@ Return ONLY valid JSON, no explanation."""
         result['primary_location'] = parsed.get('primary_location')
         result['inference_success'] = True
 
-        # Calculate token usage and cost
-        usage = response.usage
-        if usage:
-            cost = calculate_cost(model, usage.prompt_tokens, usage.completion_tokens)
-            result['tokens'] = usage.total_tokens
-            result['cost'] = cost
+        result['tokens'] = llm_result["total_tokens"]
+        result['cost'] = llm_result["cost"]
 
     except json.JSONDecodeError as e:
         print(f"  Warning: Could not parse location inference response: {e}")

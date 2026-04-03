@@ -29,21 +29,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
-# OpenAI for LLM-mediated institution resolution
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
-
-# Import prompt logger for tracking LLM calls
-try:
-    from core.prompt_logger import log_prompt_before_call, log_prompt_response
-except ImportError:
-    def log_prompt_before_call(*args, **kwargs):
-        return None
-    def log_prompt_response(*args, **kwargs):
-        pass
+from unified_pipeline.llm_client import call_llm
 
 # Paths
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5b_institution_enrichment"
@@ -312,10 +298,6 @@ def lookup_institutions_llm(
           from legitimate empty results.
         - cost: API call cost in dollars
     """
-    if not OPENAI_AVAILABLE:
-        print("Warning: OpenAI not available. Skipping LLM institution lookup.")
-        return None, 0.0
-
     # Build user prompt
     owner_context = _build_owner_context(cv_owner_location)
 
@@ -332,53 +314,22 @@ def lookup_institutions_llm(
         print(f"    LLM batch: {len(batch)} institutions")
 
     try:
-        client = OpenAI()
-
-        # Build messages and log the prompt
         messages = [
             {"role": "system", "content": INSTITUTION_SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt}
         ]
-        call_id = log_prompt_before_call(
-            messages=messages,
-            model=model,
-            purpose="institution_enrichment",
-            temperature=0.0
-        )
 
-        response = client.chat.completions.create(
-            model=model,
+        llm_result = call_llm(
+            stage="stage_5b",
             messages=messages,
             temperature=0.0,
             response_format={"type": "json_object"}
         )
 
-        # Calculate cost
-        usage = response.usage
-        prompt_tokens = usage.prompt_tokens if usage else 0
-        completion_tokens = usage.completion_tokens if usage else 0
-
-        # Token pricing for common models (per 1M tokens)
-        pricing = {
-            'gpt-5.1': {'input': 2.00, 'output': 8.00},
-            'gpt-5-mini': {'input': 0.30, 'output': 1.20},
-            'gpt-4.1': {'input': 2.00, 'output': 8.00},
-            'gpt-4.1-mini': {'input': 0.40, 'output': 1.60},
-            'gpt-4.1-nano': {'input': 0.10, 'output': 0.40},
-        }
-        model_pricing = pricing.get(model, {'input': 2.00, 'output': 8.00})
-        cost = (prompt_tokens * model_pricing['input'] / 1_000_000 +
-                completion_tokens * model_pricing['output'] / 1_000_000)
-
-        # Log the response
-        log_prompt_response(
-            log_id=call_id,
-            response=response,
-            purpose="institution_enrichment"
-        )
+        cost = llm_result["cost"]
 
         # Parse response
-        raw_text = response.choices[0].message.content.strip()
+        raw_text = llm_result["content"].strip()
         results = json.loads(raw_text)
 
         if verbose:

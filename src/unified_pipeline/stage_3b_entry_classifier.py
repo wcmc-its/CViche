@@ -23,12 +23,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 from datetime import datetime
 from dataclasses import dataclass, field
-from openai import OpenAI
-
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core.prompt_logger import log_prompt_before_call, log_prompt_response
+from unified_pipeline.llm_client import call_llm
 
 # Post-classification auto-correction validators
 from core.validators.structural_header import apply_structural_corrections
@@ -295,8 +293,6 @@ def classify_entries_batch(
     Returns:
         Tuple of (classified_entries, stats)
     """
-    client = OpenAI()
-
     all_results = []
     total_input_tokens = 0
     total_output_tokens = 0
@@ -1140,54 +1136,25 @@ Return ONLY valid JSON with the classifications array."""
             {"role": "user", "content": user_message}
         ]
 
-        # Log prompt
-        log_id = log_prompt_before_call(
-            messages=messages,
-            model=model,
-            purpose="stage_3b_entry_classification",
-            temperature=0.1,
-            max_tokens=2000,  # Logger uses max_tokens param name
-            response_format={"type": "json_object"},
-            context={
-                "batch_size": len(entries_with_text),
-                "suggested_codes": all_suggested_codes
-            }
-        )
-
         # Call LLM
-        start_time = datetime.now()
-
         try:
-            response = client.chat.completions.create(
-                model=model,
+            llm_result = call_llm(
+                stage="stage_3b",
                 messages=messages,
+                response_format={"type": "json_object"},
                 temperature=0.1,
-                max_completion_tokens=2000,
-                response_format={"type": "json_object"}
-            )
-
-            elapsed = (datetime.now() - start_time).total_seconds()
-
-            # Log response
-            log_prompt_response(
-                log_id=log_id,
-                response=response,
-                purpose="stage_3b_entry_classification",
-                elapsed_time=elapsed
+                max_tokens=2000
             )
 
             # Parse response
-            content = response.choices[0].message.content
+            content = llm_result["content"]
             result = json.loads(content)
             classifications = result.get("classifications", [])
 
             # Track tokens/cost
-            total_input_tokens += response.usage.prompt_tokens
-            total_output_tokens += response.usage.completion_tokens
-            # gpt-5.1 pricing: $1.00/1M input, $2.00/1M output
-            batch_cost = (response.usage.prompt_tokens * 1.00 / 1_000_000) + \
-                        (response.usage.completion_tokens * 2.00 / 1_000_000)
-            total_cost += batch_cost
+            total_input_tokens += llm_result["prompt_tokens"]
+            total_output_tokens += llm_result["completion_tokens"]
+            total_cost += llm_result["cost"]
 
         except Exception as e:
             print(f"    ⚠️ Batch classification error: {e}")
@@ -1290,8 +1257,6 @@ def validate_t_classifications(
 
     if not t_entries:
         return entries, {"t_entries_reviewed": 0, "t_entries_reclassified": 0, "cost": 0.0}
-
-    client = OpenAI()
 
     # Build FULL taxonomy reference for maximum context
     taxonomy_ref = build_taxonomy_codes_for_prompt(taxonomy)
@@ -1403,25 +1368,16 @@ Respond with a JSON array of objects, one per entry:
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
     ]
-    prompt_id = log_prompt_before_call(
-        messages=messages,
-        model=model,
-        purpose="stage_3b_t_validation"
-    )
-
     try:
-        response = client.chat.completions.create(
-            model=model,
+        llm_result = call_llm(
+            stage="stage_3b",
             messages=messages,
-            temperature=0.1,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            temperature=0.1
         )
 
-        # Log response
-        log_prompt_response(prompt_id, response, purpose="stage_3b_t_validation")
-
         # Parse response
-        content = response.choices[0].message.content
+        content = llm_result["content"]
 
         # Handle both array and object responses
         result = json.loads(content)
@@ -1544,8 +1500,6 @@ def reconnect_fragments(
     if not fragment_candidates:
         return entries, {"fragments_reviewed": 0, "fragments_reconnected": 0, "cost": 0.0}
 
-    client = OpenAI()
-
     # Build prompt for fragment analysis
     system_prompt = """You are analyzing CV entries to identify fragments that belong with adjacent entries.
 
@@ -1601,23 +1555,15 @@ Fragment at index {idx}:
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt}
     ]
-    prompt_id = log_prompt_before_call(
-        messages=messages,
-        model=model,
-        purpose="stage_3b_fragment_reconnection"
-    )
-
     try:
-        response = client.chat.completions.create(
-            model=model,
+        llm_result = call_llm(
+            stage="stage_3b",
             messages=messages,
-            temperature=0.1,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            temperature=0.1
         )
 
-        log_prompt_response(prompt_id, response, purpose="stage_3b_fragment_reconnection")
-
-        content = response.choices[0].message.content
+        content = llm_result["content"]
         result = json.loads(content)
         fragment_decisions = result.get("fragments", [])
 

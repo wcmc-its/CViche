@@ -17,12 +17,11 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
-from openai import OpenAI
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
-from core.prompt_logger import log_prompt_before_call, log_prompt_response
+from unified_pipeline.llm_client import call_llm
 
 
 def load_taxonomy() -> Dict:
@@ -93,7 +92,6 @@ def build_taxonomy_reference_condensed(taxonomy: Dict) -> str:
 def map_headers_to_taxonomy(
     hierarchy: List[Dict],
     taxonomy: Dict,
-    model: str = "gpt-5.1"
 ) -> Tuple[Dict, Dict]:
     """
     Map CV hierarchy headers to taxonomy codes using LLM.
@@ -101,13 +99,10 @@ def map_headers_to_taxonomy(
     Args:
         hierarchy: Stage 1a hierarchy
         taxonomy: Taxonomy reference dict
-        model: OpenAI model to use
 
     Returns:
         Tuple of (mapping_result, stats)
     """
-    client = OpenAI()
-
     # Format inputs
     outline = format_hierarchy_as_outline(hierarchy)
     taxonomy_ref = build_taxonomy_reference_condensed(taxonomy)
@@ -311,59 +306,31 @@ Now output the JSON mapping. Remember: output ONLY valid JSON, no markdown or co
         {"role": "user", "content": user_message}
     ]
 
-    # Log prompt before call
-    log_id = log_prompt_before_call(
-        messages=messages,
-        model=model,
-        purpose="stage_3a_header_taxonomy",
-        temperature=0.2,
-        max_tokens=8000,  # Logger uses max_tokens param name
-        response_format={"type": "json_object"},
-        context={"hierarchy_size": len(hierarchy)}
-    )
-
     # Call LLM
-    start_time = datetime.now()
-
-    response = client.chat.completions.create(
-        model=model,
+    llm_result = call_llm(
+        stage="stage_3a",
         messages=messages,
+        response_format={"type": "json_object"},
         temperature=0.2,
-        max_completion_tokens=8000,
-        response_format={"type": "json_object"}
-    )
-
-    elapsed = (datetime.now() - start_time).total_seconds()
-
-    # Log response
-    log_prompt_response(
-        log_id=log_id,
-        response=response,
-        purpose="stage_3a_header_taxonomy",
-        elapsed_time=elapsed
+        max_tokens=8000
     )
 
     # Parse response
-    content = response.choices[0].message.content
+    content = llm_result["content"]
 
     try:
         result = json.loads(content)
     except json.JSONDecodeError as e:
-        print(f"  ⚠️ JSON parse error: {e}")
+        print(f"  JSON parse error: {e}")
         result = {"mappings": [], "error": str(e)}
 
-    # Calculate cost (gpt-5.1 pricing: $1.00/1M input, $2.00/1M output)
-    input_cost = response.usage.prompt_tokens * 1.00 / 1_000_000
-    output_cost = response.usage.completion_tokens * 2.00 / 1_000_000
-    total_cost = input_cost + output_cost
-
     stats = {
-        "model": model,
-        "input_tokens": response.usage.prompt_tokens,
-        "output_tokens": response.usage.completion_tokens,
-        "total_tokens": response.usage.total_tokens,
-        "cost": total_cost,
-        "elapsed_seconds": elapsed
+        "model": llm_result["model"],
+        "input_tokens": llm_result["prompt_tokens"],
+        "output_tokens": llm_result["completion_tokens"],
+        "total_tokens": llm_result["total_tokens"],
+        "cost": llm_result["cost"],
+        "elapsed_seconds": llm_result["latency_ms"] / 1000.0
     }
 
     return result, stats
@@ -382,7 +349,6 @@ def run_stage_3a(
     document_uid: str,
     stage_1a_path: Optional[str] = None,
     output_dir: Optional[str] = None,
-    model: str = "gpt-5.1"
 ) -> Dict:
     """
     Run Stage 3a header taxonomy mapping.
@@ -426,8 +392,8 @@ def run_stage_3a(
     print()
 
     # Map headers to taxonomy
-    print(f"Mapping headers to taxonomy using {model}...")
-    mappings, stats = map_headers_to_taxonomy(hierarchy, taxonomy, model=model)
+    print(f"Mapping headers to taxonomy...")
+    mappings, stats = map_headers_to_taxonomy(hierarchy, taxonomy)
 
     node_count = count_nodes(mappings.get("mappings", []))
     print(f"  ✓ Mapped {node_count} nodes")
@@ -453,7 +419,7 @@ def run_stage_3a(
         "source_file": str(stage_1a_path),
         "mappings": mappings.get("mappings", []),
         "meta": {
-            "model": model,
+            "model": stats.get("model", "unknown"),
             "taxonomy_version": taxonomy["meta"]["version"],
             "node_count": node_count,
             "stats": stats,
@@ -479,15 +445,13 @@ def run_stage_3a(
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python stage_3a_header_taxonomy_mapper.py <document_uid> [model]")
+        print("Usage: python stage_3a_header_taxonomy_mapper.py <document_uid>")
         print("  document_uid: Document identifier (e.g., 2086_Jones_Webb)")
-        print("  model: Optional, defaults to gpt-5.1")
         sys.exit(1)
 
     document_uid = sys.argv[1]
-    model = sys.argv[2] if len(sys.argv) > 2 else "gpt-5.1"
 
-    result = run_stage_3a(document_uid, model=model)
+    result = run_stage_3a(document_uid)
 
     print()
     print("MAPPING SUMMARY:")

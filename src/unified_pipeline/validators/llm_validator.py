@@ -14,12 +14,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
 
-try:
-    import openai
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
-    print("WARNING: openai package not available. GPT-5 validation will be disabled.")
+from unified_pipeline.llm_client import call_llm
 
 
 class GPT5Validator:
@@ -49,17 +44,11 @@ class GPT5Validator:
             verbosity: GPT-5.1 output verbosity ("low", "medium", "high")
             max_output_tokens: Maximum tokens for response (GPT-5.1 parameter)
         """
-        if not OPENAI_AVAILABLE:
-            raise ImportError("openai package required. Install with: pip install openai")
-
         self.model = model
         self.mode = mode
         self.reasoning_effort = reasoning_effort
         self.verbosity = verbosity
         self.max_output_tokens = max_output_tokens
-
-        # Initialize OpenAI client (uses OPENAI_API_KEY from environment)
-        self.client = openai.OpenAI()
 
         # Track costs and usage
         self.total_cost = 0.0
@@ -146,35 +135,18 @@ class GPT5Validator:
         # Build validation prompt with section mappings
         prompt = self._build_validation_prompt(cv_analysis_text, section_mappings)
 
-        # Call API (use Responses API for GPT-5.1, Chat Completions for others)
+        # Call LLM via centralized client
         try:
-            # Check if using GPT-5.1 (which supports Responses API)
-            is_gpt5 = 'gpt-5' in self.model.lower()
-
-            if is_gpt5:
-                # Use Responses API for GPT-5.1
-                full_input = f"{self._get_system_prompt_validation()}\n\n{prompt}"
-
-                response = self.client.responses.create(
-                    model=self.model,
-                    input=full_input,
-                    reasoning={"effort": self.reasoning_effort},
-                    text={"verbosity": self.verbosity},
-                    max_output_tokens=self.max_output_tokens,
-                    response_format={"type": "json_object"}
-                )
-            else:
-                # Use Chat Completions API for gpt-4o and other models
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": self._get_system_prompt_validation()},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.1,  # Low temperature for consistency
-                    max_tokens=self.max_output_tokens,
-                    response_format={"type": "json_object"}
-                )
+            llm_result = call_llm(
+                stage="validator_llm",
+                messages=[
+                    {"role": "system", "content": self._get_system_prompt_validation()},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=self.max_output_tokens,
+                response_format={"type": "json_object"}
+            )
 
         except Exception as e:
             return {
@@ -185,12 +157,25 @@ class GPT5Validator:
                 'tokens_used': 0
             }
 
-        # Parse response (handles both API formats)
-        result = self._parse_validation_response(response, cv_id, is_gpt5=is_gpt5)
+        # Parse response
+        try:
+            parsed = json.loads(llm_result["content"])
+            parsed['cv_id'] = cv_id
+            parsed['raw_response'] = llm_result["content"]
+            parsed['timestamp'] = datetime.now().isoformat()
+            result = parsed
+        except json.JSONDecodeError as e:
+            result = {
+                'cv_id': cv_id,
+                'error': f'JSON parse error: {str(e)}',
+                'raw_response': llm_result["content"],
+                'status': 'parse_failed',
+                'cost': 0.0,
+                'tokens_used': 0
+            }
 
-        # Calculate cost (handles both API formats)
-        result['cost'] = self._calculate_cost(response.usage)
-        result['tokens_used'] = response.usage.total_tokens
+        result['cost'] = llm_result["cost"]
+        result['tokens_used'] = llm_result["total_tokens"]
 
         # Track cumulative stats
         self.total_cost += result['cost']
@@ -244,34 +229,18 @@ class GPT5Validator:
             full_section_text
         )
 
-        # Call API (use Responses API for GPT-5.1, Chat Completions for others)
+        # Call LLM via centralized client
         try:
-            is_gpt5 = 'gpt-5' in self.model.lower()
-
-            if is_gpt5:
-                # Use Responses API for GPT-5.1
-                full_input = f"{self._get_system_prompt_classification()}\n\n{prompt}"
-
-                response = self.client.responses.create(
-                    model=self.model,
-                    input=full_input,
-                    reasoning={"effort": self.reasoning_effort},
-                    text={"verbosity": "low"},
-                    max_output_tokens=500,
-                    response_format={"type": "json_object"}
-                )
-            else:
-                # Use Chat Completions API for gpt-4o and other models
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": self._get_system_prompt_classification()},
-                        {"role": "user", "content": prompt}
-                    ],
-                    temperature=0.1,
-                    max_tokens=500,
-                    response_format={"type": "json_object"}
-                )
+            llm_result = call_llm(
+                stage="validator_llm",
+                messages=[
+                    {"role": "system", "content": self._get_system_prompt_classification()},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=500,
+                response_format={"type": "json_object"}
+            )
 
         except Exception as e:
             return {
@@ -282,12 +251,21 @@ class GPT5Validator:
                 'tokens_used': 0
             }
 
-        # Parse response (handles both API formats)
-        result = self._parse_classification_response(response, is_gpt5=is_gpt5)
+        # Parse response
+        try:
+            result = json.loads(llm_result["content"])
+            result['timestamp'] = datetime.now().isoformat()
+        except json.JSONDecodeError as e:
+            result = {
+                'error': f'JSON parse error: {str(e)}',
+                'raw_response': llm_result["content"],
+                'status': 'parse_failed',
+                'cost': 0.0,
+                'tokens_used': 0
+            }
 
-        # Calculate cost
-        result['cost'] = self._calculate_cost(response.usage)
-        result['tokens_used'] = response.usage.total_tokens
+        result['cost'] = llm_result["cost"]
+        result['tokens_used'] = llm_result["total_tokens"]
 
         # Track stats
         self.total_cost += result['cost']
@@ -546,87 +524,6 @@ Be specific and provide your confidence score."""
 2. **S1/S7 Disambiguation**: Published articles (volume/pages/publisher DOI) → S1, submissions/preprints → S7
 3. **Mixed Content Sections**: Sections with multiple types (e.g., BA+PhD+postdoc) → Parent category
 4. **Hospital Appointments**: "Appointments at Hospitals" with Staff Nurse, Informatician → D (Positions), not K"""
-
-    def _parse_validation_response(self, response, cv_id: str, is_gpt5: bool = False) -> Dict[str, Any]:
-        """Parse validation JSON response from either Responses API (GPT-5) or Chat Completions API."""
-
-        try:
-            # Get content based on API type
-            if is_gpt5:
-                # Responses API returns output_text
-                content = response.output_text
-            else:
-                # Chat Completions API returns choices[0].message.content
-                content = response.choices[0].message.content
-
-            parsed = json.loads(content)
-
-            # Add metadata
-            parsed['cv_id'] = cv_id
-            parsed['raw_response'] = content
-            parsed['timestamp'] = datetime.now().isoformat()
-
-            return parsed
-        except json.JSONDecodeError as e:
-            # Fallback if JSON parsing fails
-            if is_gpt5:
-                raw = response.output_text if hasattr(response, 'output_text') else str(response)
-            else:
-                raw = response.choices[0].message.content if hasattr(response, 'choices') else str(response)
-
-            return {
-                'cv_id': cv_id,
-                'error': f'JSON parse error: {str(e)}',
-                'raw_response': raw,
-                'status': 'parse_failed',
-                'cost': 0.0,
-                'tokens_used': 0
-            }
-
-    def _parse_classification_response(self, response, is_gpt5: bool = False) -> Dict[str, Any]:
-        """Parse classification JSON response from either Responses API or Chat Completions API."""
-
-        try:
-            # Get content based on API type
-            if is_gpt5:
-                content = response.output_text
-            else:
-                content = response.choices[0].message.content
-
-            parsed = json.loads(content)
-            parsed['timestamp'] = datetime.now().isoformat()
-            return parsed
-        except json.JSONDecodeError as e:
-            if is_gpt5:
-                raw = response.output_text if hasattr(response, 'output_text') else str(response)
-            else:
-                raw = response.choices[0].message.content if hasattr(response, 'choices') else str(response)
-
-            return {
-                'error': f'JSON parse error: {str(e)}',
-                'raw_response': raw,
-                'status': 'parse_failed',
-                'cost': 0.0,
-                'tokens_used': 0
-            }
-
-    def _calculate_cost(self, usage) -> float:
-        """
-        Calculate API cost based on token usage.
-
-        Uses approximate GPT-4o pricing (will update when GPT-5 pricing available):
-        - Input: $2.50 per 1M tokens
-        - Output: $10.00 per 1M tokens
-        """
-
-        # GPT-4o pricing (placeholder for GPT-5)
-        input_cost_per_1m = 2.50
-        output_cost_per_1m = 10.00
-
-        input_cost = (usage.prompt_tokens / 1_000_000) * input_cost_per_1m
-        output_cost = (usage.completion_tokens / 1_000_000) * output_cost_per_1m
-
-        return input_cost + output_cost
 
     def _compare_with_current(
         self,
