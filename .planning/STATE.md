@@ -49,7 +49,6 @@ Progress: [█████████░] 89%
 - [Phase 21]: Lazy boto3 import in _get_bedrock_client() to avoid ImportError when only OpenAI is used
 - [Phase 21]: Guarded botocore.ClientError import with type(None) fallback for RETRYABLE_ERRORS tuple
 - [Phase 21]: JSON validation retry appends user message with stronger hint, accumulates token usage
-- [Phase 21]: Lazy boto3 import in _get_bedrock_client() avoids ImportError when only OpenAI is used
 
 ### Pending Todos
 
