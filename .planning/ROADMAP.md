@@ -16,7 +16,7 @@
 ## Phases
 
 - [x] **Phase 19: Abstraction Foundation** - Config system, centralized LLM client, and cost tracking layer (completed 2026-03-31)
-- [ ] **Phase 20: Pipeline Migration** - Migrate all 43 pipeline files from direct OpenAI calls to the LLM client
+- [x] **Phase 20: Pipeline Migration** - Migrate all 43 pipeline files from direct OpenAI calls to the LLM client (completed 2026-04-03)
 - [ ] **Phase 21: Bedrock Provider & Validation** - AWS Bedrock provider implementation and end-to-end test coverage
 
 ## Phase Details
@@ -45,12 +45,12 @@ Plans:
   1. Zero pipeline files import openai directly (all go through the LLM client)
   2. The sample CV pipeline completes with identical output quality after migration
   3. Per-stage model overrides from config are respected during pipeline execution
-**Plans:** 3/4 plans executed
+**Plans:** 4/4 plans complete
 Plans:
 - [x] 20-01-PLAN.md -- Migrate 10 parser files to call_llm()
 - [x] 20-02-PLAN.md -- Migrate 10 segmentation files to call_llm() (excl. 2 Assistants API exceptions)
 - [x] 20-03-PLAN.md -- Migrate 8 core files to call_llm(), update prompt_logger for dict responses
-- [ ] 20-04-PLAN.md -- Migrate 15 stage/cv_parser/validator files, final migration audit
+- [x] 20-04-PLAN.md -- Migrate 15 stage/cv_parser/validator files, final migration audit
 
 ### Phase 21: Bedrock Provider & Validation
 **Goal**: AWS Bedrock works as an alternative LLM provider, and both providers are validated with automated tests
@@ -68,5 +68,5 @@ Plans:
 | Phase | Milestone | Plans Complete | Status | Completed |
 |-------|-----------|----------------|--------|-----------|
 | 19. Abstraction Foundation | v1.5 | 3/3 | Complete    | 2026-03-31 |
-| 20. Pipeline Migration | v1.5 | 3/4 | In Progress|  |
+| 20. Pipeline Migration | v1.5 | 4/4 | Complete   | 2026-04-03 |
 | 21. Bedrock Provider & Validation | v1.5 | 0/? | Not started | - |
