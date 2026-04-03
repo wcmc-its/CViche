@@ -48,13 +48,12 @@ You can reduce costs by using a smaller model via `--model gpt-4.1-mini`, though
 <details>
 <summary><strong>What LLM models are supported?</strong></summary>
 
-Any model available through the OpenAI API. The default is `gpt-5.1`. You can override it per run:
+CViche supports two LLM providers:
 
-```bash
-python3 run_full_pipeline.py sample_vasquez_cv --model gpt-4.1
-```
+- **OpenAI** (default): Any model available through the OpenAI API. The default is `gpt-5.1`.
+- **AWS Bedrock**: Claude (Anthropic), Llama (Meta), and Mistral models via the Converse API.
 
-Different stages may benefit from different model tiers. The segmentation and classification stages benefit most from larger models, while the formatting stages (5c, 5d) work well with smaller models.
+Set the provider in `config.yaml` (`provider: openai` or `provider: bedrock`). Different stages may benefit from different model tiers -- this can be configured per-stage in `config.yaml`. The segmentation and classification stages benefit most from larger models, while the formatting stages (5c, 5d) work well with smaller models.
 
 </details>
 
@@ -181,11 +180,11 @@ Stage 3b classifies every entry in the CV individually, grouped by section. A CV
 <details>
 <summary><strong>The pipeline hangs or times out</strong></summary>
 
-This is usually an OpenAI API rate limit or timeout. Check:
+This is usually an API rate limit or timeout. Check:
 
-1. Your API key has sufficient quota and funds
-2. You're not hitting per-minute token limits (especially with `gpt-5.1`)
-3. Your network can reach `api.openai.com`
+1. Your API key has sufficient quota and funds (OpenAI) or your AWS account has Bedrock model access enabled (Bedrock)
+2. You're not hitting per-minute token limits
+3. Your network can reach the API endpoint (`api.openai.com` for OpenAI, or the Bedrock endpoint for your configured AWS region)
 
 If a specific stage fails, you can re-run just that stage with `--stage` rather than restarting the entire pipeline.
 

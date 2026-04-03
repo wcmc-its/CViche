@@ -40,7 +40,9 @@ python3 run_full_pipeline.py sample_vasquez_cv
 ### Prerequisites
 
 - Python 3.11+
-- OpenAI API key (get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys))
+- An LLM provider API key -- either:
+  - **OpenAI** (default): get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
+  - **AWS Bedrock**: uses boto3 default credential chain (env vars, `~/.aws/credentials`, or IAM roles)
 - Node.js 18+ (for the web frontend)
 
 ### Installation
@@ -53,13 +55,19 @@ pip install -r requirements.txt
 
 ### Configuration
 
-Set your OpenAI API key as an environment variable:
+Set your LLM provider API key:
 
 ```bash
+# OpenAI (default)
 export OPENAI_API_KEY=your-key-here
+
+# OR AWS Bedrock (uses boto3 credential chain)
+export AWS_ACCESS_KEY_ID=your-key
+export AWS_SECRET_ACCESS_KEY=your-secret
+export AWS_DEFAULT_REGION=us-east-1
 ```
 
-Pipeline behavior can be tuned via `config.yaml`, which controls taxonomy settings, PDF processing parameters, and LLM model selection. See [Environment Variables](#environment-variables) for the full list of configuration options.
+Pipeline behavior can be tuned via `config.yaml`, which controls taxonomy settings, PDF processing parameters, LLM provider, and model selection. To switch providers, set the `provider` field in `config.yaml` to `openai` (default) or `bedrock`. See [Environment Variables](#environment-variables) for the full list of configuration options.
 
 ## Architecture
 
@@ -94,7 +102,7 @@ graph TB
 
 CViche has three layers:
 
-- **CV Parsing Pipeline** (`src/unified_pipeline/`): A 12-stage LLM pipeline where each stage produces JSON consumed by the next stage. Entry points are the CLI (`run_full_pipeline.py`) and the web backend's pipeline orchestrator.
+- **CV Parsing Pipeline** (`src/unified_pipeline/`): A 12-stage LLM pipeline where each stage produces JSON consumed by the next stage. All LLM calls go through a unified `call_llm()` abstraction that supports OpenAI and AWS Bedrock, with per-stage model configuration via `config.yaml`. Entry points are the CLI (`run_full_pipeline.py`) and the web backend's pipeline orchestrator.
 
 - **Web Backend** (`web_interface/backend/app/`): A FastAPI REST API with WebSocket support for real-time pipeline progress. Uses SQLAlchemy ORM with MariaDB (production) or SQLite (development). Follows a service layer pattern with dedicated modules for access control, configuration, user provisioning, and admin queries.
 
@@ -119,7 +127,7 @@ docker compose up --build
 | Backend  | 8000 | FastAPI API server     |
 | Frontend | 3000 | React web application  |
 
-Set the `OPENAI_API_KEY` environment variable before running `docker compose` so the backend can access the OpenAI API.
+Set the `OPENAI_API_KEY` environment variable before running `docker compose` (or configure AWS credentials for Bedrock -- see [Configuration](#configuration)).
 
 ### Local Development (without Docker)
 
@@ -211,14 +219,19 @@ Key patterns:
 
 ## Environment Variables
 
-All backend configuration uses `CVICHE_*` prefixed environment variables with sensible defaults for local development. Only `OPENAI_API_KEY` is required to get started.
+All backend configuration uses `CVICHE_*` prefixed environment variables with sensible defaults for local development. Either `OPENAI_API_KEY` (for OpenAI) or AWS credentials (for Bedrock) are required to get started.
 
-### External API Keys
+### LLM Provider
 
 | Variable | Description | Required |
 |----------|-------------|----------|
-| `OPENAI_API_KEY` | OpenAI API key for LLM pipeline stages | Yes |
+| `OPENAI_API_KEY` | OpenAI API key for LLM pipeline stages | Yes (if using OpenAI) |
+| `AWS_ACCESS_KEY_ID` | AWS access key for Bedrock | Yes (if using Bedrock without IAM roles) |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key for Bedrock | Yes (if using Bedrock without IAM roles) |
+| `AWS_DEFAULT_REGION` | AWS region for Bedrock (default: `us-east-1`) | No |
 | `NCBI_API_KEY` | NCBI API key for faster PubMed queries | No |
+
+Bedrock supports Claude (Anthropic), Llama (Meta), and Mistral models. Set `provider: bedrock` in `config.yaml` to switch.
 
 ### Database and Storage
 
@@ -266,8 +279,11 @@ python3 run_full_pipeline.py sample_vasquez_cv
 # Run a single stage
 python3 run_full_pipeline.py sample_vasquez_cv --stage 3b
 
-# Specify LLM model
+# Specify LLM model (OpenAI)
 python3 run_full_pipeline.py sample_vasquez_cv --model gpt-4.1
+
+# Use AWS Bedrock (set provider in config.yaml to "bedrock")
+python3 run_full_pipeline.py sample_vasquez_cv
 ```
 
 Stage outputs are written to `src/unified_pipeline/outputs/stage_*/`, with each stage producing a JSON file named by the document UID.
