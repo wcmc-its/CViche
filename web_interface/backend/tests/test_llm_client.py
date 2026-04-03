@@ -62,22 +62,44 @@ def _bedrock_config():
     """Return a config dict with bedrock as provider."""
     return {
         "provider": "bedrock",
-        "model": "claude-3-haiku",
+        "model": "anthropic.claude-3-haiku-20240307-v1:0",
         "temperature": 0,
         "max_tokens": None,
         "retry_count": 3,
     }
 
 
+def _make_bedrock_response(content="test response", input_tokens=100,
+                           output_tokens=50, total_tokens=150,
+                           stop_reason="end_turn"):
+    """Create a mock Bedrock Converse response dict."""
+    return {
+        "output": {
+            "message": {
+                "role": "assistant",
+                "content": [{"text": content}],
+            },
+        },
+        "usage": {
+            "inputTokens": input_tokens,
+            "outputTokens": output_tokens,
+            "totalTokens": total_tokens,
+        },
+        "stopReason": stop_reason,
+    }
+
+
 @pytest.fixture(autouse=True)
 def reset_state():
-    """Reset config cache and OpenAI client before each test."""
+    """Reset config cache, OpenAI client, and Bedrock client before each test."""
     reload_config()
     import unified_pipeline.llm_client as mod
     mod._openai_client = None
+    mod._bedrock_client = None
     yield
     reload_config()
     mod._openai_client = None
+    mod._bedrock_client = None
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +268,38 @@ def test_normalized_response_latency():
     assert result["latency_ms"] >= 0
 
 
+def test_normalized_response_bedrock():
+    """Bedrock response has exactly the same 9 required keys as OpenAI."""
+    from unified_pipeline.llm_client import call_llm
+
+    mock_response = _make_bedrock_response(
+        content="extracted text",
+        input_tokens=200,
+        output_tokens=80,
+        total_tokens=280,
+        stop_reason="end_turn",
+    )
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        result = call_llm("stage_2", [{"role": "user", "content": "test"}])
+
+    expected_keys = {"content", "prompt_tokens", "completion_tokens", "total_tokens",
+                     "cost", "model", "provider", "finish_reason", "latency_ms"}
+    assert set(result.keys()) == expected_keys
+    assert result["content"] == "extracted text"
+    assert result["prompt_tokens"] == 200
+    assert result["completion_tokens"] == 80
+    assert result["total_tokens"] == 280
+    assert result["finish_reason"] == "stop"
+    assert result["provider"] == "bedrock"
+
+
 # ---------------------------------------------------------------------------
 # Retry behavior
 # ---------------------------------------------------------------------------
@@ -356,6 +410,307 @@ def test_call_llm_unsupported_provider():
 
 
 # ---------------------------------------------------------------------------
+# Bedrock provider (BED-01, TEST-01)
+# ---------------------------------------------------------------------------
+
+def test_call_llm_bedrock():
+    """call_llm returns normalized dict for Bedrock provider."""
+    from unified_pipeline.llm_client import call_llm
+
+    mock_response = _make_bedrock_response()
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        result = call_llm("stage_2", [{"role": "user", "content": "test"}])
+
+    assert isinstance(result, dict)
+    assert result["content"] == "test response"
+    assert result["provider"] == "bedrock"
+    assert result["model"] == "anthropic.claude-3-haiku-20240307-v1:0"
+    assert result["prompt_tokens"] == 100
+    assert result["completion_tokens"] == 50
+    assert result["total_tokens"] == 150
+    assert result["finish_reason"] == "stop"  # mapped from end_turn
+    assert "cost" in result
+    assert "latency_ms" in result
+
+
+def test_call_llm_bedrock_params():
+    """call_llm passes modelId and temperature to Bedrock Converse API."""
+    from unified_pipeline.llm_client import call_llm
+
+    mock_response = _make_bedrock_response()
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        call_llm("stage_2", [{"role": "user", "content": "classify"}],
+                 response_format={"type": "json_object"})
+
+        call_kwargs = mock_client.converse.call_args
+        passed = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
+        assert passed["modelId"] == "anthropic.claude-3-haiku-20240307-v1:0"
+        assert passed["inferenceConfig"]["temperature"] == 0.0
+
+
+def test_call_llm_bedrock_temperature():
+    """call_llm passes temperature from config to Bedrock."""
+    from unified_pipeline.llm_client import call_llm
+
+    mock_response = _make_bedrock_response()
+    cfg = _bedrock_config()
+    cfg["temperature"] = 0.7
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=cfg), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        call_llm("stage_2", [{"role": "user", "content": "test"}])
+
+        call_kwargs = mock_client.converse.call_args
+        passed = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
+        assert passed["inferenceConfig"]["temperature"] == 0.7
+
+
+def test_call_llm_bedrock_kwargs_override():
+    """kwargs override config values for Bedrock calls."""
+    from unified_pipeline.llm_client import call_llm
+
+    mock_response = _make_bedrock_response()
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        result = call_llm("stage_2", [{"role": "user", "content": "test"}],
+                          model="anthropic.claude-3-5-sonnet-20241022-v2:0",
+                          temperature=0.5)
+
+        call_kwargs = mock_client.converse.call_args
+        passed = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
+        assert passed["modelId"] == "anthropic.claude-3-5-sonnet-20241022-v2:0"
+        assert passed["inferenceConfig"]["temperature"] == 0.5
+        assert result["model"] == "anthropic.claude-3-5-sonnet-20241022-v2:0"
+
+
+def test_call_llm_bedrock_system_message_separation():
+    """Bedrock call separates system messages into the system parameter."""
+    from unified_pipeline.llm_client import call_llm
+
+    mock_response = _make_bedrock_response()
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        messages = [
+            {"role": "system", "content": "You are a classifier"},
+            {"role": "user", "content": "Classify this"},
+        ]
+        call_llm("stage_2", messages)
+
+        call_kwargs = mock_client.converse.call_args
+        passed = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
+        # System messages should be in system param, not in messages
+        assert "system" in passed
+        assert passed["system"][0]["text"] == "You are a classifier"
+        # Only user message should be in messages
+        assert len(passed["messages"]) == 1
+        assert passed["messages"][0]["role"] == "user"
+        assert passed["messages"][0]["content"] == [{"text": "Classify this"}]
+
+
+def test_call_llm_bedrock_stop_reason_mapping():
+    """Bedrock stopReason values are mapped to OpenAI finish_reason equivalents."""
+    from unified_pipeline.llm_client import call_llm
+
+    mock_response = _make_bedrock_response(stop_reason="max_tokens")
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        result = call_llm("stage_2", [{"role": "user", "content": "test"}])
+
+    assert result["finish_reason"] == "length"  # mapped from max_tokens
+
+
+def test_call_llm_bedrock_retry_on_throttle():
+    """call_llm retries on Bedrock ThrottlingException and succeeds."""
+    from unified_pipeline.llm_client import call_llm
+    from botocore.exceptions import ClientError
+
+    mock_response = _make_bedrock_response()
+
+    throttle_error = ClientError(
+        {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+        "Converse",
+    )
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm_client.time.sleep"):
+        mock_client = MagicMock()
+        mock_client.converse.side_effect = [
+            throttle_error,
+            throttle_error,
+            mock_response,
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = call_llm("stage_2", [{"role": "user", "content": "test"}])
+
+    assert result["content"] == "test response"
+    assert mock_client.converse.call_count == 3
+
+
+def test_call_llm_bedrock_retry_exhausted():
+    """call_llm raises ClientError when all Bedrock retries are exhausted."""
+    from unified_pipeline.llm_client import call_llm
+    from botocore.exceptions import ClientError
+
+    throttle_error = ClientError(
+        {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+        "Converse",
+    )
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm_client.time.sleep"):
+        mock_client = MagicMock()
+        mock_client.converse.side_effect = [
+            throttle_error, throttle_error, throttle_error, throttle_error,
+        ]
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(ClientError):
+            call_llm("stage_2", [{"role": "user", "content": "test"}])
+
+    assert mock_client.converse.call_count == 4
+
+
+def test_call_llm_bedrock_no_retry_on_access_denied():
+    """call_llm raises AccessDeniedException immediately without retrying."""
+    from unified_pipeline.llm_client import call_llm
+    from botocore.exceptions import ClientError
+
+    access_error = ClientError(
+        {"Error": {"Code": "AccessDeniedException", "Message": "Not authorized"}},
+        "Converse",
+    )
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm_client.time.sleep"):
+        mock_client = MagicMock()
+        mock_client.converse.side_effect = access_error
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(ClientError):
+            call_llm("stage_2", [{"role": "user", "content": "test"}])
+
+    assert mock_client.converse.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# JSON validation + retry (D-05, D-07)
+# ---------------------------------------------------------------------------
+
+def test_bedrock_json_valid_passthrough():
+    """Valid JSON response passes through without retry."""
+    from unified_pipeline.llm_client import call_llm
+
+    valid_json = '{"category": "publications", "count": 5}'
+    mock_response = _make_bedrock_response(content=valid_json)
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        result = call_llm("stage_2", [{"role": "user", "content": "test"}],
+                          response_format={"type": "json_object"})
+
+    assert result["content"] == valid_json
+    # Should only call converse once (no retry needed)
+    assert mock_client.converse.call_count == 1
+
+
+def test_bedrock_json_invalid_triggers_retry():
+    """Invalid JSON response triggers one retry with stronger prompt hint."""
+    from unified_pipeline.llm_client import call_llm
+
+    invalid_json = "Here is the JSON: {bad}"
+    valid_json = '{"category": "publications"}'
+    first_response = _make_bedrock_response(content=invalid_json)
+    retry_response = _make_bedrock_response(content=valid_json)
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.side_effect = [first_response, retry_response]
+        mock_get_client.return_value = mock_client
+
+        result = call_llm("stage_2", [{"role": "user", "content": "test"}],
+                          response_format={"type": "json_object"})
+
+    assert result["content"] == valid_json
+    # Should call converse twice (initial + retry)
+    assert mock_client.converse.call_count == 2
+
+
+def test_bedrock_json_second_failure_returns_as_is():
+    """If retry also produces invalid JSON, return content as-is."""
+    from unified_pipeline.llm_client import call_llm
+
+    invalid_json_1 = "not json at all"
+    invalid_json_2 = "still not json"
+    first_response = _make_bedrock_response(content=invalid_json_1)
+    retry_response = _make_bedrock_response(content=invalid_json_2)
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.side_effect = [first_response, retry_response]
+        mock_get_client.return_value = mock_client
+
+        result = call_llm("stage_2", [{"role": "user", "content": "test"}],
+                          response_format={"type": "json_object"})
+
+    # Should return the retry content (not raise), per D-05
+    assert result["content"] == invalid_json_2
+    assert mock_client.converse.call_count == 2
+
+
+# ---------------------------------------------------------------------------
 # Lazy initialization
 # ---------------------------------------------------------------------------
 
@@ -377,6 +732,25 @@ def test_openai_client_lazy_init():
         # After calling, client should be set
         mod.call_llm("stage_2", [{"role": "user", "content": "test"}])
         assert mod._openai_client is not None
+
+
+def test_bedrock_client_lazy_init():
+    """Importing llm_client does not create a Bedrock client. First Bedrock call does."""
+    import unified_pipeline.llm_client as mod
+
+    # After import (and reset in fixture), client should be None
+    assert mod._bedrock_client is None
+
+    mock_response = _make_bedrock_response()
+    mock_client = MagicMock()
+    mock_client.converse.return_value = mock_response
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("boto3.client", return_value=mock_client):
+
+        mod.call_llm("stage_2", [{"role": "user", "content": "test"}])
+        assert mod._bedrock_client is not None
 
 
 # ---------------------------------------------------------------------------

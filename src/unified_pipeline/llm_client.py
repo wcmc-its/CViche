@@ -111,13 +111,20 @@ def _call_with_retry(call_fn, retry_count: int = 3):
 
     Raises:
         The last error if all retries are exhausted
-        Non-retryable errors immediately
+        Non-retryable errors immediately (including non-retryable ClientError)
     """
     last_error = None
     for attempt in range(retry_count + 1):
         try:
             return call_fn()
         except RETRYABLE_ERRORS as e:
+            # For botocore ClientError, only retry if the error code is retryable.
+            # Non-retryable Bedrock errors (AccessDeniedException, ValidationException,
+            # etc.) should propagate immediately.
+            if isinstance(e, _BotoClientError) and _BotoClientError is not type(None):
+                error_code = e.response.get("Error", {}).get("Code", "")
+                if error_code not in BEDROCK_RETRYABLE_CODES:
+                    raise
             last_error = e
             if attempt < retry_count:
                 wait = min(2 ** attempt, 30)  # 1s, 2s, 4s... capped at 30s
