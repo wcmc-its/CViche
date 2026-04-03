@@ -79,7 +79,45 @@ PRICING = {
         },
     },
     "bedrock": {
-        # Placeholder -- populated in Phase 21
+        # Anthropic Claude models
+        "anthropic.claude-3-haiku-20240307-v1:0": {
+            "input": 0.250,
+            "output": 1.250,
+        },
+        "anthropic.claude-3-5-sonnet-20241022-v2:0": {
+            "input": 3.000,
+            "output": 15.000,
+        },
+        "anthropic.claude-3-5-haiku-20241022-v1:0": {
+            "input": 0.800,
+            "output": 4.000,
+        },
+        # Meta Llama models
+        "meta.llama3-1-8b-instruct-v1:0": {
+            "input": 0.200,
+            "output": 0.250,
+        },
+        "meta.llama3-1-70b-instruct-v1:0": {
+            "input": 0.350,
+            "output": 0.450,
+        },
+        "meta.llama3-3-70b-instruct-v1:0": {
+            "input": 0.350,
+            "output": 0.450,
+        },
+        # Mistral models
+        "mistral.mistral-7b-instruct-v0:2": {
+            "input": 0.150,
+            "output": 0.200,
+        },
+        "mistral.mixtral-8x7b-instruct-v0:1": {
+            "input": 0.450,
+            "output": 0.700,
+        },
+        "mistral.mistral-large-2407-v1:0": {
+            "input": 2.700,
+            "output": 8.100,
+        },
     },
 }
 
