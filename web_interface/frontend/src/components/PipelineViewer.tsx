@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { MapPin, CheckCircle2, XCircle, AlertCircle, Clock } from 'lucide-react'
+import { MapPin, XCircle, AlertCircle, Clock } from 'lucide-react'
 import type { RunStatus } from '../types'
 import { getRunStatus, getRunStep, getPromptLogs, getRunDataJson, cancelRun, restartRun } from '../api/runs'
 import { getWebSocketUrl } from '../api/websocket'
@@ -462,18 +462,6 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
             >
               {isRestarting ? 'Restarting...' : 'Restart with this file'}
             </button>
-          </div>
-        </div>
-      )}
-
-      {/* Completion Banner */}
-      {runStatus.status === 'complete' && (
-        <div className="bg-success-50 border-b border-success-600 px-6 py-3" role="status" aria-live="polite">
-          <div className="flex items-center gap-3 max-w-full">
-            <CheckCircle2 className="h-5 w-5 text-success-600 flex-shrink-0" aria-hidden="true" />
-            <p className="text-sm font-medium text-success-800">
-              Pipeline completed successfully in {runStatus.total_duration_seconds}s — Cost: {formatCost(runStatus.total_cost, 3)}
-            </p>
           </div>
         </div>
       )}

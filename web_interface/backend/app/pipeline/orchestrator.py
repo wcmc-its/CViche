@@ -446,8 +446,7 @@ class PipelineOrchestrator:
                 hierarchy, stats = await self._run_with_stdout_capture(
                     get_cv_hierarchy_chunked,
                     step_number,
-                    cv_path=cv_path,
-                    model=self.model
+                    cv_path=cv_path
                 )
 
                 # Save output
@@ -539,8 +538,7 @@ class PipelineOrchestrator:
                 stage3a_result = await self._run_with_stdout_capture(
                     run_stage_3a,
                     step_number,
-                    document_uid=self.document_uid,
-                    model=self.model
+                    document_uid=self.document_uid
                 )
 
                 cost = stage3a_result['stats']['cost']
@@ -563,8 +561,7 @@ class PipelineOrchestrator:
                     run_stage_3b,
                     step_number,
                     document_uid=self.document_uid,
-                    stage_3a_path=stage3a_path,
-                    model=self.model
+                    stage_3a_path=stage3a_path
                 )
 
                 cost = stage3b_result['stats']['cost']
@@ -584,8 +581,7 @@ class PipelineOrchestrator:
                 stage4_result = await self._run_with_stdout_capture(
                     run_stage_4,
                     step_number,
-                    docx_path=f"{self.document_uid}.docx",
-                    model=self.model
+                    docx_path=f"{self.document_uid}.docx"
                 )
 
                 stage4_output = stage4_result['output']
@@ -684,7 +680,6 @@ class PipelineOrchestrator:
                     run_stage_5c,
                     step_number,
                     input_path=input_path,
-                    model=self.model,
                     verbose=True
                 )
 
@@ -722,7 +717,6 @@ class PipelineOrchestrator:
                     run_stage_5d,
                     step_number,
                     input_path=input_path,
-                    model=self.model,
                     verbose=True
                 )
 

@@ -41,10 +41,10 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
         return (
           <div className="mb-6">
             <h3 className="text-sm font-semibold text-gray-700 mb-2">Final Output</h3>
-            <div className="bg-gradient-to-r from-green-50 to-blue-50 border-2 border-green-300 rounded-lg p-6">
+            <div className="bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-300 rounded-lg p-6">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-4">
-                  <FileText className="w-10 h-10 text-green-600" aria-hidden="true" />
+                  <FileText className="w-10 h-10 text-blue-600" aria-hidden="true" />
                   <div>
                     <div className="font-semibold text-lg text-gray-900">WCM Template Document</div>
                     <div className="text-sm text-gray-600">{filename}</div>
@@ -54,7 +54,7 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
                   href={`/api/run/${runId}/data/${docxFile}`}
                   download
                   aria-label={`Download final output file ${filename}`}
-                  className="px-6 py-3 bg-green-600 hover:bg-green-700 text-white font-semibold rounded-lg shadow-md transition-colors flex items-center gap-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                  className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg shadow-md transition-colors flex items-center gap-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
                 >
                   <Download className="w-5 h-5" aria-hidden="true" />
                   <span>Download</span>

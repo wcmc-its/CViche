@@ -303,8 +303,7 @@ def main():
 
         # Use chunked_chat_hierarchy_extractor (V9 architecture)
         hierarchy, stats = get_cv_hierarchy_chunked(
-            cv_path=cv_path,
-            model='gpt-5.1'
+            cv_path=cv_path
         )
 
         # Save output to standard location
@@ -494,8 +493,7 @@ def main():
 
         try:
             stage3a_result = run_stage_3a(
-                document_uid=document_uid,
-                model=model
+                document_uid=document_uid
             )
             stage3a_path = stage3a_result['output_path']
             stage3a_cost = stage3a_result['stats']['cost']
@@ -546,8 +544,7 @@ def main():
             try:
                 stage3b_result = run_stage_3b(
                     document_uid=document_uid,
-                    stage_3a_path=stage3a_path,
-                    model=model
+                    stage_3a_path=stage3a_path
                 )
                 stage3b_cost = stage3b_result['stats']['cost']
                 total_cost += stage3b_cost
@@ -605,8 +602,7 @@ def main():
             try:
                 # run_stage_4 expects a document path/UID, not the 3b output path
                 stage4_result = run_stage_4(
-                    docx_path=f"{document_uid}.docx",  # Uses UID to find 3b output
-                    model=model
+                    docx_path=f"{document_uid}.docx"  # Uses UID to find 3b output
                 )
                 stage4_output = stage4_result['output']
                 stage4_cost = stage4_output.get('total_cost', 0)
@@ -776,8 +772,7 @@ def main():
             try:
                 stage5b_output_path = run_stage5b(
                     input_path=input_for_stage5b,
-                    verbose=True,
-                    model=model
+                    verbose=True
                 )
 
                 # Read output to get enrichment stats and cost
@@ -843,7 +838,6 @@ def main():
             try:
                 stage5c_output_path = run_stage_5c(
                     input_path=input_for_stage5c,
-                    model=model,
                     verbose=True
                 )
 
@@ -899,7 +893,6 @@ def main():
             try:
                 stage5d_output_path = run_stage_5d(
                     input_path=input_for_stage5d,
-                    model=model,
                     verbose=True
                 )
 
