@@ -23,7 +23,7 @@ phases:
       - REPO_FE=$REPOSITORY_URI/wcmc/cviche/frontend
       # Use the first 7 characters of the Git commit as the version tag
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
-      - IMAGE_TAG=${COMMIT_HASH:-latest}
+      - IMAGE_TAG="${COMMIT_HASH:-latest}"
 
       
       - echo "Targeting environment: ${ENV_NAME}"
