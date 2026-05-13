@@ -22,9 +22,9 @@ phases:
       - REPO_BE=$REPOSITORY_URI/wcmc/cviche/backend
       - REPO_FE=$REPOSITORY_URI/wcmc/cviche/frontend
       # Use the first 7 characters of the Git commit as the version tag
-      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
-      - IMAGE_TAG="${COMMIT_HASH:-latest}"
-
+      - 'COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)'
+      - 'IMAGE_TAG="${COMMIT_HASH}-latest"'
+      - 'echo $IMAGE_TAG'        
       
       - echo "Targeting environment: ${ENV_NAME}"
       - echo "Injecting AWS Account ID into Service Account manifest..."
