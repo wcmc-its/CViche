@@ -4,58 +4,52 @@ phases:
   pre_build:
     commands:
       - echo Logging in to Amazon ECR...
-    # Fetch Docker credentials from AWS Secrets Manager
+
       - echo "Fetching Docker credentials from AWS Secrets Manager"
       - SECRET=$(aws secretsmanager get-secret-value --secret-id docker-hub-credentials --query "SecretString" --output text)
-  
-     # Extract username and password from the JSON response
+
       - DOCKER_USERNAME=$(echo $SECRET | sed -n 's/.*"username":"\([^"]*\)".*/\1/p')
       - DOCKER_PASSWORD=$(echo $SECRET | sed -n 's/.*"password":"\([^"]*\)".*/\1/p')
-  
-    # Print the Docker username to the CodeBuild log
+
       - echo "Docker Username $DOCKER_USERNAME"
-    
-    # Log in to Docker registry 
-      - echo "Logging in to Docker registry $REPOSITORY_URI" 
+
+      - echo "Logging in to Docker registry $REPOSITORY_URI"
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $REPOSITORY_URI
-    
+
       - REPO_BE=$REPOSITORY_URI/wcmc/cviche/backend
       - REPO_FE=$REPOSITORY_URI/wcmc/cviche/frontend
-      # Use the first 7 characters of the Git commit as the version tag
+
       - 'COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)'
       - 'IMAGE_TAG="${COMMIT_HASH}-latest"'
-      - 'echo $IMAGE_TAG'        
-      
+      - 'echo $IMAGE_TAG'
+
       - echo "Targeting environment: ${ENV_NAME}"
       - echo "Injecting AWS Account ID into Service Account manifest..."
-      
-      # The path is now dynamic based on the ENV_NAME variable
+
       - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" K8s/overlays/${ENV_NAME}/sa-patch.yaml
 
   build:
     commands:
-      - echo Building Backend...
+      - echo "Building Backend..."
       - docker build -t $REPO_BE:$IMAGE_TAG ./web_interface/backend
-      
-      - echo Building Frontend...
+
+      - echo "Building Frontend..."
       - docker build -t $REPO_FE:$IMAGE_TAG ./web_interface/frontend
 
   post_build:
     commands:
-      - echo Pushing images to ECR...
+      - echo "Pushing images to ECR..."
       - docker push $REPO_BE:$IMAGE_TAG
       - docker push $REPO_FE:$IMAGE_TAG
-      
-      - echo Updating EKS Deployment...
+
+      - echo "Updating EKS Deployment..."
       - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_DEFAULT_REGION
-      
-       # Since it worked locally without the flag, use the clean version:
+
       - kubectl apply -k K8s/overlays/${ENV_NAME}
-      
-      # This command updates the running pods to the new image version directly
-      - kubectl set image deployment/cviche-backend backend=$REPO_BE:$IMAGE_TAG -n cviche-{ENV_NAME}
-      - kubectl set image deployment/cviche-frontend frontend=$REPO_FE:$IMAGE_TAG -n cviche-{ENV_NAME}
-      
-      - echo Checking rollout status...
-      - kubectl rollout status deployment/cviche-backend -n cviche-{ENV_NAME}
-      - kubectl rollout status deployment/cviche-frontend -n cviche-{ENV_NAME}
+
+      - kubectl set image deployment/cviche-backend backend=$REPO_BE:$IMAGE_TAG -n cviche-${ENV_NAME}
+      - kubectl set image deployment/cviche-frontend frontend=$REPO_FE:$IMAGE_TAG -n cviche-${ENV_NAME}
+
+      - echo "Checking rollout status..."
+      - kubectl rollout status deployment/cviche-backend -n cviche-${ENV_NAME}
+      - kubectl rollout status deployment/cviche-frontend -n cviche-${ENV_NAME}
