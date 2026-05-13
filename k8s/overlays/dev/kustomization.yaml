@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Pointing directly to the files since base has no index
+resources:
+ - ../../base  # Point to the FOLDER, not the files inside it
+
+namespace: cviche-dev
+
+patches:
+  - path: backend-patch.yaml
+  - path: frontend-patch.yaml
+  - path: sa-patch.yaml
+  - path: ingress-patch.yaml

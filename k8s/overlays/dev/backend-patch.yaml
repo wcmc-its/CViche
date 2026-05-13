@@ -1,0 +1,9 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cviche-backend
+spec:
+  template:
+    spec:
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: reciter-main-al2023-ng # Your specific node group    

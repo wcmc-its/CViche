@@ -1,0 +1,24 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cviche-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cviche-frontend
+  template:
+    metadata:
+      labels:
+        app: cviche-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_DEFAULT_REGION>.amazonaws.com/wcmc/cviche/frontend:dev-latest
+          ports:
+            - containerPort: 80
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: PORT
+                  value: "80"

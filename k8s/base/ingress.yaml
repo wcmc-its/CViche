@@ -1,0 +1,39 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: cviche-ingress
+  namespace: cviche-dev
+  annotations:
+    # Use the AWS Load Balancer Controller
+    kubernetes.io/ingress.class: alb                                      
+    # Keep it internal for now                         
+    alb.ingress.kubernetes.io/scheme: internal
+    # Routes traffic directly to Pod IPs (more efficient)                                                     
+    alb.ingress.kubernetes.io/target-type: ip
+    # This helps the ALB know which subnets to use (Private subnets only)
+    # alb.ingress.kubernetes.io/subnets: subnet-xxxx, subnet-yyyy
+    # Health check path for your FastAPI backend
+    alb.ingress.kubernetes.io/healthcheck-path: /api/health 
+    # Optional: If you have an SSL cert in ACM
+    # alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:region:account:certificate/id
+spec:
+  ingressClassName: alb
+  rules:
+    - http:
+        paths:
+          # Backend Route               
+          - path: /api
+            pathType: Prefix
+            backend:
+              service:
+                name: cviche-backend-svc
+                port:
+                  number: 8000
+          # Frontend Route (Catch-all)                            
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: cviche-frontend-svc
+                port:
+                  number: 80

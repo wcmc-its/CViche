@@ -1,0 +1,26 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cviche-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cviche-backend
+  template:
+    metadata:
+      labels:
+        app: cviche-backend
+    spec:
+      # This MUST match the name of the ServiceAccount you created
+      serviceAccountName: cviche-sa 
+      containers:
+      - name: backend
+        image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_DEFAULT_REGION>.amazonaws.com/wcmc/cviche/backend:dev-latest
+        ports:
+        - containerPort: 8000
+        # Optional: Force EKS to pull the image even if it exists locally
+        imagePullPolicy: IfNotPresent 
+        env:
+        - name: PORT
+          value: "8000"
