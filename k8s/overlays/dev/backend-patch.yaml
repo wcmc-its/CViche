@@ -6,4 +6,4 @@ spec:
   template:
     spec:
       nodeSelector:
-        eks.amazonaws.com/nodegroup: reciter-main-al2023-ng # Your specific node group    
+        eks.amazonaws.com/nodegroup: cviche-al2023-nodes    

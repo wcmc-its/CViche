@@ -33,7 +33,7 @@ phases:
        - 'echo "Targeting environment: ${ENV_NAME}"'
        - 'echo "Injecting AWS Account ID into Service Account manifest..."'
 
-       - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" K8s/overlays/${ENV_NAME}/sa-patch.yaml
+       - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" k8s/overlays/${ENV_NAME}/sa-patch.yaml
 
   build:
     commands:
