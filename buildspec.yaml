@@ -49,7 +49,7 @@ phases:
       - docker logout $REPOSITORY_URI
       - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_DEFAULT_REGION --role-arn $EKS_KUBECTL_ROLE_ARN
  
-      - kubectl apply -k K8s/overlays/${ENV_NAME}
+      - kubectl apply -k k8s/overlays/${ENV_NAME}
 
       - kubectl set image deployment/cviche-backend backend=$REPO_BE:$TAG -n cviche-${ENV_NAME}
       - kubectl set image deployment/cviche-frontend frontend=$REPO_FE:$TAG -n cviche-${ENV_NAME}
