@@ -10,7 +10,8 @@ phases:
        - echo "Fetching Docker credentials from AWS Secrets Manager"
        - SECRET=$(aws secretsmanager get-secret-value --secret-id docker-hub-credentials --query "SecretString" --output text)
 
-       # Extract username and password from the JSON response                                               - DOCKER_USERNAME=$(echo $SECRET | sed -n 's/.*"username":"\([^"]*\)".*/\1/p')
+       # Extract username and password from the JSON response                                               
+       - DOCKER_USERNAME=$(echo $SECRET | sed -n 's/.*"username":"\([^"]*\)".*/\1/p')
        - DOCKER_PASSWORD=$(echo $SECRET | sed -n 's/.*"password":"\([^"]*\)".*/\1/p')
 
        # Print the Docker username to the CodeBuild log                                                 
