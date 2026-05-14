@@ -1,36 +1,41 @@
 version: 0.2
 
 phases:
-  pre_build:
+  install:
     commands:
-      - echo Logging in to Amazon ECR...
+      - kubectl version --client    
+  pre_build:
+     commands:
+       # Fetch Docker credentials from AWS Secrets Manager
+       - echo "Fetching Docker credentials from AWS Secrets Manager"
+       - SECRET=$(aws secretsmanager get-secret-value --secret-id docker-hub-credentials --query "SecretString" --output text)
 
-      - echo "Fetching Docker credentials from AWS Secrets Manager"
-      - SECRET=$(aws secretsmanager get-secret-value --secret-id docker-hub-credentials --query "SecretString" --output text)
+       # Extract username and password from the JSON response                                                - DOCKER_USERNAME=$(echo $SECRET | sed -n 's/.*"username":"\([^"]*\)".*/\1/p')
+       - DOCKER_PASSWORD=$(echo $SECRET | sed -n 's/.*"password":"\([^"]*\)".*/\1/p')
 
-      - DOCKER_USERNAME=$(echo $SECRET | sed -n 's/.*"username":"\([^"]*\)".*/\1/p')
-      - DOCKER_PASSWORD=$(echo $SECRET | sed -n 's/.*"password":"\([^"]*\)".*/\1/p')
+       # Print the Docker username to the CodeBuild log                                                 
+       - echo "Docker Username $DOCKER_USERNAME"
 
-      - echo "Docker Username $DOCKER_USERNAME"
+       # Log in to Docker registry                             
+       - echo "Logging in to Docker registry $REPOSITORY_URI"
+       - echo "$DOCKER_PASSWORD" | docker login --username $DOCKER_USERNAME --password-stdin                                       
+       
+       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $REPOSITORY_URI
 
-      - echo "Logging in to Docker registry $REPOSITORY_URI"
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $REPOSITORY_URI
+       - REPO_BE=$REPOSITORY_URI/wcmc/cviche/backend
+       - REPO_FE=$REPOSITORY_URI/wcmc/cviche/frontend
 
-      - REPO_BE=$REPOSITORY_URI/wcmc/cviche/backend
-      - REPO_FE=$REPOSITORY_URI/wcmc/cviche/frontend
+       - 'COMMIT_HASH=$(echo  $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)'
+       - 'IMAGE_TAG="${COMMIT_HASH}-latest"'
+       - 'echo $IMAGE_TAG'
 
-      - 'COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)'
-      - 'IMAGE_TAG="${COMMIT_HASH}-latest"'
-      - 'echo $IMAGE_TAG'
+       - 'echo "Targeting environment: ${ENV_NAME}"'
+       - 'echo "Injecting AWS Account ID into Service Account manifest..."'
 
-      - echo "Targeting environment: ${ENV_NAME}"
-      - echo "Injecting AWS Account ID into Service Account manifest..."
-
-      - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" K8s/overlays/${ENV_NAME}/sa-patch.yaml
+       - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" K8s/overlays/${ENV_NAME}/sa-patch.yaml
 
   build:
     commands:
-      - echo "Building Backend..."
       - docker build -t $REPO_BE:$IMAGE_TAG ./web_interface/backend
 
       - echo "Building Frontend..."
