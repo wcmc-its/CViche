@@ -3,15 +3,28 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: cviche-frontend
+  namespace:cviche-dev
+  labels:
+    app: cviche-frontend
+    environment: dev
+    owner: mrj4001
+    tier: frontend      
 spec:
   replicas: 1
   selector:
     matchLabels:
       app: cviche-frontend
+      tier: frontend      
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0                
   template:
     metadata:
       labels:
         app: cviche-frontend
+        environment: dev
+        tier: frontend
+        owner: mrj4001              
     spec:
       containers:
         - name: frontend
