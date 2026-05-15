@@ -26,11 +26,11 @@ spec:
         owner: mrj4001              
     spec:
       containers:
-        - name: frontend
-          image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_DEFAULT_REGION>.amazonaws.com/wcmc/cviche/frontend:dev-latest
-          ports:
-            - containerPort: 80
-              imagePullPolicy: IfNotPresent
-              env:
-                - name: PORT
-                  value: "80"
+      - name: frontend
+        image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_DEFAULT_REGION>.amazonaws.com/wcmc/cviche/frontend:dev-latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 80
+        env:
+        - name: PORT
+          value: "80"
