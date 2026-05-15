@@ -7,6 +7,20 @@ resources:
 
 namespace: cviche-dev
 
+configMapGenerator:
+  - name: cviche-config
+    literals:
+      - DB_URL: "<DB_URL_PLACEHOLDER>"
+      - LOG_LEVEL: "<LOG_LEVEL_PLACEHOLDER>"
+
+secretGenerator:
+  - name: cviche-secrets
+    type: Opaque
+    literals:
+      - DB_PASSWORD: "VAR_DB_PASSWORD"
+      - CVICHE_SESSION_SECRET: "VAR_SESSION_SECRET"
+      
+      
 patches:
   - path: backend-patch.yaml
   - path: frontend-patch.yaml

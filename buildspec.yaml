@@ -31,6 +31,9 @@ phases:
        - 'echo "Injecting AWS Account ID into Service Account manifest..."'
 
        - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" k8s/overlays/${ENV_NAME}/sa-patch.yaml
+       
+       #- sed -i "s|VAR_DB_PASSWORD|$DB_PASSWORD|g" k8s/overlays/dev/kustomization.yaml
+       - sed -i "s|VAR_SESSION_SECRET|$SESSION_SECRET|g" k8s/overlays/dev/kustomization.yaml
 
   build:
     commands:
@@ -49,6 +52,10 @@ phases:
       - docker logout $REPOSITORY_URI
       - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_DEFAULT_REGION
  
+      # Replace placeholders with real values from CodeBuild/SSM
+      - sed -i "s|BACKEND_URL_PLACEHOLDER|$REAL_BACKEND_URL|g" k8s/overlays/dev/kustomization.yaml  
+      - sed -i "s|DB_PASSWORD_PLACEHOLDER|$REAL_DB_PASSWORD|g" k8s/overlays/dev/kustomization.yaml
+      
       - kubectl apply -k k8s/overlays/${ENV_NAME}
 
       - kubectl set image deployment/cviche-backend backend=$REPO_BE:$TAG -n cviche-${ENV_NAME}

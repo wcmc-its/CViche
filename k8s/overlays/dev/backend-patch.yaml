@@ -6,4 +6,18 @@ spec:
   template:
     spec:
       nodeSelector:
-        eks.amazonaws.com/nodegroup: cviche-al2023-nodes    
+        eks.amazonaws.com/nodegroup: cviche-al2023-nodes
+      containers:
+      - name: backend # Must match the name in base/deployment.yaml
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+        envFrom:
+          - configMapRef:
+              name: cviche-config
+          - secretRef:
+              name: cviche-secrets
