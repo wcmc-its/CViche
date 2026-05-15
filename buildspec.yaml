@@ -47,7 +47,7 @@ phases:
 
       - echo "Updating EKS Deployment..."
       - docker logout $REPOSITORY_URI
-      - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_DEFAULT_REGION --role-arn $EKS_KUBECTL_ROLE_ARN
+      - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_DEFAULT_REGION
  
       - kubectl apply -k k8s/overlays/${ENV_NAME}
 
