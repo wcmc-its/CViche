@@ -1,6 +1,5 @@
 # docker-compose.prod.yml -- Production settings
 # Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build -d
-version: "3.9"
 
 services:
   # --- Backend (production) ---

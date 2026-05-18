@@ -1,6 +1,5 @@
 # docker-compose.yml -- Local development
 # Usage: docker compose up --build
-version: "3.9"
 
 services:
   # --- MariaDB ---
