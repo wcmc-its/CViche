@@ -29,6 +29,9 @@ phases:
 
        - 'echo "Targeting environment: ${ENV_NAME}"'
        - 'echo "Injecting AWS Account ID into Service Account manifest..."'
+       - echo "Database URL length -> ${#DATABASE_URL}"
+       - if [ -z "${DATABASE_URL}" ]; then echo "❌ AWS CodeBuild is passing an EMPTY string for DATABASE_URL"; else echo "✅ CodeBuild has successfully loaded DATABASE_URL"; fi
+       - echo "========================"
         # 1. Inject Secrets and Parameters
        - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" k8s/overlays/${ENV_NAME}/sa-patch.yaml
        - sed -i "s|CVICHE_SESSION_SECRET_PLACEHOLDER|$SESSION_SECRET|g" k8s/overlays/dev/kustomization.yaml
