@@ -32,11 +32,15 @@ phases:
 
        - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" k8s/overlays/${ENV_NAME}/sa-patch.yaml
        
-       #- sed -i "s|VAR_DB_PASSWORD|$DB_PASSWORD|g" k8s/overlays/dev/kustomization.yaml
-       - sed -i "s|VAR_SESSION_SECRET|$SESSION_SECRET|g" k8s/overlays/dev/kustomization.yaml
-       # Replace placeholders with real values from CodeBuild/SSM
-       - sed -i "s|DB_URL|$DB_URL|g" k8s/overlays/dev/kustomization.yaml  
-       
+       - sed -i "s|CVICHE_SESSION_SECRET_PLACEHOLDER|$SESSION_SECRET|g" k8s/overlays/dev/kustomization.yaml
+       - sed -i "s|CVICHE_DB_URL_PLACEHOLDER|$DATABASE_URL|g" k8s/overlays/dev/kustomization.yaml
+       #1. Move into your dev overlay directory inside the runner
+       - cd overlays/dev
+       # 2. Dynamically add the specific annotation using your pipeline environment variable
+       - kustomize edit add annotation alb.ingress.kubernetes.io/certificate-arn:${ACM_CERTIFICATE_ARN}
+       # 3. Move back and deploy the built manifest
+       - cd ../..
+       - kubectl apply -k overlays/dev/
 
   build:
     commands:

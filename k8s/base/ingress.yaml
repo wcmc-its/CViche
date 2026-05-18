@@ -7,6 +7,8 @@ metadata:
     kubernetes.io/ingress.class: alb                                      
     # Keep it internal for now                         
     alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: '443'
     # Routes traffic directly to Pod IPs (more efficient)                                                     
     alb.ingress.kubernetes.io/target-type: ip
     # This helps the ALB know which subnets to use (Private subnets only)
