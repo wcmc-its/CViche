@@ -6,6 +6,10 @@ services:
   # --- Backend (production) ---
   backend:
     restart: always
+    # Production uses an external managed database (RDS); the local "db"
+    # service is disabled here, so drop the depends_on inherited from the
+    # base file. !reset is required -- a plain value would merge, not replace.
+    depends_on: !reset null
     environment:
       # Production overrides (set via .env or deployment pipeline)
       CVICHE_DATABASE_URL: "${CVICHE_DATABASE_URL}"
