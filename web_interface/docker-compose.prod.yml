@@ -20,8 +20,10 @@ services:
       CVICHE_S3_PREFIX: "${CVICHE_S3_PREFIX:-cviche}"
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
     volumes: []  # No hot-reload mounts in production
-    # Production: no --reload flag, add workers
-    command: ["--workers", "4"]
+    # Single uvicorn worker: the pipeline-progress WebSocket uses an
+    # in-process event emitter, so with multiple workers a client can miss
+    # live updates (see issue #4). Scale out with replicas, not workers.
+    command: ["--workers", "1"]
     deploy:
       resources:
         limits:
