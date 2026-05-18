@@ -49,7 +49,6 @@ WORKDIR /app
 COPY web_interface/backend/ ./web_interface/backend/
 COPY src/ ./src/
 COPY key_files/ ./key_files/
-COPY data/templates/ ./data/templates/
 COPY config.yaml ./config.yaml
 
 # Entrypoint + writable runtime directories (pipeline intermediates, uploads,
