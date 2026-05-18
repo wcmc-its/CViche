@@ -1,15 +1,32 @@
 """Load auth config from YAML and seed SystemConfig DB table."""
 import json
+import logging
 import yaml
 from pathlib import Path
 from sqlalchemy.orm import Session
 from app.models import SystemConfig
 
+logger = logging.getLogger(__name__)
+
 CONFIG_PATH = Path(__file__).parent.parent / "auth_config.yaml"
+EXAMPLE_CONFIG_PATH = Path(__file__).parent.parent / "auth_config.yaml.example"
 
 def load_yaml_config() -> dict:
-    """Load auth_config.yaml from disk."""
-    with open(CONFIG_PATH, "r") as f:
+    """Load auth_config.yaml, falling back to the .example template if absent.
+
+    auth_config.yaml is environment-specific and gitignored. In a deployment
+    that has not provisioned it, fall back to the tracked .example so the app
+    still boots (in a locked-down state) instead of crashing at startup.
+    """
+    path = CONFIG_PATH
+    if not path.exists():
+        logger.warning(
+            "auth_config.yaml not found at %s; falling back to %s. "
+            "Provide a real auth_config.yaml for production.",
+            CONFIG_PATH, EXAMPLE_CONFIG_PATH.name,
+        )
+        path = EXAMPLE_CONFIG_PATH
+    with open(path, "r") as f:
         return yaml.safe_load(f)
 
 def seed_system_config(db: Session) -> None:
