@@ -3,7 +3,9 @@ version: 0.2
 phases:
   install:
     commands:
-      - kubectl version --client    
+      - kubectl version --client
+      - pwd
+      - ls -R
   pre_build:
      commands:
        # Fetch Docker credentials from AWS Secrets Manager
@@ -35,12 +37,12 @@ phases:
        - sed -i "s|CVICHE_SESSION_SECRET_PLACEHOLDER|$SESSION_SECRET|g" k8s/overlays/dev/kustomization.yaml
        - sed -i "s|CVICHE_DB_URL_PLACEHOLDER|$DATABASE_URL|g" k8s/overlays/dev/kustomization.yaml
        #1. Move into your dev overlay directory inside the runner
-       - cd overlays/dev
+       - cd k8s/overlays/${ENV_NAME}
        # 2. Dynamically add the specific annotation using your pipeline environment variable
        - kustomize edit add annotation alb.ingress.kubernetes.io/certificate-arn:${ACM_CERTIFICATE_ARN}
        # 3. Move back and deploy the built manifest
        - cd ../..
-       - kubectl apply -k overlays/dev/
+       - kubectl apply -k k8s/overlays/${ENV_NAME}
 
   build:
     commands:
