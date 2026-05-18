@@ -15,7 +15,7 @@ spec:
       serviceAccountName: cviche-sa 
       containers:
       - name: backend
-        image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_DEFAULT_REGION>.amazonaws.com/wcmc/cviche/backend:dev-latest
+        image: backend
         # imagePullPolicy and env now correctly align with 'name' and 'ports'
         imagePullPolicy: IfNotPresent 
         ports:

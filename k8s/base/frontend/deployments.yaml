@@ -27,7 +27,7 @@ spec:
     spec:
       containers:
       - name: frontend
-        image: <AWS_ACCOUNT_ID>.dkr.ecr.<AWS_DEFAULT_REGION>.amazonaws.com/wcmc/cviche/frontend:dev-latest
+        image: frontend
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 80
