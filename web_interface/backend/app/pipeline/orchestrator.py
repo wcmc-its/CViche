@@ -445,8 +445,11 @@ class PipelineOrchestrator:
         cost = 0.0
         step_number = get_step_by_stage_id(stage_id).number
 
-        # Change to project directory for imports to work correctly
-        original_cwd = os.getcwd()
+        # Pin cwd to the project root for the pipeline's repo-root-relative
+        # path lookups. Runs execute in concurrent background threads and cwd
+        # is process-global, so this is intentionally not saved/restored per
+        # run: every run targets the same constant directory, which removes
+        # the race the previous getcwd()/restore caused.
         os.chdir(PARENT_DIR)
 
         try:
@@ -783,7 +786,7 @@ class PipelineOrchestrator:
                 raise ValueError(f"Unknown stage ID: {stage_id}")
 
         finally:
-            os.chdir(original_cwd)
+            os.chdir(PARENT_DIR)
 
         return {
             "output_files": output_files,
