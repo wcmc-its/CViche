@@ -4,8 +4,6 @@ phases:
   install:
     commands:
       - kubectl version --client
-      - pwd
-      - ls -R
   pre_build:
      commands:
        # Fetch Docker credentials from AWS Secrets Manager
@@ -31,18 +29,18 @@ phases:
 
        - 'echo "Targeting environment: ${ENV_NAME}"'
        - 'echo "Injecting AWS Account ID into Service Account manifest..."'
-
+        # 1. Inject Secrets and Parameters
        - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" k8s/overlays/${ENV_NAME}/sa-patch.yaml
-       
        - sed -i "s|CVICHE_SESSION_SECRET_PLACEHOLDER|$SESSION_SECRET|g" k8s/overlays/dev/kustomization.yaml
        - sed -i "s|CVICHE_DB_URL_PLACEHOLDER|$DATABASE_URL|g" k8s/overlays/dev/kustomization.yaml
-       #1. Move into your dev overlay directory inside the runner
-       - cd k8s/overlays/${ENV_NAME}
-       # 2. Dynamically add the specific annotation using your pipeline environment variable
-       - kustomize edit add annotation alb.ingress.kubernetes.io/certificate-arn:${ACM_CERTIFICATE_ARN}
-       # 3. Move back and deploy the built manifest
-       - cd ../..
-       - kubectl apply -k k8s/overlays/${ENV_NAME}
+       # Target the base ingress.yaml file where your placeholder actually lives
+       - sed -i "s|ACM_ARN_PLACEHOLDER|${ACM_CERTIFICATE_ARN}|g" k8s/base/ingress.yaml
+
+       # 2. Dynamic Image Injection via sed (Replaces kubectl set image)
+       - sed -i "s|REPO_BE_PLACEHOLDER|$REPO_BE|g" k8s/base/kustomization.yaml
+       - sed -i "s|REPO_FE_PLACEHOLDER|$REPO_FE|g" k8s/base/kustomization.yaml
+       - sed -i "s|TAG_PLACEHOLDER|$TAG|g" k8s/base/kustomization.yaml
+       
 
   build:
     commands:
@@ -63,8 +61,6 @@ phases:
        
       - kubectl apply -k k8s/overlays/${ENV_NAME}
 
-      - kubectl set image deployment/cviche-backend backend=$REPO_BE:$TAG -n cviche-${ENV_NAME}
-      - kubectl set image deployment/cviche-frontend frontend=$REPO_FE:$TAG -n cviche-${ENV_NAME}
 
       - echo "Checking rollout status..."
       - kubectl rollout status deployment/cviche-backend -n cviche-${ENV_NAME}
