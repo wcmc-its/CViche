@@ -8,4 +8,5 @@ export interface Estimate {
   num_steps: number
   filename: string
   file_size_kb: number
+  pricing_model: string
 }

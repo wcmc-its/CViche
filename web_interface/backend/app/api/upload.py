@@ -17,7 +17,10 @@ from app.pipeline.step_registry import STEP_REGISTRY
 from app.auth import get_current_user
 from app.rate_limiter import check_rate_limit
 from app.config_loader import get_config_value
-from app.services.config_service import MAX_UPLOAD_SIZE, COST_PER_1K_TOKENS, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS
+from app.services.config_service import (
+    MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
+    get_cost_per_1k_tokens, get_estimate_model_name,
+)
 from app.errors import bad_request
 
 logger = logging.getLogger(__name__)
@@ -55,6 +58,7 @@ class EstimateResponse(BaseModel):
     num_steps: int
     filename: str
     file_size_kb: float
+    pricing_model: str
 
 # Upload directory
 UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
@@ -253,14 +257,11 @@ async def estimate_processing(
     # Estimate tokens (roughly 4 characters per token for English text)
     estimated_tokens = text_char_count // 4
 
-    # Cost estimation based on empirical data from actual pipeline runs
-    # The pipeline processes each document through 12 stages with multiple LLM calls
-    # Empirical observation: ~$0.07-0.08 per 1000 document tokens
-    # This includes all stages: hierarchy extraction, entry extraction, taxonomy mapping,
-    # field extraction, research summary, enrichment stages, and Word document generation
-
-    # Use empirical cost rate (based on actual runs)
-    cost_per_1k_tokens = COST_PER_1K_TOKENS
+    # Cost estimation. The per-token rate is derived from the model configured
+    # in llm_config.yaml so the estimate tracks the active model preset. It
+    # covers all 12 stages: hierarchy/entry extraction, taxonomy mapping, field
+    # extraction, research summary, enrichment, and Word document generation.
+    cost_per_1k_tokens = get_cost_per_1k_tokens()
     base_cost = (estimated_tokens / 1000) * cost_per_1k_tokens
 
     # Add variation buffer for different CV complexities
@@ -298,5 +299,6 @@ async def estimate_processing(
         estimated_time_seconds_max=time_max,
         num_steps=num_stages,
         filename=file.filename,
-        file_size_kb=round(file_size_kb, 1)
+        file_size_kb=round(file_size_kb, 1),
+        pricing_model=get_estimate_model_name(),
     )
