@@ -91,7 +91,11 @@ Before the pipeline can call the model:
    aws bedrock list-inference-profiles --query "inferenceProfileSummaries[?contains(inferenceProfileId, 'sonnet-4-6')]"
    ```
    If the ID differs from `us.anthropic.claude-sonnet-4-6`, update `llm_config.yaml` and the `PRICING` key in `config.py` to match.
-3. **Credentials.** `llm_client.py` uses the boto3 default credential chain (env vars → `~/.aws/credentials` → IAM instance role). On AWS infrastructure an IAM role is sufficient — no API key.
+3. **Credentials.** `llm_client.py` calls `boto3.client("bedrock-runtime")`, which can authenticate two ways:
+   - **Bedrock API key (bearer token)** — set the `AWS_BEARER_TOKEN_BEDROCK` environment variable to the key. Current boto3 detects it automatically for Bedrock calls; no other AWS credentials are needed. Simplest for local development.
+   - **Standard credential chain** — `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` env vars, `~/.aws/credentials`, or an IAM instance role. On AWS infrastructure an IAM role needs no static key.
+
+   Either way, the identity behind the credential still needs Bedrock model access (step 1) and `bedrock:InvokeModel*` permissions — the credential authenticates, it does not grant model access. Outside an interactive shell (a service process or container), the credential must be set in that process's own environment; a developer's `~/.zshrc` is not inherited.
 
 `AWS_DEFAULT_REGION` (default `us-east-1`) selects the Bedrock region.
 
