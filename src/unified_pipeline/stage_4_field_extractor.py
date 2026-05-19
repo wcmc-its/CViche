@@ -803,7 +803,7 @@ def needs_llm_recovery(entry: Dict[str, Any], min_original_chars: int = 200, max
 
 def attempt_llm_recovery(
     entries: List[Dict[str, Any]],
-    model: str = "gpt-5.1"
+    model: str = None
 ) -> List[Dict[str, Any]]:
     """
     Attempt LLM-assisted recovery for entries with poor extraction coverage.
@@ -813,7 +813,7 @@ def attempt_llm_recovery(
 
     Args:
         entries: List of entries needing recovery (same taxonomy code)
-        model: OpenAI model to use
+        model: Unused -- the model is resolved from llm_config.yaml, not this argument
 
     Returns:
         List of entries with recovered fields
@@ -1001,7 +1001,7 @@ def extract_fields_batch(
     entries: List[Dict[str, Any]],
     batch_idx: int,
     total_batches: int,
-    model: str = "gpt-5.1",
+    model: str = None,
     cv_owner_name: Optional[Dict[str, str]] = None
 ) -> Dict[str, Any]:
     """
@@ -1011,7 +1011,7 @@ def extract_fields_batch(
         entries: List of entries to process
         batch_idx: Current batch index
         total_batches: Total number of batches
-        model: OpenAI model to use (default: gpt-5.1)
+        model: Unused -- the model is resolved from llm_config.yaml, not this argument
         cv_owner_name: Dict with 'last_name' and optionally 'full_name' of CV owner
     """
     print(f"  Processing batch {batch_idx + 1}/{total_batches} ({len(entries)} entries)...")
@@ -1656,8 +1656,9 @@ def extract_cv_owner_name(document_uid: str, mapped_entries: List[Dict[str, Any]
     """
     Extract CV owner's name using LLM from the first chunk of CV content.
 
-    Uses gpt-5-mini for a cheap, reliable extraction that handles all edge cases
-    (dashes, various formats, credentials, etc.) without brittle regex.
+    Uses an LLM (configured in llm_config.yaml) for a reliable extraction that
+    handles all edge cases (dashes, various formats, credentials, etc.)
+    without brittle regex.
 
     Args:
         document_uid: Document identifier (e.g., "2015_Wende")
@@ -1746,7 +1747,7 @@ If you cannot determine a field, return an empty string for it."""
 
 def infer_cv_owner_location(
     mapped_entries: List[Dict[str, Any]],
-    model: str = "gpt-5.1"
+    model: str = None
 ) -> Dict[str, Any]:
     """
     Infer CV owner's current location(s) from employment, education, and training history.
@@ -1756,7 +1757,7 @@ def infer_cv_owner_location(
 
     Args:
         mapped_entries: List of all mapped entries with taxonomy codes
-        model: OpenAI model to use (default: gpt-5.1)
+        model: Unused -- the model is resolved from llm_config.yaml, not this argument
 
     Returns:
         Dict with:
@@ -2061,7 +2062,7 @@ def add_target_names(entries: List[Dict[str, Any]], cv_owner_last_name: str) -> 
 def extract_fields_from_mapped_entries(
     mapped_entries: List[Dict[str, Any]],
     batch_size: int = 10,
-    model: str = "gpt-5.1",
+    model: str = None,
     document_uid: str = ""
 ) -> Dict[str, Any]:
     """
@@ -2070,14 +2071,13 @@ def extract_fields_from_mapped_entries(
     Args:
         mapped_entries: List of taxonomy-mapped entries from Stage 3
         batch_size: Number of entries to process per batch (default: 10)
-        model: OpenAI model to use (default: gpt-5.1)
+        model: Unused -- the model is resolved from llm_config.yaml, not this argument
         document_uid: Document identifier for extracting CV owner name
     """
     print(f"\n{'='*80}")
     print("Stage 4: Intra-Entry Field Extraction")
     print(f"{'='*80}")
     print(f"Total entries: {len(mapped_entries)}")
-    print(f"Model: {model}")
 
     # Load and display schema version
     schemas = get_active_schemas()
@@ -2196,13 +2196,13 @@ def extract_fields_from_mapped_entries(
     }
 
 
-def process_cv(docx_path: str, model: str = "gpt-5.1") -> Dict[str, Any]:
+def process_cv(docx_path: str, model: str = None) -> Dict[str, Any]:
     """
     Main pipeline: Load Stage 3b classified entries and extract fields.
 
     Args:
         docx_path: Path to the CV document (or just the document UID)
-        model: OpenAI model to use (default: gpt-5.1)
+        model: Unused -- the model is resolved from llm_config.yaml, not this argument
     """
     # Derive UIDs
     filename = Path(docx_path).stem
@@ -2335,14 +2335,13 @@ def run_validation(output_path: str) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python stage_4_field_extractor.py <document_uid_or_path> [model]")
+        print("Usage: python stage_4_field_extractor.py <document_uid_or_path>")
         print("  document_uid_or_path: Either the document UID (e.g., '2005_Bpg')")
         print("                        or path to CV document (e.g., 'path/to/2005_Bpg.docx')")
-        print("  model: Optional, defaults to gpt-5.1")
+        print("  (the LLM model is configured in llm_config.yaml)")
         sys.exit(1)
 
     input_arg = sys.argv[1]
-    model = sys.argv[2] if len(sys.argv) > 2 else "gpt-5.1"
 
     # Handle both document UID and file path
     # If it's a path to an existing file, use it directly
@@ -2354,7 +2353,7 @@ if __name__ == "__main__":
         docx_path = f"{input_arg}.docx"
 
     try:
-        result = process_cv(docx_path, model=model)
+        result = process_cv(docx_path)
         output_path = result["output_path"]
 
         # Run validation on the output
