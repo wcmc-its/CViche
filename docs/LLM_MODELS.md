@@ -117,28 +117,56 @@ The `/estimate` endpoint's USD-per-1,000-document-token rate is no longer a hard
 
 The anchor rate (`COST_ESTIMATE_ANCHOR_RATE` in `config.py`) is calibrated against gpt-4o-era runs and is approximate — see [Follow-ups](#follow-ups).
 
-## Prompt caching (recommended, not yet implemented)
+## Prompt caching
 
-The pipeline re-sends large, stable prompt prefixes (schemas, taxonomy rule-books, instructions) across many calls — especially `stage_4`, where 30–60+ calls per CV share the same schema block. Bedrock supports prompt caching for Claude with cache **reads at 0.1×** the input price; for a prompt-heavy pipeline this can cut input cost by ~80–90%.
+Live as of 2026-05-19. The pipeline re-sends large, stable prompt prefixes (schemas, taxonomy rule-books, instructions) across many calls — especially `stage_4`, where 30–60+ calls per CV share the same system prompt. Bedrock prices cache **reads at 0.1×** the input price and cache **writes at 1.25×** input. For `stage_4`'s prompt-heavy workload this cuts input cost by ~80–90% once the cache is warm; the cache TTL is 5 minutes, which is long enough that the per-CV burst reuses the cached prefix.
 
-Implementation sketch for a future change:
+### How it works
 
-- In `_call_bedrock()` (`llm_client.py`), append a cache checkpoint to the Converse `system` block: `{"cachePoint": {"type": "default"}}` after the system text.
-- Read the cache token counts from the Converse response `usage` and price cache reads at 0.1× / cache writes at 1.25× input in `calculate_cost()` so recorded costs stay accurate.
-- Bedrock's cache TTL is 5 minutes — long enough that `stage_4`'s burst of calls for one CV reuses the cached prefix.
-- Guard it behind a config flag; caching requires a supporting model (Sonnet 4.6 qualifies).
+- `_call_bedrock()` in `llm_client.py` appends a `{"cachePoint": {"type": "default"}}` checkpoint to the Converse `system` block, marking the system prompt as the cache key.
+- It then reads `cacheReadInputTokens` / `cacheWriteInputTokens` from the response `usage` and surfaces them in `call_llm()`'s normalized return dict as `cache_read_tokens` / `cache_write_tokens`. With caching on, Bedrock's `inputTokens` reports only the *uncached* portion, so `call_llm` re-synthesizes `prompt_tokens = uncached + cache_read + cache_write` to keep downstream token accounting intact.
+- `calculate_cost()` in `config.py` accepts `cache_read_tokens` / `cache_write_tokens` and prices them at 0.1× / 1.25× the model's input rate. Cache pricing matches Anthropic's direct API.
+- The pipeline orchestrator's `update_cost()` accumulates the cache split per run, and the `Run` table carries `cache_read_tokens` / `cache_write_tokens` columns (Alembic revision `d7a4f9b2e103`). The WebSocket `COST_UPDATE` event also includes the deltas.
+
+### Config flag
+
+Caching is on by default. Toggle it in `llm_config.yaml`:
+
+```yaml
+default:
+  enable_prompt_caching: true   # default; set false to disable
+```
+
+When `enable_prompt_caching: false`, the Converse request body is **byte-identical** to the pre-caching shape — useful for isolating caching-related issues or testing against models that don't support it.
+
+### Operational notes
+
+- Only the `system` block is cached. The schema/instruction prefix lives there; per-call entry data goes in the user message and is intentionally outside the cache key.
+- The cached prefix must be ≥ Claude's minimum cacheable size (~1024 tokens for Sonnet 4.6). Short system prompts won't trigger a cache write — and that's fine, since the savings would have been negligible anyway.
+- Cache token counts from non-`stage_4` stages are not yet aggregated into `Run.cache_read_tokens` / `cache_write_tokens` — their `cost` field is still accurate via `calculate_cost`, but the split is reported as 0. Wiring the remaining stages up is a small follow-up; the hot path (`stage_4`) is wired today and accounts for the vast majority of LLM calls.
 
 ## Follow-ups
 
 - **Eval `stage_4` on Haiku 4.5.** It is the dominant cost. A/B its field-extraction accuracy against Sonnet 4.6 on real CVs; if Haiku holds up, downgrading saves ~5× on the biggest line item.
-- **Implement prompt caching** (above) — the highest-value cost optimization.
-- **Recalibrate the UI estimate.** `COST_ESTIMATE_ANCHOR_RATE` is approximate. Once enough runs accumulate with correct `PRICING`, recompute it from real `run.total_cost` data (this needs the document-token count persisted per run).
+- **Aggregate cache tokens for the remaining stages.** Today only `stage_4` surfaces a cache-token split into `Run.cache_read_tokens` / `cache_write_tokens`. The cost is still accurate everywhere via `calculate_cost`, but other stages report 0 cache tokens; wiring them up is a mechanical follow-up.
+- **Recalibrate the UI estimate.** `COST_ESTIMATE_ANCHOR_RATE` is approximate. Once enough runs accumulate with correct `PRICING`, recompute it from real `run.total_cost` data (this needs the document-token count persisted per run). With prompt caching live, recalibration should be done against post-caching cost data so the rate reflects warm-cache reality.
 - **Delete dead code.** The `core_*`, `cv_parser_*`, `parser_*`, and alternative `segmentation_*` modules are unreachable on the live path.
 - **Stale model references remain in comments** — e.g. the module docstring of `extraction_failure_detector.py` describes a gpt-4o-mini/gpt-5.1 tiering that no longer reflects reality.
 
 ## Change log
 
-This strategy was introduced on 2026-05-19. Files changed:
+### 2026-05-19 — Bedrock prompt caching
+
+- `src/unified_pipeline/config/llm_config.yaml` — added `enable_prompt_caching: true` to the `default` block.
+- `src/unified_pipeline/config.py` — `calculate_cost()` now accepts `cache_read_tokens` / `cache_write_tokens` and prices them at 0.1× / 1.25× the model's input rate.
+- `src/unified_pipeline/llm_client.py` — `_call_bedrock()` appends a `cachePoint` to the system block when caching is enabled; `call_llm()` surfaces `cache_read_tokens` / `cache_write_tokens` in its return dict.
+- `src/unified_pipeline/stage_4_field_extractor.py` — aggregates cache tokens through the batch loop and emits them in the stage output.
+- `web_interface/backend/app/models.py` — added `cache_read_tokens` / `cache_write_tokens` columns to the `runs` table.
+- `web_interface/backend/alembic/versions/d7a4f9b2e103_add_cache_token_columns_to_runs.py` — migration for those columns.
+- `web_interface/backend/app/pipeline/orchestrator.py` — `update_cost()` accepts cache deltas and writes them to `Run`.
+- `web_interface/backend/app/pipeline/event_emitter.py` — `COST_UPDATE` events now carry the cache deltas and totals.
+
+### 2026-05-19 — Bedrock Claude Sonnet 4.6
 
 - `src/unified_pipeline/config/llm_config.yaml` — provider → `bedrock`, model → Claude Sonnet 4.6; removed stale `gpt-4o` overrides.
 - `src/unified_pipeline/config.py` — added Bedrock Claude 4.x pricing; `calculate_cost()` region-prefix normalization + warn-once on missing pricing; cost-estimate helpers (`estimate_cost_per_1k_doc_tokens`, `friendly_model_name`).
