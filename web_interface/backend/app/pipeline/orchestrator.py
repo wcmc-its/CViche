@@ -198,9 +198,6 @@ class PipelineOrchestrator:
         # Track outputs between stages
         self.stage_outputs: Dict[str, str] = {}
 
-        # Model to use for LLM stages
-        self.model = "gpt-5.1"
-
         # Total cost tracking
         self.total_cost = 0.0
 
