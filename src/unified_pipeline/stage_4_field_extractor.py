@@ -1027,6 +1027,8 @@ def extract_fields_batch(
     all_extracted = []
     total_cost = 0.0
     total_tokens = 0
+    total_cache_read_tokens = 0
+    total_cache_write_tokens = 0
 
     for code, code_entries in entries_by_code.items():
         schema = get_field_schema(code)
@@ -1172,6 +1174,8 @@ Return JSON with format:
             cost = llm_result["cost"]
             total_cost += cost
             total_tokens += llm_result["total_tokens"]
+            total_cache_read_tokens += llm_result.get("cache_read_tokens", 0)
+            total_cache_write_tokens += llm_result.get("cache_write_tokens", 0)
 
             # Log cost for this call
             print(f"    [{code}] {len(code_entries)} entries | {llm_result['total_tokens']:,} tokens | ${cost:.4f}")
@@ -1287,6 +1291,8 @@ Return JSON with format:
         "entries": all_extracted,
         "cost": total_cost,
         "tokens": total_tokens,
+        "cache_read_tokens": total_cache_read_tokens,
+        "cache_write_tokens": total_cache_write_tokens,
         "success": True
     }
 
@@ -2136,6 +2142,8 @@ def extract_fields_from_mapped_entries(
     all_entries = []
     total_cost = 0.0
     total_tokens = 0
+    total_cache_read_tokens = 0
+    total_cache_write_tokens = 0
 
     for batch_idx in range(num_batches):
         start_idx = batch_idx * batch_size
@@ -2148,6 +2156,8 @@ def extract_fields_from_mapped_entries(
             all_entries.extend(result.get("entries", []))
             total_cost += result.get("cost", 0.0)
             total_tokens += result.get("tokens", 0)
+            total_cache_read_tokens += result.get("cache_read_tokens", 0)
+            total_cache_write_tokens += result.get("cache_write_tokens", 0)
             # Show running total after each batch
             print(f"  Batch {batch_idx + 1}/{num_batches} complete | Running total: ${total_cost:.4f}")
 
@@ -2185,12 +2195,16 @@ def extract_fields_from_mapped_entries(
         "cv_owner_location": cv_owner_location,  # Include location context for geographic scope
         "total_cost": total_cost + location_cost,
         "total_tokens": total_tokens + location_tokens,
+        "cache_read_tokens": total_cache_read_tokens,
+        "cache_write_tokens": total_cache_write_tokens,
         "stats": {
             "total_entries": len(all_entries),
             "extracted": len(valid_entries),
             "skipped": len(skipped_entries),
             "batches_processed": num_batches,
-            "entries_reformatted": reformatted_count
+            "entries_reformatted": reformatted_count,
+            "cache_read_tokens": total_cache_read_tokens,
+            "cache_write_tokens": total_cache_write_tokens
         },
         "success": True
     }
@@ -2258,6 +2272,8 @@ def process_cv(docx_path: str, model: str = None) -> Dict[str, Any]:
         "total_entries": len(result["entries"]),
         "total_cost": result["total_cost"],
         "total_tokens": result["total_tokens"],
+        "cache_read_tokens": result.get("cache_read_tokens", 0),
+        "cache_write_tokens": result.get("cache_write_tokens", 0),
         "stats": {
             **result.get("stats", {}),
             "fragments_skipped": fragment_count,

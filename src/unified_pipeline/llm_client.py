@@ -232,7 +232,7 @@ def _validate_json_response(content, response_format):
 
 
 def _call_bedrock(model, messages, temperature, response_format=None,
-                  max_tokens=None, **kwargs):
+                  max_tokens=None, enable_prompt_caching=False, **kwargs):
     """Make a Bedrock Converse API call.
 
     Args:
@@ -241,6 +241,10 @@ def _call_bedrock(model, messages, temperature, response_format=None,
         temperature: Temperature setting
         response_format: Optional response format (triggers prompt injection per D-04)
         max_tokens: Optional max tokens limit
+        enable_prompt_caching: If True, append a cachePoint checkpoint after
+            the system block so the system prompt is read from cache on
+            subsequent calls within the 5-minute TTL. When False, the request
+            is byte-identical to the pre-caching shape.
         **kwargs: Additional arguments (currently unused for Bedrock)
 
     Returns:
@@ -253,6 +257,14 @@ def _call_bedrock(model, messages, temperature, response_format=None,
 
     client = _get_bedrock_client()
     system_prompts, converse_messages = _translate_messages(messages, response_format)
+
+    if enable_prompt_caching and system_prompts:
+        # Cache the system block: the large, stable schema / instruction prefix
+        # that stage_4 re-sends across 30-60+ calls per CV. The checkpoint goes
+        # AFTER the cacheable content, marking it as the end of the cached
+        # prefix. Bedrock returns the previously-written cache as a read on
+        # subsequent calls that match the cached prefix.
+        system_prompts = system_prompts + [{"cachePoint": {"type": "default"}}]
 
     call_kwargs = {
         "modelId": model,
@@ -275,6 +287,32 @@ def _call_bedrock(model, messages, temperature, response_format=None,
         raise
 
 
+def _extract_cache_tokens(usage: dict) -> tuple:
+    """Read cacheRead / cacheWrite token counts from a Converse `usage` dict.
+
+    Bedrock's prompt-caching docs use `cacheReadInputTokens` and
+    `cacheWriteInputTokens` in the prompt-caching guide, but the conversation-
+    inference page documents the same fields as `...Count`-suffixed names and
+    some examples capitalize them. Accept all observed variants so the caller
+    doesn't have to track which one a given response actually carries.
+
+    Returns:
+        (cache_read_tokens, cache_write_tokens) -- both 0 when caching is
+        disabled or the response doesn't include the fields.
+    """
+    if not usage:
+        return 0, 0
+    cache_read = (usage.get("cacheReadInputTokens")
+                  or usage.get("cacheReadInputTokensCount")
+                  or usage.get("CacheReadInputTokens")
+                  or 0)
+    cache_write = (usage.get("cacheWriteInputTokens")
+                   or usage.get("cacheWriteInputTokensCount")
+                   or usage.get("CacheWriteInputTokens")
+                   or 0)
+    return int(cache_read), int(cache_write)
+
+
 def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict:
     """Centralized LLM call with config resolution, retries, and cost tracking.
 
@@ -287,9 +325,16 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
     Returns:
         Normalized response dict with keys:
         - content (str): LLM response text
-        - prompt_tokens (int): Input token count
+        - prompt_tokens (int): Total input token count (uncached + cache
+          read + cache write). With Bedrock caching on, the SDK's own
+          `inputTokens` is the uncached portion only, so this is
+          synthesized to keep downstream token tracking intact.
         - completion_tokens (int): Output token count
-        - total_tokens (int): Total token count
+        - total_tokens (int): prompt_tokens + completion_tokens
+        - cache_read_tokens (int): Input tokens served from prompt cache
+          (priced at 0.1x input). 0 when caching is off or not supported.
+        - cache_write_tokens (int): Input tokens written to prompt cache
+          (priced at 1.25x input). 0 when caching is off or not supported.
         - cost (float): Cost in USD
         - model (str): Model used
         - provider (str): Provider used ("openai" or "bedrock")
@@ -307,11 +352,13 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
     temperature = kwargs.get("temperature", config["temperature"])
     max_tokens = kwargs.get("max_tokens", config["max_tokens"])
     retry_count = kwargs.get("retry_count", config["retry_count"])
+    enable_prompt_caching = kwargs.get("enable_prompt_caching",
+                                       config.get("enable_prompt_caching", False))
 
     # Filter out keys already extracted as explicit args
     extra_kwargs = {k: v for k, v in kwargs.items()
                     if k not in {"provider", "model", "temperature", "max_tokens",
-                                 "retry_count", "stage"}}
+                                 "retry_count", "stage", "enable_prompt_caching"}}
 
     start_time = time.time()
 
@@ -343,6 +390,8 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
             "prompt_tokens": usage.prompt_tokens,
             "completion_tokens": usage.completion_tokens,
             "total_tokens": usage.total_tokens,
+            "cache_read_tokens": 0,
+            "cache_write_tokens": 0,
             "cost": cost,
             "model": model,
             "provider": provider,
@@ -353,7 +402,9 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
     elif provider == "bedrock":
         response = _call_with_retry(
             lambda: _call_bedrock(model, messages, temperature, response_format,
-                                  max_tokens, **extra_kwargs),
+                                  max_tokens,
+                                  enable_prompt_caching=enable_prompt_caching,
+                                  **extra_kwargs),
             retry_count=retry_count,
         )
 
@@ -364,6 +415,7 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
         usage = response["usage"]
         stop_reason = response.get("stopReason", "end_turn")
         finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
+        cache_read_tokens, cache_write_tokens = _extract_cache_tokens(usage)
 
         # D-05: Validate JSON when response_format was requested
         if not _validate_json_response(content, response_format):
@@ -375,31 +427,50 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
                 "content": "Your previous response was not valid JSON. Please respond with ONLY valid JSON, no markdown fencing or explanation.",
             })
             retry_response = _call_bedrock(model, stronger_messages, temperature,
-                                            response_format, max_tokens, **extra_kwargs)
+                                            response_format, max_tokens,
+                                            enable_prompt_caching=enable_prompt_caching,
+                                            **extra_kwargs)
             content = retry_response["output"]["message"]["content"][0]["text"]
             retry_usage = retry_response["usage"]
+            retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)
             # Accumulate token usage from retry
             usage = {
                 "inputTokens": usage["inputTokens"] + retry_usage["inputTokens"],
                 "outputTokens": usage["outputTokens"] + retry_usage["outputTokens"],
                 "totalTokens": usage["totalTokens"] + retry_usage["totalTokens"],
             }
+            cache_read_tokens += retry_cache_read
+            cache_write_tokens += retry_cache_write
             stop_reason = retry_response.get("stopReason", "end_turn")
             finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
             # If still invalid, return as-is (let downstream handle it per D-05)
 
+        # With caching on, Bedrock's `inputTokens` reports ONLY the uncached
+        # input tokens; the cached portion shows up in cacheRead/cacheWrite.
+        # calculate_cost prices each bucket separately, and we synthesize
+        # totals from the three so downstream cost/token tracking still sees
+        # the full input regardless of caching.
+        uncached_input_tokens = usage["inputTokens"]
+        output_tokens = usage["outputTokens"]
+        total_input_tokens = uncached_input_tokens + cache_read_tokens + cache_write_tokens
+        total_tokens = total_input_tokens + output_tokens
+
         cost = calculate_cost(
-            usage["inputTokens"],
-            usage["outputTokens"],
+            uncached_input_tokens,
+            output_tokens,
             model=model,
             provider="bedrock",
+            cache_read_tokens=cache_read_tokens,
+            cache_write_tokens=cache_write_tokens,
         )
 
         return {
             "content": content,
-            "prompt_tokens": usage["inputTokens"],
-            "completion_tokens": usage["outputTokens"],
-            "total_tokens": usage["totalTokens"],
+            "prompt_tokens": total_input_tokens,
+            "completion_tokens": output_tokens,
+            "total_tokens": total_tokens,
+            "cache_read_tokens": cache_read_tokens,
+            "cache_write_tokens": cache_write_tokens,
             "cost": cost,
             "model": model,
             "provider": "bedrock",

@@ -89,6 +89,13 @@ class Run(Base):
     total_tokens = Column(Integer, default=0)
     input_tokens = Column(Integer, default=0)
     output_tokens = Column(Integer, default=0)
+    # Bedrock prompt-caching split: cache_read = input tokens served from
+    # cache (0.1x input rate); cache_write = input tokens written to cache
+    # (1.25x input rate). Both are subsets of input_tokens, not additions to
+    # it -- input_tokens already includes the cached portion, so don't sum
+    # these into totals.
+    cache_read_tokens = Column(Integer, default=0)
+    cache_write_tokens = Column(Integer, default=0)
     error_message = Column(Text)
     created_at = Column(DateTime, server_default=func.now())
     # Auth-related fields

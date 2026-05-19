@@ -17,6 +17,14 @@ default:
   model: us.anthropic.claude-sonnet-4-6
   temperature: 0
   retry_count: 3
+  # Bedrock prompt caching. When true, _call_bedrock appends a cachePoint
+  # checkpoint after the system block so the (large, stable) system prompt
+  # is read from cache on subsequent calls within the 5-minute TTL. Cache
+  # reads are billed at 0.1x input, cache writes at 1.25x input -- the
+  # break-even is one reuse, so this is a near-pure win for stages that
+  # re-send the same prompt prefix (notably stage_4). Bedrock charges the
+  # same cache prices as Anthropic's direct API. See docs/LLM_MODELS.md.
+  enable_prompt_caching: true
 
 # No per-stage overrides: the whole pipeline runs on Claude Sonnet 4.6.
 #

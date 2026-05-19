@@ -213,18 +213,34 @@ def _normalize_model_id(model: str) -> str:
     return model
 
 
+# Bedrock / Anthropic prompt-caching multipliers, applied against the model's
+# base input price. Bedrock charges the same cache prices as Anthropic's
+# direct API (see docs/LLM_MODELS.md).
+CACHE_READ_PRICE_MULTIPLIER = 0.1   # cache hits cost 0.1x input
+CACHE_WRITE_PRICE_MULTIPLIER = 1.25  # cache writes cost 1.25x input
+
+
 def calculate_cost(prompt_tokens: int, completion_tokens: int,
-                   model: str = None, provider: str = "openai") -> float:
+                   model: str = None, provider: str = "openai",
+                   cache_read_tokens: int = 0,
+                   cache_write_tokens: int = 0) -> float:
     """
     Calculate cost for an LLM API call.
 
     Args:
-        prompt_tokens: Number of input tokens
+        prompt_tokens: Number of uncached input tokens. With Bedrock prompt
+            caching enabled, this should be the *uncached* portion only --
+            Bedrock's `usage.inputTokens` already excludes cached tokens.
         completion_tokens: Number of output tokens
         model: Model name/ID (default: DEFAULT_MODEL). Bedrock region
             inference-profile prefixes (us./eu./apac./global.) are stripped
             before the PRICING lookup.
         provider: LLM provider name (default: "openai")
+        cache_read_tokens: Input tokens served from prompt cache, billed at
+            0.1x the input rate. 0 when caching is off or unsupported.
+        cache_write_tokens: Input tokens written to prompt cache on this
+            call, billed at 1.25x the input rate. 0 when caching is off or
+            unsupported.
 
     Returns:
         float: Cost in USD
@@ -251,8 +267,13 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
         return 0.0
 
     pricing = provider_pricing[lookup]
-    return (prompt_tokens * pricing["input"] / 1_000_000 +
-            completion_tokens * pricing["output"] / 1_000_000)
+    input_rate = pricing["input"]
+    return (
+        prompt_tokens * input_rate / 1_000_000
+        + completion_tokens * pricing["output"] / 1_000_000
+        + cache_read_tokens * input_rate * CACHE_READ_PRICE_MULTIPLIER / 1_000_000
+        + cache_write_tokens * input_rate * CACHE_WRITE_PRICE_MULTIPLIER / 1_000_000
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -387,6 +408,10 @@ def get_stage_config(stage: str) -> dict:
         "temperature": 0,
         "max_tokens": None,
         "retry_count": 3,
+        # Bedrock-only knob; ignored by the OpenAI path. Default false so the
+        # request is byte-identical to pre-caching behavior when the YAML is
+        # absent. The shipping llm_config.yaml sets it to true.
+        "enable_prompt_caching": False,
     }
 
     # Layer 2: YAML default block
