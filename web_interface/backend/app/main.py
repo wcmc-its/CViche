@@ -9,9 +9,16 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 
+# Configure logging BEFORE any module-level loggers are wired. dictConfig
+# reapplies handlers on existing loggers, but doing it first avoids the
+# transient window where boto3 imports might log at default INFO.
+from app.logging_config import configure_logging
+configure_logging()
+
 logger = logging.getLogger(__name__)
 
 from app.database import init_db
+from app.middleware.request_id import RequestIDMiddleware
 from app.api import upload, runs, steps, websocket, auth_routes, consent_routes, feedback_routes, admin_routes, saml_routes
 
 # ---------------------------------------------------------------------------
@@ -153,6 +160,10 @@ app.add_middleware(SecurityHeadersMiddleware)
 
 # CSRF middleware (must be added after CORS so CORS pre-flight passes first)
 app.add_middleware(CSRFMiddleware)
+
+# Request ID middleware: added LAST so it is the outermost layer. The
+# ContextVar it sets must be populated before any other middleware logs.
+app.add_middleware(RequestIDMiddleware)
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):

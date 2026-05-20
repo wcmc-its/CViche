@@ -19,6 +19,10 @@ services:
       CVICHE_S3_BUCKET: "${CVICHE_S3_BUCKET}"
       CVICHE_S3_PREFIX: "${CVICHE_S3_PREFIX:-cviche}"
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      # Structured logging: emit one JSON object per line so the EKS log
+      # collector / CloudWatch can index by request_id, level, logger, etc.
+      CVICHE_LOG_FORMAT: "json"
+      CVICHE_LOG_LEVEL: "${CVICHE_LOG_LEVEL:-INFO}"
     volumes: []  # No hot-reload mounts in production
     # Single uvicorn worker: the pipeline-progress WebSocket uses an
     # in-process event emitter, so with multiple workers a client can miss
