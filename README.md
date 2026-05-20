@@ -129,6 +129,37 @@ docker compose up --build
 
 Set the `OPENAI_API_KEY` environment variable before running `docker compose` (or configure AWS credentials for Bedrock -- see [Configuration](#configuration)).
 
+### Production: provisioning `auth_config.yaml`
+
+`web_interface/backend/auth_config.yaml` is environment-specific (it carries the allowed-users list, SAML SP / IdP settings, and ED-group authorization config) and is gitignored. It is therefore **not baked into the image**. `app/config_loader.py` falls back to `auth_config.yaml.example` if the file is missing -- the app boots in a locked-down state instead of crashing -- but real production must mount a real config.
+
+**docker compose (single-host prod)** -- point `CVICHE_AUTH_CONFIG_HOST_PATH` at the host path of the provisioned file, then bring up the service:
+
+```bash
+export CVICHE_AUTH_CONFIG_HOST_PATH=/etc/cviche/auth_config.yaml
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+`docker-compose.prod.yml` mounts that file read-only at the canonical in-container path `/app/web_interface/backend/auth_config.yaml`. If `CVICHE_AUTH_CONFIG_HOST_PATH` is unset, compose falls back to mounting `./backend/auth_config.yaml` from the repo (the dev convention).
+
+**Kubernetes** -- provision `auth_config.yaml` as a `Secret` (preferred, since it may contain SAML private keys or ED group DNs) or `ConfigMap`, and mount it at the same canonical in-container path. Drop the compose `volumes:` mount entirely and use a pod-level `volumeMounts` instead:
+
+```yaml
+volumeMounts:
+  - name: auth-config
+    mountPath: /app/web_interface/backend/auth_config.yaml
+    subPath: auth_config.yaml
+    readOnly: true
+volumes:
+  - name: auth-config
+    secret:
+      secretName: cviche-auth-config
+```
+
+**ECS** -- store `auth_config.yaml` in AWS Secrets Manager (or as an SSM parameter), then either fetch it into the host at task start and bind-mount, or render it into the task definition's `secrets` block and mount via a Docker volume.
+
+Verify after deploy: `docker compose exec backend cat /app/web_interface/backend/auth_config.yaml` must show your real config, not the `.example` defaults. Watch the application logs for `auth_config.yaml not found ... falling back to auth_config.yaml.example` -- that line means the mount failed.
+
 ### Local Development (without Docker)
 
 **Backend:**
