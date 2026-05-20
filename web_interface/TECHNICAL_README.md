@@ -158,6 +158,14 @@ The frontend runs on port 3000 by default and proxies `/api` and `/ws` requests 
 | `OPENAI_API_KEY` | Yes | -- | OpenAI API key for all LLM calls in the pipeline. |
 | `CVICHE_LOCAL_STORAGE_DIR` | No | `web_interface/uploads/` | Override the default local storage directory for uploads and outputs. Only applies when `CVICHE_STORAGE_BACKEND=local`. |
 
+### TLS termination in production
+
+The container terminates HTTP, not TLS. It runs behind a TLS-terminating load balancer (ALB+ACM at WCM). uvicorn is invoked with `--proxy-headers --forwarded-allow-ips='*'` (see `web_interface/backend/docker-entrypoint.sh`), so `X-Forwarded-Proto` from the LB is honored and `request.url.scheme` reflects the upstream scheme. This matters for SAML metadata / OIDC redirects (which embed absolute URLs).
+
+The container's network exposure must be restricted to the LB only (security-group rules on EKS) — `--forwarded-allow-ips='*'` trusts every forwarded header it sees, so direct access from outside the cluster would let a client spoof `X-Forwarded-Proto`.
+
+For the full contract the LB must honor and a go-live checklist, see [docs/PRODUCTION_TLS.md](../docs/PRODUCTION_TLS.md).
+
 ---
 
 ## Database Setup
