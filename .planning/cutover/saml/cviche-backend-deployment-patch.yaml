@@ -1,0 +1,68 @@
+# Strategic-merge patch for the cviche-backend Deployment to wire SAML into
+# the running pod. Adds:
+#   - a Secret volume for the SP keypair, mounted at the configured cert_dir
+#   - a ConfigMap volume for auth_config.yaml, mounted as a single file
+#   - envFrom for the ED LDAP Secret (ED_LDAP_URL/BIND_DN/BIND_PASSWORD)
+#
+# The existing envFrom (cviche-secrets-h4dmgg4gb6 carrying CVICHE_DATABASE_URL
+# and CVICHE_SESSION_SECRET) is preserved -- strategic merge appends to lists
+# keyed by name.
+#
+# === Apply order (after the three Secrets/ConfigMap above) ===
+#
+#   kubectl -n cviche-dev patch deploy cviche-backend \
+#     --patch-file cviche-backend-deployment-patch.yaml
+#
+#   kubectl -n cviche-dev rollout status deploy/cviche-backend
+#
+# === Verify after rollout ===
+#
+#   # The new pod should serve valid SAML metadata
+#   POD=$(kubectl -n cviche-dev get pod -l app=cviche-backend -o jsonpath='{.items[0].metadata.name}')
+#   kubectl -n cviche-dev exec $POD -- curl -s localhost:8000/api/auth/config
+#   # -> {"mode":"saml","discovery_url":"https://shibboleth.weill.cornell.edu/..."}
+#
+#   kubectl -n cviche-dev exec $POD -- curl -s localhost:8000/api/saml/metadata | grep -oE 'AssertionConsumerService[^>]*Location="[^"]*"'
+#   # -> Location="https://cviche.weill.cornell.edu/api/saml/acs"   (NOT /shibboleth/api/saml/acs)
+#
+#   kubectl -n cviche-dev exec $POD -- env | grep ^ED_LDAP
+#   # -> ED_LDAP_URL=ldaps://ed.weill.cornell.edu:636
+#   # -> ED_LDAP_BIND_DN=cn=svc-cviche,...
+#   # -> (ED_LDAP_BIND_PASSWORD set but redacted)
+#
+# === Rollback ===
+#
+#   kubectl -n cviche-dev rollout undo deploy/cviche-backend
+#
+# (Or: re-apply the patch with auth.mode=simple in the ConfigMap and roll
+#  pods. SAML routes 404; simple mode resumes.)
+---
+spec:
+  template:
+    spec:
+      containers:
+      - name: backend
+        envFrom:
+        - secretRef:
+            name: cviche-secrets-h4dmgg4gb6   # existing -- preserved
+        - secretRef:
+            name: cviche-ed-ldap              # new
+        volumeMounts:
+        - name: saml-sp-cert
+          mountPath: /app/web_interface/backend/certs
+          readOnly: true
+        - name: auth-config
+          mountPath: /app/web_interface/backend/auth_config.yaml
+          subPath: auth_config.yaml
+          readOnly: true
+      volumes:
+      - name: saml-sp-cert
+        secret:
+          secretName: cviche-saml-sp-cert
+          defaultMode: 0400
+      - name: auth-config
+        configMap:
+          name: cviche-auth-config
+          items:
+          - key: auth_config.yaml
+            path: auth_config.yaml

@@ -1,0 +1,26 @@
+BEGIN:VCALENDAR
+VERSION:2.0
+PRODID:-//CViche//SAML SP cert rotation//EN
+CALSCALE:GREGORIAN
+METHOD:PUBLISH
+BEGIN:VEVENT
+UID:cviche-saml-sp-cert-rotation-2029@wcm
+DTSTAMP:20260520T160000Z
+DTSTART:20290115T140000Z
+DTEND:20290115T150000Z
+SUMMARY:Renew CViche SAML SP cert (expires 2029-05-19)
+LOCATION:WCM ITS Service Portal
+TRANSP:TRANSPARENT
+DESCRIPTION:CViche SAML SP cert expires 2029-05-19 (3-year validity\, generated 2026-05-20).\n\nProcess:\n1. Regenerate keypair with openssl (same subject\, 3-year).\n2. File a WCM ITS follow-up to the original ticket RITM0791615\, attaching the new public cert.\n3. After IT confirms\, atomically swap the new keypair into 1Password + AWS Secrets Manager + the cviche-saml-sp-cert K8s Secret.\n4. Rotate the deployment (kubectl rollout restart deploy/cviche-backend -n cviche-dev).\n\nRefs:\n- docs/sp-registration.md SP Certificate section\n- ~/Dropbox/Projects/CViche - Planning/saml-its-form-prod.md\n- Original cert SHA-256: 5B:C2:43:CD:76:CC:21:B2:DD:D8:1E:B2:34:44:51:73:F1:AC:3C:DD:65:01:B0:2B:1F:42:0A:A2:B6:B8:1A:47
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:CViche SAML SP cert renewal: 30 days out
+TRIGGER:-P30D
+END:VALARM
+BEGIN:VALARM
+ACTION:DISPLAY
+DESCRIPTION:CViche SAML SP cert renewal: 7 days out
+TRIGGER:-P7D
+END:VALARM
+END:VEVENT
+END:VCALENDAR

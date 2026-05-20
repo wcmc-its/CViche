@@ -1,0 +1,73 @@
+# Production auth_config.yaml for CViche, mounted at
+# /app/web_interface/backend/auth_config.yaml in the backend pod.
+#
+# Currently the pod has no ConfigMap mounted and falls back to
+# auth_config.yaml.example (placeholder allowed_users), which is why no real
+# WCM user can log in to prod. Applying this ConfigMap + the deployment patch
+# fixes that.
+#
+# === Apply recipe ===
+#
+#   # 1) Fill in the <FROM-ITS-RESPONSE> placeholder below with the IdP
+#   #    metadata URL returned by WCM ITS (RITM0791615). Confirm the WAYF
+#   #    discovery_url path with IT too -- the form below is the expected
+#   #    shape but the exact path may differ.
+#   # 2) Apply:
+#   kubectl apply -f cviche-auth-config-configmap.yaml
+#
+# === Verify ===
+#
+#   kubectl -n cviche-dev get configmap cviche-auth-config -o jsonpath='{.data.auth_config\.yaml}'
+#   # Should print the full YAML body.
+#
+# === Rollback ===
+#
+# Edit this file's auth.mode back to "simple" and re-apply, then restart the
+# pod. SAML endpoints become 404, simple-mode login restored. SAML-mode users
+# already in the DB stay there; they just authenticate via simple again.
+#
+# === Field provenance ===
+#
+#   entity_id        Locked. Filed in ITS form 2026-05-20 (RITM0791615).
+#   sp_base_url      Locked. NEW field as of PR #33 -- distinct from entity_id
+#                    because Shibboleth convention appends /shibboleth to the
+#                    entity_id but the SP actually serves at the bare host.
+#   idp_metadata_url FROM ITS RESPONSE -- the only true placeholder here.
+#   discovery_url    Expected WCM WAYF; confirm exact path with ITS.
+#   cert_dir         Locked to match the volumeMount in the deployment patch.
+#   ed.*             Groups provisioned 2026-05-20 (canonical names).
+#   allowed_users    Empty: ed.enabled=true means ED governs access. Kept as
+#                    [] (not removed) so the failover-to-simple path keeps
+#                    working if ed.enabled is toggled off in an incident.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: cviche-auth-config
+  namespace: cviche-dev
+  labels:
+    app: cviche-backend
+    component: auth-config
+data:
+  auth_config.yaml: |
+    auth:
+      mode: saml
+    saml:
+      entity_id: "https://cviche.weill.cornell.edu/shibboleth"
+      sp_base_url: "https://cviche.weill.cornell.edu"
+      idp_metadata_url: "<FROM-ITS-RESPONSE>"
+      discovery_url: "https://shibboleth.weill.cornell.edu/idp/profile/SAML2/WAYF"
+      cert_dir: "/app/web_interface/backend/certs"
+    allowed_users: []
+    admin_users: []
+    rate_limits:
+      daily: 10
+      monthly: 50
+    consent:
+      version: "1.0"
+    ed:
+      enabled: true
+      access_group: "cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
+      admin_group:  "cn=ITS:Library:CViche/admin-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
+      contact_name: "Paul Albert"
+      contact_email: "paa2013@med.cornell.edu"
