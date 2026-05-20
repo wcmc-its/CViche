@@ -1,6 +1,7 @@
 """Step details and data API endpoints."""
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,6 +14,7 @@ from app.models import Step, Log, Run, User
 from app.schemas import StepDetail, LogEntry, OutputPreview
 from app.auth import get_current_user
 from app.services.run_service import check_run_access
+from app.storage.factory import get_storage
 from app.errors import bad_request, not_found, internal_error
 
 logger = logging.getLogger(__name__)
@@ -435,49 +437,73 @@ async def get_prompt_logs(
             "message": STAGES_WITHOUT_PROMPT_LOGS[stage_id]
         })
 
-    # Find prompt logs directory
-    # prompt_logger.py writes to src/unified_pipeline/prompt_logs/ using absolute path
-    project_root = Path(__file__).parent.parent.parent.parent.parent
-    prompt_log_dirs = [
-        project_root / "src" / "unified_pipeline" / "prompt_logs",
-    ]
-
-    logs = []
-    seen_files = set()
+    logs: list[dict] = []
+    seen_files: set[str] = set()
 
     # The set of `purpose` values that belong to this stage.
     purposes = STAGE_TO_PURPOSES.get(stage_id, [])
+    if not purposes:
+        return JSONResponse(content={"logs": [], "stage_id": stage_id, "step": step})
 
-    for prompt_logs_base in prompt_log_dirs:
-        if not (prompt_logs_base.exists() and purposes):
+    # Per-run storage: the orchestrator replicates new prompt log files into
+    # storage at step-end, so this works across container restarts in prod
+    # (S3) and locally (LocalRunStorage mirrors them into the run dir).
+    storage = get_storage()
+    try:
+        storage_keys = storage.list_files(run_id, prefix="prompt_logs/")
+    except Exception as exc:
+        logger.warning("Could not list prompt logs in storage for %s: %s", run_id, exc)
+        storage_keys = []
+
+    for key in sorted(storage_keys):
+        filename = key.rsplit('/', 1)[-1]
+        if not filename.endswith('.txt'):
             continue
+        if filename in seen_files:
+            continue
+        purpose = _purpose_from_filename(filename)
+        if not purpose or not _purpose_matches_stage(purpose, purposes):
+            continue
+        seen_files.add(filename)
+        try:
+            content = storage.get_file(run_id, key).decode('utf-8', errors='replace')
+            logs.append({
+                "filename": filename,
+                "content": content[:50000],
+            })
+        except Exception as exc:
+            logs.append({
+                "filename": filename,
+                "content": f"Error reading file: {exc}",
+            })
 
-        for log_file in sorted(prompt_logs_base.iterdir()):
-            # Only surface the human-readable .txt files in the viewer.
+    # Fallback: legacy local-fs path. Picks up runs that completed before
+    # storage-replication landed, and lets dev "still works" while the
+    # backend pipeline runs on the same machine as the API.
+    project_root = Path(__file__).parent.parent.parent.parent.parent
+    legacy_prompt_logs_dir = project_root / "src" / "unified_pipeline" / "prompt_logs"
+    if legacy_prompt_logs_dir.exists():
+        for log_file in sorted(legacy_prompt_logs_dir.iterdir()):
             if not log_file.name.endswith('.txt'):
                 continue
             if log_file.name in seen_files:
                 continue
-
             purpose = _purpose_from_filename(log_file.name)
             if not purpose or not _purpose_matches_stage(purpose, purposes):
                 continue
-
-            # Only files written during this run.
             if log_file.stat().st_mtime < run_start_timestamp:
                 continue
-
             seen_files.add(log_file.name)
             try:
                 content = log_file.read_text(encoding='utf-8', errors='replace')
                 logs.append({
                     "filename": str(log_file),
-                    "content": content[:50000]  # Limit to 50KB per file
+                    "content": content[:50000],
                 })
-            except Exception as e:
+            except Exception as exc:
                 logs.append({
                     "filename": str(log_file),
-                    "content": f"Error reading file: {str(e)}"
+                    "content": f"Error reading file: {exc}",
                 })
 
     # Newest first.
