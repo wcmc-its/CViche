@@ -388,13 +388,17 @@ def _purpose_matches_stage(purpose: str, stage_purposes) -> bool:
             return True
     return False
 
-# Stages that don't have prompt logs with an explanation
+# Stages that don't have prompt logs, with an explanation.
+# NOTE: stages 5b and 6 were mistakenly included here. Both make LLM calls --
+# 5b runs ROR lookups AND `call_llm(stage="stage_5b")` from institution
+# enrichment, and 6 calls `call_llm(stage="stage_6")` for geographic scope
+# classification during template population. Prompts ARE being logged for
+# both, but the short-circuit returned the "non-LLM stage" message before
+# the file walker ran. Keep only stages with zero LLM activity here.
 STAGES_WITHOUT_PROMPT_LOGS = {
     '1a': "Stage 1a (Hierarchy Extraction) uses direct OpenAI API calls without prompt logging.",
     '1b': "Stage 1b (Hierarchy Mapping) is a non-LLM stage - no prompts are used.",
     '5': "Stage 5 (PubMed Enrichment) is a non-LLM stage - uses PubMed API.",
-    '5b': "Stage 5b (Institution Enrichment) is a non-LLM stage - uses ROR API.",
-    '6': "Stage 6 (WCM Word Template) is a non-LLM stage - generates Word documents.",
 }
 
 
