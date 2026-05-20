@@ -14,3 +14,4 @@ services:
       SIMPLESAMLPHP_SP_SINGLE_LOGOUT_SERVICE: "http://localhost:8000/api/saml/logout"
     volumes:
       - ./mock-idp/authsources.php:/var/www/simplesamlphp/config/authsources.php
+      - ./mock-idp/saml20-idp-hosted.php:/var/www/simplesamlphp/metadata/saml20-idp-hosted.php

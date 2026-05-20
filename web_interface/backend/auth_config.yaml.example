@@ -3,6 +3,11 @@ auth:
 
 saml:
   entity_id: ""                    # SP entity ID (e.g., "https://cviche.weill.cornell.edu/shibboleth")
+  sp_base_url: ""                  # SP's reachable base URL (e.g., "https://cviche.weill.cornell.edu").
+                                   # ACS/SLO endpoints are advertised as {sp_base_url}/api/saml/{acs,logout}.
+                                   # This MUST match where the SP actually serves /api/saml/acs;
+                                   # the IdP enforces it as the assertion Destination/Recipient.
+                                   # Often differs from entity_id (Shibboleth convention appends /shibboleth).
   idp_metadata_url: ""             # IdP metadata URL
   discovery_url: ""                # WAYF discovery service URL
   cert_dir: "certs"                # Directory containing SP key/cert files (auto-generated if missing)

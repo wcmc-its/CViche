@@ -41,6 +41,7 @@ def seed_system_config(db: Session) -> None:
         "consent_version": json.dumps(config.get("consent", {}).get("version", "1.0")),
         # SAML config (Phase 8 will consume these; stored now for forward-compatibility)
         "saml_entity_id": json.dumps(config.get("saml", {}).get("entity_id", "")),
+        "saml_sp_base_url": json.dumps(config.get("saml", {}).get("sp_base_url", "")),
         "saml_idp_metadata_url": json.dumps(config.get("saml", {}).get("idp_metadata_url", "")),
         "saml_discovery_url": json.dumps(config.get("saml", {}).get("discovery_url", "")),
         "saml_cert_dir": json.dumps(config.get("saml", {}).get("cert_dir", "")),

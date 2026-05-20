@@ -4,6 +4,7 @@ import os
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse, Response
+from saml2.metadata import create_metadata_string
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -161,7 +162,10 @@ async def saml_metadata(db: Session = Depends(get_db)):
 
     try:
         client = get_saml_client(db)
-        metadata_str = client.config.create_metadata_string()
+        # pysaml2 7.x: build SP metadata via the module-level helper.
+        # First arg `configfile` is required by signature but ignored when
+        # `config=` is provided directly.
+        metadata_str = create_metadata_string("", config=client.config)
         return Response(content=metadata_str, media_type="application/xml")
     except Exception:
         logger.error("SAML metadata generation failed", exc_info=True)

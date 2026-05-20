@@ -7,6 +7,13 @@
  *   adminuser:password -- Admin user in both access and admin groups
  *   outsider:password  -- User NOT in ED access group (denial testing)
  *   nomail:password    -- User missing mail attribute (validation testing)
+ *
+ * Attribute keys here use SimpleSAMLphp's friendly names (mail, displayName,
+ * eduPersonPrincipalName). The mounted saml20-idp-hosted.php override sets
+ * attributes.NameFormat=urn:oasis:names:tc:SAML:2.0:attrname-format:uri and
+ * adds an authproc core:AttributeMap that rewrites these to OIDs at emit
+ * time -- so the wire format matches what WCM's production IdP sends and
+ * pysaml2's default attribute map decodes them correctly.
  */
 
 $config = [
