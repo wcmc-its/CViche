@@ -11,10 +11,13 @@ the four artifacts below fixes that.
   - IdP metadata URL → goes into `cviche-auth-config-configmap.yaml`
   - Confirmation that `mail` attribute carries the user's real email
   - WAYF discovery URL → confirm matches the value pre-filled in the ConfigMap
-- [ ] **ED service-account bind** provisioned: `cn=svc-cviche,ou=ServiceAccounts,…`
-  with read-only LDAPS access. Password in 1Password. File a separate ED
-  ticket if not done. (Paul's personal bind is ldapmodify-only; never put
-  it in pod env.)
+- [ ] **ED bind credentials** available. Tactically reusing the existing
+  `cn=reciter,ou=binds,...` read-only bind (verified 2026-05-20 to have
+  read access to both `ou=people` and `ou=application security`). Password
+  lives in the `reciter` namespace under `reciter-inst-secrets/LDAP_BIND_PASSWORD`
+  — we copy it into `cviche-dev` at apply time. **Followup:** file a proper
+  `cn=svc-cviche,ou=ServiceAccounts,...` service-account ticket to break the
+  cross-app credential coupling. Migration is a pure credential swap.
 - [ ] **Backend image** is on `dev-70.2026-05-20.15.48.22.2e2d6caf` or newer
   (carries PR #33: `saml.sp_base_url` field, `/api/saml/metadata` fix).
   Verify: `kubectl -n cviche-dev get pod -l app=cviche-backend -o jsonpath='{.items[0].spec.containers[0].image}'`
@@ -35,11 +38,13 @@ kubectl -n cviche-dev create secret generic cviche-saml-sp-cert \
 rm /tmp/sp.key.pem
 # (Keep /tmp/sp.crt.pem; it's public.)
 
-# 2. ED LDAP bind credentials (imperative -- password sourced from 1Password)
-ED_PW="$(op item get 'CViche -- ED service account bind (prod)' --fields password --reveal)"
+# 2. ED LDAP bind credentials -- reuse the existing cn=reciter bind by copying
+#    its password from the reciter ns secret (no echo)
+ED_PW="$(kubectl -n reciter get secret reciter-inst-secrets \
+  -o jsonpath='{.data.LDAP_BIND_PASSWORD}' | base64 -d)"
 kubectl -n cviche-dev create secret generic cviche-ed-ldap \
   --from-literal=ED_LDAP_URL='ldaps://ed.weill.cornell.edu:636' \
-  --from-literal=ED_LDAP_BIND_DN='cn=svc-cviche,ou=ServiceAccounts,dc=weill,dc=cornell,dc=edu' \
+  --from-literal=ED_LDAP_BIND_DN='cn=reciter,ou=binds,dc=weill,dc=cornell,dc=edu' \
   --from-literal=ED_LDAP_BIND_PASSWORD="$ED_PW" \
   --dry-run=client -o yaml | kubectl apply -f -
 unset ED_PW
@@ -73,7 +78,7 @@ kubectl -n cviche-dev exec $POD -- curl -s localhost:8000/api/saml/metadata \
 
 # ED env vars set
 kubectl -n cviche-dev exec $POD -- env | grep ^ED_LDAP_ | sort
-# -> ED_LDAP_BIND_DN=cn=svc-cviche,…
+# -> ED_LDAP_BIND_DN=cn=reciter,ou=binds,dc=weill,dc=cornell,dc=edu
 # -> ED_LDAP_BIND_PASSWORD=…     (don't echo)
 # -> ED_LDAP_URL=ldaps://ed.weill.cornell.edu:636
 
