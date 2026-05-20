@@ -56,6 +56,7 @@ COPY config.yaml ./config.yaml
 # demand; pre-creating them keeps startup quiet.
 RUN chmod +x ./web_interface/backend/docker-entrypoint.sh \
     && mkdir -p ./src/unified_pipeline/outputs \
+                ./src/unified_pipeline/prompt_logs \
                 ./web_interface/outputs \
                 ./web_interface/uploads \
                 ./data/sample_cvs/word \
@@ -74,6 +75,7 @@ RUN groupadd --gid ${APP_GID} cviche \
                 cviche \
     && chown -R cviche:cviche \
         /app/src/unified_pipeline/outputs \
+        /app/src/unified_pipeline/prompt_logs \
         /app/web_interface/outputs \
         /app/web_interface/uploads \
         /app/data/sample_cvs/word \
