@@ -1,0 +1,52 @@
+# .dockerignore -- applies to image builds whose context is the repo root
+# (currently the backend image: web_interface/backend/Dockerfile).
+#
+# NOTE: a pattern without "**/" only matches at the repo root. "*.md" below
+# therefore excludes README.md / CHANGELOG.md but NOT the nested
+# web_interface/backend/consent_text.md, which the app loads at startup.
+
+# Version control & local tooling
+.git
+.gitignore
+.claude
+.playwright-mcp
+.pytest_cache
+.superpowers
+.temp_analysis
+
+# Python bytecode
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# Top-level docs & planning artifacts (not needed at runtime)
+*.md
+docs
+.planning
+
+# The frontend ships as its own image; archived code is dead weight
+web_interface/frontend
+archive
+
+# Bulk sample CVs -- the app stages uploads at runtime, none are baked in
+data/sample_cvs
+data/test_cvs
+
+# Dev databases
+**/*.db
+**/*.sqlite3
+
+# Runtime-generated directories
+src/unified_pipeline/outputs
+web_interface/outputs
+web_interface/uploads
+web_interface/backend/prompt_logs
+web_interface/backend/prompt_logs_debug
+
+# Tests
+tests
+web_interface/backend/tests
+
+# Environment files / secrets
+**/.env
+**/.env.*

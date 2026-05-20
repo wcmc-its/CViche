@@ -1,8 +1,10 @@
 #!/bin/bash
 set -e
 
+# alembic.ini, the alembic/ tree and the `app` package all live here.
+cd /app/web_interface/backend
+
 echo "==> Running Alembic migrations..."
-cd /app
 alembic upgrade head
 echo "==> Migrations complete."
 

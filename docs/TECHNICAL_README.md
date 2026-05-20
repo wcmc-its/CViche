@@ -1097,19 +1097,36 @@ The web interface visualizes 9 processing steps:
 
 ### Database Schema
 
-The database (SQLite in development, MariaDB in production) tracks:
+The database (SQLite in development, MariaDB in production) is the operational store for the CV pipeline — it captures who ran what, what each step did, what it cost, how the output measured up, and how reviewers rated it. Defined in `web_interface/backend/app/models.py`.
 
-| Table | Purpose |
-|-------|---------|
-| `users` | User accounts, roles, per-user rate limit overrides |
-| `runs` | Pipeline run metadata (status, timestamps, costs, user) |
-| `steps` | Individual step execution (status, duration, outputs) |
-| `logs` | Execution logs per step |
-| `llm_usage` | LLM API usage and token costs |
-| `consent` | Audit trail for consent acceptance |
-| `feedback` | Post-run feedback (15+ fields) |
-| `system_config` | Key-value system settings |
-| `run_metrics` | Aggregated performance metrics |
+**Identity & auth**
+
+| Table | Captures |
+|-------|----------|
+| `users` | Accounts: email, display name, role (user/admin), status, daily/monthly run caps, default submission type, auth method (simple/SAML), consent version + date, created_at, last_active_at |
+| `consent` | Audit trail of consent acceptances: user, consent version, SHA-256 hash of consent text, IP, user agent, timestamp |
+
+**Pipeline execution**
+
+| Table | Captures |
+|-------|----------|
+| `runs` | One row per pipeline job: short id (e.g. `A1B2C3`), filename, file_type (docx/pdf), status (running/complete/failed/paused), started/completed timestamps, total cost and token totals (input/output), owning user, submission type, display toggles (track-changes, pipeline comments), error message |
+| `steps` | Per-step execution within a run: step_number (1–12), stage_id (`1a`, `3b`, `4.5`, `5c`…), status, timing, duration, cost, input/output file paths, error type (llm_timeout, token_limit, parse_error, invalid_response, api_error, file_error, unknown) |
+| `logs` | Pipeline log messages: run, step, timestamp, level (INFO/WARNING/ERROR), message text |
+| `llm_usage` | Every LLM call: run, step, model and model_version, provider (openai/bedrock), prompt/completion/total tokens, cost, latency_ms, temperature, finish_reason (stop/length/content_filter), retry_count, SHA-256 hash of prompt template |
+
+**Outputs & quality**
+
+| Table | Captures |
+|-------|----------|
+| `run_metrics` | Aggregate per run: word/char counts, publication count, sections populated (out of 71), detected language, computed_at |
+| `feedback` | Post-run survey (one per user per run): reviewer role, ratings for overall accuracy (1–10), completeness (1–10), usefulness (1–5), manual conversion effort, correction effort, enrichment quality (1–5), summary quality (1–5), issue checkboxes (missing content, split/merged, wrong section, inaccurate, AI enrichment, formatting), JSON array of issue locations, free-text biggest issue, likelihood-to-recommend (1–5) |
+
+**Configuration**
+
+| Table | Captures |
+|-------|----------|
+| `system_config` | Key-value JSON store for system settings (rate limit defaults, feature flags, etc.) with `updated_by` user reference |
 
 ### Frontend Dependencies
 
