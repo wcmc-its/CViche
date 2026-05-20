@@ -642,8 +642,12 @@ class PipelineOrchestrator:
                 cost = stage45_data.get('total_cost', 0)
                 input_tokens = stage45_data.get('prompt_tokens', 0)
                 output_tokens = stage45_data.get('completion_tokens', 0)
+                cache_read_tokens = stage45_data.get('cache_read_tokens', 0)
+                cache_write_tokens = stage45_data.get('cache_write_tokens', 0)
                 if cost > 0:
-                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens)
+                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
+                                           cache_read_tokens_delta=cache_read_tokens,
+                                           cache_write_tokens_delta=cache_write_tokens)
 
             elif stage_id == '5':
                 # Stage 5: PubMed Enrichment
@@ -711,8 +715,12 @@ class PipelineOrchestrator:
                 cost = stage5c_meta.get('total_cost', 0)
                 input_tokens = stage5c_meta.get('prompt_tokens', 0)
                 output_tokens = stage5c_meta.get('completion_tokens', 0)
+                cache_read_tokens = stage5c_meta.get('cache_read_tokens', 0)
+                cache_write_tokens = stage5c_meta.get('cache_write_tokens', 0)
                 if cost > 0:
-                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens)
+                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
+                                           cache_read_tokens_delta=cache_read_tokens,
+                                           cache_write_tokens_delta=cache_write_tokens)
 
                 await self.log(step_number, "Teaching entries formatted")
 
@@ -748,8 +756,12 @@ class PipelineOrchestrator:
                 cost = stage5d_meta.get('total_cost', 0)
                 input_tokens = stage5d_meta.get('prompt_tokens', 0)
                 output_tokens = stage5d_meta.get('completion_tokens', 0)
+                cache_read_tokens = stage5d_meta.get('cache_read_tokens', 0)
+                cache_write_tokens = stage5d_meta.get('cache_write_tokens', 0)
                 if cost > 0:
-                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens)
+                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
+                                           cache_read_tokens_delta=cache_read_tokens,
+                                           cache_write_tokens_delta=cache_write_tokens)
 
                 await self.log(step_number, "Citations formatted")
 
