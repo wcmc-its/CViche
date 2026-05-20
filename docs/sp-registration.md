@@ -95,6 +95,7 @@ When WCM IT returns the SAML Integration Request, the following CViche config va
 | Attribute confirmation for `mail` | (no config change) | Confirms the assertion-attribute lookup in `saml_client.extract_user_attrs` will resolve `urn:oid:0.9.2342.19200300.100.1.3` |
 | (already known) Discovery URL | `auth_config.yaml` → `saml.discovery_url` | `https://login.weill.cornell.edu/...` (WCM WAYF) |
 | (already known) SP entity ID | `auth_config.yaml` → `saml.entity_id` | `https://cviche.weill.cornell.edu/shibboleth` |
+| (already known) SP base URL | `auth_config.yaml` → `saml.sp_base_url` | `https://cviche.weill.cornell.edu` — the SP's reachable hostname. ACS/SLO URLs in published metadata are built as `{sp_base_url}/api/saml/{acs,logout}`. **Must** differ from `entity_id` when the entity uses Shibboleth `/shibboleth` convention; otherwise the IdP rejects assertions on Destination mismatch. |
 | (already known) Cert dir | `auth_config.yaml` → `saml.cert_dir` | Where `sp.crt` and `sp.key` are mounted (e.g., `/app/web_interface/backend/certs`) |
 
 ### EKS deployment (current production)
@@ -136,6 +137,7 @@ CViche prod runs in the `cviche-dev` namespace on the `reciter` EKS cluster (us-
      mode: saml
    saml:
      entity_id: "https://cviche.weill.cornell.edu/shibboleth"
+     sp_base_url: "https://cviche.weill.cornell.edu"   # ACS/SLO endpoints in metadata are built from this; distinct from entity_id by design
      idp_metadata_url: "<value from WCM IT>"
      discovery_url: "https://login.weill.cornell.edu/..."  # WCM WAYF, confirm exact path with IT
      cert_dir: "/app/web_interface/backend/certs"
