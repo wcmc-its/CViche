@@ -61,6 +61,24 @@ RUN chmod +x ./web_interface/backend/docker-entrypoint.sh \
                 ./data/sample_cvs/word \
                 ./web_interface/backend/prompt_logs
 
+# Run as a non-root system user. UID/GID 1000 is the conventional first
+# non-root user and matches a k8s securityContext of
+# `runAsNonRoot: true, runAsUser: 1000`. Override at build time with
+# `--build-arg APP_UID=<uid>` if a different UID is required (e.g. to match
+# a host volume owner during local development).
+ARG APP_UID=1000
+ARG APP_GID=1000
+RUN groupadd --gid ${APP_GID} cviche \
+    && useradd  --uid ${APP_UID} --gid ${APP_GID} \
+                --home-dir /home/cviche --create-home --shell /sbin/nologin \
+                cviche \
+    && chown -R cviche:cviche \
+        /app/src/unified_pipeline/outputs \
+        /app/web_interface/outputs \
+        /app/web_interface/uploads \
+        /app/data/sample_cvs/word \
+        /app/web_interface/backend/prompt_logs
+
 # alembic and uvicorn both run from the backend directory.
 WORKDIR /app/web_interface/backend
 
@@ -69,5 +87,7 @@ EXPOSE 8000
 # Health check: hit the /health endpoint
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
+
+USER cviche
 
 ENTRYPOINT ["/app/web_interface/backend/docker-entrypoint.sh"]
