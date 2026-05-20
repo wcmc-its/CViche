@@ -283,7 +283,9 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
         usage = {
             'prompt_tokens': llm_result["prompt_tokens"],
             'completion_tokens': llm_result["completion_tokens"],
-            'total_tokens': llm_result["total_tokens"]
+            'total_tokens': llm_result["total_tokens"],
+            'cache_read_tokens': llm_result.get("cache_read_tokens", 0),
+            'cache_write_tokens': llm_result.get("cache_write_tokens", 0),
         }
 
         return result_text, usage
@@ -400,7 +402,9 @@ def run_stage_5c(input_path: str, output_path: str = None, model: str = "gpt-4o-
         'total_cost': total_cost,
         'prompt_tokens': usage.get('prompt_tokens', 0) if usage else 0,
         'completion_tokens': usage.get('completion_tokens', 0) if usage else 0,
-        'total_tokens': usage.get('total_tokens', 0) if usage else 0
+        'total_tokens': usage.get('total_tokens', 0) if usage else 0,
+        'cache_read_tokens': usage.get('cache_read_tokens', 0) if usage else 0,
+        'cache_write_tokens': usage.get('cache_write_tokens', 0) if usage else 0,
     }
 
     # Write output - full copy with K-code entries updated

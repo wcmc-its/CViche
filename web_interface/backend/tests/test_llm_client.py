@@ -200,7 +200,7 @@ def test_call_llm_kwargs_override():
 # ---------------------------------------------------------------------------
 
 def test_normalized_response():
-    """Returned dict has exactly the 9 required keys with correct values."""
+    """Returned dict has exactly the required keys with correct values."""
     from unified_pipeline.llm_client import call_llm
 
     mock_response = _make_mock_response(
@@ -220,12 +220,16 @@ def test_normalized_response():
         result = call_llm("stage_2", [{"role": "user", "content": "test"}])
 
     expected_keys = {"content", "prompt_tokens", "completion_tokens", "total_tokens",
+                     "cache_read_tokens", "cache_write_tokens",
                      "cost", "model", "provider", "finish_reason", "latency_ms"}
     assert set(result.keys()) == expected_keys
     assert result["content"] == "extracted text"
     assert result["prompt_tokens"] == 200
     assert result["completion_tokens"] == 80
     assert result["total_tokens"] == 280
+    # OpenAI path never reports cache splits.
+    assert result["cache_read_tokens"] == 0
+    assert result["cache_write_tokens"] == 0
     assert result["finish_reason"] == "stop"
     assert result["model"] == "gpt-4o-mini"
     assert result["provider"] == "openai"
@@ -269,7 +273,7 @@ def test_normalized_response_latency():
 
 
 def test_normalized_response_bedrock():
-    """Bedrock response has exactly the same 9 required keys as OpenAI."""
+    """Bedrock response has exactly the same required keys as OpenAI."""
     from unified_pipeline.llm_client import call_llm
 
     mock_response = _make_bedrock_response(
@@ -290,12 +294,16 @@ def test_normalized_response_bedrock():
         result = call_llm("stage_2", [{"role": "user", "content": "test"}])
 
     expected_keys = {"content", "prompt_tokens", "completion_tokens", "total_tokens",
+                     "cache_read_tokens", "cache_write_tokens",
                      "cost", "model", "provider", "finish_reason", "latency_ms"}
     assert set(result.keys()) == expected_keys
     assert result["content"] == "extracted text"
     assert result["prompt_tokens"] == 200
     assert result["completion_tokens"] == 80
     assert result["total_tokens"] == 280
+    # Mock response has no cacheRead/cacheWrite fields -> 0.
+    assert result["cache_read_tokens"] == 0
+    assert result["cache_write_tokens"] == 0
     assert result["finish_reason"] == "stop"
     assert result["provider"] == "bedrock"
 
