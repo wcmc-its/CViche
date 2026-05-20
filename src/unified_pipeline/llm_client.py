@@ -38,6 +38,10 @@ from openai import (
 )
 
 from unified_pipeline.config import get_stage_config, calculate_cost
+from unified_pipeline.core.prompt_logger import (
+    log_prompt_before_call,
+    log_prompt_response,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -362,6 +366,17 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
 
     start_time = time.time()
 
+    log_id = log_prompt_before_call(
+        messages=messages,
+        model=model,
+        purpose=stage,
+        temperature=temperature,
+        response_format=response_format,
+        max_tokens=max_tokens,
+        context={"provider": provider},
+        caller_file="llm_client.py",
+    )
+
     # Dispatch to provider
     if provider == "openai":
         response = _call_with_retry(
@@ -385,7 +400,7 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
             provider=provider,
         )
 
-        return {
+        result = {
             "content": content,
             "prompt_tokens": usage.prompt_tokens,
             "completion_tokens": usage.completion_tokens,
@@ -398,6 +413,13 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
             "finish_reason": finish_reason,
             "latency_ms": latency_ms,
         }
+        log_prompt_response(
+            log_id=log_id,
+            response=result,
+            purpose=stage,
+            elapsed_time=latency_ms / 1000.0,
+        )
+        return result
 
     elif provider == "bedrock":
         response = _call_with_retry(
@@ -464,7 +486,7 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
             cache_write_tokens=cache_write_tokens,
         )
 
-        return {
+        result = {
             "content": content,
             "prompt_tokens": total_input_tokens,
             "completion_tokens": output_tokens,
@@ -477,6 +499,13 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
             "finish_reason": finish_reason,
             "latency_ms": latency_ms,
         }
+        log_prompt_response(
+            log_id=log_id,
+            response=result,
+            purpose=stage,
+            elapsed_time=latency_ms / 1000.0,
+        )
+        return result
 
     else:
         raise ValueError(
