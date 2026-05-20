@@ -840,9 +840,11 @@ def test_pipeline_e2e_openai():
     try:
         from unified_pipeline.core.cv_pipeline import CVPipeline
 
-        pipeline = CVPipeline(sample_cv)
-        # Override output directory to temp
-        pipeline.output_dir = temp_dir
+        # Pass output_dir via the constructor so it is normalised to Path()
+        # alongside the stage_dirs map. Monkey-patching pipeline.output_dir
+        # after construction skips that normalisation (and CVPipeline uses
+        # `self.output_dir / "subdir"` at several call sites).
+        pipeline = CVPipeline(sample_cv, output_dir=temp_dir)
 
         result = pipeline.run()
 
