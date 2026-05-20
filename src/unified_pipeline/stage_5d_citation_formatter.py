@@ -226,6 +226,7 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
             'total_tokens': llm_result["total_tokens"],
             'cache_read_tokens': llm_result.get("cache_read_tokens", 0),
             'cache_write_tokens': llm_result.get("cache_write_tokens", 0),
+            'cost': llm_result.get("cost", 0.0),
         }
 
         return result_text, usage
@@ -313,17 +314,16 @@ def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1
         # Call LLM
         llm_output, usage = call_llm_formatter(raw_content, verbose=verbose)
 
-        # Accumulate costs
+        # Accumulate tokens + the per-batch cost from llm_result['cost'],
+        # which calculate_cost() prices per-provider and per-model and
+        # accounts for Bedrock prompt-cache discounts. Don't recompute
+        # cost here from a hardcoded $/M-token figure.
         if usage:
-            prompt_tokens = usage.get('prompt_tokens', 0)
-            completion_tokens = usage.get('completion_tokens', 0)
-            total_prompt_tokens += prompt_tokens
-            total_completion_tokens += completion_tokens
+            total_prompt_tokens += usage.get('prompt_tokens', 0)
+            total_completion_tokens += usage.get('completion_tokens', 0)
             total_cache_read_tokens += usage.get('cache_read_tokens', 0)
             total_cache_write_tokens += usage.get('cache_write_tokens', 0)
-            # gpt-5.1 pricing: $2.00/1M input, $8.00/1M output (estimate)
-            batch_cost = (prompt_tokens * 2.00 / 1_000_000) + (completion_tokens * 8.00 / 1_000_000)
-            total_cost += batch_cost
+            total_cost += usage.get('cost', 0.0)
 
         if llm_output:
             # Parse LLM output
