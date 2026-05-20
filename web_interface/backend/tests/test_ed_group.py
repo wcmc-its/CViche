@@ -25,8 +25,8 @@ LDAP_PARAMS = {
     "bind_password": "test-password",
     "search_base": "dc=weill,dc=cornell,dc=edu",
 }
-ACCESS_GROUP = "cn=App-CViche-Users,ou=Groups,dc=weill,dc=cornell,dc=edu"
-ADMIN_GROUP = "cn=App-CViche-Admins,ou=Groups,dc=weill,dc=cornell,dc=edu"
+ACCESS_GROUP = "cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
+ADMIN_GROUP = "cn=ITS:Library:CViche/admin-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
 
 
 @pytest.fixture(autouse=True)
@@ -175,7 +175,7 @@ class TestDnComparison:
         # memberOf returns mixed-case group DN
         mock_entry.__getitem__ = lambda self, key: {
             "memberOf": [
-                "CN=App-CViche-Users,OU=Groups,DC=weill,DC=cornell,DC=edu"
+                "CN=ITS:Library:CViche/user-role,OU=application security,OU=groups,DC=weill,DC=cornell,DC=edu"
             ],
         }.get(key, MagicMock())
 
@@ -195,7 +195,7 @@ class TestDnComparison:
 
         result = _ldap_check_membership(
             email="testuser@med.cornell.edu",
-            group_dn="cn=App-CViche-Users,ou=Groups,dc=weill,dc=cornell,dc=edu",
+            group_dn="cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu",
             ldap_url="ldaps://ed.weill.cornell.edu:636",
             bind_dn="cn=svc,ou=SA,dc=weill,dc=cornell,dc=edu",
             bind_password="pass",
