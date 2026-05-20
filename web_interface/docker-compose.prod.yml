@@ -19,6 +19,11 @@ services:
       CVICHE_S3_BUCKET: "${CVICHE_S3_BUCKET}"
       CVICHE_S3_PREFIX: "${CVICHE_S3_PREFIX:-cviche}"
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      # Don't run Alembic migrations on every replica boot (issue #5).
+      # Run migrations as a one-shot before `up`:
+      #   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+      #       run --rm backend migrate
+      CVICHE_RUN_MIGRATIONS: "0"
     volumes: []  # No hot-reload mounts in production
     # Single uvicorn worker: the pipeline-progress WebSocket uses an
     # in-process event emitter, so with multiple workers a client can miss

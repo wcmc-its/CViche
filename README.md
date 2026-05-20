@@ -129,6 +129,27 @@ docker compose up --build
 
 Set the `OPENAI_API_KEY` environment variable before running `docker compose` (or configure AWS credentials for Bedrock -- see [Configuration](#configuration)).
 
+### Production Deployment
+
+Production runs the backend image with `CVICHE_RUN_MIGRATIONS=0` so that N replicas don't race `alembic upgrade head` against the shared database. Run migrations as a one-shot step before bringing the service up.
+
+**docker compose (single-host prod):**
+
+```bash
+# 1. Run migrations once. Exits 0 on success, non-zero on failure.
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+    run --rm backend migrate
+
+# 2. Bring up the service (backend skips migrations because CVICHE_RUN_MIGRATIONS=0).
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+```
+
+**k8s:** run the same image with the command `["migrate"]` as a `Job` (or an `initContainer` that shares the main container's image). Set `CVICHE_RUN_MIGRATIONS=0` on the main `Deployment` so the application pods skip migrations entirely.
+
+**ECS:** run a one-shot `RunTask` with the backend image and `command: ["migrate"]` as a pre-deploy step in your pipeline; the service task definition sets `CVICHE_RUN_MIGRATIONS=0`.
+
+The entrypoint accepts the literal argument `migrate` (run migrations and exit) or any other argument (passed to `uvicorn`). With no argument it starts uvicorn directly.
+
 ### Local Development (without Docker)
 
 **Backend:**
