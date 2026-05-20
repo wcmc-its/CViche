@@ -96,7 +96,8 @@ npm run dev
 # Open in browser
 http://localhost:8000        # API info
 http://localhost:8000/docs   # Interactive docs
-http://localhost:8000/health # Health check
+http://localhost:8000/livez  # Liveness probe
+http://localhost:8000/readyz # Readiness probe (DB + S3 reachability)
 ```
 
 ### Check Database

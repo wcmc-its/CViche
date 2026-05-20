@@ -66,8 +66,10 @@ WORKDIR /app/web_interface/backend
 
 EXPOSE 8000
 
-# Health check: hit the /health endpoint
+# Container health check uses the liveness probe (process up; no DB/S3 call).
+# /readyz is the right probe for an LB/orchestrator -- it checks downstream
+# dependencies and should de-list, not restart, on failure.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:8000/livez || exit 1
 
 ENTRYPOINT ["/app/web_interface/backend/docker-entrypoint.sh"]
