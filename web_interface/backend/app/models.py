@@ -79,16 +79,23 @@ class Run(Base):
     """Pipeline run tracking."""
     __tablename__ = "runs"
 
-    id = Column(String, primary_key=True)  # e.g., "A1B2C3"
-    filename = Column(String, nullable=False)
-    file_type = Column(String, nullable=False)  # "docx" or "pdf"
-    status = Column(String, nullable=False)  # "running", "complete", "failed", "paused"
+    id = Column(String(10), primary_key=True)  # e.g., "A1B2C3"
+    filename = Column(String(255), nullable=False)
+    file_type = Column(String(20), nullable=False)  # "docx" or "pdf"
+    status = Column(String(20), nullable=False)  # "running", "complete", "failed", "paused"
     started_at = Column(DateTime, nullable=False, server_default=func.now())
     completed_at = Column(DateTime)
     total_cost = Column(Float, default=0.0)
     total_tokens = Column(Integer, default=0)
     input_tokens = Column(Integer, default=0)
     output_tokens = Column(Integer, default=0)
+    # Bedrock prompt-caching split: cache_read = input tokens served from
+    # cache (0.1x input rate); cache_write = input tokens written to cache
+    # (1.25x input rate). Both are subsets of input_tokens, not additions to
+    # it -- input_tokens already includes the cached portion, so don't sum
+    # these into totals.
+    cache_read_tokens = Column(Integer, default=0)
+    cache_write_tokens = Column(Integer, default=0)
     error_message = Column(Text)
     created_at = Column(DateTime, server_default=func.now())
     # Auth-related fields
@@ -103,16 +110,16 @@ class Step(Base):
     __tablename__ = "steps"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String, ForeignKey("runs.id"), nullable=False)
+    run_id = Column(String(10), ForeignKey("runs.id"), nullable=False)
     step_number = Column(Integer, nullable=False)  # 1-12
-    stage_id = Column(String, nullable=True)  # e.g., '1a', '1b', '2', '3a', '3b', '4', '4.5', '5', '5b', '5c', '5d', '6'
-    step_name = Column(String, nullable=False)
-    status = Column(String, nullable=False)  # "pending", "running", "complete", "error"
+    stage_id = Column(String(10), nullable=True)  # e.g., '1a', '1b', '2', '3a', '3b', '4', '4.5', '5', '5b', '5c', '5d', '6'
+    step_name = Column(String(255), nullable=False)
+    status = Column(String(20), nullable=False)  # "pending", "running", "complete", "error"
     started_at = Column(DateTime)
     completed_at = Column(DateTime)
     duration_seconds = Column(Integer)
     cost = Column(Float, default=0.0)
-    input_file = Column(String)
+    input_file = Column(String(512))
     output_files = Column(Text)  # JSON array as string
     error_message = Column(Text)
     error_type = Column(String(50), nullable=True)  # llm_timeout, token_limit, parse_error, invalid_response, api_error, file_error, unknown
@@ -123,10 +130,10 @@ class Log(Base):
     __tablename__ = "logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String, ForeignKey("runs.id"), nullable=False)
+    run_id = Column(String(10), ForeignKey("runs.id"), nullable=False)
     step_number = Column(Integer)
     timestamp = Column(DateTime, server_default=func.now())
-    level = Column(String, default="INFO")  # INFO, WARNING, ERROR
+    level = Column(String(20), default="INFO")  # INFO, WARNING, ERROR
     message = Column(Text, nullable=False)
 
 
@@ -135,9 +142,9 @@ class LLMUsage(Base):
     __tablename__ = "llm_usage"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String, ForeignKey("runs.id"), nullable=False)
+    run_id = Column(String(10), ForeignKey("runs.id"), nullable=False)
     step_number = Column(Integer, nullable=False)
-    model = Column(String, nullable=False)  # "gpt-4o-mini", etc.
+    model = Column(String(100), nullable=False)  # "gpt-4o-mini", etc.
     prompt_tokens = Column(Integer, nullable=False)
     completion_tokens = Column(Integer, nullable=False)
     total_tokens = Column(Integer, nullable=False)

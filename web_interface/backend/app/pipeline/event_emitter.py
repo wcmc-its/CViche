@@ -78,8 +78,16 @@ class EventEmitter:
                                 tokens_delta: int = 0, total_tokens: int = 0,
                                 input_tokens_delta: int = 0, output_tokens_delta: int = 0,
                                 input_tokens_total: int = 0, output_tokens_total: int = 0,
+                                cache_read_tokens_delta: int = 0, cache_write_tokens_delta: int = 0,
+                                cache_read_tokens_total: int = 0, cache_write_tokens_total: int = 0,
                                 provider: str = "openai"):
-        """Emit real-time cost updates as LLM calls complete."""
+        """Emit real-time cost updates as LLM calls complete.
+
+        Cache token fields carry the Bedrock prompt-caching split (input
+        tokens served from / written to cache). They are subsets of
+        input_tokens, not additions -- the frontend can divide
+        cache_read / input to show a cache hit rate.
+        """
         await self.emit(run_id, {
             "event": "COST_UPDATE",
             "step": step_number,
@@ -91,6 +99,10 @@ class EventEmitter:
             "output_tokens_delta": output_tokens_delta,
             "input_tokens": input_tokens_total,
             "output_tokens": output_tokens_total,
+            "cache_read_tokens_delta": cache_read_tokens_delta,
+            "cache_write_tokens_delta": cache_write_tokens_delta,
+            "cache_read_tokens": cache_read_tokens_total,
+            "cache_write_tokens": cache_write_tokens_total,
             "provider": provider,
         })
 

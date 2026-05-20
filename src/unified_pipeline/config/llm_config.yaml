@@ -1,20 +1,38 @@
-# LLM provider and model configuration
-# All values can be overridden by CVICHE_* environment variables
-# If this file is absent, defaults to openai / gpt-4o-mini
+# LLM provider and model configuration for the CV parsing pipeline.
+#
+# Resolution order (later wins): hardcoded defaults -> this file's `default`
+# block -> per-stage `stages:` overrides -> CVICHE_LLM_PROVIDER / CVICHE_LLM_MODEL
+# environment variables. Env vars override the `default` block only -- never an
+# explicit per-stage override. If this file is absent, the pipeline falls back
+# to openai / gpt-4o-mini.
+#
+# See docs/LLM_MODELS.md for the model strategy, the Bedrock model-access
+# steps, and how to verify the inference-profile ID for your region.
 
 default:
-  provider: openai
-  model: gpt-4o-mini
+  provider: bedrock
+  # Claude Sonnet 4.6 via the US cross-region inference profile. Every live
+  # pipeline stage inherits this. Requires Bedrock model access to be enabled
+  # for this model in the AWS account/region the pipeline runs in.
+  model: us.anthropic.claude-sonnet-4-6
   temperature: 0
   retry_count: 3
+  # Bedrock prompt caching. When true, _call_bedrock appends a cachePoint
+  # checkpoint after the system block so the (large, stable) system prompt
+  # is read from cache on subsequent calls within the 5-minute TTL. Cache
+  # reads are billed at 0.1x input, cache writes at 1.25x input -- the
+  # break-even is one reuse, so this is a near-pure win for stages that
+  # re-send the same prompt prefix (notably stage_4). Bedrock charges the
+  # same cache prices as Anthropic's direct API. See docs/LLM_MODELS.md.
+  enable_prompt_caching: true
 
-stages:
-  stage_4:
-    provider: openai
-    model: gpt-4o
-  stage_4_5:
-    model: gpt-4o
-  # stage_3b:          # Example: uncomment to use Bedrock for entry classification
-  #   provider: bedrock
-  #   model: claude-3-haiku
-  #   temperature: 0.2
+# No per-stage overrides: the whole pipeline runs on Claude Sonnet 4.6.
+#
+# To trade quality for cost on the terminal, non-cascading stages, drop them
+# to the cheaper Claude Haiku 4.5 by uncommenting:
+#
+# stages:
+#   stage_5b: {model: us.anthropic.claude-haiku-4-5}   # institution lookup
+#   stage_5c: {model: us.anthropic.claude-haiku-4-5}   # teaching reformat
+#   stage_5d: {model: us.anthropic.claude-haiku-4-5}   # citation reformat
+#   stage_6:  {model: us.anthropic.claude-haiku-4-5}   # geo-scope classify
