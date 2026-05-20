@@ -23,7 +23,31 @@ services:
       # collector / CloudWatch can index by request_id, level, logger, etc.
       CVICHE_LOG_FORMAT: "json"
       CVICHE_LOG_LEVEL: "${CVICHE_LOG_LEVEL:-INFO}"
-    volumes: []  # No hot-reload mounts in production
+      # Don't run Alembic migrations on every replica boot (issue #5).
+      # Run migrations as a one-shot before `up`:
+      #   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+      #       run --rm backend migrate
+      CVICHE_RUN_MIGRATIONS: "0"
+    # Drop the dev-only bind mounts (hot-reload of ./backend/app, etc.)
+    # and replace with the single production mount: an environment-specific
+    # auth_config.yaml. Without !override Compose appends to the base
+    # list, leaking the dev mounts into prod.
+    #
+    # auth_config.yaml is gitignored (it carries allowed users, SAML, and
+    # ED group settings) and is NOT baked into the image. config_loader.py
+    # falls back to auth_config.yaml.example if the file is absent, which
+    # puts the app in a locked-down boot state -- real production must
+    # mount a real config. Point CVICHE_AUTH_CONFIG_HOST_PATH at the host
+    # path of the provisioned file before running compose up:
+    #
+    #   export CVICHE_AUTH_CONFIG_HOST_PATH=/etc/cviche/auth_config.yaml
+    #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+    #
+    # On k8s, ignore this mount and provision auth_config.yaml as a Secret
+    # or ConfigMap mounted at the same in-container path
+    # (`/app/web_interface/backend/auth_config.yaml`).
+    volumes: !override
+      - "${CVICHE_AUTH_CONFIG_HOST_PATH:-./backend/auth_config.yaml}:/app/web_interface/backend/auth_config.yaml:ro"
     # Single uvicorn worker: the pipeline-progress WebSocket uses an
     # in-process event emitter, so with multiple workers a client can miss
     # live updates (see issue #4). Scale out with replicas, not workers.
@@ -46,7 +70,11 @@ services:
     restart: always
     ports:
       - "80:80"
-    volumes: []  # No hot-reload mounts in production
+    # Drop the dev-only hot-reload mounts (./frontend/src etc.). Without
+    # !override Compose appends to the base list and the source-tree
+    # bind mounts leak into prod -- benign today because nginx serves
+    # /usr/share/nginx/html and not /app/src, but still wrong.
+    volumes: !override []
     command: ["nginx", "-g", "daemon off;"]
     deploy:
       resources:
