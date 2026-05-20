@@ -19,6 +19,11 @@ services:
       CVICHE_S3_BUCKET: "${CVICHE_S3_BUCKET}"
       CVICHE_S3_PREFIX: "${CVICHE_S3_PREFIX:-cviche}"
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      # Don't run Alembic migrations on every replica boot (issue #5).
+      # Run migrations as a one-shot before `up`:
+      #   docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+      #       run --rm backend migrate
+      CVICHE_RUN_MIGRATIONS: "0"
     # Drop the dev-only bind mounts (hot-reload of ./backend/app, etc.)
     # and replace with the single production mount: an environment-specific
     # auth_config.yaml. Without !override Compose appends to the base
