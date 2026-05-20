@@ -13,9 +13,12 @@ from app.ed_group_lookup import (
     clear_cache,
     EdUnavailableError,
     _ldap_check_membership,
+    _parse_memberurl,
+    _user_matches_memberurl,
     _group_cache,
     _stale_cache,
 )
+from ldap3 import BASE, LEVEL, SUBTREE
 
 
 # Common test parameters for LDAP calls
@@ -200,6 +203,231 @@ class TestDnComparison:
             bind_dn="cn=svc,ou=SA,dc=weill,dc=cornell,dc=edu",
             bind_password="pass",
             search_base="dc=weill,dc=cornell,dc=edu",
+        )
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# TestGroupOfURLs -- WCM's house-style group schema (memberURL, not member)
+# ---------------------------------------------------------------------------
+
+def _make_entry(dn: str, **attrs):
+    """Build a mock ldap3.Entry whose entry_dn returns dn and whose
+    __getitem__ returns the supplied attribute lists (missing -> [])."""
+    entry = MagicMock()
+    entry.entry_dn = dn
+    entry.__getitem__ = lambda self, key, _a=attrs: _a.get(key, [])
+    return entry
+
+
+_GOU_GROUP_DN = "cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
+_GOU_USER_DN = "uid=paa2013,ou=People,dc=weill,dc=cornell,dc=edu"
+_GOU_MEMBERURL_PAA = "ldap:///uid=paa2013,ou=people,dc=weill,dc=cornell,dc=edu??base?(&(weillCornellEduPersonTypeCode=academic-faculty))"
+_GOU_MEMBERURL_DRW = "ldap:///uid=drw2004,ou=people,dc=weill,dc=cornell,dc=edu??base?(&(weillCornellEduPersonTypeCode=academic-faculty))"
+
+
+class TestParseMemberURL:
+    """Direct tests for the RFC 4516 LDAP URL parser."""
+
+    def test_parses_wcm_hybrid_url(self):
+        """WCM-style URL: base DN + ?base? scope + stay-active filter."""
+        result = _parse_memberurl(_GOU_MEMBERURL_PAA)
+        assert result is not None
+        base_dn, scope, ldap_filter = result
+        assert base_dn == "uid=paa2013,ou=people,dc=weill,dc=cornell,dc=edu"
+        assert scope == BASE
+        assert ldap_filter == "(&(weillCornellEduPersonTypeCode=academic-faculty))"
+
+    def test_defaults_filter_to_objectclass_star(self):
+        """Empty filter component falls back to (objectClass=*) per RFC 4516."""
+        result = _parse_memberurl("ldap:///uid=x,ou=people,dc=example,dc=org??sub?")
+        assert result is not None
+        _, scope, ldap_filter = result
+        assert scope == SUBTREE
+        assert ldap_filter == "(objectClass=*)"
+
+    def test_returns_none_for_non_ldap_url(self):
+        """https:// or arbitrary strings return None, not a crash."""
+        assert _parse_memberurl("https://example.com/oops") is None
+        assert _parse_memberurl("") is None
+        assert _parse_memberurl("garbage") is None
+
+    def test_handles_url_encoded_components(self):
+        """LDAP URL bodies can be percent-encoded; decode them."""
+        # 'cn=Test User' percent-encoded to demonstrate unquote
+        result = _parse_memberurl("ldap:///cn=Test%20User,ou=people,dc=x,dc=y??base?")
+        assert result is not None
+        base_dn, _, _ = result
+        assert base_dn == "cn=Test User,ou=people,dc=x,dc=y"
+
+
+class TestUserMatchesMemberURL:
+    """Direct tests for the memberURL evaluator."""
+
+    def test_short_circuits_when_base_dn_mismatch(self):
+        """For ?base? scope, a DN mismatch should not trigger an LDAP roundtrip."""
+        mock_conn = MagicMock()
+        # Different user than the memberURL points at
+        result = _user_matches_memberurl(
+            mock_conn, _GOU_MEMBERURL_PAA,
+            user_dn="uid=someoneelse,ou=People,dc=weill,dc=cornell,dc=edu",
+        )
+        assert result is False
+        mock_conn.search.assert_not_called()  # short-circuited before LDAP
+
+    def test_returns_true_when_user_matches_base_and_filter(self):
+        """Base DN matches and the stay-active filter is satisfied -> True."""
+        mock_conn = MagicMock()
+        # Filter-eval search returns the user entry
+        mock_conn.entries = [_make_entry(_GOU_USER_DN)]
+        result = _user_matches_memberurl(mock_conn, _GOU_MEMBERURL_PAA, _GOU_USER_DN)
+        assert result is True
+        mock_conn.search.assert_called_once()
+
+    def test_returns_false_when_filter_excludes_user(self):
+        """Base DN matches BUT the stay-active filter doesn't -- e.g. the user
+        is no longer academic-faculty. ldap3 returns zero entries; we return False."""
+        mock_conn = MagicMock()
+        mock_conn.entries = []  # filter excluded the user
+        result = _user_matches_memberurl(mock_conn, _GOU_MEMBERURL_PAA, _GOU_USER_DN)
+        assert result is False
+        mock_conn.search.assert_called_once()
+
+    def test_malformed_url_returns_false(self):
+        """Garbage URL is not a fatal error -- skip and continue evaluating others."""
+        mock_conn = MagicMock()
+        assert _user_matches_memberurl(mock_conn, "not-a-url", _GOU_USER_DN) is False
+        mock_conn.search.assert_not_called()
+
+
+class TestGroupOfURLsMembership:
+    """End-to-end _ldap_check_membership tests for WCM's groupOfURLs schema.
+
+    Regression coverage for BUG D: until 2026-05-20 the code's fallback used
+    (&(objectClass=groupOfNames)(cn=*)) and only read the `member` attribute.
+    WCM ED groups are groupOfURLs with memberURL, so every membership check
+    returned False -> would have locked every user out post-SAML cutover.
+    """
+
+    @patch("app.ed_group_lookup.Connection")
+    @patch("app.ed_group_lookup.Server")
+    def test_user_in_groupofurls_returns_true(self, _mock_server_cls, mock_conn_cls):
+        """The WCM hybrid pattern: group has memberURL for the user; filter matches."""
+        mock_conn = MagicMock()
+        mock_conn_cls.return_value = mock_conn
+
+        # search_side_effect drives three calls:
+        #  1. mail lookup -> user entry (no memberOf)
+        #  2. group lookup -> group entry with memberURL list
+        #  3. memberURL filter eval -> the user entry (passes filter)
+        def search_side_effect(search_base, search_filter, search_scope, attributes):
+            if "(mail=" in search_filter:
+                # User lookup
+                mock_conn.entries = [_make_entry(_GOU_USER_DN)]
+            elif "groupOfNames" in search_filter or "groupOfURLs" in search_filter:
+                # Group lookup
+                mock_conn.entries = [_make_entry(
+                    _GOU_GROUP_DN,
+                    memberURL=[_GOU_MEMBERURL_DRW, _GOU_MEMBERURL_PAA],
+                )]
+            elif "weillCornellEduPersonTypeCode" in search_filter:
+                # memberURL filter eval -- user passes the academic-faculty check
+                mock_conn.entries = [_make_entry(_GOU_USER_DN)]
+            else:
+                mock_conn.entries = []
+
+        mock_conn.search.side_effect = search_side_effect
+
+        result = _ldap_check_membership(
+            email="paa2013@med.cornell.edu",
+            group_dn=_GOU_GROUP_DN,
+            **LDAP_PARAMS,
+        )
+        assert result is True
+
+    @patch("app.ed_group_lookup.Connection")
+    @patch("app.ed_group_lookup.Server")
+    def test_user_listed_but_filter_excludes_returns_false(self, _mock_server_cls, mock_conn_cls):
+        """User's memberURL is in the group but they no longer satisfy the filter
+        (e.g., personTypeCode changed from academic-faculty). Must deny access."""
+        mock_conn = MagicMock()
+        mock_conn_cls.return_value = mock_conn
+
+        def search_side_effect(search_base, search_filter, search_scope, attributes):
+            if "(mail=" in search_filter:
+                mock_conn.entries = [_make_entry(_GOU_USER_DN)]
+            elif "groupOfNames" in search_filter or "groupOfURLs" in search_filter:
+                mock_conn.entries = [_make_entry(
+                    _GOU_GROUP_DN,
+                    memberURL=[_GOU_MEMBERURL_PAA],
+                )]
+            elif "weillCornellEduPersonTypeCode" in search_filter:
+                mock_conn.entries = []   # filter excluded user
+            else:
+                mock_conn.entries = []
+
+        mock_conn.search.side_effect = search_side_effect
+
+        result = _ldap_check_membership(
+            email="paa2013@med.cornell.edu",
+            group_dn=_GOU_GROUP_DN,
+            **LDAP_PARAMS,
+        )
+        assert result is False
+
+    @patch("app.ed_group_lookup.Connection")
+    @patch("app.ed_group_lookup.Server")
+    def test_user_not_in_any_memberurl_returns_false(self, _mock_server_cls, mock_conn_cls):
+        """Group has memberURLs but none point at the user -- short-circuits."""
+        mock_conn = MagicMock()
+        mock_conn_cls.return_value = mock_conn
+        other_user_dn = "uid=someoneelse,ou=People,dc=weill,dc=cornell,dc=edu"
+
+        def search_side_effect(search_base, search_filter, search_scope, attributes):
+            if "(mail=" in search_filter:
+                mock_conn.entries = [_make_entry(other_user_dn)]
+            elif "groupOfNames" in search_filter or "groupOfURLs" in search_filter:
+                mock_conn.entries = [_make_entry(
+                    _GOU_GROUP_DN,
+                    memberURL=[_GOU_MEMBERURL_PAA, _GOU_MEMBERURL_DRW],
+                )]
+            else:
+                mock_conn.entries = []
+
+        mock_conn.search.side_effect = search_side_effect
+
+        result = _ldap_check_membership(
+            email="outsider@med.cornell.edu",
+            group_dn=_GOU_GROUP_DN,
+            **LDAP_PARAMS,
+        )
+        assert result is False
+
+    @patch("app.ed_group_lookup.Connection")
+    @patch("app.ed_group_lookup.Server")
+    def test_groupofnames_member_attribute_still_works(self, _mock_server_cls, mock_conn_cls):
+        """Backward compat: a real groupOfNames group with a `member` attribute
+        is still recognized (the fallback now handles both schemas)."""
+        mock_conn = MagicMock()
+        mock_conn_cls.return_value = mock_conn
+
+        def search_side_effect(search_base, search_filter, search_scope, attributes):
+            if "(mail=" in search_filter:
+                mock_conn.entries = [_make_entry(_GOU_USER_DN)]
+            elif "groupOfNames" in search_filter or "groupOfURLs" in search_filter:
+                mock_conn.entries = [_make_entry(
+                    _GOU_GROUP_DN,
+                    member=[_GOU_USER_DN, "uid=otherperson,ou=People,dc=weill,dc=cornell,dc=edu"],
+                )]
+            else:
+                mock_conn.entries = []
+
+        mock_conn.search.side_effect = search_side_effect
+
+        result = _ldap_check_membership(
+            email="paa2013@med.cornell.edu",
+            group_dn=_GOU_GROUP_DN,
+            **LDAP_PARAMS,
         )
         assert result is True
 
