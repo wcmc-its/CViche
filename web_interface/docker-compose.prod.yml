@@ -42,7 +42,11 @@ services:
     restart: always
     ports:
       - "80:80"
-    volumes: []  # No hot-reload mounts in production
+    # Drop the dev-only hot-reload mounts (./frontend/src etc.). Without
+    # !override Compose appends to the base list and the source-tree
+    # bind mounts leak into prod -- benign today because nginx serves
+    # /usr/share/nginx/html and not /app/src, but still wrong.
+    volumes: !override []
     command: ["nginx", "-g", "daemon off;"]
     deploy:
       resources:
