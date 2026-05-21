@@ -46,19 +46,31 @@ phases:
        - echo "Generating native Kustomize Auth environment configuration for ${ENV_NAME}..."
       
        # Overwrite the auth.env file inside the target overlay instantly
-       - echo "Writing flat application configuration parameters into auth.env template..."
-       - echo "AUTH_MODE=saml" > k8s/overlays/${ENV_NAME}/auth.env
-       - echo "ENTITY_ID=${AUTH_ENTITY_ID}" >> k8s/overlays/${ENV_NAME}/auth.env
-       - echo "SP_BASE_URL=${AUTH_BASE_URL}" >> k8s/overlays/${ENV_NAME}/auth.env
-       - echo "METADATA_URL=${AUTH_METADATA_URL}" >> k8s/overlays/${ENV_NAME}/auth.env
-       - echo "DISCOVERY_URL=${AUTH_DISCOVERY_URL}" >> k8s/overlays/${ENV_NAME}/auth.env
-       - echo "CERT_PATH=${AUTH_CERT_PATH}" >> k8s/overlays/${ENV_NAME}/auth.env
-       - echo "ACCESS_GROUP=${AUTH_ACCESS_GROUP}" >> k8s/overlays/${ENV_NAME}/auth.env
-       - echo "ADMIN_GROUP=${AUTH_ADMIN_GROUP}" >> k8s/overlays/${ENV_NAME}/auth.env
-       - echo "CONTACT_NAME=${AUTH_CONTACT_NAME}" >> k8s/overlays/${ENV_NAME}/auth.env
-       - echo "CONTACT_EMAIL=${AUTH_CONTACT_EMAIL}" >> k8s/overlays/${ENV_NAME}/auth.env 
-       # 1. Sanitize the DB URL so 'sed' treats special characters (like &) as raw text
-       - SANITIZED_DB_URL=$(echo "$DATABASE_URL" | sed 's/[&]/\\&/g')
+       - echo "Generating the structured auth_config.yaml file for container volume mount..."
+       - |
+        cat <<EOF > k8s/overlays/${ENV_NAME}/auth_config.yaml
+        auth:
+          mode: saml
+        saml:
+          entity_id: "${AUTH_ENTITY_ID}"
+          sp_base_url: "${AUTH_BASE_URL}"
+          idp_metadata_url: "${AUTH_METADATA_URL}"
+          discovery_url: "${AUTH_DISCOVERY_URL}"
+          cert_dir: "${AUTH_CERT_PATH}"
+        allowed_users: []
+        admin_users: []
+        rate_limits:
+          daily: 10
+          monthly: 50
+        consent:
+          version: "1.0"
+        ed:
+          enabled: true
+          access_group: "${AUTH_ACCESS_GROUP}"
+          admin_group: "${AUTH_ADMIN_GROUP}"
+          contact_name: "${AUTH_CONTACT_NAME}"
+          contact_email: "${AUTH_CONTACT_EMAIL}"
+        EOF
        - echo "Writing live environment secrets into db.env template..."
        - echo "DATABASE_URL=${DATABASE_URL}" > k8s/overlays/${ENV_NAME}/db.env
        - echo "CVICHE_DATABASE_URL=${DATABASE_URL}" >> k8s/overlays/${ENV_NAME}/db.env

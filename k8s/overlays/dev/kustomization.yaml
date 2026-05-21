@@ -1,22 +1,23 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# 1. Pointing directly to the files since base has no index
 resources:
- - ../../base  # Point to the FOLDER, not the files inside it
+  - ../../base  # Point to the FOLDER, not the files inside it
 
 namespace: cviche-dev
 
 # 2. Cviche authentication config map configuration right below it!
 configMapGenerator:
   - name: cviche-auth-config
-    envs:
-      - auth.env             
+    files:
+      - auth_config.yaml
+
 # 1. Your existing database secrets configuration
 secretGenerator:
   - name: cviche-secrets
     envs:
       - db.env      
+
 patches:
   - path: backend-patch.yaml
   - path: frontend-patch.yaml
