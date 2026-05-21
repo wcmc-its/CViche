@@ -159,6 +159,12 @@ The frontend runs on port 3000 by default and proxies `/api` and `/ws` requests 
 | `OPENAI_API_KEY` | Yes | -- | OpenAI API key for all LLM calls in the pipeline. |
 | `CVICHE_LOCAL_STORAGE_DIR` | No | `web_interface/uploads/` | Override the default local storage directory for uploads and outputs. Only applies when `CVICHE_STORAGE_BACKEND=local`. |
 
+### Secrets in production
+
+The variables above marked "Yes (prod)" plus `OPENAI_API_KEY` are secrets and must not be committed, baked into the image, or passed on the command line. AWS credentials should come from IRSA, not static `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`.
+
+For the provisioning pattern (External Secrets Operator + AWS Secrets Manager on EKS, `.env` on a VM), the IRSA trust policy and IAM policy templates, the bucket policy, and a verification checklist, see [docs/PRODUCTION_SECRETS.md](../docs/PRODUCTION_SECRETS.md). `auth_config.yaml` provisioning is documented separately in the root [README](../README.md).
+
 ---
 
 ## Database Setup
