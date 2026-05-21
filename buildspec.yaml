@@ -72,7 +72,11 @@ phases:
 
   build:
     commands:
-      - docker build -t $REPO_BE:$TAG ./web_interface/backend
+      # Backend MUST be built with the repo root as context. The Dockerfile
+      # copies src/, key_files/, and config.yaml from the repo root because
+      # the orchestrator resolves them through repo-root-relative paths
+      # (see web_interface/backend/Dockerfile header for the rationale).
+      - docker build -t $REPO_BE:$TAG -f web_interface/backend/Dockerfile .
 
       - echo "Building Frontend..."
       - docker build -t $REPO_FE:$TAG ./web_interface/frontend

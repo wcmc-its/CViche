@@ -345,7 +345,10 @@ Respond with JSON only:
     usage = {
         'prompt_tokens': llm_result["prompt_tokens"],
         'completion_tokens': llm_result["completion_tokens"],
-        'total_tokens': llm_result["total_tokens"]
+        'total_tokens': llm_result["total_tokens"],
+        'cache_read_tokens': llm_result.get("cache_read_tokens", 0),
+        'cache_write_tokens': llm_result.get("cache_write_tokens", 0),
+        'cost': llm_result.get("cost", 0.0),
     }
 
     # Parse JSON response
@@ -401,7 +404,10 @@ Generate only the research summary paragraph (150-200 words max), no additional 
     usage = {
         'prompt_tokens': llm_result["prompt_tokens"],
         'completion_tokens': llm_result["completion_tokens"],
-        'total_tokens': llm_result["total_tokens"]
+        'total_tokens': llm_result["total_tokens"],
+        'cache_read_tokens': llm_result.get("cache_read_tokens", 0),
+        'cache_write_tokens': llm_result.get("cache_write_tokens", 0),
+        'cost': llm_result.get("cost", 0.0),
     }
 
     return result_text, usage
@@ -473,6 +479,8 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
     score_reasoning = ""
     total_prompt_tokens = 0
     total_completion_tokens = 0
+    total_cache_read_tokens = 0
+    total_cache_write_tokens = 0
     total_cost = 0.0
 
     if existing_m1_content.strip():
@@ -485,6 +493,9 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
         if score_usage:
             total_prompt_tokens += score_usage.get('prompt_tokens', 0)
             total_completion_tokens += score_usage.get('completion_tokens', 0)
+            total_cache_read_tokens += score_usage.get('cache_read_tokens', 0)
+            total_cache_write_tokens += score_usage.get('cache_write_tokens', 0)
+            total_cost += score_usage.get('cost', 0.0)
 
         if verbose:
             print(f"  Score: {m1_score:.2f}")
@@ -537,13 +548,18 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
         if gen_usage:
             total_prompt_tokens += gen_usage.get('prompt_tokens', 0)
             total_completion_tokens += gen_usage.get('completion_tokens', 0)
+            total_cache_read_tokens += gen_usage.get('cache_read_tokens', 0)
+            total_cache_write_tokens += gen_usage.get('cache_write_tokens', 0)
+            total_cost += gen_usage.get('cost', 0.0)
 
         if verbose:
             print(f"\nGenerated summary ({len(research_summary)} chars):")
             print(f"  {research_summary[:200]}...")
 
-    # Calculate cost (gpt-5.1 pricing: $2.00/1M input, $8.00/1M output estimate)
-    total_cost = (total_prompt_tokens * 2.00 / 1_000_000) + (total_completion_tokens * 8.00 / 1_000_000)
+    # total_cost was accumulated from llm_result['cost'] on each call above,
+    # which calculate_cost() prices per-provider and per-model (and accounts
+    # for Bedrock prompt-cache reads at 0.1x and writes at 1.25x). Don't
+    # recompute it here from a hardcoded $/M-token figure.
 
     # Build standalone output (not modifying upstream data)
     word_count = len(research_summary.split())
@@ -590,6 +606,8 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
         "prompt_tokens": total_prompt_tokens,
         "completion_tokens": total_completion_tokens,
         "total_tokens": total_prompt_tokens + total_completion_tokens,
+        "cache_read_tokens": total_cache_read_tokens,
+        "cache_write_tokens": total_cache_write_tokens,
     }
 
     # Determine output path

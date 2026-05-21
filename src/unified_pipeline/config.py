@@ -13,6 +13,8 @@ import logging
 import os
 import yaml
 
+logger = logging.getLogger(__name__)
+
 # ============================================================================
 # Project Structure
 # ============================================================================
@@ -79,7 +81,27 @@ PRICING = {
         },
     },
     "bedrock": {
-        # Anthropic Claude models
+        # Anthropic Claude models -- per 1M tokens, identical to the direct
+        # Anthropic API. Keyed by the BARE model ID; calculate_cost() strips
+        # region inference-profile prefixes (us./eu./apac./global.) before
+        # lookup, so "us.anthropic.claude-sonnet-4-6" resolves here.
+        "anthropic.claude-sonnet-4-6": {
+            "input": 3.000,
+            "output": 15.000,
+        },
+        "anthropic.claude-haiku-4-5": {
+            "input": 1.000,
+            "output": 5.000,
+        },
+        "anthropic.claude-opus-4-7": {
+            "input": 15.000,
+            "output": 75.000,
+        },
+        "anthropic.claude-opus-4-6": {
+            "input": 15.000,
+            "output": 75.000,
+        },
+        # Older Claude 3.x generation -- kept for historical cost calculations
         "anthropic.claude-3-haiku-20240307-v1:0": {
             "input": 0.250,
             "output": 1.250,
@@ -173,16 +195,52 @@ def get_template_path() -> Path:
     )
 
 
+# Region prefixes used by Bedrock cross-region inference-profile IDs, e.g.
+# "us.anthropic.claude-sonnet-4-6". PRICING is keyed by the bare model ID.
+_BEDROCK_REGION_PREFIXES = ("us-gov.", "us.", "eu.", "apac.", "global.")
+
+# Models already warned about (missing PRICING) -- avoids per-call log spam.
+_warned_missing_pricing = set()
+
+
+def _normalize_model_id(model: str) -> str:
+    """Strip a Bedrock cross-region inference-profile prefix from a model ID."""
+    if not model:
+        return model
+    for prefix in _BEDROCK_REGION_PREFIXES:
+        if model.startswith(prefix):
+            return model[len(prefix):]
+    return model
+
+
+# Bedrock / Anthropic prompt-caching multipliers, applied against the model's
+# base input price. Bedrock charges the same cache prices as Anthropic's
+# direct API (see docs/LLM_MODELS.md).
+CACHE_READ_PRICE_MULTIPLIER = 0.1   # cache hits cost 0.1x input
+CACHE_WRITE_PRICE_MULTIPLIER = 1.25  # cache writes cost 1.25x input
+
+
 def calculate_cost(prompt_tokens: int, completion_tokens: int,
-                   model: str = None, provider: str = "openai") -> float:
+                   model: str = None, provider: str = "openai",
+                   cache_read_tokens: int = 0,
+                   cache_write_tokens: int = 0) -> float:
     """
-    Calculate cost for LLM API call.
+    Calculate cost for an LLM API call.
 
     Args:
-        prompt_tokens: Number of input tokens
+        prompt_tokens: Number of uncached input tokens. With Bedrock prompt
+            caching enabled, this should be the *uncached* portion only --
+            Bedrock's `usage.inputTokens` already excludes cached tokens.
         completion_tokens: Number of output tokens
-        model: Model name (default: DEFAULT_MODEL)
+        model: Model name/ID (default: DEFAULT_MODEL). Bedrock region
+            inference-profile prefixes (us./eu./apac./global.) are stripped
+            before the PRICING lookup.
         provider: LLM provider name (default: "openai")
+        cache_read_tokens: Input tokens served from prompt cache, billed at
+            0.1x the input rate. 0 when caching is off or unsupported.
+        cache_write_tokens: Input tokens written to prompt cache on this
+            call, billed at 1.25x the input rate. 0 when caching is off or
+            unsupported.
 
     Returns:
         float: Cost in USD
@@ -190,17 +248,109 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
     model = model or DEFAULT_MODEL
 
     provider_pricing = PRICING.get(provider, PRICING.get("openai", {}))
-    if model not in provider_pricing:
-        # Fallback to openai gpt-4o-mini pricing
-        provider_pricing = PRICING.get("openai", {})
-        model = "gpt-4o-mini"
 
-    if model not in provider_pricing:
+    # Resolve the pricing key: exact match first, then region-prefix-stripped.
+    lookup = model if model in provider_pricing else _normalize_model_id(model)
+
+    if lookup not in provider_pricing:
+        if model not in _warned_missing_pricing:
+            _warned_missing_pricing.add(model)
+            logger.warning(
+                "No PRICING entry for model %r (provider %r); falling back to "
+                "gpt-4o-mini pricing -- reported cost will be inaccurate. Add "
+                "the model to PRICING in config.py.", model, provider,
+            )
+        provider_pricing = PRICING.get("openai", {})
+        lookup = "gpt-4o-mini"
+
+    if lookup not in provider_pricing:
         return 0.0
 
-    pricing = provider_pricing[model]
-    return (prompt_tokens * pricing["input"] / 1_000_000 +
-            completion_tokens * pricing["output"] / 1_000_000)
+    pricing = provider_pricing[lookup]
+    input_rate = pricing["input"]
+    return (
+        prompt_tokens * input_rate / 1_000_000
+        + completion_tokens * pricing["output"] / 1_000_000
+        + cache_read_tokens * input_rate * CACHE_READ_PRICE_MULTIPLIER / 1_000_000
+        + cache_write_tokens * input_rate * CACHE_WRITE_PRICE_MULTIPLIER / 1_000_000
+    )
+
+
+# ----------------------------------------------------------------------------
+# Pipeline cost estimation (consumed by the web UI /estimate endpoint)
+# ----------------------------------------------------------------------------
+# The /estimate endpoint multiplies a document's token count by a USD/token
+# rate. That rate is anchored to an empirically observed figure and rescaled
+# to the currently-configured model, so the estimate tracks llm_config.yaml.
+
+# Historically observed cost per 1,000 *document* tokens for a full 12-stage
+# run, measured when the dominant (highest call volume) stage ran on the
+# anchor model below. Recalibrate from real run-cost data as runs accumulate.
+COST_ESTIMATE_ANCHOR_RATE = 0.075
+COST_ESTIMATE_ANCHOR_MODEL = ("openai", "gpt-4o")
+# Fraction of pipeline LLM tokens that are input (prompts/schemas dominate).
+COST_ESTIMATE_INPUT_SHARE = 0.8
+
+
+def _blended_price_per_million(provider: str, model: str) -> float:
+    """Blended USD/1M-token price: input_share*input + output_share*output.
+
+    Returns 0.0 when the model has no PRICING entry.
+    """
+    provider_pricing = PRICING.get(provider, {})
+    pricing = (provider_pricing.get(model)
+               or provider_pricing.get(_normalize_model_id(model)))
+    if not pricing:
+        return 0.0
+    return (COST_ESTIMATE_INPUT_SHARE * pricing["input"] +
+            (1 - COST_ESTIMATE_INPUT_SHARE) * pricing["output"])
+
+
+def estimate_cost_per_1k_doc_tokens(model: str = None, provider: str = None) -> float:
+    """Estimate pipeline cost (USD) per 1,000 document tokens for a model.
+
+    Lets the web /estimate endpoint show a cost that tracks the model
+    configured in llm_config.yaml. When model/provider are omitted, the
+    effective default config is used (YAML default + CVICHE_LLM_* env vars).
+
+    The estimate rescales COST_ESTIMATE_ANCHOR_RATE by the ratio of blended
+    model prices. It is an approximation -- see docs/LLM_MODELS.md.
+    """
+    if model is None or provider is None:
+        # "default" is not a real stage, so get_stage_config returns the
+        # effective default config (YAML default block + env overrides).
+        cfg = get_stage_config("default")
+        provider = provider or cfg["provider"]
+        model = model or cfg["model"]
+
+    anchor_provider, anchor_model = COST_ESTIMATE_ANCHOR_MODEL
+    anchor_blended = _blended_price_per_million(anchor_provider, anchor_model)
+    model_blended = _blended_price_per_million(provider, model)
+
+    if not anchor_blended or not model_blended:
+        # Unknown pricing on either side -- fall back to the flat anchor rate.
+        return COST_ESTIMATE_ANCHOR_RATE
+
+    return COST_ESTIMATE_ANCHOR_RATE * (model_blended / anchor_blended)
+
+
+# Human-readable names for known model IDs, used by the web UI.
+_FRIENDLY_MODEL_NAMES = {
+    "anthropic.claude-sonnet-4-6": "Claude Sonnet 4.6",
+    "anthropic.claude-haiku-4-5": "Claude Haiku 4.5",
+    "anthropic.claude-opus-4-7": "Claude Opus 4.7",
+    "anthropic.claude-opus-4-6": "Claude Opus 4.6",
+    "gpt-4o": "GPT-4o",
+    "gpt-4o-mini": "GPT-4o mini",
+    "gpt-5.1": "GPT-5.1",
+}
+
+
+def friendly_model_name(model: str) -> str:
+    """Best-effort human-readable model name for UI display."""
+    if not model:
+        return "unknown"
+    return _FRIENDLY_MODEL_NAMES.get(_normalize_model_id(model), model)
 
 
 # ============================================================================
@@ -209,8 +359,6 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
 
 # Config cache
 _cached_config = None
-
-logger = logging.getLogger(__name__)
 
 
 def _load_yaml_config() -> dict:
@@ -260,6 +408,10 @@ def get_stage_config(stage: str) -> dict:
         "temperature": 0,
         "max_tokens": None,
         "retry_count": 3,
+        # Bedrock-only knob; ignored by the OpenAI path. Default false so the
+        # request is byte-identical to pre-caching behavior when the YAML is
+        # absent. The shipping llm_config.yaml sets it to true.
+        "enable_prompt_caching": False,
     }
 
     # Layer 2: YAML default block

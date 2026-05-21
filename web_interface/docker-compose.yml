@@ -1,6 +1,5 @@
 # docker-compose.yml -- Local development
 # Usage: docker compose up --build
-version: "3.9"
 
 services:
   # --- MariaDB ---
@@ -26,8 +25,10 @@ services:
   # --- Backend (FastAPI) ---
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      # Context is the repo root: the image needs src/ and key_files/,
+      # which live above web_interface/backend/.
+      context: ..
+      dockerfile: web_interface/backend/Dockerfile
     restart: unless-stopped
     depends_on:
       db:
@@ -48,16 +49,16 @@ services:
       # OpenAI API key -- read from host environment
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
     volumes:
-      # Hot-reload: mount source code
-      - ./backend/app:/app/app:ro
-      - ./backend/auth_config.yaml:/app/auth_config.yaml:ro
-      - ./backend/consent_text.md:/app/consent_text.md:ro
-      # Persist uploads and outputs across restarts
-      - backend_uploads:/app/uploads
-      - backend_outputs:/app/outputs
-      - backend_prompt_logs:/app/prompt_logs
+      # Hot-reload: mount source code (paths mirror the in-container repo layout)
+      - ./backend/app:/app/web_interface/backend/app:ro
+      - ./backend/auth_config.yaml:/app/web_interface/backend/auth_config.yaml:ro
+      - ./backend/consent_text.md:/app/web_interface/backend/consent_text.md:ro
+      # Persist uploads and pipeline outputs across restarts
+      - backend_uploads:/app/web_interface/uploads
+      - backend_outputs:/app/src/unified_pipeline/outputs
+      - backend_prompt_logs:/app/web_interface/backend/prompt_logs
     # Override entrypoint for dev: add --reload flag to uvicorn
-    command: ["--reload", "--reload-dir", "/app/app"]
+    command: ["--reload", "--reload-dir", "/app/web_interface/backend/app"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s

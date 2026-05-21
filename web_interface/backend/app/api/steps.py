@@ -1,6 +1,7 @@
 """Step details and data API endpoints."""
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
@@ -309,23 +310,83 @@ async def get_json_content(
         raise internal_error("Error reading file")
 
 
-# Mapping of stage IDs to filename patterns in prompt logs
-# These patterns match the actual filenames in the prompt_logs directory
-# Note: Some stages don't create prompt logs (1a uses direct OpenAI API, 1b/2/5/5b/6 are non-LLM stages)
-STAGE_TO_FILENAME_PATTERNS = {
-    '1a': [],  # Stage 1a uses OpenAI API directly without prompt logging
-    '1b': [],  # Non-LLM stage (no prompts)
-    '2': ['*stage_2_entry_extraction*'],  # Stage 2 may have some LLM components
-    '3a': ['*stage_3a_header_taxonomy*', '*taxonomy_mapping_pass1*'],
-    '3b': ['*stage_3b_entry_classification*', '*taxonomy_mapping_pass2*'],
-    '4': ['*stage_4_field*', '*stage_4_extraction*', '*field_extraction_batch*'],
-    '4.5': ['*stage_4_5*', '*stage_4.5*', '*research_summary*'],
-    '5': [],  # Non-LLM stage (PubMed API)
-    '5b': [],  # Non-LLM stage (ROR API)
-    '5c': ['*stage_5c*', '*teaching_formatter*'],
-    '5d': ['*stage_5d*', '*citation_formatter*'],
-    '6': [],  # Non-LLM stage (Word document generation)
+# Mapping of stage IDs to the set of `purpose` values written into prompt log
+# filenames by src/unified_pipeline/core/prompt_logger.py.
+#
+# Filenames look like: {YYYY-MM-DD_HH-MM-SS}_{purpose}_{12-char-hex-id}[_READABLE].{txt,json}
+# Today every LLM call routed through unified_pipeline.llm_client.call_llm logs
+# with purpose=<stage> (e.g. "stage_3a"). Older files in the directory used
+# more specific purposes (e.g. "taxonomy_mapping_pass1", "field_extraction_batch_S8");
+# they're preserved here for viewing historical runs.
+#
+# Each stage entry separates `exact` matches (the purpose must equal the value)
+# from `prefix` matches (the purpose must equal the value or start with
+# value + "_"). The prefix list intentionally excludes ambiguous bare names
+# like "stage_4" — that gets exact-only treatment so it doesn't swallow
+# `stage_4_5_*` files that belong to stage 4.5.
+#
+# Stage IDs without LLM activity get an empty list and surface a friendly
+# explanation via STAGES_WITHOUT_PROMPT_LOGS instead.
+STAGE_TO_PURPOSES = {
+    '1a': {'exact': [], 'prefix': []},
+    '1b': {'exact': [], 'prefix': []},
+    '2':  {'exact': ['stage_2', 'stage_2_entry_extraction'],
+           'prefix': []},
+    '2a': {'exact': ['stage_2a'],
+           'prefix': ['segmentation']},
+    '3a': {'exact': ['stage_3a', 'core_taxonomy_mapper', 'core_taxonomy_v2',
+                     'stage_3a_header_taxonomy', 'taxonomy_mapping_pass1'],
+           'prefix': []},
+    '3b': {'exact': ['stage_3b', 'stage_3b_entry_classification',
+                     'stage_3b_t_validation', 'stage_3b_fragment_reconnection',
+                     'taxonomy_mapping_pass2', 'taxonomy_mapping_pass2_batch'],
+           'prefix': []},
+    '4':  {'exact': ['stage_4', 'core_extraction_recovery', 'core_personal_info',
+                     'core_repair_segmentation', 'core_section_orchestrator',
+                     'core_candidate_surfacer', 'cv_parser_classifier',
+                     'cv_parser_evaluator', 'cv_parser_structurer',
+                     'validator_llm'],
+           'prefix': ['stage_4_field', 'stage_4_extraction',
+                      'field_extraction_batch', 'parser_']},
+    '4.5': {'exact': ['stage_4_5', '4.5_summary_generation', '4.5_m1_scoring'],
+            'prefix': ['stage_4_5', 'research_summary']},
+    '5':  {'exact': [], 'prefix': []},
+    '5b': {'exact': ['stage_5b', 'institution_enrichment'],
+           'prefix': []},
+    '5c': {'exact': ['stage_5c', 'stage_5c_teaching_formatting'],
+           'prefix': ['teaching_formatter']},
+    '5d': {'exact': ['stage_5d', 'stage_5d_citation_formatting'],
+           'prefix': ['citation_formatter']},
+    '6':  {'exact': ['stage_6'], 'prefix': []},
 }
+
+# Filename: {YYYY-MM-DD}_{HH-MM-SS}_{purpose}_{12 hex chars}[_READABLE|_RESPONSE].{ext}
+_PROMPT_LOG_FILENAME_RE = re.compile(
+    r'^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}_(?P<purpose>.+)_[0-9a-f]{12}'
+    r'(?:_READABLE|_RESPONSE)?\.(?:txt|json)$'
+)
+
+
+def _purpose_from_filename(name: str):
+    """Extract the `purpose` field from a prompt-log filename, or None if it
+    doesn't match the prompt_logger naming convention."""
+    m = _PROMPT_LOG_FILENAME_RE.match(name)
+    return m.group('purpose') if m else None
+
+
+def _purpose_matches_stage(purpose: str, stage_purposes) -> bool:
+    """A filename's purpose belongs to a stage if it equals one of the
+    `exact` values, or starts with one of the `prefix` values followed by
+    an underscore. The split prevents collisions like `stage_4_5_*` being
+    claimed by stage 4 just because it shares the `stage_4_` prefix."""
+    if not stage_purposes:
+        return False
+    if purpose in stage_purposes.get('exact', ()):
+        return True
+    for known in stage_purposes.get('prefix', ()):
+        if purpose.startswith(known + '_'):
+            return True
+    return False
 
 # Stages that don't have prompt logs with an explanation
 STAGES_WITHOUT_PROMPT_LOGS = {
@@ -384,40 +445,42 @@ async def get_prompt_logs(
     logs = []
     seen_files = set()
 
-    # Get the filename patterns for this stage
-    patterns = STAGE_TO_FILENAME_PATTERNS.get(stage_id, [])
+    # The set of `purpose` values that belong to this stage.
+    purposes = STAGE_TO_PURPOSES.get(stage_id, [])
 
     for prompt_logs_base in prompt_log_dirs:
-        if prompt_logs_base.exists() and patterns:
-            # Find files matching any of the patterns for this stage
-            for pattern in patterns:
-                for log_file in sorted(prompt_logs_base.glob(pattern)):
-                    # Only include .txt files (readable format)
-                    if not log_file.name.endswith('.txt'):
-                        continue
-                    # Avoid duplicates (by filename, not full path)
-                    if log_file.name in seen_files:
-                        continue
+        if not (prompt_logs_base.exists() and purposes):
+            continue
 
-                    # Filter by file modification time - only include files created during this run
-                    file_mtime = log_file.stat().st_mtime
-                    if file_mtime < run_start_timestamp:
-                        continue  # Skip files from before this run started
+        for log_file in sorted(prompt_logs_base.iterdir()):
+            # Only surface the human-readable .txt files in the viewer.
+            if not log_file.name.endswith('.txt'):
+                continue
+            if log_file.name in seen_files:
+                continue
 
-                    seen_files.add(log_file.name)
-                    try:
-                        content = log_file.read_text(encoding='utf-8', errors='replace')
-                        logs.append({
-                            "filename": str(log_file),
-                            "content": content[:50000]  # Limit to 50KB per file
-                        })
-                    except Exception as e:
-                        logs.append({
-                            "filename": str(log_file),
-                            "content": f"Error reading file: {str(e)}"
-                        })
+            purpose = _purpose_from_filename(log_file.name)
+            if not purpose or not _purpose_matches_stage(purpose, purposes):
+                continue
 
-    # Sort logs by filename (which includes timestamp) in descending order (newest first)
+            # Only files written during this run.
+            if log_file.stat().st_mtime < run_start_timestamp:
+                continue
+
+            seen_files.add(log_file.name)
+            try:
+                content = log_file.read_text(encoding='utf-8', errors='replace')
+                logs.append({
+                    "filename": str(log_file),
+                    "content": content[:50000]  # Limit to 50KB per file
+                })
+            except Exception as e:
+                logs.append({
+                    "filename": str(log_file),
+                    "content": f"Error reading file: {str(e)}"
+                })
+
+    # Newest first.
     logs.sort(key=lambda x: x['filename'], reverse=True)
 
     return JSONResponse(content={"logs": logs, "stage_id": stage_id, "step": step})

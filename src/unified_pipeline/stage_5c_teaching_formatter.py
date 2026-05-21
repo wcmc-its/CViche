@@ -283,7 +283,10 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
         usage = {
             'prompt_tokens': llm_result["prompt_tokens"],
             'completion_tokens': llm_result["completion_tokens"],
-            'total_tokens': llm_result["total_tokens"]
+            'total_tokens': llm_result["total_tokens"],
+            'cache_read_tokens': llm_result.get("cache_read_tokens", 0),
+            'cache_write_tokens': llm_result.get("cache_write_tokens", 0),
+            'cost': llm_result.get("cost", 0.0),
         }
 
         return result_text, usage
@@ -359,12 +362,11 @@ def run_stage_5c(input_path: str, output_path: str = None, model: str = "gpt-4o-
     entries_formatted_count = 0
     total_cost = 0.0
 
-    # Calculate cost from tokens (approximate pricing for gpt-4o-mini)
+    # llm_result['cost'] is the per-provider, per-model cost from
+    # calculate_cost(), including Bedrock prompt-cache discounts when
+    # caching is on. Don't recompute it from a hardcoded $/M-token figure.
     if usage:
-        prompt_tokens = usage.get('prompt_tokens', 0)
-        completion_tokens = usage.get('completion_tokens', 0)
-        # gpt-4o-mini pricing: $0.15/1M input, $0.60/1M output
-        total_cost = (prompt_tokens * 0.15 / 1_000_000) + (completion_tokens * 0.60 / 1_000_000)
+        total_cost = usage.get('cost', 0.0)
 
     if llm_output:
         # Parse LLM output
@@ -400,7 +402,9 @@ def run_stage_5c(input_path: str, output_path: str = None, model: str = "gpt-4o-
         'total_cost': total_cost,
         'prompt_tokens': usage.get('prompt_tokens', 0) if usage else 0,
         'completion_tokens': usage.get('completion_tokens', 0) if usage else 0,
-        'total_tokens': usage.get('total_tokens', 0) if usage else 0
+        'total_tokens': usage.get('total_tokens', 0) if usage else 0,
+        'cache_read_tokens': usage.get('cache_read_tokens', 0) if usage else 0,
+        'cache_write_tokens': usage.get('cache_write_tokens', 0) if usage else 0,
     }
 
     # Write output - full copy with K-code entries updated

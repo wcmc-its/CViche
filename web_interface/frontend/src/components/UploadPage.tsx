@@ -167,6 +167,9 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                     </dd>
                   </div>
                 </dl>
+                <p className="text-xs text-gray-500 mt-3">
+                  Cost estimated for {estimate.pricing_model}.
+                </p>
               </section>
             )}
 

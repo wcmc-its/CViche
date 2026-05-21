@@ -9,8 +9,8 @@ from app.services.run_service import check_run_access
 from app.services.user_service import provision_user
 from app.services.config_service import (
     SESSION_TTL, LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW,
-    MAX_UPLOAD_SIZE, COST_PER_1K_TOKENS, TIME_PER_1K_TOKENS,
-    BASE_OVERHEAD_SECONDS,
+    MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
+    get_cost_per_1k_tokens,
 )
 from app.errors import not_found, bad_request, forbidden, validation_error
 from app.models import Run, User
@@ -142,9 +142,12 @@ class TestConfigService:
         assert MAX_UPLOAD_SIZE == 50 * 1024 * 1024  # 52428800
 
     def test_cost_estimation_defaults(self):
-        assert COST_PER_1K_TOKENS == 0.075
         assert TIME_PER_1K_TOKENS == 30
         assert BASE_OVERHEAD_SECONDS == 60
+
+    def test_cost_per_1k_tokens_derived(self):
+        # Rate is derived from the model configured in llm_config.yaml.
+        assert get_cost_per_1k_tokens() > 0
 
 
 class TestErrorHelpers:

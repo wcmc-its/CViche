@@ -198,9 +198,6 @@ class PipelineOrchestrator:
         # Track outputs between stages
         self.stage_outputs: Dict[str, str] = {}
 
-        # Model to use for LLM stages
-        self.model = "gpt-5.1"
-
         # Total cost tracking
         self.total_cost = 0.0
 
@@ -213,8 +210,16 @@ class PipelineOrchestrator:
 
     async def update_cost(self, step_number: int, cost_delta: float, tokens_delta: int = 0,
                           input_tokens_delta: int = 0, output_tokens_delta: int = 0,
+                          cache_read_tokens_delta: int = 0,
+                          cache_write_tokens_delta: int = 0,
                           provider: str = "openai"):
-        """Update run costs in real-time and emit cost update event."""
+        """Update run costs in real-time and emit cost update event.
+
+        cache_read_tokens_delta / cache_write_tokens_delta are subsets of
+        input_tokens_delta (Bedrock prompt-caching split), not additions to
+        it -- input_tokens already includes the cached portion. Stages that
+        don't surface a cache split simply pass 0.
+        """
         run = self.db.query(Run).filter(Run.id == self.run_id).first()
         if not run:
             return
@@ -224,6 +229,8 @@ class PipelineOrchestrator:
         run.total_tokens = (run.total_tokens or 0) + tokens_delta
         run.input_tokens = (run.input_tokens or 0) + input_tokens_delta
         run.output_tokens = (run.output_tokens or 0) + output_tokens_delta
+        run.cache_read_tokens = (run.cache_read_tokens or 0) + cache_read_tokens_delta
+        run.cache_write_tokens = (run.cache_write_tokens or 0) + cache_write_tokens_delta
         self.db.commit()
 
         await event_emitter.emit_cost_update(
@@ -237,6 +244,10 @@ class PipelineOrchestrator:
             output_tokens_delta,
             run.input_tokens,
             run.output_tokens,
+            cache_read_tokens_delta=cache_read_tokens_delta,
+            cache_write_tokens_delta=cache_write_tokens_delta,
+            cache_read_tokens_total=run.cache_read_tokens,
+            cache_write_tokens_total=run.cache_write_tokens,
             provider=provider
         )
 
@@ -434,8 +445,11 @@ class PipelineOrchestrator:
         cost = 0.0
         step_number = get_step_by_stage_id(stage_id).number
 
-        # Change to project directory for imports to work correctly
-        original_cwd = os.getcwd()
+        # Pin cwd to the project root for the pipeline's repo-root-relative
+        # path lookups. Runs execute in concurrent background threads and cwd
+        # is process-global, so this is intentionally not saved/restored per
+        # run: every run targets the same constant directory, which removes
+        # the race the previous getcwd()/restore caused.
         os.chdir(PARENT_DIR)
 
         try:
@@ -589,13 +603,17 @@ class PipelineOrchestrator:
                 stats4 = stage4_output.get('stats', {})
                 input_tokens = stats4.get('input_tokens', 0) or stats4.get('prompt_tokens', 0) or stage4_output.get('total_tokens', 0) // 2
                 output_tokens = stats4.get('output_tokens', 0) or stats4.get('completion_tokens', 0) or stage4_output.get('total_tokens', 0) // 2
+                cache_read_tokens = stage4_output.get('cache_read_tokens', 0) or stats4.get('cache_read_tokens', 0)
+                cache_write_tokens = stage4_output.get('cache_write_tokens', 0) or stats4.get('cache_write_tokens', 0)
 
                 self.stage_outputs['4'] = stage4_result['output_path']
                 output_files.append(stage4_result['output_path'])
 
                 extracted = stats4.get('extracted', 0)
                 await self.log(step_number, f"Extracted fields for {extracted} entries")
-                await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens)
+                await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
+                                       cache_read_tokens_delta=cache_read_tokens,
+                                       cache_write_tokens_delta=cache_write_tokens)
 
             elif stage_id == '4.5':
                 # Stage 4.5: Research Summary
@@ -624,8 +642,12 @@ class PipelineOrchestrator:
                 cost = stage45_data.get('total_cost', 0)
                 input_tokens = stage45_data.get('prompt_tokens', 0)
                 output_tokens = stage45_data.get('completion_tokens', 0)
+                cache_read_tokens = stage45_data.get('cache_read_tokens', 0)
+                cache_write_tokens = stage45_data.get('cache_write_tokens', 0)
                 if cost > 0:
-                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens)
+                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
+                                           cache_read_tokens_delta=cache_read_tokens,
+                                           cache_write_tokens_delta=cache_write_tokens)
 
             elif stage_id == '5':
                 # Stage 5: PubMed Enrichment
@@ -693,8 +715,12 @@ class PipelineOrchestrator:
                 cost = stage5c_meta.get('total_cost', 0)
                 input_tokens = stage5c_meta.get('prompt_tokens', 0)
                 output_tokens = stage5c_meta.get('completion_tokens', 0)
+                cache_read_tokens = stage5c_meta.get('cache_read_tokens', 0)
+                cache_write_tokens = stage5c_meta.get('cache_write_tokens', 0)
                 if cost > 0:
-                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens)
+                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
+                                           cache_read_tokens_delta=cache_read_tokens,
+                                           cache_write_tokens_delta=cache_write_tokens)
 
                 await self.log(step_number, "Teaching entries formatted")
 
@@ -730,8 +756,12 @@ class PipelineOrchestrator:
                 cost = stage5d_meta.get('total_cost', 0)
                 input_tokens = stage5d_meta.get('prompt_tokens', 0)
                 output_tokens = stage5d_meta.get('completion_tokens', 0)
+                cache_read_tokens = stage5d_meta.get('cache_read_tokens', 0)
+                cache_write_tokens = stage5d_meta.get('cache_write_tokens', 0)
                 if cost > 0:
-                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens)
+                    await self.update_cost(step_number, cost, input_tokens + output_tokens, input_tokens, output_tokens,
+                                           cache_read_tokens_delta=cache_read_tokens,
+                                           cache_write_tokens_delta=cache_write_tokens)
 
                 await self.log(step_number, "Citations formatted")
 
@@ -768,7 +798,7 @@ class PipelineOrchestrator:
                 raise ValueError(f"Unknown stage ID: {stage_id}")
 
         finally:
-            os.chdir(original_cwd)
+            os.chdir(PARENT_DIR)
 
         return {
             "output_files": output_files,

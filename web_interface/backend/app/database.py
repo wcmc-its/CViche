@@ -1,14 +1,18 @@
 """Database configuration and session management."""
 import os
+from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# Read DATABASE_URL from environment; default to SQLite for local dev
-DATABASE_URL = os.environ.get(
-    "CVICHE_DATABASE_URL",
-    "sqlite:///./cviche_dev.db"
-)
+# Read DATABASE_URL from environment; default to SQLite for local dev.
+# The default is an absolute path anchored at the backend directory so it is
+# stable regardless of the process working directory (the pipeline
+# orchestrator pins cwd to the repo root while runs execute).
+DATABASE_URL = os.environ.get("CVICHE_DATABASE_URL", "")
+if not DATABASE_URL:
+    _default_db = Path(__file__).resolve().parent.parent / "cviche_dev.db"
+    DATABASE_URL = f"sqlite:///{_default_db}"
 
 # Configure engine kwargs based on database backend
 engine_kwargs = {}
