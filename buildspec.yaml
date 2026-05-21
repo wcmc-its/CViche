@@ -47,27 +47,27 @@ phases:
       
        # Overwrite the auth.env file inside the target overlay instantly
        - |
-          cat <<EOF > k8s/overlays/${ENV_NAME}/auth.env
-          AUTH_MODE=saml
-          ENTITY_ID=${AUTH_ENTITY_ID}
-          BASE_URL=${AUTH_BASE_URL}
-          METADATA_URL=${AUTH_METADATA_URL}
-          DISCOVERY_URL=${AUTH_DISCOVERY_URL}
-          CERT_PATH=${AUTH_CERT_PATH}
-          ACCESS_GROUP=${AUTH_ACCESS_GROUP}
-          ADMIN_GROUP=${AUTH_ADMIN_GROUP}
-          CONTACT_NAME=${AUTH_CONTACT_NAME}
-          CONTACT_EMAIL=${AUTH_CONTACT_EMAIL}
-          EOF 
+        cat <<EOF > k8s/overlays/${ENV_NAME}/auth.env
+        AUTH_MODE=saml
+        ENTITY_ID=${AUTH_ENTITY_ID}
+        BASE_URL=${AUTH_BASE_URL}
+        METADATA_URL=${AUTH_METADATA_URL}
+        DISCOVERY_URL=${AUTH_DISCOVERY_URL}
+        CERT_PATH=${AUTH_CERT_PATH}
+        ACCESS_GROUP=${AUTH_ACCESS_GROUP}
+        ADMIN_GROUP=${AUTH_ADMIN_GROUP}
+        CONTACT_NAME=${AUTH_CONTACT_NAME}
+        CONTACT_EMAIL=${AUTH_CONTACT_EMAIL}
+        EOF 
        # 1. Sanitize the DB URL so 'sed' treats special characters (like &) as raw text
        - SANITIZED_DB_URL=$(echo "$DATABASE_URL" | sed 's/[&]/\\&/g')
        - echo "Writing live environment secrets into db.env template..."
        - |
-          cat <<EOF > k8s/overlays/${ENV_NAME}/db.env
-          DATABASE_URL=${DATABASE_URL}
-          CVICHE_DATABASE_URL=${DATABASE_URL}
-          CVICHE_SESSION_SECRET=${SESSION_SECRET}
-          EOF 
+        cat <<EOF> k8s/overlays/${ENV_NAME}/db.env
+        DATABASE_URL=${DATABASE_URL}
+        CVICHE_DATABASE_URL=${DATABASE_URL}
+        CVICHE_SESSION_SECRET=${SESSION_SECRET}
+        EOF 
 
 
   build:
