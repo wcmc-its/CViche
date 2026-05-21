@@ -140,7 +140,8 @@ The frontend runs on port 3000 by default and proxies `/api` and `/ws` requests 
 - Frontend: http://localhost:3000
 - Backend API: http://localhost:8000
 - API docs (Swagger): http://localhost:8000/docs
-- Health check: http://localhost:8000/health
+- Liveness probe: http://localhost:8000/livez
+- Readiness probe: http://localhost:8000/readyz (returns 503 if DB/S3 not reachable)
 
 ---
 
@@ -463,7 +464,9 @@ All admin endpoints require the `admin` role. Non-admin users receive a 403 resp
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| `GET` | `/health` | No | Health check. Returns `{"status": "healthy"}`. |
+| `GET` | `/livez` | No | Liveness probe. 200 if the process is up. Does not touch the DB or S3. |
+| `GET` | `/readyz` | No | Readiness probe. 200 if DB and (when storage backend is `s3`) S3 are reachable. 503 with a JSON `checks` body otherwise. |
+| `GET` | `/health` | No | Deprecated alias for `/livez`. Kept for backward compatibility. |
 | `GET` | `/` | No | API info with version and docs link. |
 
 ---
@@ -535,13 +538,14 @@ All application logs use JSON Lines format, written to stdout (standard for cont
 | `admin_user_updated` | Admin changes user status/role/limits |
 | `admin_export` | Admin exports data |
 
-### Health Check
+### Health Probes
 
-`GET /health` returns:
+The backend exposes two probes:
 
-```json
-{"status": "healthy"}
-```
+- `GET /livez` — liveness. Returns `{"status": "ok"}` immediately. Wire this to container HEALTHCHECK and Kubernetes `livenessProbe`. A failure here means "restart the container."
+- `GET /readyz` — readiness. Runs `SELECT 1` against the DB and (when `CVICHE_STORAGE_BACKEND=s3`) `head_bucket` against `CVICHE_S3_BUCKET`. Returns 200 with `{"status": "ready", "checks": {...}}` on success or 503 with `{"status": "not_ready", "checks": {...}}` naming the failing check(s). Wire this to Kubernetes `readinessProbe` and any LB target-group health check. A failure here means "de-list this replica."
+
+`GET /health` is preserved as a deprecated alias for `/livez`.
 
 ---
 
