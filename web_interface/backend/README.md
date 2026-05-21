@@ -23,7 +23,8 @@ FastAPI backend for the CViche web interface.
 4. **Access the API:**
    - API: http://localhost:8000
    - Interactive docs: http://localhost:8000/docs
-   - Health check: http://localhost:8000/health
+   - Liveness probe: http://localhost:8000/livez
+   - Readiness probe: http://localhost:8000/readyz
 
 ## API Endpoints
 

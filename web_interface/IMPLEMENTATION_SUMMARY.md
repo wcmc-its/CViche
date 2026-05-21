@@ -99,7 +99,7 @@ INFO:     Uvicorn running on http://127.0.0.1:8000
 **Verify:**
 - Visit http://localhost:8000 → Should show API info
 - Visit http://localhost:8000/docs → Should show Swagger docs
-- Visit http://localhost:8000/health → Should show `{"status": "healthy"}`
+- Visit http://localhost:8000/livez → Should show `{"status": "ok"}`
 
 ### 2. Start the Frontend
 

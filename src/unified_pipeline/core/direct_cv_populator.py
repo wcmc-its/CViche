@@ -135,7 +135,6 @@ class DirectCVPopulator:
                 5: "Dates"
             }
         },
-                },
 
         # E - OTHER EMPLOYMENT
         "E": {
@@ -229,7 +228,6 @@ class DirectCVPopulator:
                 3: "Dates"
             }
         },
-                },
 
         # O - SERVICE
         "O": {
@@ -404,7 +402,6 @@ class DirectCVPopulator:
                 3: "Dates"
             }
         },
-                },
         "K7": {
             "heading": "PROGRAM DEVELOPMENT",
             "fields": {
@@ -423,7 +420,6 @@ class DirectCVPopulator:
                 3: "Date"
             }
         },
-                },
 
         # M - RESEARCH (some can use tables)
         "M1": {
@@ -497,8 +493,6 @@ class DirectCVPopulator:
                 3: "Dates"
             }
         },
-                },
-                },
 
         # A - PERSONAL DATA (general)
         "A": {

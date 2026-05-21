@@ -3,15 +3,24 @@ import logging
 import os
 import traceback
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 
+# Configure logging BEFORE any module-level loggers are wired. dictConfig
+# reapplies handlers on existing loggers, but doing it first avoids the
+# transient window where boto3 imports might log at default INFO.
+from app.logging_config import configure_logging
+configure_logging()
+
 logger = logging.getLogger(__name__)
 
-from app.database import init_db
+from app.database import init_db, get_db
+from app.middleware.request_id import RequestIDMiddleware
 from app.api import upload, runs, steps, websocket, auth_routes, consent_routes, feedback_routes, admin_routes, saml_routes
 
 # ---------------------------------------------------------------------------
@@ -154,6 +163,10 @@ app.add_middleware(SecurityHeadersMiddleware)
 # CSRF middleware (must be added after CORS so CORS pre-flight passes first)
 app.add_middleware(CSRFMiddleware)
 
+# Request ID middleware: added LAST so it is the outermost layer. The
+# ContextVar it sets must be populated before any other middleware logs.
+app.add_middleware(RequestIDMiddleware)
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Catch-all: log full traceback server-side, return sanitized response to client."""
@@ -183,9 +196,66 @@ async def root():
     }
 
 
+@app.get("/livez")
+async def livez():
+    """Liveness probe -- the process is up.
+
+    Does NOT check downstream dependencies. If this endpoint fails the right
+    response is to restart the container, so it must never call the DB,
+    S3, or any other network resource.
+    """
+    return {"status": "ok"}
+
+
+@app.get("/readyz")
+def readyz(response: Response, db: Session = Depends(get_db)):
+    """Readiness probe -- downstream dependencies are reachable.
+
+    Returns 503 with a JSON body naming the failing check(s) if the database
+    is unreachable or the configured S3 bucket cannot be reached. A failing
+    /readyz should de-list the replica from the load balancer; it should
+    NOT trigger a restart.
+    """
+    checks: dict[str, dict] = {}
+
+    try:
+        db.execute(text("SELECT 1"))
+        checks["db"] = {"ok": True}
+    except Exception as exc:
+        checks["db"] = {"ok": False, "error": str(exc)}
+
+    storage_backend = os.environ.get("CVICHE_STORAGE_BACKEND", "local")
+    if storage_backend == "s3":
+        bucket = os.environ.get("CVICHE_S3_BUCKET")
+        if not bucket:
+            checks["s3"] = {"ok": False, "error": "CVICHE_S3_BUCKET not set"}
+        else:
+            try:
+                import boto3
+                from botocore.config import Config
+                s3 = boto3.client(
+                    "s3",
+                    config=Config(
+                        connect_timeout=2,
+                        read_timeout=2,
+                        retries={"max_attempts": 1},
+                    ),
+                )
+                s3.head_bucket(Bucket=bucket)
+                checks["s3"] = {"ok": True}
+            except Exception as exc:
+                checks["s3"] = {"ok": False, "error": str(exc)}
+
+    all_ok = all(c["ok"] for c in checks.values())
+    if not all_ok:
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return {"status": "ready" if all_ok else "not_ready", "checks": checks}
+
+
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
+    """Deprecated alias for /livez. Kept so existing healthcheck wiring keeps
+    working; new probes should use /livez (liveness) or /readyz (readiness)."""
     return {"status": "healthy"}
 
 
