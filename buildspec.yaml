@@ -29,21 +29,46 @@ phases:
 
        - 'echo "Targeting environment: ${ENV_NAME}"'
        - 'echo "Injecting AWS Account ID into Service Account manifest..."'
-       - echo "Database URL length -> ${#DATABASE_URL}"
-       - if [ -z "${DATABASE_URL}" ]; then echo "❌ AWS CodeBuild is passing an EMPTY string for DATABASE_URL"; else echo "✅ CodeBuild has successfully loaded DATABASE_URL"; fi
-       - echo "========================"
-        # 1. Inject Secrets and Parameters
+       # ... Keep your registry login, image tagging, and db.env lines here ...
+       # 1. Inject Secrets and Parameters
        - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" k8s/overlays/${ENV_NAME}/sa-patch.yaml
-       - sed -i "s|CVICHE_SESSION_SECRET_PLACEHOLDER|$SESSION_SECRET|g" k8s/overlays/dev/kustomization.yaml
-       - sed -i "s|'CVICHE_DB_URL_PLACEHOLDER'|'$DATABASE_URL'|g" k8s/overlays/dev/kustomization.yaml
        # Target the base ingress.yaml file where your placeholder actually lives
        - sed -i "s|ACM_ARN_PLACEHOLDER|${ACM_CERTIFICATE_ARN}|g" k8s/base/ingress.yaml
+       #- sed -i "s|CVICHE_SESSION_SECRET_PLACEHOLDER|$SESSION_SECRET|g" k8s/overlays/dev/kustomization.yaml
+       #- sed -i "s|'CVICHE_DB_URL_PLACEHOLDER'|'$DATABASE_URL'|g" k8s/overlays/dev/kustomization.yaml
+ 
 
        # 2. Dynamic Image Injection via sed (Replaces kubectl set image)
        - sed -i "s|REPO_BE_PLACEHOLDER|$REPO_BE|g" k8s/base/kustomization.yaml
        - sed -i "s|REPO_FE_PLACEHOLDER|$REPO_FE|g" k8s/base/kustomization.yaml
        - sed -i "s|TAG_PLACEHOLDER|$TAG|g" k8s/base/kustomization.yaml
        
+       - echo "Generating native Kustomize Auth environment configuration for ${ENV_NAME}..."
+      
+       # Overwrite the auth.env file inside the target overlay instantly
+       - |
+          cat <<EOF > k8s/overlays/${ENV_NAME}/auth.env
+          AUTH_MODE=saml
+          ENTITY_ID=${AUTH_ENTITY_ID}
+          BASE_URL=${AUTH_BASE_URL}
+          METADATA_URL=${AUTH_METADATA_URL}
+          DISCOVERY_URL=${AUTH_DISCOVERY_URL}
+          CERT_PATH=${AUTH_CERT_PATH}
+          ACCESS_GROUP=${AUTH_ACCESS_GROUP}
+          ADMIN_GROUP=${AUTH_ADMIN_GROUP}
+          CONTACT_NAME=${AUTH_CONTACT_NAME}
+          CONTACT_EMAIL=${AUTH_CONTACT_EMAIL}
+          EOF 
+       # 1. Sanitize the DB URL so 'sed' treats special characters (like &) as raw text
+       - SANITIZED_DB_URL=$(echo "$DATABASE_URL" | sed 's/[&]/\\&/g')
+       - echo "Writing live environment secrets into db.env template..."
+       - |
+          cat <<EOF > k8s/overlays/${ENV_NAME}/db.env
+          DATABASE_URL=${DATABASE_URL}
+          CVICHE_DATABASE_URL=${DATABASE_URL}
+          CVICHE_SESSION_SECRET=${SESSION_SECRET}
+          EOF 
+
 
   build:
     commands:
