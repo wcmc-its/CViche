@@ -190,6 +190,8 @@ For production, use a managed MariaDB instance and set `CVICHE_DATABASE_URL` acc
 mysql+pymysql://cviche_user:PASSWORD@mariadb-host:3306/cviche
 ```
 
+For backup configuration, snapshot retention, point-in-time recovery, and the restore runbook, see [docs/PRODUCTION_BACKUPS.md](../docs/PRODUCTION_BACKUPS.md). That doc also covers S3 versioning and the (currently fragile) prompt-log persistence story.
+
 ### Alembic Migrations
 
 All schema changes are managed by Alembic. Migration files live in `web_interface/backend/alembic/versions/`.
