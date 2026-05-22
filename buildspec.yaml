@@ -34,9 +34,7 @@ phases:
        - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" k8s/overlays/${ENV_NAME}/sa-patch.yaml
        # Target the base ingress.yaml file where your placeholder actually lives
        - sed -i "s|ACM_ARN_PLACEHOLDER|${ACM_CERTIFICATE_ARN}|g" k8s/base/ingress.yaml
-       #- sed -i "s|CVICHE_SESSION_SECRET_PLACEHOLDER|$SESSION_SECRET|g" k8s/overlays/dev/kustomization.yaml
-       #- sed -i "s|'CVICHE_DB_URL_PLACEHOLDER'|'$DATABASE_URL'|g" k8s/overlays/dev/kustomization.yaml
- 
+       
 
        # 2. Dynamic Image Injection via sed (Replaces kubectl set image)
        - sed -i "s|REPO_BE_PLACEHOLDER|$REPO_BE|g" k8s/base/kustomization.yaml
@@ -44,7 +42,8 @@ phases:
        - sed -i "s|TAG_PLACEHOLDER|$TAG|g" k8s/base/kustomization.yaml
        
        - echo "Generating native Kustomize Auth environment configuration for ${ENV_NAME}..."
-      
+       - echo "AUTH_BASE_URL is ${AUTH_BASE_URL}"
+       - echo "AUTH_METADATA_URL is ${AUTH_METADATA_URL}"
        # Overwrite the auth.env file inside the target overlay instantly
        - echo "Generating the structured auth_config.yaml file for container volume mount..."
        - |
@@ -101,6 +100,7 @@ phases:
       - kubectl apply -k k8s/overlays/${ENV_NAME}
 
 
-      - echo "Checking rollout status..."
-      - kubectl rollout status deployment/cviche-backend -n cviche-${ENV_NAME}
-      - kubectl rollout status deployment/cviche-frontend -n cviche-${ENV_NAME}
+      - echo "Forcing a zero-downtime rolling update to clear configuration caches..."
+      - kubectl rollout restart deployment/cviche-backend -n cviche-${ENV_NAME}
+      - kubectl rollout restart deployment/cviche-frontend -n cviche-${ENV_NAME}
+      
