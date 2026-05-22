@@ -16,7 +16,11 @@ configMapGenerator:
 secretGenerator:
   - name: cviche-secrets
     envs:
-      - db.env      
+      - db.env
+  - name: cviche-saml-certs
+    files:
+      - saml.key
+      - saml.crt          
 
 patches:
   - path: backend-patch.yaml

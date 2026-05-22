@@ -24,8 +24,21 @@ spec:
             - name: auth-config-volume
               mountPath: /app/web_interface/backend/auth_config.yaml
               subPath: auth_config.yaml # Mounts ONLY this file without wiping out existing app files
+
+          # --- Map SAML Private Key ---
+            - name: certs-volume
+              mountPath: /app/web_interface/backend/certs/cviche-saml-sp-prod.key.pem
+              subPath: saml.key
+            # --- Map SAML Public Certificate ---
+            - name: certs-volume
+              mountPath: /app/web_interface/backend/certs/cviche-saml-sp-prod.crt.pem
+              subPath: saml.crt    
       # --- New Volume Definition ---
       volumes:
         - name: auth-config-volume
           configMap:
             name: cviche-auth-config # Automatically links with your configMapGenerator
+        # --- Declare the Shared Secret Volume ---
+        - name: certs-volume
+          secret:
+            secretName: cviche-saml-certs    
