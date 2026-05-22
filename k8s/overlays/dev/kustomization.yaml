@@ -19,8 +19,8 @@ secretGenerator:
       - db.env
   - name: cviche-saml-certs
     files:
-      - saml.key
-      - saml.crt          
+      - cviche-saml-sp-prod.key.pem
+      - cviche-saml-sp-prod.crt.pem          
 
 patches:
   - path: backend-patch.yaml
