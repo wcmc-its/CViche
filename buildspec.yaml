@@ -33,7 +33,7 @@ phases:
        # 1. Inject Secrets and Parameters
        - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" k8s/overlays/${ENV_NAME}/sa-patch.yaml
        # Target the base ingress.yaml file where your placeholder actually lives
-       - sed -i "s|ACM_ARN_PLACEHOLDER|${ACM_CERTIFICATE_ARN}|g" k8s/base/ingress.yaml
+       - sed -i "s|ACM_ARN_PLACEHOLDER|${ACM_CERTIFICATE_ARN}|g" k8s/overlays/${ENV_NAME}/ingress-patch.yaml
        
 
        # 2. Dynamic Image Injection via sed (Replaces kubectl set image)

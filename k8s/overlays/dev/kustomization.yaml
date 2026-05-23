@@ -27,3 +27,16 @@ patches:
   - path: frontend-patch.yaml
   - path: sa-patch.yaml
   - path: ingress-patch.yaml
+
+patchesJson6902:
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: Ingress
+      name: cviche-ingress
+      # Note: We can omit the namespace filter here because Kustomize 
+      # runs this JSON patch within the scope of the file's defined target name.
+    patch: |-
+      - op: add
+        path: /spec/rules/0/host
+        value: cviche.weill.cornell.edu

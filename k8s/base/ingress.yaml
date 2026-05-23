@@ -11,12 +11,8 @@ metadata:
     alb.ingress.kubernetes.io/ssl-redirect: '443'
     # Routes traffic directly to Pod IPs (more efficient)                                                     
     alb.ingress.kubernetes.io/target-type: ip
-    # This helps the ALB know which subnets to use (Private subnets only)
-    # alb.ingress.kubernetes.io/subnets: subnet-xxxx, subnet-yyyy
     # Health check path for your FastAPI backend
     alb.ingress.kubernetes.io/healthcheck-path: /api/health 
-    # SSL cert in ACM
-    alb.ingress.kubernetes.io/certificate-arn: ACM_ARN_PLACEHOLDER
 spec:
   ingressClassName: alb
   rules:

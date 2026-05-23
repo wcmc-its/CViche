@@ -2,6 +2,5 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: cviche-ingress
-spec:
-  rules:
-    - host: cviche.weill.cornell.edu  
+  annotations:
+    alb.ingress.kubernetes.io/certificate-arn: ACM_ARN_PLACEHOLDER
