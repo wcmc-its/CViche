@@ -73,11 +73,22 @@ class S3RunStorage(RunStorage):
 
         return keys
 
-    def get_download_url(self, run_id: str, key: str, expires_in: int = 300) -> str | None:
+    def get_download_url(
+        self,
+        run_id: str,
+        key: str,
+        expires_in: int = 300,
+        download_name: str | None = None,
+    ) -> str | None:
         s3_key = self._s3_key(run_id, key)
+        params = {"Bucket": self._bucket, "Key": s3_key}
+        if download_name:
+            params["ResponseContentDisposition"] = (
+                f'attachment; filename="{download_name}"'
+            )
         url = self._s3.generate_presigned_url(
             "get_object",
-            Params={"Bucket": self._bucket, "Key": s3_key},
+            Params=params,
             ExpiresIn=expires_in,
         )
         return url

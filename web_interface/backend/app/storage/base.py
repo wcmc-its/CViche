@@ -54,7 +54,13 @@ class RunStorage(ABC):
         ...
 
     @abstractmethod
-    def get_download_url(self, run_id: str, key: str, expires_in: int = 300) -> str | None:
+    def get_download_url(
+        self,
+        run_id: str,
+        key: str,
+        expires_in: int = 300,
+        download_name: str | None = None,
+    ) -> str | None:
         """Generate a download URL for a file.
 
         For S3, this returns a presigned URL. For local storage, returns None
@@ -64,6 +70,9 @@ class RunStorage(ABC):
             run_id: The run identifier.
             key: Relative path within the run's storage.
             expires_in: URL expiry in seconds (default 5 minutes).
+            download_name: If set, the URL forces a download with this filename
+                (Content-Disposition: attachment). Ignored by backends that
+                don't return a URL.
 
         Returns:
             Presigned URL string, or None if not supported.

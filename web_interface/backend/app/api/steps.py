@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -14,7 +14,7 @@ from app.models import Step, Log, Run, User
 from app.schemas import StepDetail, LogEntry, OutputPreview
 from app.auth import get_current_user
 from app.services.run_service import check_run_access
-from app.storage.factory import get_storage
+from app.storage import get_storage
 from app.errors import bad_request, not_found, internal_error
 
 logger = logging.getLogger(__name__)
@@ -144,6 +144,27 @@ async def get_data_file(
     """Download or preview a data file."""
 
     check_run_access(run_id, current_user, db)
+
+    # Prefer durable storage (S3 in prod) so downloads survive pod recycling
+    # (#38): the pipeline writes outputs to the pod's ephemeral filesystem, so
+    # a restart wipes them and the local FileResponse below 404s. JSON previews
+    # need the file contents inline, so only short-circuit for real downloads.
+    download_name = Path(filename).name
+    if not (preview and download_name.endswith(".json")):
+        storage = get_storage()
+        storage_key = f"outputs/{download_name}"
+        try:
+            if storage.exists(run_id, storage_key):
+                url = storage.get_download_url(
+                    run_id, storage_key, download_name=download_name
+                )
+                if url:
+                    return RedirectResponse(url, status_code=307)
+        except Exception as e:
+            # Fall back to local serving if storage is unreachable.
+            logger.warning(
+                "Storage lookup failed for %s/%s: %s", run_id, storage_key, e
+            )
 
     file_path = _resolve_safe_path(filename, run_id)
 
