@@ -23,7 +23,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   const [error, setError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
 
-   // Shared selection path for both the file picker and drag-and-drop.
+  // Shared selection path for both the file picker and drag-and-drop.
   const processFile = async (selectedFile: File) => {
     const ext = selectedFile.name.toLowerCase()
     if (ext.endsWith('.docx')) {
@@ -40,12 +40,10 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
       } finally {
         setEstimating(false)
       }
-    }
-    else {
+    } else {
       setError('Please select a .docx file')
       setFile(null)
       setEstimate(null)
-      }
     }
   }
 
@@ -202,6 +200,9 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                     </dd>
                   </div>
                 </dl>
+                <p className="text-xs text-gray-500 mt-3">
+                  Cost estimated for {estimate.pricing_model}.
+                </p>
               </section>
             )}
 
@@ -252,3 +253,4 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
       </div>
     </main>
   )
+}
