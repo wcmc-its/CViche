@@ -17,10 +17,13 @@ secretGenerator:
   - name: cviche-secrets
     envs:
       - db.env
+    literals:
+      - ED_LDAP_BIND_PASSWORD=CODEBUILD_ED_LDAP_BIND_PASSWORD
+
   - name: cviche-saml-certs
     files:
-      - cviche-saml-sp-prod.key.pem
-      - cviche-saml-sp-prod.crt.pem          
+      - saml.key=cviche-saml-sp-prod.key.pem
+      - saml.crt=cviche-saml-sp-prod.crt.pem          
 
 patches:
   - path: backend-patch.yaml

@@ -4,6 +4,6 @@ metadata:
   name: cviche-sa
   annotations:
     # Use this exact placeholder
-    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID_PLACEHOLDER:role/cviche-bedrock-role-dev
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID_PLACEHOLDER:role/cviche-bedrock-role
     
     

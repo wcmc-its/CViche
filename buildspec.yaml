@@ -35,8 +35,10 @@ phases:
        # Target the base ingress.yaml file where your placeholder actually lives
        - sed -i "s|ACM_ARN_PLACEHOLDER|${ACM_CERTIFICATE_ARN}|g" k8s/overlays/${ENV_NAME}/ingress-patch.yaml
        
+       # 2. Injects the actual runtime LDAP password variable into the kustomization layout
+       - sed -i "s|CODEBUILD_ED_LDAP_BIND_PASSWORD|$ED_LDAP_BIND_PASSWORD|g" k8s/overlays/${ENV_NAME}/kustomization.yaml
 
-       # 2. Dynamic Image Injection via sed (Replaces kubectl set image)
+       # 3. Dynamic Image Injection via sed (Replaces kubectl set image)
        - sed -i "s|REPO_BE_PLACEHOLDER|$REPO_BE|g" k8s/base/kustomization.yaml
        - sed -i "s|REPO_FE_PLACEHOLDER|$REPO_FE|g" k8s/base/kustomization.yaml
        - sed -i "s|TAG_PLACEHOLDER|$TAG|g" k8s/base/kustomization.yaml
@@ -50,6 +52,10 @@ phases:
         cat <<EOF > k8s/overlays/${ENV_NAME}/auth_config.yaml
         auth:
           mode: saml
+          CVICHE_ALLOWED_ORIGINS: "${CVICHE_ALLOWED_ORIGINS}"
+        ldap:
+          ED_LDAP_URL: "${ED_LDAP_URL}"
+          ED_LDAP_BIND_DN: "${ED_LDAP_BIND_DN}"  
         saml:
           entity_id: "${AUTH_ENTITY_ID}"
           sp_base_url: "${AUTH_BASE_URL}"
