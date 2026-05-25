@@ -27,11 +27,11 @@ spec:
 
           # --- Map SAML Private Key ---
             - name: certs-volume
-              mountPath: /app/web_interface/backend/certs/cviche-saml-sp-prod.key.pem
+              mountPath: /app/web_interface/backend/certs/sp.key
               subPath: saml.key
             # --- Map SAML Public Certificate ---
             - name: certs-volume
-              mountPath: /app/web_interface/backend/certs/cviche-saml-sp-prod.crt.pem
+              mountPath: /app/web_interface/backend/certs/sp.crt
               subPath: saml.crt    
       # --- New Volume Definition ---
       volumes:
