@@ -7,6 +7,7 @@ Stages: 1a, 1b, 2, 3a, 3b, 4, 4.5, 5, 5b, 5c, 5d, 6
 import json
 import time
 import asyncio
+import logging
 import os
 import re
 import shutil
@@ -28,6 +29,9 @@ sys.path.insert(0, str(PARENT_DIR / 'src'))
 from app.models import Run, Step, Log
 from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.pipeline.event_emitter import event_emitter
+from app.storage import get_storage
+
+logger = logging.getLogger(__name__)
 
 # Import stage functions from run_full_pipeline.py dependencies
 from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
@@ -290,6 +294,35 @@ class PipelineOrchestrator:
             '6': base / 'stage_6_wcm_documents' / f'{self.document_uid}_wcm.docx',
         }
 
+    def _persist_outputs_to_storage(self, output_files):
+        """Mirror a stage's output files to durable storage (S3 in prod).
+
+        The pipeline writes outputs to the pod's ephemeral filesystem; a pod
+        restart/roll wipes them, so downloads for completed runs 404 even
+        though the run shows complete (issue #38). When running on S3, copy
+        each output up under ``outputs/{basename}`` so the download route can
+        serve it via a presigned URL. Keyed by basename to match how the
+        download route normalizes the requested filename.
+
+        Best-effort: a storage failure here logs a warning and must never fail
+        the run. In local mode this is a no-op (downloads serve from disk).
+        """
+        if os.environ.get("CVICHE_STORAGE_BACKEND", "local") != "s3":
+            return
+
+        storage = get_storage()
+        for path_str in output_files:
+            try:
+                path = Path(path_str)
+                if not path.is_file():
+                    continue
+                storage.put_file(self.run_id, f"outputs/{path.name}", path.read_bytes())
+            except Exception as e:
+                logger.warning(
+                    "Failed to mirror output %s to storage for run %s: %s",
+                    path_str, self.run_id, e,
+                )
+
     async def execute(self):
         """Execute the full pipeline."""
         run = self.db.query(Run).filter(Run.id == self.run_id).first()
@@ -379,6 +412,12 @@ class PipelineOrchestrator:
             step.cost = result.get("cost", 0.0)
             step.output_files = json.dumps(result.get("output_files", []))
             self.db.commit()
+
+            # Mirror outputs to durable storage so downloads survive pod
+            # recycling (#38). Off-loop to avoid blocking websocket emits.
+            await asyncio.get_running_loop().run_in_executor(
+                None, self._persist_outputs_to_storage, result.get("output_files", [])
+            )
 
             await self.log(step_number, f"Completed Stage {stage_id} in {duration}s")
             await event_emitter.emit_step_complete(
