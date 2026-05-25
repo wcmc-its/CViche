@@ -717,7 +717,138 @@ def test_bedrock_json_second_failure_returns_as_is():
     assert result["content"] == invalid_json_2
     assert mock_client.converse.call_count == 2
 
+# ---------------------------------------------------------------------------
+# Markdown-fence stripping (Bedrock json_schema / json_object responses)
+# ---------------------------------------------------------------------------
 
+def test_strip_markdown_fences_plain_json_unchanged():
+    """Content without fences is returned unchanged."""
+    from unified_pipeline.llm_client import _strip_markdown_fences
+    assert _strip_markdown_fences('{"x": 1}') == '{"x": 1}'
+
+
+def test_strip_markdown_fences_json_lang_tag():
+    """```json … ``` block is unwrapped to its inner content."""
+    from unified_pipeline.llm_client import _strip_markdown_fences
+    fenced = '```json\n{"x": 1}\n```'
+    assert _strip_markdown_fences(fenced) == '{"x": 1}'
+
+
+def test_strip_markdown_fences_bare_fences():
+    """``` … ``` without a language tag also unwraps."""
+    from unified_pipeline.llm_client import _strip_markdown_fences
+    fenced = '```\n{"x": 1}\n```'
+    assert _strip_markdown_fences(fenced) == '{"x": 1}'
+
+
+def test_strip_markdown_fences_with_surrounding_whitespace():
+    """Leading/trailing whitespace around the fence block is tolerated."""
+    from unified_pipeline.llm_client import _strip_markdown_fences
+    fenced = '   \n```json\n{"x": 1}\n```\n  '
+    assert _strip_markdown_fences(fenced) == '{"x": 1}'
+
+
+def test_strip_markdown_fences_preserves_inline_fences():
+    """A response with inline (not whole-block) fences is left intact."""
+    from unified_pipeline.llm_client import _strip_markdown_fences
+    inline = 'Here is some text with ```inline``` fences in the middle.'
+    assert _strip_markdown_fences(inline) == inline
+
+
+def test_bedrock_json_schema_fenced_response_is_stripped():
+    """Claude wraps JSON in markdown fences even when told not to.
+    When response_format is json_schema (or json_object), the Bedrock path
+    must strip the fence so callers can json.loads() the content directly.
+    Without this, every parser that uses json_schema would crash with
+    JSONDecodeError on the leading backtick."""
+    from unified_pipeline.llm_client import call_llm
+
+    fenced = '```json\n{"section_id": "orcid_id", "confidence": 0.99}\n```'
+    mock_response = _make_bedrock_response(content=fenced)
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        result = call_llm(
+            "stage_2",
+            [{"role": "user", "content": "classify"}],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "x", "strict": True, "schema": {}},
+            },
+        )
+
+    # Content must be the inner JSON, not the fenced wrapper.
+    assert result["content"] == '{"section_id": "orcid_id", "confidence": 0.99}'
+    # And it must round-trip through json.loads(), which is what parsers do.
+    import json as _json
+    parsed = _json.loads(result["content"])
+    assert parsed["section_id"] == "orcid_id"
+    # No retry should have fired -- the content was valid after stripping.
+    assert mock_client.converse.call_count == 1
+
+
+def test_bedrock_json_object_fenced_response_is_stripped():
+    """Same fence-stripping applies to json_object responses (regression:
+    previously the retry path fired and the second response was returned
+    as-is, which could itself still be fenced)."""
+    from unified_pipeline.llm_client import call_llm
+
+    fenced = '```json\n{"x": 1}\n```'
+    mock_response = _make_bedrock_response(content=fenced)
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        result = call_llm("stage_2", [{"role": "user", "content": "test"}],
+                          response_format={"type": "json_object"})
+
+    assert result["content"] == '{"x": 1}'
+    assert mock_client.converse.call_count == 1
+
+
+def test_bedrock_json_schema_appends_json_only_hint():
+    """Bedrock has no native structured-output mode, so a 'respond with
+    valid JSON only' hint is appended to the system message whenever a
+    JSON response is requested. Regression: the hint previously only
+    fired for json_object, leaving json_schema callers unguarded."""
+    from unified_pipeline.llm_client import call_llm
+
+    mock_response = _make_bedrock_response(content='{"x": 1}')
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        call_llm(
+            "stage_2",
+            [
+                {"role": "system", "content": "You classify CVs."},
+                {"role": "user", "content": "Classify this entry."},
+            ],
+            response_format={
+                "type": "json_schema",
+                "json_schema": {"name": "x", "strict": True, "schema": {}},
+            },
+        )
+
+        passed = mock_client.converse.call_args.kwargs
+        system_text = passed["system"][0]["text"]
+        assert "valid JSON only" in system_text, (
+            f"json_schema requests should append the JSON-only hint to the "
+            f"Bedrock system message; got: {system_text!r}"
+        )
 # ---------------------------------------------------------------------------
 # Lazy initialization
 # ---------------------------------------------------------------------------
