@@ -7,6 +7,7 @@ from datetime import datetime
 from fastapi import Request, HTTPException, Depends
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
 
 from app.database import get_db
 from app.models import User
@@ -51,6 +52,27 @@ def decode_session_cookie(cookie_value: str) -> dict | None:
         return _serializer.loads(cookie_value, max_age=SESSION_TTL)
     except (BadSignature, SignatureExpired):
         return None
+
+
+def _best_effort_commit(db: Session, what: str) -> bool:
+    """Commit a non-critical per-request write (last_active_at bump, role sync).
+
+    A page load fires several API calls at once, each running this dependency
+    and writing the same `users` row. On some MySQL configurations the racing
+    writers raise OperationalError 1020 ("Record has changed since last read"),
+    which would otherwise surface as a 500. These writes aren't required to
+    serve the current request, so on conflict we roll back and continue; the
+    update simply lands on a later request.
+
+    Returns True if committed, False if the conflict was swallowed.
+    """
+    try:
+        db.commit()
+        return True
+    except OperationalError as e:
+        db.rollback()
+        logger.warning("Skipped %s write due to concurrent DB conflict: %s", what, e)
+        return False
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
@@ -130,13 +152,13 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
             new_role = "admin" if membership.get("in_admin_group") else "user"
             if user.role != new_role:
                 user.role = new_role
-                db.commit()
+                _best_effort_commit(db, "role sync")
 
     # Debounced last_active_at update (once per 60s)
     now = datetime.now()
     if not user.last_active_at or (now - user.last_active_at).total_seconds() > 60:
         user.last_active_at = now
-        db.commit()
+        _best_effort_commit(db, "last_active_at")
 
     return user
 
