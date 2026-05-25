@@ -168,10 +168,17 @@ class CVPipeline:
             "stage_2a": base_output_dir / "stage_2a_entry_delimitation",
             "stage_2b": base_output_dir / "stage_2b_extract_entries_from_delimiters",
             "stage_3": base_output_dir / "stage_3_taxonomy_mapping",
+            "stage_3_parsing": base_output_dir / "stage_3_parsing",
             "stage_4": base_output_dir / "stage_4_wcm_templates",
             # Legacy compatibility - old "stage_2" pointed to taxonomy mapping
             "stage_2_legacy": base_output_dir / "stage_3_taxonomy_mapping"
         }
+        # Per-entity-type parsing subdirs consumed by run_stage_3_section_parsing
+        # and the entity-files fallback reader in run_stage_4_template_generation.
+        for entity_type in self.entity_to_section_code:
+            self.stage_dirs[f"stage_3_{entity_type}"] = (
+                self.stage_dirs["stage_3_parsing"] / entity_type
+            )
 
         # Create all directories
         for stage_dir in self.stage_dirs.values():
@@ -1354,7 +1361,7 @@ class CVPipeline:
         from .unified_to_classified_converter import convert_unified_to_classified
 
         segmented_file = self.stage_dirs["stage_1"] / f"{cv_name}_segmented.json"
-        mapped_file = self.stage_dirs["stage_2"] / f"{cv_name}_mapped.json"
+        mapped_file = self.stage_dirs["stage_3"] / f"{cv_name}_mapped.json"
         classified_file = classified_dir / f"{cv_name}_classified.json"
 
         convert_unified_to_classified(
@@ -1479,7 +1486,7 @@ class CVPipeline:
         entity_files = {}
 
         if not section_files:
-            stage3_parsing_dir = self.stage_dirs.get("stage_3", self.output_dir / "stage_3_parsing")
+            stage3_parsing_dir = self.stage_dirs.get("stage_3_parsing", self.output_dir / "stage_3_parsing")
 
             for entity_type in ["publications", "education", "positions", "grants", "certifications",
                                "honors", "memberships", "service", "licensure", "mentoring"]:

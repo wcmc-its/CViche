@@ -60,7 +60,9 @@ services:
     # Override entrypoint for dev: add --reload flag to uvicorn
     command: ["--reload", "--reload-dir", "/app/web_interface/backend/app"]
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      # /livez = liveness (process is up). Use /readyz for an LB/orchestrator
+      # probe -- it adds DB and S3 reachability checks.
+      test: ["CMD", "curl", "-f", "http://localhost:8000/livez"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -5,6 +5,7 @@ Uses run_full_pipeline.py stage functions directly.
 Stages: 1a, 1b, 2, 3a, 3b, 4, 4.5, 5, 5b, 5c, 5d, 6
 """
 import json
+import logging
 import time
 import asyncio
 import logging
@@ -20,6 +21,8 @@ from datetime import datetime
 from typing import Dict, Any, Optional
 from sqlalchemy.orm import Session
 
+logger = logging.getLogger(__name__)
+
 # Add parent project to path to import existing pipeline code
 import sys
 PARENT_DIR = Path(__file__).parent.parent.parent.parent.parent
@@ -32,6 +35,11 @@ from app.pipeline.event_emitter import event_emitter
 from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
+
+# The pipeline's prompt_logger writes per-LLM-call transcripts here. We
+# replicate fresh files into per-run storage so they survive container
+# restarts and replica scale-up.
+PROMPT_LOGS_DIR = PARENT_DIR / 'src' / 'unified_pipeline' / 'prompt_logs'
 
 # Import stage functions from run_full_pipeline.py dependencies
 from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
@@ -428,6 +436,15 @@ class PipelineOrchestrator:
                 result.get("output_files", [])
             )
 
+            # Replicate prompt-log files written during this step into the
+            # per-run storage backend. In dev (local storage) this just
+            # mirrors them into the run dir; in prod (S3) it makes them
+            # survive container restarts. Runs in a thread so the boto3 PUT
+            # doesn't block the event loop. Failure does not fail the step.
+            await asyncio.to_thread(
+                self._sync_prompt_logs_to_storage, step.started_at, step_number
+            )
+
         except Exception as e:
             step.status = "error"
             step.completed_at = datetime.now()
@@ -438,6 +455,56 @@ class PipelineOrchestrator:
             await self.log(step_number, f"Error in Stage {stage_id}: {str(e)}", "ERROR")
             await event_emitter.emit_step_error(self.run_id, step_number, str(e))
             raise
+
+    def _sync_prompt_logs_to_storage(
+        self, since: Optional[datetime], step_number: int
+    ) -> None:
+        """Copy prompt log files written since ``since`` into per-run storage.
+
+        The pipeline's prompt_logger.py writes files to a single shared
+        directory (`src/unified_pipeline/prompt_logs/`). In prod the
+        container's writable layer is wiped on every restart, so these
+        files must be replicated to durable storage to be readable later
+        from the API.
+
+        Files are filtered by mtime > ``since`` so each step uploads only
+        what it wrote. Failures are logged and swallowed -- the step has
+        already succeeded by the time this runs, and a missed prompt-log
+        upload should not flip its status.
+        """
+        if not PROMPT_LOGS_DIR.exists():
+            return
+
+        since_ts = since.timestamp() if since else 0
+        storage = get_storage()
+        uploaded = 0
+
+        try:
+            entries = list(PROMPT_LOGS_DIR.iterdir())
+        except OSError as exc:
+            logger.warning("Could not list prompt logs dir: %s", exc)
+            return
+
+        for path in entries:
+            if not path.is_file():
+                continue
+            try:
+                if path.stat().st_mtime < since_ts:
+                    continue
+                data = path.read_bytes()
+                storage.put_file(self.run_id, f"prompt_logs/{path.name}", data)
+                uploaded += 1
+            except Exception as exc:
+                logger.warning(
+                    "Failed to upload prompt log %s for run %s step %d: %s",
+                    path.name, self.run_id, step_number, exc,
+                )
+
+        if uploaded:
+            logger.info(
+                "Synced %d prompt log(s) to storage for run %s step %d",
+                uploaded, self.run_id, step_number,
+            )
 
     def _count_headers(self, nodes) -> int:
         """Count total headers in hierarchy."""

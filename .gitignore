@@ -88,6 +88,8 @@ src/logs/
 # Deprecated files
 *_DEPRECATED*
 *_backup*
+# Negation: the production-backups doc is not itself a backup file
+!docs/PRODUCTION_BACKUPS.md
 
 # Pipeline runtime artifacts
 src/unified_pipeline/core/*.txt

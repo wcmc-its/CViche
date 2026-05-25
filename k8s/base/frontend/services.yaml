@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: cviche-frontend-svc
+spec:
+  selector:
+    app: cviche-frontend
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80

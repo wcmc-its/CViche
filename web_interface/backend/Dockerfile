@@ -56,6 +56,7 @@ COPY config.yaml ./config.yaml
 # demand; pre-creating them keeps startup quiet.
 RUN chmod +x ./web_interface/backend/docker-entrypoint.sh \
     && mkdir -p ./src/unified_pipeline/outputs \
+                ./src/unified_pipeline/prompt_logs \
                 ./web_interface/outputs \
                 ./web_interface/uploads \
                 ./data/sample_cvs/word \
@@ -74,6 +75,7 @@ RUN groupadd --gid ${APP_GID} cviche \
                 cviche \
     && chown -R cviche:cviche \
         /app/src/unified_pipeline/outputs \
+        /app/src/unified_pipeline/prompt_logs \
         /app/web_interface/outputs \
         /app/web_interface/uploads \
         /app/data/sample_cvs/word \
@@ -84,9 +86,11 @@ WORKDIR /app/web_interface/backend
 
 EXPOSE 8000
 
-# Health check: hit the /health endpoint
+# Container health check uses the liveness probe (process up; no DB/S3 call).
+# /readyz is the right probe for an LB/orchestrator -- it checks downstream
+# dependencies and should de-list, not restart, on failure.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+    CMD curl -f http://localhost:8000/livez || exit 1
 
 USER cviche
 

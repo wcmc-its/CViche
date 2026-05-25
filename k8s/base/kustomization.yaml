@@ -1,0 +1,14 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - backend/   # This looks for backend/kustomization.yaml
+  - frontend/  # This looks for frontend/kustomization.yaml
+  - ingress.yaml
+images:
+  - name: backend # Make sure this matches the image name in your base deployment yaml
+    newName: REPO_BE_PLACEHOLDER
+    newTag: TAG_PLACEHOLDER
+  - name: frontend
+    newName: REPO_FE_PLACEHOLDER
+    newTag: TAG_PLACEHOLDER  

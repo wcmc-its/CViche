@@ -2,7 +2,12 @@ auth:
   mode: simple  # "simple" or "saml"
 
 saml:
-  entity_id: ""                    # SP entity ID (e.g., "https://cviche.med.cornell.edu/shibboleth")
+  entity_id: ""                    # SP entity ID (e.g., "https://cviche.weill.cornell.edu/shibboleth")
+  sp_base_url: ""                  # SP's reachable base URL (e.g., "https://cviche.weill.cornell.edu").
+                                   # ACS/SLO endpoints are advertised as {sp_base_url}/api/saml/{acs,logout}.
+                                   # This MUST match where the SP actually serves /api/saml/acs;
+                                   # the IdP enforces it as the assertion Destination/Recipient.
+                                   # Often differs from entity_id (Shibboleth convention appends /shibboleth).
   idp_metadata_url: ""             # IdP metadata URL
   discovery_url: ""                # WAYF discovery service URL
   cert_dir: "certs"                # Directory containing SP key/cert files (auto-generated if missing)
@@ -22,7 +27,7 @@ consent:
 
 ed:
   enabled: false  # Toggle ED group check independently of SAML mode
-  access_group: ""  # DN of access group, e.g., "cn=App-CViche-Users,ou=Groups,dc=weill,dc=cornell,dc=edu"
-  admin_group: ""   # DN of admin group, e.g., "cn=App-CViche-Admins,ou=Groups,dc=weill,dc=cornell,dc=edu"
+  access_group: ""  # DN of access group, e.g., "cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
+  admin_group: ""   # DN of admin group, e.g., "cn=ITS:Library:CViche/admin-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
   contact_name: ""  # Name shown in access denial message
   contact_email: "" # Email shown in access denial message
