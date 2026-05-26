@@ -10,7 +10,7 @@ from app.services.user_service import provision_user
 from app.services.config_service import (
     SESSION_TTL, LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW,
     MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
-    get_cost_per_1k_tokens,
+    get_cost_per_1k_tokens, get_estimated_run_cost,
 )
 from app.errors import not_found, bad_request, forbidden, validation_error
 from app.models import Run, User
@@ -148,6 +148,22 @@ class TestConfigService:
     def test_cost_per_1k_tokens_derived(self):
         # Rate is derived from the model configured in llm_config.yaml.
         assert get_cost_per_1k_tokens() > 0
+
+    def test_run_cost_brackets_calibration_run(self):
+        # Calibration run (2026-03-28): 56,372 doc chars / 123 entries cost
+        # ~$0.99 on Sonnet 4.6. The estimate band must bracket that. Pins the
+        # entry-classification cost model so the constants can't silently drift.
+        cost_min, cost_max = get_estimated_run_cost(56372)
+        assert cost_min < 0.99 < cost_max
+        assert cost_min < cost_max
+
+    def test_run_cost_scales_with_entry_density(self):
+        # Cost must rise with document size (more entries -> more stage 3b
+        # calls), and a tiny CV is floored, not zero.
+        small_min, small_max = get_estimated_run_cost(3000)
+        big_min, big_max = get_estimated_run_cost(60000)
+        assert small_min >= 0.10
+        assert big_max > small_max
 
 
 class TestErrorHelpers:

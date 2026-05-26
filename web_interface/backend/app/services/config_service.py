@@ -40,6 +40,26 @@ def get_cost_per_1k_tokens() -> float:
         return 0.075
 
 
+def get_estimated_run_cost(text_char_count: int) -> tuple[float, float]:
+    """(min, max) USD cost estimate for a full pipeline run on a CV.
+
+    Uses the entry-classification-aware model in unified_pipeline.config, which
+    accounts for stage 3b re-sending its large static prompt once per hierarchy
+    group -- the dominant, entry-count-driven cost a flat per-token rate misses.
+    The band is intentionally wide because entry count is estimated from
+    document text. Falls back to the legacy per-token rate if anything fails.
+    """
+    try:
+        from unified_pipeline.config import estimate_run_cost_usd
+        point = estimate_run_cost_usd(text_char_count)
+    except Exception:  # pragma: no cover - defensive fallback
+        point = (text_char_count / 4 / 1000) * get_cost_per_1k_tokens()
+
+    cost_min = max(point * 0.7, 0.10)
+    cost_max = max(point * 1.5, cost_min * 1.3)
+    return round(cost_min, 3), round(cost_max, 3)
+
+
 def get_estimate_model_name() -> str:
     """Friendly name of the model the cost estimate is based on (for display)."""
     try:
