@@ -1,8 +1,45 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
 resources:
-  - ../../base
+  - ../../base  # Point to the FOLDER, not the files inside it
 
 namespace: cviche-prod
+
+# 2. Cviche authentication config map configuration right below it!
+configMapGenerator:
+  - name: cviche-auth-config
+    files:
+      - auth_config.yaml
+
+# 1. Your existing database secrets configuration
+secretGenerator:
+  - name: cviche-secrets
+    envs:
+      - db.env
+    literals:
+      - ED_LDAP_BIND_PASSWORD=CODEBUILD_ED_LDAP_BIND_PASSWORD
+
+  - name: cviche-saml-certs
+    files:
+      - saml.key=cviche-saml-sp-prod.key.pem
+      - saml.crt=cviche-saml-sp-prod.crt.pem          
 
 patches:
   - path: backend-patch.yaml
   - path: frontend-patch.yaml
+  - path: sa-patch.yaml
+  - path: ingress-patch.yaml
+
+patchesJson6902:
+  - target:
+      group: networking.k8s.io
+      version: v1
+      kind: Ingress
+      name: cviche-ingress
+      # Note: We can omit the namespace filter here because Kustomize 
+      # runs this JSON patch within the scope of the file's defined target name.
+    patch: |-
+      - op: add
+        path: /spec/rules/0/host
+        value: cviche.weill.cornell.edu
