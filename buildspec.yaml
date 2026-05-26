@@ -53,6 +53,10 @@ phases:
         auth:
           mode: saml
           CVICHE_ALLOWED_ORIGINS: "${CVICHE_ALLOWED_ORIGINS}"
+        s3:
+          CVICHE_S3_BUCKET: "${CVICHE_S3_BUCKET}"
+          CVICHE_STORAGE_BACKEND: "${CVICHE_STORAGE_BACKEND}"
+          CVICHE_S3_PREFIX: "${CVICHE_S3_PREFIX}"         
         ldap:
           ED_LDAP_URL: "${ED_LDAP_URL}"
           ED_LDAP_BIND_DN: "${ED_LDAP_BIND_DN}"  
