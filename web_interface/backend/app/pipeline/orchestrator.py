@@ -315,7 +315,11 @@ class PipelineOrchestrator:
         Best-effort: a storage failure here logs a warning and must never fail
         the run. In local mode this is a no-op (downloads serve from disk).
         """
-        if os.environ.get("CVICHE_STORAGE_BACKEND", "local") != "s3":
+        from app.config_loader import load_yaml_config
+        config = load_yaml_config()
+        s3_config = config.get("s3", {})
+        
+        if s3_config.get("CVICHE_STORAGE_BACKEND", "local") != "s3":
             return
 
         storage = get_storage()
