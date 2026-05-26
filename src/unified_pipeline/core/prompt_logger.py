@@ -203,9 +203,15 @@ def log_prompt_response(
             response_record["response"]["usage"] = {
                 "prompt_tokens": response.get("prompt_tokens", 0),
                 "completion_tokens": response.get("completion_tokens", 0),
-                "total_tokens": response.get("total_tokens", 0)
+                "total_tokens": response.get("total_tokens", 0),
+                # Prompt-cache breakdown -- without these, caching is invisible
+                # in the logs and its effectiveness can't be verified.
+                "cache_read_tokens": response.get("cache_read_tokens", 0),
+                "cache_write_tokens": response.get("cache_write_tokens", 0),
             }
+            response_record["response"]["cost"] = response.get("cost", 0.0)
             response_record["response"]["model"] = response.get("model", "")
+            response_record["response"]["provider"] = response.get("provider", "")
         else:
             # Handle OpenAI SDK response objects (exception files)
             if hasattr(response, 'choices'):
