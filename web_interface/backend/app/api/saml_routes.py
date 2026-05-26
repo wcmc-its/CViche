@@ -104,7 +104,8 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
         ldap_url = os.environ.get("ED_LDAP_URL", "")
         bind_dn = os.environ.get("ED_LDAP_BIND_DN", "")
         bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
-
+        logger.error("LDAP config ldap_url=%s bind_dn=%s password_length=%s",
+                        ldap_url,bind_dn,len(bind_password) if bind_password else 0)
         if not ldap_url or not bind_dn:
             logger.error("ED LDAP credentials not configured (ED_LDAP_URL, ED_LDAP_BIND_DN)")
             return RedirectResponse("/login?error=directory_unavailable", status_code=302)

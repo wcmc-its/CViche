@@ -8,6 +8,7 @@ metadata:
     # Keep it internal for now                         
     alb.ingress.kubernetes.io/scheme: internal
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS":443}]'
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=500
     alb.ingress.kubernetes.io/ssl-redirect: '443'
     # Routes traffic directly to Pod IPs (more efficient)                                                     
     alb.ingress.kubernetes.io/target-type: ip
