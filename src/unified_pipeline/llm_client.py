@@ -498,11 +498,16 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
             finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
             # If still invalid, return as-is (let downstream handle it per D-05)
 
-            # Strip a surrounding markdown fence (Claude wraps JSON in ```json…```
-            # even when told not to) so callers can json.loads() the content
-            # directly. No-op when no fence is present or no JSON was requested.
-            if _wants_json(response_format):
-              content = _strip_markdown_fences(content)
+        # Strip a surrounding markdown fence (Claude wraps JSON in ```json…```
+        # even when told not to) so callers can json.loads() the content
+        # directly. This MUST stay at the call_llm body level, NOT inside the
+        # retry branch above: _validate_json_response strips fences before
+        # validating, so a fence-wrapped-but-valid response passes validation
+        # and never triggers a retry -- stripping here is the only thing that
+        # makes the returned content fence-free for the common case. No-op when
+        # no fence is present or no JSON was requested.
+        if _wants_json(response_format):
+            content = _strip_markdown_fences(content)
 
         # With caching on, Bedrock's `inputTokens` reports ONLY the uncached
         # input tokens; the cached portion shows up in cacheRead/cacheWrite.
