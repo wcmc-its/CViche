@@ -1,6 +1,7 @@
 """SAML 2.0 Service Provider endpoints."""
 import logging
 import os
+import yaml
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse, Response
@@ -99,10 +100,18 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
     ed_enabled = get_config_value(db, "ed_enabled")
     membership = None
     if ed_enabled:
+        CONFIG_PATH = "/app/web_interface/backend/auth_config.yaml"  
+
+        with open(CONFIG_PATH, "r") as f:
+            config = yaml.safe_load(f)
+        ldap_config = config.get("ldap", {})
+
         ed_access_group = get_config_value(db, "ed_access_group") or ""
         ed_admin_group = get_config_value(db, "ed_admin_group") or ""
-        ldap_url = os.environ.get("ED_LDAP_URL", "")
-        bind_dn = os.environ.get("ED_LDAP_BIND_DN", "")
+        ldap_url = ldap_config.get("ED_LDAP_URL", "")
+        bind_dn = ldap_config.get("ED_LDAP_BIND_DN", "")
+        #ldap_url = os.environ.get("ED_LDAP_URL", "")
+        #bind_dn = os.environ.get("ED_LDAP_BIND_DN", "")
         bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
         logger.error("LDAP config ldap_url=%s bind_dn=%s password_length=%s",
                         ldap_url,bind_dn,len(bind_password) if bind_password else 0)
