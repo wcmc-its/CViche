@@ -25,39 +25,15 @@ from app.middleware.request_id import RequestIDMiddleware
 from app.api import upload, runs, steps, websocket, auth_routes, consent_routes, feedback_routes, admin_routes, saml_routes
 
 # ---------------------------------------------------------------------------
-# Allowed origins (comma-separated) for CORS and the CSRF origin check.
+# Allowed origins (env-configurable, comma-separated)
 # ---------------------------------------------------------------------------
-_LOCALHOST_ORIGINS = (
-    "http://localhost:3000,http://localhost:3001,http://localhost:5173,"
-    "http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:5173"
-)
-
-
-def _resolve_allowed_origins() -> list[str]:
-    """Resolve allowed origins. Precedence: CVICHE_ALLOWED_ORIGINS env var,
-    then auth_config.yaml (where the deploy buildspec writes it, under `auth`),
-    then localhost dev defaults.
-
-    The deploy buildspec writes CVICHE_ALLOWED_ORIGINS into auth_config.yaml
-    rather than as an env var, so an env-only lookup silently fell back to the
-    localhost defaults in production -- which then rejected same-origin POST
-    requests from the real prod origin via the CSRF middleware below. Reading
-    the YAML as a fallback makes the configured value take effect.
-    """
-    raw = os.environ.get("CVICHE_ALLOWED_ORIGINS")
-    if not raw:
-        try:
-            from app.config_loader import load_yaml_config
-            cfg = load_yaml_config() or {}
-            raw = (cfg.get("auth") or {}).get("CVICHE_ALLOWED_ORIGINS")
-        except Exception:
-            raw = None
-    if not raw:
-        raw = _LOCALHOST_ORIGINS
-    return [o.strip() for o in raw.split(",") if o.strip()]
-
-
-_allowed_origins = _resolve_allowed_origins()
+_allowed_origins = [
+    o.strip()
+    for o in os.environ.get(
+        "CVICHE_ALLOWED_ORIGINS",
+        "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:5173",
+    ).split(",")
+]
 
 
 # ---------------------------------------------------------------------------
