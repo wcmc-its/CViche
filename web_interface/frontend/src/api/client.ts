@@ -5,9 +5,29 @@ export interface ApiError {
   message: string
 }
 
+// Paths that manage auth state themselves. A 401 from these is expected
+// (e.g. /api/auth/me during bootstrap means "not signed in") and must NOT
+// trigger the global redirect, or the login page would loop.
+const AUTH_BOOTSTRAP_PREFIX = '/api/auth/'
+
+// Registered by the app (see AuthErrorHandler in App.tsx). Invoked on any 401
+// from a protected endpoint so the app can clear auth state and bounce to /login.
+let onUnauthorized: (() => void) | null = null
+
+export function setUnauthorizedHandler(handler: (() => void) | null) {
+  onUnauthorized = handler
+}
+
+function maybeHandleUnauthorized(path: string, status: number) {
+  if (status === 401 && !path.startsWith(AUTH_BOOTSTRAP_PREFIX)) {
+    onUnauthorized?.()
+  }
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, options)
   if (!res.ok) {
+    maybeHandleUnauthorized(path, res.status)
     const body = await res.json().catch(() => null)
     const message = body?.detail?.message || body?.detail || `Request failed: ${res.status}`
     throw { status: res.status, message } as ApiError
@@ -30,13 +50,17 @@ export const api = {
       body: JSON.stringify(body),
     }),
   postRaw: async (path: string, body?: unknown): Promise<Response> => {
-    return fetch(`${API_BASE}${path}`, {
+    const res = await fetch(`${API_BASE}${path}`, {
       method: 'POST',
       headers: body instanceof FormData ? undefined : { 'Content-Type': 'application/json' },
       body: body instanceof FormData ? body : body ? JSON.stringify(body) : undefined,
     })
+    maybeHandleUnauthorized(path, res.status)
+    return res
   },
   getRaw: async (path: string): Promise<Response> => {
-    return fetch(`${API_BASE}${path}`)
+    const res = await fetch(`${API_BASE}${path}`)
+    maybeHandleUnauthorized(path, res.status)
+    return res
   },
 }

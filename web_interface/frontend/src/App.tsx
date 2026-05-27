@@ -1,5 +1,7 @@
+import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom'
 import { useAuth } from './contexts/AuthContext'
+import { setUnauthorizedHandler } from './api/client'
 import UploadPage from './components/UploadPage'
 import PipelineViewer from './components/PipelineViewer'
 import LoginPage from './components/LoginPage'
@@ -132,9 +134,31 @@ function ConsentRoute() {
   return <ConsentPage />
 }
 
+/**
+ * Registers a global 401 handler with the API client. When a protected request
+ * comes back 401 (session expired mid-use), clear auth state and bounce to
+ * /login — which in SAML mode presents the WCM SSO button. Lives inside the
+ * router so it can navigate; auth-bootstrap calls are excluded in client.ts.
+ */
+function AuthErrorHandler() {
+  const { clearAuth } = useAuth()
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      clearAuth()
+      navigate('/login', { replace: true })
+    })
+    return () => setUnauthorizedHandler(null)
+  }, [clearAuth, navigate])
+
+  return null
+}
+
 function App() {
   return (
     <BrowserRouter>
+      <AuthErrorHandler />
       <div className="min-h-screen bg-surface-muted">
         <Routes>
           <Route
