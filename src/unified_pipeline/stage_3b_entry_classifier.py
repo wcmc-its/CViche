@@ -557,24 +557,11 @@ C. GRANTS, FUNDING, CLINICAL TRIALS, AND CLINICAL ACTIVITY
      * Role indicators: PI, Co-PI, Co-I, Site PI, Mentor
      * Funding period: dates like "2019–2024"
      * Dollar amounts linked to projects: "$X,XXX,XXX"
-   - NOT THE OWNER'S OWN GRANT → M1 (research activity), NOT M2:
-     If another person is the named PI and the CV owner is NOT
-     PI/Co-PI/Co-I/Site PI (e.g. the stated role is "program manager",
-     "coordinator", "grant writer", or "research assistant"), or the
-     entry merely describes participation in a project funded to someone
-     else, classify it M1 (research experience/activity). M2A/B/C are
-     reserved for grants the CV owner actually holds. This is common under
-     a "Research Experience" section, where a funder/PI is named but the
-     CV owner is a contributor rather than the awardee.
    - Subtypes (DETERMINISTIC RULES - HIERARCHY OVERRIDES DATES):
-     * DECIDE THE SUBTYPE FROM THE SECTION/HIERARCHY LABEL FIRST. The
-       section label is AUTHORITATIVE and overrides ALL date-based
-       reasoning -- do not let the listed dates pull you off it:
+     * HIERARCHY SIGNALS TAKE PRECEDENCE over date-based inference:
        - Section labeled "Funded", "Active", "Current" → M2A or M2B (not M2C)
        - Section labeled "Completed", "Past" → M2B (not M2A)
-       - Section labeled "Pending", "Submitted", "Under Review",
-         "Proposed", or "Not Funded" → M2C, EVEN IF the listed dates look
-         current or in the past.
+       - Section labeled "Pending", "Submitted", "Not Funded" → M2C
      * M2C (Pending) - use if ANY of these are true:
        - Listed under "Pending", "Submitted", or "Not Funded" hierarchy
        - Grant number contains "TBA", "TBD", "Pending", or is blank
@@ -811,15 +798,6 @@ E. SERVICE, MEMBERSHIP, ADVOCACY, AND POLICY (P, Q1–Q4, H, I)
     - Media interviews and press activities → S9 (Other Media):
       * TV/radio interviews, podcasts, newspaper/magazine interviews,
         press releases, media statements.
-    - ACADEMIC INVITED LECTURES → R, EVEN AT A CONFERENCE: A named talk
-      listed under an "Invited Lectures", "Invited Talks", "Lectureship",
-      "Grand Rounds", "Visiting Professor", or similar section is R
-      (Invited Talk) even when delivered at a conference or meeting. The
-      section/hierarchy label is authoritative here. Reserve S8 for
-      posters, abstracts, proceedings, and *contributed* (non-invited)
-      conference presentations. The "part of a conference → S8" guidance
-      below applies to lay/public-outreach talks, NOT to invited academic
-      lectures.
     - Public talks to lay audiences → R (Invited Talks) if invited, or
       S8 if part of a conference/meeting:
       * Schools, churches, community groups, rotary clubs, local
