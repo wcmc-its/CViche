@@ -345,8 +345,8 @@ def classify_entries_batch(
         system_prompt = f"""You are an expert at classifying academic CV entries into a standardized taxonomy.
 
 HIERARCHY CONTEXT:
-  Each request includes labels (Top-level, Section, Subsection) drawn directly from the
-  original CV's internal structure. These are *not* authoritative taxonomy codes.
+  The following labels (Top-level, Section, Subsection) come directly from the original CV's
+  internal structure. These are *not* authoritative taxonomy codes.
 
   SUGGESTED CODES: The codes in parentheses (e.g., "P 40%, Q1 30%") are automated
   first-pass suggestions that may be WRONG. They indicate what a heuristic system
@@ -362,11 +362,13 @@ HIERARCHY CONTEXT:
   - When content is ambiguous or could fit multiple codes (e.g., a lecture could be K1
     teaching, K5 community education, or R presentation), use the hierarchy to infer the
     CV author's likely intent and weight your classification accordingly.
-  - Each entry includes its specific CV section path. Use this per-entry context
-    alongside the batch-level hierarchy provided with the request.
+  - Each entry below includes its specific CV section path. Use this per-entry context
+    alongside the batch-level hierarchy above.
 
-  The batch-level hierarchy context and the list of AVAILABLE TAXONOMY CODES (you may use
-  ANY code listed there) are provided in the user message, immediately before the entries.
+{context_str}
+
+AVAILABLE TAXONOMY CODES (you may use ANY of these):
+{taxonomy_ref}
 
 ════════════════════════════════════════════════════════════════════════════════
 CV TAXONOMY CLASSIFICATION RULES v2.6
@@ -1145,13 +1147,7 @@ Example:
             entries_lines.append(f"[{i}] (Section: {hierarchy_path}) {e['text'][:500]}")
         entries_text = "\n".join(entries_lines)
 
-        user_message = f"""HIERARCHY CONTEXT FOR THIS BATCH:
-{context_str}
-
-AVAILABLE TAXONOMY CODES (you may use ANY of these):
-{taxonomy_ref}
-
-Classify these {len(entries_with_text)} entries:
+        user_message = f"""Classify these {len(entries_with_text)} entries:
 
 {entries_text}
 
