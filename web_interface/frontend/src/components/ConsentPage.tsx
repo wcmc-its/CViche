@@ -3,6 +3,7 @@ import { Loader2, ShieldCheck } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { submitConsent } from '../api/consent'
 import ErrorBanner from './ErrorBanner'
+import UserMenu from './UserMenu'
 
 export default function ConsentPage() {
   const { user, consentStatus, refreshConsent, refreshUser } = useAuth()
@@ -63,12 +64,15 @@ export default function ConsentPage() {
         <form onSubmit={handleSubmit}>
           <section className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6 md:p-8">
             {/* Header */}
-            <div className="flex items-center gap-3 mb-6">
-              <ShieldCheck className="h-6 w-6 text-primary-600 flex-shrink-0" aria-hidden="true" />
-              <div>
-                <h1 className="text-xl font-bold text-gray-900">Consent to Participate</h1>
-                <p className="text-sm text-gray-500">Version {consentStatus.version}</p>
+            <div className="flex items-center justify-between gap-3 mb-6">
+              <div className="flex items-center gap-3 min-w-0">
+                <ShieldCheck className="h-6 w-6 text-primary-600 flex-shrink-0" aria-hidden="true" />
+                <div className="min-w-0">
+                  <h1 className="text-xl font-bold text-gray-900">Consent to Participate</h1>
+                  <p className="text-sm text-gray-500">Version {consentStatus.version}</p>
+                </div>
               </div>
+              <UserMenu />
             </div>
 
             {/* Consent text -- rendered as prose */}
