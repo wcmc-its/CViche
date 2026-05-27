@@ -281,3 +281,36 @@ def test_prepare_resume_preserves_cost_and_loads_prior_outputs(db, tmp_path):
         assert set(orch.stage_outputs) == {"1a", "1b", "2", "3a", "3b"}
     finally:
         shutil.rmtree(orch.web_output_dir, ignore_errors=True)
+
+
+def test_resume_missing_upstream_output_gives_friendly_error(db, tmp_path):
+    """When a resumed stage can't find an earlier stage's on-disk output (pod
+    recycled), the failed banner must show a clear 'use Restart' message rather
+    than a raw filesystem path + errno."""
+    import asyncio
+    import shutil
+    from app.pipeline.orchestrator import PipelineOrchestrator
+
+    run = Run(id="RSME02", filename="cv.docx", file_type="docx", status="running",
+              total_cost=0.2, started_at=datetime.now())
+    db.add(run)
+    db.commit()
+
+    fake_file = tmp_path / "RSME02.docx"
+    fake_file.write_bytes(b"x")
+    orch = PipelineOrchestrator("RSME02", fake_file, db)
+    raw = "[Errno 2] No such file or directory: '/x/stage_4_field_extraction/RSME02_fields.json'"
+    try:
+        with patch.object(orch, "_copy_to_pipeline_input", return_value=str(fake_file)), \
+             patch.object(orch, "execute_step", new=AsyncMock(side_effect=FileNotFoundError(raw))):
+            with pytest.raises(FileNotFoundError):
+                asyncio.run(orch.execute(start_step_number=8))
+
+        db.refresh(run)
+        assert run.status == "failed"
+        msg = run.error_message
+        assert "resume" in msg.lower() and "restart" in msg.lower()
+        # The raw path / errno must NOT leak into the user-facing banner message.
+        assert "Errno" not in msg and "stage_4" not in msg
+    finally:
+        shutil.rmtree(orch.web_output_dir, ignore_errors=True)

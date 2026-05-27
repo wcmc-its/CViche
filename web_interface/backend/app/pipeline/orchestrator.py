@@ -401,7 +401,19 @@ class PipelineOrchestrator:
 
         except Exception as e:
             run.status = "failed"
-            run.error_message = str(e)
+            # On a resume (per-step retry), a missing input file means an earlier
+            # stage's output is no longer on disk -- e.g. the pod recycled since
+            # the original run. Surface a clear next step instead of leaking a raw
+            # filesystem path + errno to the (non-technical) user.
+            is_missing_input = isinstance(e, FileNotFoundError) or "no such file or directory" in str(e).lower()
+            if start_step_number is not None and is_missing_input:
+                run.error_message = (
+                    "Couldn't resume: earlier pipeline results are no longer "
+                    "available (the server may have restarted since this run). "
+                    'Please use "Restart with this file" to run it from the beginning.'
+                )
+            else:
+                run.error_message = str(e)
             run.completed_at = datetime.now()
             self.db.commit()
             await self.log(0, f"Pipeline failed: {str(e)}", "ERROR")
