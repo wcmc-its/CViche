@@ -23,17 +23,34 @@ logger = logging.getLogger(__name__)
 from app.database import init_db, get_db
 from app.middleware.request_id import RequestIDMiddleware
 from app.api import upload, runs, steps, websocket, auth_routes, consent_routes, feedback_routes, admin_routes, saml_routes
-
+from app.config_loader import get_config
 # ---------------------------------------------------------------------------
 # Allowed origins (env-configurable, comma-separated)
 # ---------------------------------------------------------------------------
-_allowed_origins = [
-    o.strip()
-    for o in os.environ.get(
-        "CVICHE_ALLOWED_ORIGINS",
-        "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:5173",
-    ).split(",")
-]
+_LOCALHOST_ORIGINS = (
+    "http://localhost:3000,http://localhost:3001,http://localhost:5173,"
+    "http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:5173"
+)
+
+
+def _resolve_allowed_origins() -> list[str]:
+    """Resolve allowed origins. Precedence: CVICHE_ALLOWED_ORIGINS env var,
+    then auth_config.yaml (where the deploy buildspec writes it, under `auth`),
+    then localhost dev defaults.
+
+    The deploy buildspec writes CVICHE_ALLOWED_ORIGINS into auth_config.yaml
+    rather than as an env var, so an env-only lookup silently fell back to the
+    localhost defaults in production -- which then rejected same-origin POST
+    requests from the real prod origin via the CSRF middleware below. Reading
+    the YAML as a fallback makes the configured value take effect.
+    """
+    raw, source = get_config("auth", "CVICHE_ALLOWED_ORIGINS", default=_LOCALHOST_ORIGINS)
+    if source == "default":
+        raw = _LOCALHOST_ORIGINS
+    return [o.strip() for o in raw.split(",") if o.strip()]
+    
+
+_allowed_origins = _resolve_allowed_origins()
 
 
 # ---------------------------------------------------------------------------
@@ -219,21 +236,17 @@ def readyz(response: Response, db: Session = Depends(get_db)):
     """
     checks: dict[str, dict] = {}
 
-    from app.config_loader import load_yaml_config
-    config = load_yaml_config()
-        
-    s3_config = config.get("s3", {})
-
+    cviche_storage_backend, source = get_config("s3", "CVICHE_STORAGE_BACKEND", default="local")
+    
     try:
         db.execute(text("SELECT 1"))
         checks["db"] = {"ok": True}
     except Exception as exc:
         checks["db"] = {"ok": False, "error": str(exc)}
 
-    storage_backend = s3_config.get("CVICHE_STORAGE_BACKEND", "local")
+    storage_backend = cviche_storage_backend;
     if storage_backend == "s3":
-        
-        bucket = s3_config.get("CVICHE_S3_BUCKET", "")
+        bucket, source = get_config("s3", "CVICHE_S3_BUCKET", default="local")
         if not bucket:
             checks["s3"] = {"ok": False, "error": "CVICHE_S3_BUCKET not set"}
         else:

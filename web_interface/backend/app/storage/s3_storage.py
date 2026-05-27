@@ -31,17 +31,17 @@ class S3RunStorage(RunStorage):
     def __init__(self, bucket: str | None = None, prefix: str | None = None):
         import boto3
 
-        from app.config_loader import load_yaml_config
-        config = load_yaml_config()
-        s3_config = config.get("s3", {})
-
-        self._bucket = bucket or s3_config.get("CVICHE_S3_BUCKET")
+        from app.config_loader import get_config
+        s3_bucket, source = get_config("s3", "CVICHE_S3_BUCKET", default="local")
+       
+        self._bucket = bucket or s3_bucket
         if not self._bucket:
             raise ValueError(
                 "S3 bucket not configured. Set CVICHE_S3_BUCKET environment variable."
             )
+        s3_bucket_prefix, source = get_config("s3", "CVICHE_S3_PREFIX", default="cviche")
         
-        self._prefix = prefix or s3_config.get("CVICHE_S3_PREFIX", "cviche")
+        self._prefix = prefix or s3_bucket_prefix
 
         self._s3 = boto3.client("s3")
 

@@ -22,15 +22,14 @@ def get_storage() -> RunStorage:
     """Return the singleton RunStorage instance, creating it on first call."""
     global _storage
     if _storage is None:
-        from app.config_loader import load_yaml_config
-        config = load_yaml_config()
-        s3_config = config.get("s3", {})
-        backend = s3_config.get("CVICHE_STORAGE_BACKEND", "local")
+        from app.config_loader import get_config
+        backend, source = get_config("s3", "CVICHE_STORAGE_BACKEND", default="local")
         if backend == "s3":
             from app.storage.s3_storage import S3RunStorage
 
             _storage = S3RunStorage()
-            logger.info("Storage backend: S3 (bucket=%s)", s3_config.get("CVICHE_S3_BUCKET"))
+            bucket, source = get_config("s3", "CVICHE_S3_BUCKET", default="local")
+            logger.info("Storage backend: S3 (bucket=%s)", bucket)
         else:
             from app.storage.local_storage import LocalRunStorage
 
