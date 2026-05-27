@@ -226,3 +226,26 @@ def test_calculate_cost_unknown_model_fallback():
     cost = calculate_cost(1_000_000, 1_000_000, model="unknown-model", provider="openai")
     # Should fall back to gpt-4o-mini: 0.150 + 0.600 = 0.750
     assert cost == pytest.approx(0.750)
+
+
+def test_bedrock_region_prefix_is_stripped():
+    """A us./eu. inference-profile prefix resolves to the bare PRICING key."""
+    cost = calculate_cost(
+        1_000_000, 1_000_000,
+        model="us.anthropic.claude-sonnet-4-6", provider="bedrock",
+    )
+    # Sonnet 4.6: 3.000 + 15.000 = 18.000 (NOT the 0.750 gpt-4o-mini fallback)
+    assert cost == pytest.approx(18.000)
+
+
+def test_dated_haiku_4_5_id_prices_as_haiku_not_fallback():
+    """Regression: the FULL versioned Haiku 4.5 id Bedrock requires for stage 3b
+    must price at Haiku rates. The bare alias is rejected by Bedrock and
+    _normalize_model_id strips only the region prefix, so the dated id needs its
+    own PRICING entry -- otherwise stage 3b (the dominant cost stage) silently
+    falls back to gpt-4o-mini rates and reported run cost is understated."""
+    model = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    cost = calculate_cost(1_000_000, 1_000_000, model=model, provider="bedrock")
+    # Haiku 4.5: 1.000 + 5.000 = 6.000; gpt-4o-mini fallback would be 0.750.
+    assert cost == pytest.approx(6.000)
+    assert cost != pytest.approx(0.750)
