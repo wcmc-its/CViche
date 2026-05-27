@@ -126,6 +126,7 @@ async def lifespan(app: FastAPI):
     print("✅ Database initialized")
     from app.config_loader import seed_system_config
     from app.consent import load_consent_text, check_consent_integrity
+    from app.services.run_service import reconcile_stale_runs
     from app.database import SessionLocal
     db = SessionLocal()
     try:
@@ -134,6 +135,11 @@ async def lifespan(app: FastAPI):
         load_consent_text()
         print("✅ Consent text loaded")
         check_consent_integrity(db)
+        # Resolve runs orphaned by a previous restart so they don't hang
+        # in "running" forever (the UI would count elapsed time up endlessly).
+        swept = reconcile_stale_runs(db)
+        if swept:
+            print(f"♻️  Reconciled {swept} stale run(s) from a previous restart")
     finally:
         db.close()
     yield
