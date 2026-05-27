@@ -19,7 +19,7 @@ from app.rate_limiter import check_rate_limit
 from app.config_loader import get_config_value
 from app.services.config_service import (
     MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
-    get_cost_per_1k_tokens, get_estimate_model_name,
+    get_estimated_run_cost, get_estimate_model_name,
 )
 from app.errors import bad_request
 
@@ -257,16 +257,13 @@ async def estimate_processing(
     # Estimate tokens (roughly 4 characters per token for English text)
     estimated_tokens = text_char_count // 4
 
-    # Cost estimation. The per-token rate is derived from the model configured
-    # in llm_config.yaml so the estimate tracks the active model preset. It
-    # covers all 12 stages: hierarchy/entry extraction, taxonomy mapping, field
-    # extraction, research summary, enrichment, and Word document generation.
-    cost_per_1k_tokens = get_cost_per_1k_tokens()
-    base_cost = (estimated_tokens / 1000) * cost_per_1k_tokens
-
-    # Add variation buffer for different CV complexities
-    cost_min = base_cost * 0.8
-    cost_max = base_cost * 1.4
+    # Cost estimation. Driven by the entry-classification-aware model in
+    # unified_pipeline.config: stage 3b re-sends a large static taxonomy prompt
+    # once per hierarchy group, so cost scales with entry COUNT (estimated from
+    # document text), not document length. Priced at the active model from
+    # llm_config.yaml. Covers all stages: hierarchy/entry extraction, taxonomy
+    # mapping, field extraction, research summary, enrichment, and doc gen.
+    cost_min, cost_max = get_estimated_run_cost(text_char_count)
 
     # Time estimation based on empirical data
     # Actual processing observed: ~8 minutes for 3500 tokens
