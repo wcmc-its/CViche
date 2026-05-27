@@ -26,7 +26,17 @@ default:
   # same cache prices as Anthropic's direct API. See docs/LLM_MODELS.md.
   enable_prompt_caching: true
 
-# No per-stage overrides: the whole pipeline runs on Claude Sonnet 4.6.
+# Per-stage override: stage 3b (entry classification) runs on Claude Haiku 4.5.
+# A frontier-adjudicated gold eval (2026-05-26, see #50 item 4) found Haiku MORE
+# accurate than Sonnet on the hard/ambiguous entries (66% vs 58%) and at the
+# full-CV level (est. 94.4% vs 93.1%), at ~2.9x lower cost. Requires the FULL
+# versioned inference-profile id -- the short alias is rejected by Bedrock and
+# silently falls back to default codes (see #56 / PR #57). Revert by deleting
+# this stages block (3b then inherits the Sonnet 4.6 default above).
+stages:
+  stage_3b: {model: us.anthropic.claude-haiku-4-5-20251001-v1:0}
+
+# Other stages inherit the Sonnet 4.6 default above.
 #
 # To trade quality for cost on the terminal, non-cascading stages, drop them
 # to the cheaper Claude Haiku 4.5 by uncommenting:
