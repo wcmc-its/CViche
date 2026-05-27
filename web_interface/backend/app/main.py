@@ -143,6 +143,7 @@ async def lifespan(app: FastAPI):
     print("✅ Database initialized")
     from app.config_loader import seed_system_config
     from app.consent import load_consent_text, check_consent_integrity
+    from app.services.run_service import reconcile_stale_runs
     from app.database import SessionLocal
     db = SessionLocal()
     try:
@@ -151,10 +152,35 @@ async def lifespan(app: FastAPI):
         load_consent_text()
         print("✅ Consent text loaded")
         check_consent_integrity(db)
+        # Resolve runs orphaned by a previous restart so they don't hang
+        # in "running" forever (the UI would count elapsed time up endlessly).
+        swept = reconcile_stale_runs(db)
+        if swept:
+            print(f"♻️  Reconciled {swept} stale run(s) from a previous restart")
     finally:
         db.close()
+
+    # Real-time broker: when CVICHE_REDIS_URL is set, pipeline events and
+    # cancellation cross worker/replica boundaries via Redis; otherwise the
+    # emitter and orchestrator use process-local state (single-worker behavior).
+    from app.pipeline.redis_broker import broker_from_env
+    from app.pipeline.event_emitter import event_emitter
+    from app.pipeline import orchestrator as orchestrator_module
+    broker = broker_from_env()
+    app.state.broker = broker
+    event_emitter.set_broker(broker)
+    orchestrator_module.set_broker(broker)
+    await event_emitter.startup()
+    if broker.enabled:
+        print("✅ Redis broker enabled (cross-worker events + cancellation)")
+    else:
+        print("ℹ️  Redis broker disabled — in-process events (single-worker mode)")
+
     yield
-    # Shutdown: cleanup if needed
+
+    # Shutdown: stop the subscriber loop and close broker connections.
+    await event_emitter.shutdown()
+    await broker.shutdown()
     print("👋 Shutting down CViche Pipeline Viewer")
 
 

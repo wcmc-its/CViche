@@ -26,6 +26,10 @@ export async function restartRun(runId: string): Promise<{ new_run_id: string }>
   return api.post<{ new_run_id: string }>(`/api/run/${runId}/restart`)
 }
 
+export async function retryStep(runId: string, step: number): Promise<void> {
+  await api.post(`/api/run/${runId}/retry/${step}`)
+}
+
 export async function getRuns(offset: number, limit: number): Promise<PaginatedRuns> {
   const res = await api.getRaw(`/api/runs?offset=${offset}&limit=${limit}`)
   if (!res.ok) {

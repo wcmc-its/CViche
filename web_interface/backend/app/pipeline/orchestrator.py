@@ -56,23 +56,43 @@ from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
 
 
-# Global registry to track cancellation requests
+# Cancellation tracking. The in-process set covers same-worker cancels (and is
+# the only mechanism when no Redis broker is configured). When a broker is
+# enabled, cancels also round-trip through Redis so a cancel received by one
+# worker/replica reaches the worker actually running the pipeline. The broker's
+# cancel ops use a sync client, so is_cancelled() stays synchronous and the
+# stage-boundary check (check_cancelled) needs no async change.
 _cancelled_runs: set = set()
+_broker = None
+
+
+def set_broker(broker):
+    """Attach the Redis broker (called at app startup)."""
+    global _broker
+    _broker = broker
 
 
 def cancel_run(run_id: str):
     """Signal a run to be cancelled."""
     _cancelled_runs.add(run_id)
+    if _broker is not None and _broker.enabled:
+        _broker.request_cancel(run_id)
 
 
 def is_cancelled(run_id: str) -> bool:
-    """Check if a run has been cancelled."""
-    return run_id in _cancelled_runs
+    """Check if a run has been cancelled (locally or via the broker)."""
+    if run_id in _cancelled_runs:
+        return True
+    if _broker is not None and _broker.enabled:
+        return _broker.is_cancelled(run_id)
+    return False
 
 
 def clear_cancelled(run_id: str):
     """Clear cancellation flag for a run."""
     _cancelled_runs.discard(run_id)
+    if _broker is not None and _broker.enabled:
+        _broker.clear_cancel(run_id)
 
 
 class CancelledException(Exception):
@@ -334,8 +354,31 @@ class PipelineOrchestrator:
                     path_str, self.run_id, e,
                 )
 
-    async def execute(self):
-        """Execute the full pipeline."""
+    def _prepare_resume(self, run: Run, start_step_number: int) -> None:
+        """Prime in-memory state for a resumed run (per-step retry).
+
+        Continues cost accounting from the run's existing total (so the costs of
+        the already-completed earlier stages are preserved) and registers each
+        completed stage's on-disk output so downstream stages that prefer the
+        in-memory path resolve their inputs correctly.
+        """
+        self.total_cost = run.total_cost or 0.0
+        output_paths = self._get_output_paths()
+        for step_def in STEP_REGISTRY:
+            if step_def.number >= start_step_number:
+                break
+            path = output_paths.get(step_def.stage_id)
+            if path and Path(path).exists():
+                self.stage_outputs[step_def.stage_id] = str(path)
+
+    async def execute(self, start_step_number: Optional[int] = None):
+        """Execute the pipeline.
+
+        When ``start_step_number`` is given (a per-step retry), stages before it
+        are skipped and their outputs are loaded from disk so the resumed stages
+        resolve their inputs. This relies on the prior stages' output files
+        still being present on this pod's filesystem.
+        """
         run = self.db.query(Run).filter(Run.id == self.run_id).first()
         if not run:
             raise ValueError(f"Run {self.run_id} not found")
@@ -347,8 +390,13 @@ class PipelineOrchestrator:
             # Copy file to pipeline input directory
             cv_path = self._copy_to_pipeline_input()
 
-            # Execute all 12 stages
+            if start_step_number is not None:
+                self._prepare_resume(run, start_step_number)
+
+            # Execute all 12 stages (or, on retry, from the failed step onward)
             for step_def in STEP_REGISTRY:
+                if start_step_number is not None and step_def.number < start_step_number:
+                    continue
                 # Check for cancellation before each step
                 self.check_cancelled()
                 await self.execute_step(step_def.number, step_def.stage_id, cv_path)
@@ -372,7 +420,19 @@ class PipelineOrchestrator:
 
         except Exception as e:
             run.status = "failed"
-            run.error_message = str(e)
+            # On a resume (per-step retry), a missing input file means an earlier
+            # stage's output is no longer on disk -- e.g. the pod recycled since
+            # the original run. Surface a clear next step instead of leaking a raw
+            # filesystem path + errno to the (non-technical) user.
+            is_missing_input = isinstance(e, FileNotFoundError) or "no such file or directory" in str(e).lower()
+            if start_step_number is not None and is_missing_input:
+                run.error_message = (
+                    "Couldn't resume: earlier pipeline results are no longer "
+                    "available (the server may have restarted since this run). "
+                    'Please use "Restart with this file" to run it from the beginning.'
+                )
+            else:
+                run.error_message = str(e)
             run.completed_at = datetime.now()
             self.db.commit()
             await self.log(0, f"Pipeline failed: {str(e)}", "ERROR")

@@ -1,15 +1,104 @@
-"""Event emitter for WebSocket communication."""
+"""Event emitter for WebSocket communication.
+
+Delivery has two modes, selected by whether a Redis broker is enabled:
+
+  - Broker disabled (no CVICHE_REDIS_URL): events are written directly to this
+    process's local WebSocket connections. Correct for a single worker/replica;
+    this is the historical behavior.
+  - Broker enabled: emit() only *publishes* to Redis; a per-worker subscriber
+    loop (started at app startup) receives every run's events and delivers them
+    to whatever sockets that worker holds locally. This lets events reach a
+    browser connected to a different worker/replica than the one running the
+    pipeline -- and, because the subscriber runs on the main server loop where
+    the sockets live, delivery is on the correct loop.
+"""
+import asyncio
 import json
-from typing import Dict, Set
+import logging
+from typing import Dict, Optional, Set
 from fastapi import WebSocket
 from datetime import datetime
+
+from app.pipeline.redis_broker import EVENTS_PATTERN
+
+logger = logging.getLogger(__name__)
 
 
 class EventEmitter:
     """Manages WebSocket connections and broadcasts events."""
 
-    def __init__(self):
+    def __init__(self, broker=None):
         self.connections: Dict[str, Set[WebSocket]] = {}
+        self._broker = broker
+        self._pubsub = None
+        self._subscriber_task: Optional[asyncio.Task] = None
+
+    def set_broker(self, broker) -> None:
+        """Attach the Redis broker (called at app startup)."""
+        self._broker = broker
+
+    @property
+    def _enabled(self) -> bool:
+        return self._broker is not None and self._broker.enabled
+
+    async def startup(self) -> None:
+        """Start the subscriber loop when the broker is enabled. A single
+        pattern subscription covers every run's event channel for this worker."""
+        if not self._enabled:
+            return
+        client = await self._broker.async_client()
+        self._pubsub = client.pubsub()
+        await self._pubsub.psubscribe(EVENTS_PATTERN)
+        self._subscriber_task = asyncio.create_task(self._subscribe_loop())
+
+    async def shutdown(self) -> None:
+        if self._subscriber_task:
+            self._subscriber_task.cancel()
+            try:
+                await self._subscriber_task
+            except asyncio.CancelledError:
+                pass
+            self._subscriber_task = None
+        if self._pubsub is not None:
+            try:
+                await self._pubsub.aclose()
+            except Exception:
+                logger.warning("pubsub close failed", exc_info=True)
+            self._pubsub = None
+
+    async def _subscribe_loop(self) -> None:
+        """Receive published events and fan them out to local sockets."""
+        try:
+            async for message in self._pubsub.listen():
+                if message.get("type") != "pmessage":
+                    continue
+                channel = message["channel"]
+                if isinstance(channel, bytes):
+                    channel = channel.decode()
+                # channel == cviche:run:{run_id}:events
+                run_id = channel.split(":")[2]
+                data = message["data"]
+                if isinstance(data, bytes):
+                    data = data.decode()
+                await self._deliver_local(run_id, data)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("subscriber loop error", exc_info=True)
+
+    async def _deliver_local(self, run_id: str, message: str) -> None:
+        """Send a serialized message to this worker's sockets for run_id."""
+        local = self.connections.get(run_id)
+        if not local:
+            return
+        disconnected = set()
+        for websocket in list(local):
+            try:
+                await websocket.send_text(message)
+            except Exception:
+                disconnected.add(websocket)
+        for ws in disconnected:
+            self.disconnect(run_id, ws)
 
     async def connect(self, run_id: str, websocket: WebSocket):
         """Register a new WebSocket connection."""
@@ -26,24 +115,19 @@ class EventEmitter:
                 del self.connections[run_id]
 
     async def emit(self, run_id: str, event: dict):
-        """Broadcast an event to all connections."""
-        if run_id not in self.connections:
-            return
-
+        """Broadcast an event. Publishes via Redis when enabled, else delivers
+        directly to this process's local connections."""
         if "timestamp" not in event:
             event["timestamp"] = datetime.now().isoformat()
 
-        message = json.dumps(event)
-        disconnected = set()
+        if self._enabled:
+            # Publish only; the subscriber loop delivers to local sockets
+            # (including this worker's). Never write to sockets from the
+            # producer side when brokered -- it may be the wrong loop.
+            self._broker.publish_event(run_id, event)
+            return
 
-        for websocket in self.connections[run_id]:
-            try:
-                await websocket.send_text(message)
-            except Exception:
-                disconnected.add(websocket)
-
-        for ws in disconnected:
-            self.disconnect(run_id, ws)
+        await self._deliver_local(run_id, json.dumps(event))
 
     async def emit_run_start(self, run_id: str):
         await self.emit(run_id, {"event": "RUN_START"})

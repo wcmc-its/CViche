@@ -1,7 +1,9 @@
 """File upload API endpoint."""
 import io
 import logging
+import os
 import secrets
+import tempfile
 import zipfile
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
@@ -27,6 +29,11 @@ logger = logging.getLogger(__name__)
 PDF_MAGIC = b"%PDF-"
 ZIP_MAGIC = b"PK\x03\x04"
 
+# Minimum extracted text (characters) for a document to be considered readable.
+# A real CV runs into the thousands of characters; anything below this is almost
+# certainly a scanned image, a password-protected file, or effectively blank.
+MIN_EXTRACTED_CHARS = 500
+
 
 def _validate_pdf_magic(content: bytes) -> bool:
     """Check if content starts with PDF magic bytes."""
@@ -42,6 +49,57 @@ def _validate_docx_magic(content: bytes) -> bool:
             return "word/document.xml" in zf.namelist()
     except (zipfile.BadZipFile, Exception):
         return False
+
+
+def _extract_text(content: bytes, file_ext: str) -> str | None:
+    """Best-effort text extraction for the empty-document guard.
+
+    Returns the extracted text, an empty string when the file is readable but
+    contains no text (scan/blank) or is password-protected, or ``None`` when
+    extraction could not run at all (missing library, unexpected read error).
+    Callers treat ``None`` as "cannot determine" and skip the guard rather than
+    block a possibly-valid upload.
+    """
+    try:
+        if file_ext == ".docx":
+            from docx import Document
+            with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                doc = Document(tmp_path)
+                parts = [p.text for p in doc.paragraphs if p.text.strip()]
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if cell.text.strip():
+                                parts.append(cell.text)
+                return "\n".join(parts)
+            finally:
+                os.unlink(tmp_path)
+
+        elif file_ext == ".pdf":
+            import pdfplumber
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                parts = []
+                with pdfplumber.open(tmp_path) as pdf:
+                    for page in pdf.pages:
+                        parts.append(page.extract_text() or "")
+                return "\n".join(parts)
+            finally:
+                os.unlink(tmp_path)
+    except Exception as e:
+        msg = str(e).lower()
+        # A password/encryption failure means the document is genuinely
+        # unreadable -> trip the guard (empty string) rather than fail open.
+        if "password" in msg or "encrypt" in msg or "decrypt" in msg:
+            return ""
+        logger.warning("Text extraction for empty-doc guard failed (%s): %s", file_ext, e)
+        return None
+    return None
 
 
 router = APIRouter()
@@ -116,6 +174,18 @@ async def upload_cv(
     elif file_ext == ".docx" and not _validate_docx_magic(content):
         logger.warning("[SECURITY] Rejected upload: file claims .docx but magic bytes do not match (user=%s)", current_user.email)
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
+
+    # Reject documents we can't read (scanned images, password-protected, blank).
+    # These pass the magic-byte check but yield no text, so they would burn LLM
+    # calls and return empty output with no explanation to the user. Fail open
+    # (extracted is None) if extraction couldn't run, to avoid blocking valid files.
+    extracted = _extract_text(content, file_ext)
+    if extracted is not None and len(extracted.strip()) < MIN_EXTRACTED_CHARS:
+        logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
+        raise bad_request(
+            "We couldn't read any text from this file. It may be a scanned image, "
+            "password-protected, or empty. Please upload a text-based PDF or Word document."
+        )
 
     # Generate run ID (after validation so rejected uploads don't waste IDs)
     run_id = generate_run_id()
