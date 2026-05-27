@@ -2,7 +2,7 @@
 import logging
 import os
 import traceback
-import yaml
+
 
 from fastapi import FastAPI, Request, Depends, Response, status
 from fastapi.middleware.cors import CORSMiddleware

@@ -100,15 +100,12 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
     ed_enabled = get_config_value(db, "ed_enabled")
     membership = None
     if ed_enabled:
-
-        from app.config_loader import load_yaml_config
-        config = load_yaml_config()
-        ldap_config = config.get("ldap", {})
+        from app.config_loader import get_config
 
         ed_access_group = get_config_value(db, "ed_access_group") or ""
         ed_admin_group = get_config_value(db, "ed_admin_group") or ""
-        ldap_url = ldap_config.get("ED_LDAP_URL", "")
-        bind_dn = ldap_config.get("ED_LDAP_BIND_DN", "")
+        ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
+        bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
         bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
         if not ldap_url or not bind_dn:
             logger.error("ED LDAP credentials not configured (ED_LDAP_URL, ED_LDAP_BIND_DN)")
