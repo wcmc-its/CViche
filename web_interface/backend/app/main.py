@@ -142,8 +142,28 @@ async def lifespan(app: FastAPI):
             print(f"♻️  Reconciled {swept} stale run(s) from a previous restart")
     finally:
         db.close()
+
+    # Real-time broker: when CVICHE_REDIS_URL is set, pipeline events and
+    # cancellation cross worker/replica boundaries via Redis; otherwise the
+    # emitter and orchestrator use process-local state (single-worker behavior).
+    from app.pipeline.redis_broker import broker_from_env
+    from app.pipeline.event_emitter import event_emitter
+    from app.pipeline import orchestrator as orchestrator_module
+    broker = broker_from_env()
+    app.state.broker = broker
+    event_emitter.set_broker(broker)
+    orchestrator_module.set_broker(broker)
+    await event_emitter.startup()
+    if broker.enabled:
+        print("✅ Redis broker enabled (cross-worker events + cancellation)")
+    else:
+        print("ℹ️  Redis broker disabled — in-process events (single-worker mode)")
+
     yield
-    # Shutdown: cleanup if needed
+
+    # Shutdown: stop the subscriber loop and close broker connections.
+    await event_emitter.shutdown()
+    await broker.shutdown()
     print("👋 Shutting down CViche Pipeline Viewer")
 
 

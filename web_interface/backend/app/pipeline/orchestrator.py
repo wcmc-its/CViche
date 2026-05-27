@@ -56,23 +56,43 @@ from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
 
 
-# Global registry to track cancellation requests
+# Cancellation tracking. The in-process set covers same-worker cancels (and is
+# the only mechanism when no Redis broker is configured). When a broker is
+# enabled, cancels also round-trip through Redis so a cancel received by one
+# worker/replica reaches the worker actually running the pipeline. The broker's
+# cancel ops use a sync client, so is_cancelled() stays synchronous and the
+# stage-boundary check (check_cancelled) needs no async change.
 _cancelled_runs: set = set()
+_broker = None
+
+
+def set_broker(broker):
+    """Attach the Redis broker (called at app startup)."""
+    global _broker
+    _broker = broker
 
 
 def cancel_run(run_id: str):
     """Signal a run to be cancelled."""
     _cancelled_runs.add(run_id)
+    if _broker is not None and _broker.enabled:
+        _broker.request_cancel(run_id)
 
 
 def is_cancelled(run_id: str) -> bool:
-    """Check if a run has been cancelled."""
-    return run_id in _cancelled_runs
+    """Check if a run has been cancelled (locally or via the broker)."""
+    if run_id in _cancelled_runs:
+        return True
+    if _broker is not None and _broker.enabled:
+        return _broker.is_cancelled(run_id)
+    return False
 
 
 def clear_cancelled(run_id: str):
     """Clear cancellation flag for a run."""
     _cancelled_runs.discard(run_id)
+    if _broker is not None and _broker.enabled:
+        _broker.clear_cancel(run_id)
 
 
 class CancelledException(Exception):

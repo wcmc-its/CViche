@@ -22,6 +22,18 @@ services:
       retries: 5
       start_period: 30s
 
+  # --- Redis (real-time event fan-out + cross-worker cancellation) ---
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   # --- Backend (FastAPI) ---
   backend:
     build:
@@ -33,11 +45,16 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "8000:8000"
     environment:
       # Database
       CVICHE_DATABASE_URL: "mysql+pymysql://root:cviche_dev@db:3306/cviche"
+      # Real-time broker: enables cross-worker events + cancellation. Remove to
+      # exercise the in-process (single-worker) fallback path.
+      CVICHE_REDIS_URL: "redis://redis:6379/0"
       # Session (random for dev -- sessions lost on restart, as expected)
       CVICHE_SESSION_SECRET: "dev-secret-change-in-production"
       # Cookies: no TLS in local dev
