@@ -106,6 +106,123 @@ class TestFindXmlsec1:
                 with pytest.raises(RuntimeError, match="xmlsec1 binary not found"):
                     _find_xmlsec1()
 
+# --- Unit test: get_saml_client config wiring ---
+
+
+from app.saml_client import get_saml_client
+
+
+class TestGetSamlClient:
+    """Verify Saml2Client is configured from the right SystemConfig values.
+
+    Regression coverage for the ACS-URL bug: ACS/SLO endpoints in SP metadata
+    must come from saml_sp_base_url, NOT entity_id. The IdP enforces the
+    Destination/Recipient against the URL we publish in metadata, so any drift
+    silently rejects every assertion.
+    """
+
+    def test_acs_endpoints_use_sp_base_url_not_entity_id(self, db, seed_saml_mode, tmp_path):
+        """ACS/SLO endpoint URLs are derived from sp_base_url, not entity_id."""
+        # Override cert dir to a writable tmp path
+        from app.models import SystemConfig
+        import json as _json
+        row = db.query(SystemConfig).filter(SystemConfig.key == "saml_cert_dir").first()
+        row.value = _json.dumps(str(tmp_path / "certs"))
+        db.commit()
+
+        # Stub out IdP metadata loading so the call doesn't try to fetch a URL
+        with patch("app.saml_client.Saml2Config.load") as mock_load, \
+             patch("app.saml_client.Saml2Client") as mock_client_cls:
+            get_saml_client(db)
+
+            assert mock_load.called, "Saml2Config.load() was not called"
+            saml_config = mock_load.call_args[0][0]
+            endpoints = saml_config["service"]["sp"]["endpoints"]
+            acs_url = endpoints["assertion_consumer_service"][0][0]
+            slo_url = endpoints["single_logout_service"][0][0]
+
+            # seed_saml_mode sets sp_base_url=https://cviche.med.cornell.edu
+            # and entity_id=https://cviche.med.cornell.edu/shibboleth (with /shibboleth)
+            assert acs_url == "https://cviche.med.cornell.edu/api/saml/acs", (
+                f"ACS URL should be derived from sp_base_url, got {acs_url}"
+            )
+            assert slo_url == "https://cviche.med.cornell.edu/api/saml/logout", (
+                f"SLO URL should be derived from sp_base_url, got {slo_url}"
+            )
+            # Sanity check: the bug would have produced this:
+            assert "/shibboleth/api/saml/acs" not in acs_url, (
+                "ACS URL must not include /shibboleth (the entity_id path)"
+            )
+
+    def test_raises_when_sp_base_url_missing(self, db, seed_saml_mode, tmp_path):
+        """get_saml_client raises if saml_sp_base_url is empty -- fail loud, not silently broken."""
+        from app.models import SystemConfig
+        import json as _json
+        row = db.query(SystemConfig).filter(SystemConfig.key == "saml_sp_base_url").first()
+        row.value = _json.dumps("")
+        db.commit()
+
+        with pytest.raises(RuntimeError, match="saml_sp_base_url"):
+            get_saml_client(db)
+
+    # --- Unit test: get_saml_client config wiring ---
+
+
+from app.saml_client import get_saml_client
+
+
+class TestGetSamlClient:
+    """Verify Saml2Client is configured from the right SystemConfig values.
+
+    Regression coverage for the ACS-URL bug: ACS/SLO endpoints in SP metadata
+    must come from saml_sp_base_url, NOT entity_id. The IdP enforces the
+    Destination/Recipient against the URL we publish in metadata, so any drift
+    silently rejects every assertion.
+    """
+
+    def test_acs_endpoints_use_sp_base_url_not_entity_id(self, db, seed_saml_mode, tmp_path):
+        """ACS/SLO endpoint URLs are derived from sp_base_url, not entity_id."""
+        # Override cert dir to a writable tmp path
+        from app.models import SystemConfig
+        import json as _json
+        row = db.query(SystemConfig).filter(SystemConfig.key == "saml_cert_dir").first()
+        row.value = _json.dumps(str(tmp_path / "certs"))
+        db.commit()
+
+        # Stub out IdP metadata loading so the call doesn't try to fetch a URL
+        with patch("app.saml_client.Saml2Config.load") as mock_load, \
+             patch("app.saml_client.Saml2Client") as mock_client_cls:
+            get_saml_client(db)
+
+            assert mock_load.called, "Saml2Config.load() was not called"
+            saml_config = mock_load.call_args[0][0]
+            endpoints = saml_config["service"]["sp"]["endpoints"]
+            acs_url = endpoints["assertion_consumer_service"][0][0]
+            slo_url = endpoints["single_logout_service"][0][0]
+
+            # seed_saml_mode sets sp_base_url=https://cviche.med.cornell.edu
+            # and entity_id=https://cviche.med.cornell.edu/shibboleth (with /shibboleth)
+            assert acs_url == "https://cviche.med.cornell.edu/api/saml/acs", (
+                f"ACS URL should be derived from sp_base_url, got {acs_url}"
+            )
+            assert slo_url == "https://cviche.med.cornell.edu/api/saml/logout", (
+                f"SLO URL should be derived from sp_base_url, got {slo_url}"
+            )
+            # Sanity check: the bug would have produced this:
+            assert "/shibboleth/api/saml/acs" not in acs_url, (
+                "ACS URL must not include /shibboleth (the entity_id path)"
+            )
+
+    def test_raises_when_sp_base_url_missing(self, db, seed_saml_mode, tmp_path):
+        """get_saml_client raises if saml_sp_base_url is empty -- fail loud, not silently broken."""
+        from app.models import SystemConfig
+        import json as _json
+        row = db.query(SystemConfig).filter(SystemConfig.key == "saml_sp_base_url").first()
+        row.value = _json.dumps("")
+        db.commit()
+
+        with pytest.raises(RuntimeError, match="saml_sp_base_url"):
+            get_saml_client(db)
 
 # --- SAML endpoint tests (Plan 02) ---
 
@@ -126,8 +243,7 @@ def _mock_saml_client(identity_dict=None):
         mock_client.parse_authn_request_response.return_value = mock_response
     else:
         mock_client.parse_authn_request_response.return_value = None
-    mock_client.config.create_metadata_string.return_value = b"<EntityDescriptor>test</EntityDescriptor>"
-    return mock_client
+        return mock_client
 
 
 class TestSamlLogin:
@@ -244,11 +360,12 @@ class TestSamlACS:
 
 class TestSamlMetadata:
     """SAML SP metadata endpoint tests (SAML-02)."""
-
+    @patch("app.api.saml_routes.create_metadata_string")
     @patch("app.api.saml_routes.get_saml_client")
-    def test_metadata_returns_xml(self, mock_get_client, client, seed_saml_mode):
+    def test_metadata_returns_xml(self, mock_get_client, mock_create_md, client, seed_saml_mode):
         """GET /api/saml/metadata in SAML mode returns 200 with application/xml content."""
         mock_get_client.return_value = _mock_saml_client()
+        mock_create_md.return_value = b"<EntityDescriptor>test</EntityDescriptor>"
         response = client.get("/api/saml/metadata")
         assert response.status_code == 200
         assert "application/xml" in response.headers["content-type"]

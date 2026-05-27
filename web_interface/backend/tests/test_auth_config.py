@@ -103,3 +103,68 @@ def test_saml_config_seeded(db):
         # Verify value is JSON-decodable
         value = json.loads(row.value)
         assert isinstance(value, str), f"SystemConfig key '{key}' value is not a string"
+
+
+def _yaml(mode="simple", entity_id="", idp_metadata_url="", allowed=None):
+    return {
+        "auth": {"mode": mode},
+        "saml": {
+            "entity_id": entity_id,
+            "idp_metadata_url": idp_metadata_url,
+            "discovery_url": "",
+            "cert_dir": "",
+        },
+        "allowed_users": allowed if allowed is not None else [],
+        "admin_users": [],
+        "rate_limits": {"daily": 10, "monthly": 50},
+        "consent": {"version": "1.0"},
+    }
+
+
+def test_file_managed_keys_reconciled_on_reseed(db):
+    """Re-seeding with a changed YAML updates file-managed keys (auth_mode, saml_*).
+
+    Regression: the original insert-if-absent seed left auth_mode stuck on its
+    first value, so flipping the configmap to 'saml' never took effect.
+    """
+    from app.config_loader import seed_system_config
+
+    # First boot: simple mode, empty SAML.
+    with patch("app.config_loader.load_yaml_config", return_value=_yaml(mode="simple")):
+        seed_system_config(db)
+    assert json.loads(db.query(SystemConfig).filter_by(key="auth_mode").first().value) == "simple"
+
+    # Configmap edited to SAML + real endpoints, pod restarts -> re-seed.
+    with patch("app.config_loader.load_yaml_config", return_value=_yaml(
+        mode="saml",
+        entity_id="https://cviche.weill.cornell.edu/shibboleth",
+        idp_metadata_url="https://login-proxy.weill.cornell.edu/idp/metadata.php",
+    )):
+        seed_system_config(db)
+
+    assert json.loads(db.query(SystemConfig).filter_by(key="auth_mode").first().value) == "saml"
+    assert json.loads(db.query(SystemConfig).filter_by(key="saml_entity_id").first().value) == \
+        "https://cviche.weill.cornell.edu/shibboleth"
+    assert json.loads(db.query(SystemConfig).filter_by(key="saml_idp_metadata_url").first().value) == \
+        "https://login-proxy.weill.cornell.edu/idp/metadata.php"
+
+
+def test_admin_managed_keys_not_clobbered_on_reseed(db):
+    """Re-seeding must NOT overwrite admin-editable keys (allowed_users) -- admin
+    edits via the UI survive redeploys."""
+    from app.config_loader import seed_system_config
+
+    with patch("app.config_loader.load_yaml_config", return_value=_yaml(allowed=["seed@example.com"])):
+        seed_system_config(db)
+
+    # Admin edits allowed_users at runtime (simulating PUT /api/admin/config).
+    row = db.query(SystemConfig).filter_by(key="allowed_users").first()
+    row.value = json.dumps(["admin-added@example.com"])
+    db.commit()
+
+    # Pod restarts with the original YAML -> re-seed must preserve the admin edit.
+    with patch("app.config_loader.load_yaml_config", return_value=_yaml(allowed=["seed@example.com"])):
+        seed_system_config(db)
+
+    assert json.loads(db.query(SystemConfig).filter_by(key="allowed_users").first().value) == \
+        ["admin-added@example.com"]

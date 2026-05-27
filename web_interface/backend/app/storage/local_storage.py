@@ -76,7 +76,13 @@ class LocalRunStorage(RunStorage):
                 results.append(str(path.relative_to(run_dir)))
         return sorted(results)
 
-    def get_download_url(self, run_id: str, key: str, expires_in: int = 300) -> str | None:
+    def get_download_url(
+        self,
+        run_id: str,
+        key: str,
+        expires_in: int = 300,
+        download_name: str | None = None,
+    ) -> str | None:
         # Local storage does not support presigned URLs.
         # The backend proxies the file directly instead.
         return None

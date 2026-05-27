@@ -1,9 +1,11 @@
 """SAML 2.0 Service Provider endpoints."""
 import logging
 import os
+import yaml
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import RedirectResponse, Response
+from saml2.metadata import create_metadata_string
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -98,12 +100,16 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
     ed_enabled = get_config_value(db, "ed_enabled")
     membership = None
     if ed_enabled:
+
+        from app.config_loader import load_yaml_config
+        config = load_yaml_config()
+        ldap_config = config.get("ldap", {})
+
         ed_access_group = get_config_value(db, "ed_access_group") or ""
         ed_admin_group = get_config_value(db, "ed_admin_group") or ""
-        ldap_url = os.environ.get("ED_LDAP_URL", "")
-        bind_dn = os.environ.get("ED_LDAP_BIND_DN", "")
+        ldap_url = ldap_config.get("ED_LDAP_URL", "")
+        bind_dn = ldap_config.get("ED_LDAP_BIND_DN", "")
         bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
-
         if not ldap_url or not bind_dn:
             logger.error("ED LDAP credentials not configured (ED_LDAP_URL, ED_LDAP_BIND_DN)")
             return RedirectResponse("/login?error=directory_unavailable", status_code=302)
@@ -161,7 +167,10 @@ async def saml_metadata(db: Session = Depends(get_db)):
 
     try:
         client = get_saml_client(db)
-        metadata_str = client.config.create_metadata_string()
+         # pysaml2 7.x: build SP metadata via the module-level helper.
+        # First arg `configfile` is required by signature but ignored when
+        # `config=` is provided directly.
+        metadata_str = create_metadata_string("", config=client.config)
         return Response(content=metadata_str, media_type="application/xml")
     except Exception:
         logger.error("SAML metadata generation failed", exc_info=True)

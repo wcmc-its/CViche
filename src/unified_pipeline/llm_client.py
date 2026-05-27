@@ -178,6 +178,33 @@ def _call_openai(model: str, messages: list, temperature: float,
 
     return client.chat.completions.create(**call_kwargs)
 
+def _wants_json(response_format):
+    """True when response_format requests a JSON-shaped response (json_object
+    or json_schema). OpenAI distinguishes the two natively; Bedrock has no
+    structured-output mode and only honors prompt-level hints, so for the
+    Bedrock translation/validation layer both are treated the same."""
+    return bool(response_format) and response_format.get("type") in (
+        "json_object", "json_schema"
+    )
+
+
+def _strip_markdown_fences(text):
+    """Remove a surrounding ```json … ``` or ``` … ``` block.
+
+    Claude often wraps JSON in a markdown code fence even when asked not to;
+    OpenAI's Structured Outputs never does, so for OpenAI this is a no-op on
+    well-formed responses. Only strips when the ENTIRE (stripped) response is
+    a single fenced block, so inline fences in legitimate text are preserved.
+    """
+    if not isinstance(text, str):
+        return text
+    stripped = text.strip()
+    if not (stripped.startswith("```") and stripped.endswith("```")):
+        return text
+    first_newline = stripped.find("\n")
+    if first_newline == -1:
+        return text
+    return stripped[first_newline + 1 : -3].rstrip()
 
 def _translate_messages(messages, response_format=None):
     """Translate OpenAI-style messages to Bedrock Converse format.
@@ -195,7 +222,7 @@ def _translate_messages(messages, response_format=None):
     """
     system_prompts = []
     converse_messages = []
-    json_hint = (response_format and response_format.get("type") == "json_object")
+    json_hint = _wants_json(response_format)
 
     for msg in messages:
         if msg["role"] == "system":
@@ -219,6 +246,10 @@ def _translate_messages(messages, response_format=None):
 def _validate_json_response(content, response_format):
     """Check if content is valid JSON when response_format requires it.
 
+    Fences are stripped before parsing so a fence-wrapped-but-otherwise-valid
+    response is not treated as invalid (the surrounding Bedrock path then
+    avoids a needless second LLM call). Callers receive the stripped content.
+    
     Args:
         content: Response text from LLM
         response_format: The response_format dict (or None)
@@ -226,10 +257,10 @@ def _validate_json_response(content, response_format):
     Returns:
         True if no validation needed or content is valid JSON, False otherwise
     """
-    if not response_format or response_format.get("type") != "json_object":
+    if not _wants_json(response_format):
         return True
     try:
-        json_module.loads(content)
+        json_module.loads(_strip_markdown_fences(content))
         return True
     except (json_module.JSONDecodeError, TypeError):
         return False
@@ -466,6 +497,17 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
             stop_reason = retry_response.get("stopReason", "end_turn")
             finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
             # If still invalid, return as-is (let downstream handle it per D-05)
+
+        # Strip a surrounding markdown fence (Claude wraps JSON in ```json…```
+        # even when told not to) so callers can json.loads() the content
+        # directly. This MUST stay at the call_llm body level, NOT inside the
+        # retry branch above: _validate_json_response strips fences before
+        # validating, so a fence-wrapped-but-valid response passes validation
+        # and never triggers a retry -- stripping here is the only thing that
+        # makes the returned content fence-free for the common case. No-op when
+        # no fence is present or no JSON was requested.
+        if _wants_json(response_format):
+            content = _strip_markdown_fences(content)
 
         # With caching on, Bedrock's `inputTokens` reports ONLY the uncached
         # input tokens; the cached portion shows up in cacheRead/cacheWrite.

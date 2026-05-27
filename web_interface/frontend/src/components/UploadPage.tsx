@@ -21,31 +21,55 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   const [estimating, setEstimating] = useState(false)
   const [estimate, setEstimate] = useState<Estimate | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [isDragging, setIsDragging] = useState(false)
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0]
-    if (selectedFile) {
-      const ext = selectedFile.name.toLowerCase()
-      if (ext.endsWith('.docx')) {
-        setFile(selectedFile)
-        setError(null)
-        setEstimate(null)
+  // Shared selection path for both the file picker and drag-and-drop.
+  const processFile = async (selectedFile: File) => {
+    const ext = selectedFile.name.toLowerCase()
+    if (ext.endsWith('.docx')) {
+      setFile(selectedFile)
+      setError(null)
+      setEstimate(null)
 
-        setEstimating(true)
-        try {
-          const data = await getEstimate(selectedFile)
-          setEstimate(data)
-        } catch (err: any) {
-          console.error('Estimation failed:', err)
-        } finally {
-          setEstimating(false)
-        }
-      } else {
-        setError('Please select a .docx file')
-        setFile(null)
-        setEstimate(null)
+      setEstimating(true)
+      try {
+        const data = await getEstimate(selectedFile)
+        setEstimate(data)
+      } catch (err: any) {
+        console.error('Estimation failed:', err)
+      } finally {
+        setEstimating(false)
       }
+    } else {
+      setError('Please select a .docx file')
+      setFile(null)
+      setEstimate(null)
     }
+  }
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0]
+    if (selectedFile) processFile(selectedFile)
+  }
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    if (!isDragging) setIsDragging(true)
+  }
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    // Ignore dragleave events fired when moving over child elements.
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+      setIsDragging(false)
+    }
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    setIsDragging(false)
+    const droppedFile = e.dataTransfer.files?.[0]
+    if (droppedFile) processFile(droppedFile)
   }
 
   const handleUpload = async () => {
@@ -107,7 +131,16 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
               <label htmlFor="file-upload" className="block text-sm font-semibold text-gray-900 mb-2">
                 Upload Your CV
               </label>
-              <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-primary-500 focus-within:border-primary-500 focus-within:ring-2 focus-within:ring-primary-500 transition-colors bg-white">
+              <div
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                className={`border-2 border-dashed rounded-lg p-6 text-center focus-within:border-primary-500 focus-within:ring-2 focus-within:ring-primary-500 transition-colors ${
+                  isDragging
+                    ? 'border-primary-500 bg-primary-50'
+                    : 'border-gray-300 hover:border-primary-500 bg-white'
+                }`}
+              >
                 <input
                   type="file"
                   onChange={handleFileChange}
@@ -123,7 +156,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                       <Upload className="mx-auto h-12 w-12 text-gray-400" aria-hidden="true" />
                     )}
                     <p className="mt-2 font-medium">
-                      {file ? file.name : 'Click to select a file'}
+                      {file ? file.name : 'Click to select or drag a file here'}
                     </p>
                     <p className="text-xs text-gray-500 mt-1" id="file-type-hint">
                       .docx only

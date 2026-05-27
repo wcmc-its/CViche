@@ -2,6 +2,7 @@
 import logging
 import os
 import traceback
+import yaml
 
 from fastapi import FastAPI, Request, Depends, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -218,15 +219,21 @@ def readyz(response: Response, db: Session = Depends(get_db)):
     """
     checks: dict[str, dict] = {}
 
+    from app.config_loader import load_yaml_config
+    config = load_yaml_config()
+        
+    s3_config = config.get("s3", {})
+
     try:
         db.execute(text("SELECT 1"))
         checks["db"] = {"ok": True}
     except Exception as exc:
         checks["db"] = {"ok": False, "error": str(exc)}
 
-    storage_backend = os.environ.get("CVICHE_STORAGE_BACKEND", "local")
+    storage_backend = s3_config.get("CVICHE_STORAGE_BACKEND", "local")
     if storage_backend == "s3":
-        bucket = os.environ.get("CVICHE_S3_BUCKET")
+        
+        bucket = s3_config.get("CVICHE_S3_BUCKET", "")
         if not bucket:
             checks["s3"] = {"ok": False, "error": "CVICHE_S3_BUCKET not set"}
         else:

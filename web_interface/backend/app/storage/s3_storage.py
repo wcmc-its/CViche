@@ -10,6 +10,7 @@ for local-only development.
 
 import os
 import logging
+import yaml
 
 from app.storage.base import RunStorage
 
@@ -30,13 +31,18 @@ class S3RunStorage(RunStorage):
     def __init__(self, bucket: str | None = None, prefix: str | None = None):
         import boto3
 
-        self._bucket = bucket or os.environ.get("CVICHE_S3_BUCKET")
+        from app.config_loader import load_yaml_config
+        config = load_yaml_config()
+        s3_config = config.get("s3", {})
+
+        self._bucket = bucket or s3_config.get("CVICHE_S3_BUCKET")
         if not self._bucket:
             raise ValueError(
                 "S3 bucket not configured. Set CVICHE_S3_BUCKET environment variable."
             )
+        
+        self._prefix = prefix or s3_config.get("CVICHE_S3_PREFIX", "cviche")
 
-        self._prefix = prefix or os.environ.get("CVICHE_S3_PREFIX", "cviche")
         self._s3 = boto3.client("s3")
 
     def _s3_key(self, run_id: str, key: str) -> str:
@@ -73,11 +79,22 @@ class S3RunStorage(RunStorage):
 
         return keys
 
-    def get_download_url(self, run_id: str, key: str, expires_in: int = 300) -> str | None:
+    def get_download_url(
+        self,
+        run_id: str,
+        key: str,
+        expires_in: int = 300,
+        download_name: str | None = None,
+    ) -> str | None:
         s3_key = self._s3_key(run_id, key)
+        params = {"Bucket": self._bucket, "Key": s3_key}
+        if download_name:
+            params["ResponseContentDisposition"] = (
+                f'attachment; filename="{download_name}"'
+            )
         url = self._s3.generate_presigned_url(
             "get_object",
-            Params={"Bucket": self._bucket, "Key": s3_key},
+            Params=params,
             ExpiresIn=expires_in,
         )
         return url

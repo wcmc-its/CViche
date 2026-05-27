@@ -3,7 +3,8 @@ import os
 import time
 import logging
 import threading
-from ldap3 import Server, Connection, SUBTREE
+from urllib.parse import unquote
+from ldap3 import Server, Connection, BASE, LEVEL, SUBTREE
 from ldap3.utils.conv import escape_filter_chars
 from ldap3.core.exceptions import LDAPException
 from cachetools import TTLCache
@@ -70,13 +71,72 @@ def clear_cache() -> None:
 # Internal LDAP helper
 # ---------------------------------------------------------------------------
 
+# LDAP URL scope tokens (RFC 4516) -> ldap3 scope constants
+_LDAP_URL_SCOPE_MAP = {
+    "": BASE,
+    "base": BASE,
+    "one": LEVEL,
+    "sub": SUBTREE,
+}
+
+
+def _parse_memberurl(member_url: str) -> tuple[str, str, str] | None:
+    """Parse an RFC 4516 LDAP URL into (base_dn, scope, filter).
+
+    Returns None for malformed URLs. WCM's hybrid groupOfURLs pattern uses
+    ldap:///uid=X,ou=people,...??base?(filter), so the scope and filter
+    components carry real meaning -- the filter is the "stay-active" gate
+    (e.g. (weillCornellEduPersonTypeCode=academic-faculty)).
+    """
+    if not member_url or not member_url.lower().startswith("ldap:///"):
+        return None
+    body = member_url[len("ldap:///"):]
+    parts = body.split("?", 3)
+    while len(parts) < 4:
+        parts.append("")
+    base_dn = unquote(parts[0])
+    scope = _LDAP_URL_SCOPE_MAP.get(parts[2].lower(), BASE)
+    ldap_filter = unquote(parts[3]) or "(objectClass=*)"
+    return base_dn, scope, ldap_filter
+
+
+def _user_matches_memberurl(conn: Connection, member_url: str, user_dn: str) -> bool:
+    """Return True if user_dn satisfies the membership rule encoded in member_url.
+
+    For ?base? scope (the WCM hybrid pattern), short-circuits the LDAP roundtrip
+    when the URL's base DN doesn't match user_dn at all -- no point evaluating
+    the filter against an entry we know isn't the user.
+    """
+    parsed = _parse_memberurl(member_url)
+    if parsed is None:
+        return False
+    base_dn, scope, ldap_filter = parsed
+    if scope == BASE and base_dn.lower() != user_dn.lower():
+        return False
+    try:
+        conn.search(
+            search_base=base_dn,
+            search_filter=ldap_filter,
+            search_scope=scope,
+            attributes=["dn"],
+        )
+    except LDAPException:
+        return False
+    user_dn_lower = user_dn.lower()
+    return any(str(e.entry_dn).lower() == user_dn_lower for e in conn.entries)
+
 def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
                             bind_dn: str, bind_password: str,
                             search_base: str) -> bool:
     """Check if a user (by email) is a member of the given LDAP group.
-
+    Handles both schemas WCM ED uses:
+      groupOfNames  -- static `member` attribute on the group, listing user DNs
+      groupOfURLs   -- dynamic `memberURL` attribute, each URL resolving (via
+                       ldap3 search) to zero or more users. WCM's house style is
+                       a "hybrid" groupOfURLs with one memberURL per allowed user
+                       and an attribute-based stay-active filter.
     Uses escape_filter_chars for injection protection.
-    Tries memberOf attribute first, falls back to querying the group directly.
+    
     """
     safe_email = escape_filter_chars(email)
     search_filter = f"(mail={safe_email})"
@@ -89,7 +149,7 @@ def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
         conn = Connection(server, user=bind_dn, password=bind_password,
                           auto_bind=True, read_only=True, receive_timeout=5)
 
-        # Search for the user entry to get memberOf attribute
+        # Find the user entry; collect user_dn and any memberOf attribute
         conn.search(
             search_base=search_base,
             search_filter=search_filter,
@@ -104,40 +164,57 @@ def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
         user_entry = conn.entries[0]
         user_dn = str(user_entry.entry_dn)
 
-        # Try memberOf attribute first
-        member_of_list = []
+        # Path 1: memberOf on the user (groupOfNames only; WCM ED does not
+        # populate memberOf for groupOfURLs groups)
         try:
             member_of_raw = user_entry["memberOf"]
             if member_of_raw:
-                member_of_list = [str(dn) for dn in member_of_raw]
+                member_of_list = [str(dn).lower() for dn in member_of_raw]
+                if group_dn.lower() in member_of_list:
+                    logger.debug("memberOf hit for %s in %s", email, group_dn)
+                    return True
+                # Fall through -- group could still be groupOfURLs even though
+                # memberOf is populated for other (groupOfNames) groups.
         except (KeyError, LDAPException):
             pass
 
-        if member_of_list:
-            result = group_dn.lower() in [dn.lower() for dn in member_of_list]
-            logger.debug("memberOf check for %s in %s: %s", email, group_dn, result)
-            return result
-
-        # Fallback: query the group DN itself for member attribute
-        logger.debug("memberOf empty/missing for %s, checking group directly", email)
+         # Path 2: read the group entry, handle both schemas
+        logger.debug("Checking group entry directly for %s in %s", email, group_dn)
         conn.search(
             search_base=group_dn,
-            search_filter=f"(&(objectClass=groupOfNames)(cn=*))",
-            search_scope=SUBTREE,
-            attributes=["member"],
+            search_filter="(|(objectClass=groupOfNames)(objectClass=groupOfURLs))",
+            search_scope=BASE,
+            attributes=["member", "memberURL"],
         )
 
-        if conn.entries:
-            group_entry = conn.entries[0]
-            try:
-                members_raw = group_entry["member"]
-                if members_raw:
-                    members = [str(m).lower() for m in members_raw]
-                    result = user_dn.lower() in members
-                    logger.debug("Direct group member check for %s: %s", email, result)
-                    return result
-            except (KeyError, LDAPException):
-                pass
+        if not conn.entries:
+            logger.debug("Group %s not found or wrong objectClass", group_dn)
+            return False
+
+        group_entry = conn.entries[0]
+
+        # Path 2a: static `member` list (groupOfNames)
+        try:
+            members_raw = group_entry["member"]
+            if members_raw:
+                members = [str(m).lower() for m in members_raw]
+                if user_dn.lower() in members:
+                    logger.debug("Group `member` hit for %s in %s", email, group_dn)
+                    return True
+        except (KeyError, LDAPException):
+            pass
+
+        # Path 2b: dynamic `memberURL` list (groupOfURLs) -- evaluate each URL
+        try:
+            member_urls_raw = group_entry["memberURL"]
+            if member_urls_raw:
+                for url in member_urls_raw:
+                    if _user_matches_memberurl(conn, str(url), user_dn):
+                        logger.debug("memberURL hit for %s in %s via %s",
+                                     email, group_dn, url)
+                        return True
+        except (KeyError, LDAPException):
+            pass
 
         logger.debug("User %s not found in group %s via any method", email, group_dn)
         return False

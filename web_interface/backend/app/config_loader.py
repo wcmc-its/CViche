@@ -29,8 +29,31 @@ def load_yaml_config() -> dict:
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
+# Keys whose source of truth is the runtime admin UI (PUT /api/admin/config).
+# These are seeded once from YAML and then owned by admins -- a redeploy must
+# NOT clobber admin edits, so they are insert-if-absent only.
+ADMIN_MANAGED_KEYS = frozenset({
+    "allowed_users",
+    "admin_users",
+    "rate_limit_daily",
+    "rate_limit_monthly",
+    "consent_version",
+})
+
+# All other keys (auth_mode, saml_*, ed_*) have no admin-UI path, so the YAML
+# (configmap) is their only source of truth. They are reconciled from YAML on
+# every boot -- otherwise a configmap edit can never override an existing row
+# (the original insert-if-absent bug: flipping auth.mode to "saml" had no
+# effect because the row already existed as "simple").
+
+
 def seed_system_config(db: Session) -> None:
-    """Seed SystemConfig table from YAML. Only inserts keys absent from DB (forward-compatible)."""
+    """Seed/reconcile SystemConfig from YAML.
+
+    Admin-managed keys (see ADMIN_MANAGED_KEYS) are inserted only when absent so
+    runtime admin edits survive redeploys. All file-managed keys are reconciled
+    to match the YAML on every boot so configmap changes actually take effect.
+    """
     config = load_yaml_config()
     defaults = {
         "auth_mode": json.dumps(config.get("auth", {}).get("mode", "simple")),
@@ -39,12 +62,13 @@ def seed_system_config(db: Session) -> None:
         "rate_limit_daily": json.dumps(config.get("rate_limits", {}).get("daily", 10)),
         "rate_limit_monthly": json.dumps(config.get("rate_limits", {}).get("monthly", 50)),
         "consent_version": json.dumps(config.get("consent", {}).get("version", "1.0")),
-        # SAML config (Phase 8 will consume these; stored now for forward-compatibility)
+        # SAML config
         "saml_entity_id": json.dumps(config.get("saml", {}).get("entity_id", "")),
         "saml_idp_metadata_url": json.dumps(config.get("saml", {}).get("idp_metadata_url", "")),
+        "saml_sp_base_url": json.dumps(config.get("saml", {}).get("sp_base_url", "")),
         "saml_discovery_url": json.dumps(config.get("saml", {}).get("discovery_url", "")),
         "saml_cert_dir": json.dumps(config.get("saml", {}).get("cert_dir", "")),
-        # ED group authorization config (Phase 9)
+        # ED group authorization config
         "ed_enabled": json.dumps(config.get("ed", {}).get("enabled", False)),
         "ed_access_group": json.dumps(config.get("ed", {}).get("access_group", "")),
         "ed_admin_group": json.dumps(config.get("ed", {}).get("admin_group", "")),
@@ -53,8 +77,15 @@ def seed_system_config(db: Session) -> None:
     }
     for key, value in defaults.items():
         existing = db.query(SystemConfig).filter(SystemConfig.key == key).first()
-        if not existing:
+        if existing is None:
             db.add(SystemConfig(key=key, value=value))
+        elif key not in ADMIN_MANAGED_KEYS and existing.value != value:
+            # File-managed key drifted from the YAML -- reconcile it.
+            logger.info(
+                "Reconciling config '%s' from YAML: %s -> %s",
+                key, existing.value, value,
+            )
+            existing.value = value
     db.commit()
 
 def get_config_value(db: Session, key: str):

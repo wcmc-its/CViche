@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cviche-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cviche-backend
+  template:
+    metadata:
+      labels:
+        app: cviche-backend
+    spec:
+      serviceAccountName: cviche-sa 
+      containers:
+      - name: backend
+        image: backend
+        # imagePullPolicy and env now correctly align with 'name' and 'ports'
+        imagePullPolicy: IfNotPresent 
+        ports:
+        - containerPort: 8000
+        env:
+        - name: PORT
+          value: "8000"

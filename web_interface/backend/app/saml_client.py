@@ -99,7 +99,22 @@ def get_saml_client(db: Session) -> Saml2Client:
     """
     entity_id = get_config_value(db, "saml_entity_id") or ""
     idp_metadata_url = get_config_value(db, "saml_idp_metadata_url") or ""
+    sp_base_url = get_config_value(db, "saml_sp_base_url") or ""
     cert_dir_str = get_config_value(db, "saml_cert_dir")
+
+    # The SP endpoints (ACS, SLO) live at the SP's reachable base URL, not at
+    # the entity_id. The two often differ -- e.g., entity_id is
+    # "https://host/shibboleth" by Shibboleth convention while the SP serves
+    # at "https://host". The IdP enforces the Destination/Recipient against
+    # the URLs published in our metadata, so they must match the real
+    # endpoints exactly.
+    if not sp_base_url:
+        raise RuntimeError(
+            "saml_sp_base_url is not configured. Set the SP's reachable base "
+            "URL (e.g. 'https://cviche.weill.cornell.edu') in auth_config.yaml "
+            "under saml.sp_base_url. This must match where the SP actually "
+            "serves /api/saml/acs, not the entity_id."
+        )
 
     # Default cert directory: <backend>/certs
     if not cert_dir_str:
@@ -118,10 +133,10 @@ def get_saml_client(db: Session) -> Saml2Client:
                 "name": "CViche",
                 "endpoints": {
                     "assertion_consumer_service": [
-                        (f"{entity_id}/api/saml/acs", BINDING_HTTP_POST),
+                        (f"{sp_base_url}/api/saml/acs", BINDING_HTTP_POST),
                     ],
                     "single_logout_service": [
-                        (f"{entity_id}/api/saml/logout", BINDING_HTTP_REDIRECT),
+                        (f"{sp_base_url}/api/saml/logout", BINDING_HTTP_REDIRECT),
                     ],
                 },
                 "allow_unsolicited": True,

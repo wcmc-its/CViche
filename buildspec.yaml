@@ -1,0 +1,122 @@
+version: 0.2
+
+phases:
+  install:
+    commands:
+      - kubectl version --client
+  pre_build:
+     commands:
+       # Fetch Docker credentials from AWS Secrets Manager
+       - echo "Fetching Docker credentials from AWS Secrets Manager"
+       - SECRET=$(aws secretsmanager get-secret-value --secret-id docker-hub-credentials --query "SecretString" --output text)
+
+       # Extract username and password from the JSON response                                               
+       - DOCKER_USERNAME=$(echo $SECRET | sed -n 's/.*"username":"\([^"]*\)".*/\1/p')
+       - DOCKER_PASSWORD=$(echo $SECRET | sed -n 's/.*"password":"\([^"]*\)".*/\1/p')
+
+       # Log in to Docker registry                             
+       - echo "Logging in to Docker registry $REPOSITORY_URI"
+       - echo "$DOCKER_PASSWORD" | docker login --username $DOCKER_USERNAME --password-stdin                                       
+       
+       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $REPOSITORY_URI
+
+       - REPO_BE=$REPOSITORY_URI/cviche/backend
+       - REPO_FE=$REPOSITORY_URI/cviche/frontend
+       - 'echo $REPO_BE'
+       - 'echo $REPO_FE'
+       - TAG="${BRANCH}-$CODEBUILD_BUILD_NUMBER.$(date +%Y-%m-%d.%H.%M.%S).$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | head -c 8)"
+       - 'echo $TAG'
+
+       - 'echo "Targeting environment: ${ENV_NAME}"'
+       - 'echo "Injecting AWS Account ID into Service Account manifest..."'
+       # ... Keep your registry login, image tagging, and db.env lines here ...
+       # 1. Inject Secrets and Parameters
+       - sed -i "s/ACCOUNT_ID_PLACEHOLDER/${AWS_ACCOUNT_ID}/g" k8s/overlays/${ENV_NAME}/sa-patch.yaml
+       # Target the base ingress.yaml file where your placeholder actually lives
+       - sed -i "s|ACM_ARN_PLACEHOLDER|${ACM_CERTIFICATE_ARN}|g" k8s/overlays/${ENV_NAME}/ingress-patch.yaml
+       
+       # 2. Injects the actual runtime LDAP password variable into the kustomization layout
+       - sed -i "s|CODEBUILD_ED_LDAP_BIND_PASSWORD|$ED_LDAP_BIND_PASSWORD|g" k8s/overlays/${ENV_NAME}/kustomization.yaml
+
+       # 3. Dynamic Image Injection via sed (Replaces kubectl set image)
+       - sed -i "s|REPO_BE_PLACEHOLDER|$REPO_BE|g" k8s/base/kustomization.yaml
+       - sed -i "s|REPO_FE_PLACEHOLDER|$REPO_FE|g" k8s/base/kustomization.yaml
+       - sed -i "s|TAG_PLACEHOLDER|$TAG|g" k8s/base/kustomization.yaml
+       
+       - echo "Generating native Kustomize Auth environment configuration for ${ENV_NAME}..."
+       - echo "AUTH_BASE_URL is ${AUTH_BASE_URL}"
+       - echo "AUTH_METADATA_URL is ${AUTH_METADATA_URL}"
+       # Overwrite the auth.env file inside the target overlay instantly
+       - echo "Generating the structured auth_config.yaml file for container volume mount..."
+       - |
+        cat <<EOF > k8s/overlays/${ENV_NAME}/auth_config.yaml
+        auth:
+          mode: saml
+          CVICHE_ALLOWED_ORIGINS: "${CVICHE_ALLOWED_ORIGINS}"
+        s3:
+          CVICHE_S3_BUCKET: "${CVICHE_S3_BUCKET}"
+          CVICHE_STORAGE_BACKEND: "${CVICHE_STORAGE_BACKEND}"
+          CVICHE_S3_PREFIX: "${CVICHE_S3_PREFIX}"         
+        ldap:
+          ED_LDAP_URL: "${ED_LDAP_URL}"
+          ED_LDAP_BIND_DN: "${ED_LDAP_BIND_DN}"  
+        saml:
+          entity_id: "${AUTH_ENTITY_ID}"
+          sp_base_url: "${AUTH_BASE_URL}"
+          idp_metadata_url: "${AUTH_METADATA_URL}"
+          discovery_url: "${AUTH_DISCOVERY_URL}"
+          cert_dir: "${AUTH_CERT_PATH}"
+        allowed_users: []
+        admin_users: []
+        rate_limits:
+          daily: 10
+          monthly: 50
+        consent:
+          version: "1.0"
+        ed:
+          enabled: true
+          access_group: "${AUTH_ACCESS_GROUP}"
+          admin_group: "${AUTH_ADMIN_GROUP}"
+          contact_name: "${AUTH_CONTACT_NAME}"
+          contact_email: "${AUTH_CONTACT_EMAIL}"
+        EOF
+       - echo "Writing live environment secrets into db.env template..."
+       - echo "DATABASE_URL=${DATABASE_URL}" > k8s/overlays/${ENV_NAME}/db.env
+       - echo "CVICHE_DATABASE_URL=${DATABASE_URL}" >> k8s/overlays/${ENV_NAME}/db.env
+       - echo "CVICHE_SESSION_SECRET=${SESSION_SECRET}" >> k8s/overlays/${ENV_NAME}/db.env
+       - echo "CVICHE_OPENAI_API_KEY=${OPENAI_API_KEY}" >> k8s/overlays/${ENV_NAME}/db.env
+       
+       # --- Write your SAML cryptographic assets securely ---
+       - echo "Extracting SAML Cryptographic Key Pair..."
+       - echo "${SP_SAML_KEY}" > k8s/overlays/${ENV_NAME}/cviche-saml-sp-prod.key.pem
+       - echo "${SP_SAML_CRT}" > k8s/overlays/${ENV_NAME}/cviche-saml-sp-prod.crt.pem
+
+
+  build:
+    commands:
+      # Backend MUST be built with the repo root as context. The Dockerfile
+      # copies src/, key_files/, and config.yaml from the repo root because
+      # the orchestrator resolves them through repo-root-relative paths
+      # (see web_interface/backend/Dockerfile header for the rationale).
+      - docker build -t $REPO_BE:$TAG -f web_interface/backend/Dockerfile .
+
+      - echo "Building Frontend..."
+      - docker build -t $REPO_FE:$TAG ./web_interface/frontend
+
+  post_build:
+    commands:
+      - echo "Pushing images to ECR..."
+      - docker push $REPO_BE:$TAG
+      - docker push $REPO_FE:$TAG
+
+      - echo "Updating EKS Deployment..."
+      - docker logout $REPOSITORY_URI
+      - aws eks update-kubeconfig --name $EKS_CLUSTER_NAME --region $AWS_DEFAULT_REGION
+       
+      - kubectl apply -k k8s/overlays/${ENV_NAME}
+
+
+      - echo "Forcing a zero-downtime rolling update to clear configuration caches..."
+      - kubectl rollout restart deployment/cviche-backend -n cviche-${ENV_NAME}
+      - kubectl rollout restart deployment/cviche-frontend -n cviche-${ENV_NAME}
+      
