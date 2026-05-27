@@ -29,6 +29,8 @@ import os
 import time
 import json as json_module
 import logging
+import random
+import threading
 from openai import (
     OpenAI,
     RateLimitError,
@@ -76,6 +78,24 @@ except ImportError:
 RETRYABLE_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError, _BotoClientError)
 
 
+# Per-pod ceiling on concurrent in-flight LLM calls. A backstop against fanning
+# out too many simultaneous Bedrock/OpenAI requests from one pod -- e.g. if the
+# per-run admission cap (CVICHE_MAX_CONCURRENT_RUNS) is raised, or a stage ever
+# parallelizes its calls. The live pipeline runs stages sequentially and runs
+# are admission-capped, so in-flight calls are already few; this default is
+# generous headroom rather than a bottleneck. Read once at import (a
+# deploy-time knob), since BoundedSemaphore is sized at construction.
+def _get_max_concurrent_llm_calls() -> int:
+    try:
+        value = int(os.environ.get("CVICHE_MAX_CONCURRENT_LLM_CALLS", 8))
+    except (TypeError, ValueError):
+        return 8
+    return value if value > 0 else 8
+
+
+_llm_call_semaphore = threading.BoundedSemaphore(_get_max_concurrent_llm_calls())
+
+
 def _get_openai_client():
     """Get or create the OpenAI client (lazy initialization)."""
     global _openai_client
@@ -120,7 +140,11 @@ def _call_with_retry(call_fn, retry_count: int = 3):
     last_error = None
     for attempt in range(retry_count + 1):
         try:
-            return call_fn()
+            # Bound concurrent in-flight calls per pod. The slot is acquired only
+            # around the actual call and released before any backoff sleep below,
+            # so a backing-off caller never holds a slot idle.
+            with _llm_call_semaphore:
+                return call_fn()
         except RETRYABLE_ERRORS as e:
             # For botocore ClientError, only retry if the error code is retryable.
             # Non-retryable Bedrock errors (AccessDeniedException, ValidationException,
@@ -131,10 +155,17 @@ def _call_with_retry(call_fn, retry_count: int = 3):
                     raise
             last_error = e
             if attempt < retry_count:
-                wait = min(2 ** attempt, 30)  # 1s, 2s, 4s... capped at 30s
+                # Exponential backoff with equal jitter (AWS "backoff and
+                # jitter"): half the exponential base plus a random half, i.e.
+                # a wait in [base/2, base] where base is 1s, 2s, 4s... capped at
+                # 30s. The jitter decorrelates the retries of many runs that
+                # were throttled at the same instant, so they don't retry in
+                # lockstep and re-throttle together (a self-inflicted herd).
+                base = min(2 ** attempt, 30)
+                wait = base / 2 + random.uniform(0, base / 2)
                 logger.warning(
                     f"LLM call failed (attempt {attempt + 1}/{retry_count + 1}): {e}. "
-                    f"Retrying in {wait}s..."
+                    f"Retrying in {wait:.1f}s..."
                 )
                 time.sleep(wait)
     raise last_error
@@ -479,10 +510,12 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
                 "role": "user",
                 "content": "Your previous response was not valid JSON. Please respond with ONLY valid JSON, no markdown fencing or explanation.",
             })
-            retry_response = _call_bedrock(model, stronger_messages, temperature,
-                                            response_format, max_tokens,
-                                            enable_prompt_caching=enable_prompt_caching,
-                                            **extra_kwargs)
+            # Bound this in-flight call too, consistent with _call_with_retry.
+            with _llm_call_semaphore:
+                retry_response = _call_bedrock(model, stronger_messages, temperature,
+                                               response_format, max_tokens,
+                                               enable_prompt_caching=enable_prompt_caching,
+                                               **extra_kwargs)
             content = retry_response["output"]["message"]["content"][0]["text"]
             retry_usage = retry_response["usage"]
             retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)
