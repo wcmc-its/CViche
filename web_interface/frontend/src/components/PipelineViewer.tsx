@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { MapPin, XCircle, AlertCircle, Clock } from 'lucide-react'
 import type { RunStatus } from '../types'
-import { getRunStatus, getRunStep, getPromptLogs, getRunDataJson, cancelRun, restartRun } from '../api/runs'
+import { getRunStatus, getRunStep, getPromptLogs, getRunDataJson, cancelRun, restartRun, retryStep } from '../api/runs'
 import { getWebSocketUrl } from '../api/websocket'
 import { formatCost } from '../utils'
 import PipelineHeader from './PipelineHeader'
@@ -70,6 +70,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   const [stepStartCosts, setStepStartCosts] = useState<Record<number, number>>({})
   const [isCancelling, setIsCancelling] = useState(false)
   const [isRestarting, setIsRestarting] = useState(false)
+  const [isRetrying, setIsRetrying] = useState(false)
 
   // Auto-scroll to feedback section when URL has #feedback hash
   useEffect(() => {
@@ -129,6 +130,25 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
       setApiError(`Failed to restart: ${err.message || 'Unknown error'}`)
     } finally {
       setIsRestarting(false)
+    }
+  }
+
+  // Resume this run from the failed step (re-runs the failed stage onward,
+  // reusing earlier stages' outputs). Cheaper than a full restart.
+  const handleRetry = async () => {
+    if (isRetrying) return
+    const failedStep = runStatus?.steps?.find((s) => s.status === 'error')
+    if (!failedStep) return
+    setIsRetrying(true)
+    try {
+      await retryStep(runId, failedStep.step_number)
+      // The 2s status poll + WebSocket pick up the run flipping back to
+      // "running", which swaps the failed banner for the live progress view.
+    } catch (err: any) {
+      console.error('Error retrying step:', err)
+      setApiError(`Failed to retry: ${err.message || 'Unknown error'}`)
+    } finally {
+      setIsRetrying(false)
     }
   }
 
@@ -412,13 +432,24 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                 </p>
               </div>
             </div>
-            <button
-              onClick={handleRestart}
-              disabled={isRestarting}
-              className="ml-4 shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-red-100 text-red-800 hover:bg-red-200 transition-colors focus:ring-2 focus:ring-red-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isRestarting ? 'Restarting...' : 'Restart with this file'}
-            </button>
+            <div className="ml-4 flex shrink-0 gap-2">
+              {runStatus.steps?.some((s) => s.status === 'error') && (
+                <button
+                  onClick={handleRetry}
+                  disabled={isRetrying || isRestarting}
+                  className="rounded-lg px-4 py-1.5 text-sm font-medium bg-red-600 text-white hover:bg-red-700 transition-colors focus:ring-2 focus:ring-red-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isRetrying ? 'Retrying...' : 'Retry failed step'}
+                </button>
+              )}
+              <button
+                onClick={handleRestart}
+                disabled={isRestarting || isRetrying}
+                className="rounded-lg px-4 py-1.5 text-sm font-medium bg-red-100 text-red-800 hover:bg-red-200 transition-colors focus:ring-2 focus:ring-red-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isRestarting ? 'Restarting...' : 'Restart with this file'}
+              </button>
+            </div>
           </div>
         </div>
       )}

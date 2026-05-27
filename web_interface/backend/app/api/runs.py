@@ -13,6 +13,7 @@ from app.pipeline.step_registry import STEP_REGISTRY
 from app.auth import get_current_user
 from app.api.upload import generate_run_id, UPLOAD_DIR
 from app.services.run_service import check_run_access
+from app.rate_limiter import check_rate_limit
 from app.errors import not_found, bad_request
 
 router = APIRouter()
@@ -216,6 +217,13 @@ async def restart_run(
 
     original_run = check_run_access(run_id, current_user, db)
 
+    # Enforce the same per-user quota as /upload. Restart creates a brand-new
+    # run, so without this check an impatient user mashing "restart" sails past
+    # the daily/monthly cap and racks up Bedrock spend.
+    rate_limit_error = check_rate_limit(current_user, db)
+    if rate_limit_error:
+        raise HTTPException(status_code=429, detail=rate_limit_error)
+
     # Locate the original uploaded file
     original_file = UPLOAD_DIR / f"{run_id}.{original_run.file_type}"
     if not original_file.exists():
@@ -268,9 +276,19 @@ async def retry_step(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Retry a failed step."""
+    """Retry a failed step by resuming the pipeline from that step.
 
-    check_run_access(run_id, current_user, db)
+    Re-runs the failed stage and every stage after it, reusing the outputs of
+    the earlier completed stages already on disk. Cheaper than a full restart,
+    which re-runs all 12 stages from the uploaded file.
+
+    Resuming depends on the prior stages' outputs still being present on this
+    pod's filesystem. If the pod recycled since the original run those are gone
+    and the resumed stage will fail -- at which point the user falls back to
+    "Restart with this file".
+    """
+
+    run = check_run_access(run_id, current_user, db)
 
     step = db.query(Step).filter(
         Step.run_id == run_id,
@@ -283,14 +301,45 @@ async def retry_step(
     if step.status != "error":
         raise bad_request(f"Can only retry failed steps. Step {step_number} status: {step.status}")
 
-    # Reset step status
-    step.status = "pending"
-    step.error_message = None
+    # The original uploaded file is needed to re-feed the pipeline.
+    file_path = UPLOAD_DIR / f"{run_id}.{run.file_type}"
+    if not file_path.exists():
+        raise not_found("Uploaded file no longer available — please upload again.")
+
+    # Reset the failed step and every step after it back to pending; the earlier
+    # completed steps are left untouched so the pipeline resumes rather than
+    # restarts. Clear stale per-step metadata so the re-run repopulates it.
+    downstream_steps = db.query(Step).filter(
+        Step.run_id == run_id,
+        Step.step_number >= step_number,
+    ).all()
+    for s in downstream_steps:
+        s.status = "pending"
+        s.error_message = None
+        s.started_at = None
+        s.completed_at = None
+        s.duration_seconds = None
+        s.cost = None
+
+    run.status = "running"
+    run.error_message = None
+    run.completed_at = None
     db.commit()
 
-    # TODO: Implement retry logic
-    # For now, just return success
-    return {"message": f"Step {step_number} queued for retry", "status": "pending"}
+    # Resume pipeline execution in the background, mirroring start_run.
+    def run_pipeline():
+        from app.database import SessionLocal
+        bg_db = SessionLocal()
+        try:
+            orchestrator = PipelineOrchestrator(run_id, file_path, bg_db)
+            import asyncio
+            asyncio.run(orchestrator.execute(start_step_number=step_number))
+        finally:
+            bg_db.close()
+
+    background_tasks.add_task(run_pipeline)
+
+    return {"message": f"Retrying run {run_id} from step {step_number}", "status": "running"}
 
 
 @router.get("/run/{run_id}/quality")

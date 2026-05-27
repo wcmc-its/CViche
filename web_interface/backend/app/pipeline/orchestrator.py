@@ -335,8 +335,31 @@ class PipelineOrchestrator:
                     path_str, self.run_id, e,
                 )
 
-    async def execute(self):
-        """Execute the full pipeline."""
+    def _prepare_resume(self, run: Run, start_step_number: int) -> None:
+        """Prime in-memory state for a resumed run (per-step retry).
+
+        Continues cost accounting from the run's existing total (so the costs of
+        the already-completed earlier stages are preserved) and registers each
+        completed stage's on-disk output so downstream stages that prefer the
+        in-memory path resolve their inputs correctly.
+        """
+        self.total_cost = run.total_cost or 0.0
+        output_paths = self._get_output_paths()
+        for step_def in STEP_REGISTRY:
+            if step_def.number >= start_step_number:
+                break
+            path = output_paths.get(step_def.stage_id)
+            if path and Path(path).exists():
+                self.stage_outputs[step_def.stage_id] = str(path)
+
+    async def execute(self, start_step_number: Optional[int] = None):
+        """Execute the pipeline.
+
+        When ``start_step_number`` is given (a per-step retry), stages before it
+        are skipped and their outputs are loaded from disk so the resumed stages
+        resolve their inputs. This relies on the prior stages' output files
+        still being present on this pod's filesystem.
+        """
         run = self.db.query(Run).filter(Run.id == self.run_id).first()
         if not run:
             raise ValueError(f"Run {self.run_id} not found")
@@ -348,8 +371,13 @@ class PipelineOrchestrator:
             # Copy file to pipeline input directory
             cv_path = self._copy_to_pipeline_input()
 
-            # Execute all 12 stages
+            if start_step_number is not None:
+                self._prepare_resume(run, start_step_number)
+
+            # Execute all 12 stages (or, on retry, from the failed step onward)
             for step_def in STEP_REGISTRY:
+                if start_step_number is not None and step_def.number < start_step_number:
+                    continue
                 # Check for cancellation before each step
                 self.check_cancelled()
                 await self.execute_step(step_def.number, step_def.stage_id, cv_path)
