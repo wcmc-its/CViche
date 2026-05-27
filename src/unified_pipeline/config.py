@@ -11,6 +11,7 @@ Single source of truth for all paths, settings, and feature flags.
 from pathlib import Path
 import logging
 import os
+import re
 import yaml
 
 logger = logging.getLogger(__name__)
@@ -213,6 +214,18 @@ def _normalize_model_id(model: str) -> str:
     return model
 
 
+# Bedrock inference-profile IDs often carry a dated version suffix, e.g.
+# "anthropic.claude-haiku-4-5-20251001-v1:0". PRICING / friendly-name maps may
+# be keyed by the bare, undated ID, so strip the suffix as a fallback when an
+# exact (and region-stripped) lookup misses. Exact match is always tried first,
+# so explicitly-dated keys (the Claude 3.x entries) are unaffected.
+_VERSION_SUFFIX_RE = re.compile(r"-\d{8}-v\d+:\d+$")
+
+
+def _strip_version_suffix(model: str) -> str:
+    return _VERSION_SUFFIX_RE.sub("", model) if model else model
+
+
 # Bedrock / Anthropic prompt-caching multipliers, applied against the model's
 # base input price. Bedrock charges the same cache prices as Anthropic's
 # direct API (see docs/LLM_MODELS.md).
@@ -249,8 +262,11 @@ def calculate_cost(prompt_tokens: int, completion_tokens: int,
 
     provider_pricing = PRICING.get(provider, PRICING.get("openai", {}))
 
-    # Resolve the pricing key: exact match first, then region-prefix-stripped.
+    # Resolve the pricing key: exact match first, then region-prefix-stripped,
+    # then with the dated version suffix stripped (dated Bedrock inference IDs).
     lookup = model if model in provider_pricing else _normalize_model_id(model)
+    if lookup not in provider_pricing and _strip_version_suffix(lookup) in provider_pricing:
+        lookup = _strip_version_suffix(lookup)
 
     if lookup not in provider_pricing:
         if model not in _warned_missing_pricing:
@@ -350,7 +366,9 @@ def friendly_model_name(model: str) -> str:
     """Best-effort human-readable model name for UI display."""
     if not model:
         return "unknown"
-    return _FRIENDLY_MODEL_NAMES.get(_normalize_model_id(model), model)
+    norm = _normalize_model_id(model)
+    return (_FRIENDLY_MODEL_NAMES.get(norm)
+            or _FRIENDLY_MODEL_NAMES.get(_strip_version_suffix(norm), model))
 
 
 # ============================================================================
