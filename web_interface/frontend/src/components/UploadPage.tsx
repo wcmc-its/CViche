@@ -8,6 +8,7 @@ import { startRun } from '../api/runs'
 import { formatDuration, formatCost } from '../utils'
 import ErrorBanner from './ErrorBanner'
 import RunHistory from './RunHistory'
+import UserMenu from './UserMenu'
 
 interface UploadPageProps {
   onUploadSuccess: (runId: string) => void
@@ -115,14 +116,17 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
         </div>
 
         <section className="bg-white/95 backdrop-blur-sm rounded-lg shadow-lg p-6 md:p-8 relative max-w-md mx-auto">
-          <Link
-            to="/help"
-            aria-label="Help and support"
-            title="Help and support"
-            className="absolute top-4 right-4 text-gray-400 hover:text-primary-600 transition-colors"
-          >
-            <HelpCircle className="h-5 w-5" />
-          </Link>
+          <div className="absolute top-4 right-4 flex items-center gap-1">
+            <Link
+              to="/help"
+              aria-label="Help and support"
+              title="Help and support"
+              className="text-gray-400 hover:text-primary-600 transition-colors"
+            >
+              <HelpCircle className="h-5 w-5" />
+            </Link>
+            <UserMenu />
+          </div>
           <h1 className="sr-only">Upload CV for Processing</h1>
           <p className="text-gray-600 mb-8 italic">Upload a CV in any format. Get back a document in WCM institutional format.</p>
 

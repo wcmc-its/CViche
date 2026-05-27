@@ -1,6 +1,7 @@
 import { ArrowLeft, HelpCircle } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { formatCost } from '../utils'
+import UserMenu from './UserMenu'
 
 interface PipelineHeaderProps {
   runId: string
@@ -130,6 +131,9 @@ export default function PipelineHeader({
               {isCancelling ? 'Cancelling...' : 'Cancel'}
             </button>
           )}
+
+          {/* Account / sign out */}
+          <UserMenu />
         </div>
       </div>
     </header>
