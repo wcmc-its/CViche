@@ -100,7 +100,7 @@ def get_config(section, key, default=None):
     # 1. env 
     value = os.environ.get(key)
     if value:
-        return value
+        return value,"env"
 
     # 2. yaml (ConfigMap)
     try:
