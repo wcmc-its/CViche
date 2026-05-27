@@ -32,13 +32,7 @@ default:
 # to the cheaper Claude Haiku 4.5 by uncommenting:
 #
 # stages:
-#   stage_5b: {model: us.anthropic.claude-haiku-4-5-20251001-v1:0}   # institution lookup
-#   stage_5c: {model: us.anthropic.claude-haiku-4-5-20251001-v1:0}   # teaching reformat
-#   stage_5d: {model: us.anthropic.claude-haiku-4-5-20251001-v1:0}   # citation reformat
-#   stage_6:  {model: us.anthropic.claude-haiku-4-5-20251001-v1:0}   # geo-scope classify
-#
-# IMPORTANT: Haiku 4.5 requires the FULL versioned inference-profile ID above.
-# The short alias `us.anthropic.claude-haiku-4-5` is rejected by Bedrock with
-# ValidationException ("model identifier is invalid"); stage code swallows that
-# per-batch error and silently falls back to default codes. Verify the exact ID
-# for your region with `aws bedrock list-inference-profiles`.
+#   stage_5b: {model: us.anthropic.claude-haiku-4-5}   # institution lookup
+#   stage_5c: {model: us.anthropic.claude-haiku-4-5}   # teaching reformat
+#   stage_5d: {model: us.anthropic.claude-haiku-4-5}   # citation reformat
+#   stage_6:  {model: us.anthropic.claude-haiku-4-5}   # geo-scope classify

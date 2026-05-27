@@ -58,19 +58,11 @@ If cost needs trimming, the terminal, non-cascading stages are the safe place to
 
 ```yaml
 stages:
-  stage_5b: {model: us.anthropic.claude-haiku-4-5-20251001-v1:0}
-  stage_5c: {model: us.anthropic.claude-haiku-4-5-20251001-v1:0}
-  stage_5d: {model: us.anthropic.claude-haiku-4-5-20251001-v1:0}
-  stage_6:  {model: us.anthropic.claude-haiku-4-5-20251001-v1:0}
+  stage_5b: {model: us.anthropic.claude-haiku-4-5}
+  stage_5c: {model: us.anthropic.claude-haiku-4-5}
+  stage_5d: {model: us.anthropic.claude-haiku-4-5}
+  stage_6:  {model: us.anthropic.claude-haiku-4-5}
 ```
-
-> **Use the full versioned inference-profile ID for Haiku 4.5.** The short alias
-> `us.anthropic.claude-haiku-4-5` is rejected by Bedrock (`ValidationException:
-> model identifier is invalid`), and stage code swallows the per-batch error and
-> silently falls back to default codes — so a misconfigured downgrade looks like
-> it works but produces garbage. Confirm the exact ID for your region with
-> `aws bedrock list-inference-profiles`. (Sonnet 4.6 happens to expose the short
-> `us.anthropic.claude-sonnet-4-6` alias; Haiku 4.5 does not.)
 
 The largest single lever is `stage_4` (the 30–60+ call hotspot). Before changing its model, run an A/B accuracy comparison of Sonnet 4.6 vs. Haiku 4.5 on a sample of real CVs — see [Follow-ups](#follow-ups).
 
