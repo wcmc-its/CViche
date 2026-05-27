@@ -1,10 +1,11 @@
 """Tests for the pre-release hardening guards.
 
-Four user-facing failure modes hardened before the non-technical rollout:
+User-facing failure modes hardened before the non-technical rollout:
   #5  restart_run enforces the per-user quota (so "restart" spam can't run up cost)
   #4  /upload rejects documents with no readable text (scan / encrypted / blank)
   #3  reconcile_stale_runs sweeps runs orphaned by a server restart
   #2  retry_step resumes the pipeline from the failed step (real retry)
+  #1  per-pod admission control caps concurrent in-process pipelines (load)
 """
 import io
 import os
@@ -17,6 +18,7 @@ import pytest
 from docx import Document
 
 from app.models import Run, Step, User
+from app.pipeline import concurrency
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.services.run_service import reconcile_stale_runs
 
@@ -314,3 +316,121 @@ def test_resume_missing_upstream_output_gives_friendly_error(db, tmp_path):
         assert "Errno" not in msg and "stage_4" not in msg
     finally:
         shutil.rmtree(orch.web_output_dir, ignore_errors=True)
+
+
+# --- #1  per-pod concurrency admission control ------------------------------
+
+class TestConcurrencyModule:
+    """The process-global slot counter that bounds concurrent in-process runs."""
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        # The counter is module-global; isolate each test from slot leakage.
+        concurrency._active_runs = 0
+        yield
+        concurrency._active_runs = 0
+
+    def test_acquire_release_roundtrip(self, monkeypatch):
+        monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "2")
+        assert concurrency.try_acquire_slot() is True
+        assert concurrency.try_acquire_slot() is True
+        assert concurrency.active_count() == 2
+        assert concurrency.try_acquire_slot() is False   # at cap -> rejected
+        concurrency.release_slot()
+        assert concurrency.active_count() == 1
+        assert concurrency.try_acquire_slot() is True     # slot freed
+
+    def test_env_cap_respected(self, monkeypatch):
+        monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "1")
+        assert concurrency.try_acquire_slot() is True
+        assert concurrency.try_acquire_slot() is False
+
+    def test_nonpositive_cap_falls_back_to_default(self, monkeypatch):
+        # A 0/negative cap would wedge the pod; we treat it as the default.
+        monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "0")
+        assert concurrency.get_max_concurrent_runs() == concurrency.DEFAULT_MAX_CONCURRENT_RUNS
+
+    def test_release_never_goes_negative(self):
+        concurrency.release_slot()
+        assert concurrency.active_count() == 0
+
+
+class TestConcurrencyAdmission:
+    """The 429 gate on the endpoints that launch a pipeline."""
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        concurrency._active_runs = 0
+        yield
+        concurrency._active_runs = 0
+
+    def test_start_rejected_when_at_capacity(self, client, db, seed_simple_mode, monkeypatch):
+        from app.api.upload import UPLOAD_DIR
+        user = _make_user(db)
+        _auth_cookie(client, user)
+        run = Run(id="BUSY01", filename="cv.docx", file_type="docx", status="created",
+                  user_id=user.id, started_at=datetime.now())
+        db.add(run)
+        db.commit()
+        upload_file = UPLOAD_DIR / "BUSY01.docx"
+        upload_file.write_bytes(b"dummy")
+
+        monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "1")
+        assert concurrency.try_acquire_slot() is True   # fill the only slot
+        try:
+            resp = client.post("/api/run/BUSY01/start")
+
+            assert resp.status_code == 429
+            assert resp.json()["detail"]["error"] == "server_busy"
+            assert resp.headers.get("Retry-After") == "30"
+            # A rejected start must leave the run in its prior state, retryable.
+            db.expire_all()
+            assert db.query(Run).filter(Run.id == "BUSY01").first().status == "created"
+        finally:
+            upload_file.unlink(missing_ok=True)
+
+    def test_start_proceeds_and_releases_under_capacity(self, client, db, seed_simple_mode):
+        from app.api.upload import UPLOAD_DIR
+        user = _make_user(db, email="free@example.com")
+        _auth_cookie(client, user)
+        run = Run(id="FREE01", filename="cv.docx", file_type="docx", status="created",
+                  user_id=user.id, started_at=datetime.now())
+        db.add(run)
+        db.commit()
+        upload_file = UPLOAD_DIR / "FREE01.docx"
+        upload_file.write_bytes(b"dummy")
+        try:
+            with patch("app.api.runs.PipelineOrchestrator") as MockOrch:
+                MockOrch.return_value.execute = AsyncMock(return_value=None)
+                resp = client.post("/api/run/FREE01/start")
+
+                assert resp.status_code == 200
+                assert resp.json()["status"] == "running"
+            # TestClient runs the background task before returning, so the slot
+            # acquired for the run must have been released in the task's finally.
+            assert concurrency.active_count() == 0
+        finally:
+            upload_file.unlink(missing_ok=True)
+
+    def test_retry_rejected_when_at_capacity(self, client, db, seed_simple_mode, monkeypatch):
+        from app.api.upload import UPLOAD_DIR
+        user = _make_user(db, email="busy2@example.com")
+        _auth_cookie(client, user)
+        _seed_failed_run(db, user, run_id="BUSY02", failed_at=6)
+        upload_file = UPLOAD_DIR / "BUSY02.docx"
+        upload_file.write_bytes(b"dummy")
+
+        monkeypatch.setenv("CVICHE_MAX_CONCURRENT_RUNS", "1")
+        assert concurrency.try_acquire_slot() is True
+        try:
+            resp = client.post("/api/run/BUSY02/retry/6")
+
+            assert resp.status_code == 429
+            assert resp.json()["detail"]["error"] == "server_busy"
+            # A rejected retry must not touch run or step state.
+            db.expire_all()
+            assert db.query(Run).filter(Run.id == "BUSY02").first().status == "failed"
+            step6 = db.query(Step).filter(Step.run_id == "BUSY02", Step.step_number == 6).first()
+            assert step6.status == "error"
+        finally:
+            upload_file.unlink(missing_ok=True)

@@ -10,6 +10,7 @@ from app.models import Run, Step, User
 from app.schemas import RunStatus, RunSummary, StepSummary, PaginatedRuns
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
+from app.pipeline import concurrency
 from app.auth import get_current_user
 from app.api.upload import generate_run_id, UPLOAD_DIR
 from app.services.run_service import check_run_access
@@ -132,10 +133,6 @@ async def start_run(
     if run.status not in ["created", "paused"]:
         raise bad_request(f"Cannot start run in status: {run.status}")
 
-    # Update status
-    run.status = "running"
-    db.commit()
-
     # Get the uploaded file path
     upload_dir = Path(__file__).parent.parent.parent.parent / "uploads"
     file_path = upload_dir / f"{run_id}.{run.file_type}"
@@ -143,7 +140,34 @@ async def start_run(
     if not file_path.exists():
         raise not_found("Uploaded file not found")
 
-    # Start pipeline execution in background
+    # Admission control: cap concurrent in-process pipelines per pod. Acquire a
+    # slot before marking the run "running" so a rejected start leaves the run
+    # in its prior state, retryable once a slot frees.
+    if not concurrency.try_acquire_slot():
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "server_busy",
+                "message": (
+                    f"The server is already running the maximum of "
+                    f"{concurrency.get_max_concurrent_runs()} pipelines. "
+                    f"Please try again in a moment."
+                ),
+                "details": {
+                    "limit_type": "concurrency",
+                    "limit": concurrency.get_max_concurrent_runs(),
+                    "active": concurrency.active_count(),
+                },
+            },
+            headers={"Retry-After": "30"},
+        )
+
+    # Update status
+    run.status = "running"
+    db.commit()
+
+    # Start pipeline execution in background. The slot acquired above is held
+    # for the lifetime of the run and released when the task finishes.
     def run_pipeline():
         # Create new DB session for background task
         from app.database import SessionLocal
@@ -155,6 +179,7 @@ async def start_run(
             asyncio.run(orchestrator.execute())
         finally:
             bg_db.close()
+            concurrency.release_slot()
 
     background_tasks.add_task(run_pipeline)
 
@@ -306,6 +331,28 @@ async def retry_step(
     if not file_path.exists():
         raise not_found("Uploaded file no longer available — please upload again.")
 
+    # Admission control: a retry resumes a full pipeline and consumes the same
+    # per-pod resource as a fresh start, so gate it the same way. Acquire before
+    # mutating step/run state so a rejected retry leaves the run untouched.
+    if not concurrency.try_acquire_slot():
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "server_busy",
+                "message": (
+                    f"The server is already running the maximum of "
+                    f"{concurrency.get_max_concurrent_runs()} pipelines. "
+                    f"Please try again in a moment."
+                ),
+                "details": {
+                    "limit_type": "concurrency",
+                    "limit": concurrency.get_max_concurrent_runs(),
+                    "active": concurrency.active_count(),
+                },
+            },
+            headers={"Retry-After": "30"},
+        )
+
     # Reset the failed step and every step after it back to pending; the earlier
     # completed steps are left untouched so the pipeline resumes rather than
     # restarts. Clear stale per-step metadata so the re-run repopulates it.
@@ -326,7 +373,8 @@ async def retry_step(
     run.completed_at = None
     db.commit()
 
-    # Resume pipeline execution in the background, mirroring start_run.
+    # Resume pipeline execution in the background, mirroring start_run. The slot
+    # acquired above is held for the resumed run and released when it finishes.
     def run_pipeline():
         from app.database import SessionLocal
         bg_db = SessionLocal()
@@ -336,6 +384,7 @@ async def retry_step(
             asyncio.run(orchestrator.execute(start_step_number=step_number))
         finally:
             bg_db.close()
+            concurrency.release_slot()
 
     background_tasks.add_task(run_pipeline)
 
