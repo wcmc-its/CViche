@@ -1443,9 +1443,9 @@ Respond with a JSON array of objects, one per entry:
                     entries[entry_idx]["t_validation_applied"] = True
 
         # Calculate cost
-        input_tokens = llm_result["prompt_tokens"]
-        output_tokens = llm_result["completion_tokens"]
-        cost = llm_result["cost"]
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        cost = (input_tokens * 0.002 + output_tokens * 0.008) / 1000  # Approximate for gpt-5.1
 
         stats = {
             "t_entries_reviewed": len(t_entries),
@@ -1625,9 +1625,9 @@ Fragment at index {idx}:
                     entry["fragment_reasoning"] = f"[Confirmed standalone] {reasoning}"
 
         # Calculate cost
-        input_tokens = llm_result["prompt_tokens"]
-        output_tokens = llm_result["completion_tokens"]
-        cost = llm_result["cost"]
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+        cost = (input_tokens * 0.002 + output_tokens * 0.008) / 1000
 
         stats = {
             "fragments_reviewed": len(fragment_candidates),
