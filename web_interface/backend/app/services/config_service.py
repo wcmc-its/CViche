@@ -8,18 +8,18 @@ import os
 from app.config_loader import get_config
 # Session
 
-SESSION_TTL, source = int(get_config("auth", "CVICHE_SESSION_TTL", default=7 * 24 * 3600)[0])
+SESSION_TTL = int(get_config("auth", "CVICHE_SESSION_TTL", default=7 * 24 * 3600)[0])
 
 # Auth rate limiting (in-memory login attempt limiter)
-LOGIN_RATE_LIMIT_MAX, source = int(get_config("auth", "CVICHE_LOGIN_RATE_LIMIT", default=10)[0])
-LOGIN_RATE_LIMIT_WINDOW, source = int(get_config("auth", "CVICHE_LOGIN_RATE_WINDOW", default=60)[0])
+LOGIN_RATE_LIMIT_MAX = int(get_config("auth", "CVICHE_LOGIN_RATE_LIMIT", default=10)[0])
+LOGIN_RATE_LIMIT_WINDOW = int(get_config("auth", "CVICHE_LOGIN_RATE_WINDOW", default=60)[0])
 
 # Upload
-MAX_UPLOAD_SIZE, source = int(get_config("auth", "CVICHE_MAX_UPLOAD_MB", default=10)[0])*1024*1024
+MAX_UPLOAD_SIZE = int(get_config("auth", "CVICHE_MAX_UPLOAD_MB", default=10)[0])*1024*1024
 
 # Cost / time estimation for the /estimate endpoint.
-TIME_PER_1K_TOKENS, source = int(get_config("auth", "CVICHE_TIME_PER_1K_TOKENS", default=30)[0])
-BASE_OVERHEAD_SECONDS, source = int(get_config("auth", "CVICHE_BASE_OVERHEAD_SECONDS", default=60)[0])
+TIME_PER_1K_TOKENS = int(get_config("auth", "CVICHE_TIME_PER_1K_TOKENS", default=30)[0])
+BASE_OVERHEAD_SECONDS = int(get_config("auth", "CVICHE_BASE_OVERHEAD_SECONDS", default=60)[0])
 
 # The cost rate (USD per 1,000 document tokens) is derived from the model
 # configured in llm_config.yaml so the estimate tracks the active preset.
