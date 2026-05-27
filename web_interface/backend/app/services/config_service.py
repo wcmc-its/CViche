@@ -12,11 +12,8 @@ SESSION_TTL = int(os.environ.get("CVICHE_SESSION_TTL", 7 * 24 * 3600))
 LOGIN_RATE_LIMIT_MAX = int(os.environ.get("CVICHE_LOGIN_RATE_LIMIT", 10))
 LOGIN_RATE_LIMIT_WINDOW = int(os.environ.get("CVICHE_LOGIN_RATE_WINDOW", 60))
 
-# Upload. This is the safety-net fallback when CVICHE_MAX_UPLOAD_MB is unset;
-# the operational cap should be set explicitly per environment. CVs are small
-# (a text .docx is well under 1 MB; an image-heavy/scanned PDF rarely exceeds
-# ~10 MB), so the default is intentionally conservative to limit resource abuse.
-MAX_UPLOAD_SIZE = int(os.environ.get("CVICHE_MAX_UPLOAD_MB", 10)) * 1024 * 1024
+# Upload
+MAX_UPLOAD_SIZE = int(os.environ.get("CVICHE_MAX_UPLOAD_MB", 50)) * 1024 * 1024
 
 # Cost / time estimation for the /estimate endpoint.
 TIME_PER_1K_TOKENS = int(os.environ.get("CVICHE_TIME_PER_1K_TOKENS", 30))
