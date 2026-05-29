@@ -139,8 +139,16 @@ async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup: Initialize database
     print("🚀 Starting CViche Pipeline Viewer...")
-    init_db()
-    print("✅ Database initialized")
+    # init_db() emits CREATE TABLE IF NOT EXISTS via metadata.create_all().
+    # In production the runtime DB role is DML-only (IAM-auth'd cviche_app_user
+    # with SELECT/INSERT/UPDATE/DELETE) and Alembic owns schema via a separate
+    # one-shot migrate Job. Set CVICHE_INIT_DB=0 in the EKS overlay so pods
+    # don't fail at boot trying to issue DDL they aren't authorized for.
+    if os.environ.get("CVICHE_INIT_DB", "1") == "1":
+        init_db()
+        print("✅ Database initialized")
+    else:
+        print("⏭️  Skipping init_db() (CVICHE_INIT_DB=0); Alembic owns schema.")
     from app.config_loader import seed_system_config
     from app.consent import load_consent_text, check_consent_integrity
     from app.services.run_service import reconcile_stale_runs
