@@ -11,11 +11,14 @@ spec:
         - name: backend # Must match the name in base/deployment.yaml
           resources:
             requests:
-              cpu: "1"
-              memory: "1Gi"
+              cpu: "2"
+              memory: "2Gi"
             limits:
-              cpu: "1"
-              memory: "1Gi"
+              cpu: "2"
+              memory: "2Gi"
+          env:
+            - name: CVICHE_MAX_CONCURRENT_RUNS
+              value: "3"
           envFrom:
             - secretRef:
                 name: cviche-secrets
