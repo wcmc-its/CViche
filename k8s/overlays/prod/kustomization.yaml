@@ -3,6 +3,7 @@ kind: Kustomization
 
 resources:
   - ../../base  # Point to the FOLDER, not the files inside it
+  - backend-hpa.yaml
 
 namespace: cviche-prod
 

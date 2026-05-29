@@ -3,6 +3,13 @@ kind: Deployment
 metadata:
   name: cviche-backend
 spec:
+  # Baseline replica count for the prod backend. The HorizontalPodAutoscaler
+  # (k8s/overlays/prod/backend-hpa.yaml) governs scale-out from here up to
+  # maxReplicas. Going >1 requires CVICHE_REDIS_URL to be set in the
+  # cviche-secrets Secret so the event broker and cancellation signal cross
+  # pod boundaries; otherwise the live progress viewer breaks for any user
+  # whose WebSocket lands on a different pod than their run.
+  replicas: 2
   template:
     spec:
       nodeSelector:
