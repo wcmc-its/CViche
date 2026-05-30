@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Structured field extraction with domain-specific parsers (Stage 4)
 - Biosketch-style research summary generation (Stage 4.5)
 - PubMed enrichment via NCBI E-utilities (Stage 5)
-- Institution enrichment via ROR API (Stage 5b)
+- Institution enrichment via LLM (Stage 5b)
 - Teaching entry reformatter (Stage 5c) and citation formatter (Stage 5d)
 - WCM Word template generation with 20-section taxonomy support (Stage 6)
 - Web interface with real-time pipeline progress viewer (WebSocket)

@@ -108,3 +108,7 @@ src/unified_pipeline/config/institution_cache.json
 *.tar.gz
 *.zip
 .superpowers/
+
+# Architecture diagrams: commit the SVGs (render on GitHub, diff as text);
+# the PNGs are regenerable via scripts/diagrams/build.mjs.
+docs/architecture/*.png
