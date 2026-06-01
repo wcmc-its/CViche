@@ -94,6 +94,16 @@ PRICING = {
             "input": 1.000,
             "output": 5.000,
         },
+        # Bedrock requires the FULL versioned inference-profile id for Haiku 4.5
+        # (the bare alias above is rejected by the API), and _normalize_model_id
+        # strips only the region prefix -- not the dated -vN suffix. So the
+        # configured stage_3b id resolves to this key, not the bare one above.
+        # Same price as the bare entry; keep both in sync. (Sonnet 4.6 needs no
+        # dated variant -- its inference-profile id carries no date.)
+        "anthropic.claude-haiku-4-5-20251001-v1:0": {
+            "input": 1.000,
+            "output": 5.000,
+        },
         "anthropic.claude-opus-4-7": {
             "input": 15.000,
             "output": 75.000,
@@ -416,6 +426,7 @@ def estimate_run_cost_usd(text_char_count: int, model: str = None,
 _FRIENDLY_MODEL_NAMES = {
     "anthropic.claude-sonnet-4-6": "Claude Sonnet 4.6",
     "anthropic.claude-haiku-4-5": "Claude Haiku 4.5",
+    "anthropic.claude-haiku-4-5-20251001-v1:0": "Claude Haiku 4.5",
     "anthropic.claude-opus-4-7": "Claude Opus 4.7",
     "anthropic.claude-opus-4-6": "Claude Opus 4.6",
     "gpt-4o": "GPT-4o",
