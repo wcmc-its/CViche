@@ -113,6 +113,7 @@ def run_migrations_online() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        **engine_kwargs,  # ◄ CRITICAL: unpack the kwargs dictionary here!
     )
 
     with connectable.connect() as connection:
@@ -128,3 +129,4 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+
