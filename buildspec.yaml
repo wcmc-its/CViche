@@ -91,11 +91,18 @@ phases:
           contact_name: "${AUTH_CONTACT_NAME}"
           contact_email: "${AUTH_CONTACT_EMAIL}"
         EOF
+        - echo "Wiping and regenerating db.env to ensure single-instance properties..."
+        # ◄ FIX 1: We write BOTH parameters into db.env simultaneously using standard lines to block duplicates
+        - |
+        cat <<EOF > k8s/overlays/${ENV_NAME}/db.env
+        CVICHE_SESSION_SECRET=${SESSION_SECRET}
+        CVICHE_OPENAI_API_KEY=${OPENAI_API_KEY}
+        EOF 
        - echo "Writing live environment secrets into db.env template..."
        #- echo "DATABASE_URL=${DATABASE_URL}" > k8s/overlays/${ENV_NAME}/db.env
        #- echo "CVICHE_DATABASE_URL=${DATABASE_URL}" >> k8s/overlays/${ENV_NAME}/db.env
-       - echo "CVICHE_SESSION_SECRET=${SESSION_SECRET}" > k8s/overlays/${ENV_NAME}/db.env
-       - echo "CVICHE_OPENAI_API_KEY=${OPENAI_API_KEY}" > k8s/overlays/${ENV_NAME}/db.env
+       #- echo "CVICHE_SESSION_SECRET=${SESSION_SECRET}" > k8s/overlays/${ENV_NAME}/db.env
+       #- echo "CVICHE_OPENAI_API_KEY=${OPENAI_API_KEY}" > k8s/overlays/${ENV_NAME}/db.env
        
        # --- Write your SAML cryptographic assets securely ---
        - echo "Extracting SAML Cryptographic Key Pair..."

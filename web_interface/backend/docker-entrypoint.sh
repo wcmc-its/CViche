@@ -16,6 +16,11 @@ cd /app/web_interface/backend
 # main container.
 if [ "${1:-}" = "migrate" ]; then
     echo "==> Running Alembic migrations (one-shot)..."
+
+     # ◄ THE IAM FIX: Dynamically intercept and swap the identity context 
+    # to your high-privilege migration identity just for the scope of this one-shot run.
+    export DB_USER="cviche_migration_user"
+    
     exec alembic upgrade head
 fi
 
