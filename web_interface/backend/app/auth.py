@@ -117,7 +117,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                 ed_access_group = get_config_value(db, "ed_access_group") or ""
                 ed_admin_group = get_config_value(db, "ed_admin_group") or ""
                 ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
-                ldap_url, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
+                ldap_bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
                 bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
                 try:
                     membership = check_ed_membership(
@@ -125,7 +125,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                         access_group=ed_access_group,
                         admin_group=ed_admin_group,
                         ldap_url=ldap_url,
-                        bind_dn=bind_dn,
+                        bind_dn=ldap_bind_dn,
                         bind_password=bind_password,
                     )
                     set_cached_membership(user.email, membership)
