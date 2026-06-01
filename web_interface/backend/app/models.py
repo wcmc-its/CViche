@@ -1,8 +1,7 @@
 """SQLAlchemy database models."""
 from sqlalchemy import Column, String, Integer, Float, Text, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.sql import func
-
-
+from app.base_class import Base
 
 class User(Base):
     """User accounts for authentication and authorization."""
@@ -66,7 +65,6 @@ class Feedback(Base):
 
 
 class SystemConfig(Base):
-    from app.database import Base
     """Key-value store for system configuration."""
     __tablename__ = "system_config"
 

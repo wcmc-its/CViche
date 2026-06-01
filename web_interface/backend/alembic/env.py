@@ -24,8 +24,9 @@ config.set_main_option("sqlalchemy.url", database_url)
 
 # Import models so Alembic can detect them for autogenerate
 from app.models import User, SystemConfig, Consent, Feedback, Run, Step, Log, LLMUsage, RunMetrics  # noqa: F401, E402
-from app.database import Base  # noqa: E402
+#from app.database import Base  # noqa: E402
 
+from app.base_class import Base
 target_metadata = Base.metadata
 
 

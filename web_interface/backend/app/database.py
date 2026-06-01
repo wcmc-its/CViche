@@ -5,6 +5,7 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from app.base_class import Base
 
 # Read DATABASE_URL from environment; default to SQLite for local dev.
 # The default is an absolute path anchored at the backend directory so it is
@@ -66,7 +67,7 @@ else:
 # 5. Initialize Engine and Session Factories exactly as before
 engine = create_engine(DATABASE_URL, **engine_kwargs)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()    
+   
 
 def get_db():
     """Dependency for getting database sessions."""
