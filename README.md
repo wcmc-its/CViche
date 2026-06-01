@@ -30,7 +30,7 @@ python3 run_full_pipeline.py sample_vasquez_cv
 6. **Stage 4 -- Field Extraction**: Extracts structured fields from classified entries using domain-specific parsers
 7. **Stage 4.5 -- Research Summary**: Generates a biosketch-style research summary (NIH M1 format)
 8. **Stage 5 -- PubMed Enrichment**: Enriches publications with PubMed metadata via NCBI E-utilities
-9. **Stage 5b -- Institution Enrichment**: Adds city/state to institutional affiliations via LLM
+9. **Stage 5b -- Institution Enrichment**: Adds city/state/country to institutional affiliations via LLM (batched, with a local cache)
 10. **Stage 5c -- Teaching Formatter**: Reformats teaching entries for consistent presentation
 11. **Stage 5d -- Citation Formatter**: Reformats non-enriched citations to Vancouver style
 12. **Stage 6 -- Word Output**: Generates the final formatted Word document using the WCM template
@@ -40,15 +40,15 @@ python3 run_full_pipeline.py sample_vasquez_cv
 ### Prerequisites
 
 - Python 3.11+
-- An LLM provider API key -- either:
-  - **OpenAI** (default): get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
-  - **AWS Bedrock**: uses boto3 default credential chain (env vars, `~/.aws/credentials`, or IAM roles)
+- LLM provider credentials -- either:
+  - **AWS Bedrock** (default): uses the boto3 default credential chain (env vars, `~/.aws/credentials`, or IAM roles)
+  - **OpenAI**: get a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 - Node.js 18+ (for the web frontend)
 
 ### Installation
 
 ```bash
-git clone https://github.com/wcm-its/CViche.git
+git clone https://github.com/wcmc-its/CViche.git
 cd CViche
 pip install -r requirements.txt
 ```
@@ -58,18 +58,31 @@ pip install -r requirements.txt
 Set your LLM provider API key:
 
 ```bash
-# OpenAI (default)
-export OPENAI_API_KEY=your-key-here
-
-# OR AWS Bedrock (uses boto3 credential chain)
+# AWS Bedrock (default -- uses the boto3 credential chain)
 export AWS_ACCESS_KEY_ID=your-key
 export AWS_SECRET_ACCESS_KEY=your-secret
 export AWS_DEFAULT_REGION=us-east-1
+
+# OR OpenAI -- also set provider: openai in src/unified_pipeline/config/llm_config.yaml
+export OPENAI_API_KEY=your-key-here
 ```
 
-Pipeline behavior can be tuned via `config.yaml`, which controls taxonomy settings, PDF processing parameters, LLM provider, and model selection. To switch providers, set the `provider` field in `config.yaml` to `openai` (default) or `bedrock`. See [Environment Variables](#environment-variables) for the full list of configuration options.
+Pipeline behavior is tuned via two files: `config.yaml` (taxonomy, PDF processing, and extraction parameters) and `src/unified_pipeline/config/llm_config.yaml` (LLM provider and per-stage model selection). The latter defaults to AWS Bedrock with Claude Sonnet 4.6; set `provider: openai` there to use OpenAI instead. See [Environment Variables](#environment-variables) for the full list of configuration options.
 
 ## Architecture
+
+Four version-controlled architecture views document CViche. They are generated from plain-data specs by a dependency-free renderer (`scripts/diagrams/`) and fact-checked against the source on every build, so they cannot silently drift from the code. Browse them together in the **[architecture gallery](docs/architecture/index.html)** (open locally, or ⌘/Ctrl+P → Save as PDF for slides).
+
+| View | What it answers |
+|------|-----------------|
+| [① System context](docs/architecture/context.svg) | What feeds CViche and who it serves |
+| [② 12-stage pipeline](docs/architecture/pipeline.svg) | Each stage, the model/API it uses, and the data flow |
+| [③ Web app & run lifecycle](docs/architecture/runtime.svg) | How a browser drives a run: upload → live progress → download |
+| [④ Deployment topology](docs/architecture/deployment.svg) | EKS, the ALB ingress, the HPA, and IRSA → Bedrock |
+
+[![CViche system context](docs/architecture/context.svg)](docs/architecture/index.html)
+
+Regenerate after the system changes with `node scripts/diagrams/build.mjs` (writes SVG + PNG + the gallery `index.html`); see [`scripts/diagrams/README.md`](scripts/diagrams/README.md). The quick layered overview below is kept for at-a-glance orientation.
 
 ```mermaid
 graph TB
@@ -102,7 +115,7 @@ graph TB
 
 CViche has three layers:
 
-- **CV Parsing Pipeline** (`src/unified_pipeline/`): A 12-stage LLM pipeline where each stage produces JSON consumed by the next stage. All LLM calls go through a unified `call_llm()` abstraction that supports OpenAI and AWS Bedrock, with per-stage model configuration via `config.yaml`. Entry points are the CLI (`run_full_pipeline.py`) and the web backend's pipeline orchestrator.
+- **CV Parsing Pipeline** (`src/unified_pipeline/`): A 12-stage LLM pipeline where each stage produces JSON consumed by the next stage. All LLM calls go through a unified `call_llm()` abstraction that supports OpenAI and AWS Bedrock, with per-stage model configuration via `src/unified_pipeline/config/llm_config.yaml` (default: AWS Bedrock / Claude Sonnet 4.6). Entry points are the CLI (`run_full_pipeline.py`) and the web backend's pipeline orchestrator.
 
 - **Web Backend** (`web_interface/backend/app/`): A FastAPI REST API with WebSocket support for real-time pipeline progress. Uses SQLAlchemy ORM with MariaDB (production) or SQLite (development). Follows a service layer pattern with dedicated modules for access control, configuration, user provisioning, and admin queries.
 
@@ -188,7 +201,7 @@ Verify after deploy: `docker compose exec backend cat /app/web_interface/backend
 ```bash
 cd web_interface/backend
 pip install -r requirements.txt
-uvicorn app.main:app --port 5002 --reload
+uvicorn app.main:app --port 8000 --reload
 ```
 
 **Frontend:**
@@ -196,13 +209,13 @@ uvicorn app.main:app --port 5002 --reload
 ```bash
 cd web_interface/frontend
 npm install
-npm run dev    # Starts on port 3001, proxies API to :5002
+npm run dev    # Starts on port 3001, proxies API to :8000
 ```
 
 | Mode      | Backend Port | Frontend Port | Database              |
 |-----------|-------------|---------------|-----------------------|
 | Docker    | 8000        | 3000          | MariaDB (container)   |
-| Local dev | 5002        | 3001          | SQLite (file)         |
+| Local dev | 8000        | 3001          | SQLite (file)         |
 
 ## Service Layer
 
@@ -283,7 +296,7 @@ All backend configuration uses `CVICHE_*` prefixed environment variables with se
 | `AWS_DEFAULT_REGION` | AWS region for Bedrock (default: `us-east-1`) | No |
 | `NCBI_API_KEY` | NCBI API key for faster PubMed queries | No |
 
-Bedrock supports Claude (Anthropic), Llama (Meta), and Mistral models. Set `provider: bedrock` in `config.yaml` to switch.
+The pipeline runs on Claude (Anthropic) models via Bedrock by default. To use OpenAI instead, set `provider: openai` in `src/unified_pipeline/config/llm_config.yaml`.
 
 ### Database and Storage
 
