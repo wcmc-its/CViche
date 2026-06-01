@@ -15,11 +15,27 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
+from app.config_loader import get_config
+# 1. Extract routing parameters using your configuration loader
+db_host, source = get_config("db", "DB_HOST", default="")
+db_port, source = get_config("db", "DB_PORT", default="")
+db_user, source = get_config("db", "DB_USER", default="")
+db_name, source = get_config("db", "DB_NAME", default="")
+
+# 2. Determine Database URL Backend Type
+if db_host and db_port and db_user and db_name:
+    # MariaDB / MySQL Configuration Path
+    # Note: We omit the password from the static string because we inject it dynamically via a pool creator callback
+    database_url = f"mysql+pymysql://{db_user}@{db_host}:{db_port}/{db_name}"
+else:
+    # Fallback Path: SQLite Local Development
+    database_url = f"sqlite:///./cviche_dev.db"
+    
 # Override sqlalchemy.url from environment variable (same source as database.py)
-database_url = os.environ.get(
-    "CVICHE_DATABASE_URL",
-    "sqlite:///./cviche_dev.db"
-)
+#database_url = os.environ.get(
+#    "CVICHE_DATABASE_URL",
+#    "sqlite:///./cviche_dev.db"
+#)
 config.set_main_option("sqlalchemy.url", database_url)
 
 # Import models so Alembic can detect them for autogenerate
