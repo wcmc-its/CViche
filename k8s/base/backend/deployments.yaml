@@ -22,6 +22,12 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "docker-entrypoint.sh"]
           args: ["migrate"] # ◄ Triggers the migration logic inside your entrypoint script
+          env:
+            - name: MIGRATION_USER
+              valueFrom:
+                configMapKeyRef:
+                  name: cviche-auth-config
+                  key: MIGRATE_USER # ◄ Standard, valid Kubernetes key reference!
 
       # 2. The Main Runtime Web Application Step
       containers:

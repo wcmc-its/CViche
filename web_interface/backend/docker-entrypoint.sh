@@ -17,13 +17,7 @@ cd /app/web_interface/backend
 if [ "${1:-}" = "migrate" ]; then
     echo "==> Running Alembic migrations (one-shot)..."
 
-    # ◄ THE LOCATION FIX: Points Python directly inside the backend subfolder
-    export PYTHONPATH="${PYTHONPATH}:/app/web-interface/backend"
-
-    echo "==> Fetching migration identity from app config loader..."
-    export DB_USER=$(python3 -c "from app.config_loader import get_config; print(get_config('db', 'MIGRATION_USER', default='')[0])")
-    
-    echo "==> Executing migrations with identity context: ${DB_USER}"
+    echo "==> Executing migrations with identity context: ${MIGRATION_USER}"
     
     # Since alembic needs to run from the root of your backend project,
     # cd into it right before executing the migration

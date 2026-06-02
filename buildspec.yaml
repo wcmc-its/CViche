@@ -77,7 +77,6 @@ phases:
           DB_PORT: "${DB_PORT}"
           DB_USER: "${DB_USER}"
           DB_NAME: "${DB_NAME}"
-          MIGRATE_USER: "${MIGRATION_USER}"  
         allowed_users: []
         admin_users: []
         rate_limits:
@@ -102,6 +101,10 @@ phases:
        - echo "Extracting SAML Cryptographic Key Pair..."
        - echo "${SP_SAML_KEY}" > k8s/overlays/${ENV_NAME}/cviche-saml-sp-prod.key.pem
        - echo "${SP_SAML_CRT}" > k8s/overlays/${ENV_NAME}/cviche-saml-sp-prod.crt.pem
+
+       - echo "Exposing flat user parameters for the Kubernetes layer..."
+       # ◄ THE FIX: Write the raw pipeline variables straight to a flat env file
+       - echo "MIGRATE_USER=${MIGRATION_USER}" > k8s/overlays/${ENV_NAME}/db_migration_users.env
 
 
   build:
