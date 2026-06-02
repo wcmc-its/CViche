@@ -27,6 +27,7 @@ from app.services.config_service import (
 )
 from app.errors import bad_request
 from app.storage import get_storage
+from app.services.template_warning import detect_wcm_template
 
 logger = logging.getLogger(__name__)
 PDF_MAGIC = b"%PDF-"
@@ -190,6 +191,20 @@ async def upload_cv(
             "password-protected, or empty. Please upload a text-based PDF or Word document."
         )
 
+    # Cheap, no-LLM check: does this look like the *blank* WCM CV template?
+    # Reuses the already-extracted text -- a filled CV matches the blank-template
+    # string set on almost no lines, an unfilled template on nearly all of them.
+    # Best-effort and non-fatal: detect_wcm_template swallows its own errors and
+    # returns (False, None), so this never blocks an upload. We only warn (the UI
+    # requires an acknowledgement) -- we never reject, since reformatting an
+    # existing publication list is a legitimate, template-shaped use.
+    wcm_template_warning, wcm_template_match_ratio = detect_wcm_template(extracted)
+    if wcm_template_warning:
+        logger.info(
+            "Upload looks like a blank WCM template (user=%s, match_ratio=%s)",
+            current_user.email, wcm_template_match_ratio,
+        )
+
     # Generate run ID (after validation so rejected uploads don't waste IDs)
     run_id = generate_run_id()
 
@@ -248,7 +263,9 @@ async def upload_cv(
         filename=file.filename,
         file_type=file_ext[1:],
         status="created",
-        message=f"File uploaded successfully. Run ID: {run_id}"
+        message=f"File uploaded successfully. Run ID: {run_id}",
+        wcm_template_warning=wcm_template_warning,
+        wcm_template_match_ratio=wcm_template_match_ratio,
     )
 
 

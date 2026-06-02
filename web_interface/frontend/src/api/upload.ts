@@ -7,8 +7,21 @@ export async function getEstimate(file: File): Promise<Estimate> {
   return api.post<Estimate>('/api/estimate', formData)
 }
 
-export async function uploadFile(file: File): Promise<{ run_id: string }> {
+export interface UploadResult {
+  run_id: string
+  // True when the backend's cheap, no-LLM heuristic thinks this upload is a
+  // blank/near-blank WCM CV template. The UI warns and requires an
+  // acknowledgement before starting a (paid) run when this is set.
+  wcm_template_warning: boolean
+  // Fraction of non-trivial lines that matched the blank-template string set
+  // (~0 = clearly a real CV, ~1 = clearly an unfilled template). null when the
+  // backend couldn't compute it. Available for logging/telemetry; the UI shows
+  // a qualitative warning rather than this raw number.
+  wcm_template_match_ratio: number | null
+}
+
+export async function uploadFile(file: File): Promise<UploadResult> {
   const formData = new FormData()
   formData.append('file', file)
-  return api.post<{ run_id: string }>('/api/upload', formData)
+  return api.post<UploadResult>('/api/upload', formData)
 }

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useNavigate, Link } from 'react-router-dom'
-import { Upload, FileText, Loader2, Shield, HelpCircle } from 'lucide-react'
+import { Upload, FileText, Loader2, Shield, HelpCircle, AlertTriangle } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import type { Estimate } from '../types'
 import { getEstimate, uploadFile } from '../api/upload'
@@ -23,6 +23,11 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   const [estimate, setEstimate] = useState<Estimate | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [isDragging, setIsDragging] = useState(false)
+  // When the backend flags the upload as a blank/near-blank WCM template, we
+  // hold the created (but not-yet-started) run here and require the user to tick
+  // an acknowledgement before spending a paid run. null = no warning pending.
+  const [pendingWarning, setPendingWarning] = useState<{ runId: string } | null>(null)
+  const [acknowledged, setAcknowledged] = useState(false)
 
   // Shared selection path for both the file picker and drag-and-drop.
   const processFile = async (selectedFile: File) => {
@@ -31,6 +36,9 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
       setFile(selectedFile)
       setError(null)
       setEstimate(null)
+      // A new file invalidates any pending template warning/acknowledgement.
+      setPendingWarning(null)
+      setAcknowledged(false)
 
       setEstimating(true)
       try {
@@ -45,6 +53,8 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
       setError('Please select a .docx file')
       setFile(null)
       setEstimate(null)
+      setPendingWarning(null)
+      setAcknowledged(false)
     }
   }
 
@@ -73,16 +83,46 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
     if (droppedFile) processFile(droppedFile)
   }
 
+  // Kick off the (paid) pipeline run for an already-uploaded run, then hand off.
+  const beginRun = async (runId: string) => {
+    await startRun(runId)
+    onUploadSuccess(runId)
+  }
+
   const handleUpload = async () => {
     if (!file) return
+
+    // Second click on an acknowledged template warning: the run already exists
+    // (it was created on the first click's upload), so just start it. The button
+    // stays disabled until the box is ticked, but guard here as well.
+    if (pendingWarning) {
+      if (!acknowledged) return
+      setUploading(true)
+      setError(null)
+      try {
+        await beginRun(pendingWarning.runId)
+      } catch (err: any) {
+        setError(err.message || 'Failed to start processing. Please try again.')
+        console.error(err)
+      } finally {
+        setUploading(false)
+      }
+      return
+    }
 
     setUploading(true)
     setError(null)
 
     try {
       const data = await uploadFile(file)
-      await startRun(data.run_id)
-      onUploadSuccess(data.run_id)
+      // Blank-template heuristic tripped: don't start the run yet. Surface the
+      // warning and require the acknowledgement checkbox before the next click
+      // (which spends a paid run). The upload itself already created the run.
+      if (data.wcm_template_warning) {
+        setPendingWarning({ runId: data.run_id })
+        return
+      }
+      await beginRun(data.run_id)
     } catch (err: any) {
       if (err.message?.includes('consent_required') || err.status === 403) {
         navigate('/consent')
@@ -210,13 +250,43 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
               </section>
             )}
 
+            {pendingWarning && (
+              <section
+                className="bg-amber-50 border border-amber-300 rounded-lg p-4"
+                role="alert"
+                aria-label="Blank template warning"
+              >
+                <div className="flex items-start gap-3">
+                  <AlertTriangle className="h-5 w-5 text-amber-600 flex-shrink-0 mt-0.5" aria-hidden="true" />
+                  <div className="text-sm text-amber-800">
+                    <p className="font-semibold">This looks like a blank WCM CV template.</p>
+                    <p className="mt-1">
+                      We didn&apos;t find much filled-in content, so processing it may
+                      return a document whose formatting has regressed rather than
+                      improved &mdash; and each run has a cost. If you meant to
+                      reformat an existing CV or publication list, you can continue.
+                    </p>
+                    <label className="mt-3 flex items-start gap-2 cursor-pointer font-medium">
+                      <input
+                        type="checkbox"
+                        checked={acknowledged}
+                        onChange={(e) => setAcknowledged(e.target.checked)}
+                        className="mt-0.5 h-4 w-4 rounded border-amber-400 text-amber-600 focus:ring-amber-500"
+                      />
+                      <span>I understand and want to process this file anyway.</span>
+                    </label>
+                  </div>
+                </div>
+              </section>
+            )}
+
             {error && (
               <ErrorBanner message={error} onDismiss={() => setError(null)} />
             )}
 
             <button
               onClick={handleUpload}
-              disabled={!file || uploading || estimating}
+              disabled={!file || uploading || estimating || (pendingWarning !== null && !acknowledged)}
               className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none"
               style={{ touchAction: 'manipulation' }}
             >
@@ -225,6 +295,8 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                   <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" />
                   Starting Pipeline...
                 </span>
+              ) : pendingWarning ? (
+                'Process Anyway'
               ) : estimate ? (
                 'Start Processing'
               ) : (
