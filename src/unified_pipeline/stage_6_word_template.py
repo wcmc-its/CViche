@@ -43,6 +43,22 @@ except ImportError:
 
 from unified_pipeline.llm_client import call_llm
 
+
+def _clean_inline_tabs(text: str) -> str:
+    """Render tab-separated label/value content readably instead of emitting a
+    naked tab. A raw \\t in a bullet renders ragged against Word's default tab
+    stops; the source CV's WCM tables carry "Label\\tValue" pairs. The first tab
+    becomes ": " (label: value); any further tabs become " — ". Properly
+    structured content (mentee/board tables) is routed to real Word tables
+    upstream via classification; this is the fallback for residual tabbed text."""
+    if not text or "\t" not in text:
+        return text
+    parts = [p.strip() for p in text.split("\t") if p.strip()]
+    if len(parts) <= 1:
+        return text.replace("\t", " ").strip()
+    return parts[0] + ": " + " — ".join(parts[1:])
+
+
 # XML namespaces for Word documents
 WORD_NAMESPACE = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 W14_NAMESPACE = 'http://schemas.microsoft.com/office/word/2010/wordml'
@@ -1443,7 +1459,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Use a simple bullet character prefix for reliable rendering
         # This avoids Word numbering system issues across different templates
-        run = entry_para.add_run(f"• {text}")
+        run = entry_para.add_run(f"• {_clean_inline_tabs(text)}")
         self._set_font(run)
 
         if entry:
@@ -2777,7 +2793,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for entry in reversed(s0_entries):
             text = entry.get('text', '').strip()
             entry_para = self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
-            run = entry_para.add_run(f"• {text}")
+            run = entry_para.add_run(f"• {_clean_inline_tabs(text)}")
             self._set_font(run)
             self.stats['entries_inserted'] += 1
 
@@ -7075,7 +7091,7 @@ Now analyze the text above:"""
             insert_para = self.doc.paragraphs[insert_idx]
             new_para = insert_para.insert_paragraph_before()
 
-            run = new_para.add_run(f"• {text}")
+            run = new_para.add_run(f"• {_clean_inline_tabs(text)}")
             self._set_font(run)
 
             # Add explanatory comment
