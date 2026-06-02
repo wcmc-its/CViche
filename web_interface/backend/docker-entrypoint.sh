@@ -17,14 +17,18 @@ cd /app/web_interface/backend
 if [ "${1:-}" = "migrate" ]; then
     echo "==> Running Alembic migrations (one-shot)..."
 
-    from app.config_loader import get_config
-    # 1. Extract routing parameters using your configuration loader
-    db_user, source = get_config("db", "MIGRATE_USER", default="")
+    # ◄ THE LOCATION FIX: Points Python directly inside the backend subfolder
+    export PYTHONPATH="${PYTHONPATH}:/app/web-interface/backend"
 
-     # ◄ THE IAM FIX: Dynamically intercept and swap the identity context 
-    # to your high-privilege migration identity just for the scope of this one-shot run.
-    export DB_USER=db_user
+    echo "==> Fetching migration identity from app config loader..."
+    export DB_USER=$(python3 -c "from app.config_loader import get_config; print(get_config('db', 'MIGRATION_USER', default='')[0])")
     
+    echo "==> Executing migrations with identity context: ${DB_USER}"
+    
+    # Since alembic needs to run from the root of your backend project,
+    # cd into it right before executing the migration
+    cd /app/web-interface/backend
+
     exec alembic upgrade head
 fi
 
