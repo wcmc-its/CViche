@@ -1416,10 +1416,10 @@ Respond with a JSON array of objects, one per entry:
                     entries[entry_idx]["classification_reasoning"] = f"[T-validation confirmed] {reasoning}"
                     entries[entry_idx]["t_validation_applied"] = True
 
-        # Calculate cost
-        input_tokens = response.usage.prompt_tokens
-        output_tokens = response.usage.completion_tokens
-        cost = (input_tokens * 0.002 + output_tokens * 0.008) / 1000  # Approximate for gpt-5.1
+        # Calculate cost (call_llm already returns token counts and priced cost)
+        input_tokens = llm_result["prompt_tokens"]
+        output_tokens = llm_result["completion_tokens"]
+        cost = llm_result["cost"]
 
         stats = {
             "t_entries_reviewed": len(t_entries),
@@ -1433,7 +1433,9 @@ Respond with a JSON array of objects, one per entry:
 
     except Exception as e:
         print(f"    ⚠ T-validation error: {e}")
-        return entries, {"t_entries_reviewed": len(t_entries), "t_entries_reclassified": 0, "cost": 0.0, "error": str(e)}
+        # Report reclassifications already applied to entries before the error,
+        # so meta.stats reflects reality even on a partial failure.
+        return entries, {"t_entries_reviewed": len(t_entries), "t_entries_reclassified": locals().get("reclassified_count", 0), "cost": 0.0, "error": str(e)}
 
 
 def reconnect_fragments(
@@ -1598,10 +1600,10 @@ Fragment at index {idx}:
                 elif belongs_to == "standalone":
                     entry["fragment_reasoning"] = f"[Confirmed standalone] {reasoning}"
 
-        # Calculate cost
-        input_tokens = response.usage.prompt_tokens
-        output_tokens = response.usage.completion_tokens
-        cost = (input_tokens * 0.002 + output_tokens * 0.008) / 1000
+        # Calculate cost (call_llm already returns token counts and priced cost)
+        input_tokens = llm_result["prompt_tokens"]
+        output_tokens = llm_result["completion_tokens"]
+        cost = llm_result["cost"]
 
         stats = {
             "fragments_reviewed": len(fragment_candidates),
@@ -1615,7 +1617,8 @@ Fragment at index {idx}:
 
     except Exception as e:
         print(f"    ⚠ Fragment reconnection error: {e}")
-        return entries, {"fragments_reviewed": len(fragment_candidates), "fragments_reconnected": 0, "cost": 0.0, "error": str(e)}
+        # Report reconnections already applied to entries before the error.
+        return entries, {"fragments_reviewed": len(fragment_candidates), "fragments_reconnected": locals().get("reconnected_count", 0), "cost": 0.0, "error": str(e)}
 
 
 def detect_duplicates(entries: List[Dict], similarity_threshold: float = 0.9) -> Tuple[List[Dict], List[Dict]]:
