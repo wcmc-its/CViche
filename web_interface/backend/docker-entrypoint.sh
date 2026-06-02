@@ -27,7 +27,7 @@ if [ "${1:-}" = "migrate" ]; then
     
     # Since alembic needs to run from the root of your backend project,
     # cd into it right before executing the migration
-    cd /app/web-interface/backend
+    cd /app/web_interface/backend
 
     exec alembic upgrade head
 fi
