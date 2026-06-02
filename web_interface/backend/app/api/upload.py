@@ -1,5 +1,7 @@
 """File upload API endpoint."""
+import hashlib
 import io
+import json
 import logging
 import os
 import secrets
@@ -24,6 +26,7 @@ from app.services.config_service import (
     get_estimated_run_cost, get_estimate_model_name,
 )
 from app.errors import bad_request
+from app.storage import get_storage
 
 logger = logging.getLogger(__name__)
 PDF_MAGIC = b"%PDF-"
@@ -191,9 +194,30 @@ async def upload_cv(
     run_id = generate_run_id()
 
     # Save with randomized filename (no user-provided text on filesystem)
-    file_path = UPLOAD_DIR / f"{run_id}.{file_ext.lstrip('.')}"
+    stored_name = f"{run_id}.{file_ext.lstrip('.')}"
+    file_path = UPLOAD_DIR / stored_name
     with open(file_path, "wb") as f:
         f.write(content)
+
+    # Durably archive the ORIGINAL upload (same bucket/prefix as outputs) so the
+    # run is reproducible and restart/retry survive a pod recycle. The pod-local
+    # copy above is ephemeral. Non-fatal: never block a run on archival.
+    try:
+        storage = get_storage()
+        storage.put_file(run_id, f"input/{stored_name}", content)
+        storage.put_file(run_id, "input/manifest.json", json.dumps({
+            "run_id": run_id,
+            "original_filename": file.filename,  # only record of the real name
+            "stored_as": stored_name,
+            "file_type": file_ext[1:],
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "content_type": file.content_type,
+            "uploaded_at": datetime.now().isoformat(),
+            "user_email": current_user.email,
+        }, indent=2).encode("utf-8"))
+    except Exception as e:
+        logger.warning("Failed to archive original upload to storage (run=%s): %s", run_id, e)
 
     # Create run record
     run = Run(
