@@ -19,8 +19,6 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 
-# 1. Extract routing parameters using your configuration loader
-migrate_user, source = get_config("db", "MIGRATE_USER", default="")
 
 #config.set_main_option("sqlalchemy.url", database_url)
 
@@ -63,6 +61,9 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
+    # 1. Extract routing parameters using your configuration loader
+    migrate_user, source = get_config("db", "MIGRATE_USER", default="")
+
     connectable = create_cviche_engine(override_user=migrate_user)
 
     with connectable.connect() as connection:

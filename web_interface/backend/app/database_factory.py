@@ -12,9 +12,11 @@ def create_cviche_engine(override_user: str = None):
     """
     # 1. Extract base parameters using your existing config loader
     db_host, _ = get_config("db", "DB_HOST", default="")
+    print(f"==> dbhost -> '{db_host}'")
     db_port, _ = get_config("db", "DB_PORT", default="")
+    print(f"==> dbport -> '{db_port}'")
     db_name, _ = get_config("db", "DB_NAME", default="")
-    
+    print(f"==> dbname -> '{db_name}'")
     # Use the explicitly passed override user, fallback to config file, fallback to string
     if override_user:
         db_user = override_user
@@ -28,6 +30,7 @@ def create_cviche_engine(override_user: str = None):
     if db_host and db_port and db_user and db_name:
         # MariaDB / MySQL Path
         DATABASE_URL = f"mysql+pymysql://{db_user}@{db_host}:{db_port}/{db_name}"
+        print(f"==> databaseUrl -> '{DATABASE_URL}'")
         engine_kwargs["pool_pre_ping"] = True
 
         # Inner dynamic token generation helper function
