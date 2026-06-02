@@ -1,4 +1,5 @@
 """Run status and management API endpoints."""
+import logging
 import shutil
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
@@ -16,8 +17,32 @@ from app.api.upload import generate_run_id, UPLOAD_DIR
 from app.services.run_service import check_run_access
 from app.rate_limiter import check_rate_limit
 from app.errors import not_found, bad_request
+from app.storage import get_storage
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> None:
+    """Re-fetch a run's original upload from durable storage if the pod-local
+    copy is gone (e.g. after a pod recycle), so start/restart/retry survive.
+    No-op if the local file already exists or storage has no copy — the caller
+    keeps its own missing-file handling.
+    """
+    if dest.exists():
+        return
+    try:
+        data = get_storage().get_file(run_id, f"input/{run_id}.{file_type}")
+    except Exception as e:
+        logger.info("No durable input copy for run %s (%s); using local only", run_id, e)
+        return
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        logger.info("Re-materialized input for run %s from storage (%d bytes)", run_id, len(data))
+    except Exception as e:
+        logger.warning("Failed to write re-materialized input for run %s: %s", run_id, e)
 
 
 @router.get("/runs", response_model=PaginatedRuns)
@@ -137,6 +162,7 @@ async def start_run(
     upload_dir = Path(__file__).parent.parent.parent.parent / "uploads"
     file_path = upload_dir / f"{run_id}.{run.file_type}"
 
+    _materialize_input_if_missing(run_id, run.file_type, file_path)
     if not file_path.exists():
         raise not_found("Uploaded file not found")
 
@@ -251,6 +277,7 @@ async def restart_run(
 
     # Locate the original uploaded file
     original_file = UPLOAD_DIR / f"{run_id}.{original_run.file_type}"
+    _materialize_input_if_missing(run_id, original_run.file_type, original_file)
     if not original_file.exists():
         raise HTTPException(
             status_code=404,
@@ -328,6 +355,7 @@ async def retry_step(
 
     # The original uploaded file is needed to re-feed the pipeline.
     file_path = UPLOAD_DIR / f"{run_id}.{run.file_type}"
+    _materialize_input_if_missing(run_id, run.file_type, file_path)
     if not file_path.exists():
         raise not_found("Uploaded file no longer available — please upload again.")
 
