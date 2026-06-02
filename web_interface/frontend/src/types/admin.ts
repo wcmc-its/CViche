@@ -32,6 +32,16 @@ export interface AdminRun {
   total_cost: number
   started_at: string | null
   has_feedback: boolean
+  quality_score: number | null
+  quality_band: string | null
+}
+
+export interface QualityScoreResult {
+  run_id: string
+  totalScore: number
+  band: string
+  dimensionScores: Array<{ name: string; score: number; max: number; penalty?: number; detail?: string }>
+  flags: string[]
 }
 
 export interface AdminRunsResponse {
