@@ -22,9 +22,7 @@ if config.config_file_name is not None:
 # 1. Extract routing parameters using your configuration loader
 migrate_user, source = get_config("db", "MIGRATE_USER", default="")
 
-database_url = create_cviche_engine(override_user=migrate_user)
-
-config.set_main_option("sqlalchemy.url", database_url)
+#config.set_main_option("sqlalchemy.url", database_url)
 
 # Import models so Alembic can detect them for autogenerate
 from app.models import User, SystemConfig, Consent, Feedback, Run, Step, Log, LLMUsage, RunMetrics  # noqa: F401, E402
@@ -65,11 +63,7 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool
-    )
+    connectable = create_cviche_engine(override_user=migrate_user)
 
     with connectable.connect() as connection:
         context.configure(
