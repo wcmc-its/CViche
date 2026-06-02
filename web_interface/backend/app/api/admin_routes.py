@@ -23,8 +23,11 @@ from app.schemas import (
     AdminConfigResponse,
     AdminConfigUpdate,
     AdminUserUpdate,
+    QualityScoreResult,
 )
 from app.services.admin_service import get_users_with_stats, get_single_user_stats
+from app.services.quality_score_service import get_cached_score, compute_and_cache_score
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -211,12 +214,22 @@ async def get_runs(
         )
         feedback_run_ids = {row.run_id for row in feedback_rows}
 
+    # Read cached advisory quality scores in parallel (small JSON per run; only
+    # present for runs already scored — None otherwise). Admin-only / paginated.
+    cached_scores: dict[str, dict] = {}
+    if run_ids:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for rid, score in zip(run_ids, pool.map(get_cached_score, run_ids)):
+                if score:
+                    cached_scores[rid] = score
+
     entries = []
     for run, run_user in rows:
         duration = None
         if run.started_at and run.completed_at:
             duration = int((run.completed_at - run.started_at).total_seconds())
 
+        score = cached_scores.get(run.id)
         entries.append(
             AdminRunEntry(
                 run_id=run.id,
@@ -228,6 +241,8 @@ async def get_runs(
                 total_cost=round(run.total_cost or 0, 4),
                 started_at=run.started_at,
                 has_feedback=run.id in feedback_run_ids,
+                quality_score=score.get("totalScore") if score else None,
+                quality_band=score.get("band") if score else None,
             )
         )
 
@@ -237,6 +252,37 @@ async def get_runs(
         has_more=(offset + limit) < total,
         offset=offset,
         limit=limit,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/admin/run/{run_id}/score  -- compute/backfill the advisory score
+# ---------------------------------------------------------------------------
+@router.post("/admin/run/{run_id}/score", response_model=QualityScoreResult)
+def compute_run_score(
+    run_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Compute (or refresh) the advisory quality score for a run and cache it.
+
+    Used to backfill runs created before scoring existed, or to refresh after a
+    re-run. Sync def so FastAPI runs the (blocking) storage I/O off the loop.
+    """
+    run = db.query(Run).filter(Run.id == run_id).first()
+    if not run:
+        raise not_found("Run not found")
+
+    result = compute_and_cache_score(run_id)
+    if not result:
+        raise not_found("No scorable outputs available for this run")
+
+    return QualityScoreResult(
+        run_id=run_id,
+        totalScore=result.get("totalScore", 0),
+        band=result.get("band", ""),
+        dimensionScores=result.get("dimensionScores", []),
+        flags=result.get("flags", []),
     )
 
 
