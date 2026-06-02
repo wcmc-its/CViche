@@ -401,6 +401,24 @@ class PipelineOrchestrator:
                 self.check_cancelled()
                 await self.execute_step(step_def.number, step_def.stage_id, cv_path)
 
+            # Final cancellation check after the last stage. A cancel signalled
+            # while the final stage was running (the intra-stage checks may have
+            # already passed) must not be lost: re-checking here routes it into
+            # the CancelledException handler instead of falling through to the
+            # "complete" commit below.
+            self.check_cancelled()
+
+            # "cancelled" is terminal. The cancel endpoint sets run.status on a
+            # *different* DB session/row, so our in-memory ``run`` object can be
+            # stale; refreshing it (or re-querying) surfaces a cancel that
+            # landed without tripping check_cancelled() above -- e.g. set
+            # directly on the row, or by a replica that never populated this
+            # worker's in-process flag. Either way we must not flip it back to
+            # "complete".
+            self.db.refresh(run)
+            if run.status == "cancelled" or is_cancelled(self.run_id):
+                raise CancelledException(f"Run {self.run_id} was cancelled by user")
+
             duration = int(time.time() - start_time)
             run.status = "complete"
             run.completed_at = datetime.now()
@@ -700,7 +718,12 @@ class PipelineOrchestrator:
                     run_stage_2,
                     step_number,
                     docx_path=cv_path,
-                    hierarchy_json_path=stage1b_path
+                    hierarchy_json_path=stage1b_path,
+                    # Stage 2 makes one LLM call per section (~86 total); pass an
+                    # intra-stage cancel check so an abort lands mid-stage rather
+                    # than only at the stage boundary. check_cancelled() is sync,
+                    # so it's safe to call from inside the stage worker thread.
+                    cancel_check=self.check_cancelled
                 )
 
                 cost = stage2_data.get('total_cost', 0)
@@ -764,7 +787,12 @@ class PipelineOrchestrator:
                 stage4_result = await self._run_with_stdout_capture(
                     run_stage_4,
                     step_number,
-                    docx_path=f"{self.document_uid}.docx"
+                    docx_path=f"{self.document_uid}.docx",
+                    # Stage 4 is the heaviest stage (~130 LLM calls across
+                    # batches); pass an intra-stage cancel check so an abort
+                    # lands mid-stage. check_cancelled() is sync, so it's safe
+                    # to call from inside the stage worker thread.
+                    cancel_check=self.check_cancelled
                 )
 
                 stage4_output = stage4_result['output']
