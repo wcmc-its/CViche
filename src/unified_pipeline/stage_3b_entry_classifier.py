@@ -40,6 +40,8 @@ from core.validators.adjunct_position_corrector import apply_adjunct_position_co
 from core.validators.training_compliance_corrector import apply_training_compliance_corrections
 from core.validators.invited_talk_corrector import apply_invited_talk_corrections
 from core.validators.grant_position_corrector import apply_grant_position_corrections
+from core.validators.wcm_table_corrector import apply_wcm_table_corrections
+from core.validators.template_scaffold import apply_template_scaffold_corrections
 
 
 @dataclass
@@ -1416,10 +1418,10 @@ Respond with a JSON array of objects, one per entry:
                     entries[entry_idx]["classification_reasoning"] = f"[T-validation confirmed] {reasoning}"
                     entries[entry_idx]["t_validation_applied"] = True
 
-        # Calculate cost
-        input_tokens = response.usage.prompt_tokens
-        output_tokens = response.usage.completion_tokens
-        cost = (input_tokens * 0.002 + output_tokens * 0.008) / 1000  # Approximate for gpt-5.1
+        # Calculate cost (call_llm already returns token counts and priced cost)
+        input_tokens = llm_result["prompt_tokens"]
+        output_tokens = llm_result["completion_tokens"]
+        cost = llm_result["cost"]
 
         stats = {
             "t_entries_reviewed": len(t_entries),
@@ -1433,7 +1435,9 @@ Respond with a JSON array of objects, one per entry:
 
     except Exception as e:
         print(f"    ⚠ T-validation error: {e}")
-        return entries, {"t_entries_reviewed": len(t_entries), "t_entries_reclassified": 0, "cost": 0.0, "error": str(e)}
+        # Report reclassifications already applied to entries before the error,
+        # so meta.stats reflects reality even on a partial failure.
+        return entries, {"t_entries_reviewed": len(t_entries), "t_entries_reclassified": locals().get("reclassified_count", 0), "cost": 0.0, "error": str(e)}
 
 
 def reconnect_fragments(
@@ -1598,10 +1602,10 @@ Fragment at index {idx}:
                 elif belongs_to == "standalone":
                     entry["fragment_reasoning"] = f"[Confirmed standalone] {reasoning}"
 
-        # Calculate cost
-        input_tokens = response.usage.prompt_tokens
-        output_tokens = response.usage.completion_tokens
-        cost = (input_tokens * 0.002 + output_tokens * 0.008) / 1000
+        # Calculate cost (call_llm already returns token counts and priced cost)
+        input_tokens = llm_result["prompt_tokens"]
+        output_tokens = llm_result["completion_tokens"]
+        cost = llm_result["cost"]
 
         stats = {
             "fragments_reviewed": len(fragment_candidates),
@@ -1615,7 +1619,8 @@ Fragment at index {idx}:
 
     except Exception as e:
         print(f"    ⚠ Fragment reconnection error: {e}")
-        return entries, {"fragments_reviewed": len(fragment_candidates), "fragments_reconnected": 0, "cost": 0.0, "error": str(e)}
+        # Report reconnections already applied to entries before the error.
+        return entries, {"fragments_reviewed": len(fragment_candidates), "fragments_reconnected": locals().get("reconnected_count", 0), "cost": 0.0, "error": str(e)}
 
 
 def detect_duplicates(entries: List[Dict], similarity_threshold: float = 0.9) -> Tuple[List[Dict], List[Dict]]:
@@ -2065,6 +2070,30 @@ def run_stage_3b(
             print(f"     - S8 → R: {corr['reason'][:60]}...")
     else:
         print("   ✓ No invited talk corrections needed")
+
+    # 10b. WCM structured-table corrections (mentee → N3A/N3B, board cert → F2, licensure → F1)
+    print()
+    print("10b. WCM structured-table corrections...")
+    all_classified, wcm_table_stats = apply_wcm_table_corrections(all_classified)
+    post_correction_stats['wcm_table'] = wcm_table_stats
+    if wcm_table_stats['corrections_made'] > 0:
+        print(f"   ✓ Corrected {wcm_table_stats['corrections_made']} WCM table codes")
+        for detail in wcm_table_stats['correction_details'][:3]:
+            print(f"     - {detail['original']} → {detail['corrected_to']}: {detail['reason']}")
+    else:
+        print("   ✓ No WCM table corrections needed")
+
+    # 10c. Template-scaffold suppression (filled-template instruction text → T)
+    #      Runs AFTER 10b so pure template strings (e.g. the board-table header
+    #      row) end as T rather than being promoted to a content code.
+    print()
+    print("10c. Template-scaffold corrections...")
+    all_classified, scaffold_stats = apply_template_scaffold_corrections(all_classified)
+    post_correction_stats['template_scaffold'] = scaffold_stats
+    if scaffold_stats['corrections_made'] > 0:
+        print(f"   ✓ Recoded {scaffold_stats['corrections_made']} template-scaffold entries to T")
+    else:
+        print("   ✓ No template-scaffold entries detected")
 
     # 11. Hierarchy-taxonomy mismatch flagging (QA review flags)
     print()
