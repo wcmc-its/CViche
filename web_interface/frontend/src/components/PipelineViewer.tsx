@@ -52,6 +52,22 @@ const STEP_WEIGHTS: Record<string, { weight: number; estimated_seconds: number }
 }
 const TOTAL_WEIGHT = Object.values(STEP_WEIGHTS).reduce((sum, s) => sum + s.weight, 0)
 
+// The elapsed timer freezes on ANY non-running status (it previously only
+// froze on 'complete'/'failed', so a 'cancelled' run kept a stale timer);
+// see the timer effect below.
+
+// Sum of per-stage estimates (~8 min). Used to decide when a still-"running"
+// run has plausibly hung rather than just being slow.
+const EXPECTED_TOTAL_SECONDS = Object.values(STEP_WEIGHTS).reduce((sum, s) => sum + s.estimated_seconds, 0)
+// A run is flagged "may be stuck" when EITHER no server-side forward progress
+// (a step completing, or cost/tokens advancing) has been seen for this long,
+// OR total elapsed exceeds this multiple of the expected total. Deliberately
+// conservative so a large CV doing real work is not falsely flagged.
+const STALL_NO_PROGRESS_MS = 5 * 60 * 1000
+const STALL_ELAPSED_MULTIPLIER = 3
+// Consecutive failed status polls before we warn the user the connection is lost.
+const POLL_FAILURE_THRESHOLD = 3
+
 export default function PipelineViewer({ runId, onBack, onNavigateToRun }: PipelineViewerProps) {
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null)
   const [currentStep, setCurrentStep] = useState(1)
@@ -71,6 +87,14 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   const [isCancelling, setIsCancelling] = useState(false)
   const [isRestarting, setIsRestarting] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
+  // True once the status poll has failed POLL_FAILURE_THRESHOLD times in a row,
+  // so the user is told the displayed state may be out of date instead of the
+  // failures being swallowed silently.
+  const [connectionLost, setConnectionLost] = useState(false)
+  // True when a still-"running" run looks hung (no forward progress / elapsed
+  // far past expected). Lets the UI stop implying active work and offer recourse
+  // even if the backend never reports a terminal status.
+  const [maybeStuck, setMaybeStuck] = useState(false)
 
   // Auto-scroll to feedback section when URL has #feedback hash
   useEffect(() => {
@@ -101,6 +125,10 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   const wsRef = useRef<WebSocket | null>(null)
   const startTimeRef = useRef<number | null>(null)
   const logsEndRef = useRef<HTMLDivElement>(null)
+  // Consecutive status-poll failures (reset on any success).
+  const pollFailuresRef = useRef(0)
+  // Last time server-reported progress advanced, used for stall detection.
+  const lastProgressRef = useRef<{ fingerprint: string; at: number }>({ fingerprint: '', at: Date.now() })
 
   // Cancel the running pipeline
   const handleCancel = async () => {
@@ -192,19 +220,26 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     return Math.round(Math.min(100, Math.max(0, totalProgress)))
   }, [runStatus?.steps, stepProgress, stepStartTimes])
 
-  // Fetch initial status
+  // Fetch initial status. The 2s poll is the authoritative source of run
+  // status (the WebSocket only fast-paths events); a stuck/disconnected poll
+  // must therefore be visible, not swallowed.
   useEffect(() => {
     const fetchStatus = async () => {
       try {
         const data = await getRunStatus(runId)
+        pollFailuresRef.current = 0
+        setConnectionLost(false)
         setRunStatus(data)
       } catch {
-        // Transient failure -- polling will retry
+        // Don't treat a single blip as a problem, but a sustained run of
+        // failures means the displayed state is stale -- say so.
+        pollFailuresRef.current += 1
+        if (pollFailuresRef.current >= POLL_FAILURE_THRESHOLD) {
+          setConnectionLost(true)
+        }
       }
     }
-    fetchStatus().catch(() => {
-      setApiError('Failed to fetch pipeline status. The server may be unavailable.')
-    })
+    fetchStatus()
     const interval = setInterval(fetchStatus, 2000)
     return () => clearInterval(interval)
   }, [runId])
@@ -261,7 +296,11 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     }
   }, [currentStep, fetchPromptLogs, showPromptLogs])
 
-  // Smooth timer that ticks every second
+  // Smooth timer that ticks every second while running, and freezes the
+  // instant the run is no longer running. The timer is intentionally driven
+  // off runStatus.status (sourced from the authoritative poll), so it can
+  // never keep counting after the run has actually ended -- the bug Mohammad
+  // hit, where a Stage 4 failure left the timer climbing indefinitely.
   useEffect(() => {
     if (runStatus?.status === 'running') {
       if (!startTimeRef.current) {
@@ -275,15 +314,45 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
 
       const timer = setInterval(() => {
         if (startTimeRef.current) {
-          setLocalElapsedSeconds(Math.floor((Date.now() - startTimeRef.current) / 1000))
+          const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000)
+          setLocalElapsedSeconds(elapsed)
+          // Deterministic client-side stall guard: even if the backend never
+          // reports a terminal status, stop pretending work is ongoing once
+          // progress has clearly stalled.
+          const noProgressMs = Date.now() - lastProgressRef.current.at
+          setMaybeStuck(
+            noProgressMs > STALL_NO_PROGRESS_MS ||
+            elapsed > EXPECTED_TOTAL_SECONDS * STALL_ELAPSED_MULTIPLIER
+          )
         }
       }, 1000)
       return () => clearInterval(timer)
-    } else if (runStatus?.status === 'complete' || runStatus?.status === 'failed') {
-      setLocalElapsedSeconds(runStatus.total_duration_seconds || 0)
+    } else {
+      // Any non-running status: stop ticking and freeze the displayed elapsed
+      // at the server's authoritative duration. Covers complete, failed,
+      // cancelled, created -- previously cancelled/created kept a stale timer.
+      if (typeof runStatus?.total_duration_seconds === 'number') {
+        setLocalElapsedSeconds(runStatus.total_duration_seconds)
+      }
       startTimeRef.current = null
+      setMaybeStuck(false)
     }
   }, [runStatus?.status, runStatus?.total_duration_seconds])
+
+  // Record when server-reported progress last advanced. A step completing or
+  // cost/tokens moving is real forward progress; an ever-incrementing elapsed
+  // time is NOT (it climbs even when wedged), so it is deliberately excluded
+  // from the fingerprint. The stall guard above measures time since this.
+  useEffect(() => {
+    if (!runStatus) return
+    const completeCount = runStatus.steps.filter((s) => s.status === 'complete').length
+    const runningStep = runStatus.steps.find((s) => s.status === 'running')?.step_number ?? -1
+    const fingerprint = `${completeCount}|${runningStep}|${runStatus.total_cost}|${runStatus.total_tokens}`
+    if (fingerprint !== lastProgressRef.current.fingerprint) {
+      lastProgressRef.current = { fingerprint, at: Date.now() }
+      setMaybeStuck(false)
+    }
+  }, [runStatus])
 
   // Smooth progress animation
   useEffect(() => {
@@ -397,6 +466,25 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
             output_tokens: data.output_tokens || prev.output_tokens
           }
         })
+      } else if (data.event === 'STEP_ERROR') {
+        // Mark the failing step so the "Retry failed step" affordance appears
+        // immediately. The run-level RUN_FAILED below flips overall status.
+        setRunStatus((prev) =>
+          prev
+            ? { ...prev, steps: prev.steps.map((s) => (s.step_number === data.step ? { ...s, status: 'error' } : s)) }
+            : prev
+        )
+      } else if (data.event === 'RUN_FAILED') {
+        // Authoritative terminal failure: flip status now rather than waiting
+        // for the next poll. The poll then fills in full detail (error_message,
+        // per-step state, final duration).
+        setRunStatus((prev) =>
+          prev ? { ...prev, status: 'failed', error_message: data.error ?? prev.error_message } : prev
+        )
+      } else if (data.event === 'RUN_CANCELLED') {
+        setRunStatus((prev) => (prev ? { ...prev, status: 'cancelled' } : prev))
+      } else if (data.event === 'RUN_COMPLETE') {
+        setRunStatus((prev) => (prev ? { ...prev, status: 'complete' } : prev))
       }
     }
 
@@ -424,6 +512,51 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
       {/* API Error Banner */}
       {apiError && (
         <ErrorBanner message={apiError} onDismiss={() => setApiError(null)} />
+      )}
+
+      {/* Connection-lost warning — the status poll has failed repeatedly, so
+          what's shown may be stale. (Provisional styling — pending UI sign-off.) */}
+      {connectionLost && (
+        <div className="bg-orange-50 border-b border-orange-300 px-6 py-3" role="status" aria-live="polite">
+          <div className="flex items-center gap-3 max-w-full">
+            <AlertCircle className="h-5 w-5 text-orange-600 flex-shrink-0" aria-hidden="true" />
+            <p className="text-sm font-medium text-orange-800">
+              Lost connection to the server — the status shown may be out of date. Reconnecting…
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Possible-stall warning — run is still "running" but progress has
+          stalled / it's far past the expected time. Gives the user recourse
+          instead of a timer that climbs forever. (Provisional — pending UI sign-off.) */}
+      {runStatus.status === 'running' && maybeStuck && (
+        <div className="bg-orange-50 border-b border-orange-300 px-6 py-3" role="alert">
+          <div className="flex items-center justify-between max-w-full">
+            <div className="flex items-center gap-3">
+              <AlertCircle className="h-5 w-5 text-orange-600 flex-shrink-0" aria-hidden="true" />
+              <p className="text-sm font-medium text-orange-800">
+                This run is taking much longer than expected and may be stuck. You can keep waiting, or cancel and start over.
+              </p>
+            </div>
+            <div className="ml-4 flex shrink-0 gap-2">
+              <button
+                onClick={handleCancel}
+                disabled={isCancelling}
+                className="rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-600 text-white hover:bg-orange-700 transition-colors focus:ring-2 focus:ring-orange-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isCancelling ? 'Cancelling...' : 'Cancel'}
+              </button>
+              <button
+                onClick={handleRestart}
+                disabled={isRestarting}
+                className="rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-100 text-orange-800 hover:bg-orange-200 transition-colors focus:ring-2 focus:ring-orange-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isRestarting ? 'Restarting...' : 'Restart with this file'}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Failed Banner */}

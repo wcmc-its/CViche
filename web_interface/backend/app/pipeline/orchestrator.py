@@ -100,6 +100,28 @@ class CancelledException(Exception):
     pass
 
 
+def _get_stage_timeout_seconds() -> int:
+    """Per-stage wall-clock ceiling, in seconds (0 disables it).
+
+    A coarse last-resort backstop: if a stage runs longer than this, the
+    orchestrator abandons the await, marks the run failed, and emits
+    RUN_FAILED -- so a hung stage can never leave the run pinned at
+    "running" forever (the bug where the UI timer counted up indefinitely
+    after a silent Stage 4 hang). It is intentionally generous so a large
+    CV doing a lot of legitimate work is never clipped; the precise net
+    against a single wedged provider call is the per-call timeout on the
+    LLM client (see unified_pipeline/llm_client.py). asyncio.wait_for can't
+    kill the worker thread the stage runs in, so the LLM-call timeout is
+    what actually lets that thread unwind -- this only bounds how long the
+    *user* is left waiting. Tune via CVICHE_STAGE_TIMEOUT_SECONDS.
+    """
+    try:
+        value = int(os.environ.get("CVICHE_STAGE_TIMEOUT_SECONDS", 1800))
+    except (TypeError, ValueError):
+        return 1800
+    return value if value >= 0 else 1800
+
+
 # Progress patterns to detect in stdout
 PROGRESS_PATTERNS = [
     # "Processing section 5 of 10" or "Processing 5/10"
@@ -232,6 +254,10 @@ class PipelineOrchestrator:
 
         # Total cost tracking
         self.total_cost = 0.0
+
+        # Step number of the stage that raised, so the run-level failure handler
+        # can attribute RUN_FAILED to the stage the user was watching.
+        self.failed_step_number: Optional[int] = None
 
     async def log(self, step_number: int, message: str, level: str = "INFO"):
         """Log a message to database and emit via WebSocket."""
@@ -436,6 +462,14 @@ class PipelineOrchestrator:
             run.completed_at = datetime.now()
             self.db.commit()
             await self.log(0, f"Pipeline failed: {str(e)}", "ERROR")
+            # Authoritative terminal failure signal. Emit the user-facing
+            # message (run.error_message), not the raw exception, so a
+            # resume-input failure surfaces its actionable guidance. Mirrors
+            # RUN_COMPLETE / RUN_CANCELLED so the UI stops the timer and
+            # switches to the failure state without waiting for a status poll.
+            await event_emitter.emit_run_failed(
+                self.run_id, run.error_message or str(e), self.failed_step_number
+            )
             raise
 
         finally:
@@ -471,8 +505,25 @@ class PipelineOrchestrator:
 
             start_time = time.time()
 
-            # Execute the actual stage logic
-            result = await self._execute_stage_logic(stage_id, cv_path)
+            # Execute the actual stage logic, bounded by a coarse per-stage
+            # wall-clock ceiling. A hung stage (e.g. a wedged provider call)
+            # then raises TimeoutError into the except below instead of
+            # leaving the run pinned at "running" forever. Translate it to a
+            # clear, user-facing message rather than a bare asyncio error.
+            stage_timeout = _get_stage_timeout_seconds()
+            try:
+                if stage_timeout > 0:
+                    result = await asyncio.wait_for(
+                        self._execute_stage_logic(stage_id, cv_path),
+                        timeout=stage_timeout,
+                    )
+                else:
+                    result = await self._execute_stage_logic(stage_id, cv_path)
+            except (asyncio.TimeoutError, TimeoutError) as exc:
+                raise TimeoutError(
+                    f"Stage {stage_id} ({step_def.name}) timed out after "
+                    f"{stage_timeout}s and was stopped."
+                ) from exc
 
             duration = int(time.time() - start_time)
 
@@ -514,6 +565,10 @@ class PipelineOrchestrator:
             tb_str = traceback.format_exc()
             step.error_message = f"{str(e)}\n\nTraceback:\n{tb_str}"
             self.db.commit()
+
+            # Remember which stage broke so the run-level handler can name it
+            # in the terminal RUN_FAILED event.
+            self.failed_step_number = step_number
 
             await self.log(step_number, f"Error in Stage {stage_id}: {str(e)}", "ERROR")
             await event_emitter.emit_step_error(self.run_id, step_number, str(e))

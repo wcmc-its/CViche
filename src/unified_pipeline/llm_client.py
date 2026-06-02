@@ -96,11 +96,47 @@ def _get_max_concurrent_llm_calls() -> int:
 _llm_call_semaphore = threading.BoundedSemaphore(_get_max_concurrent_llm_calls())
 
 
+def _get_llm_timeout_seconds() -> float:
+    """Per-call response timeout, in seconds.
+
+    Without an explicit timeout a wedged provider call blocks the worker
+    thread the pipeline stage runs in indefinitely -- nothing raises, the
+    run stays "running", and the UI elapsed timer counts up forever (the
+    reported Stage 4 hang). A bounded timeout turns that hang into a normal
+    exception that propagates to the orchestrator, fails the run, and
+    surfaces to the user. Generous by default so legitimately slow calls
+    are not clipped; tune via CVICHE_LLM_TIMEOUT_SECONDS.
+    """
+    try:
+        value = float(os.environ.get("CVICHE_LLM_TIMEOUT_SECONDS", 180))
+    except (TypeError, ValueError):
+        return 180.0
+    return value if value > 0 else 180.0
+
+
+def _get_llm_max_attempts() -> int:
+    """Total botocore attempts (initial + retries) for Bedrock calls.
+
+    botocore's standard retry mode retries connect/read timeouts and
+    throttling up to this many attempts, then raises -- so a persistently
+    wedged Bedrock endpoint fails deterministically instead of hanging.
+    Tune via CVICHE_LLM_MAX_ATTEMPTS.
+    """
+    try:
+        value = int(os.environ.get("CVICHE_LLM_MAX_ATTEMPTS", 3))
+    except (TypeError, ValueError):
+        return 3
+    return value if value >= 1 else 3
+
+
 def _get_openai_client():
     """Get or create the OpenAI client (lazy initialization)."""
     global _openai_client
     if _openai_client is None:
-        _openai_client = OpenAI()
+        # Bound every request so a non-responsive endpoint raises
+        # APITimeoutError (retried by _call_with_retry, then surfaced)
+        # instead of blocking forever. Reads OPENAI_API_KEY from the env.
+        _openai_client = OpenAI(timeout=_get_llm_timeout_seconds())
     return _openai_client
 
 
@@ -118,8 +154,20 @@ def _get_bedrock_client():
     global _bedrock_client
     if _bedrock_client is None:
         import boto3
+        from botocore.config import Config
         region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
-        _bedrock_client = boto3.client("bedrock-runtime", region_name=region)
+        # Explicit connect/read timeouts + bounded standard retries so a
+        # wedged Bedrock call can't block the worker thread indefinitely.
+        # botocore's default read_timeout (60s) and retry behavior are left
+        # implicit otherwise; here we make them explicit and tunable.
+        bedrock_config = Config(
+            connect_timeout=10,
+            read_timeout=_get_llm_timeout_seconds(),
+            retries={"mode": "standard", "max_attempts": _get_llm_max_attempts()},
+        )
+        _bedrock_client = boto3.client(
+            "bedrock-runtime", region_name=region, config=bedrock_config
+        )
     return _bedrock_client
 
 
