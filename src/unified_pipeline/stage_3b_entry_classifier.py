@@ -40,6 +40,8 @@ from core.validators.adjunct_position_corrector import apply_adjunct_position_co
 from core.validators.training_compliance_corrector import apply_training_compliance_corrections
 from core.validators.invited_talk_corrector import apply_invited_talk_corrections
 from core.validators.grant_position_corrector import apply_grant_position_corrections
+from core.validators.wcm_table_corrector import apply_wcm_table_corrections
+from core.validators.template_scaffold import apply_template_scaffold_corrections
 
 
 @dataclass
@@ -2068,6 +2070,30 @@ def run_stage_3b(
             print(f"     - S8 → R: {corr['reason'][:60]}...")
     else:
         print("   ✓ No invited talk corrections needed")
+
+    # 10b. WCM structured-table corrections (mentee → N3A/N3B, board cert → F2, licensure → F1)
+    print()
+    print("10b. WCM structured-table corrections...")
+    all_classified, wcm_table_stats = apply_wcm_table_corrections(all_classified)
+    post_correction_stats['wcm_table'] = wcm_table_stats
+    if wcm_table_stats['corrections_made'] > 0:
+        print(f"   ✓ Corrected {wcm_table_stats['corrections_made']} WCM table codes")
+        for detail in wcm_table_stats['correction_details'][:3]:
+            print(f"     - {detail['original']} → {detail['corrected_to']}: {detail['reason']}")
+    else:
+        print("   ✓ No WCM table corrections needed")
+
+    # 10c. Template-scaffold suppression (filled-template instruction text → T)
+    #      Runs AFTER 10b so pure template strings (e.g. the board-table header
+    #      row) end as T rather than being promoted to a content code.
+    print()
+    print("10c. Template-scaffold corrections...")
+    all_classified, scaffold_stats = apply_template_scaffold_corrections(all_classified)
+    post_correction_stats['template_scaffold'] = scaffold_stats
+    if scaffold_stats['corrections_made'] > 0:
+        print(f"   ✓ Recoded {scaffold_stats['corrections_made']} template-scaffold entries to T")
+    else:
+        print("   ✓ No template-scaffold entries detected")
 
     # 11. Hierarchy-taxonomy mismatch flagging (QA review flags)
     print()
