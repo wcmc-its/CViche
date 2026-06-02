@@ -1,4 +1,21 @@
-# 1. The One-Shot Pre-Deployment Migration Step
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cviche-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cviche-backend
+  template:
+    metadata:
+      labels:
+        app: cviche-backend
+    spec:
+      # Reuses your single IRSA setup to authenticate both database users via IAM
+      serviceAccountName: cviche-sa 
+      
+      # 1. The One-Shot Pre-Deployment Migration Step
       initContainers:
         - name: db-migration
           image: backend # Dynamically updated by Kustomize via CodeBuild
@@ -6,12 +23,12 @@
           command: ["/bin/bash", "docker-entrypoint.sh"]
           args: ["migrate"] # ◄ Triggers the migration logic inside your entrypoint script
           env:
-            - name: MIGRATION_USER
+            - name: DB_USER
               valueFrom:
                 configMapKeyRef:
                   name: cviche-auth-config # Your existing ConfigMap
                   key: auth_config.yaml
-                  jsonPath: $.db.MIGRATE_USER # ◄ Dynamically extracts your migration user string
+                  jsonPath: $.db.MIGRATE_DB_USER # ◄ Dynamically extracts your migration user string
 
       # 2. The Main Runtime Web Application Step
       containers:
@@ -31,4 +48,4 @@
                 configMapKeyRef:
                   name: cviche-auth-config
                   key: auth_config.yaml
-                  jsonPath: $.db.DB_USER # ◄ Dynamically extracts your web app user string
+                  jsonPath: $.db.APP_DB_USER # ◄ Dynamically extracts your web app user string
