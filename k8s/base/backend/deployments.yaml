@@ -22,13 +22,6 @@ spec:
           imagePullPolicy: IfNotPresent
           command: ["/bin/bash", "docker-entrypoint.sh"]
           args: ["migrate"] # ◄ Triggers the migration logic inside your entrypoint script
-          env:
-            - name: DB_USER
-              valueFrom:
-                configMapKeyRef:
-                  name: cviche-auth-config # Your existing ConfigMap
-                  key: auth_config.yaml
-                  jsonPath: $.db.MIGRATE_DB_USER # ◄ Dynamically extracts your migration user string
 
       # 2. The Main Runtime Web Application Step
       containers:
@@ -43,9 +36,3 @@ spec:
               value: "8000"
             - name: CVICHE_RUN_MIGRATIONS
               value: "0" # ◄ Tells the app container to skip migrations on boot
-            - name: DB_USER
-              valueFrom:
-                configMapKeyRef:
-                  name: cviche-auth-config
-                  key: auth_config.yaml
-                  jsonPath: $.db.APP_DB_USER # ◄ Dynamically extracts your web app user string

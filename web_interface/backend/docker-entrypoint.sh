@@ -17,9 +17,13 @@ cd /app/web_interface/backend
 if [ "${1:-}" = "migrate" ]; then
     echo "==> Running Alembic migrations (one-shot)..."
 
+    from app.config_loader import get_config
+    # 1. Extract routing parameters using your configuration loader
+    db_user, source = get_config("db", "MIGRATE_USER", default="")
+
      # ◄ THE IAM FIX: Dynamically intercept and swap the identity context 
     # to your high-privilege migration identity just for the scope of this one-shot run.
-    export DB_USER="cviche_migration_user"
+    export DB_USER=db_user
     
     exec alembic upgrade head
 fi
