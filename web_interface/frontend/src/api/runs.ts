@@ -15,7 +15,11 @@ export async function getPromptLogs(runId: string, step: number): Promise<any> {
 }
 
 export async function getRunDataJson(runId: string, filename: string): Promise<any> {
-  return api.get(`/api/run/${runId}/data/${filename}/json`)
+  // Backend resolves data files by basename and rejects absolute paths; some
+  // callers pass the full output path recorded in Step.output_files, so strip
+  // any directory prefix here to avoid a 400 from the path-traversal guard.
+  const name = filename.split('/').pop() || filename
+  return api.get(`/api/run/${runId}/data/${name}/json`)
 }
 
 export async function cancelRun(runId: string): Promise<void> {

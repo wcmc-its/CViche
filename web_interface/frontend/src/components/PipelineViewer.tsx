@@ -86,6 +86,10 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     }
   }, [runStatus?.status])
   const [apiError, setApiError] = useState<string | null>(null)
+  // Track which run we've already attempted a CV-insights load for, so the 2s
+  // status poll (a fresh steps array each tick) can't re-fire the request on
+  // every poll — especially after a failure, where cvInsights stays null.
+  const cvInsightsAttemptedRef = useRef<string | null>(null)
   const [cvInsights, setCvInsights] = useState<{
     cv_owner?: { full_name?: string; last_name?: string };
     cv_owner_location?: {
@@ -312,6 +316,8 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
       const stage4Step = runStatus?.steps.find(s => s.stage_id === '4')
       if (!stage4Step || stage4Step.status !== 'complete') return
       if (cvInsights) return
+      // Only attempt once per run, regardless of success/failure.
+      if (cvInsightsAttemptedRef.current === runId) return
 
       let outputFiles: string[] = []
       try {
@@ -323,6 +329,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
       const fieldsJson = outputFiles.find(f => f.includes('_fields.json'))
       if (!fieldsJson) return
 
+      cvInsightsAttemptedRef.current = runId
       try {
         const data = await getRunDataJson(runId, fieldsJson)
         if (data.content) {
