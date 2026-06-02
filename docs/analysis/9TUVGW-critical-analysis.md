@@ -14,13 +14,37 @@
 |---|-------|----------|---------|
 | E | `name 'response' is not defined` corrupts stage_3b cost/stats on ~100% of runs | High | **Fixed** |
 | A | Run-viewer spams `[SECURITY]` 400s every ~2s; CV-insights card never loads | Medium | **Fixed** |
-| D | Generated `.docx`: raw `\t` tabs, prompt-echo bullets, mis-routed content | High | Diagnosed (upstream fix needed) |
+| D | Generated `.docx`: raw `\t` tabs, prompt-echo bullets, mis-routed content | High | **Partly fixed** (see Accuracy fixes) |
+| Acc | Misclassification routing + template-scaffold leakage (root of D, T-bucket, sparse fields) | High | **Fixed (deterministic, validated)** |
 | C | New image CrashLoops; migration/scale architecture incoherent with SQLite | Critical (dev rollout blocker) | **Diagnosed only** — active parallel work |
 | B | SAML assertion accepted **despite** failing signature verification | Medium (security) | **Diagnosed only** — auth, needs care |
 
 Plus: a per-run **LLM cost** breakdown, and a **quality scorer** (`src/unified_pipeline/quality_score.py`) shipped advisory-only.
 
 **Why C and B are diagnosis-only:** both sit inside active, sensitive work (Mahender has 5 migration commits today; B is auth where a wrong "fix" causes an outage). Precise root-cause is more useful than a competing commit. Details below.
+
+---
+
+## Accuracy fixes (implemented + validated deterministically against 8 real S3 runs, no LLM re-run)
+
+The user's directive was to improve **accuracy**, not suppress errors. Three converging root causes were found; the deterministic, validatable ones are fixed here. The deepest one (over-segmentation) changes LLM inputs and is flagged eval-needed.
+
+**1. WCM structured-table correctors** (`core/validators/wcm_table_corrector.py`, wired into stage_3b step 10b). Content-keyed, deterministic post-classification corrections, only overriding a small allow-list of known-wrong source codes:
+- Mentee table (`Mentoring Period` + `Type of Supervision`/`Site/position`) → **N3A/N3B** (was K2).
+- Board certification (`American Board of …` / board-table labels **with** a cert number/date) → **F2** (was I).
+- Licensure (`DEA/NPI/License number`) → **F1**.
+- *Validated on 9TUVGW:* 7 corrections, **0 false positives** — the 2 real board-cert blocks (I→F2) and all 4 mentee tables (K2→N3A). This is the root fix for the "tab in Section I / mentees as bullets" symptom: mentees now route to the mentee **table** (proper columns) instead of tabbed bullets.
+
+**2. Template-scaffold corrector** (`core/validators/template_scaffold.py` + `wcm_template_scaffold_strings.json`, stage_3b step 10c). The source CVs are filled WCM templates; leftover instruction text leaks in as content. Entries whose normalized text matches the **blank** template (exact, or ≥0.95 ratio for long sentences) are recoded to **T** so downstream stages drop them.
+- *Validated on 9TUVGW:* 30 recodes — the prompt-echo bullets ("Clinical teaching (bedside…)" K2→T, "Administrative teaching…" K3→T), hospital-affiliation labels, visa questions. Non-WCM-template CVs got 0–2, so it does not over-fire. Net code distribution: **T +30, K2 −7, K3 −3, F2 +3, N3A +4**.
+
+**3. Tab rendering fallback** (`stage_6_word_template._clean_inline_tabs`, applied at the 3 bullet emit sites). Residual `Label\tValue` bullets render as "Label: Value" instead of a ragged naked tab. With fix #1 the main offenders no longer reach this path; this is the backstop.
+
+### Accuracy fixes deferred — need a gold/eval run (documented, NOT committed, to honor "don't claim accuracy without eval")
+- **Over-segmentation / hierarchy fan-out (the disease behind 58% duplicates + misclassification).** Stage 1b emits overlapping section ranges (`stage_1b_hierarchy_mapper.py:446` repair only handles `end < start`); Stage 2 re-extracts the same indices once per overlap (`stage_2_entry_extraction.py:1052`, no cross-section guard). Fix: clamp overlapping ranges in 1b / skip already-assigned indices in 2. **Changes which section wins a contested index → changes downstream classification → must be eval'd that no real content is lost.** Highest-leverage next step.
+- **Cross-code duplicate removal.** Stage 3b flags `is_duplicate` but keys on first-100-chars + same-code, missing ~19 cross-code copies that reach the docx; stage 6 dedups within-code only. Fix: key dedup on normalized full text across all codes, and drop (not just flag). Eval to confirm no false-merge.
+- **Add F1/F2 to the classifier prompt** (currently absent — 0 occurrences), so the LLM has the option natively rather than relying on the corrector. Prompt change → eval.
+- **Field-schema overflow + recovery gate** (`stage_4_field_extractor.py`): re-add `narrative`/`institution` overflow to `minimal` schemas; lower the `min_original_chars=200` recovery threshold. Eval.
 
 ---
 
