@@ -243,6 +243,16 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   const supportHref = (reason: string) =>
     `mailto:paa2013@med.cornell.edu?subject=${encodeURIComponent(`CViche: ${reason} (run ${runId})`)}&body=${encodeURIComponent(`Run ID: ${runId}\nFile: ${runStatus?.filename}\n\nPlease describe what happened:\n`)}`
 
+  if (!runStatus || !runStatus.steps) {
+  return (
+    <main className="flex items-center justify-center min-h-screen bg-surface-muted">
+      <div className="text-gray-600 font-medium" role="status" aria-live="polite">
+        Loading pipeline data...
+      </div>
+    </main>
+  )
+}
+
   return (
     <div className="min-h-screen bg-surface-muted">
       {apiError && <ErrorBanner message={apiError} onDismiss={() => setApiError(null)} />}
