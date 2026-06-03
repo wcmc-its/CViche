@@ -1,5 +1,5 @@
 import { api } from './client'
-import type { Stats, AdminUser, AdminRunsResponse, SystemConfig } from '../types'
+import type { Stats, AdminUser, AdminRunsResponse, QualityScoreResult, SystemConfig } from '../types'
 
 export async function getAdminStats(): Promise<Stats> {
   return api.get<Stats>('/api/admin/stats')
@@ -15,6 +15,10 @@ export async function updateAdminUser(userId: number, updates: Record<string, un
 
 export async function getAdminRuns(params: string): Promise<AdminRunsResponse> {
   return api.get<AdminRunsResponse>(`/api/admin/runs?${params}`)
+}
+
+export async function computeRunScore(runId: string): Promise<QualityScoreResult> {
+  return api.post<QualityScoreResult>(`/api/admin/run/${runId}/score`)
 }
 
 export async function getAdminConfig(): Promise<SystemConfig> {

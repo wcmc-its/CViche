@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from app.models import Run, Step, User
 from app.errors import not_found, forbidden
+from app.config_loader import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,9 @@ def reconcile_stale_runs(db: Session) -> int:
     sibling's genuinely in-flight run is not killed. Returns the count swept.
     """
     try:
-        minutes = int(os.environ.get("CVICHE_STALE_RUN_MINUTES", DEFAULT_STALE_RUN_MINUTES))
+        #minutes = int(os.environ.get("CVICHE_STALE_RUN_MINUTES", DEFAULT_STALE_RUN_MINUTES))
+        stale_run_minutes, _ = get_config("llm","CVICHE_STALE_RUN_MINUTES",default=DEFAULT_STALE_RUN_MINUTES)
+        minutes = int(stale_run_minutes)
     except (TypeError, ValueError):
         minutes = DEFAULT_STALE_RUN_MINUTES
 

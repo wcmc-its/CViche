@@ -22,6 +22,7 @@ docs/proposals/issue-4-redis-broker.md and concurrency-and-load-readiness.md).
 import logging
 import os
 import threading
+from app.config_loader import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +39,9 @@ _active_runs = 0
 def get_max_concurrent_runs() -> int:
     """Read the per-pod concurrency cap from CVICHE_MAX_CONCURRENT_RUNS."""
     try:
-        value = int(os.environ.get("CVICHE_MAX_CONCURRENT_RUNS", DEFAULT_MAX_CONCURRENT_RUNS))
+        #value = int(os.environ.get("CVICHE_MAX_CONCURRENT_RUNS", DEFAULT_MAX_CONCURRENT_RUNS))
+        max_concurrent_runs, _ = get_config("llm","CVICHE_MAX_CONCURRENT_RUNS",default=DEFAULT_MAX_CONCURRENT_RUNS)
+        value = int(max_concurrent_runs) 
     except (TypeError, ValueError):
         return DEFAULT_MAX_CONCURRENT_RUNS
     # A non-positive cap would wedge the pod (no run could ever start); treat it

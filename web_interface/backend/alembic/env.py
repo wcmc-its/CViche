@@ -61,10 +61,20 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    # 1. Extract routing parameters using your configuration loader
-    migrate_user, source = get_config("db", "MIGRATE_USER", default="")
+    # 1. Extract routing parameters using in configuration loader
+    db_host, _ = get_config("db", "DB_HOST", default="")
+    db_port, _ = get_config("db", "DB_PORT", default="")
+    db_name, _ = get_config("db", "DB_NAME", default="")
+    migrate_user, _ = get_config("db", "MIGRATE_USER", default="")
 
-    connectable = create_cviche_engine(override_user=migrate_user)
+
+    # 2. Pass them directly to the factory
+    connectable = create_cviche_engine(
+        db_host=db_host,
+        db_port=db_port,
+        db_name=db_name,
+        db_user=migrate_user
+    )
 
     with connectable.connect() as connection:
         context.configure(

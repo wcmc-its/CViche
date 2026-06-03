@@ -182,8 +182,7 @@ Same IRSA role, add the Bedrock permissions:
   "Effect": "Allow",
   "Action": [
     "bedrock:InvokeModel",
-    "bedrock:Converse",
-    "bedrock:ConverseStream"
+    "bedrock:InvokeModelWithResponseStream" 
   ],
   "Resource": "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6:0"
 }

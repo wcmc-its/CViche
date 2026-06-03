@@ -10,6 +10,7 @@ import LogViewer from './LogViewer'
 import PromptLogViewer from './PromptLogViewer'
 import OutputFiles from './OutputFiles'
 import JsonViewerModal from './JsonViewerModal'
+import CancelConfirmModal from './CancelConfirmModal'
 import ErrorBanner from './ErrorBanner'
 import FeedbackForm from './FeedbackForm'
 
@@ -85,6 +86,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   const [stepStartTimes, setStepStartTimes] = useState<Record<number, number>>({})
   const [stepStartCosts, setStepStartCosts] = useState<Record<number, number>>({})
   const [isCancelling, setIsCancelling] = useState(false)
+  const [showCancelConfirm, setShowCancelConfirm] = useState(false)
   const [isRestarting, setIsRestarting] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
   // True once the status poll has failed POLL_FAILURE_THRESHOLD times in a row,
@@ -130,19 +132,28 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   // Last time server-reported progress advanced, used for stall detection.
   const lastProgressRef = useRef<{ fingerprint: string; at: number }>({ fingerprint: '', at: Date.now() })
 
-  // Cancel the running pipeline
-  const handleCancel = async () => {
+  // Open the in-app confirmation modal that spells out the implications of
+  // cancelling (partial output, sunk cost, delayed stop, no undo) before any
+  // request is sent. The actual cancellation happens in confirmCancel.
+  const handleCancel = () => {
     if (isCancelling) return
+    setShowCancelConfirm(true)
+  }
 
-    const confirmed = window.confirm('Are you sure you want to cancel this pipeline run? This action cannot be undone.')
-    if (!confirmed) return
+  // Proceed with cancellation after the user confirms in the modal. Keeps the
+  // isCancelling busy state so both the modal's primary button and the header
+  // Cancel button reflect the in-flight request.
+  const confirmCancel = async () => {
+    if (isCancelling) return
 
     setIsCancelling(true)
     try {
       await cancelRun(runId)
+      setShowCancelConfirm(false)
     } catch (err: any) {
       console.error('Error cancelling run:', err)
       setApiError(`Failed to cancel: ${err.message || 'Unknown error'}`)
+      // Leave the modal open on failure so the user can retry or dismiss.
     } finally {
       setIsCancelling(false)
     }
@@ -506,6 +517,21 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     if (runStatus?.status === 'complete' && runStatus.steps.length > 0) {
       setCurrentStep(runStatus.steps[runStatus.steps.length - 1].step_number)
     }
+  // Warn before the tab is closed or navigated away while a run is in progress.
+  // The run continues server-side regardless, but the browser prompt reminds the
+  // user that leaving won't stop it (and that they can return later). Modern
+  // browsers ignore custom text and show their own generic message, so we only
+  // need to call preventDefault / set returnValue to trigger the prompt.
+  useEffect(() => {
+    if (runStatus?.status !== 'running') return
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+      e.returnValue = ''
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
   }, [runStatus?.status])
 
   if (!runStatus) {
@@ -758,6 +784,18 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         </div>
       </div>
 
+      {/* Run-continues-on-server note — only while running. Reassures the user
+          that the run keeps going server-side whether or not this window stays
+          open, mirroring the beforeunload prompt above. */}
+      {runStatus.status === 'running' && (
+        <div className="bg-blue-50 border-b border-blue-200 px-6 py-2" role="note">
+          <p className="text-xs text-blue-800 max-w-full">
+            This run continues on the server whether or not this window stays open. You can safely
+            close the tab and return to the app when it completes.
+          </p>
+        </div>
+      )}
+
       {/* Main Content */}
       <div className="flex flex-col md:flex-row max-w-full">
         {/* Sidebar */}
@@ -947,6 +985,14 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         content={jsonContent}
         filename={jsonFilename}
         downloadUrl={`/api/run/${runId}/data/${jsonFilename}`}
+      />
+
+      {/* Cancel Confirmation Modal */}
+      <CancelConfirmModal
+        isOpen={showCancelConfirm}
+        isCancelling={isCancelling}
+        onConfirm={confirmCancel}
+        onClose={() => setShowCancelConfirm(false)}
       />
     </div>
   )

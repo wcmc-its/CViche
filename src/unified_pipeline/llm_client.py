@@ -26,6 +26,8 @@ Usage:
 """
 
 import os
+from pathlib import Path
+import sys
 import time
 import json as json_module
 import logging
@@ -44,6 +46,20 @@ from unified_pipeline.core.prompt_logger import (
     log_prompt_before_call,
     log_prompt_response,
 )
+
+# 1. Calculate the absolute path to your web_interface/backend folder
+# This traverses up from src/unified_pipeline to the root, then jumps into the backend folder
+CURRENT_FILE = Path(__file__).resolve()
+PROJECT_ROOT = CURRENT_FILE.parent.parent.parent # Adjust the number of .parent calls based on your exact depth
+BACKEND_ROOT = PROJECT_ROOT / "web_interface" / "backend"
+
+# 2. Append the backend workspace root to Python's look-up path list
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+# 3. Now you can cleanly import config_loader from the app package!
+from app.config_loader import get_config
+
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +103,9 @@ RETRYABLE_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, Interna
 # deploy-time knob), since BoundedSemaphore is sized at construction.
 def _get_max_concurrent_llm_calls() -> int:
     try:
-        value = int(os.environ.get("CVICHE_MAX_CONCURRENT_LLM_CALLS", 8))
+        #value = int(os.environ.get("CVICHE_MAX_CONCURRENT_LLM_CALLS", 8))
+        max_concurrent_llm_calls, _ = get_config("llm","CVICHE_MAX_CONCURRENT_LLM_CALLS",default=8)
+        value = int(max_concurrent_llm_calls)
     except (TypeError, ValueError):
         return 8
     return value if value > 0 else 8
@@ -108,7 +126,9 @@ def _get_llm_timeout_seconds() -> float:
     are not clipped; tune via CVICHE_LLM_TIMEOUT_SECONDS.
     """
     try:
-        value = float(os.environ.get("CVICHE_LLM_TIMEOUT_SECONDS", 180))
+        #value = float(os.environ.get("CVICHE_LLM_TIMEOUT_SECONDS", 180))
+        timeout, _ = get_config("llm","CVICHE_LLM_TIMEOUT_SECONDS", default=180)
+        value = float(timeout)
     except (TypeError, ValueError):
         return 180.0
     return value if value > 0 else 180.0
@@ -123,7 +143,9 @@ def _get_llm_max_attempts() -> int:
     Tune via CVICHE_LLM_MAX_ATTEMPTS.
     """
     try:
-        value = int(os.environ.get("CVICHE_LLM_MAX_ATTEMPTS", 3))
+        #value = int(os.environ.get("CVICHE_LLM_MAX_ATTEMPTS", 3))
+        max_attempts,_ = get_config("llm","CVICHE_LLM_MAX_ATTEMPTS",3)
+        value = int(max_attempts)
     except (TypeError, ValueError):
         return 3
     return value if value >= 1 else 3

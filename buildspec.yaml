@@ -78,6 +78,11 @@ phases:
           DB_USER: "${DB_USER}"
           DB_NAME: "${DB_NAME}"
           MIGRATE_USER: "${MIGRATION_USER}"
+        llm:
+          CVICHE_LLM_TIMEOUT_SECONDS: "${CVICHE_LLM_TIMEOUT_SECONDS}"
+          CVICHE_LLM_MAX_ATTEMPTS: "${CVICHE_LLM_MAX_ATTEMPTS}"
+          CVICHE_STAGE_TIMEOUT_SECONDS: "${CVICHE_STAGE_TIMEOUT_SECONDS}"
+          CVICHE_STALE_RUN_MINUTES: "${CVICHE_STALE_RUN_MINUTES}"  
         allowed_users: []
         admin_users: []
         rate_limits:
@@ -105,7 +110,10 @@ phases:
 
        - echo "Exposing flat user parameters for the Kubernetes layer..."
        # ◄ THE FIX: Write the raw pipeline variables straight to a flat env file
-       - echo "MIGRATE_USER=${MIGRATION_USER}" > k8s/overlays/${ENV_NAME}/db_migration_users.env
+       - echo "MIGRATE_USER=${DB_HOST}" > k8s/overlays/${ENV_NAME}/db_migration_users.env
+       - echo "MIGRATE_USER=${DB_PORT}" > k8s/overlays/${ENV_NAME}/db_migration_users.env
+       - echo "MIGRATE_USER=${DB_NAME}" > k8s/overlays/${ENV_NAME}/db_migration_users.env
+      
 
 
   build:

@@ -15,6 +15,18 @@ class UploadResponse(BaseModel):
     file_type: str
     status: str
     message: str
+    # Cheap, no-LLM heuristic: True when the upload looks like a blank/near-blank
+    # WCM faculty CV template. The frontend uses this to warn the user (and
+    # require an acknowledgement) that formatting may regress before spending a
+    # run on what is most likely the unfilled template. Best-effort: defaults to
+    # no warning if detection couldn't run, so it never blocks an upload.
+    wcm_template_warning: bool = False
+    # Fraction of non-trivial lines that matched the blank-template string set
+    # (0.0 = clearly a real CV, ~1.0 = clearly an unfilled template). Returned
+    # for server-side logging/telemetry and available to the client; the UI
+    # currently shows a qualitative warning rather than this raw number. None
+    # when the ratio couldn't be computed.
+    wcm_template_match_ratio: Optional[float] = None
 
 
 # ============================================================
@@ -340,9 +352,20 @@ class AdminRunEntry(BaseModel):
     total_cost: float = 0.0
     started_at: Optional[datetime] = None
     has_feedback: bool = False
+    quality_score: Optional[int] = None      # advisory 0-100, None if not computed
+    quality_band: Optional[str] = None       # "GREEN (ship)" / "YELLOW ..." / "RED ..."
 
     class Config:
         from_attributes = True
+
+
+class QualityScoreResult(BaseModel):
+    """Per-run quality score detail (advisory, computed from artifacts)."""
+    run_id: str
+    totalScore: int
+    band: str
+    dimensionScores: List[dict] = []
+    flags: List[str] = []
 
 
 class AdminRunsResponse(BaseModel):
