@@ -85,7 +85,7 @@ export function usePipelineRun(runId: string) {
     const isRunning = runStatus?.status === 'running' && 
       (currentStepInfo?.status === 'running' || currentStepInfo?.status === 'pending')
 
-    let interval: NodeJS.Timeout | null = null
+    let interval: ReturnType<typeof setInterval> | null = null
     if (isRunning) {
       interval = setInterval(fetchStepLogs, 1000)
     }
