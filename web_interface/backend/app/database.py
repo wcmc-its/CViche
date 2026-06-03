@@ -16,7 +16,19 @@ from app.config_loader import get_config
 
 db_user, source = get_config("db", "DB_USER", default="")
 
-engine = create_cviche_engine(override_user=db_user)
+# 1. Extract routing parameters using in configuration loader
+db_host, _ = get_config("db", "DB_HOST", default="")
+db_port, _ = get_config("db", "DB_PORT", default="")
+db_name, _ = get_config("db", "DB_NAME", default="")
+migrate_user, _ = get_config("db", "DB_USER", default="")
+
+# 2. Pass them directly to the factory
+engine = create_cviche_engine(
+        db_host=db_host,
+        db_port=db_port,
+        db_name=db_name,
+        db_user=migrate_user
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
    

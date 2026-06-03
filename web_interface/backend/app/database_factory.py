@@ -5,58 +5,34 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from app.config_loader import get_config
 
-def create_cviche_engine(override_user: str = None):
+def create_cviche_engine(db_host: str, db_port: str, db_name: str, db_user: str):
     """
-    Common factory that sets up an SQLAlchemy engine with dynamic 
-    AWS IAM token generation and mandatory SSL encryption.
+    Pure engine compiler. Accepts configuration values directly,
+    eliminating pathing or duplicate file-reading bugs.
     """
-    # 1. Extract base parameters using your existing config loader
-    db_host, _ = get_config("db", "DB_HOST", default="")
-    print(f"==> dbhost -> '{db_host}'")
-    db_port, _ = get_config("db", "DB_PORT", default="")
-    print(f"==> dbport -> '{db_port}'")
-    db_name, _ = get_config("db", "DB_NAME", default="")
-    print(f"==> dbname -> '{db_name}'")
-    # Use the explicitly passed override user, fallback to config file, fallback to string
-    if override_user:
-        db_user = override_user
-    else:
-        db_user, _ = get_config("db", "DB_USER", default="")
-        
+    print(f"==> DB Factory: Compiling Engine -> HOST: '{db_host}', PORT: '{db_port}', USER: '{db_user}'")
+
+    if not all([db_host, db_port, db_name, db_user]):
+        raise RuntimeError(
+            f"Database factory received incomplete configurations! "
+            f"Given: HOST='{db_host}', PORT='{db_port}', USER='{db_user}', NAME='{db_name}'"
+        )
+
+    DATABASE_URL = f"mysql+pymysql://{db_user}@{db_host}:{db_port}/{db_name}"
     aws_region = os.environ.get("AWS_REGION", "us-east-1")
-    engine_kwargs = {}
-
-    # 2. Determine Database Engine Target Topology
-    if db_host and db_port and db_user and db_name:
-        # MariaDB / MySQL Path
-        DATABASE_URL = f"mysql+pymysql://{db_user}@{db_host}:{db_port}/{db_name}"
-        print(f"==> databaseUrl -> '{DATABASE_URL}'")
-        engine_kwargs["pool_pre_ping"] = True
-
-        # Inner dynamic token generation helper function
-        def generate_iam_db_token():
-            rds_client = boto3.client('rds', region_name=aws_region)
-            return rds_client.generate_db_auth_token(
-                DBHostname=db_host,
-                Port=int(db_port),
-                DBUsername=db_user,
-                Region=aws_region
-            )
-
-        # Inject the pool connection creator interceptor with forced SSL activation
-        engine_kwargs["creator"] = lambda: pymysql.connect(
+    
+    engine_kwargs = {
+        "pool_pre_ping": True,
+        "creator": lambda: pymysql.connect(
             host=db_host,
             port=int(db_port),
             user=db_user,
-            password=generate_iam_db_token(),
+            password=boto3.client('rds', region_name=aws_region).generate_db_auth_token(
+                DBHostname=db_host, Port=int(db_port), DBUsername=db_user, Region=aws_region
+            ),
             database=db_name,
             ssl={'ssl': True}
         )
-    else:
-        # Fallback Local Path: SQLite
-        _default_db = Path(__file__).resolve().parent.parent / "cviche_dev.db"
-        DATABASE_URL = f"sqlite:///{_default_db}"
-        engine_kwargs["connect_args"] = {"check_same_thread": False}
+    }
 
-    # 3. Compile and return the live connection resource
     return create_engine(DATABASE_URL, **engine_kwargs)
