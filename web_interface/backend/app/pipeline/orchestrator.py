@@ -33,6 +33,7 @@ from app.models import Run, Step, Log
 from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.pipeline.event_emitter import event_emitter
 from app.storage import get_storage
+from app.config_loader import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,9 @@ def _get_stage_timeout_seconds() -> int:
     *user* is left waiting. Tune via CVICHE_STAGE_TIMEOUT_SECONDS.
     """
     try:
-        value = int(os.environ.get("CVICHE_STAGE_TIMEOUT_SECONDS", 1800))
+        #value = int(os.environ.get("CVICHE_STAGE_TIMEOUT_SECONDS", 1800))
+        timeout_seconds,_ = get_config("llm","CVICHE_STAGE_TIMEOUT_SECONDS",default=1800)
+        value = int(timeout_seconds) 
     except (TypeError, ValueError):
         return 1800
     return value if value >= 0 else 1800
