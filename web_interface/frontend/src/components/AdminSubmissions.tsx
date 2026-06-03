@@ -8,6 +8,7 @@ import {
   ChevronDown,
   ChevronUp,
   Search,
+  AlertCircle,
 } from 'lucide-react'
 import type { AdminRun } from '../types'
 import { getAdminRuns, computeRunScore } from '../api/admin'
@@ -38,6 +39,7 @@ function QualityCell({
   onScored: (s: { score: number; band: string }) => void
 }) {
   const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   if (score != null) {
     return (
@@ -54,21 +56,37 @@ function QualityCell({
     <button
       type="button"
       disabled={busy}
+      title={error ?? undefined}
       onClick={async (e) => {
         e.stopPropagation()
         setBusy(true)
+        setError(null)
         try {
           const r = await computeRunScore(run.run_id)
           onScored({ score: r.totalScore, band: r.band })
-        } catch {
-          /* leave unscored; admin can retry */
+        } catch (err) {
+          console.error(`Failed to score run ${run.run_id}:`, err)
+          setError(err instanceof Error ? err.message : 'Scoring failed')
         } finally {
           setBusy(false)
         }
       }}
-      className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 disabled:opacity-50"
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium disabled:opacity-50 ${
+        error
+          ? 'bg-red-100 text-red-700 hover:bg-red-200'
+          : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+      }`}
     >
-      {busy ? <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" /> : 'Score'}
+      {busy ? (
+        <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" />
+      ) : error ? (
+        <>
+          <AlertCircle className="w-3 h-3" aria-hidden="true" />
+          Retry
+        </>
+      ) : (
+        'Score'
+      )}
     </button>
   )
 }
