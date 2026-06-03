@@ -147,6 +147,18 @@ class EventEmitter:
     async def emit_run_complete(self, run_id: str, total_cost: float, total_tokens: int, duration: int):
         await self.emit(run_id, {"event": "RUN_COMPLETE", "total_cost": total_cost, "total_tokens": total_tokens, "duration": duration})
 
+    async def emit_run_failed(self, run_id: str, error: str, step_number: int | None = None):
+        """Emit an explicit terminal failure event.
+
+        The granular STEP_ERROR tells the client which stage broke; this
+        run-level event is the authoritative "this run is over, it failed"
+        signal that lets the UI stop the elapsed timer and switch to the
+        failure state immediately, rather than waiting for the next status
+        poll to observe run.status == 'failed'. Mirrors emit_run_complete /
+        RUN_CANCELLED so every terminal outcome has a run-level event.
+        """
+        await self.emit(run_id, {"event": "RUN_FAILED", "error": error, "step": step_number})
+
     async def emit_progress(self, run_id: str, step_number: int, current: int, total: int, message: str = ""):
         """Emit granular progress within a step (e.g., "Processing 5 of 20 sections")."""
         await self.emit(run_id, {
