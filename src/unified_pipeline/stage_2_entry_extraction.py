@@ -14,7 +14,7 @@ import sys
 import json
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Callable, Optional
 from docx import Document
 
 # Add to path
@@ -818,7 +818,11 @@ Respond **only** with a JSON array containing the identified entries. If no entr
     return all_validated_entries, cost_info
 
 
-def run_stage_2(docx_path: str, hierarchy_json_path: str = None):
+def run_stage_2(
+    docx_path: str,
+    hierarchy_json_path: str = None,
+    cancel_check: Optional[Callable[[], None]] = None,
+):
     """
     Main Stage 2: Extract entries from CV sections using LLM
 
@@ -826,6 +830,14 @@ def run_stage_2(docx_path: str, hierarchy_json_path: str = None):
         docx_path: Path to Word document
         hierarchy_json_path: Optional path to Stage 1b hierarchy JSON with boundaries
                             (if not provided, will use OutputManager to find it)
+        cancel_check: Optional zero-arg callable invoked at the top of each
+                            section iteration. It should raise to abort the run
+                            (the web orchestrator passes its check_cancelled,
+                            which raises CancelledException). This stage makes
+                            one LLM call per section, so without an intra-stage
+                            check a cancel would not land until all ~86 sections
+                            finished. None (the standalone CLI default) is a
+                            no-op, leaving CLI behavior unchanged.
     """
 
     print(f"Input: {docx_path}")
@@ -959,6 +971,11 @@ def run_stage_2(docx_path: str, hierarchy_json_path: str = None):
                             all_assigned_indices.add(gap_idx)
 
     for i, (hierarchy_path, start_idx, end_idx) in enumerate(sections_to_process, 1):
+        # Check for cancellation before each section's LLM call so an aborted
+        # run terminates promptly rather than completing all sections first.
+        if cancel_check is not None:
+            cancel_check()
+
         section_name = hierarchy_path[-1] if hierarchy_path else "Unknown"
         print(f"[{i}/{len(sections_to_process)}] Processing: {' > '.join(hierarchy_path)}")
         print(f"  Elements: {start_idx} to {end_idx}")

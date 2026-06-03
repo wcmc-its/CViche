@@ -26,7 +26,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Callable
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -2069,7 +2069,8 @@ def extract_fields_from_mapped_entries(
     mapped_entries: List[Dict[str, Any]],
     batch_size: int = 10,
     model: str = None,
-    document_uid: str = ""
+    document_uid: str = "",
+    cancel_check: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     """
     Extract structured fields from all mapped entries.
@@ -2079,6 +2080,10 @@ def extract_fields_from_mapped_entries(
         batch_size: Number of entries to process per batch (default: 10)
         model: Unused -- the model is resolved from llm_config.yaml, not this argument
         document_uid: Document identifier for extracting CV owner name
+        cancel_check: Optional zero-arg callable invoked at the top of each
+            batch iteration. It should raise to abort the run (the web
+            orchestrator passes its check_cancelled). None (the standalone CLI
+            default) is a no-op.
     """
     print(f"\n{'='*80}")
     print("Stage 4: Intra-Entry Field Extraction")
@@ -2146,6 +2151,11 @@ def extract_fields_from_mapped_entries(
     total_cache_write_tokens = 0
 
     for batch_idx in range(num_batches):
+        # Check for cancellation before each batch's LLM calls so an aborted
+        # run terminates promptly rather than running every batch to completion.
+        if cancel_check is not None:
+            cancel_check()
+
         start_idx = batch_idx * batch_size
         end_idx = min(start_idx + batch_size, len(valid_entries))
         batch = valid_entries[start_idx:end_idx]
@@ -2210,13 +2220,24 @@ def extract_fields_from_mapped_entries(
     }
 
 
-def process_cv(docx_path: str, model: str = None) -> Dict[str, Any]:
+def process_cv(
+    docx_path: str,
+    model: str = None,
+    cancel_check: Optional[Callable[[], None]] = None,
+) -> Dict[str, Any]:
     """
     Main pipeline: Load Stage 3b classified entries and extract fields.
 
     Args:
         docx_path: Path to the CV document (or just the document UID)
         model: Unused -- the model is resolved from llm_config.yaml, not this argument
+        cancel_check: Optional zero-arg callable threaded into the per-batch
+            extraction loop. It should raise to abort the run (the web
+            orchestrator passes its check_cancelled, which raises
+            CancelledException). This stage is the heaviest -- ~130 LLM calls
+            spread across batches -- so an intra-stage check is what lets a
+            cancel land mid-stage instead of after the last batch. None (the
+            standalone CLI default) is a no-op, leaving CLI behavior unchanged.
     """
     # Derive UIDs
     filename = Path(docx_path).stem
@@ -2259,7 +2280,13 @@ def process_cv(docx_path: str, model: str = None) -> Dict[str, Any]:
     print(f"  - Valid for extraction: {len(valid_entries)}")
 
     # Extract fields
-    result = extract_fields_from_mapped_entries(valid_entries, batch_size=10, model=model, document_uid=document_uid)
+    result = extract_fields_from_mapped_entries(
+        valid_entries,
+        batch_size=10,
+        model=model,
+        document_uid=document_uid,
+        cancel_check=cancel_check,
+    )
 
     # Build output with stage metadata
     output = {
