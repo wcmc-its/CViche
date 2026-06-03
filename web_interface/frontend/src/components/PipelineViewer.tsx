@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { MapPin, XCircle, AlertCircle, Clock } from 'lucide-react'
+import { MapPin, XCircle, AlertCircle, Clock, CheckCircle2, Download, LifeBuoy } from 'lucide-react'
 import type { RunStatus } from '../types'
 import { getRunStatus, getRunStep, getPromptLogs, getRunDataJson, cancelRun, restartRun, retryStep } from '../api/runs'
 import { getWebSocketUrl } from '../api/websocket'
@@ -508,6 +508,15 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     }
   }, [runId])
 
+  // On completion, jump to the final stage so the output/download is on screen
+  // (the prominent Download button was previously only rendered for stage 6,
+  // which the user often wasn't viewing). Fires once on the transition to
+  // 'complete'; the dep is the status string, so the 2s poll re-returning
+  // 'complete' doesn't keep yanking the user off a stage they navigated to.
+  useEffect(() => {
+    if (runStatus?.status === 'complete' && runStatus.steps.length > 0) {
+      setCurrentStep(runStatus.steps[runStatus.steps.length - 1].step_number)
+    }
   // Warn before the tab is closed or navigated away while a run is in progress.
   // The run continues server-side regardless, but the browser prompt reminds the
   // user that leaving won't stop it (and that they can return later). Modern
@@ -534,6 +543,36 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   }
 
   const currentStepData = runStatus.steps[currentStep - 1]
+
+  // Basename of the final Word document, for the success bar's primary
+  // Download CTA. Searches from the last step backward so it resolves to the
+  // final stage's .docx. A completed run always produces one (confirmed), but
+  // guard anyway so a momentarily-missing file hides the button rather than
+  // rendering a dead link.
+  const finalDocxName = (() => {
+    if (runStatus.status !== 'complete') return null
+    for (let i = runStatus.steps.length - 1; i >= 0; i--) {
+      const raw = runStatus.steps[i].output_files
+      if (!raw) continue
+      try {
+        const files: string[] = JSON.parse(raw)
+        const docx = files.find((f) => f.endsWith('.docx'))
+        if (docx) return docx.split('/').pop() || docx
+      } catch {
+        // ignore unparseable output_files
+      }
+    }
+    return null
+  })()
+
+  // mailto: for the "Contact support" recourse, prefilled with run context.
+  // Uses the established support contact (paa2013@med.cornell.edu).
+  const supportHref = (reason: string) =>
+    `mailto:paa2013@med.cornell.edu?subject=${encodeURIComponent(
+      `CViche: ${reason} (run ${runId})`
+    )}&body=${encodeURIComponent(
+      `Run ID: ${runId}\nFile: ${runStatus.filename}\n\nPlease describe what happened:\n`
+    )}`
 
   return (
     <div className="min-h-screen bg-surface-muted">
@@ -582,7 +621,41 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
               >
                 {isRestarting ? 'Restarting...' : 'Restart with this file'}
               </button>
+              <a
+                href={supportHref('a run appears stuck')}
+                className="inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium text-orange-800 hover:bg-orange-100 transition-colors focus:ring-2 focus:ring-orange-500 focus:outline-none"
+              >
+                <LifeBuoy className="h-4 w-4" aria-hidden="true" />
+                Contact support
+              </a>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Success Banner — unmistakable completion + the primary Download CTA,
+          always visible at the top (not buried in the stage-6 card). */}
+      {runStatus.status === 'complete' && (
+        <div className="bg-success-50 border-b-2 border-success-600 px-6 py-4" role="status" aria-live="polite">
+          <div className="flex items-center justify-between gap-4 max-w-full">
+            <div className="flex items-center gap-3">
+              <CheckCircle2 className="h-6 w-6 text-success-600 flex-shrink-0" aria-hidden="true" />
+              <div>
+                <p className="text-base font-semibold text-success-800">Your CV is ready to download</p>
+                <p className="text-sm text-success-700">{runStatus.filename}</p>
+              </div>
+            </div>
+            {finalDocxName && (
+              <a
+                href={`/api/run/${runId}/data/${finalDocxName}`}
+                download
+                aria-label={`Download your formatted CV, ${finalDocxName}`}
+                className="shrink-0 inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold bg-success-600 text-white shadow-md hover:bg-success-700 transition-colors focus:ring-2 focus:ring-success-600 focus:outline-none"
+              >
+                <Download className="h-5 w-5" aria-hidden="true" />
+                <span>Download Word document</span>
+              </a>
+            )}
           </div>
         </div>
       )}
@@ -617,6 +690,13 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
               >
                 {isRestarting ? 'Restarting...' : 'Restart with this file'}
               </button>
+              <a
+                href={supportHref('a run failed')}
+                className="inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium text-red-800 hover:bg-red-100 transition-colors focus:ring-2 focus:ring-red-500 focus:outline-none"
+              >
+                <LifeBuoy className="h-4 w-4" aria-hidden="true" />
+                Contact support
+              </a>
             </div>
           </div>
         </div>
