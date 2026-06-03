@@ -41,6 +41,7 @@ from core.validators.training_compliance_corrector import apply_training_complia
 from core.validators.invited_talk_corrector import apply_invited_talk_corrections
 from core.validators.grant_position_corrector import apply_grant_position_corrections
 from core.validators.wcm_table_corrector import apply_wcm_table_corrections
+from core.validators.prose_mentee_corrector import apply_prose_mentee_corrections
 from core.validators.template_scaffold import apply_template_scaffold_corrections
 
 
@@ -2082,6 +2083,21 @@ def run_stage_3b(
             print(f"     - {detail['original']} → {detail['corrected_to']}: {detail['reason']}")
     else:
         print("   ✓ No WCM table corrections needed")
+
+    # 10b-2. Prose named-mentee corrections (named individual mentee under an
+    #        advising/mentoring section, misclassified as a K teaching code,
+    #        -> N3A/N3B). Runs AFTER 10b so structured mentee rows are already
+    #        N3A/N3B, and BEFORE 10c so a real named mentee is never demoted to T.
+    print()
+    print("10b-2. Prose named-mentee corrections...")
+    all_classified, prose_mentee_stats = apply_prose_mentee_corrections(all_classified)
+    post_correction_stats['prose_mentee'] = prose_mentee_stats
+    if prose_mentee_stats['corrections_made'] > 0:
+        print(f"   ✓ Corrected {prose_mentee_stats['corrections_made']} prose mentee codes")
+        for detail in prose_mentee_stats['correction_details'][:3]:
+            print(f"     - {detail['original']} → {detail['corrected_to']}: {detail['reason']}")
+    else:
+        print("   ✓ No prose mentee corrections needed")
 
     # 10c. Template-scaffold suppression (filled-template instruction text → T)
     #      Runs AFTER 10b so pure template strings (e.g. the board-table header
