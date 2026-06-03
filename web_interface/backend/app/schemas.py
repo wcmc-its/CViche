@@ -340,9 +340,20 @@ class AdminRunEntry(BaseModel):
     total_cost: float = 0.0
     started_at: Optional[datetime] = None
     has_feedback: bool = False
+    quality_score: Optional[int] = None      # advisory 0-100, None if not computed
+    quality_band: Optional[str] = None       # "GREEN (ship)" / "YELLOW ..." / "RED ..."
 
     class Config:
         from_attributes = True
+
+
+class QualityScoreResult(BaseModel):
+    """Per-run quality score detail (advisory, computed from artifacts)."""
+    run_id: str
+    totalScore: int
+    band: str
+    dimensionScores: List[dict] = []
+    flags: List[str] = []
 
 
 class AdminRunsResponse(BaseModel):

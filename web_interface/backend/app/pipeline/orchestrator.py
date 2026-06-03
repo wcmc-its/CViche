@@ -413,6 +413,17 @@ class PipelineOrchestrator:
 
             await event_emitter.emit_run_complete(self.run_id, run.total_cost, run.total_tokens, duration)
 
+            # Compute & cache the advisory quality score for the admin view.
+            # Best-effort, run off the event loop; never affects run status.
+            try:
+                import asyncio
+                from app.services.quality_score_service import compute_and_cache_score
+                await asyncio.get_running_loop().run_in_executor(
+                    None, compute_and_cache_score, self.run_id
+                )
+            except Exception as e:
+                logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
+
         except CancelledException:
             # Run was cancelled - status already updated by API endpoint
             await self.log(0, "Pipeline cancelled by user", "WARNING")

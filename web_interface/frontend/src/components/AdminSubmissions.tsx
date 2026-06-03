@@ -10,12 +10,68 @@ import {
   Search,
 } from 'lucide-react'
 import type { AdminRun } from '../types'
-import { getAdminRuns } from '../api/admin'
+import { getAdminRuns, computeRunScore } from '../api/admin'
 import { formatDate, formatDuration, formatCost } from '../utils'
 import StatusIcon from './shared/StatusIcon'
 
 type SortField = 'started_at' | 'total_cost' | 'duration_seconds' | 'filename' | 'status'
 type SortDir = 'asc' | 'desc'
+
+function bandClasses(band: string | null | undefined): string {
+  if (!band) return 'bg-gray-100 text-gray-600'
+  if (band.startsWith('GREEN')) return 'bg-green-100 text-green-700'
+  if (band.startsWith('YELLOW')) return 'bg-amber-100 text-amber-700'
+  return 'bg-red-100 text-red-700'
+}
+
+// Advisory run-quality score (provisional — bands not yet calibrated). Shows the
+// cached score as a colored badge, or a "Score" button to compute/backfill.
+function QualityCell({
+  run,
+  score,
+  band,
+  onScored,
+}: {
+  run: AdminRun
+  score: number | null
+  band: string | null
+  onScored: (s: { score: number; band: string }) => void
+}) {
+  const [busy, setBusy] = useState(false)
+
+  if (score != null) {
+    return (
+      <span
+        title={`${band ?? ''} — provisional/diagnostic quality score`}
+        className={`inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-semibold ${bandClasses(band)}`}
+      >
+        {score}
+      </span>
+    )
+  }
+  if (run.status !== 'complete') return <span className="text-gray-400 text-xs">--</span>
+  return (
+    <button
+      type="button"
+      disabled={busy}
+      onClick={async (e) => {
+        e.stopPropagation()
+        setBusy(true)
+        try {
+          const r = await computeRunScore(run.run_id)
+          onScored({ score: r.totalScore, band: r.band })
+        } catch {
+          /* leave unscored; admin can retry */
+        } finally {
+          setBusy(false)
+        }
+      }}
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 disabled:opacity-50"
+    >
+      {busy ? <Loader2 className="w-3 h-3 animate-spin" aria-hidden="true" /> : 'Score'}
+    </button>
+  )
+}
 
 export default function AdminSubmissions() {
   const navigate = useNavigate()
@@ -28,6 +84,8 @@ export default function AdminSubmissions() {
   const [filterStatus, setFilterStatus] = useState('')
   const [sortField, setSortField] = useState<SortField>('started_at')
   const [sortDir, setSortDir] = useState<SortDir>('desc')
+  // On-demand scores computed this session, keyed by run_id (overlays fetched data).
+  const [computedScores, setComputedScores] = useState<Record<string, { score: number; band: string }>>({})
 
   const fetchRuns = useCallback(async (offset: number, append: boolean) => {
     const params = new URLSearchParams({
@@ -188,6 +246,13 @@ export default function AdminSubmissions() {
                   >
                     Date <SortIcon field="started_at" />
                   </th>
+                  <th
+                    scope="col"
+                    title="Advisory run-quality score (0-100). Provisional — bands not yet calibrated."
+                    className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider"
+                  >
+                    Quality
+                  </th>
                   <th scope="col" className="px-4 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Feedback
                   </th>
@@ -232,6 +297,14 @@ export default function AdminSubmissions() {
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
                       {formatDate(run.started_at)}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap text-center">
+                      <QualityCell
+                        run={run}
+                        score={run.quality_score ?? computedScores[run.run_id]?.score ?? null}
+                        band={run.quality_band ?? computedScores[run.run_id]?.band ?? null}
+                        onScored={(s) => setComputedScores((prev) => ({ ...prev, [run.run_id]: s }))}
+                      />
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap text-center">
                       {run.status === 'complete' ? (
