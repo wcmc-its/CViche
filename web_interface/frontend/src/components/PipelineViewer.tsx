@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { MapPin, XCircle, AlertCircle, Clock, CheckCircle2, Download, LifeBuoy } from 'lucide-react'
 import type { RunStatus } from '../types'
-import { getRunStatus, getRunStep, getPromptLogs, getRunDataJson, cancelRun, restartRun, retryStep } from '../api/runs'
-import { getWebSocketUrl } from '../api/websocket'
+import { getRunDataJson, cancelRun, restartRun, retryStep } from '../api/runs'
 import { formatCost } from '../utils'
+import { usePipelineRun } from '../hooks/usePipelineRun'
+
 import PipelineHeader from './PipelineHeader'
 import StepSidebar from './StepSidebar'
 import LogViewer from './LogViewer'
@@ -20,7 +21,6 @@ interface PipelineViewerProps {
   onNavigateToRun?: (runId: string) => void
 }
 
-// Stage descriptions for the UI
 const STAGE_DESCRIPTIONS: Record<string, string> = {
   '1a': 'Uses GPT to analyze the CV structure and identify all section headers (Education, Publications, Grants, etc.) and their hierarchical relationships.',
   '1b': 'Creates mappings between extracted headers and Word document paragraph indices without using LLM.',
@@ -36,7 +36,6 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
   '6': 'Generates the final WCM-formatted Word document with all sections filled by taxonomy code. Routes presentations and service activities to Regional/National/International tables based on inferred CV owner location.',
 }
 
-// Step weights for progress calculation (must match step_registry.py)
 const STEP_WEIGHTS: Record<string, { weight: number; estimated_seconds: number }> = {
   '1a': { weight: 15, estimated_seconds: 70 },
   '1b': { weight: 2, estimated_seconds: 10 },
@@ -53,155 +52,70 @@ const STEP_WEIGHTS: Record<string, { weight: number; estimated_seconds: number }
 }
 const TOTAL_WEIGHT = Object.values(STEP_WEIGHTS).reduce((sum, s) => sum + s.weight, 0)
 
-// The elapsed timer freezes on ANY non-running status (it previously only
-// froze on 'complete'/'failed', so a 'cancelled' run kept a stale timer);
-// see the timer effect below.
-
-// Sum of per-stage estimates (~8 min). Used to decide when a still-"running"
-// run has plausibly hung rather than just being slow.
-const EXPECTED_TOTAL_SECONDS = Object.values(STEP_WEIGHTS).reduce((sum, s) => sum + s.estimated_seconds, 0)
-// A run is flagged "may be stuck" when EITHER no server-side forward progress
-// (a step completing, or cost/tokens advancing) has been seen for this long,
-// OR total elapsed exceeds this multiple of the expected total. Deliberately
-// conservative so a large CV doing real work is not falsely flagged.
-const STALL_NO_PROGRESS_MS = 5 * 60 * 1000
-const STALL_ELAPSED_MULTIPLIER = 3
-// Consecutive failed status polls before we warn the user the connection is lost.
-const POLL_FAILURE_THRESHOLD = 3
-
 export default function PipelineViewer({ runId, onBack, onNavigateToRun }: PipelineViewerProps) {
-  const [runStatus, setRunStatus] = useState<RunStatus | null>(null)
-  const [currentStep, setCurrentStep] = useState(1)
-  const [logs, setLogs] = useState<Record<number, string[]>>({})
+  // Extract clean state and background engine processing mechanisms out of the custom hook
+  const {
+    runStatus,
+    setRunStatus,
+    currentStep,
+    setCurrentStep,
+    logs,
+    stepProgress,
+    showPromptLogs,
+    setShowPromptLogs,
+    promptLogs,
+    promptLogsMessage,
+    selectedPromptLog,
+    setSelectedPromptLog,
+    localElapsedSeconds,
+    stepStartTimes,
+    stepStartCosts,
+    connectionLost,
+    maybeStuck,
+    setMaybeStuck,
+    fetchPromptLogsContext,
+  } = usePipelineRun(runId)
+
+  const [displayProgress, setDisplayProgress] = useState(0)
+  const [apiError, setApiError] = useState<string | null>(null)
   const [jsonViewerOpen, setJsonViewerOpen] = useState(false)
   const [jsonContent, setJsonContent] = useState<any>(null)
   const [jsonFilename, setJsonFilename] = useState('')
-  const [stepProgress, setStepProgress] = useState<Record<number, { current: number; total: number; message: string }>>({})
-  const [showPromptLogs, setShowPromptLogs] = useState(false)
-  const [promptLogs, setPromptLogs] = useState<{filename: string, content: string}[]>([])
-  const [promptLogsMessage, setPromptLogsMessage] = useState<string | null>(null)
-  const [selectedPromptLog, setSelectedPromptLog] = useState<string | null>(null)
-  const [localElapsedSeconds, setLocalElapsedSeconds] = useState(0)
-  const [displayProgress, setDisplayProgress] = useState(0)
-  const [stepStartTimes, setStepStartTimes] = useState<Record<number, number>>({})
-  const [stepStartCosts, setStepStartCosts] = useState<Record<number, number>>({})
-  const [isCancelling, setIsCancelling] = useState(false)
   const [showCancelConfirm, setShowCancelConfirm] = useState(false)
+  const [isCancelling, setIsCancelling] = useState(false)
   const [isRestarting, setIsRestarting] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
-  // True once the status poll has failed POLL_FAILURE_THRESHOLD times in a row,
-  // so the user is told the displayed state may be out of date instead of the
-  // failures being swallowed silently.
-  const [connectionLost, setConnectionLost] = useState(false)
-  // True when a still-"running" run looks hung (no forward progress / elapsed
-  // far past expected). Lets the UI stop implying active work and offer recourse
-  // even if the backend never reports a terminal status.
-  const [maybeStuck, setMaybeStuck] = useState(false)
+  
+  const cvInsightsAttemptedRef = useRef<string | null>(null)
+  const logsEndRef = useRef<HTMLDivElement>(null)
+  const [cvInsights, setCvInsights] = useState<any>(null)
 
-  // Auto-scroll to feedback section when URL has #feedback hash
+  // Explicit user page exit protection alert interceptor
+  useEffect(() => {
+    if (runStatus?.status !== 'running') return
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+      e.returnValue = ''
+    }
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
+  }, [runStatus?.status])
+
+  // Automatic target window scroll tracker targeting live user context feedback triggers
   useEffect(() => {
     if (window.location.hash === '#feedback' && runStatus?.status === 'complete') {
-      // Wait for FeedbackForm to mount and render
       const timer = setTimeout(() => {
         const el = document.getElementById('feedback-section')
-        if (el) {
-          el.scrollIntoView({ behavior: 'smooth' })
-        }
+        if (el) el.scrollIntoView({ behavior: 'smooth' })
       }, 500)
       return () => clearTimeout(timer)
     }
   }, [runStatus?.status])
-  const [apiError, setApiError] = useState<string | null>(null)
-  // Track which run we've already attempted a CV-insights load for, so the 2s
-  // status poll (a fresh steps array each tick) can't re-fire the request on
-  // every poll — especially after a failure, where cvInsights stays null.
-  const cvInsightsAttemptedRef = useRef<string | null>(null)
-  const [cvInsights, setCvInsights] = useState<{
-    cv_owner?: { full_name?: string; last_name?: string };
-    cv_owner_location?: {
-      metro_area?: string;
-      primary_location?: { city?: string; state?: string; institution?: string };
-      inference_success?: boolean;
-    };
-  } | null>(null)
-  const wsRef = useRef<WebSocket | null>(null)
-  const startTimeRef = useRef<number | null>(null)
-  const logsEndRef = useRef<HTMLDivElement>(null)
-  // Consecutive status-poll failures (reset on any success).
-  const pollFailuresRef = useRef(0)
-  // Last time server-reported progress advanced, used for stall detection.
-  const lastProgressRef = useRef<{ fingerprint: string; at: number }>({ fingerprint: '', at: Date.now() })
 
-  // Open the in-app confirmation modal that spells out the implications of
-  // cancelling (partial output, sunk cost, delayed stop, no undo) before any
-  // request is sent. The actual cancellation happens in confirmCancel.
-  const handleCancel = () => {
-    if (isCancelling) return
-    setShowCancelConfirm(true)
-  }
-
-  // Proceed with cancellation after the user confirms in the modal. Keeps the
-  // isCancelling busy state so both the modal's primary button and the header
-  // Cancel button reflect the in-flight request.
-  const confirmCancel = async () => {
-    if (isCancelling) return
-
-    setIsCancelling(true)
-    try {
-      await cancelRun(runId)
-      setShowCancelConfirm(false)
-    } catch (err: any) {
-      console.error('Error cancelling run:', err)
-      setApiError(`Failed to cancel: ${err.message || 'Unknown error'}`)
-      // Leave the modal open on failure so the user can retry or dismiss.
-    } finally {
-      setIsCancelling(false)
-    }
-  }
-
-  // Restart the pipeline with the same file
-  const handleRestart = async () => {
-    if (isRestarting) return
-    setIsRestarting(true)
-    try {
-      const data = await restartRun(runId)
-      if (onNavigateToRun) {
-        onNavigateToRun(data.new_run_id)
-      }
-    } catch (err: any) {
-      console.error('Error restarting run:', err)
-      setApiError(`Failed to restart: ${err.message || 'Unknown error'}`)
-    } finally {
-      setIsRestarting(false)
-    }
-  }
-
-  // Resume this run from the failed step (re-runs the failed stage onward,
-  // reusing earlier stages' outputs). Cheaper than a full restart.
-  const handleRetry = async () => {
-    if (isRetrying) return
-    const failedStep = runStatus?.steps?.find((s) => s.status === 'error')
-    if (!failedStep) return
-    setIsRetrying(true)
-    try {
-      await retryStep(runId, failedStep.step_number)
-      // The 2s status poll + WebSocket pick up the run flipping back to
-      // "running", which swaps the failed banner for the live progress view.
-    } catch (err: any) {
-      console.error('Error retrying step:', err)
-      setApiError(`Failed to retry: ${err.message || 'Unknown error'}`)
-    } finally {
-      setIsRetrying(false)
-    }
-  }
-
-  // Calculate overall progress with weighted steps and time-based interpolation
+  // Pure data derived state execution calculation — maps linear updates instantly on changes
   const calculateProgress = useCallback(() => {
     if (!runStatus?.steps) return 0
-
-    let completedWeight = 0
-    let runningWeight = 0
-    let runningProgress = 0
+    let completedWeight = 0, runningWeight = 0, runningProgress = 0
 
     runStatus.steps.forEach((step) => {
       const stageId = step.stage_id || String(step.step_number)
@@ -211,222 +125,94 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         completedWeight += stepInfo.weight
       } else if (step.status === 'running') {
         runningWeight = stepInfo.weight
-
         const stepProg = stepProgress[step.step_number]
         if (stepProg && stepProg.total > 0) {
           runningProgress = stepProg.current / stepProg.total
         } else {
           const stepStartTime = stepStartTimes[step.step_number]
-          if (stepStartTime) {
-            const elapsed = (Date.now() - stepStartTime) / 1000
-            runningProgress = Math.min(0.95, elapsed / stepInfo.estimated_seconds)
-          } else {
-            runningProgress = 0.05
-          }
+          runningProgress = stepStartTime ? Math.min(0.95, (Date.now() - stepStartTime) / 1000 / stepInfo.estimated_seconds) : 0.05
         }
       }
     })
-
-    const totalProgress = (completedWeight + runningWeight * runningProgress) / TOTAL_WEIGHT * 100
-    return Math.round(Math.min(100, Math.max(0, totalProgress)))
+    return Math.round(Math.min(100, Math.max(0, ((completedWeight + runningWeight * runningProgress) / TOTAL_WEIGHT) * 100)))
   }, [runStatus?.steps, stepProgress, stepStartTimes])
 
-  // Fetch initial status. The 2s poll is the authoritative source of run
-  // status (the WebSocket only fast-paths events); a stuck/disconnected poll
-  // must therefore be visible, not swallowed.
-  useEffect(() => {
-    const fetchStatus = async () => {
-      try {
-        const data = await getRunStatus(runId)
-        pollFailuresRef.current = 0
-        setConnectionLost(false)
-        setRunStatus(data)
-      } catch {
-        // Don't treat a single blip as a problem, but a sustained run of
-        // failures means the displayed state is stale -- say so.
-        pollFailuresRef.current += 1
-        if (pollFailuresRef.current >= POLL_FAILURE_THRESHOLD) {
-          setConnectionLost(true)
-        }
-      }
-    }
-    fetchStatus()
-    const interval = setInterval(fetchStatus, 2000)
-    return () => clearInterval(interval)
-  }, [runId])
-
-  // Fetch logs for current step from API
-  useEffect(() => {
-    const fetchStepLogs = async () => {
-      try {
-        const data = await getRunStep(runId, currentStep)
-        if (data.logs && data.logs.length > 0) {
-          setLogs((prev) => ({
-            ...prev,
-            [currentStep]: data.logs.map((log: any) => `[${log.time}] ${log.message}`)
-          }))
-        }
-      } catch (err) {
-        console.error('Error fetching step logs:', err)
-      }
-    }
-
-    fetchStepLogs()
-
-    const currentStepInfo = runStatus?.steps?.find(s => s.step_number === currentStep)
-    const isRunning = runStatus?.status === 'running' &&
-      (currentStepInfo?.status === 'running' || currentStepInfo?.status === 'pending')
-
-    if (isRunning) {
-      const interval = setInterval(fetchStepLogs, 1000)
-      return () => clearInterval(interval)
-    }
-  }, [runId, currentStep, runStatus?.status, runStatus?.steps])
-
-  // Fetch prompt logs for current step
-  const fetchPromptLogs = useCallback(async () => {
-    try {
-      const data = await getPromptLogs(runId, currentStep)
-      setPromptLogs(data.logs || [])
-      setPromptLogsMessage(data.message || null)
-      setShowPromptLogs(true)
-      if (data.logs && data.logs.length > 0) {
-        setSelectedPromptLog(data.logs[0].filename)
-      } else {
-        setSelectedPromptLog(null)
-      }
-    } catch (err) {
-      console.error('Error fetching prompt logs:', err)
-    }
-  }, [runId, currentStep])
-
-  // Re-fetch prompt logs when step changes and panel is visible
-  useEffect(() => {
-    if (showPromptLogs) {
-      fetchPromptLogs()
-    }
-  }, [currentStep, fetchPromptLogs, showPromptLogs])
-
-  // Smooth timer that ticks every second while running, and freezes the
-  // instant the run is no longer running. The timer is intentionally driven
-  // off runStatus.status (sourced from the authoritative poll), so it can
-  // never keep counting after the run has actually ended -- the bug Mohammad
-  // hit, where a Stage 4 failure left the timer climbing indefinitely.
-  useEffect(() => {
-    if (runStatus?.status === 'running') {
-      if (!startTimeRef.current) {
-        if (runStatus.total_duration_seconds) {
-          startTimeRef.current = Date.now() - (runStatus.total_duration_seconds * 1000)
-        } else {
-          startTimeRef.current = Date.now()
-        }
-        setLocalElapsedSeconds(runStatus.total_duration_seconds || 0)
-      }
-
-      const timer = setInterval(() => {
-        if (startTimeRef.current) {
-          const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000)
-          setLocalElapsedSeconds(elapsed)
-          // Deterministic client-side stall guard: even if the backend never
-          // reports a terminal status, stop pretending work is ongoing once
-          // progress has clearly stalled.
-          const noProgressMs = Date.now() - lastProgressRef.current.at
-          setMaybeStuck(
-            noProgressMs > STALL_NO_PROGRESS_MS ||
-            elapsed > EXPECTED_TOTAL_SECONDS * STALL_ELAPSED_MULTIPLIER
-          )
-        }
-      }, 1000)
-      return () => clearInterval(timer)
-    } else {
-      // Any non-running status: stop ticking and freeze the displayed elapsed
-      // at the server's authoritative duration. Covers complete, failed,
-      // cancelled, created -- previously cancelled/created kept a stale timer.
-      if (typeof runStatus?.total_duration_seconds === 'number') {
-        setLocalElapsedSeconds(runStatus.total_duration_seconds)
-      }
-      startTimeRef.current = null
-      setMaybeStuck(false)
-    }
-  }, [runStatus?.status, runStatus?.total_duration_seconds])
-
-  // Record when server-reported progress last advanced. A step completing or
-  // cost/tokens moving is real forward progress; an ever-incrementing elapsed
-  // time is NOT (it climbs even when wedged), so it is deliberately excluded
-  // from the fingerprint. The stall guard above measures time since this.
-  useEffect(() => {
-    if (!runStatus) return
-    const completeCount = runStatus.steps.filter((s) => s.status === 'complete').length
-    const runningStep = runStatus.steps.find((s) => s.status === 'running')?.step_number ?? -1
-    const fingerprint = `${completeCount}|${runningStep}|${runStatus.total_cost}|${runStatus.total_tokens}`
-    if (fingerprint !== lastProgressRef.current.fingerprint) {
-      lastProgressRef.current = { fingerprint, at: Date.now() }
-      setMaybeStuck(false)
-    }
-  }, [runStatus])
-
-  // Smooth progress animation
+  // Animation layout frame interpolator for progress bar visualization adjustments
   useEffect(() => {
     if (runStatus?.status !== 'running') {
-      const progress = calculateProgress()
-      if (displayProgress !== progress) {
-        setDisplayProgress(progress)
-      }
+      setDisplayProgress(calculateProgress())
       return
     }
-
     const interval = setInterval(() => {
       const targetProgress = calculateProgress()
-      setDisplayProgress(prev => {
-        if (prev < targetProgress) {
-          return Math.min(prev + 1, targetProgress)
-        } else if (prev > targetProgress) {
-          return targetProgress
-        }
-        return prev
-      })
+      setDisplayProgress((prev) => (prev < targetProgress ? Math.min(prev + 1, targetProgress) : targetProgress))
     }, 1000)
-
     return () => clearInterval(interval)
-  }, [runStatus?.status, calculateProgress, displayProgress])
+  }, [runStatus?.status, calculateProgress])
 
-  // Load CV insights when Stage 4 completes
+  // Load extracted summary details following complete validation matches on stage 4 transitions
   useEffect(() => {
     const loadCvInsights = async () => {
-      const stage4Step = runStatus?.steps.find(s => s.stage_id === '4')
-      if (!stage4Step || stage4Step.status !== 'complete') return
-      if (cvInsights) return
-      // Only attempt once per run, regardless of success/failure.
-      if (cvInsightsAttemptedRef.current === runId) return
+      const stage4Step = runStatus?.steps.find((s) => s.stage_id === '4')
+      if (!stage4Step || stage4Step.status !== 'complete' || cvInsights || cvInsightsAttemptedRef.current === runId) return
 
       let outputFiles: string[] = []
       try {
         outputFiles = stage4Step.output_files ? JSON.parse(stage4Step.output_files) : []
-      } catch {
-        return
-      }
+      } catch { return }
 
-      const fieldsJson = outputFiles.find(f => f.includes('_fields.json'))
+      const fieldsJson = outputFiles.find((f) => f.includes('_fields.json'))
       if (!fieldsJson) return
 
       cvInsightsAttemptedRef.current = runId
       try {
         const data = await getRunDataJson(runId, fieldsJson)
         if (data.content) {
-          setCvInsights({
-            cv_owner: data.content.cv_owner,
-            cv_owner_location: data.content.cv_owner_location
-          })
+          setCvInsights({ cv_owner: data.content.cv_owner, cv_owner_location: data.content.cv_owner_location })
         }
       } catch (err) {
         console.error('Error loading CV insights:', err)
       }
     }
-
     loadCvInsights()
   }, [runStatus?.steps, runId, cvInsights])
 
-  // Open JSON viewer
+  const handleCancel = () => { if (!isCancelling) setShowCancelConfirm(true) }
+
+  const confirmCancel = async () => {
+    if (isCancelling) return
+    setIsCancelling(true)
+    try {
+      await cancelRun(runId)
+      setShowCancelConfirm(false)
+    } catch (err: any) {
+      setApiError(`Failed to cancel: ${err.message || 'Unknown error'}`)
+    } finally { setIsCancelling(false) }
+  }
+
+  const handleRestart = async () => {
+    if (isRestarting) return
+    setIsRestarting(true)
+    try {
+      const data = await restartRun(runId)
+      if (onNavigateToRun) onNavigateToRun(data.new_run_id)
+    } catch (err: any) {
+      setApiError(`Failed to restart: ${err.message || 'Unknown error'}`)
+    } finally { setIsRestarting(false) }
+  }
+
+  const handleRetry = async () => {
+    if (isRetrying) return
+    const failedStep = runStatus?.steps?.find((s) => s.status === 'error')
+    if (!failedStep) return
+    setIsRetrying(true)
+    try {
+      await retryStep(runId, failedStep.step_number)
+    } catch (err: any) {
+      setApiError(`Failed to retry: ${err.message || 'Unknown error'}`)
+    } finally { setIsRetrying(false) }
+  }
+
   const openJsonViewer = async (filename: string) => {
     try {
       const data = await getRunDataJson(runId, filename)
@@ -434,123 +220,14 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
       setJsonFilename(filename)
       setJsonViewerOpen(true)
     } catch (err) {
-      console.error('Error loading JSON:', err)
       setApiError('Failed to load JSON file.')
     }
   }
 
-  // WebSocket connection
-  useEffect(() => {
-    const wsUrl = getWebSocketUrl(`/ws/run/${runId}/stream`)
-    const ws = new WebSocket(wsUrl)
-    wsRef.current = ws
+  const currentStepData = runStatus?.steps[currentStep - 1]
 
-    ws.onmessage = (event) => {
-      const data = JSON.parse(event.data)
-
-      if (data.event === 'STEP_START') {
-        setCurrentStep(data.step)
-        setStepStartTimes((prev) => ({ ...prev, [data.step]: Date.now() }))
-        setStepStartCosts((prev) => ({ ...prev, [data.step]: data.total_cost || 0 }))
-        setStepProgress((prev) => ({ ...prev, [data.step]: { current: 0, total: 0, message: '' } }))
-      } else if (data.event === 'LOG') {
-        const logMessage = data.timestamp
-          ? `[${new Date(data.timestamp).toLocaleTimeString()}] ${data.message}`
-          : data.message
-        setLogs((prev) => ({
-          ...prev,
-          [data.step]: [...(prev[data.step] || []), logMessage],
-        }))
-      } else if (data.event === 'PROGRESS') {
-        setStepProgress((prev) => ({
-          ...prev,
-          [data.step]: { current: data.current, total: data.total, message: data.message || '' }
-        }))
-      } else if (data.event === 'COST_UPDATE') {
-        setRunStatus((prev) => {
-          if (!prev) return prev
-          return {
-            ...prev,
-            total_cost: data.total_cost,
-            total_tokens: data.total_tokens,
-            input_tokens: data.input_tokens || prev.input_tokens,
-            output_tokens: data.output_tokens || prev.output_tokens
-          }
-        })
-      } else if (data.event === 'STEP_ERROR') {
-        // Mark the failing step so the "Retry failed step" affordance appears
-        // immediately. The run-level RUN_FAILED below flips overall status.
-        setRunStatus((prev) =>
-          prev
-            ? { ...prev, steps: prev.steps.map((s) => (s.step_number === data.step ? { ...s, status: 'error' } : s)) }
-            : prev
-        )
-      } else if (data.event === 'RUN_FAILED') {
-        // Authoritative terminal failure: flip status now rather than waiting
-        // for the next poll. The poll then fills in full detail (error_message,
-        // per-step state, final duration).
-        setRunStatus((prev) =>
-          prev ? { ...prev, status: 'failed', error_message: data.error ?? prev.error_message } : prev
-        )
-      } else if (data.event === 'RUN_CANCELLED') {
-        setRunStatus((prev) => (prev ? { ...prev, status: 'cancelled' } : prev))
-      } else if (data.event === 'RUN_COMPLETE') {
-        setRunStatus((prev) => (prev ? { ...prev, status: 'complete' } : prev))
-      }
-    }
-
-    ws.onerror = () => {
-      console.error('WebSocket connection error')
-    }
-
-    return () => {
-      ws.close()
-    }
-  }, [runId])
-
-  // On completion, jump to the final stage so the output/download is on screen
-  // (the prominent Download button was previously only rendered for stage 6,
-  // which the user often wasn't viewing). Fires once on the transition to
-  // 'complete'; the dep is the status string, so the 2s poll re-returning
-  // 'complete' doesn't keep yanking the user off a stage they navigated to.
-  useEffect(() => {
-    if (runStatus?.status === 'complete' && runStatus.steps.length > 0) {
-      setCurrentStep(runStatus.steps[runStatus.steps.length - 1].step_number)
-    }
-  // Warn before the tab is closed or navigated away while a run is in progress.
-  // The run continues server-side regardless, but the browser prompt reminds the
-  // user that leaving won't stop it (and that they can return later). Modern
-  // browsers ignore custom text and show their own generic message, so we only
-  // need to call preventDefault / set returnValue to trigger the prompt.
-  useEffect(() => {
-    if (runStatus?.status !== 'running') return
-
-    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault()
-      e.returnValue = ''
-    }
-
-    window.addEventListener('beforeunload', handleBeforeUnload)
-    return () => window.removeEventListener('beforeunload', handleBeforeUnload)
-  }, [runStatus?.status])
-
-  if (!runStatus) {
-    return (
-      <main className="flex items-center justify-center min-h-screen">
-        <div className="text-gray-600" role="status" aria-live="polite">Loading pipeline data...</div>
-      </main>
-    )
-  }
-
-  const currentStepData = runStatus.steps[currentStep - 1]
-
-  // Basename of the final Word document, for the success bar's primary
-  // Download CTA. Searches from the last step backward so it resolves to the
-  // final stage's .docx. A completed run always produces one (confirmed), but
-  // guard anyway so a momentarily-missing file hides the button rather than
-  // rendering a dead link.
   const finalDocxName = (() => {
-    if (runStatus.status !== 'complete') return null
+    if (runStatus?.status !== 'complete' || !runStatus.steps) return null
     for (let i = runStatus.steps.length - 1; i >= 0; i--) {
       const raw = runStatus.steps[i].output_files
       if (!raw) continue
@@ -558,194 +235,99 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         const files: string[] = JSON.parse(raw)
         const docx = files.find((f) => f.endsWith('.docx'))
         if (docx) return docx.split('/').pop() || docx
-      } catch {
-        // ignore unparseable output_files
-      }
+      } catch { /* parse error safe ignore */ }
     }
     return null
   })()
 
-  // mailto: for the "Contact support" recourse, prefilled with run context.
-  // Uses the established support contact (paa2013@med.cornell.edu).
   const supportHref = (reason: string) =>
-    `mailto:paa2013@med.cornell.edu?subject=${encodeURIComponent(
-      `CViche: ${reason} (run ${runId})`
-    )}&body=${encodeURIComponent(
-      `Run ID: ${runId}\nFile: ${runStatus.filename}\n\nPlease describe what happened:\n`
-    )}`
+    `mailto:paa2013@med.cornell.edu?subject=${encodeURIComponent(`CViche: ${reason} (run ${runId})`)}&body=${encodeURIComponent(`Run ID: ${runId}\nFile: ${runStatus?.filename}\n\nPlease describe what happened:\n`)}`
 
   return (
     <div className="min-h-screen bg-surface-muted">
-      {/* API Error Banner */}
-      {apiError && (
-        <ErrorBanner message={apiError} onDismiss={() => setApiError(null)} />
-      )}
+      {apiError && <ErrorBanner message={apiError} onDismiss={() => setApiError(null)} />}
 
-      {/* Connection-lost warning — the status poll has failed repeatedly, so
-          what's shown may be stale. (Provisional styling — pending UI sign-off.) */}
       {connectionLost && (
         <div className="bg-orange-50 border-b border-orange-300 px-6 py-3" role="status" aria-live="polite">
           <div className="flex items-center gap-3 max-w-full">
             <AlertCircle className="h-5 w-5 text-orange-600 flex-shrink-0" aria-hidden="true" />
-            <p className="text-sm font-medium text-orange-800">
-              Lost connection to the server — the status shown may be out of date. Reconnecting…
-            </p>
+            <p className="text-sm font-medium text-orange-800">Lost connection to the server — showing cached data. Reconnecting…</p>
           </div>
         </div>
       )}
 
-      {/* Possible-stall warning — run is still "running" but progress has
-          stalled / it's far past the expected time. Gives the user recourse
-          instead of a timer that climbs forever. (Provisional — pending UI sign-off.) */}
       {runStatus.status === 'running' && maybeStuck && (
         <div className="bg-orange-50 border-b border-orange-300 px-6 py-3" role="alert">
           <div className="flex items-center justify-between max-w-full">
             <div className="flex items-center gap-3">
               <AlertCircle className="h-5 w-5 text-orange-600 flex-shrink-0" aria-hidden="true" />
-              <p className="text-sm font-medium text-orange-800">
-                This run is taking much longer than expected and may be stuck. You can keep waiting, or cancel and start over.
-              </p>
+              <p className="text-sm font-medium text-orange-800">This run is taking much longer than expected and may be stuck.</p>
             </div>
             <div className="ml-4 flex shrink-0 gap-2">
-              <button
-                onClick={handleCancel}
-                disabled={isCancelling}
-                className="rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-600 text-white hover:bg-orange-700 transition-colors focus:ring-2 focus:ring-orange-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isCancelling ? 'Cancelling...' : 'Cancel'}
-              </button>
-              <button
-                onClick={handleRestart}
-                disabled={isRestarting}
-                className="rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-100 text-orange-800 hover:bg-orange-200 transition-colors focus:ring-2 focus:ring-orange-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isRestarting ? 'Restarting...' : 'Restart with this file'}
-              </button>
-              <a
-                href={supportHref('a run appears stuck')}
-                className="inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium text-orange-800 hover:bg-orange-100 transition-colors focus:ring-2 focus:ring-orange-500 focus:outline-none"
-              >
-                <LifeBuoy className="h-4 w-4" aria-hidden="true" />
-                Contact support
-              </a>
+              <button onClick={handleCancel} disabled={isCancelling} className="rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-600 text-white hover:bg-orange-700 disabled:opacity-55">{isCancelling ? 'Cancelling...' : 'Cancel'}</button>
+              <button onClick={handleRestart} disabled={isRestarting} className="rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-100 text-orange-800 hover:bg-orange-200 disabled:opacity-55">Restart with file</button>
+              <a href={supportHref('a run appears stuck')} className="inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium text-orange-800 hover:bg-orange-100"><LifeBuoy className="h-4 w-4" />Contact support</a>
             </div>
           </div>
         </div>
       )}
 
-      {/* Success Banner — unmistakable completion + the primary Download CTA,
-          always visible at the top (not buried in the stage-6 card). */}
       {runStatus.status === 'complete' && (
         <div className="bg-success-50 border-b-2 border-success-600 px-6 py-4" role="status" aria-live="polite">
           <div className="flex items-center justify-between gap-4 max-w-full">
             <div className="flex items-center gap-3">
-              <CheckCircle2 className="h-6 w-6 text-success-600 flex-shrink-0" aria-hidden="true" />
+              <CheckCircle2 className="h-6 w-6 text-success-600 flex-shrink-0" />
               <div>
                 <p className="text-base font-semibold text-success-800">Your CV is ready to download</p>
                 <p className="text-sm text-success-700">{runStatus.filename}</p>
               </div>
             </div>
             {finalDocxName && (
-              <a
-                href={`/api/run/${runId}/data/${finalDocxName}`}
-                download
-                aria-label={`Download your formatted CV, ${finalDocxName}`}
-                className="shrink-0 inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold bg-success-600 text-white shadow-md hover:bg-success-700 transition-colors focus:ring-2 focus:ring-success-600 focus:outline-none"
-              >
-                <Download className="h-5 w-5" aria-hidden="true" />
-                <span>Download Word document</span>
-              </a>
+              <a href={`/api/run/${runId}/data/${finalDocxName}`} download className="shrink-0 inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold bg-success-600 text-white shadow-md hover:bg-success-700"><Download className="h-5 w-5" /><span>Download Word document</span></a>
             )}
           </div>
         </div>
       )}
 
-      {/* Failed Banner */}
       {runStatus.status === 'failed' && (
         <div className="bg-red-50 border-b border-red-300 px-6 py-3" role="alert">
           <div className="flex items-center justify-between max-w-full">
             <div className="flex items-center gap-3">
-              <XCircle className="h-5 w-5 text-red-600 flex-shrink-0" aria-hidden="true" />
-              <div>
-                <p className="text-sm font-medium text-red-800">
-                  Pipeline failed
-                  {runStatus.error_message && ` — ${runStatus.error_message}`}
-                </p>
-              </div>
+              <XCircle className="h-5 w-5 text-red-600 flex-shrink-0" />
+              <p className="text-sm font-medium text-red-800">Pipeline failed {runStatus.error_message && ` — ${runStatus.error_message}`}</p>
             </div>
             <div className="ml-4 flex shrink-0 gap-2">
               {runStatus.steps?.some((s) => s.status === 'error') && (
-                <button
-                  onClick={handleRetry}
-                  disabled={isRetrying || isRestarting}
-                  className="rounded-lg px-4 py-1.5 text-sm font-medium bg-red-600 text-white hover:bg-red-700 transition-colors focus:ring-2 focus:ring-red-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  {isRetrying ? 'Retrying...' : 'Retry failed step'}
-                </button>
+                <button onClick={handleRetry} disabled={isRetrying || isRestarting} className="rounded-lg px-4 py-1.5 text-sm font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-55">{isRetrying ? 'Retrying...' : 'Retry failed step'}</button>
               )}
-              <button
-                onClick={handleRestart}
-                disabled={isRestarting || isRetrying}
-                className="rounded-lg px-4 py-1.5 text-sm font-medium bg-red-100 text-red-800 hover:bg-red-200 transition-colors focus:ring-2 focus:ring-red-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isRestarting ? 'Restarting...' : 'Restart with this file'}
-              </button>
-              <a
-                href={supportHref('a run failed')}
-                className="inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium text-red-800 hover:bg-red-100 transition-colors focus:ring-2 focus:ring-red-500 focus:outline-none"
-              >
-                <LifeBuoy className="h-4 w-4" aria-hidden="true" />
-                Contact support
-              </a>
+              <button onClick={handleRestart} disabled={isRestarting || isRetrying} className="rounded-lg px-4 py-1.5 text-sm font-medium bg-red-100 text-red-800 hover:bg-red-200 disabled:opacity-55">Restart with file</button>
+              <a href={supportHref('a run failed')} className="inline-flex items-center gap-1.5 rounded-lg px-4 py-1.5 text-sm font-medium text-red-800 hover:bg-red-100"><LifeBuoy className="h-4 w-4" />Contact support</a>
             </div>
           </div>
         </div>
       )}
 
-      {/* Cancelled Banner */}
       {runStatus.status === 'cancelled' && (
         <div className="bg-orange-50 border-b border-orange-300 px-6 py-3" role="status">
           <div className="flex items-center justify-between max-w-full">
             <div className="flex items-center gap-3">
-              <AlertCircle className="h-5 w-5 text-orange-600 flex-shrink-0" aria-hidden="true" />
-              <p className="text-sm font-medium text-orange-800">
-                Pipeline was cancelled
-                {runStatus.error_message && ` — ${runStatus.error_message}`}
-              </p>
+              <AlertCircle className="h-5 w-5 text-orange-600 flex-shrink-0" />
+              <p className="text-sm font-medium text-orange-800">Pipeline was cancelled {runStatus.error_message && ` — ${runStatus.error_message}`}</p>
             </div>
-            <button
-              onClick={handleRestart}
-              disabled={isRestarting}
-              className="ml-4 shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-100 text-orange-800 hover:bg-orange-200 transition-colors focus:ring-2 focus:ring-orange-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isRestarting ? 'Restarting...' : 'Restart with this file'}
-            </button>
+            <button onClick={handleRestart} disabled={isRestarting} className="ml-4 shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-orange-100 text-orange-800 hover:bg-orange-200 disabled:opacity-55">Restart with file</button>
           </div>
         </div>
       )}
 
-      {/* Created (not yet started) Banner */}
       {runStatus.status === 'created' && (
         <div className="bg-gray-50 border-b border-gray-300 px-6 py-3" role="status">
           <div className="flex items-center justify-between max-w-full">
-            <div className="flex items-center gap-3">
-              <Clock className="h-5 w-5 text-gray-500 flex-shrink-0" aria-hidden="true" />
-              <p className="text-sm font-medium text-gray-700">
-                Pipeline has not been started yet
-              </p>
-            </div>
-            <button
-              onClick={handleRestart}
-              disabled={isRestarting}
-              className="ml-4 shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 transition-colors focus:ring-2 focus:ring-gray-500 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {isRestarting ? 'Restarting...' : 'Restart with this file'}
-            </button>
+            <p className="text-sm font-medium text-gray-700">Pipeline has not been started yet</p>
+            <button onClick={handleRestart} disabled={isRestarting} className="ml-4 shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-55">Restart with file</button>
           </div>
         </div>
       )}
 
-      {/* Header */}
       <PipelineHeader
         runId={runId}
         filename={runStatus.filename}
@@ -759,198 +341,69 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         onBack={onBack}
       />
 
-      {/* Progress Bar — always rendered to prevent layout shift, visibility toggled */}
-      <div
-        className={`bg-white border-b border-gray-200 px-6 py-3 transition-opacity ${
-          runStatus.status === 'running' ? 'opacity-100' : 'opacity-0 h-0 py-0 overflow-hidden'
-        }`}
-        role="progressbar"
-        aria-valuenow={displayProgress}
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-label={`Pipeline progress: ${displayProgress}%`}
-      >
+      <div className={`bg-white border-b border-gray-200 px-6 py-3 transition-opacity ${runStatus.status === 'running' ? 'opacity-100' : 'opacity-0 h-0 py-0 overflow-hidden'}`} role="progressbar" aria-valuenow={displayProgress} aria-valuemin={0} aria-valuemax={100}>
         <div className="flex items-center gap-3 max-w-full">
           <span className="text-sm font-medium text-gray-700 min-w-[80px]">Progress:</span>
           <div className="flex-1 bg-gray-200 rounded-full h-6 overflow-hidden">
-            <div
-              className="h-full bg-gradient-to-r from-primary-500 to-primary-600 transition-all duration-100 ease-linear relative overflow-hidden"
-              style={{ width: `${displayProgress}%` }}
-            >
-              <div className="absolute inset-0 bg-stripe-animation" aria-hidden="true"></div>
-            </div>
+            <div className="h-full bg-gradient-to-r from-primary-500 to-primary-600 transition-all duration-100 ease-linear relative overflow-hidden" style={{ width: `${displayProgress}%` }} />
           </div>
           <span className="text-sm font-semibold text-gray-900 min-w-[50px] text-right">{displayProgress}%</span>
         </div>
       </div>
 
-      {/* Run-continues-on-server note — only while running. Reassures the user
-          that the run keeps going server-side whether or not this window stays
-          open, mirroring the beforeunload prompt above. */}
-      {runStatus.status === 'running' && (
-        <div className="bg-blue-50 border-b border-blue-200 px-6 py-2" role="note">
-          <p className="text-xs text-blue-800 max-w-full">
-            This run continues on the server whether or not this window stays open. You can safely
-            close the tab and return to the app when it completes.
-          </p>
-        </div>
-      )}
-
-      {/* Main Content */}
       <div className="flex flex-col md:flex-row max-w-full">
-        {/* Sidebar */}
-        <StepSidebar
-          steps={runStatus.steps}
-          currentStep={currentStep}
-          onSelectStep={setCurrentStep}
-          stepStartTimes={stepStartTimes}
-          stepStartCosts={stepStartCosts}
-          totalCost={runStatus.total_cost}
-        />
+        <StepSidebar steps={runStatus.steps} currentStep={currentStep} onSelectStep={setCurrentStep} stepStartTimes={stepStartTimes} stepStartCosts={stepStartCosts} totalCost={runStatus.total_cost} />
 
-        {/* Step Detail Panel */}
         <main className="flex-1 p-4 md:p-8" aria-label="Step details">
           {currentStepData && (
             <section className="bg-white rounded-lg shadow p-6">
               <div className="mb-6">
-                <h2 className="text-xl md:text-2xl font-bold text-gray-900 mb-2">
-                  Stage {currentStepData.stage_id || currentStep}: {currentStepData.step_name}
-                </h2>
+                <h2 className="text-xl md:text-2xl font-bold text-gray-900 mb-2">Stage {currentStepData.stage_id || currentStep}: {currentStepData.step_name}</h2>
                 {currentStepData.stage_id && STAGE_DESCRIPTIONS[currentStepData.stage_id] && (
-                  <p className="text-sm text-gray-600 mb-3 bg-primary-50 p-3 rounded-lg border border-primary-100">
-                    {STAGE_DESCRIPTIONS[currentStepData.stage_id]}
-                  </p>
+                  <p className="text-sm text-gray-600 mb-3 bg-primary-50 p-3 rounded-lg border border-primary-100">{STAGE_DESCRIPTIONS[currentStepData.stage_id]}</p>
                 )}
                 <div className="flex flex-wrap items-center gap-2 md:gap-4 text-sm text-gray-600">
                   <span>Status: <strong>{currentStepData.status}</strong></span>
-                  <span className="hidden md:inline" aria-hidden="true">·</span>
-                  <span>Duration: <strong>{
-                    currentStepData.status === 'running' && stepStartTimes[currentStep]
-                      ? `${Math.floor((Date.now() - stepStartTimes[currentStep]) / 1000)}s`
-                      : currentStepData.duration_seconds
-                        ? `${currentStepData.duration_seconds}s`
-                        : '—'
-                  }</strong></span>
-                  <span className="hidden md:inline" aria-hidden="true">·</span>
-                  <span>Cost: <strong>{
-                    currentStepData.status === 'running'
-                      ? formatCost((runStatus.total_cost || 0) - (stepStartCosts[currentStep] || 0), 3)
-                      : formatCost(currentStepData.cost, 3)
-                  }</strong></span>
+                  <span className="hidden md:inline">·</span>
+                  <span>Duration: <strong>{currentStepData.status === 'running' && stepStartTimes[currentStep] ? `${Math.floor((Date.now() - stepStartTimes[currentStep]) / 1000)}s` : currentStepData.duration_seconds ? `${currentStepData.duration_seconds}s` : '—'}</strong></span>
+                  <span className="hidden md:inline">·</span>
+                  <span>Cost: <strong>{currentStepData.status === 'running' ? formatCost((runStatus.total_cost || 0) - (stepStartCosts[currentStep] || 0), 3) : formatCost(currentStepData.cost, 3)}</strong></span>
                 </div>
 
-                {/* Within-Step Progress */}
                 {currentStepData.status === 'running' && stepProgress[currentStep] && stepProgress[currentStep].total > 0 && (
                   <div className="mt-4 p-3 bg-primary-50 border border-primary-200 rounded-lg">
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-medium text-blue-900">
-                        {stepProgress[currentStep].message || 'Processing...'}
-                      </span>
-                      <span className="text-sm font-semibold text-blue-900">
-                        {stepProgress[currentStep].current} / {stepProgress[currentStep].total}
-                      </span>
+                      <span className="text-sm font-medium text-blue-900">{stepProgress[currentStep].message || 'Processing...'}</span>
+                      <span className="text-sm font-semibold text-blue-900">{stepProgress[currentStep].current} / {stepProgress[currentStep].total}</span>
                     </div>
-                    <div
-                      className="bg-primary-200 rounded-full h-2 overflow-hidden"
-                      role="progressbar"
-                      aria-valuenow={stepProgress[currentStep].current}
-                      aria-valuemax={stepProgress[currentStep].total}
-                      aria-label="Step progress"
-                    >
-                      <div
-                        className="h-full bg-primary-600 transition-all duration-300"
-                        style={{
-                          width: `${(stepProgress[currentStep].current / stepProgress[currentStep].total) * 100}%`
-                        }}
-                      />
+                    <div className="bg-primary-200 rounded-full h-2 overflow-hidden" role="progressbar" aria-valuenow={stepProgress[currentStep].current} aria-valuemax={stepProgress[currentStep].total}>
+                      <div className="h-full bg-primary-600 transition-all duration-300" style={{ width: `${(stepProgress[currentStep].current / stepProgress[currentStep].total) * 100}%` }} />
                     </div>
                   </div>
                 )}
               </div>
 
-              {/* Log/Prompt Tabs */}
-              <div className="mb-4 flex gap-2" role="tablist" aria-label="Log view options">
-                <button
-                  onClick={() => setShowPromptLogs(false)}
-                  role="tab"
-                  aria-selected={!showPromptLogs}
-                  aria-controls="log-panel"
-                  className={`px-4 py-2 rounded-lg font-medium transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none ${
-                    !showPromptLogs
-                      ? 'bg-primary-500 text-white'
-                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                  }`}
-                >
-                  Logs
-                </button>
-                <button
-                  onClick={() => fetchPromptLogs()}
-                  role="tab"
-                  aria-selected={showPromptLogs}
-                  aria-controls="prompt-log-panel"
-                  className={`px-4 py-2 rounded-lg font-medium transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none ${
-                    showPromptLogs
-                      ? 'bg-primary-500 text-white'
-                      : 'bg-gray-200 text-gray-700 hover:bg-gray-300'
-                  }`}
-                >
-                  Prompt Logs
-                </button>
+              <div className="mb-4 flex gap-2" role="tablist">
+                <button onClick={() => setShowPromptLogs(false)} className={`px-4 py-2 rounded-lg font-medium ${!showPromptLogs ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700'}`}>Logs</button>
+                <button onClick={() => fetchPromptLogsContext()} className={`px-4 py-2 rounded-lg font-medium ${showPromptLogs ? 'bg-primary-500 text-white' : 'bg-gray-200 text-gray-700'}`}>Prompt Logs</button>
               </div>
 
-              {/* Log Panels */}
-              {!showPromptLogs && (
-                <div id="log-panel" role="tabpanel">
-                  <LogViewer
-                    logs={logs[currentStep] || []}
-                    logsEndRef={logsEndRef}
-                  />
-                </div>
-              )}
-              {showPromptLogs && (
-                <div id="prompt-log-panel" role="tabpanel">
-                  <PromptLogViewer
-                    promptLogs={promptLogs}
-                    promptLogsMessage={promptLogsMessage}
-                    selectedPromptLog={selectedPromptLog}
-                    onSelectPromptLog={setSelectedPromptLog}
-                  />
-                </div>
-              )}
+              {!showPromptLogs && <div id="log-panel"><LogViewer logs={logs[currentStep] || []} logsEndRef={logsEndRef} /></div>}
+              {showPromptLogs && <div id="prompt-log-panel"><PromptLogViewer promptLogs={promptLogs} promptLogsMessage={promptLogsMessage} selectedPromptLog={selectedPromptLog} onSelectPromptLog={setSelectedPromptLog} /></div>}
 
-              {/* CV Insights */}
               {cvInsights && cvInsights.cv_owner_location?.inference_success && (
-                <section className="mt-6" aria-label="CV Insights">
+                <section className="mt-6">
                   <h3 className="text-sm font-semibold text-gray-700 mb-2">CV Insights</h3>
                   <div className="bg-gradient-to-r from-purple-50 to-indigo-50 border border-purple-200 rounded-lg p-4">
                     <div className="flex items-start gap-4">
-                      <MapPin className="h-6 w-6 text-purple-600 flex-shrink-0 mt-0.5" aria-hidden="true" />
+                      <MapPin className="h-6 w-6 text-purple-600 flex-shrink-0 mt-0.5" />
                       <div className="flex-1">
                         <div className="font-medium text-gray-900 mb-1">Inferred CV Owner Location</div>
-                        {cvInsights.cv_owner?.full_name && (
-                          <div className="text-sm text-gray-600 mb-2">
-                            <span className="font-medium">CV Owner:</span> {cvInsights.cv_owner.full_name}
-                          </div>
-                        )}
+                        {cvInsights.cv_owner?.full_name && <div className="text-sm text-gray-600 mb-2"><span className="font-medium">CV Owner:</span> {cvInsights.cv_owner.full_name}</div>}
                         <div className="text-sm text-gray-700">
                           {cvInsights.cv_owner_location?.primary_location && (
-                            <span>
-                              <span className="font-medium">Primary Location:</span>{' '}
-                              {cvInsights.cv_owner_location.primary_location.institution &&
-                                `${cvInsights.cv_owner_location.primary_location.institution}, `}
-                              {cvInsights.cv_owner_location.primary_location.city}
-                              {cvInsights.cv_owner_location.primary_location.state &&
-                                `, ${cvInsights.cv_owner_location.primary_location.state}`}
-                            </span>
+                            <span><span className="font-medium">Primary Location:</span> {cvInsights.cv_owner_location.primary_location.institution && `${cvInsights.cv_owner_location.primary_location.institution}, `}{cvInsights.cv_owner_location.primary_location.city}, {cvInsights.cv_owner_location.primary_location.state}</span>
                           )}
-                        </div>
-                        {cvInsights.cv_owner_location?.metro_area && (
-                          <div className="text-sm text-gray-600 mt-1">
-                            <span className="font-medium">Metro Area:</span> {cvInsights.cv_owner_location.metro_area}
-                          </div>
-                        )}
-                        <div className="text-xs text-gray-500 mt-2">
-                          Used for classifying presentations & service activities as Regional/National/International
                         </div>
                       </div>
                     </div>
@@ -958,42 +411,15 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
                 </section>
               )}
 
-              {/* Output Files */}
-              {currentStepData.status === 'complete' && (
-                <OutputFiles
-                  runId={runId}
-                  step={currentStepData}
-                  onOpenJson={openJsonViewer}
-                />
-              )}
-
-              {/* Feedback Form -- only for completed runs */}
-              {runStatus?.status === 'complete' && (
-                <section id="feedback-section" className="mt-6">
-                  <FeedbackForm runId={runId} />
-                </section>
-              )}
+              {currentStepData.status === 'complete' && <OutputFiles runId={runId} step={currentStepData} onOpenJson={openJsonViewer} />}
+              {runStatus?.status === 'complete' && <section id="feedback-section" className="mt-6"><FeedbackForm runId={runId} /></section>}
             </section>
           )}
         </main>
       </div>
 
-      {/* JSON Viewer Modal */}
-      <JsonViewerModal
-        isOpen={jsonViewerOpen}
-        onClose={() => setJsonViewerOpen(false)}
-        content={jsonContent}
-        filename={jsonFilename}
-        downloadUrl={`/api/run/${runId}/data/${jsonFilename}`}
-      />
-
-      {/* Cancel Confirmation Modal */}
-      <CancelConfirmModal
-        isOpen={showCancelConfirm}
-        isCancelling={isCancelling}
-        onConfirm={confirmCancel}
-        onClose={() => setShowCancelConfirm(false)}
-      />
+      <JsonViewerModal isOpen={jsonViewerOpen} onClose={() => setJsonViewerOpen(false)} content={jsonContent} filename={jsonFilename} downloadUrl={`/api/run/${runId}/data/${jsonFilename}`} />
+      <CancelConfirmModal isOpen={showCancelConfirm} isCancelling={isCancelling} onConfirm={confirmCancel} onClose={() => setShowCancelConfirm(false)} />
     </div>
   )
 }
