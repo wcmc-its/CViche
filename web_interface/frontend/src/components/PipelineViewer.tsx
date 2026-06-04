@@ -1,6 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
-import { MapPin, XCircle, AlertCircle, Clock, CheckCircle2, Download, LifeBuoy } from 'lucide-react'
-import type { RunStatus } from '../types'
+import { MapPin, XCircle, AlertCircle, CheckCircle2, Download, LifeBuoy } from 'lucide-react'
 import { getRunDataJson, cancelRun, restartRun, retryStep } from '../api/runs'
 import { formatCost } from '../utils'
 import { usePipelineRun } from '../hooks/usePipelineRun'
@@ -56,7 +55,6 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   // Extract clean state and background engine processing mechanisms out of the custom hook
   const {
     runStatus,
-    setRunStatus,
     currentStep,
     setCurrentStep,
     logs,
@@ -72,7 +70,6 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     stepStartCosts,
     connectionLost,
     maybeStuck,
-    setMaybeStuck,
     fetchPromptLogsContext,
   } = usePipelineRun(runId)
 
