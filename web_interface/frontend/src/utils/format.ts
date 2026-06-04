@@ -43,8 +43,11 @@ export function formatDuration(seconds: number | null): string {
 /**
  * Format cost with dollar sign. Default precision 2 for summary views,
  * pass 3 for detail views (PipelineViewer, StepSidebar, AdminSubmissions).
+ * null/undefined => em dash. Older runs can store a null cost; without this
+ * guard `cost.toFixed` throws and, with no error boundary, blanks the page.
  */
-export function formatCost(cost: number, precision: 2 | 3 = 2): string {
+export function formatCost(cost: number | null | undefined, precision: 2 | 3 = 2): string {
+  if (cost === null || cost === undefined) return '—'
   return `$${cost.toFixed(precision)}`
 }
 
