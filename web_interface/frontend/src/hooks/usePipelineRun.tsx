@@ -9,6 +9,61 @@ const STALL_NO_PROGRESS_MS = 5 * 60 * 1000
 const STALL_ELAPSED_MULTIPLIER = 3
 const POLL_FAILURE_THRESHOLD = 3
 
+// Run/step statuses that are terminal — once observed, a stale poll snapshot must
+// not be allowed to move away from them (see reconcileStatus).
+const TERMINAL_RUN_STATUSES = ['complete', 'failed', 'cancelled']
+const TERMINAL_STEP_STATUSES = ['complete', 'error']
+
+// Merge an authoritative-but-possibly-stale 2s poll snapshot into the current
+// state without letting it override fresher, monotonic information.
+//
+// runStatus has two writers: this poll (a full snapshot) and the WebSocket
+// (optimistic partial updates below). The poll's DB read can predate a terminal
+// commit while a WebSocket terminal event (RUN_COMPLETE/FAILED/CANCELLED) has
+// already advanced the UI. A blind replace would then let that stale 'running'
+// snapshot resurrect a finished run for ~2s (banner/timer flap), regress live
+// cost/token counters, and rewind per-step progress. Reconcile instead: terminal
+// run status and terminal per-step status are sticky, and counters are monotonic.
+//
+// A different run (restart navigation) or a user-triggered retry — the only
+// legitimate terminal->running transition — bypasses the stickiness.
+function reconcileStatus(
+  prev: RunStatus | null,
+  next: RunStatus,
+  retryInFlight: boolean
+): RunStatus {
+  if (!prev || prev.run_id !== next.run_id || retryInFlight) return next
+
+  // A stale snapshot must never resurrect a finished run.
+  if (
+    TERMINAL_RUN_STATUSES.includes(prev.status) &&
+    !TERMINAL_RUN_STATUSES.includes(next.status)
+  ) {
+    return prev
+  }
+
+  // Keep per-step terminal states the snapshot would rewind (e.g. an optimistic
+  // STEP_ERROR, or an already-complete step momentarily shown as still running).
+  const steps = next.steps.map((step) => {
+    const prevStep = prev.steps.find((s) => s.step_number === step.step_number)
+    return prevStep &&
+      TERMINAL_STEP_STATUSES.includes(prevStep.status) &&
+      !TERMINAL_STEP_STATUSES.includes(step.status)
+      ? prevStep
+      : step
+  })
+
+  // Cost/token counters only ever increase; never let a stale read tick them back.
+  return {
+    ...next,
+    steps,
+    total_cost: Math.max(prev.total_cost ?? 0, next.total_cost ?? 0),
+    total_tokens: Math.max(prev.total_tokens ?? 0, next.total_tokens ?? 0),
+    input_tokens: Math.max(prev.input_tokens ?? 0, next.input_tokens ?? 0),
+    output_tokens: Math.max(prev.output_tokens ?? 0, next.output_tokens ?? 0),
+  }
+}
+
 export function usePipelineRun(runId: string) {
   const [runStatus, setRunStatus] = useState<RunStatus | null>(null)
   const [currentStep, setCurrentStep] = useState(1)
@@ -31,17 +86,27 @@ export function usePipelineRun(runId: string) {
   const startTimeRef = useRef<number | null>(null)
   const pollFailuresRef = useRef(0)
   const lastProgressRef = useRef<{ fingerprint: string; at: number }>({ fingerprint: '', at: Date.now() })
+  // True from when the user triggers a per-step retry until the run is observed
+  // running again. Lets the otherwise-monotonic poll reducer accept the one
+  // legitimate terminal->running transition a retry causes (see reconcileStatus).
+  const retryInFlightRef = useRef(false)
 
   // Authoritative status polling loop (Every 2 seconds)
   useEffect(() => {
     let isMounted = true
+    // New run (mount or restart navigation): clear the retry carve-out so it
+    // can't leak across runs.
+    retryInFlightRef.current = false
     const fetchStatus = async () => {
       try {
         const data = await getRunStatus(runId)
         if (!isMounted) return
         pollFailuresRef.current = 0
         setConnectionLost(false)
-        setRunStatus(data)
+        // Reconcile rather than blind-replace: a stale poll snapshot must not
+        // demote a WebSocket-applied terminal status, rewind per-step progress,
+        // or regress cost/token counters. See reconcileStatus.
+        setRunStatus((prev) => reconcileStatus(prev, data, retryInFlightRef.current))
       } catch {
         if (!isMounted) return
         pollFailuresRef.current += 1
@@ -171,6 +236,9 @@ export function usePipelineRun(runId: string) {
   // Explicit elapsed timing context loop and system stall guard
   useEffect(() => {
     if (runStatus?.status === 'running') {
+      // Running observed: the retry carve-out has served its purpose, so close
+      // it before a later stale 'running' poll could be mistaken for a retry.
+      retryInFlightRef.current = false
       if (!startTimeRef.current) {
         startTimeRef.current = runStatus.total_duration_seconds
           ? Date.now() - runStatus.total_duration_seconds * 1000
@@ -239,6 +307,13 @@ export function usePipelineRun(runId: string) {
     }
   }, [currentStep, showPromptLogs, fetchPromptLogsContext])
 
+  // Opened by the component's retry handler so the poll reducer accepts the run
+  // flipping from a terminal status back to "running"; auto-closed once running
+  // is observed (above) and on runId change.
+  const setRetryInFlight = useCallback((value: boolean) => {
+    retryInFlightRef.current = value
+  }, [])
+
   return {
     runStatus,
     setRunStatus,
@@ -259,5 +334,6 @@ export function usePipelineRun(runId: string) {
     maybeStuck,
     setMaybeStuck,
     fetchPromptLogsContext,
+    setRetryInFlight,
   }
 }

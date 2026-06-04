@@ -71,6 +71,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     connectionLost,
     maybeStuck,
     fetchPromptLogsContext,
+    setRetryInFlight,
   } = usePipelineRun(runId)
 
   const [displayProgress, setDisplayProgress] = useState(0)
@@ -203,10 +204,15 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     const failedStep = runStatus?.steps?.find((s) => s.status === 'error')
     if (!failedStep) return
     setIsRetrying(true)
+    // Open the carve-out so the poll reducer accepts the run flipping from a
+    // terminal status back to "running"; cleared once running is observed (in
+    // the hook) or here if the retry request itself fails.
+    setRetryInFlight(true)
     try {
       await retryStep(runId, failedStep.step_number)
     } catch (err: any) {
       setApiError(`Failed to retry: ${err.message || 'Unknown error'}`)
+      setRetryInFlight(false)
     } finally { setIsRetrying(false) }
   }
 
