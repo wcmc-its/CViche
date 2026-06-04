@@ -120,3 +120,36 @@ def test_duration_metrics_endpoint_empty(client, db):
     data = resp.json()
     assert data["count"] == 0
     assert data["avg_seconds"] is None
+
+
+def test_admin_runs_table_prefers_persisted_duration(client, db):
+    """The admin submissions table's Duration column uses the persisted value,
+    falling back to wall-clock for older rows -- consistent with the run API."""
+    from app.main import app
+    from app.auth import require_admin
+    from app.models import Run
+
+    base = datetime(2026, 6, 4, 12, 0, 0)
+    db.add_all([
+        # Persisted duration (120s) must win over wall-clock (999s).
+        Run(id="ADR001", filename="a.docx", file_type="docx", status="complete",
+            started_at=base, completed_at=base + timedelta(seconds=999), total_duration_seconds=120),
+        # Older completed run, no persisted value -> wall-clock 45s.
+        Run(id="ADR002", filename="b.docx", file_type="docx", status="complete",
+            started_at=base, completed_at=base + timedelta(seconds=45)),
+        # In-flight run -> no duration shown.
+        Run(id="ADR003", filename="c.docx", file_type="docx", status="running", started_at=base),
+    ])
+    db.commit()
+
+    app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
+    try:
+        resp = client.get("/api/admin/runs")
+    finally:
+        app.dependency_overrides.pop(require_admin, None)
+
+    assert resp.status_code == 200
+    by_id = {r["run_id"]: r["duration_seconds"] for r in resp.json()["runs"]}
+    assert by_id["ADR001"] == 120   # persisted preferred over wall-clock
+    assert by_id["ADR002"] == 45    # wall-clock fallback
+    assert by_id["ADR003"] is None  # in-flight, no completed_at

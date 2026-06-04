@@ -279,9 +279,15 @@ async def get_runs(
 
     entries = []
     for run, run_user in rows:
-        duration = None
-        if run.started_at and run.completed_at:
+        # Prefer the persisted pipeline duration so the admin table matches the
+        # run status/history API; fall back to wall-clock for runs that predate
+        # the column. (Still blank for in-flight runs with no completed_at.)
+        if run.total_duration_seconds is not None:
+            duration = run.total_duration_seconds
+        elif run.started_at and run.completed_at:
             duration = int((run.completed_at - run.started_at).total_seconds())
+        else:
+            duration = None
 
         score = cached_scores.get(run.id)
         entries.append(
