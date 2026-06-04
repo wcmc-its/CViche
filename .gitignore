@@ -112,3 +112,12 @@ src/unified_pipeline/config/institution_cache.json
 # Architecture diagrams: commit the SVGs (render on GitHub, diff as text);
 # the PNGs are regenerable via scripts/diagrams/build.mjs.
 docs/architecture/*.png
+
+# Rendered secret material for k8s overlays (generated at build time by buildspec.yaml; never commit)
+# The committed db.env files are intentionally empty placeholders and stay tracked;
+# this only blocks future *rendered* secrets (session secret, OpenAI key, SAML SP key/cert) from being added.
+k8s/overlays/*/db.env
+k8s/overlays/*/auth_config.yaml
+k8s/overlays/*/*.pem
+k8s/overlays/*/*.key
+k8s/overlays/*/*.crt
