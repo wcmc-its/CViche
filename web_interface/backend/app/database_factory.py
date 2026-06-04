@@ -23,6 +23,11 @@ def create_cviche_engine(db_host: str, db_port: str, db_name: str, db_user: str)
     
     engine_kwargs = {
         "pool_pre_ping": True,
+        # Recycle pooled connections after 1800s (30 min) so a connection is never
+        # reused after RDS wait_timeout or a load balancer has silently dropped it.
+        # Comfortably under RDS's default 8h wait_timeout; pool_pre_ping is the
+        # backstop for anything that dies sooner.
+        "pool_recycle": 1800,
         "creator": lambda: pymysql.connect(
             host=db_host,
             port=int(db_port),
