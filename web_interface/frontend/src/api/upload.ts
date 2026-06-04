@@ -1,10 +1,11 @@
 import { api } from './client'
+import { uploadRoutes } from './routes'
 import type { Estimate } from '../types'
 
 export async function getEstimate(file: File): Promise<Estimate> {
   const formData = new FormData()
   formData.append('file', file)
-  return api.post<Estimate>('/api/estimate', formData)
+  return api.post<Estimate>(uploadRoutes.estimate(), formData)
 }
 
 export interface UploadResult {
@@ -23,5 +24,5 @@ export interface UploadResult {
 export async function uploadFile(file: File): Promise<UploadResult> {
   const formData = new FormData()
   formData.append('file', file)
-  return api.post<UploadResult>('/api/upload', formData)
+  return api.post<UploadResult>(uploadRoutes.upload(), formData)
 }

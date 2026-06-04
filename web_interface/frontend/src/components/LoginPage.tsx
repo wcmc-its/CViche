@@ -3,6 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useAuth } from '../contexts/AuthContext'
 import ErrorBanner from './ErrorBanner'
 import { LogIn, Loader2, Shield } from 'lucide-react'
+import { authRoutes } from '../api/routes'
 
 const SAML_ERROR_MESSAGES: Record<string, string> = {
   auth_failed: "Authentication failed. Please try again or contact IT support.",
@@ -49,7 +50,7 @@ export default function LoginPage() {
 
   const handleSSOLogin = () => {
     setRedirecting(true)
-    window.location.href = '/api/saml/login'
+    window.location.href = authRoutes.samlLogin()
   }
 
   if (!authConfig) {

@@ -1,4 +1,5 @@
 import { FileText, Download } from 'lucide-react'
+import { runRoutes } from '../api/routes'
 
 interface OutputFilesProps {
   runId: string
@@ -51,7 +52,7 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
                   </div>
                 </div>
                 <a
-                  href={`/api/run/${runId}/data/${filename}`}
+                  href={runRoutes.dataFile(runId, filename)}
                   download
                   aria-label={`Download final output file ${filename}`}
                   className="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-lg shadow-md transition-colors flex items-center gap-2 focus:ring-2 focus:ring-blue-500 focus:outline-none"
@@ -90,7 +91,7 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
                         {filename}
                       </button>
                       <a
-                        href={`/api/run/${runId}/data/${filename}`}
+                        href={runRoutes.dataFile(runId, filename)}
                         download
                         aria-label={`Download ${filename}`}
                         className="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1 focus:ring-2 focus:ring-blue-500 focus:outline-none rounded"
@@ -101,7 +102,7 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
                     </>
                   ) : isDocx ? (
                     <a
-                      href={`/api/run/${runId}/data/${filename}`}
+                      href={runRoutes.dataFile(runId, filename)}
                       download
                       aria-label={`Download ${filename}`}
                       className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1.5 focus:ring-2 focus:ring-blue-500 focus:outline-none rounded"
@@ -111,7 +112,7 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
                     </a>
                   ) : (
                     <a
-                      href={`/api/run/${runId}/data/${filename}`}
+                      href={runRoutes.dataFile(runId, filename)}
                       aria-label={`Open ${filename}`}
                       className="text-blue-600 hover:text-blue-800 text-sm font-medium flex items-center gap-1.5 focus:ring-2 focus:ring-blue-500 focus:outline-none rounded"
                       target="_blank"

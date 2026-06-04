@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { MapPin, XCircle, AlertCircle, CheckCircle2, Download, LifeBuoy } from 'lucide-react'
 import { getRunDataJson, cancelRun, restartRun, retryStep } from '../api/runs'
+import { runRoutes } from '../api/routes'
 import { formatCost } from '../utils'
 import { usePipelineRun } from '../hooks/usePipelineRun'
 
@@ -296,7 +297,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
               </div>
             </div>
             {finalDocxName && (
-              <a href={`/api/run/${runId}/data/${finalDocxName}`} download className="shrink-0 inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold bg-success-600 text-white shadow-md hover:bg-success-700"><Download className="h-5 w-5" /><span>Download Word document</span></a>
+              <a href={runRoutes.dataFile(runId, finalDocxName)} download className="shrink-0 inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold bg-success-600 text-white shadow-md hover:bg-success-700"><Download className="h-5 w-5" /><span>Download Word document</span></a>
             )}
           </div>
         </div>
@@ -431,7 +432,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         </main>
       </div>
 
-      <JsonViewerModal isOpen={jsonViewerOpen} onClose={() => setJsonViewerOpen(false)} content={jsonContent} filename={jsonFilename} downloadUrl={`/api/run/${runId}/data/${jsonFilename}`} />
+      <JsonViewerModal isOpen={jsonViewerOpen} onClose={() => setJsonViewerOpen(false)} content={jsonContent} filename={jsonFilename} downloadUrl={runRoutes.dataFile(runId, jsonFilename)} />
       <CancelConfirmModal isOpen={showCancelConfirm} isCancelling={isCancelling} onConfirm={confirmCancel} onClose={() => setShowCancelConfirm(false)} />
     </div>
   )
