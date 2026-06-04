@@ -310,6 +310,10 @@ class AdminStats(BaseModel):
     active_users: int
     total_cost: float
     feedback_rate: float  # percentage 0-100
+    # CV-to-WCM conversion time over completed runs (whole seconds). None when
+    # there are no completed runs yet.
+    avg_duration_seconds: Optional[float] = None
+    p95_duration_seconds: Optional[int] = None
 
 
 class AdminUser(BaseModel):

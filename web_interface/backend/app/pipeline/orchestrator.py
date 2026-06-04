@@ -412,6 +412,10 @@ class PipelineOrchestrator:
         if not run:
             raise ValueError(f"Run {self.run_id} not found")
 
+        # Initialised before the try so the failure handler can always record a
+        # duration even if something throws before the pipeline proper starts.
+        start_time = None
+
         try:
             await event_emitter.emit_run_start(self.run_id)
             start_time = time.time()
@@ -451,6 +455,9 @@ class PipelineOrchestrator:
             duration = int(time.time() - start_time)
             run.status = "complete"
             run.completed_at = datetime.now()
+            # Persist the authoritative pipeline duration (previously only emitted
+            # over the WebSocket) so historical conversion-time metrics are queryable.
+            run.total_duration_seconds = duration
             run.total_cost = self.total_cost
 
             # Calculate tokens from cost (approximate)
@@ -492,6 +499,10 @@ class PipelineOrchestrator:
             else:
                 run.error_message = str(e)
             run.completed_at = datetime.now()
+            # Record time-to-failure too -- useful when diagnosing a run that was
+            # "taking too long" and then errored out.
+            if start_time is not None:
+                run.total_duration_seconds = int(time.time() - start_time)
             self.db.commit()
             await self.log(0, f"Pipeline failed: {str(e)}", "ERROR")
             # Authoritative terminal failure signal. Emit the user-facing

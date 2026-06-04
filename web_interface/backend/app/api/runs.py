@@ -1,6 +1,7 @@
 """Run status and management API endpoints."""
 import logging
 import shutil
+from typing import Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session
@@ -22,6 +23,23 @@ from app.storage import get_storage
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _run_duration_seconds(run) -> Optional[int]:
+    """Total pipeline time for a run, in whole seconds.
+
+    Prefers the authoritative value persisted by the orchestrator at terminal
+    status. Falls back to wall-clock (completed_at - started_at) for runs that
+    predate the column, and to live elapsed time while a run is still running.
+    """
+    if run.total_duration_seconds is not None:
+        return run.total_duration_seconds
+    if run.started_at and run.completed_at:
+        return int((run.completed_at - run.started_at).total_seconds())
+    if run.started_at and run.status == "running":
+        # Use datetime.now() to match server_default=func.now() (local time).
+        return max(0, int((datetime.now() - run.started_at).total_seconds()))
+    return None
 
 
 def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> None:
@@ -59,13 +77,7 @@ async def list_runs(
 
     results = []
     for run in runs:
-        total_duration_seconds = None
-        if run.started_at:
-            if run.completed_at:
-                total_duration_seconds = int((run.completed_at - run.started_at).total_seconds())
-            elif run.status == "running":
-                from datetime import datetime
-                total_duration_seconds = max(0, int((datetime.now() - run.started_at).total_seconds()))
+        total_duration_seconds = _run_duration_seconds(run)
 
         results.append(RunSummary(
             run_id=run.id,
@@ -114,18 +126,8 @@ async def get_run_status(
         for step in steps
     ]
 
-    # Calculate total duration if run is complete or running
-    total_duration_seconds = None
-    if run.started_at:
-        if run.completed_at:
-            total_duration_seconds = int((run.completed_at - run.started_at).total_seconds())
-        else:
-            # Still running - calculate elapsed time
-            # Use datetime.now() to match the server_default=func.now() which uses local time
-            from datetime import datetime
-            total_duration_seconds = int((datetime.now() - run.started_at).total_seconds())
-            # Ensure we never return negative values (in case of clock skew)
-            total_duration_seconds = max(0, total_duration_seconds)
+    # Prefer the persisted pipeline duration; fall back to wall-clock / live elapsed.
+    total_duration_seconds = _run_duration_seconds(run)
 
     return RunStatus(
         run_id=run.id,

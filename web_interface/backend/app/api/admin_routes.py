@@ -65,11 +65,33 @@ async def get_stats(
         (runs_with_feedback / completed_runs * 100) if completed_runs > 0 else 0.0
     )
 
+    # CV-to-WCM conversion time, aggregated server-side over completed runs and
+    # returned on this existing stats call (the dashboard already makes it), so the
+    # admin overview gets avg/p95 without a second round-trip. The aggregate has to
+    # be computed here rather than on the client because /admin/runs is paginated --
+    # the browser never holds the whole population. Prefer the persisted pipeline
+    # duration; fall back to wall-clock for runs that predate the column.
+    durations = sorted(
+        r.total_duration_seconds if r.total_duration_seconds is not None
+        else int((r.completed_at - r.started_at).total_seconds())
+        for r in db.query(Run)
+        .filter(Run.status == "complete", Run.started_at.isnot(None), Run.completed_at.isnot(None))
+        .all()
+    )
+    avg_duration_seconds = round(sum(durations) / len(durations), 1) if durations else None
+    # Nearest-rank p95 over the sorted durations (portable; modest run volume).
+    p95_duration_seconds = (
+        durations[min(len(durations) - 1, max(0, round(0.95 * (len(durations) - 1))))]
+        if durations else None
+    )
+
     return AdminStats(
         total_runs=total_runs,
         active_users=active_users,
         total_cost=round(total_cost, 4),
         feedback_rate=round(feedback_rate, 1),
+        avg_duration_seconds=avg_duration_seconds,
+        p95_duration_seconds=p95_duration_seconds,
     )
 
 
@@ -225,9 +247,15 @@ async def get_runs(
 
     entries = []
     for run, run_user in rows:
-        duration = None
-        if run.started_at and run.completed_at:
+        # Prefer the persisted pipeline duration so the admin table matches the
+        # run status/history API; fall back to wall-clock for runs that predate
+        # the column. (Still blank for in-flight runs with no completed_at.)
+        if run.total_duration_seconds is not None:
+            duration = run.total_duration_seconds
+        elif run.started_at and run.completed_at:
             duration = int((run.completed_at - run.started_at).total_seconds())
+        else:
+            duration = None
 
         score = cached_scores.get(run.id)
         entries.append(
