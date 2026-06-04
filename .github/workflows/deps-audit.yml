@@ -1,0 +1,65 @@
+name: deps-audit
+
+# Fail closed if any pinned Python dependency has a known vulnerability.
+# This is the repo's first CI workflow (addresses #118; the never-built #34).
+on:
+  pull_request:
+    branches: [dev, main]
+    paths:
+      - "requirements.txt"
+      - "web_interface/backend/requirements.txt"
+      - "web_interface/backend/requirements-dev.txt"
+      - ".github/workflows/deps-audit.yml"
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11" # match the build image (python:3.11-slim)
+      - run: pip install pip-audit
+
+      # --no-deps audits the exact pinned versions in each file against the
+      # advisory DB without resolving/installing the transitive tree, so the job
+      # can't go red for runner-environment reasons (missing xmlsec1 / poppler /
+      # build libs). Full transitive auditing arrives with the hash-pinned
+      # lockfile follow-up.
+      #
+      # The --ignore-vuln entries below are PRE-EXISTING advisories in the
+      # versions prod currently builds; remediating them (dep bumps + a lockfile
+      # to override pysaml2's transitive pyopenssl/cryptography) is tracked in
+      # #126. Remove each ignore as #126 lands its fix. New advisories in any
+      # pinned dep still fail this gate.
+      #   CVE-2026-25645      requests 2.32.5      -> 2.33.0
+      #   CVE-2024-36039      pymysql 1.1.0        -> 1.1.1
+      #   PYSEC-2026-35       cryptography 42.0.5  -> 46.0.6
+      #   GHSA-h4gh-qq45-vh27 cryptography 42.0.5  -> 43.0.1
+      #   CVE-2024-12797      cryptography 42.0.5  -> 44.0.1
+      #   CVE-2026-26007      cryptography 42.0.5  -> 46.0.5
+      #   PYSEC-2026-87       lxml 6.0.2           -> 6.1.0
+      #   CVE-2026-27448      pyopenssl 24.2.1     -> 26.0.0  (pysaml2 transitive)
+      #   CVE-2026-27459      pyopenssl 24.2.1     -> 26.0.0  (pysaml2 transitive)
+      - name: Audit pinned dependencies for known vulnerabilities
+        run: |
+          for req in \
+            requirements.txt \
+            web_interface/backend/requirements.txt \
+            web_interface/backend/requirements-dev.txt; do
+            echo "::group::pip-audit $req"
+            pip-audit --no-deps -r "$req" \
+              --ignore-vuln CVE-2026-25645 \
+              --ignore-vuln CVE-2024-36039 \
+              --ignore-vuln PYSEC-2026-35 \
+              --ignore-vuln GHSA-h4gh-qq45-vh27 \
+              --ignore-vuln CVE-2024-12797 \
+              --ignore-vuln CVE-2026-26007 \
+              --ignore-vuln PYSEC-2026-87 \
+              --ignore-vuln CVE-2026-27448 \
+              --ignore-vuln CVE-2026-27459
+            echo "::endgroup::"
+          done
