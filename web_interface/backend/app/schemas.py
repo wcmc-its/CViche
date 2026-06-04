@@ -310,17 +310,10 @@ class AdminStats(BaseModel):
     active_users: int
     total_cost: float
     feedback_rate: float  # percentage 0-100
-
-
-class DurationMetrics(BaseModel):
-    """Aggregate CV-to-WCM conversion time over completed runs (whole seconds)."""
-    count: int
-    window_days: Optional[int] = None
-    avg_seconds: Optional[float] = None
-    min_seconds: Optional[int] = None
-    p50_seconds: Optional[int] = None
-    p95_seconds: Optional[int] = None
-    max_seconds: Optional[int] = None
+    # CV-to-WCM conversion time over completed runs (whole seconds). None when
+    # there are no completed runs yet.
+    avg_duration_seconds: Optional[float] = None
+    p95_duration_seconds: Optional[int] = None
 
 
 class AdminUser(BaseModel):

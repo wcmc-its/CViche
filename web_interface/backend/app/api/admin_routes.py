@@ -17,7 +17,6 @@ from app.auth import require_admin
 from app.errors import not_found, validation_error
 from app.schemas import (
     AdminStats,
-    DurationMetrics,
     AdminUser,
     AdminRunEntry,
     AdminRunsResponse,
@@ -66,64 +65,33 @@ async def get_stats(
         (runs_with_feedback / completed_runs * 100) if completed_runs > 0 else 0.0
     )
 
+    # CV-to-WCM conversion time, aggregated server-side over completed runs and
+    # returned on this existing stats call (the dashboard already makes it), so the
+    # admin overview gets avg/p95 without a second round-trip. The aggregate has to
+    # be computed here rather than on the client because /admin/runs is paginated --
+    # the browser never holds the whole population. Prefer the persisted pipeline
+    # duration; fall back to wall-clock for runs that predate the column.
+    durations = sorted(
+        r.total_duration_seconds if r.total_duration_seconds is not None
+        else int((r.completed_at - r.started_at).total_seconds())
+        for r in db.query(Run)
+        .filter(Run.status == "complete", Run.started_at.isnot(None), Run.completed_at.isnot(None))
+        .all()
+    )
+    avg_duration_seconds = round(sum(durations) / len(durations), 1) if durations else None
+    # Nearest-rank p95 over the sorted durations (portable; modest run volume).
+    p95_duration_seconds = (
+        durations[min(len(durations) - 1, max(0, round(0.95 * (len(durations) - 1))))]
+        if durations else None
+    )
+
     return AdminStats(
         total_runs=total_runs,
         active_users=active_users,
         total_cost=round(total_cost, 4),
         feedback_rate=round(feedback_rate, 1),
-    )
-
-
-# ---------------------------------------------------------------------------
-# GET /api/admin/metrics/duration
-# ---------------------------------------------------------------------------
-@router.get("/admin/metrics/duration", response_model=DurationMetrics)
-async def get_duration_metrics(
-    window_days: Optional[int] = Query(
-        None, ge=1, le=365,
-        description="Only include runs completed in the last N days (default: all time).",
-    ),
-    db: Session = Depends(get_db),
-    admin: User = Depends(require_admin),
-):
-    """Aggregate CV-to-WCM conversion time over completed runs.
-
-    Lets us answer "is conversion getting slower / is this run an outlier?" when
-    someone reports a slow conversion. Durations are whole seconds: the persisted
-    pipeline time where available, else wall-clock (completed_at - started_at) for
-    runs that predate that column. Per-stage drill-down lives in steps.duration_seconds.
-    """
-    query = db.query(Run).filter(Run.status == "complete")
-    if window_days:
-        cutoff = datetime.now() - timedelta(days=window_days)
-        query = query.filter(Run.completed_at >= cutoff)
-
-    durations = []
-    for run in query.all():
-        if run.total_duration_seconds is not None:
-            durations.append(run.total_duration_seconds)
-        elif run.started_at and run.completed_at:
-            durations.append(int((run.completed_at - run.started_at).total_seconds()))
-
-    durations.sort()
-    count = len(durations)
-    if count == 0:
-        return DurationMetrics(count=0, window_days=window_days)
-
-    def pct(p: int) -> int:
-        # Nearest-rank percentile over the sorted durations (portable; no DB
-        # percentile function needed, and the run volume here is modest).
-        idx = min(count - 1, max(0, int(round((p / 100) * (count - 1)))))
-        return durations[idx]
-
-    return DurationMetrics(
-        count=count,
-        window_days=window_days,
-        avg_seconds=round(sum(durations) / count, 1),
-        min_seconds=durations[0],
-        p50_seconds=pct(50),
-        p95_seconds=pct(95),
-        max_seconds=durations[-1],
+        avg_duration_seconds=avg_duration_seconds,
+        p95_duration_seconds=p95_duration_seconds,
     )
 
 

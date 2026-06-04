@@ -62,11 +62,11 @@ def test_not_started_returns_none():
     assert _run_duration_seconds(run) is None
 
 
-# --- admin duration-metrics endpoint -------------------------------------------------
+# --- admin /stats duration aggregates (folded in, no separate endpoint) --------------
 
-def test_duration_metrics_endpoint(client, db):
-    """Aggregates over completed runs: persisted duration preferred, wall-clock
-    fallback for older rows, non-complete runs excluded, percentiles correct."""
+def test_admin_stats_includes_duration_aggregates(client, db):
+    """avg/p95 conversion time ride along on /admin/stats: persisted duration
+    preferred, wall-clock fallback for older rows, non-complete runs excluded."""
     from app.main import app
     from app.auth import require_admin
     from app.models import Run
@@ -90,36 +90,32 @@ def test_duration_metrics_endpoint(client, db):
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
     try:
-        resp = client.get("/api/admin/metrics/duration")
+        resp = client.get("/api/admin/stats")
     finally:
         app.dependency_overrides.pop(require_admin, None)
 
     assert resp.status_code == 200
     data = resp.json()
-    # Sorted durations: [50, 100, 200, 300]
-    assert data["count"] == 4
-    assert data["min_seconds"] == 50
-    assert data["max_seconds"] == 300
-    assert data["avg_seconds"] == 162.5
-    assert data["p50_seconds"] == 200   # nearest-rank: round(0.50*3)=2 -> 200
-    assert data["p95_seconds"] == 300   # nearest-rank: round(0.95*3)=3 -> 300
+    # Sorted durations over the 4 completed runs: [50, 100, 200, 300]
+    assert data["avg_duration_seconds"] == 162.5
+    assert data["p95_duration_seconds"] == 300   # nearest-rank: round(0.95*3)=3 -> 300
 
 
-def test_duration_metrics_endpoint_empty(client, db):
-    """No completed runs -> count 0 and null stats, not a 500."""
+def test_admin_stats_duration_aggregates_null_when_no_completed_runs(client, db):
+    """No completed runs -> aggregates are null, not a 500."""
     from app.main import app
     from app.auth import require_admin
 
     app.dependency_overrides[require_admin] = lambda: SimpleNamespace(role="admin")
     try:
-        resp = client.get("/api/admin/metrics/duration")
+        resp = client.get("/api/admin/stats")
     finally:
         app.dependency_overrides.pop(require_admin, None)
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["count"] == 0
-    assert data["avg_seconds"] is None
+    assert data["avg_duration_seconds"] is None
+    assert data["p95_duration_seconds"] is None
 
 
 def test_admin_runs_table_prefers_persisted_duration(client, db):
