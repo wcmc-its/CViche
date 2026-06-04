@@ -11,8 +11,6 @@ configMapGenerator:
   - name: cviche-auth-config
     files:
       - auth_config.yaml
-    envs:
-      - db_migration_users.env  
 
 # 1. Your existing database secrets configuration
 secretGenerator:
