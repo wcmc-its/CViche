@@ -84,6 +84,13 @@ class Run(Base):
     status = Column(String(20), nullable=False)  # "running", "complete", "failed", "paused"
     started_at = Column(DateTime, nullable=False, server_default=func.now())
     completed_at = Column(DateTime)
+    # Authoritative total pipeline execution time, in whole seconds, persisted by
+    # the orchestrator when a run reaches a terminal status (it already computes
+    # this value and previously only emitted it over the WebSocket). Distinct from
+    # wall-clock completed_at - started_at, which can be larger for retried runs
+    # (it spans the idle time a run sat failed before retry). NULL for runs that
+    # predate this column or never reached a terminal status here.
+    total_duration_seconds = Column(Integer)
     total_cost = Column(Float, default=0.0)
     total_tokens = Column(Integer, default=0)
     input_tokens = Column(Integer, default=0)

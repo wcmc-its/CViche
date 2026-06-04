@@ -312,6 +312,17 @@ class AdminStats(BaseModel):
     feedback_rate: float  # percentage 0-100
 
 
+class DurationMetrics(BaseModel):
+    """Aggregate CV-to-WCM conversion time over completed runs (whole seconds)."""
+    count: int
+    window_days: Optional[int] = None
+    avg_seconds: Optional[float] = None
+    min_seconds: Optional[int] = None
+    p50_seconds: Optional[int] = None
+    p95_seconds: Optional[int] = None
+    max_seconds: Optional[int] = None
+
+
 class AdminUser(BaseModel):
     """User record with per-user stats for admin view."""
     id: int

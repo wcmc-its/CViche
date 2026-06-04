@@ -17,6 +17,7 @@ from app.auth import require_admin
 from app.errors import not_found, validation_error
 from app.schemas import (
     AdminStats,
+    DurationMetrics,
     AdminUser,
     AdminRunEntry,
     AdminRunsResponse,
@@ -70,6 +71,59 @@ async def get_stats(
         active_users=active_users,
         total_cost=round(total_cost, 4),
         feedback_rate=round(feedback_rate, 1),
+    )
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/metrics/duration
+# ---------------------------------------------------------------------------
+@router.get("/admin/metrics/duration", response_model=DurationMetrics)
+async def get_duration_metrics(
+    window_days: Optional[int] = Query(
+        None, ge=1, le=365,
+        description="Only include runs completed in the last N days (default: all time).",
+    ),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Aggregate CV-to-WCM conversion time over completed runs.
+
+    Lets us answer "is conversion getting slower / is this run an outlier?" when
+    someone reports a slow conversion. Durations are whole seconds: the persisted
+    pipeline time where available, else wall-clock (completed_at - started_at) for
+    runs that predate that column. Per-stage drill-down lives in steps.duration_seconds.
+    """
+    query = db.query(Run).filter(Run.status == "complete")
+    if window_days:
+        cutoff = datetime.now() - timedelta(days=window_days)
+        query = query.filter(Run.completed_at >= cutoff)
+
+    durations = []
+    for run in query.all():
+        if run.total_duration_seconds is not None:
+            durations.append(run.total_duration_seconds)
+        elif run.started_at and run.completed_at:
+            durations.append(int((run.completed_at - run.started_at).total_seconds()))
+
+    durations.sort()
+    count = len(durations)
+    if count == 0:
+        return DurationMetrics(count=0, window_days=window_days)
+
+    def pct(p: int) -> int:
+        # Nearest-rank percentile over the sorted durations (portable; no DB
+        # percentile function needed, and the run volume here is modest).
+        idx = min(count - 1, max(0, int(round((p / 100) * (count - 1)))))
+        return durations[idx]
+
+    return DurationMetrics(
+        count=count,
+        window_days=window_days,
+        avg_seconds=round(sum(durations) / count, 1),
+        min_seconds=durations[0],
+        p50_seconds=pct(50),
+        p95_seconds=pct(95),
+        max_seconds=durations[-1],
     )
 
 
