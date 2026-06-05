@@ -72,8 +72,8 @@ class TestCheckRunAccess:
         assert exc_info.value.status_code == 403
         assert exc_info.value.detail["error"] == "forbidden"
 
-    def test_allows_unowned_run(self, db):
-        """Runs with user_id=None are accessible to any user."""
+    def test_denies_unowned_run_to_non_admin(self, db):
+        """Runs with user_id=None fail closed: a non-admin is denied (issue #112)."""
         user = User(email="user@example.com", display_name="User", role="user", auth_method="simple")
         db.add(user)
         db.commit()
@@ -82,7 +82,22 @@ class TestCheckRunAccess:
         db.add(run)
         db.commit()
 
-        result = check_run_access("ABC123", user, db)
+        with pytest.raises(HTTPException) as exc_info:
+            check_run_access("ABC123", user, db)
+        assert exc_info.value.status_code == 403
+        assert exc_info.value.detail["error"] == "forbidden"
+
+    def test_allows_unowned_run_to_admin(self, db):
+        """Admins may still access an unowned run."""
+        admin = User(email="admin@example.com", display_name="Admin", role="admin", auth_method="simple")
+        db.add(admin)
+        db.commit()
+        db.refresh(admin)
+        run = Run(id="ABC123", filename="cv.docx", file_type="docx", status="created", user_id=None)
+        db.add(run)
+        db.commit()
+
+        result = check_run_access("ABC123", admin, db)
         assert result.id == "ABC123"
 
 

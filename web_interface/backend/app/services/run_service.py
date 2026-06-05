@@ -79,6 +79,6 @@ def check_run_access(run_id: str, current_user: User, db: Session) -> Run:
     run = db.query(Run).filter(Run.id == run_id).first()
     if not run:
         raise not_found("Run not found")
-    if run.user_id and run.user_id != current_user.id and current_user.role != "admin":
+    if current_user.role != "admin" and run.user_id != current_user.id:
         raise forbidden("Access denied")
     return run
