@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import type { RunStatus } from '../types'
 import { getRunStatus, getRunStep, getPromptLogs } from '../api/runs'
 import { getWebSocketUrl } from '../api/websocket'
+import { wsRoutes } from '../api/routes'
 
 // Tuning Constants matching your design requirements
 const EXPECTED_TOTAL_SECONDS = 475 // Weighted estimates sum (~8 min)
@@ -163,7 +164,7 @@ export function usePipelineRun(runId: string) {
 
   // Real-time asynchronous push infrastructure (WebSockets)
   useEffect(() => {
-    const wsUrl = getWebSocketUrl(`/ws/run/${runId}/stream`)
+    const wsUrl = getWebSocketUrl(wsRoutes.runStream(runId))
     const ws = new WebSocket(wsUrl)
     wsRef.current = ws
 

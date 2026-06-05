@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Clock, FileText, CheckCircle2, Loader2, XCircle, AlertCircle, ChevronDown, ChevronUp, ChevronLeft, ChevronRight, MessageSquare } from 'lucide-react'
 import { formatRelativeDate } from '../utils'
+import { getRuns, getFeedbackStatuses } from '../api/runs'
 import ErrorBanner from './ErrorBanner'
 
 interface RunSummary {
@@ -119,13 +120,10 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
 
   const fetchFeedbackStatus = async () => {
     try {
-      const res = await fetch('/api/runs/feedback-status')
-      if (res.ok) {
-        const data: FeedbackStatus[] = await res.json()
-        const map: Record<string, boolean> = {}
-        data.forEach((item) => { map[item.run_id] = item.has_feedback })
-        setFeedbackMap(map)
-      }
+      const data: FeedbackStatus[] = await getFeedbackStatuses()
+      const map: Record<string, boolean> = {}
+      data.forEach((item) => { map[item.run_id] = item.has_feedback })
+      setFeedbackMap(map)
     } catch (err) {
       console.error('Error fetching feedback status:', err)
     }
@@ -134,16 +132,10 @@ export default function RunHistory({ onSelectRun }: RunHistoryProps) {
   const fetchRuns = useCallback(async (offset: number) => {
     try {
       setError(null)
-      const res = await fetch(`/api/runs?offset=${offset}&limit=${PAGE_SIZE}`)
-      if (res.ok) {
-        const data = await res.json()
-        // Handle both paginated response { runs, total, has_more } and legacy array response
-        const runsList = Array.isArray(data) ? data : (data.runs || [])
-        setRuns(runsList)
-        setTotal(data.total || runsList.length)
-      } else {
-        setError('Unable to load run history. Please refresh the page to try again.')
-      }
+      const data = await getRuns(offset, PAGE_SIZE)
+      const runsList = data.runs
+      setRuns(runsList)
+      setTotal(data.total || runsList.length)
     } catch (err) {
       console.error('Error fetching runs:', err)
       setError('Unable to load run history. Please refresh the page to try again.')

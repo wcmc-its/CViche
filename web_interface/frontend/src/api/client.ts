@@ -1,3 +1,5 @@
+import { authRoutes } from './routes'
+
 const API_BASE = import.meta.env.VITE_API_URL || ''
 
 export interface ApiError {
@@ -8,7 +10,7 @@ export interface ApiError {
 // Paths that manage auth state themselves. A 401 from these is expected
 // (e.g. /api/auth/me during bootstrap means "not signed in") and must NOT
 // trigger the global redirect, or the login page would loop.
-const AUTH_BOOTSTRAP_PREFIX = '/api/auth/'
+const AUTH_BOOTSTRAP_PREFIX = authRoutes.bootstrapPrefix
 
 // Registered by the app (see AuthErrorHandler in App.tsx). Invoked on any 401
 // from a protected endpoint so the app can clear auth state and bounce to /login.

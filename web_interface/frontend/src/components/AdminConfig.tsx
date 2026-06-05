@@ -11,6 +11,7 @@ import {
 } from 'lucide-react'
 import type { SystemConfig } from '../types'
 import { getAdminConfig, updateAdminConfig } from '../api/admin'
+import { adminRoutes } from '../api/routes'
 
 export default function AdminConfig() {
   const [config, setConfig] = useState<SystemConfig | null>(null)
@@ -130,7 +131,7 @@ export default function AdminConfig() {
   }
 
   const handleExport = (type: string) => {
-    window.open(`/api/admin/export/${type}`, '_blank')
+    window.open(adminRoutes.export(type), '_blank')
   }
 
   if (loading) {

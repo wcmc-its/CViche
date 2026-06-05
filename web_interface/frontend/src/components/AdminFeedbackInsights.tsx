@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { Loader2, Download, MessageSquare } from 'lucide-react'
 import type { FeedbackData, AggregatedScores } from '../types'
 import { exportFeedbackCsv } from '../api/admin'
+import { adminRoutes } from '../api/routes'
 
 const EFFORT_LABELS: Record<string, string> = {
   '< 5 minutes': '< 5 min',
@@ -99,7 +100,7 @@ export default function AdminFeedbackInsights() {
   }
 
   const handleExport = () => {
-    window.open('/api/admin/export/feedback', '_blank')
+    window.open(adminRoutes.exportFeedback(), '_blank')
   }
 
   if (loading) {
