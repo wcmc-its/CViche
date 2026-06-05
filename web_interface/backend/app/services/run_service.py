@@ -69,14 +69,22 @@ def reconcile_stale_runs(db: Session) -> int:
     return len(stale_runs)
 
 
-def check_run_access(run_id: str, current_user: User, db: Session) -> Run:
+def check_run_access(run_id: str, current_user: User, db: Session, *, eager=()) -> Run:
     """Verify run exists and user has access. Returns the Run.
+
+    Pass *eager* a sequence of SQLAlchemy loader options (e.g.
+    ``(selectinload(Run.steps),)``) to eager-load relationships in the same
+    access query. This is required before touching any relationship attribute,
+    since they are declared ``lazy="raise_on_sql"``.
 
     Raises:
         HTTPException 404 if run not found.
         HTTPException 403 if user does not own the run and is not admin.
     """
-    run = db.query(Run).filter(Run.id == run_id).first()
+    query = db.query(Run).filter(Run.id == run_id)
+    for option in eager:
+        query = query.options(option)
+    run = query.first()
     if not run:
         raise not_found("Run not found")
     if current_user.role != "admin" and run.user_id != current_user.id:
