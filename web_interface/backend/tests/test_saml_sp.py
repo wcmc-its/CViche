@@ -243,7 +243,7 @@ def _mock_saml_client(identity_dict=None):
         mock_client.parse_authn_request_response.return_value = mock_response
     else:
         mock_client.parse_authn_request_response.return_value = None
-        return mock_client
+    return mock_client
 
 
 class TestSamlLogin:
@@ -272,6 +272,19 @@ class TestSamlLogin:
         mock_get_client.return_value.prepare_for_authenticate.assert_called_once()
         call_kwargs = mock_get_client.return_value.prepare_for_authenticate.call_args
         assert call_kwargs[1]["relay_state"] == "/runs/ABC"
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_login_rejects_offsite_next(self, mock_get_client, client, seed_saml_mode):
+        """GET /api/saml/login?next=<off-site> coerces relay_state to '/' (CWE-601)."""
+        mock_get_client.return_value = _mock_saml_client()
+        for evil in ("https://evil.com", "//evil.com", "/\\evil.com", "javascript:alert(1)"):
+            mock_get_client.return_value.prepare_for_authenticate.reset_mock()
+            response = client.get(
+                "/api/saml/login", params={"next": evil}, follow_redirects=False
+            )
+            assert response.status_code == 302
+            call_kwargs = mock_get_client.return_value.prepare_for_authenticate.call_args
+            assert call_kwargs[1]["relay_state"] == "/", f"unsafe next not rejected: {evil!r}"
 
     @patch("app.api.saml_routes.get_saml_client")
     def test_login_error_redirects_to_login(self, mock_get_client, client, seed_saml_mode):
@@ -334,6 +347,19 @@ class TestSamlACS:
         )
         assert response.status_code == 302
         assert response.headers["location"] == "/runs/ABC123"
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_rejects_offsite_relay_state(self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity):
+        """POST /api/saml/acs with an off-site RelayState redirects to '/' not off-site (CWE-601)."""
+        for evil in ("https://evil.com", "//evil.com", "/\\evil.com"):
+            mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
+            response = client.post(
+                "/api/saml/acs",
+                data={"SAMLResponse": "base64data", "RelayState": evil},
+                follow_redirects=False,
+            )
+            assert response.status_code == 302
+            assert response.headers["location"] == "/", f"unsafe RelayState not rejected: {evil!r}"
 
     def test_acs_blocked_in_simple_mode(self, client, seed_simple_mode):
         """POST /api/saml/acs in simple mode redirects to /login?error=saml_not_enabled."""
