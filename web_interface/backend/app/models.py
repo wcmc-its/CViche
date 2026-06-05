@@ -4,6 +4,9 @@ from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.base_class import Base
 
+# ==========================
+# Authentication Models
+# ==========================
 class User(Base):
     """User accounts for authentication and authorization."""
     __tablename__ = "users"
@@ -44,10 +47,10 @@ class Consent(Base):
     ip_address = Column(String(45), nullable=True)
     user_agent = Column(String(512), nullable=True)
     timestamp = Column(DateTime, server_default=func.now())
-
     user = relationship("User", back_populates="consents", lazy="raise_on_sql")
-
-
+# ==========================
+# Feedback Models
+# ==========================
 class Feedback(Base):
     """User feedback on a pipeline run."""
     __tablename__ = "feedback"
@@ -75,11 +78,13 @@ class Feedback(Base):
     biggest_issue = Column(Text, nullable=True)
     likelihood_to_recommend = Column(Integer, nullable=False)  # 1-5
     submitted_at = Column(DateTime, server_default=func.now())
-
     run = relationship("Run", back_populates="feedback", lazy="raise_on_sql")
     user = relationship("User", back_populates="feedback", lazy="raise_on_sql")
 
 
+# ==========================
+# Configuration Models
+# ==========================
 class SystemConfig(Base):
     """Key-value store for system configuration."""
     __tablename__ = "system_config"
@@ -93,6 +98,9 @@ class SystemConfig(Base):
     updated_by_user = relationship("User", lazy="raise_on_sql")
 
 
+# ==========================
+# Pipeline Models
+# ==========================
 class Run(Base):
     """Pipeline run tracking."""
     __tablename__ = "runs"
