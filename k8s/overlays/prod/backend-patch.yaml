@@ -7,6 +7,21 @@ spec:
     spec:
       nodeSelector:
         eks.amazonaws.com/nodegroup: cviche-al2023-nodes
+      # --- Give the one-shot db-migration init container the same DB config the
+      #     main container gets: the cviche-secrets env + the auth_config.yaml file
+      #     (which carries DB_HOST/DB_PORT/DB_NAME/DB_USER). Without this the
+      #     migration engine factory resolves empty config and aborts the rollout
+      #     (Init:CrashLoopBackOff). The auth-config-volume is already declared at
+      #     the pod level below.
+      initContainers:
+        - name: db-migration # Must match the name in base/deployments.yaml
+          envFrom:
+            - secretRef:
+                name: cviche-secrets
+          volumeMounts:
+            - name: auth-config-volume
+              mountPath: /app/web_interface/backend/auth_config.yaml
+              subPath: auth_config.yaml # Same single-file mount the backend container uses
       containers:
         - name: backend # Must match the name in base/deployment.yaml
           resources:
