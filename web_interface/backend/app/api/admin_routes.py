@@ -9,7 +9,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, contains_eager
 
 from app.database import get_db
 from app.models import User, Run, Feedback, SystemConfig, Consent
@@ -213,7 +213,11 @@ async def get_runs(
     admin: User = Depends(require_admin),
 ):
     """Return all runs paginated, with optional filters."""
-    query = db.query(Run, User).outerjoin(User, Run.user_id == User.id)
+    # Eager-load run.user via the outer join (the relationship is
+    # lazy="raise_on_sql"). contains_eager populates run.user from the joined
+    # columns -- one query, no per-row lookup -- while the outer join still
+    # lets us filter by user email.
+    query = db.query(Run).outerjoin(Run.user).options(contains_eager(Run.user))
 
     if user:
         query = query.filter(User.email.ilike(f"%{user}%"))
@@ -225,7 +229,7 @@ async def get_runs(
     rows = query.order_by(Run.started_at.desc()).offset(offset).limit(limit).all()
 
     # Build run entries with feedback status
-    run_ids = [r.id for r, _ in rows]
+    run_ids = [run.id for run in rows]
     feedback_run_ids = set()
     if run_ids:
         feedback_rows = (
@@ -246,7 +250,7 @@ async def get_runs(
                     cached_scores[rid] = score
 
     entries = []
-    for run, run_user in rows:
+    for run in rows:
         # Prefer the persisted pipeline duration so the admin table matches the
         # run status/history API; fall back to wall-clock for runs that predate
         # the column. (Still blank for in-flight runs with no completed_at.)
@@ -261,8 +265,8 @@ async def get_runs(
         entries.append(
             AdminRunEntry(
                 run_id=run.id,
-                user_email=run_user.email if run_user else None,
-                user_display_name=run_user.display_name if run_user else None,
+                user_email=run.user.email if run.user else None,
+                user_display_name=run.user.display_name if run.user else None,
                 filename=run.filename,
                 status=run.status,
                 duration_seconds=duration,
@@ -443,15 +447,16 @@ async def export_csv(
             "input_tokens", "output_tokens", "submission_type", "error_message",
         ])
         rows = (
-            db.query(Run, User)
-            .outerjoin(User, Run.user_id == User.id)
+            db.query(Run)
+            .outerjoin(Run.user)
+            .options(contains_eager(Run.user))
             .order_by(Run.started_at.desc())
             .all()
         )
-        for run, run_user in rows:
+        for run in rows:
             writer.writerow([
                 run.id,
-                run_user.email if run_user else "",
+                run.user.email if run.user else "",
                 run.filename,
                 run.file_type,
                 run.status,
@@ -493,16 +498,17 @@ async def export_csv(
             "consent_text_hash", "ip_address", "user_agent", "timestamp",
         ])
         rows = (
-            db.query(Consent, User)
-            .outerjoin(User, Consent.user_id == User.id)
+            db.query(Consent)
+            .outerjoin(Consent.user)
+            .options(contains_eager(Consent.user))
             .order_by(Consent.timestamp.desc())
             .all()
         )
-        for consent, consent_user in rows:
+        for consent in rows:
             writer.writerow([
                 consent.id,
                 consent.user_id,
-                consent_user.email if consent_user else "",
+                consent.user.email if consent.user else "",
                 consent.consent_version,
                 consent.consent_text_hash,
                 consent.ip_address or "",
@@ -522,16 +528,17 @@ async def export_csv(
             "submitted_at",
         ])
         rows = (
-            db.query(Feedback, User)
-            .outerjoin(User, Feedback.user_id == User.id)
+            db.query(Feedback)
+            .outerjoin(Feedback.user)
+            .options(contains_eager(Feedback.user))
             .order_by(Feedback.submitted_at.desc())
             .all()
         )
-        for fb, fb_user in rows:
+        for fb in rows:
             writer.writerow([
                 fb.id,
                 fb.run_id,
-                fb_user.email if fb_user else "",
+                fb.user.email if fb.user else "",
                 fb.reviewer_role,
                 fb.overall_accuracy,
                 fb.overall_completeness,

@@ -4,7 +4,7 @@ import shutil
 from typing import Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from pathlib import Path
 
 from app.database import get_db
@@ -106,10 +106,9 @@ async def get_run_status(
 ):
     """Get the current status of a pipeline run."""
 
-    run = check_run_access(run_id, current_user, db)
-
-    # Get all steps for this run
-    steps = db.query(Step).filter(Step.run_id == run_id).order_by(Step.step_number).all()
+    # Eager-load the run's steps in the access query (Run.steps is
+    # lazy="raise_on_sql", so it must be loaded explicitly before access).
+    run = check_run_access(run_id, current_user, db, eager=(selectinload(Run.steps),))
 
     step_summaries = [
         StepSummary(
@@ -123,7 +122,7 @@ async def get_run_status(
             cost=step.cost or 0.0,
             output_files=step.output_files
         )
-        for step in steps
+        for step in sorted(run.steps, key=lambda s: s.step_number)
     ]
 
     # Prefer the persisted pipeline duration; fall back to wall-clock / live elapsed.
