@@ -459,10 +459,6 @@ class PipelineOrchestrator:
             # over the WebSocket) so historical conversion-time metrics are queryable.
             run.total_duration_seconds = duration
             run.total_cost = self.total_cost
-
-            # Calculate tokens from cost (approximate)
-            avg_cost_per_token = (0.150 + 0.600) / 2 / 1_000_000
-            run.total_tokens = int(self.total_cost / avg_cost_per_token) if self.total_cost > 0 else 0
             self.db.commit()
 
             await event_emitter.emit_run_complete(self.run_id, run.total_cost, run.total_tokens, duration)
