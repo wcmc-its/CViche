@@ -81,8 +81,8 @@ class Run(Base):
     id = Column(String(10), primary_key=True)  # e.g., "A1B2C3"
     filename = Column(String(255), nullable=False)
     file_type = Column(String(20), nullable=False)  # "docx" or "pdf"
-    status = Column(String(20), nullable=False)  # "running", "complete", "failed", "paused"
-    started_at = Column(DateTime, nullable=False, server_default=func.now())
+    status = Column(String(20), nullable=False, index=True)  # "running", "complete", "failed", "paused"
+    started_at = Column(DateTime, nullable=False, server_default=func.now(), index=True)
     completed_at = Column(DateTime)
     # Authoritative total pipeline execution time, in whole seconds, persisted by
     # the orchestrator when a run reaches a terminal status (it already computes
@@ -116,7 +116,7 @@ class Step(Base):
     __tablename__ = "steps"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String(10), ForeignKey("runs.id"), nullable=False)
+    run_id = Column(String(10), ForeignKey("runs.id"), nullable=False, index=True)
     step_number = Column(Integer, nullable=False)  # 1-12
     stage_id = Column(String(10), nullable=True)  # e.g., '1a', '1b', '2', '3a', '3b', '4', '4.5', '5', '5b', '5c', '5d', '6'
     step_name = Column(String(255), nullable=False)
@@ -136,7 +136,7 @@ class Log(Base):
     __tablename__ = "logs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String(10), ForeignKey("runs.id"), nullable=False)
+    run_id = Column(String(10), ForeignKey("runs.id"), nullable=False, index=True)
     step_number = Column(Integer)
     timestamp = Column(DateTime, server_default=func.now())
     level = Column(String(20), default="INFO")  # INFO, WARNING, ERROR
@@ -148,7 +148,7 @@ class LLMUsage(Base):
     __tablename__ = "llm_usage"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    run_id = Column(String(10), ForeignKey("runs.id"), nullable=False)
+    run_id = Column(String(10), ForeignKey("runs.id"), nullable=False, index=True)
     step_number = Column(Integer, nullable=False)
     model = Column(String(100), nullable=False)  # "gpt-4o-mini", etc.
     prompt_tokens = Column(Integer, nullable=False)
