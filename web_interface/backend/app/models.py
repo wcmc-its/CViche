@@ -1,5 +1,6 @@
 """SQLAlchemy database models."""
 from sqlalchemy import Column, String, Integer, Float, Text, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.base_class import Base
 
@@ -21,6 +22,16 @@ class User(Base):
     created_at = Column(DateTime, server_default=func.now())
     last_active_at = Column(DateTime, server_default=func.now())
 
+    # ORM relationships. lazy="raise_on_sql": callers must eager-load the paths
+    # they need (selectinload/joinedload); a stray lazy load raises instead of
+    # silently emitting SQL or detaching outside the request/session scope (we
+    # run pipeline work in background tasks). No cascades -- deletes defer to the
+    # DB FK rules via passive_deletes; a deliberate cascade decision is left to
+    # the follow-up (issue #131, step 3).
+    runs = relationship("Run", back_populates="user", lazy="raise_on_sql", passive_deletes=True)
+    consents = relationship("Consent", back_populates="user", lazy="raise_on_sql", passive_deletes=True)
+    feedback = relationship("Feedback", back_populates="user", lazy="raise_on_sql", passive_deletes=True)
+
 
 class Consent(Base):
     """Audit trail for user consent acceptance."""
@@ -33,6 +44,8 @@ class Consent(Base):
     ip_address = Column(String(45), nullable=True)
     user_agent = Column(String(512), nullable=True)
     timestamp = Column(DateTime, server_default=func.now())
+
+    user = relationship("User", back_populates="consents", lazy="raise_on_sql")
 
 
 class Feedback(Base):
@@ -63,6 +76,9 @@ class Feedback(Base):
     likelihood_to_recommend = Column(Integer, nullable=False)  # 1-5
     submitted_at = Column(DateTime, server_default=func.now())
 
+    run = relationship("Run", back_populates="feedback", lazy="raise_on_sql")
+    user = relationship("User", back_populates="feedback", lazy="raise_on_sql")
+
 
 class SystemConfig(Base):
     """Key-value store for system configuration."""
@@ -72,6 +88,9 @@ class SystemConfig(Base):
     value = Column(Text, nullable=False)  # JSON-encoded
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
     updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
+
+    # Forward-only audit pointer to the admin who last changed this key.
+    updated_by_user = relationship("User", lazy="raise_on_sql")
 
 
 class Run(Base):
@@ -110,6 +129,15 @@ class Run(Base):
     show_track_changes = Column(Integer, default=1)
     show_pipeline_comments = Column(Integer, default=0)
 
+    # ORM relationships (see User for the lazy/cascade rationale). user_id is
+    # nullable, so run.user can be None for anonymous/simple-mode runs.
+    user = relationship("User", back_populates="runs", lazy="raise_on_sql")
+    steps = relationship("Step", back_populates="run", lazy="raise_on_sql", passive_deletes=True)
+    logs = relationship("Log", back_populates="run", lazy="raise_on_sql", passive_deletes=True)
+    llm_usage = relationship("LLMUsage", back_populates="run", lazy="raise_on_sql", passive_deletes=True)
+    feedback = relationship("Feedback", back_populates="run", lazy="raise_on_sql", passive_deletes=True)
+    metrics = relationship("RunMetrics", back_populates="run", uselist=False, lazy="raise_on_sql", passive_deletes=True)
+
 
 class Step(Base):
     """Individual pipeline step execution."""
@@ -130,6 +158,8 @@ class Step(Base):
     error_message = Column(Text)
     error_type = Column(String(50), nullable=True)  # llm_timeout, token_limit, parse_error, invalid_response, api_error, file_error, unknown
 
+    run = relationship("Run", back_populates="steps", lazy="raise_on_sql")
+
 
 class Log(Base):
     """Pipeline execution logs."""
@@ -141,6 +171,8 @@ class Log(Base):
     timestamp = Column(DateTime, server_default=func.now())
     level = Column(String(20), default="INFO")  # INFO, WARNING, ERROR
     message = Column(Text, nullable=False)
+
+    run = relationship("Run", back_populates="logs", lazy="raise_on_sql")
 
 
 class LLMUsage(Base):
@@ -164,6 +196,8 @@ class LLMUsage(Base):
     prompt_version = Column(String(64), nullable=True)  # SHA-256 hash of prompt template
     provider = Column(String(50), server_default="openai", nullable=True)  # LLM provider: "openai", "bedrock", etc.
 
+    run = relationship("Run", back_populates="llm_usage", lazy="raise_on_sql")
+
 
 class RunMetrics(Base):
     """Aggregate metrics for a pipeline run."""
@@ -178,3 +212,5 @@ class RunMetrics(Base):
     sections_total = Column(Integer, default=71)
     language = Column(String(10), nullable=True)
     computed_at = Column(DateTime, server_default=func.now())
+
+    run = relationship("Run", back_populates="metrics", lazy="raise_on_sql")
