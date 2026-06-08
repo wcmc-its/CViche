@@ -453,6 +453,37 @@ def deduplicate_entries(entries: List[Dict], verbose: bool = False,
     return entries
 
 
+def element_idx_sort_key(value) -> tuple:
+    """Document-order sort key tolerant of stage-2's mixed index types.
+
+    ``element_idx_start`` is not uniformly typed: stage 2 writes a plain int for
+    paragraph entries, a ``"table_N"`` string for table blocks, and a
+    ``"row.col"`` string such as ``"22.2"`` for table rows. Sorting these raw
+    raises ``TypeError: '<' not supported between instances of 'str' and 'int'``
+    whenever a section mixes them. Normalize every form to a ``(major, minor)``
+    float tuple so the comparison is total and preserves document order. Mirrors
+    ``normalize_idx`` in stage_2_entry_extraction.py.
+    """
+    if value is None:
+        return (float('inf'), 0.0)
+    if isinstance(value, str):
+        if '.' in value:
+            parts = value.split('.', 1)
+            try:
+                return (float(parts[0]), float(parts[1]))
+            except ValueError:
+                return (float('inf'), 0.0)
+        if value.startswith('table_'):
+            try:
+                return (1_000_000.0 + float(value.split('_')[1]), 0.0)
+            except (ValueError, IndexError):
+                return (float('inf'), 0.0)
+    try:
+        return (float(value), 0.0)
+    except (ValueError, TypeError):
+        return (float('inf'), 0.0)
+
+
 def extract_sort_date(entry: Dict) -> tuple:
     """
     Extract a sortable date tuple from an entry for reverse-chronological ordering.
@@ -3087,7 +3118,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not entries:
             return entries
         # Sort by document order (element_idx_start) to ensure parent comes first
-        ordered = sorted(entries, key=lambda e: e.get('element_idx_start', 0))
+        ordered = sorted(entries, key=lambda e: element_idx_sort_key(e.get('element_idx_start')))
         last_institution = None
         last_enrichment = None
         propagated = 0
