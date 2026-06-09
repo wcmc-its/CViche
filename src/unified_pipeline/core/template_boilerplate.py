@@ -25,31 +25,37 @@ from typing import List
 # Resolve the JSON relative to THIS file so it works regardless of cwd.
 _JSON_PATH = Path(__file__).resolve().parent / "template_boilerplate_phrases.json"
 
-# Directive sentence prefixes. A normalized entry that begins with one of these
-# is template boilerplate (these are the opening words of the template's
-# instruction sentences). Kept explicit and lowercase.
-_DIRECTIVE_PREFIXES = (
-    "please include",
-    "please list",
-    "please summarize",
-    "please annotate",
-    "please choose",
-    "duplicate table below",
-    "include year",
-    "list trainees",
-    "entries should follow",
-    "number the entries",
-    "bold your name",
-    "if joining wcm",
-    "if this is the candidate",
-    "categorize your entries",
-    "mentorship is a longitudinal",
-)
+# Minimum length (normalized chars) for an exact / pipe-cell match to count as
+# boilerplate. Short template field labels ("Teaching", "National", "Books",
+# "Full Name of Board", ...) collide with words faculty legitimately use as
+# their own content, and real table rows arrive with such labels as cells, so we
+# only exact-match-drop DISTINCTIVE longer strings. The real leaked boilerplate
+# (directive sentences, parenthetical prompts, detailed column labels) is well
+# above this threshold.
+_MIN_EXACT_LEN = 25
 
 # Minimum length for the containment heuristic. Only long directive sentences
 # are matched by containment; short field labels must match exactly so we never
 # drop a real CV line that merely happens to contain a short label substring.
 _CONTAINMENT_MIN_LEN = 40
+
+# WCM BIBLIOGRAPHY category labels. Faculty legitimately keep these as the
+# organizing sub-headings of their own bibliography, so they must NEVER be
+# dropped even though they appear in the template (and some exceed
+# _MIN_EXACT_LEN). Protected exactly like section headers. The parenthetical
+# "(optional, ...)" template variants are deliberately NOT listed here, so those
+# fuller forms still drop as boilerplate.
+_BIBLIOGRAPHY_CATEGORIES = (
+    "Peer-reviewed Research Articles",
+    "Reviews and Editorials",
+    "Books",
+    "Chapters",
+    "Non-peer-reviewed Research Publications",
+    "Case Reports",
+    "Abstracts",
+    "In review",
+    "Other (media, podcasts, etc.)",
+)
 
 # Leading bullet / list-marker characters to strip during normalization.
 _LEADING_MARKERS = "•‣◦⁃∙*-–—.) \t"
@@ -104,23 +110,34 @@ def _load_phrases():
 # Module-level cache: load the normalized phrase sets once at import.
 _INSTRUCTION_SET, _SECTION_HEADER_SET = _load_phrases()
 
+# Protected terms are never dropped and take precedence over instruction
+# matching: top-level section headers plus bibliography category labels.
+_PROTECTED = _SECTION_HEADER_SET | {
+    n for n in (_normalize(c) for c in _BIBLIOGRAPHY_CATEGORIES) if n
+}
+
 
 def is_template_instruction(text: str) -> bool:
     """Return True if *text* is WCM-template instruction boilerplate.
 
-    PRECISION-BIASED: when unsure, return False.
+    PRECISION-BIASED: when unsure, return False — real CV content must never be
+    dropped.
 
-    Matching strategy (any rule matching -> True):
-      a. exact normalized match against the known instruction set; ALSO split
-         the entry on "|" and match each cell (handles pipe-joined template
-         cells like "Full Name of Board | Certificate # (indicate if board
-         eligible)").
-      b. containment: a known instruction string of length >= 40 chars is
-         contained in the normalized entry.
-      c. directive-prefix: the normalized entry starts with a known directive
-         prefix.
+    Matching strategy (any rule -> True), after a protected-term guard:
+      a. exact normalized match against the known instruction set, but only for
+         DISTINCTIVE strings (>= _MIN_EXACT_LEN chars). Short generic template
+         labels (Teaching, National, Books, ...) are intentionally NOT dropped,
+         because faculty use those same words as real content.
+      b. pipe-split: real CV table rows reach this joined by "|". Drop only if
+         some cell is a distinctive (>= _MIN_EXACT_LEN), non-protected known
+         instruction; a cell that is just a short label ("... | Teaching") or a
+         protected term never triggers a drop.
+      c. containment: a known instruction of length >= _CONTAINMENT_MIN_LEN is
+         contained in the normalized entry (catches a template sentence left in
+         with extra faculty text appended).
 
-    Section headers (PERSONAL DATA, EDUCATION, ...) are never dropped here.
+    Protected terms (top-level section headers + bibliography category labels)
+    are never dropped, even when they collide with a template field label.
     """
     if not text:
         return False
@@ -129,32 +146,43 @@ def is_template_instruction(text: str) -> bool:
     if not normalized:
         return False
 
-    # Precision guard: never drop a bare top-level WCM section header. Some
-    # template field labels collide with section names once lowercased (e.g.
-    # the percent-effort column label "Research" vs. the "RESEARCH" section),
-    # so this guard takes precedence over the instruction matching below.
-    if normalized in _SECTION_HEADER_SET:
+    # Precision guard: never drop a protected term (section header or
+    # bibliography category). Takes precedence over all instruction matching.
+    if normalized in _PROTECTED:
         return False
 
-    # Rule (a): exact normalized match.
-    if normalized in _INSTRUCTION_SET:
+    # Rule (a): exact match, but only on a distinctive (long enough) instruction
+    # string, so short generic labels can never drop a real one-word entry.
+    if len(normalized) >= _MIN_EXACT_LEN and normalized in _INSTRUCTION_SET:
         return True
 
-    # Rule (a, continued): pipe-split cell match. If the raw text contains pipe
-    # separators (template cells joined by "|"), match each cell individually.
+    # Rule (b): pipe-split cell match. Real table rows arrive as "cell | cell |
+    # cell"; only a distinctive, non-protected instruction cell triggers a drop.
     if "|" in text:
-        cells = [_normalize(cell) for cell in text.split("|")]
-        if any(cell and cell in _INSTRUCTION_SET for cell in cells):
-            return True
+        for cell in (_normalize(c) for c in text.split("|")):
+            if (
+                cell
+                and cell not in _PROTECTED
+                and len(cell) >= _MIN_EXACT_LEN
+                and cell in _INSTRUCTION_SET
+            ):
+                return True
 
-    # Rule (b): containment of a long known instruction inside the entry.
+    # Rule (c): containment of a long known instruction inside the entry
+    # (a template sentence left in with extra faculty text appended).
     for known in _INSTRUCTION_SET:
         if len(known) >= _CONTAINMENT_MIN_LEN and known in normalized:
             return True
 
-    # Rule (c): directive prefix.
-    if normalized.startswith(_DIRECTIVE_PREFIXES):
-        return True
+    # Rule (d): reverse containment — the entry is a long (>= _CONTAINMENT_MIN_LEN)
+    # verbatim fragment of an even longer template instruction paragraph (faculty
+    # left part of a directive paragraph in). Safe: a real CV line is never a
+    # verbatim substring of the template's directive prose, and the >= 40-char
+    # floor rules out short generic fragments.
+    if len(normalized) >= _CONTAINMENT_MIN_LEN:
+        for known in _INSTRUCTION_SET:
+            if len(known) > len(normalized) and normalized in known:
+                return True
 
     return False
 
