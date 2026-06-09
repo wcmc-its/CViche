@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from unified_pipeline.llm_client import call_llm
 from core.output_manager import OutputManager
 from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
+from core.template_boilerplate import is_template_instruction
 
 
 def get_hierarchy_path(node: Dict, current_path: List[str] = None) -> List[str]:
@@ -1109,6 +1110,25 @@ def run_stage_2(
     all_doc_indices = set(range(doc_length))
     integer_assigned = {idx for idx in all_assigned_indices if isinstance(idx, int)}
     unaccounted_indices = all_doc_indices - integer_assigned
+
+    # Drop WCM-template instruction boilerplate (Layer 1, primary filter).
+    # Faculty leave the blank template's instruction scaffolding in their CVs;
+    # those blocks get parsed as entries and pollute downstream output. The
+    # detector is precision-biased (never drops real CV content). Section
+    # headers are intentionally NOT dropped here.
+    _pre_filter_count = len(all_entries)
+    all_entries = [
+        e for e in all_entries
+        if not is_template_instruction(e.get("text", ""))
+    ]
+    _filtered_count = _pre_filter_count - len(all_entries)
+    if _filtered_count:
+        print(f"Filtered {_filtered_count} WCM-template instruction entries")
+
+    # Recompute coverage buckets after filtering so reported counts are accurate.
+    content_entries = [e for e in all_entries if e["element_type"] not in ("header", "break")]
+    header_entries = [e for e in all_entries if e["element_type"] == "header"]
+    break_entries = [e for e in all_entries if e["element_type"] == "break"]
 
     # Save output
     output_path = om.get_stage2_path()
