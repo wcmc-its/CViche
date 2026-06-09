@@ -911,6 +911,8 @@ def attempt_llm_recovery(
             if matched_recovery:
                 # Apply recovered fields
                 recovered_fields = matched_recovery.get("fields", {})
+                # Coerce off-type LLM values before regex/downstream consumers
+                recovered_fields = coerce_field_value_types(recovered_fields)
                 # Normalize dates
                 recovered_fields = normalize_dates(recovered_fields)
                 # Apply regex post-processing
@@ -1198,6 +1200,11 @@ Return JSON with format:
                     extracted_fields = {k: v for k, v in extraction_map[i].items()
                                        if k != "entry_index"}
 
+                    # Coerce off-type LLM values (e.g. list-valued strings) before
+                    # any string/number consumer (regex post-processing, downstream
+                    # stages) touches them -- see coerce_field_value_types().
+                    extracted_fields = coerce_field_value_types(extracted_fields)
+
                     # Apply date normalization to split ranges into start_date/end_date
                     extracted_fields = normalize_dates(extracted_fields)
 
@@ -1295,6 +1302,49 @@ Return JSON with format:
         "cache_write_tokens": total_cache_write_tokens,
         "success": True
     }
+
+
+def coerce_field_value_types(extracted_fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Coerce LLM-extracted field values to the scalar types downstream stages assume.
+
+    Stage 4 stores raw LLM JSON (the extraction call uses
+    ``response_format={"type": "json_object"}`` with no schema), so a field the
+    prompt asks for as a string can legitimately come back as a list of strings.
+    This is common in practice -- e.g. ``narrative`` is a list in 55/65 sample
+    outputs, and ``training_type``/``program_name``/``description``/``specialty``/
+    ``start_date``/``end_date`` have all been observed as lists. Downstream code
+    then calls ``.strip()``, ``.lower()``, ``.split()``, ``re.search()``,
+    ``< 0.7`` or ``", ".join([...])`` on the value and crashes the entire run
+    (e.g. "Pipeline failed -- expected str instance, list found", or a
+    ``'<' not supported between instances of 'str' and 'int'`` TypeError).
+    stage_6_word_template.py already patches a handful of fields ad hoc with
+    ``isinstance(x, list)`` checks; this normalizes every field once, centrally,
+    before any consumer sees it.
+
+    The rule is deliberately conservative -- it only touches values that would
+    otherwise crash a string/number consumer:
+
+    - a list whose items are all scalars -> ``"; "``-joined string of the
+      non-empty items (mirrors the ``"; ".join(...)`` convention already used in
+      stage_6_word_template.py)
+    - everything else is returned untouched, so numeric fields (``year``,
+      ``volume``) stay numeric, structured fields (``locations`` and other
+      list-of-dict / dict values) keep their shape, and ``None`` stays ``None``.
+    """
+    if not isinstance(extracted_fields, dict):
+        return extracted_fields
+
+    coerced = {}
+    for key, value in extracted_fields.items():
+        if isinstance(value, list) and all(
+            item is None or isinstance(item, (str, int, float)) for item in value
+        ):
+            coerced[key] = "; ".join(
+                str(item).strip() for item in value if item not in (None, "")
+            )
+        else:
+            coerced[key] = value
+    return coerced
 
 
 def normalize_dates(extracted_fields: Dict[str, Any]) -> Dict[str, Any]:
