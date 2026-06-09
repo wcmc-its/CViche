@@ -383,30 +383,85 @@ class PipelineOrchestrator:
                     path_str, self.run_id, e,
                 )
 
-    def _prepare_resume(self, run: Run, start_step_number: int) -> None:
-        """Prime in-memory state for a resumed run (per-step retry).
+    def _prepare_resume(self, run: Run, start_step_number: int) -> int:
+        """Prime in-memory state for a resumed run (per-step retry) and return
+        the step to actually resume from.
 
-        Continues cost accounting from the run's existing total (so the costs of
-        the already-completed earlier stages are preserved) and registers each
-        completed stage's on-disk output so downstream stages that prefer the
-        in-memory path resolve their inputs correctly.
+        For each stage completed before ``start_step_number`` it makes that
+        stage's output available again: it prefers the pod-local file and falls
+        back to durable storage when the local file is gone (e.g. the pod
+        recycled since the original run, wiping the ephemeral outputs dir).
+        Outputs are mirrored to storage under ``outputs/{basename}`` as each
+        stage completes, so this is the read side of that mirror. A registered
+        output lets downstream stages resolve their inputs from the in-memory
+        path.
+
+        If a prior stage's output can be recovered from neither source, resume
+        backs up to recompute from that stage rather than dead-ending a later
+        stage (e.g. Stage 6's "No input available"). Worst case -- only the
+        durable upload survives -- this returns step 1, i.e. a full recompute.
+
+        Cost accounting continues from the run's existing total. If the resume
+        point is backed up, the stages between the new and the originally
+        requested point get recomputed and re-add their cost, so their
+        already-counted cost is subtracted here to avoid double-counting that
+        recomputed suffix.
         """
-        self.total_cost = run.total_cost or 0.0
         output_paths = self._get_output_paths()
+        storage = get_storage()
+
+        effective_start = start_step_number
         for step_def in STEP_REGISTRY:
             if step_def.number >= start_step_number:
                 break
-            path = output_paths.get(step_def.stage_id)
-            if path and Path(path).exists():
+            raw_path = output_paths.get(step_def.stage_id)
+            if raw_path is None:
+                continue
+            path = Path(raw_path)
+            if not path.exists():
+                # Local copy gone (pod recycle). Try durable storage.
+                try:
+                    data = storage.get_file(self.run_id, f"outputs/{path.name}")
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                    logger.info(
+                        "Rehydrated stage %s output for run %s from storage",
+                        step_def.stage_id, self.run_id,
+                    )
+                except Exception:
+                    pass
+            if path.exists():
                 self.stage_outputs[step_def.stage_id] = str(path)
+            else:
+                # First unrecoverable gap: recompute from here so the missing
+                # input is regenerated instead of failing a downstream stage.
+                effective_start = step_def.number
+                logger.info(
+                    "Resume for run %s backing up to step %d: stage %s output "
+                    "unavailable locally and in storage",
+                    self.run_id, step_def.number, step_def.stage_id,
+                )
+                break
+
+        self.total_cost = run.total_cost or 0.0
+        if effective_start < start_step_number:
+            recomputed = self.db.query(Step).filter(
+                Step.run_id == self.run_id,
+                Step.step_number >= effective_start,
+                Step.step_number < start_step_number,
+            ).all()
+            self.total_cost -= sum((s.cost or 0.0) for s in recomputed)
+        return effective_start
 
     async def execute(self, start_step_number: Optional[int] = None):
         """Execute the pipeline.
 
         When ``start_step_number`` is given (a per-step retry), stages before it
-        are skipped and their outputs are loaded from disk so the resumed stages
-        resolve their inputs. This relies on the prior stages' output files
-        still being present on this pod's filesystem.
+        are skipped and their outputs are made available to the resumed stages
+        (preferring the pod-local file, falling back to durable storage). If an
+        earlier output can't be recovered, ``_prepare_resume`` lowers the resume
+        point so the missing stage is recomputed rather than dead-ending a later
+        stage; in the worst case the pipeline recomputes from the start.
         """
         run = self.db.query(Run).filter(Run.id == self.run_id).first()
         if not run:
@@ -424,7 +479,8 @@ class PipelineOrchestrator:
             cv_path = self._copy_to_pipeline_input()
 
             if start_step_number is not None:
-                self._prepare_resume(run, start_step_number)
+                # May lower the resume point if an earlier output is unrecoverable.
+                start_step_number = self._prepare_resume(run, start_step_number)
 
             # Execute all 12 stages (or, on retry, from the failed step onward)
             for step_def in STEP_REGISTRY:
@@ -485,7 +541,12 @@ class PipelineOrchestrator:
             # stage's output is no longer on disk -- e.g. the pod recycled since
             # the original run. Surface a clear next step instead of leaking a raw
             # filesystem path + errno to the (non-technical) user.
-            is_missing_input = isinstance(e, FileNotFoundError) or "no such file or directory" in str(e).lower()
+            err_text = str(e).lower()
+            is_missing_input = (
+                isinstance(e, FileNotFoundError)
+                or "no such file or directory" in err_text
+                or "no input available" in err_text
+            )
             if start_step_number is not None and is_missing_input:
                 run.error_message = (
                     "Couldn't resume: earlier pipeline results are no longer "
