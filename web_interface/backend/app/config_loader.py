@@ -2,6 +2,7 @@
 import json
 import logging
 import yaml
+import os
 from pathlib import Path
 from sqlalchemy.orm import Session
 from app.models import SystemConfig
@@ -94,3 +95,21 @@ def get_config_value(db: Session, key: str):
     if row:
         return json.loads(row.value)
     return None
+
+def get_config(section, key, default=None):
+    # 1. env 
+    value = os.environ.get(key)
+    if value:
+        return value,"env"
+
+    # 2. yaml (ConfigMap)
+    try:
+        cfg = load_yaml_config() or {}
+        value = (cfg.get(section) or {}).get(key)
+        if value:
+            return value, "yaml"
+    except Exception:
+        logger.warning("Failed to load auth_config.yaml; returning default value",exc_info=True)
+
+    # 3. default
+    return default ,"default"

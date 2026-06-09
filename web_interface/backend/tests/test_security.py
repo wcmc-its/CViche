@@ -482,8 +482,11 @@ class TestUploadValidation:
         self._create_auth_user(client, db)
         # Minimal valid PDF
         pdf_content = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF"
-        # Patch UPLOAD_DIR to tmp_path so we don't pollute real uploads
-        with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+        # Patch UPLOAD_DIR to tmp_path so we don't pollute real uploads. Mock the
+        # empty-document text extraction (covered separately in test_release_guards)
+        # so this magic-byte-acceptance test isn't tripped by the text-bearing guard.
+        with patch("app.api.upload.UPLOAD_DIR", tmp_path), \
+             patch("app.api.upload._extract_text", return_value="x" * 600):
             response = client.post(
                 "/api/upload",
                 files={"file": ("my_cv.pdf", pdf_content, "application/pdf")},
@@ -510,7 +513,8 @@ class TestUploadValidation:
         """Uploaded files are stored with randomized names, not the user-provided filename."""
         self._create_auth_user(client, db)
         pdf_content = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF"
-        with patch("app.api.upload.UPLOAD_DIR", tmp_path):
+        with patch("app.api.upload.UPLOAD_DIR", tmp_path), \
+             patch("app.api.upload._extract_text", return_value="x" * 600):
             response = client.post(
                 "/api/upload",
                 files={"file": ("John_Doe_CV_2024.pdf", pdf_content, "application/pdf")},

@@ -19,6 +19,12 @@ services:
       CVICHE_S3_BUCKET: "${CVICHE_S3_BUCKET}"
       CVICHE_S3_PREFIX: "${CVICHE_S3_PREFIX:-cviche}"
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      # Real-time broker. UNSET in prod today, so the app uses the in-process
+      # emitter and must stay single-worker / single-replica (see below). To
+      # scale out: provision managed Redis (ElastiCache / MemoryDB), set this to
+      # its endpoint, then raise replicas (k8s) -- events and cancellation will
+      # cross replica boundaries. Leave commented until that infra exists.
+      # CVICHE_REDIS_URL: "${CVICHE_REDIS_URL}"
       # Structured logging: emit one JSON object per line so the EKS log
       # collector / CloudWatch can index by request_id, level, logger, etc.
       CVICHE_LOG_FORMAT: "json"
@@ -48,9 +54,11 @@ services:
     # (`/app/web_interface/backend/auth_config.yaml`).
     volumes: !override
       - "${CVICHE_AUTH_CONFIG_HOST_PATH:-./backend/auth_config.yaml}:/app/web_interface/backend/auth_config.yaml:ro"
-    # Single uvicorn worker: the pipeline-progress WebSocket uses an
-    # in-process event emitter, so with multiple workers a client can miss
-    # live updates (see issue #4). Scale out with replicas, not workers.
+    # Single uvicorn worker: with the broker disabled (CVICHE_REDIS_URL unset)
+    # the pipeline-progress WebSocket uses an in-process event emitter, so with
+    # multiple workers/replicas a client can miss live updates and cancellation
+    # can hit the wrong process (see issue #4). The Redis broker removes this
+    # limit -- once CVICHE_REDIS_URL is set, raise this and/or scale replicas.
     command: ["--workers", "1"]
     deploy:
       resources:
@@ -88,5 +96,12 @@ services:
   # --- DB: use external managed database in production ---
   # Remove the db service -- production uses a managed MariaDB instance
   db:
+    profiles:
+      - disabled
+
+  # --- Redis: use external managed Redis in production ---
+  # Disable the dev compose container -- production points CVICHE_REDIS_URL at a
+  # managed Redis (ElastiCache / MemoryDB), not an in-stack container.
+  redis:
     profiles:
       - disabled

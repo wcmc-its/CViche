@@ -2,7 +2,7 @@
 import logging
 import os
 import traceback
-import yaml
+
 
 from fastapi import FastAPI, Request, Depends, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -23,17 +23,34 @@ logger = logging.getLogger(__name__)
 from app.database import init_db, get_db
 from app.middleware.request_id import RequestIDMiddleware
 from app.api import upload, runs, steps, websocket, auth_routes, consent_routes, feedback_routes, admin_routes, saml_routes
-
+from app.config_loader import get_config
 # ---------------------------------------------------------------------------
 # Allowed origins (env-configurable, comma-separated)
 # ---------------------------------------------------------------------------
-_allowed_origins = [
-    o.strip()
-    for o in os.environ.get(
-        "CVICHE_ALLOWED_ORIGINS",
-        "http://localhost:3000,http://localhost:3001,http://localhost:5173,http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:5173",
-    ).split(",")
-]
+_LOCALHOST_ORIGINS = (
+    "http://localhost:3000,http://localhost:3001,http://localhost:5173,"
+    "http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:5173"
+)
+
+
+def _resolve_allowed_origins() -> list[str]:
+    """Resolve allowed origins. Precedence: CVICHE_ALLOWED_ORIGINS env var,
+    then auth_config.yaml (where the deploy buildspec writes it, under `auth`),
+    then localhost dev defaults.
+
+    The deploy buildspec writes CVICHE_ALLOWED_ORIGINS into auth_config.yaml
+    rather than as an env var, so an env-only lookup silently fell back to the
+    localhost defaults in production -- which then rejected same-origin POST
+    requests from the real prod origin via the CSRF middleware below. Reading
+    the YAML as a fallback makes the configured value take effect.
+    """
+    raw, source = get_config("auth", "CVICHE_ALLOWED_ORIGINS", default=_LOCALHOST_ORIGINS)
+    if source == "default":
+        raw = _LOCALHOST_ORIGINS
+    return [o.strip() for o in raw.split(",") if o.strip()]
+    
+
+_allowed_origins = _resolve_allowed_origins()
 
 
 # ---------------------------------------------------------------------------
@@ -122,10 +139,19 @@ async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup: Initialize database
     print("🚀 Starting CViche Pipeline Viewer...")
-    init_db()
-    print("✅ Database initialized")
+    # init_db() emits CREATE TABLE IF NOT EXISTS via metadata.create_all().
+    # In production the runtime DB role is DML-only (IAM-auth'd cviche_app_user
+    # with SELECT/INSERT/UPDATE/DELETE) and Alembic owns schema via a separate
+    # one-shot migrate Job. Set CVICHE_INIT_DB=0 in the EKS overlay so pods
+    # don't fail at boot trying to issue DDL they aren't authorized for.
+    if os.environ.get("CVICHE_INIT_DB", "1") == "1":
+        init_db()
+        print("✅ Database initialized")
+    else:
+        print("⏭️  Skipping init_db() (CVICHE_INIT_DB=0); Alembic owns schema.")
     from app.config_loader import seed_system_config
     from app.consent import load_consent_text, check_consent_integrity
+    from app.services.run_service import reconcile_stale_runs
     from app.database import SessionLocal
     db = SessionLocal()
     try:
@@ -134,10 +160,35 @@ async def lifespan(app: FastAPI):
         load_consent_text()
         print("✅ Consent text loaded")
         check_consent_integrity(db)
+        # Resolve runs orphaned by a previous restart so they don't hang
+        # in "running" forever (the UI would count elapsed time up endlessly).
+        swept = reconcile_stale_runs(db)
+        if swept:
+            print(f"♻️  Reconciled {swept} stale run(s) from a previous restart")
     finally:
         db.close()
+
+    # Real-time broker: when CVICHE_REDIS_URL is set, pipeline events and
+    # cancellation cross worker/replica boundaries via Redis; otherwise the
+    # emitter and orchestrator use process-local state (single-worker behavior).
+    from app.pipeline.redis_broker import broker_from_env
+    from app.pipeline.event_emitter import event_emitter
+    from app.pipeline import orchestrator as orchestrator_module
+    broker = broker_from_env()
+    app.state.broker = broker
+    event_emitter.set_broker(broker)
+    orchestrator_module.set_broker(broker)
+    await event_emitter.startup()
+    if broker.enabled:
+        print("✅ Redis broker enabled (cross-worker events + cancellation)")
+    else:
+        print("ℹ️  Redis broker disabled — in-process events (single-worker mode)")
+
     yield
-    # Shutdown: cleanup if needed
+
+    # Shutdown: stop the subscriber loop and close broker connections.
+    await event_emitter.shutdown()
+    await broker.shutdown()
     print("👋 Shutting down CViche Pipeline Viewer")
 
 
@@ -219,21 +270,17 @@ def readyz(response: Response, db: Session = Depends(get_db)):
     """
     checks: dict[str, dict] = {}
 
-    from app.config_loader import load_yaml_config
-    config = load_yaml_config()
-        
-    s3_config = config.get("s3", {})
-
+    cviche_storage_backend, source = get_config("s3", "CVICHE_STORAGE_BACKEND", default="local")
+    
     try:
         db.execute(text("SELECT 1"))
         checks["db"] = {"ok": True}
     except Exception as exc:
         checks["db"] = {"ok": False, "error": str(exc)}
 
-    storage_backend = s3_config.get("CVICHE_STORAGE_BACKEND", "local")
+    storage_backend = cviche_storage_backend;
     if storage_backend == "s3":
-        
-        bucket = s3_config.get("CVICHE_S3_BUCKET", "")
+        bucket, source = get_config("s3", "CVICHE_S3_BUCKET", default="local")
         if not bucket:
             checks["s3"] = {"ok": False, "error": "CVICHE_S3_BUCKET not set"}
         else:

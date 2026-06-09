@@ -1,37 +1,37 @@
 """Database configuration and session management."""
 import os
+import boto3
 from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from app.base_class import Base
+from app.database_factory import create_cviche_engine
+from app.config_loader import get_config
 
 # Read DATABASE_URL from environment; default to SQLite for local dev.
 # The default is an absolute path anchored at the backend directory so it is
 # stable regardless of the process working directory (the pipeline
 # orchestrator pins cwd to the repo root while runs execute).
-DATABASE_URL = os.environ.get("CVICHE_DATABASE_URL", "")
-if not DATABASE_URL:
-    _default_db = Path(__file__).resolve().parent.parent / "cviche_dev.db"
-    DATABASE_URL = f"sqlite:///{_default_db}"
 
-# Configure engine kwargs based on database backend
-engine_kwargs = {}
-if DATABASE_URL.startswith("sqlite"):
-    # SQLite requires this for multithreaded FastAPI usage
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
-else:
-    # MariaDB/MySQL: verify connections are still alive before using them
-    engine_kwargs["pool_pre_ping"] = True
+db_user, source = get_config("db", "DB_USER", default="")
 
-# Create engine
-engine = create_engine(DATABASE_URL, **engine_kwargs)
+# 1. Extract routing parameters using in configuration loader
+db_host, _ = get_config("db", "DB_HOST", default="")
+db_port, _ = get_config("db", "DB_PORT", default="")
+db_name, _ = get_config("db", "DB_NAME", default="")
+migrate_user, _ = get_config("db", "DB_USER", default="")
 
-# Create session factory
+# 2. Pass them directly to the factory
+engine = create_cviche_engine(
+        db_host=db_host,
+        db_port=db_port,
+        db_name=db_name,
+        db_user=migrate_user
+    )
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-
-# Base class for models
-Base = declarative_base()
-
+   
 
 def get_db():
     """Dependency for getting database sessions."""

@@ -12,6 +12,7 @@ interface AuthContextType {
   needsConsent: boolean
   login: (email: string, displayName: string) => Promise<void>
   logout: () => Promise<void>
+  clearAuth: () => void
   refreshUser: () => Promise<void>
   refreshConsent: () => Promise<void>
 }
@@ -83,6 +84,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setConsentStatus(null)
   }
 
+  // Clear in-memory auth state without calling the server. Used when the
+  // session has already expired server-side (a 401 on a protected request),
+  // so RequireAuth re-gates and the user is sent back to /login.
+  const clearAuth = () => {
+    setUser(null)
+    setConsentStatus(null)
+  }
+
   const needsConsent = !!(
     user &&
     consentStatus &&
@@ -99,6 +108,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       needsConsent,
       login,
       logout,
+      clearAuth,
       refreshUser,
       refreshConsent,
     }}>

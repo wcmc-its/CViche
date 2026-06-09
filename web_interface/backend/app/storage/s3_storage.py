@@ -30,20 +30,33 @@ class S3RunStorage(RunStorage):
 
     def __init__(self, bucket: str | None = None, prefix: str | None = None):
         import boto3
+        from botocore.config import Config
 
-        from app.config_loader import load_yaml_config
-        config = load_yaml_config()
-        s3_config = config.get("s3", {})
-
-        self._bucket = bucket or s3_config.get("CVICHE_S3_BUCKET")
+        from app.config_loader import get_config
+        s3_bucket, source = get_config("s3", "CVICHE_S3_BUCKET", default="local")
+       
+        self._bucket = bucket or s3_bucket
         if not self._bucket:
             raise ValueError(
                 "S3 bucket not configured. Set CVICHE_S3_BUCKET environment variable."
             )
+        s3_bucket_prefix, source = get_config("s3", "CVICHE_S3_PREFIX", default="cviche")
         
-        self._prefix = prefix or s3_config.get("CVICHE_S3_PREFIX", "cviche")
+        self._prefix = prefix or s3_bucket_prefix
 
-        self._s3 = boto3.client("s3")
+        # Force Signature Version 4. Without it, botocore falls back to the
+        # global s3.amazonaws.com endpoint and signs presigned URLs with SigV2,
+        # which S3 rejects for objects encrypted with SSE-KMS:
+        #   "Requests specifying Server Side Encryption with AWS KMS managed
+        #    keys require AWS Signature Version 4."
+        # Pinning the region (from AWS_REGION, set by the IRSA webhook on EKS)
+        # also keeps requests on the regional endpoint.
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+        self._s3 = boto3.client(
+            "s3",
+            region_name=region,
+            config=Config(signature_version="s3v4"),
+        )
 
     def _s3_key(self, run_id: str, key: str) -> str:
         """Build the full S3 key for a run artifact."""

@@ -9,7 +9,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, contains_eager
 
 from app.database import get_db
 from app.models import User, Run, Feedback, SystemConfig, Consent
@@ -23,8 +23,11 @@ from app.schemas import (
     AdminConfigResponse,
     AdminConfigUpdate,
     AdminUserUpdate,
+    QualityScoreResult,
 )
 from app.services.admin_service import get_users_with_stats, get_single_user_stats
+from app.services.quality_score_service import get_cached_score, compute_and_cache_score
+from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -62,11 +65,33 @@ async def get_stats(
         (runs_with_feedback / completed_runs * 100) if completed_runs > 0 else 0.0
     )
 
+    # CV-to-WCM conversion time, aggregated server-side over completed runs and
+    # returned on this existing stats call (the dashboard already makes it), so the
+    # admin overview gets avg/p95 without a second round-trip. The aggregate has to
+    # be computed here rather than on the client because /admin/runs is paginated --
+    # the browser never holds the whole population. Prefer the persisted pipeline
+    # duration; fall back to wall-clock for runs that predate the column.
+    durations = sorted(
+        r.total_duration_seconds if r.total_duration_seconds is not None
+        else int((r.completed_at - r.started_at).total_seconds())
+        for r in db.query(Run)
+        .filter(Run.status == "complete", Run.started_at.isnot(None), Run.completed_at.isnot(None))
+        .all()
+    )
+    avg_duration_seconds = round(sum(durations) / len(durations), 1) if durations else None
+    # Nearest-rank p95 over the sorted durations (portable; modest run volume).
+    p95_duration_seconds = (
+        durations[min(len(durations) - 1, max(0, round(0.95 * (len(durations) - 1))))]
+        if durations else None
+    )
+
     return AdminStats(
         total_runs=total_runs,
         active_users=active_users,
         total_cost=round(total_cost, 4),
         feedback_rate=round(feedback_rate, 1),
+        avg_duration_seconds=avg_duration_seconds,
+        p95_duration_seconds=p95_duration_seconds,
     )
 
 
@@ -188,7 +213,11 @@ async def get_runs(
     admin: User = Depends(require_admin),
 ):
     """Return all runs paginated, with optional filters."""
-    query = db.query(Run, User).outerjoin(User, Run.user_id == User.id)
+    # Eager-load run.user via the outer join (the relationship is
+    # lazy="raise_on_sql"). contains_eager populates run.user from the joined
+    # columns -- one query, no per-row lookup -- while the outer join still
+    # lets us filter by user email.
+    query = db.query(Run).outerjoin(Run.user).options(contains_eager(Run.user))
 
     if user:
         query = query.filter(User.email.ilike(f"%{user}%"))
@@ -200,7 +229,7 @@ async def get_runs(
     rows = query.order_by(Run.started_at.desc()).offset(offset).limit(limit).all()
 
     # Build run entries with feedback status
-    run_ids = [r.id for r, _ in rows]
+    run_ids = [run.id for run in rows]
     feedback_run_ids = set()
     if run_ids:
         feedback_rows = (
@@ -211,23 +240,41 @@ async def get_runs(
         )
         feedback_run_ids = {row.run_id for row in feedback_rows}
 
-    entries = []
-    for run, run_user in rows:
-        duration = None
-        if run.started_at and run.completed_at:
-            duration = int((run.completed_at - run.started_at).total_seconds())
+    # Read cached advisory quality scores in parallel (small JSON per run; only
+    # present for runs already scored — None otherwise). Admin-only / paginated.
+    cached_scores: dict[str, dict] = {}
+    if run_ids:
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for rid, score in zip(run_ids, pool.map(get_cached_score, run_ids)):
+                if score:
+                    cached_scores[rid] = score
 
+    entries = []
+    for run in rows:
+        # Prefer the persisted pipeline duration so the admin table matches the
+        # run status/history API; fall back to wall-clock for runs that predate
+        # the column. (Still blank for in-flight runs with no completed_at.)
+        if run.total_duration_seconds is not None:
+            duration = run.total_duration_seconds
+        elif run.started_at and run.completed_at:
+            duration = int((run.completed_at - run.started_at).total_seconds())
+        else:
+            duration = None
+
+        score = cached_scores.get(run.id)
         entries.append(
             AdminRunEntry(
                 run_id=run.id,
-                user_email=run_user.email if run_user else None,
-                user_display_name=run_user.display_name if run_user else None,
+                user_email=run.user.email if run.user else None,
+                user_display_name=run.user.display_name if run.user else None,
                 filename=run.filename,
                 status=run.status,
                 duration_seconds=duration,
                 total_cost=round(run.total_cost or 0, 4),
                 started_at=run.started_at,
                 has_feedback=run.id in feedback_run_ids,
+                quality_score=score.get("totalScore") if score else None,
+                quality_band=score.get("band") if score else None,
             )
         )
 
@@ -237,6 +284,37 @@ async def get_runs(
         has_more=(offset + limit) < total,
         offset=offset,
         limit=limit,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/admin/run/{run_id}/score  -- compute/backfill the advisory score
+# ---------------------------------------------------------------------------
+@router.post("/admin/run/{run_id}/score", response_model=QualityScoreResult)
+def compute_run_score(
+    run_id: str,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Compute (or refresh) the advisory quality score for a run and cache it.
+
+    Used to backfill runs created before scoring existed, or to refresh after a
+    re-run. Sync def so FastAPI runs the (blocking) storage I/O off the loop.
+    """
+    run = db.query(Run).filter(Run.id == run_id).first()
+    if not run:
+        raise not_found("Run not found")
+
+    result = compute_and_cache_score(run_id)
+    if not result:
+        raise not_found("No scorable outputs available for this run")
+
+    return QualityScoreResult(
+        run_id=run_id,
+        totalScore=result.get("totalScore", 0),
+        band=result.get("band", ""),
+        dimensionScores=result.get("dimensionScores", []),
+        flags=result.get("flags", []),
     )
 
 
@@ -369,15 +447,16 @@ async def export_csv(
             "input_tokens", "output_tokens", "submission_type", "error_message",
         ])
         rows = (
-            db.query(Run, User)
-            .outerjoin(User, Run.user_id == User.id)
+            db.query(Run)
+            .outerjoin(Run.user)
+            .options(contains_eager(Run.user))
             .order_by(Run.started_at.desc())
             .all()
         )
-        for run, run_user in rows:
+        for run in rows:
             writer.writerow([
                 run.id,
-                run_user.email if run_user else "",
+                run.user.email if run.user else "",
                 run.filename,
                 run.file_type,
                 run.status,
@@ -419,16 +498,17 @@ async def export_csv(
             "consent_text_hash", "ip_address", "user_agent", "timestamp",
         ])
         rows = (
-            db.query(Consent, User)
-            .outerjoin(User, Consent.user_id == User.id)
+            db.query(Consent)
+            .outerjoin(Consent.user)
+            .options(contains_eager(Consent.user))
             .order_by(Consent.timestamp.desc())
             .all()
         )
-        for consent, consent_user in rows:
+        for consent in rows:
             writer.writerow([
                 consent.id,
                 consent.user_id,
-                consent_user.email if consent_user else "",
+                consent.user.email if consent.user else "",
                 consent.consent_version,
                 consent.consent_text_hash,
                 consent.ip_address or "",
@@ -448,16 +528,17 @@ async def export_csv(
             "submitted_at",
         ])
         rows = (
-            db.query(Feedback, User)
-            .outerjoin(User, Feedback.user_id == User.id)
+            db.query(Feedback)
+            .outerjoin(Feedback.user)
+            .options(contains_eager(Feedback.user))
             .order_by(Feedback.submitted_at.desc())
             .all()
         )
-        for fb, fb_user in rows:
+        for fb in rows:
             writer.writerow([
                 fb.id,
                 fb.run_id,
-                fb_user.email if fb_user else "",
+                fb.user.email if fb.user else "",
                 fb.reviewer_role,
                 fb.overall_accuracy,
                 fb.overall_completeness,

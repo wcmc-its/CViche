@@ -4,8 +4,11 @@ from logging.config import fileConfig
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
 
-from alembic import context
+from app.config_loader import get_config
+from app.database_factory import create_cviche_engine
 
+from alembic import context
+import boto3
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
@@ -15,17 +18,15 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Override sqlalchemy.url from environment variable (same source as database.py)
-database_url = os.environ.get(
-    "CVICHE_DATABASE_URL",
-    "sqlite:///./cviche_dev.db"
-)
-config.set_main_option("sqlalchemy.url", database_url)
+
+
+#config.set_main_option("sqlalchemy.url", database_url)
 
 # Import models so Alembic can detect them for autogenerate
 from app.models import User, SystemConfig, Consent, Feedback, Run, Step, Log, LLMUsage, RunMetrics  # noqa: F401, E402
-from app.database import Base  # noqa: E402
+#from app.database import Base  # noqa: E402
 
+from app.base_class import Base
 target_metadata = Base.metadata
 
 
@@ -60,10 +61,19 @@ def run_migrations_online() -> None:
     and associate a connection with the context.
 
     """
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
+    # 1. Extract routing parameters using in configuration loader
+    db_host, _ = get_config("db", "DB_HOST", default="")
+    db_port, _ = get_config("db", "DB_PORT", default="")
+    db_name, _ = get_config("db", "DB_NAME", default="")
+    migrate_user, _ = get_config("db", "MIGRATE_USER", default="")
+
+
+    # 2. Pass them directly to the factory
+    connectable = create_cviche_engine(
+        db_host=db_host,
+        db_port=db_port,
+        db_name=db_name,
+        db_user=migrate_user
     )
 
     with connectable.connect() as connection:
@@ -79,3 +89,4 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+

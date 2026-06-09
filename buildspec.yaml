@@ -53,6 +53,12 @@ phases:
         auth:
           mode: saml
           CVICHE_ALLOWED_ORIGINS: "${CVICHE_ALLOWED_ORIGINS}"
+          CVICHE_MAX_UPLOAD_MB: "${CVICHE_MAX_UPLOAD_MB}"
+          CVICHE_SESSION_TTL: "${CVICHE_SESSION_TTL}"
+          CVICHE_LOGIN_RATE_LIMIT: "${CVICHE_LOGIN_RATE_LIMIT}"
+          CVICHE_LOGIN_RATE_WINDOW: "${CVICHE_LOGIN_RATE_WINDOW}"
+          CVICHE_TIME_PER_1K_TOKENS: "${CVICHE_TIME_PER_1K_TOKENS}"
+          CVICHE_BASE_OVERHEAD_SECONDS: "${CVICHE_BASE_OVERHEAD_SECONDS}"
         s3:
           CVICHE_S3_BUCKET: "${CVICHE_S3_BUCKET}"
           CVICHE_STORAGE_BACKEND: "${CVICHE_STORAGE_BACKEND}"
@@ -66,6 +72,17 @@ phases:
           idp_metadata_url: "${AUTH_METADATA_URL}"
           discovery_url: "${AUTH_DISCOVERY_URL}"
           cert_dir: "${AUTH_CERT_PATH}"
+        db:
+          DB_HOST: "${DB_HOST}"
+          DB_PORT: "${DB_PORT}"
+          DB_USER: "${DB_USER}"
+          DB_NAME: "${DB_NAME}"
+          MIGRATE_USER: "${MIGRATION_USER}"
+        llm:
+          CVICHE_LLM_TIMEOUT_SECONDS: "${CVICHE_LLM_TIMEOUT_SECONDS}"
+          CVICHE_LLM_MAX_ATTEMPTS: "${CVICHE_LLM_MAX_ATTEMPTS}"
+          CVICHE_STAGE_TIMEOUT_SECONDS: "${CVICHE_STAGE_TIMEOUT_SECONDS}"
+          CVICHE_STALE_RUN_MINUTES: "${CVICHE_STALE_RUN_MINUTES}"  
         allowed_users: []
         admin_users: []
         rate_limits:
@@ -81,9 +98,9 @@ phases:
           contact_email: "${AUTH_CONTACT_EMAIL}"
         EOF
        - echo "Writing live environment secrets into db.env template..."
-       - echo "DATABASE_URL=${DATABASE_URL}" > k8s/overlays/${ENV_NAME}/db.env
-       - echo "CVICHE_DATABASE_URL=${DATABASE_URL}" >> k8s/overlays/${ENV_NAME}/db.env
-       - echo "CVICHE_SESSION_SECRET=${SESSION_SECRET}" >> k8s/overlays/${ENV_NAME}/db.env
+       #- echo "DATABASE_URL=${DATABASE_URL}" > k8s/overlays/${ENV_NAME}/db.env
+       #- echo "CVICHE_DATABASE_URL=${DATABASE_URL}" >> k8s/overlays/${ENV_NAME}/db.env
+       - echo "CVICHE_SESSION_SECRET=${SESSION_SECRET}" > k8s/overlays/${ENV_NAME}/db.env
        - echo "CVICHE_OPENAI_API_KEY=${OPENAI_API_KEY}" >> k8s/overlays/${ENV_NAME}/db.env
        
        # --- Write your SAML cryptographic assets securely ---

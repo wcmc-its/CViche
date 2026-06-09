@@ -33,6 +33,7 @@ from app.models import Run, Step, Log
 from app.pipeline.step_registry import STEP_REGISTRY, get_step_by_stage_id
 from app.pipeline.event_emitter import event_emitter
 from app.storage import get_storage
+from app.config_loader import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -56,28 +57,72 @@ from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
 
 
-# Global registry to track cancellation requests
+# Cancellation tracking. The in-process set covers same-worker cancels (and is
+# the only mechanism when no Redis broker is configured). When a broker is
+# enabled, cancels also round-trip through Redis so a cancel received by one
+# worker/replica reaches the worker actually running the pipeline. The broker's
+# cancel ops use a sync client, so is_cancelled() stays synchronous and the
+# stage-boundary check (check_cancelled) needs no async change.
 _cancelled_runs: set = set()
+_broker = None
+
+
+def set_broker(broker):
+    """Attach the Redis broker (called at app startup)."""
+    global _broker
+    _broker = broker
 
 
 def cancel_run(run_id: str):
     """Signal a run to be cancelled."""
     _cancelled_runs.add(run_id)
+    if _broker is not None and _broker.enabled:
+        _broker.request_cancel(run_id)
 
 
 def is_cancelled(run_id: str) -> bool:
-    """Check if a run has been cancelled."""
-    return run_id in _cancelled_runs
+    """Check if a run has been cancelled (locally or via the broker)."""
+    if run_id in _cancelled_runs:
+        return True
+    if _broker is not None and _broker.enabled:
+        return _broker.is_cancelled(run_id)
+    return False
 
 
 def clear_cancelled(run_id: str):
     """Clear cancellation flag for a run."""
     _cancelled_runs.discard(run_id)
+    if _broker is not None and _broker.enabled:
+        _broker.clear_cancel(run_id)
 
 
 class CancelledException(Exception):
     """Exception raised when a pipeline run is cancelled."""
     pass
+
+
+def _get_stage_timeout_seconds() -> int:
+    """Per-stage wall-clock ceiling, in seconds (0 disables it).
+
+    A coarse last-resort backstop: if a stage runs longer than this, the
+    orchestrator abandons the await, marks the run failed, and emits
+    RUN_FAILED -- so a hung stage can never leave the run pinned at
+    "running" forever (the bug where the UI timer counted up indefinitely
+    after a silent Stage 4 hang). It is intentionally generous so a large
+    CV doing a lot of legitimate work is never clipped; the precise net
+    against a single wedged provider call is the per-call timeout on the
+    LLM client (see unified_pipeline/llm_client.py). asyncio.wait_for can't
+    kill the worker thread the stage runs in, so the LLM-call timeout is
+    what actually lets that thread unwind -- this only bounds how long the
+    *user* is left waiting. Tune via CVICHE_STAGE_TIMEOUT_SECONDS.
+    """
+    try:
+        #value = int(os.environ.get("CVICHE_STAGE_TIMEOUT_SECONDS", 1800))
+        timeout_seconds,_ = get_config("llm","CVICHE_STAGE_TIMEOUT_SECONDS",default=1800)
+        value = int(timeout_seconds) 
+    except (TypeError, ValueError):
+        return 1800
+    return value if value >= 0 else 1800
 
 
 # Progress patterns to detect in stdout
@@ -213,6 +258,10 @@ class PipelineOrchestrator:
         # Total cost tracking
         self.total_cost = 0.0
 
+        # Step number of the stage that raised, so the run-level failure handler
+        # can attribute RUN_FAILED to the stage the user was watching.
+        self.failed_step_number: Optional[int] = None
+
     async def log(self, step_number: int, message: str, level: str = "INFO"):
         """Log a message to database and emit via WebSocket."""
         log_entry = Log(run_id=self.run_id, step_number=step_number, level=level, message=message)
@@ -315,11 +364,10 @@ class PipelineOrchestrator:
         Best-effort: a storage failure here logs a warning and must never fail
         the run. In local mode this is a no-op (downloads serve from disk).
         """
-        from app.config_loader import load_yaml_config
-        config = load_yaml_config()
-        s3_config = config.get("s3", {})
-        
-        if s3_config.get("CVICHE_STORAGE_BACKEND", "local") != "s3":
+        from app.config_loader import get_config
+        cviche_storage_backend, source = get_config("s3", "CVICHE_STORAGE_BACKEND", default="local")
+
+        if cviche_storage_backend != "s3":
             return
 
         storage = get_storage()
@@ -335,11 +383,38 @@ class PipelineOrchestrator:
                     path_str, self.run_id, e,
                 )
 
-    async def execute(self):
-        """Execute the full pipeline."""
+    def _prepare_resume(self, run: Run, start_step_number: int) -> None:
+        """Prime in-memory state for a resumed run (per-step retry).
+
+        Continues cost accounting from the run's existing total (so the costs of
+        the already-completed earlier stages are preserved) and registers each
+        completed stage's on-disk output so downstream stages that prefer the
+        in-memory path resolve their inputs correctly.
+        """
+        self.total_cost = run.total_cost or 0.0
+        output_paths = self._get_output_paths()
+        for step_def in STEP_REGISTRY:
+            if step_def.number >= start_step_number:
+                break
+            path = output_paths.get(step_def.stage_id)
+            if path and Path(path).exists():
+                self.stage_outputs[step_def.stage_id] = str(path)
+
+    async def execute(self, start_step_number: Optional[int] = None):
+        """Execute the pipeline.
+
+        When ``start_step_number`` is given (a per-step retry), stages before it
+        are skipped and their outputs are loaded from disk so the resumed stages
+        resolve their inputs. This relies on the prior stages' output files
+        still being present on this pod's filesystem.
+        """
         run = self.db.query(Run).filter(Run.id == self.run_id).first()
         if not run:
             raise ValueError(f"Run {self.run_id} not found")
+
+        # Initialised before the try so the failure handler can always record a
+        # duration even if something throws before the pipeline proper starts.
+        start_time = None
 
         try:
             await event_emitter.emit_run_start(self.run_id)
@@ -348,23 +423,56 @@ class PipelineOrchestrator:
             # Copy file to pipeline input directory
             cv_path = self._copy_to_pipeline_input()
 
-            # Execute all 12 stages
+            if start_step_number is not None:
+                self._prepare_resume(run, start_step_number)
+
+            # Execute all 12 stages (or, on retry, from the failed step onward)
             for step_def in STEP_REGISTRY:
+                if start_step_number is not None and step_def.number < start_step_number:
+                    continue
                 # Check for cancellation before each step
                 self.check_cancelled()
                 await self.execute_step(step_def.number, step_def.stage_id, cv_path)
 
+            # Final cancellation check after the last stage. A cancel signalled
+            # while the final stage was running (the intra-stage checks may have
+            # already passed) must not be lost: re-checking here routes it into
+            # the CancelledException handler instead of falling through to the
+            # "complete" commit below.
+            self.check_cancelled()
+
+            # "cancelled" is terminal. The cancel endpoint sets run.status on a
+            # *different* DB session/row, so our in-memory ``run`` object can be
+            # stale; refreshing it (or re-querying) surfaces a cancel that
+            # landed without tripping check_cancelled() above -- e.g. set
+            # directly on the row, or by a replica that never populated this
+            # worker's in-process flag. Either way we must not flip it back to
+            # "complete".
+            self.db.refresh(run)
+            if run.status == "cancelled" or is_cancelled(self.run_id):
+                raise CancelledException(f"Run {self.run_id} was cancelled by user")
+
             duration = int(time.time() - start_time)
             run.status = "complete"
             run.completed_at = datetime.now()
+            # Persist the authoritative pipeline duration (previously only emitted
+            # over the WebSocket) so historical conversion-time metrics are queryable.
+            run.total_duration_seconds = duration
             run.total_cost = self.total_cost
-
-            # Calculate tokens from cost (approximate)
-            avg_cost_per_token = (0.150 + 0.600) / 2 / 1_000_000
-            run.total_tokens = int(self.total_cost / avg_cost_per_token) if self.total_cost > 0 else 0
             self.db.commit()
 
             await event_emitter.emit_run_complete(self.run_id, run.total_cost, run.total_tokens, duration)
+
+            # Compute & cache the advisory quality score for the admin view.
+            # Best-effort, run off the event loop; never affects run status.
+            try:
+                import asyncio
+                from app.services.quality_score_service import compute_and_cache_score
+                await asyncio.get_running_loop().run_in_executor(
+                    None, compute_and_cache_score, self.run_id
+                )
+            except Exception as e:
+                logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
 
         except CancelledException:
             # Run was cancelled - status already updated by API endpoint
@@ -373,10 +481,34 @@ class PipelineOrchestrator:
 
         except Exception as e:
             run.status = "failed"
-            run.error_message = str(e)
+            # On a resume (per-step retry), a missing input file means an earlier
+            # stage's output is no longer on disk -- e.g. the pod recycled since
+            # the original run. Surface a clear next step instead of leaking a raw
+            # filesystem path + errno to the (non-technical) user.
+            is_missing_input = isinstance(e, FileNotFoundError) or "no such file or directory" in str(e).lower()
+            if start_step_number is not None and is_missing_input:
+                run.error_message = (
+                    "Couldn't resume: earlier pipeline results are no longer "
+                    "available (the server may have restarted since this run). "
+                    'Please use "Restart with this file" to run it from the beginning.'
+                )
+            else:
+                run.error_message = str(e)
             run.completed_at = datetime.now()
+            # Record time-to-failure too -- useful when diagnosing a run that was
+            # "taking too long" and then errored out.
+            if start_time is not None:
+                run.total_duration_seconds = int(time.time() - start_time)
             self.db.commit()
             await self.log(0, f"Pipeline failed: {str(e)}", "ERROR")
+            # Authoritative terminal failure signal. Emit the user-facing
+            # message (run.error_message), not the raw exception, so a
+            # resume-input failure surfaces its actionable guidance. Mirrors
+            # RUN_COMPLETE / RUN_CANCELLED so the UI stops the timer and
+            # switches to the failure state without waiting for a status poll.
+            await event_emitter.emit_run_failed(
+                self.run_id, run.error_message or str(e), self.failed_step_number
+            )
             raise
 
         finally:
@@ -412,8 +544,25 @@ class PipelineOrchestrator:
 
             start_time = time.time()
 
-            # Execute the actual stage logic
-            result = await self._execute_stage_logic(stage_id, cv_path)
+            # Execute the actual stage logic, bounded by a coarse per-stage
+            # wall-clock ceiling. A hung stage (e.g. a wedged provider call)
+            # then raises TimeoutError into the except below instead of
+            # leaving the run pinned at "running" forever. Translate it to a
+            # clear, user-facing message rather than a bare asyncio error.
+            stage_timeout = _get_stage_timeout_seconds()
+            try:
+                if stage_timeout > 0:
+                    result = await asyncio.wait_for(
+                        self._execute_stage_logic(stage_id, cv_path),
+                        timeout=stage_timeout,
+                    )
+                else:
+                    result = await self._execute_stage_logic(stage_id, cv_path)
+            except (asyncio.TimeoutError, TimeoutError) as exc:
+                raise TimeoutError(
+                    f"Stage {stage_id} ({step_def.name}) timed out after "
+                    f"{stage_timeout}s and was stopped."
+                ) from exc
 
             duration = int(time.time() - start_time)
 
@@ -455,6 +604,10 @@ class PipelineOrchestrator:
             tb_str = traceback.format_exc()
             step.error_message = f"{str(e)}\n\nTraceback:\n{tb_str}"
             self.db.commit()
+
+            # Remember which stage broke so the run-level handler can name it
+            # in the terminal RUN_FAILED event.
+            self.failed_step_number = step_number
 
             await self.log(step_number, f"Error in Stage {stage_id}: {str(e)}", "ERROR")
             await event_emitter.emit_step_error(self.run_id, step_number, str(e))
@@ -641,7 +794,12 @@ class PipelineOrchestrator:
                     run_stage_2,
                     step_number,
                     docx_path=cv_path,
-                    hierarchy_json_path=stage1b_path
+                    hierarchy_json_path=stage1b_path,
+                    # Stage 2 makes one LLM call per section (~86 total); pass an
+                    # intra-stage cancel check so an abort lands mid-stage rather
+                    # than only at the stage boundary. check_cancelled() is sync,
+                    # so it's safe to call from inside the stage worker thread.
+                    cancel_check=self.check_cancelled
                 )
 
                 cost = stage2_data.get('total_cost', 0)
@@ -705,7 +863,12 @@ class PipelineOrchestrator:
                 stage4_result = await self._run_with_stdout_capture(
                     run_stage_4,
                     step_number,
-                    docx_path=f"{self.document_uid}.docx"
+                    docx_path=f"{self.document_uid}.docx",
+                    # Stage 4 is the heaviest stage (~130 LLM calls across
+                    # batches); pass an intra-stage cancel check so an abort
+                    # lands mid-stage. check_cancelled() is sync, so it's safe
+                    # to call from inside the stage worker thread.
+                    cancel_check=self.check_cancelled
                 )
 
                 stage4_output = stage4_result['output']

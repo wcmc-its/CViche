@@ -1,12 +1,25 @@
-import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams } from 'react-router-dom'
+import { useEffect } from 'react'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useParams, useLocation } from 'react-router-dom'
 import { useAuth } from './contexts/AuthContext'
+import { setUnauthorizedHandler } from './api/client'
 import UploadPage from './components/UploadPage'
 import PipelineViewer from './components/PipelineViewer'
 import LoginPage from './components/LoginPage'
 import ConsentPage from './components/ConsentPage'
 import AdminDashboard from './components/AdminDashboard'
 import HelpPage from './components/HelpPage'
+import ErrorBoundary from './components/ErrorBoundary'
 import { Loader2 } from 'lucide-react'
+
+/**
+ * Wraps the routed views in an error boundary, keyed by pathname so navigating
+ * away from a crashed view resets it (a remount on key change clears the error
+ * state). Without this, one uncaught render error blanks the entire app.
+ */
+function RoutedErrorBoundary({ children }: { children: React.ReactNode }) {
+  const location = useLocation()
+  return <ErrorBoundary key={location.pathname}>{children}</ErrorBoundary>
+}
 
 /**
  * Gate: redirects to /login if not authenticated.
@@ -132,10 +145,33 @@ function ConsentRoute() {
   return <ConsentPage />
 }
 
+/**
+ * Registers a global 401 handler with the API client. When a protected request
+ * comes back 401 (session expired mid-use), clear auth state and bounce to
+ * /login — which in SAML mode presents the WCM SSO button. Lives inside the
+ * router so it can navigate; auth-bootstrap calls are excluded in client.ts.
+ */
+function AuthErrorHandler() {
+  const { clearAuth } = useAuth()
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      clearAuth()
+      navigate('/login', { replace: true })
+    })
+    return () => setUnauthorizedHandler(null)
+  }, [clearAuth, navigate])
+
+  return null
+}
+
 function App() {
   return (
     <BrowserRouter>
+      <AuthErrorHandler />
       <div className="min-h-screen bg-surface-muted">
+        <RoutedErrorBoundary>
         <Routes>
           <Route
             path="/login"
@@ -194,6 +230,7 @@ function App() {
             }
           />
         </Routes>
+        </RoutedErrorBoundary>
       </div>
     </BrowserRouter>
   )

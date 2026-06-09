@@ -43,6 +43,22 @@ except ImportError:
 
 from unified_pipeline.llm_client import call_llm
 
+
+def _clean_inline_tabs(text: str) -> str:
+    """Render tab-separated label/value content readably instead of emitting a
+    naked tab. A raw \\t in a bullet renders ragged against Word's default tab
+    stops; the source CV's WCM tables carry "Label\\tValue" pairs. The first tab
+    becomes ": " (label: value); any further tabs become " — ". Properly
+    structured content (mentee/board tables) is routed to real Word tables
+    upstream via classification; this is the fallback for residual tabbed text."""
+    if not text or "\t" not in text:
+        return text
+    parts = [p.strip() for p in text.split("\t") if p.strip()]
+    if len(parts) <= 1:
+        return text.replace("\t", " ").strip()
+    return parts[0] + ": " + " — ".join(parts[1:])
+
+
 # XML namespaces for Word documents
 WORD_NAMESPACE = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 W14_NAMESPACE = 'http://schemas.microsoft.com/office/word/2010/wordml'
@@ -435,6 +451,37 @@ def deduplicate_entries(entries: List[Dict], verbose: bool = False,
     if drop_indices:
         return [e for idx, e in enumerate(entries) if idx not in drop_indices]
     return entries
+
+
+def element_idx_sort_key(value) -> tuple:
+    """Document-order sort key tolerant of stage-2's mixed index types.
+
+    ``element_idx_start`` is not uniformly typed: stage 2 writes a plain int for
+    paragraph entries, a ``"table_N"`` string for table blocks, and a
+    ``"row.col"`` string such as ``"22.2"`` for table rows. Sorting these raw
+    raises ``TypeError: '<' not supported between instances of 'str' and 'int'``
+    whenever a section mixes them. Normalize every form to a ``(major, minor)``
+    float tuple so the comparison is total and preserves document order. Mirrors
+    ``normalize_idx`` in stage_2_entry_extraction.py.
+    """
+    if value is None:
+        return (float('inf'), 0.0)
+    if isinstance(value, str):
+        if '.' in value:
+            parts = value.split('.', 1)
+            try:
+                return (float(parts[0]), float(parts[1]))
+            except ValueError:
+                return (float('inf'), 0.0)
+        if value.startswith('table_'):
+            try:
+                return (1_000_000.0 + float(value.split('_')[1]), 0.0)
+            except (ValueError, IndexError):
+                return (float('inf'), 0.0)
+    try:
+        return (float(value), 0.0)
+    except (ValueError, TypeError):
+        return (float('inf'), 0.0)
 
 
 def extract_sort_date(entry: Dict) -> tuple:
@@ -1443,7 +1490,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Use a simple bullet character prefix for reliable rendering
         # This avoids Word numbering system issues across different templates
-        run = entry_para.add_run(f"• {text}")
+        run = entry_para.add_run(f"• {_clean_inline_tabs(text)}")
         self._set_font(run)
 
         if entry:
@@ -2777,7 +2824,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for entry in reversed(s0_entries):
             text = entry.get('text', '').strip()
             entry_para = self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
-            run = entry_para.add_run(f"• {text}")
+            run = entry_para.add_run(f"• {_clean_inline_tabs(text)}")
             self._set_font(run)
             self.stats['entries_inserted'] += 1
 
@@ -3071,7 +3118,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not entries:
             return entries
         # Sort by document order (element_idx_start) to ensure parent comes first
-        ordered = sorted(entries, key=lambda e: e.get('element_idx_start', 0))
+        ordered = sorted(entries, key=lambda e: element_idx_sort_key(e.get('element_idx_start')))
         last_institution = None
         last_enrichment = None
         propagated = 0
@@ -7075,7 +7122,7 @@ Now analyze the text above:"""
             insert_para = self.doc.paragraphs[insert_idx]
             new_para = insert_para.insert_paragraph_before()
 
-            run = new_para.add_run(f"• {text}")
+            run = new_para.add_run(f"• {_clean_inline_tabs(text)}")
             self._set_font(run)
 
             # Add explanatory comment

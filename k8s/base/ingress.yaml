@@ -13,7 +13,7 @@ metadata:
     # Routes traffic directly to Pod IPs (more efficient)                                                     
     alb.ingress.kubernetes.io/target-type: ip
     # Health check path for your FastAPI backend
-    alb.ingress.kubernetes.io/healthcheck-path: /api/health 
+    alb.ingress.kubernetes.io/healthcheck-path: /livez
 spec:
   ingressClassName: alb
   rules:
@@ -24,7 +24,7 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: cviche-backend-svc
+                name: backend
                 port:
                   number: 8000
           # Frontend Route (Catch-all)                            

@@ -12,14 +12,59 @@ spec:
       labels:
         app: cviche-backend
     spec:
+      # Reuses your single IRSA setup to authenticate both database users via IAM
       serviceAccountName: cviche-sa 
+      
+      # 1. The One-Shot Pre-Deployment Migration Step
+      initContainers:
+        - name: db-migration
+          image: backend # Dynamically updated by Kustomize via CodeBuild
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "docker-entrypoint.sh"]
+          args: ["migrate"] # ◄ Triggers the migration logic inside your entrypoint script
+
+      # 2. The Main Runtime Web Application Step
       containers:
-      - name: backend
-        image: backend
-        # imagePullPolicy and env now correctly align with 'name' and 'ports'
-        imagePullPolicy: IfNotPresent 
-        ports:
-        - containerPort: 8000
-        env:
-        - name: PORT
-          value: "8000"
+        - name: backend
+          image: backend
+                                                                             
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: PORT
+              value: "8000"
+            - name: CVICHE_RUN_MIGRATIONS
+              value: "0" # ◄ Tells the app container to skip migrations on boot
+          # Probes: the app serves /livez and /readyz at the root. The startupProbe
+          # gives a slow boot up to 30*10s=300s before the livenessProbe takes over,
+          # so a cold start is never killed prematurely.
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8000
+            periodSeconds: 15
+          # The backend image already runs as non-root UID 1000 (USER cviche in the
+          # Dockerfile). readOnlyRootFilesystem is intentionally NOT set: the app
+          # writes uploads and prompt_logs to the container filesystem.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault

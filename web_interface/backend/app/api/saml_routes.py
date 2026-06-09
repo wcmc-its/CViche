@@ -15,6 +15,7 @@ from app.config_loader import get_config_value
 from app.saml_client import get_saml_client, extract_user_attrs
 from app.ed_group_lookup import check_ed_membership, set_cached_membership, EdUnavailableError
 from app.services.user_service import provision_user
+from app.redirect_safety import safe_relative_path
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -37,7 +38,8 @@ async def saml_login(request: Request, db: Session = Depends(get_db)):
 
     try:
         client = get_saml_client(db)
-        relay_state = request.query_params.get("next", "/")
+        # CWE-601: only forward same-site relative paths as RelayState.
+        relay_state = safe_relative_path(request.query_params.get("next"))
         reqid, info = client.prepare_for_authenticate(
             binding=BINDING_HTTP_REDIRECT, relay_state=relay_state
         )
@@ -67,7 +69,9 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
     try:
         form = await request.form()
         saml_response = form.get("SAMLResponse", "")
-        relay_state = form.get("RelayState", "/")
+        # CWE-601: the IdP echoes RelayState back verbatim; validate it as a
+        # same-site relative path before using it as the post-auth redirect.
+        relay_state = safe_relative_path(form.get("RelayState"))
 
         client = get_saml_client(db)
         authn_response = client.parse_authn_request_response(
@@ -100,15 +104,12 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
     ed_enabled = get_config_value(db, "ed_enabled")
     membership = None
     if ed_enabled:
-
-        from app.config_loader import load_yaml_config
-        config = load_yaml_config()
-        ldap_config = config.get("ldap", {})
+        from app.config_loader import get_config
 
         ed_access_group = get_config_value(db, "ed_access_group") or ""
         ed_admin_group = get_config_value(db, "ed_admin_group") or ""
-        ldap_url = ldap_config.get("ED_LDAP_URL", "")
-        bind_dn = ldap_config.get("ED_LDAP_BIND_DN", "")
+        ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
+        bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
         bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
         if not ldap_url or not bind_dn:
             logger.error("ED LDAP credentials not configured (ED_LDAP_URL, ED_LDAP_BIND_DN)")
@@ -148,7 +149,8 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
     )
 
     # Build redirect response with session cookie
-    response = RedirectResponse(relay_state or "/", status_code=302)
+    # relay_state is already a validated, non-empty same-site path.
+    response = RedirectResponse(relay_state, status_code=302)
     token = create_session_cookie(user)
     cookie_settings = get_cookie_settings()
     response.set_cookie(value=token, **cookie_settings)

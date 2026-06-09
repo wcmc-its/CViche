@@ -996,3 +996,64 @@ def test_pipeline_e2e_openai():
         assert len(output_files) > 0, "Pipeline produced no output files"
     finally:
         shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+# ---------------------------------------------------------------------------
+# Load hardening: per-pod concurrency cap + retry backoff jitter
+# ---------------------------------------------------------------------------
+
+def test_max_concurrent_llm_calls_env_override(monkeypatch):
+    import unified_pipeline.llm_client as mod
+    monkeypatch.setenv("CVICHE_MAX_CONCURRENT_LLM_CALLS", "3")
+    assert mod._get_max_concurrent_llm_calls() == 3
+    # Non-positive or garbage falls back to the default (never wedge to zero).
+    monkeypatch.setenv("CVICHE_MAX_CONCURRENT_LLM_CALLS", "0")
+    assert mod._get_max_concurrent_llm_calls() == 8
+    monkeypatch.setenv("CVICHE_MAX_CONCURRENT_LLM_CALLS", "garbage")
+    assert mod._get_max_concurrent_llm_calls() == 8
+
+
+def test_retry_backoff_uses_equal_jitter(monkeypatch):
+    """Backoff waits land in [base/2, base] (equal jitter) so concurrent
+    throttled callers don't retry in lockstep."""
+    import unified_pipeline.llm_client as mod
+    from botocore.exceptions import ClientError
+
+    sleeps = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+
+    throttle = ClientError({"Error": {"Code": "ThrottlingException"}}, "Converse")
+
+    def always_throttled():
+        raise throttle
+
+    with pytest.raises(ClientError):
+        mod._call_with_retry(always_throttled, retry_count=3)
+
+    # retry_count=3 -> sleeps before attempts 1,2,3 with exponential bases 1,2,4.
+    assert len(sleeps) == 3
+    for wait, base in zip(sleeps, (1, 2, 4)):
+        assert base / 2 <= wait <= base
+
+
+def test_call_semaphore_released_on_success_and_failure(monkeypatch):
+    """The in-flight-call slot must be returned whether the call succeeds or
+    raises, so a pod can't slowly leak its way to a deadlock."""
+    import unified_pipeline.llm_client as mod
+    from botocore.exceptions import ClientError
+
+    sem = mod._llm_call_semaphore
+    initial = sem._value  # available permits (CPython BoundedSemaphore)
+
+    assert mod._call_with_retry(lambda: "ok", retry_count=0) == "ok"
+    assert sem._value == initial  # released after success
+
+    monkeypatch.setattr(mod.time, "sleep", lambda s: None)
+    non_retryable = ClientError({"Error": {"Code": "ValidationException"}}, "Converse")
+
+    def fails():
+        raise non_retryable
+
+    with pytest.raises(ClientError):
+        mod._call_with_retry(fails, retry_count=2)
+    assert sem._value == initial  # released after failure too

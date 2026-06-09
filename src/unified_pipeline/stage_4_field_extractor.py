@@ -26,7 +26,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Callable
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -911,6 +911,8 @@ def attempt_llm_recovery(
             if matched_recovery:
                 # Apply recovered fields
                 recovered_fields = matched_recovery.get("fields", {})
+                # Coerce off-type LLM values before regex/downstream consumers
+                recovered_fields = coerce_field_value_types(recovered_fields)
                 # Normalize dates
                 recovered_fields = normalize_dates(recovered_fields)
                 # Apply regex post-processing
@@ -1198,6 +1200,11 @@ Return JSON with format:
                     extracted_fields = {k: v for k, v in extraction_map[i].items()
                                        if k != "entry_index"}
 
+                    # Coerce off-type LLM values (e.g. list-valued strings) before
+                    # any string/number consumer (regex post-processing, downstream
+                    # stages) touches them -- see coerce_field_value_types().
+                    extracted_fields = coerce_field_value_types(extracted_fields)
+
                     # Apply date normalization to split ranges into start_date/end_date
                     extracted_fields = normalize_dates(extracted_fields)
 
@@ -1295,6 +1302,49 @@ Return JSON with format:
         "cache_write_tokens": total_cache_write_tokens,
         "success": True
     }
+
+
+def coerce_field_value_types(extracted_fields: Dict[str, Any]) -> Dict[str, Any]:
+    """Coerce LLM-extracted field values to the scalar types downstream stages assume.
+
+    Stage 4 stores raw LLM JSON (the extraction call uses
+    ``response_format={"type": "json_object"}`` with no schema), so a field the
+    prompt asks for as a string can legitimately come back as a list of strings.
+    This is common in practice -- e.g. ``narrative`` is a list in 55/65 sample
+    outputs, and ``training_type``/``program_name``/``description``/``specialty``/
+    ``start_date``/``end_date`` have all been observed as lists. Downstream code
+    then calls ``.strip()``, ``.lower()``, ``.split()``, ``re.search()``,
+    ``< 0.7`` or ``", ".join([...])`` on the value and crashes the entire run
+    (e.g. "Pipeline failed -- expected str instance, list found", or a
+    ``'<' not supported between instances of 'str' and 'int'`` TypeError).
+    stage_6_word_template.py already patches a handful of fields ad hoc with
+    ``isinstance(x, list)`` checks; this normalizes every field once, centrally,
+    before any consumer sees it.
+
+    The rule is deliberately conservative -- it only touches values that would
+    otherwise crash a string/number consumer:
+
+    - a list whose items are all scalars -> ``"; "``-joined string of the
+      non-empty items (mirrors the ``"; ".join(...)`` convention already used in
+      stage_6_word_template.py)
+    - everything else is returned untouched, so numeric fields (``year``,
+      ``volume``) stay numeric, structured fields (``locations`` and other
+      list-of-dict / dict values) keep their shape, and ``None`` stays ``None``.
+    """
+    if not isinstance(extracted_fields, dict):
+        return extracted_fields
+
+    coerced = {}
+    for key, value in extracted_fields.items():
+        if isinstance(value, list) and all(
+            item is None or isinstance(item, (str, int, float)) for item in value
+        ):
+            coerced[key] = "; ".join(
+                str(item).strip() for item in value if item not in (None, "")
+            )
+        else:
+            coerced[key] = value
+    return coerced
 
 
 def normalize_dates(extracted_fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -2069,7 +2119,8 @@ def extract_fields_from_mapped_entries(
     mapped_entries: List[Dict[str, Any]],
     batch_size: int = 10,
     model: str = None,
-    document_uid: str = ""
+    document_uid: str = "",
+    cancel_check: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     """
     Extract structured fields from all mapped entries.
@@ -2079,6 +2130,10 @@ def extract_fields_from_mapped_entries(
         batch_size: Number of entries to process per batch (default: 10)
         model: Unused -- the model is resolved from llm_config.yaml, not this argument
         document_uid: Document identifier for extracting CV owner name
+        cancel_check: Optional zero-arg callable invoked at the top of each
+            batch iteration. It should raise to abort the run (the web
+            orchestrator passes its check_cancelled). None (the standalone CLI
+            default) is a no-op.
     """
     print(f"\n{'='*80}")
     print("Stage 4: Intra-Entry Field Extraction")
@@ -2146,6 +2201,11 @@ def extract_fields_from_mapped_entries(
     total_cache_write_tokens = 0
 
     for batch_idx in range(num_batches):
+        # Check for cancellation before each batch's LLM calls so an aborted
+        # run terminates promptly rather than running every batch to completion.
+        if cancel_check is not None:
+            cancel_check()
+
         start_idx = batch_idx * batch_size
         end_idx = min(start_idx + batch_size, len(valid_entries))
         batch = valid_entries[start_idx:end_idx]
@@ -2210,13 +2270,24 @@ def extract_fields_from_mapped_entries(
     }
 
 
-def process_cv(docx_path: str, model: str = None) -> Dict[str, Any]:
+def process_cv(
+    docx_path: str,
+    model: str = None,
+    cancel_check: Optional[Callable[[], None]] = None,
+) -> Dict[str, Any]:
     """
     Main pipeline: Load Stage 3b classified entries and extract fields.
 
     Args:
         docx_path: Path to the CV document (or just the document UID)
         model: Unused -- the model is resolved from llm_config.yaml, not this argument
+        cancel_check: Optional zero-arg callable threaded into the per-batch
+            extraction loop. It should raise to abort the run (the web
+            orchestrator passes its check_cancelled, which raises
+            CancelledException). This stage is the heaviest -- ~130 LLM calls
+            spread across batches -- so an intra-stage check is what lets a
+            cancel land mid-stage instead of after the last batch. None (the
+            standalone CLI default) is a no-op, leaving CLI behavior unchanged.
     """
     # Derive UIDs
     filename = Path(docx_path).stem
@@ -2259,7 +2330,13 @@ def process_cv(docx_path: str, model: str = None) -> Dict[str, Any]:
     print(f"  - Valid for extraction: {len(valid_entries)}")
 
     # Extract fields
-    result = extract_fields_from_mapped_entries(valid_entries, batch_size=10, model=model, document_uid=document_uid)
+    result = extract_fields_from_mapped_entries(
+        valid_entries,
+        batch_size=10,
+        model=model,
+        document_uid=document_uid,
+        cancel_check=cancel_check,
+    )
 
     # Build output with stage metadata
     output = {

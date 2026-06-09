@@ -1,7 +1,11 @@
 """File upload API endpoint."""
+import hashlib
 import io
+import json
 import logging
+import os
 import secrets
+import tempfile
 import zipfile
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
@@ -19,13 +23,20 @@ from app.rate_limiter import check_rate_limit
 from app.config_loader import get_config_value
 from app.services.config_service import (
     MAX_UPLOAD_SIZE, TIME_PER_1K_TOKENS, BASE_OVERHEAD_SECONDS,
-    get_cost_per_1k_tokens, get_estimate_model_name,
+    get_estimated_run_cost, get_estimate_model_name,
 )
 from app.errors import bad_request
+from app.storage import get_storage
+from app.services.template_warning import detect_wcm_template
 
 logger = logging.getLogger(__name__)
 PDF_MAGIC = b"%PDF-"
 ZIP_MAGIC = b"PK\x03\x04"
+
+# Minimum extracted text (characters) for a document to be considered readable.
+# A real CV runs into the thousands of characters; anything below this is almost
+# certainly a scanned image, a password-protected file, or effectively blank.
+MIN_EXTRACTED_CHARS = 500
 
 
 def _validate_pdf_magic(content: bytes) -> bool:
@@ -42,6 +53,57 @@ def _validate_docx_magic(content: bytes) -> bool:
             return "word/document.xml" in zf.namelist()
     except (zipfile.BadZipFile, Exception):
         return False
+
+
+def _extract_text(content: bytes, file_ext: str) -> str | None:
+    """Best-effort text extraction for the empty-document guard.
+
+    Returns the extracted text, an empty string when the file is readable but
+    contains no text (scan/blank) or is password-protected, or ``None`` when
+    extraction could not run at all (missing library, unexpected read error).
+    Callers treat ``None`` as "cannot determine" and skip the guard rather than
+    block a possibly-valid upload.
+    """
+    try:
+        if file_ext == ".docx":
+            from docx import Document
+            with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                doc = Document(tmp_path)
+                parts = [p.text for p in doc.paragraphs if p.text.strip()]
+                for table in doc.tables:
+                    for row in table.rows:
+                        for cell in row.cells:
+                            if cell.text.strip():
+                                parts.append(cell.text)
+                return "\n".join(parts)
+            finally:
+                os.unlink(tmp_path)
+
+        elif file_ext == ".pdf":
+            import pdfplumber
+            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+            try:
+                parts = []
+                with pdfplumber.open(tmp_path) as pdf:
+                    for page in pdf.pages:
+                        parts.append(page.extract_text() or "")
+                return "\n".join(parts)
+            finally:
+                os.unlink(tmp_path)
+    except Exception as e:
+        msg = str(e).lower()
+        # A password/encryption failure means the document is genuinely
+        # unreadable -> trip the guard (empty string) rather than fail open.
+        if "password" in msg or "encrypt" in msg or "decrypt" in msg:
+            return ""
+        logger.warning("Text extraction for empty-doc guard failed (%s): %s", file_ext, e)
+        return None
+    return None
 
 
 router = APIRouter()
@@ -117,13 +179,60 @@ async def upload_cv(
         logger.warning("[SECURITY] Rejected upload: file claims .docx but magic bytes do not match (user=%s)", current_user.email)
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
 
+    # Reject documents we can't read (scanned images, password-protected, blank).
+    # These pass the magic-byte check but yield no text, so they would burn LLM
+    # calls and return empty output with no explanation to the user. Fail open
+    # (extracted is None) if extraction couldn't run, to avoid blocking valid files.
+    extracted = _extract_text(content, file_ext)
+    if extracted is not None and len(extracted.strip()) < MIN_EXTRACTED_CHARS:
+        logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
+        raise bad_request(
+            "We couldn't read any text from this file. It may be a scanned image, "
+            "password-protected, or empty. Please upload a text-based PDF or Word document."
+        )
+
+    # Cheap, no-LLM check: does this look like the *blank* WCM CV template?
+    # Reuses the already-extracted text -- a filled CV matches the blank-template
+    # string set on almost no lines, an unfilled template on nearly all of them.
+    # Best-effort and non-fatal: detect_wcm_template swallows its own errors and
+    # returns (False, None), so this never blocks an upload. We only warn (the UI
+    # requires an acknowledgement) -- we never reject, since reformatting an
+    # existing publication list is a legitimate, template-shaped use.
+    wcm_template_warning, wcm_template_match_ratio = detect_wcm_template(extracted)
+    if wcm_template_warning:
+        logger.info(
+            "Upload looks like a blank WCM template (user=%s, match_ratio=%s)",
+            current_user.email, wcm_template_match_ratio,
+        )
+
     # Generate run ID (after validation so rejected uploads don't waste IDs)
     run_id = generate_run_id()
 
     # Save with randomized filename (no user-provided text on filesystem)
-    file_path = UPLOAD_DIR / f"{run_id}.{file_ext.lstrip('.')}"
+    stored_name = f"{run_id}.{file_ext.lstrip('.')}"
+    file_path = UPLOAD_DIR / stored_name
     with open(file_path, "wb") as f:
         f.write(content)
+
+    # Durably archive the ORIGINAL upload (same bucket/prefix as outputs) so the
+    # run is reproducible and restart/retry survive a pod recycle. The pod-local
+    # copy above is ephemeral. Non-fatal: never block a run on archival.
+    try:
+        storage = get_storage()
+        storage.put_file(run_id, f"input/{stored_name}", content)
+        storage.put_file(run_id, "input/manifest.json", json.dumps({
+            "run_id": run_id,
+            "original_filename": file.filename,  # only record of the real name
+            "stored_as": stored_name,
+            "file_type": file_ext[1:],
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "content_type": file.content_type,
+            "uploaded_at": datetime.now().isoformat(),
+            "user_email": current_user.email,
+        }, indent=2).encode("utf-8"))
+    except Exception as e:
+        logger.warning("Failed to archive original upload to storage (run=%s): %s", run_id, e)
 
     # Create run record
     run = Run(
@@ -154,7 +263,9 @@ async def upload_cv(
         filename=file.filename,
         file_type=file_ext[1:],
         status="created",
-        message=f"File uploaded successfully. Run ID: {run_id}"
+        message=f"File uploaded successfully. Run ID: {run_id}",
+        wcm_template_warning=wcm_template_warning,
+        wcm_template_match_ratio=wcm_template_match_ratio,
     )
 
 
@@ -257,16 +368,13 @@ async def estimate_processing(
     # Estimate tokens (roughly 4 characters per token for English text)
     estimated_tokens = text_char_count // 4
 
-    # Cost estimation. The per-token rate is derived from the model configured
-    # in llm_config.yaml so the estimate tracks the active model preset. It
-    # covers all 12 stages: hierarchy/entry extraction, taxonomy mapping, field
-    # extraction, research summary, enrichment, and Word document generation.
-    cost_per_1k_tokens = get_cost_per_1k_tokens()
-    base_cost = (estimated_tokens / 1000) * cost_per_1k_tokens
-
-    # Add variation buffer for different CV complexities
-    cost_min = base_cost * 0.8
-    cost_max = base_cost * 1.4
+    # Cost estimation. Driven by the entry-classification-aware model in
+    # unified_pipeline.config: stage 3b re-sends a large static taxonomy prompt
+    # once per hierarchy group, so cost scales with entry COUNT (estimated from
+    # document text), not document length. Priced at the active model from
+    # llm_config.yaml. Covers all stages: hierarchy/entry extraction, taxonomy
+    # mapping, field extraction, research summary, enrichment, and doc gen.
+    cost_min, cost_max = get_estimated_run_cost(text_char_count)
 
     # Time estimation based on empirical data
     # Actual processing observed: ~8 minutes for 3500 tokens

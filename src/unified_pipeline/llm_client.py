@@ -26,9 +26,13 @@ Usage:
 """
 
 import os
+from pathlib import Path
+import sys
 import time
 import json as json_module
 import logging
+import random
+import threading
 from openai import (
     OpenAI,
     RateLimitError,
@@ -42,6 +46,20 @@ from unified_pipeline.core.prompt_logger import (
     log_prompt_before_call,
     log_prompt_response,
 )
+
+# 1. Calculate the absolute path to your web_interface/backend folder
+# This traverses up from src/unified_pipeline to the root, then jumps into the backend folder
+CURRENT_FILE = Path(__file__).resolve()
+PROJECT_ROOT = CURRENT_FILE.parent.parent.parent # Adjust the number of .parent calls based on your exact depth
+BACKEND_ROOT = PROJECT_ROOT / "web_interface" / "backend"
+
+# 2. Append the backend workspace root to Python's look-up path list
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+# 3. Now you can cleanly import config_loader from the app package!
+from app.config_loader import get_config
+
 
 logger = logging.getLogger(__name__)
 
@@ -76,11 +94,71 @@ except ImportError:
 RETRYABLE_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError, _BotoClientError)
 
 
+# Per-pod ceiling on concurrent in-flight LLM calls. A backstop against fanning
+# out too many simultaneous Bedrock/OpenAI requests from one pod -- e.g. if the
+# per-run admission cap (CVICHE_MAX_CONCURRENT_RUNS) is raised, or a stage ever
+# parallelizes its calls. The live pipeline runs stages sequentially and runs
+# are admission-capped, so in-flight calls are already few; this default is
+# generous headroom rather than a bottleneck. Read once at import (a
+# deploy-time knob), since BoundedSemaphore is sized at construction.
+def _get_max_concurrent_llm_calls() -> int:
+    try:
+        #value = int(os.environ.get("CVICHE_MAX_CONCURRENT_LLM_CALLS", 8))
+        max_concurrent_llm_calls, _ = get_config("llm","CVICHE_MAX_CONCURRENT_LLM_CALLS",default=8)
+        value = int(max_concurrent_llm_calls)
+    except (TypeError, ValueError):
+        return 8
+    return value if value > 0 else 8
+
+
+_llm_call_semaphore = threading.BoundedSemaphore(_get_max_concurrent_llm_calls())
+
+
+def _get_llm_timeout_seconds() -> float:
+    """Per-call response timeout, in seconds.
+
+    Without an explicit timeout a wedged provider call blocks the worker
+    thread the pipeline stage runs in indefinitely -- nothing raises, the
+    run stays "running", and the UI elapsed timer counts up forever (the
+    reported Stage 4 hang). A bounded timeout turns that hang into a normal
+    exception that propagates to the orchestrator, fails the run, and
+    surfaces to the user. Generous by default so legitimately slow calls
+    are not clipped; tune via CVICHE_LLM_TIMEOUT_SECONDS.
+    """
+    try:
+        #value = float(os.environ.get("CVICHE_LLM_TIMEOUT_SECONDS", 180))
+        timeout, _ = get_config("llm","CVICHE_LLM_TIMEOUT_SECONDS", default=180)
+        value = float(timeout)
+    except (TypeError, ValueError):
+        return 180.0
+    return value if value > 0 else 180.0
+
+
+def _get_llm_max_attempts() -> int:
+    """Total botocore attempts (initial + retries) for Bedrock calls.
+
+    botocore's standard retry mode retries connect/read timeouts and
+    throttling up to this many attempts, then raises -- so a persistently
+    wedged Bedrock endpoint fails deterministically instead of hanging.
+    Tune via CVICHE_LLM_MAX_ATTEMPTS.
+    """
+    try:
+        #value = int(os.environ.get("CVICHE_LLM_MAX_ATTEMPTS", 3))
+        max_attempts,_ = get_config("llm","CVICHE_LLM_MAX_ATTEMPTS",3)
+        value = int(max_attempts)
+    except (TypeError, ValueError):
+        return 3
+    return value if value >= 1 else 3
+
+
 def _get_openai_client():
     """Get or create the OpenAI client (lazy initialization)."""
     global _openai_client
     if _openai_client is None:
-        _openai_client = OpenAI()
+        # Bound every request so a non-responsive endpoint raises
+        # APITimeoutError (retried by _call_with_retry, then surfaced)
+        # instead of blocking forever. Reads OPENAI_API_KEY from the env.
+        _openai_client = OpenAI(timeout=_get_llm_timeout_seconds())
     return _openai_client
 
 
@@ -98,8 +176,20 @@ def _get_bedrock_client():
     global _bedrock_client
     if _bedrock_client is None:
         import boto3
+        from botocore.config import Config
         region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
-        _bedrock_client = boto3.client("bedrock-runtime", region_name=region)
+        # Explicit connect/read timeouts + bounded standard retries so a
+        # wedged Bedrock call can't block the worker thread indefinitely.
+        # botocore's default read_timeout (60s) and retry behavior are left
+        # implicit otherwise; here we make them explicit and tunable.
+        bedrock_config = Config(
+            connect_timeout=10,
+            read_timeout=_get_llm_timeout_seconds(),
+            retries={"mode": "standard", "max_attempts": _get_llm_max_attempts()},
+        )
+        _bedrock_client = boto3.client(
+            "bedrock-runtime", region_name=region, config=bedrock_config
+        )
     return _bedrock_client
 
 
@@ -120,7 +210,11 @@ def _call_with_retry(call_fn, retry_count: int = 3):
     last_error = None
     for attempt in range(retry_count + 1):
         try:
-            return call_fn()
+            # Bound concurrent in-flight calls per pod. The slot is acquired only
+            # around the actual call and released before any backoff sleep below,
+            # so a backing-off caller never holds a slot idle.
+            with _llm_call_semaphore:
+                return call_fn()
         except RETRYABLE_ERRORS as e:
             # For botocore ClientError, only retry if the error code is retryable.
             # Non-retryable Bedrock errors (AccessDeniedException, ValidationException,
@@ -131,10 +225,17 @@ def _call_with_retry(call_fn, retry_count: int = 3):
                     raise
             last_error = e
             if attempt < retry_count:
-                wait = min(2 ** attempt, 30)  # 1s, 2s, 4s... capped at 30s
+                # Exponential backoff with equal jitter (AWS "backoff and
+                # jitter"): half the exponential base plus a random half, i.e.
+                # a wait in [base/2, base] where base is 1s, 2s, 4s... capped at
+                # 30s. The jitter decorrelates the retries of many runs that
+                # were throttled at the same instant, so they don't retry in
+                # lockstep and re-throttle together (a self-inflicted herd).
+                base = min(2 ** attempt, 30)
+                wait = base / 2 + random.uniform(0, base / 2)
                 logger.warning(
                     f"LLM call failed (attempt {attempt + 1}/{retry_count + 1}): {e}. "
-                    f"Retrying in {wait}s..."
+                    f"Retrying in {wait:.1f}s..."
                 )
                 time.sleep(wait)
     raise last_error
@@ -479,10 +580,12 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
                 "role": "user",
                 "content": "Your previous response was not valid JSON. Please respond with ONLY valid JSON, no markdown fencing or explanation.",
             })
-            retry_response = _call_bedrock(model, stronger_messages, temperature,
-                                            response_format, max_tokens,
-                                            enable_prompt_caching=enable_prompt_caching,
-                                            **extra_kwargs)
+            # Bound this in-flight call too, consistent with _call_with_retry.
+            with _llm_call_semaphore:
+                retry_response = _call_bedrock(model, stronger_messages, temperature,
+                                               response_format, max_tokens,
+                                               enable_prompt_caching=enable_prompt_caching,
+                                               **extra_kwargs)
             content = retry_response["output"]["message"]["content"][0]["text"]
             retry_usage = retry_response["usage"]
             retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)

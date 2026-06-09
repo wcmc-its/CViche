@@ -16,6 +16,13 @@ cd /app/web_interface/backend
 # main container.
 if [ "${1:-}" = "migrate" ]; then
     echo "==> Running Alembic migrations (one-shot)..."
+
+    echo "==> Executing migrations with identity context: ${MIGRATION_USER}"
+    
+    # Since alembic needs to run from the root of your backend project,
+    # cd into it right before executing the migration
+    cd /app/web_interface/backend
+
     exec alembic upgrade head
 fi
 

@@ -10,6 +10,7 @@ Single source of truth for all paths, settings, and feature flags.
 """
 from pathlib import Path
 import logging
+import math
 import os
 import yaml
 
@@ -90,6 +91,16 @@ PRICING = {
             "output": 15.000,
         },
         "anthropic.claude-haiku-4-5": {
+            "input": 1.000,
+            "output": 5.000,
+        },
+        # Bedrock requires the FULL versioned inference-profile id for Haiku 4.5
+        # (the bare alias above is rejected by the API), and _normalize_model_id
+        # strips only the region prefix -- not the dated -vN suffix. So the
+        # configured stage_3b id resolves to this key, not the bare one above.
+        # Same price as the bare entry; keep both in sync. (Sonnet 4.6 needs no
+        # dated variant -- its inference-profile id carries no date.)
+        "anthropic.claude-haiku-4-5-20251001-v1:0": {
             "input": 1.000,
             "output": 5.000,
         },
@@ -334,10 +345,88 @@ def estimate_cost_per_1k_doc_tokens(model: str = None, provider: str = None) -> 
     return COST_ESTIMATE_ANCHOR_RATE * (model_blended / anchor_blended)
 
 
+# ----------------------------------------------------------------------------
+# Entry-classification-aware run cost model
+# ----------------------------------------------------------------------------
+# The flat per-doc-token rate above (estimate_cost_per_1k_doc_tokens) badly
+# under-predicts entry-dense CVs, because it assumes total cost scales with
+# document LENGTH. It does not. The dominant cost is stage 3b entry
+# classification, which re-sends a large, static taxonomy/rules system prompt
+# (~10.7K tokens) on ONE LLM call per hierarchy group (entries batched, max 15
+# per call). That cost scales with entry COUNT, not document length: a compact
+# but entry-dense CV is cheap by tokens yet expensive by calls.
+#
+# Constants are calibrated against a complete run (2026-03-28):
+#   56,372 doc chars / 123 entries / 17 classification calls /
+#   234K input + 19K output tokens / ~$0.99 on Sonnet 4.6.
+# stage 3b alone was 191K of the 234K input tokens (~82%).
+# Recalibrate from real run-cost data as runs accumulate.
+#
+# KNOWN GAP (see issue #50): the current pipeline added a per-section
+# core_taxonomy_mapper stage absent from the 2026-03-28 calibration run, so
+# OTHER_STAGES_INPUT_MULTIPLE can under-count section-dense CVs until a
+# complete current-pipeline run is measured. The min/max band widens to
+# partially absorb this; recalibrate when a current run's logs are available.
+COST_ESTIMATE_CHARS_PER_ENTRY = 458            # document chars per classified entry
+COST_ESTIMATE_ENTRIES_PER_3B_CALL = 7.2        # entries per classification call (hierarchy groups, batch <= 15)
+COST_ESTIMATE_3B_INPUT_TOKENS_PER_CALL = 11200  # static taxonomy prompt + batch text, per call
+COST_ESTIMATE_3B_OUTPUT_TOKENS_PER_ENTRY = 155  # classification JSON emitted per entry
+COST_ESTIMATE_3B_EXTRA_PASS_INPUT_TOKENS = 3221  # T-validation (~2906) + fragment reconnection (~315), once/run
+COST_ESTIMATE_OTHER_STAGES_INPUT_MULTIPLE = 2.8  # non-3b input tokens / document tokens
+COST_ESTIMATE_OTHER_STAGES_OUTPUT_SHARE = 0.05   # non-3b output tokens / non-3b input tokens
+
+
+def _model_io_rates(provider: str, model: str) -> tuple:
+    """(input, output) USD per 1M tokens for a model, with gpt-4o-mini fallback."""
+    provider_pricing = PRICING.get(provider, PRICING.get("openai", {}))
+    lookup = model if model in provider_pricing else _normalize_model_id(model)
+    pricing = provider_pricing.get(lookup) or PRICING["openai"]["gpt-4o-mini"]
+    return pricing["input"], pricing["output"]
+
+
+def estimate_run_cost_usd(text_char_count: int, model: str = None,
+                          provider: str = None) -> float:
+    """Point estimate (USD) for a full pipeline run on a CV of this size.
+
+    Models stage 3b entry classification explicitly (call_count x fixed
+    prompt + per-entry output) because it dominates cost and scales with
+    entry count, and treats all other stages as roughly proportional to
+    document tokens. Priced at the active model's input/output rates so the
+    estimate tracks llm_config.yaml. See the calibration constants above.
+
+    When model/provider are omitted, the effective default config is used.
+    """
+    if model is None or provider is None:
+        cfg = get_stage_config("default")
+        provider = provider or cfg["provider"]
+        model = model or cfg["model"]
+    in_rate, out_rate = _model_io_rates(provider, model)
+
+    doc_tokens = max(text_char_count, 0) / 4.0
+    est_entries = max(text_char_count, 0) / COST_ESTIMATE_CHARS_PER_ENTRY
+    est_3b_calls = math.ceil(est_entries / COST_ESTIMATE_ENTRIES_PER_3B_CALL) if est_entries else 0
+
+    # Stage 3b: the static taxonomy prompt re-sent on every call dominates;
+    # the per-call constant already folds in the small per-batch entry text.
+    stage3b_input = est_3b_calls * COST_ESTIMATE_3B_INPUT_TOKENS_PER_CALL
+    if est_3b_calls:
+        stage3b_input += COST_ESTIMATE_3B_EXTRA_PASS_INPUT_TOKENS
+    stage3b_output = est_entries * COST_ESTIMATE_3B_OUTPUT_TOKENS_PER_ENTRY
+
+    # All other stages: roughly proportional to document tokens (input-heavy).
+    other_input = doc_tokens * COST_ESTIMATE_OTHER_STAGES_INPUT_MULTIPLE
+    other_output = other_input * COST_ESTIMATE_OTHER_STAGES_OUTPUT_SHARE
+
+    total_input = stage3b_input + other_input
+    total_output = stage3b_output + other_output
+    return (total_input * in_rate + total_output * out_rate) / 1_000_000
+
+
 # Human-readable names for known model IDs, used by the web UI.
 _FRIENDLY_MODEL_NAMES = {
     "anthropic.claude-sonnet-4-6": "Claude Sonnet 4.6",
     "anthropic.claude-haiku-4-5": "Claude Haiku 4.5",
+    "anthropic.claude-haiku-4-5-20251001-v1:0": "Claude Haiku 4.5",
     "anthropic.claude-opus-4-7": "Claude Opus 4.7",
     "anthropic.claude-opus-4-6": "Claude Opus 4.6",
     "gpt-4o": "GPT-4o",
