@@ -107,6 +107,29 @@ class TaxonomyContext:
         return "\n".join(lines) if lines else "  (No hierarchy context available)"
 
 
+def _safe_float(value, default: float) -> float:
+    """Coerce an LLM-provided numeric (e.g. a confidence) to float.
+
+    The classifier LLM call uses ``response_format={"type": "json_object"}`` with
+    no schema, so a confidence field can come back as a stringified number like
+    ``"0.65"``. Downstream code compares it with ``< 0.7`` (in reconnect_fragments
+    here and in stage_6_word_template.py), which raises
+    ``TypeError: '<' not supported between instances of 'str' and 'float'`` and
+    fails the entire run. Coerce defensively; fall back to ``default`` on anything
+    non-numeric.
+    """
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
 def load_taxonomy() -> Dict:
     """Load the taxonomy reference JSON."""
     taxonomy_path = Path(__file__).parent / "core" / "taxonomy_v7.json"
@@ -1188,8 +1211,11 @@ Return ONLY valid JSON with the classifications array."""
                     c = class_by_idx[text_idx]
                     all_results.append({
                         **entry,
-                        "taxonomy_code": c.get("code", all_suggested_codes[0] if all_suggested_codes else "T"),
-                        "taxonomy_confidence": c.get("confidence", 0.5),
+                        # Coalesce an explicit-null/empty LLM code to the fallback,
+                        # and coerce a stringified confidence to float, so the
+                        # persisted values never crash downstream .startswith / < 0.7.
+                        "taxonomy_code": c.get("code") or (all_suggested_codes[0] if all_suggested_codes else "T"),
+                        "taxonomy_confidence": _safe_float(c.get("confidence"), 0.5),
                         "classification_reasoning": c.get("reasoning"),
                         "classification_source": "llm"
                     })
@@ -1402,8 +1428,8 @@ Respond with a JSON array of objects, one per entry:
         reclassified_count = 0
         for reclass in reclassifications:
             entry_idx = reclass.get("entry_index")
-            new_code = reclass.get("new_code", "T")
-            confidence = reclass.get("confidence", 0.5)
+            new_code = reclass.get("new_code") or "T"
+            confidence = _safe_float(reclass.get("confidence"), 0.5)
             reasoning = reclass.get("reasoning", "")
 
             if entry_idx is not None and 0 <= entry_idx < len(entries):
@@ -1477,7 +1503,7 @@ def reconnect_fragments(
         # - Low confidence (< 0.7)
         # - Contains only: location, dollar amount, institution name, or partial info
         is_short = len(text) < 100
-        is_low_conf = confidence < 0.7
+        is_low_conf = _safe_float(confidence, 1.0) < 0.7
 
         # Check for fragment patterns
         import re
@@ -1704,8 +1730,8 @@ def detect_duplicates(entries: List[Dict], similarity_threshold: float = 0.9) ->
 
                     # Mark the second one as duplicate (keep the first)
                     # Prefer M2 classification over T
-                    code1 = entry1.get("taxonomy_code", "")
-                    code2 = entry2.get("taxonomy_code", "")
+                    code1 = entry1.get("taxonomy_code") or ""
+                    code2 = entry2.get("taxonomy_code") or ""
 
                     if code1.startswith("T") and code2.startswith("M"):
                         # Second one is better classified, mark first as duplicate

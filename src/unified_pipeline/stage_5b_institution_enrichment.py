@@ -242,7 +242,11 @@ def _build_owner_context(cv_owner_location: Optional[Dict]) -> str:
 
     parts = []
     metro = cv_owner_location.get('metro_area', '')
-    primary = cv_owner_location.get('primary_location', {})
+    # primary_location is stored raw from the LLM (stage 4) and can come back as a
+    # bare string instead of the instructed object; guard the shape before .get().
+    primary = cv_owner_location.get('primary_location') or {}
+    if not isinstance(primary, dict):
+        primary = {}
 
     if primary:
         inst = primary.get('institution', '')
@@ -261,9 +265,11 @@ def _build_owner_context(cv_owner_location: Optional[Dict]) -> str:
 
     # Include other locations for career trajectory
     locations = cv_owner_location.get('locations', [])
-    if len(locations) > 1:
+    if isinstance(locations, list) and len(locations) > 1:
         other_locs = []
         for loc in locations[1:]:
+            if not isinstance(loc, dict):
+                continue
             city = loc.get('city', '')
             state = loc.get('state', '')
             if city and state:
@@ -460,7 +466,9 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
     if verbose:
         if cv_owner_location and cv_owner_location.get('inference_success'):
             metro = cv_owner_location.get('metro_area', '')
-            primary = cv_owner_location.get('primary_location', {})
+            primary = cv_owner_location.get('primary_location') or {}
+            if not isinstance(primary, dict):
+                primary = {}
             print(f"CV owner context: {metro} ({primary.get('city', '')}, {primary.get('state', '')})")
         else:
             print("CV owner context: not available")
