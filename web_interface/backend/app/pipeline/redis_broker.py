@@ -29,6 +29,8 @@ import json
 import logging
 import threading
 
+from app.config_loader import get_config
+
 logger = logging.getLogger(__name__)
 
 EVENTS_CHANNEL = "cviche:run:{run_id}:events"
@@ -118,4 +120,5 @@ class RedisBroker:
 
 def broker_from_env() -> RedisBroker:
     """Build the broker from CVICHE_REDIS_URL (disabled when unset/empty)."""
-    return RedisBroker(os.environ.get("CVICHE_REDIS_URL"))
+    CVICHE_REDIS_URL, _ = get_config("redis", "CVICHE_REDIS_URL", default="")
+    return RedisBroker("CVICHE_REDIS_URL")
