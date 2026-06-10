@@ -121,4 +121,4 @@ class RedisBroker:
 def broker_from_env() -> RedisBroker:
     """Build the broker from CVICHE_REDIS_URL (disabled when unset/empty)."""
     CVICHE_REDIS_URL, _ = get_config("redis", "CVICHE_REDIS_URL", default="")
-    return RedisBroker("CVICHE_REDIS_URL")
+    return RedisBroker(CVICHE_REDIS_URL)
