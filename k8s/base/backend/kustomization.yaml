@@ -3,3 +3,4 @@ resources:
   - services.yaml
   - service-account.yaml
   - hpa.yaml
+  - celery-deployment.yaml

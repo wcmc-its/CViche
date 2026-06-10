@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cviche-celery-worker
+spec:
+  # Replicas and selector values are kept standard at the base
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cviche-celery-worker
+  template:
+    metadata:
+      labels:
+        app: cviche-celery-worker
+    spec:
+      containers:
+        - name: worker
+          image: backend # Kustomize matching token
+          # Tells this container instance to run Celery instead of Uvicorn
+          command: ["celery", "-A", "main.celery_app", "worker", "--loglevel=info"]

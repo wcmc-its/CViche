@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cviche-celery-worker # Matches the base metadata name exactly
+spec:
+  replicas: 2 # Production environment defaults can be explicitly defined here
+  template:
+    spec:
+      containers:
+        - name: worker
+          # 1. Inject your custom resource constraints natively
+          resources:
+            requests:
+              cpu: "1Gi"
+              memory: "1Gi"
+            limits:
+              cpu: "2Gi"
+              memory: "2Gi"
+          # 2. Mount the auth_config.yaml built by your CodeBuild pipeline
+          volumeMounts:
+            - name: auth-config-volume
+              mountPath: /app/web_interface/backend/auth_config.yaml
+              subPath: auth_config.yaml # Mounts ONLY this file without wiping out existing app files
+              readOnly: true
+      volumes:
+        - name: auth-config-volume
+          configMap:
+            name: cviche-auth-config # Automatically links with your configMapGenerator
