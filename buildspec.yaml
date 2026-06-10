@@ -82,7 +82,9 @@ phases:
           CVICHE_LLM_TIMEOUT_SECONDS: "${CVICHE_LLM_TIMEOUT_SECONDS}"
           CVICHE_LLM_MAX_ATTEMPTS: "${CVICHE_LLM_MAX_ATTEMPTS}"
           CVICHE_STAGE_TIMEOUT_SECONDS: "${CVICHE_STAGE_TIMEOUT_SECONDS}"
-          CVICHE_STALE_RUN_MINUTES: "${CVICHE_STALE_RUN_MINUTES}"  
+          CVICHE_STALE_RUN_MINUTES: "${CVICHE_STALE_RUN_MINUTES}"
+        redis:
+          CVICHE_REDIS_URL: "${CVICHE_REDIS_URL}"    
         allowed_users: []
         admin_users: []
         rate_limits:
