@@ -27,7 +27,6 @@ secretGenerator:
 
 patches:
   - path: backend-patch.yaml
-  - path: celery-patch.yaml
   - path: frontend-patch.yaml
   - path: sa-patch.yaml
   - path: ingress-patch.yaml
