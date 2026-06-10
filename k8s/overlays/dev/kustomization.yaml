@@ -30,6 +30,7 @@ patches:
   - path: frontend-patch.yaml
   - path: sa-patch.yaml
   - path: ingress-patch.yaml
+  - path: hpa-patch.yaml
 
 patchesJson6902:
   - target:
