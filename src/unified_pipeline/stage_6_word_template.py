@@ -42,6 +42,7 @@ except ImportError:
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.core.template_boilerplate import is_template_instruction
 
 
 def _clean_inline_tabs(text: str) -> str:
@@ -2245,14 +2246,22 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             except ValueError:
                 pass
 
-            # Check if paragraph matches any instruction pattern
+            # Check if paragraph is template boilerplate.
+            # Primary check: shared, precision-biased detector (single source of
+            # truth, generated from the WCM template). Fallback: the legacy
+            # regexes below (for placeholder shapes the phrase list can't cover,
+            # e.g. bracketed/angle placeholders).
             if para_text:
-                for pattern in instruction_patterns:
-                    if re.match(pattern, para_text, re.IGNORECASE):
-                        paragraphs_to_remove.append(para._element)
-                        if self.verbose:
-                            print(f"    Removing template instruction: '{para_text[:60]}...'")
-                        break
+                matched = is_template_instruction(para_text)
+                if not matched:
+                    for pattern in instruction_patterns:
+                        if re.match(pattern, para_text, re.IGNORECASE):
+                            matched = True
+                            break
+                if matched:
+                    paragraphs_to_remove.append(para._element)
+                    if self.verbose:
+                        print(f"    Removing template instruction: '{para_text[:60]}...'")
 
         # Remove identified instruction paragraphs
         for para_elem in paragraphs_to_remove:
@@ -7245,6 +7254,21 @@ Now analyze the text above:"""
         if not unmapped_entries:
             return
 
+        # Layer 3 backstop: drop any WCM-template instruction boilerplate that
+        # slipped through to the unmapped pile so it does not pollute the
+        # Appendix. Precision-biased: real CV content is never dropped.
+        _pre_filter = len(unmapped_entries)
+        unmapped_entries = [
+            e for e in unmapped_entries
+            if not is_template_instruction(e.get("text", ""))
+        ]
+        _appendix_filtered = _pre_filter - len(unmapped_entries)
+        if _appendix_filtered:
+            print(f"Filtered {_appendix_filtered} WCM-template instruction entries from Appendix")
+
+        if not unmapped_entries:
+            return
+
         if self.verbose:
             print(f"Adding Appendix ({len(unmapped_entries)} unmapped entries)...")
 
@@ -7263,6 +7287,16 @@ Now analyze the text above:"""
             "The following content from the original CV was not successfully mapped to this CV format:"
         )
         self._set_font(run)
+
+        # Emit ONE summary doc comment for the boilerplate we removed (rather
+        # than a per-entry comment for each dropped block).
+        if _appendix_filtered:
+            self._add_word_comment(
+                intro_para,
+                f"{_appendix_filtered} WCM template-instruction block"
+                f"{'s' if _appendix_filtered != 1 else ''} removed",
+                author="Template Filter",
+            )
 
         # Add blank paragraph after intro text
         self.doc.add_paragraph()
