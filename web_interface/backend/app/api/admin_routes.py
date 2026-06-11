@@ -208,7 +208,15 @@ async def get_runs(
     offset: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
     user: Optional[str] = Query(None, description="Filter by user email"),
-    status: Optional[str] = Query(None, description="Filter by run status"),
+    status: Optional[str] = Query(
+        None,
+        description=(
+            "Filter by run status. Omit for the default view, which hides "
+            "never-started 'created' runs (abandoned/declined uploads). Pass a "
+            "specific status for an exact match, or 'all' to include every "
+            "status, never-started runs included."
+        ),
+    ),
     db: Session = Depends(get_db),
     admin: User = Depends(require_admin),
 ):
@@ -222,8 +230,17 @@ async def get_runs(
     if user:
         query = query.filter(User.email.ilike(f"%{user}%"))
 
-    if status:
+    # Status filtering. The default admin view hides never-started "created"
+    # runs -- these accumulate as clutter when users upload a blank WCM template
+    # and decline to proceed, leaving a run that is never advanced. An explicit
+    # status filters to exactly that status (including "created" to inspect the
+    # abandoned ones); the "all" sentinel opts back in to every status.
+    if status == "all":
+        pass
+    elif status:
         query = query.filter(Run.status == status)
+    else:
+        query = query.filter(Run.status != "created")
 
     total = query.count()
     rows = query.order_by(Run.started_at.desc()).offset(offset).limit(limit).all()

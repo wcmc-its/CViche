@@ -202,11 +202,17 @@ export default function AdminSubmissions() {
           onChange={(e) => setFilterStatus(e.target.value)}
           className="text-sm border border-gray-300 rounded-lg px-3 py-2 focus:ring-1 focus:ring-primary-500 focus:border-primary-500 focus:outline-none bg-white"
         >
-          <option value="">All statuses</option>
-          <option value="complete">Complete</option>
+          {/* Default ("") hides never-started "created" runs (abandoned/declined
+              uploads). "all" opts back in to every status; "created" inspects
+              just the never-started ones. */}
+          <option value="">All except not-started</option>
           <option value="running">Running</option>
+          <option value="paused">Paused</option>
+          <option value="complete">Complete</option>
           <option value="failed">Failed</option>
           <option value="cancelled">Cancelled</option>
+          <option value="created">Not started</option>
+          <option value="all">All (incl. not-started)</option>
         </select>
         <span className="text-sm text-gray-500 self-center ml-auto">
           {total} total runs
