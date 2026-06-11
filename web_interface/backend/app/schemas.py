@@ -1,7 +1,34 @@
 """Pydantic schemas for API request/response validation."""
-from pydantic import BaseModel
-from typing import Optional, List
+from pydantic import BaseModel, PlainSerializer
+from typing import Optional, List, Annotated
 from datetime import datetime
+
+
+def _iso_with_offset(dt: datetime) -> str:
+    """Serialize a datetime to ISO 8601 with an explicit UTC offset.
+
+    Timestamps are written with naive ``datetime.now()`` (and ``func.now()``),
+    i.e. the server's wall clock with no tzinfo. Pydantic serializes a naive
+    datetime with no timezone designator (``2026-06-11T09:00:00``), so the
+    browser's ``new Date()`` interprets it in the *viewer's* local zone. For a
+    UTC prod pod viewed from a non-UTC client every timestamp is then wrong by
+    the client's offset (e.g. a just-uploaded file shows "5 hours ago" from
+    UTC+5:30). Attaching the server's own offset (``astimezone()`` treats a
+    naive value as local) makes the instant unambiguous; the client converts it
+    correctly regardless of viewer zone. Assumption-free: writes and this
+    serializer use the same server zone, so we never need to know what it is.
+    """
+    if dt.tzinfo is None:
+        dt = dt.astimezone()
+    return dt.isoformat()
+
+
+# Apply to every datetime field the API returns. ``when_used='json'`` keeps
+# Python-mode access (``model.started_at``) a real datetime for internal callers
+# and only rewrites the JSON the browser receives.
+TZDateTime = Annotated[
+    datetime, PlainSerializer(_iso_with_offset, return_type=str, when_used="json")
+]
 
 
 # ============================================================
@@ -39,8 +66,8 @@ class RunStatus(BaseModel):
     filename: str
     file_type: str
     status: str
-    started_at: datetime
-    completed_at: Optional[datetime] = None
+    started_at: TZDateTime
+    completed_at: Optional[TZDateTime] = None
     total_cost: float
     total_tokens: int
     input_tokens: int = 0
@@ -59,8 +86,8 @@ class StepSummary(BaseModel):
     stage_id: Optional[str] = None  # e.g., '1a', '1b', '2', '3a', '3b', '4', '4.5', '5', '5b', '5c', '5d', '6'
     step_name: str
     status: str
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
+    started_at: Optional[TZDateTime] = None
+    completed_at: Optional[TZDateTime] = None
     duration_seconds: Optional[int] = None
     cost: float
     output_files: Optional[str] = None  # JSON array as string
@@ -74,8 +101,8 @@ class RunSummary(BaseModel):
     run_id: str
     filename: str
     status: str
-    started_at: datetime
-    completed_at: Optional[datetime] = None
+    started_at: TZDateTime
+    completed_at: Optional[TZDateTime] = None
     total_cost: float
     total_duration_seconds: Optional[int] = None
 
@@ -267,7 +294,7 @@ class FeedbackResponse(BaseModel):
     reviewer_role: str
     overall_usefulness: int
     likelihood_to_recommend: int
-    submitted_at: datetime
+    submitted_at: TZDateTime
 
     class Config:
         from_attributes = True
@@ -330,8 +357,8 @@ class AdminUser(BaseModel):
     total_cost: float = 0.0
     feedback_count: int = 0
     completed_run_count: int = 0
-    last_active_at: Optional[datetime] = None
-    created_at: Optional[datetime] = None
+    last_active_at: Optional[TZDateTime] = None
+    created_at: Optional[TZDateTime] = None
 
     class Config:
         from_attributes = True
@@ -354,7 +381,7 @@ class AdminRunEntry(BaseModel):
     status: str
     duration_seconds: Optional[int] = None
     total_cost: float = 0.0
-    started_at: Optional[datetime] = None
+    started_at: Optional[TZDateTime] = None
     has_feedback: bool = False
     quality_score: Optional[int] = None      # advisory 0-100, None if not computed
     quality_band: Optional[str] = None       # "GREEN (ship)" / "YELLOW ..." / "RED ..."
