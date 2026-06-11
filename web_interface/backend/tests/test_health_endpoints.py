@@ -71,7 +71,22 @@ class TestReadyz:
     def test_readyz_s3_backend_missing_bucket_returns_503(self, client, monkeypatch):
         monkeypatch.setenv("CVICHE_STORAGE_BACKEND", "s3")
         monkeypatch.delenv("CVICHE_S3_BUCKET", raising=False)
-        response = client.get("/readyz")
+
+        # Force the bucket lookup to resolve empty regardless of any ambient
+        # auth_config.yaml (which may supply a real bucket under its s3:
+        # section). Delegate every other key to the real resolver so the
+        # storage-backend lookup still sees the env override above.
+        import app.main as main_mod
+
+        real_get_config = main_mod.get_config
+
+        def fake_get_config(section, key, default=None):
+            if key == "CVICHE_S3_BUCKET":
+                return "", "default"
+            return real_get_config(section, key, default)
+
+        with patch.object(main_mod, "get_config", side_effect=fake_get_config):
+            response = client.get("/readyz")
         assert response.status_code == 503
         body = response.json()
         assert body["checks"]["s3"]["ok"] is False

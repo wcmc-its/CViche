@@ -154,7 +154,8 @@ class TestConfigService:
         assert LOGIN_RATE_LIMIT_WINDOW == 60
 
     def test_upload_size_default(self):
-        assert MAX_UPLOAD_SIZE == 50 * 1024 * 1024  # 52428800
+        # Default lowered from 50 MB to 10 MB in PR #54.
+        assert MAX_UPLOAD_SIZE == 10 * 1024 * 1024  # 10485760
 
     def test_cost_estimation_defaults(self):
         assert TIME_PER_1K_TOKENS == 30

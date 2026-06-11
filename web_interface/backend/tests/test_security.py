@@ -70,6 +70,10 @@ class TestSamlSignature:
              patch.object(saml_mod, "get_config_value", side_effect=lambda db, key: {
                  "saml_entity_id": "https://test.example.com",
                  "saml_idp_metadata_url": "https://idp.example.com/metadata",
+                 # sp_base_url is a hard precondition: get_saml_client raises if
+                 # it is unset, short-circuiting before the signature-requirement
+                 # check below. Seed it so the test reaches that assertion.
+                 "saml_sp_base_url": "https://test.example.com",
                  "saml_cert_dir": "/tmp/test-certs",
              }.get(key, "")):
             # Make cert path checks pass
