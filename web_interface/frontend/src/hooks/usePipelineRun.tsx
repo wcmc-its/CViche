@@ -10,6 +10,17 @@ const STALL_NO_PROGRESS_MS = 5 * 60 * 1000
 const STALL_ELAPSED_MULTIPLIER = 3
 const POLL_FAILURE_THRESHOLD = 3
 
+// Status-poll cadence. The poll is a *fallback* to the WebSocket push below:
+// while the socket is actively delivering we read the DB only as an occasional
+// reconcile; when it goes silent we fall back to the fast cadence (old behavior).
+const POLL_FAST_MS = 2000        // socket silent (disconnected / cross-pod) — full-rate fallback
+const POLL_RECONCILE_MS = 20000  // socket healthy — only a periodic safety reconcile against the DB
+const WS_FRESH_MS = 10000        // a WS message within this window == the socket is "delivering"
+// WebSocket keepalive + reconnect.
+const WS_HEARTBEAT_MS = 25000      // client->server keepalive ping (defeats idle-proxy drops)
+const WS_RECONNECT_BASE_MS = 1000  // exponential-backoff floor for reconnect
+const WS_RECONNECT_MAX_MS = 30000  // exponential-backoff ceiling for reconnect
+
 // Run/step statuses that are terminal — once observed, a stale poll snapshot must
 // not be allowed to move away from them (see reconcileStatus).
 const TERMINAL_RUN_STATUSES = ['complete', 'failed', 'cancelled']
@@ -87,6 +98,16 @@ export function usePipelineRun(runId: string) {
   const startTimeRef = useRef<number | null>(null)
   const pollFailuresRef = useRef(0)
   const lastProgressRef = useRef<{ fingerprint: string; at: number }>({ fingerprint: '', at: Date.now() })
+  // WS-aware polling bookkeeping (ms epoch): when the most recent WebSocket
+  // message arrived for this run, and when the status poll last read the DB. The
+  // poll skips its DB call while the socket is freshly delivering and we
+  // reconciled recently (see the poll effect).
+  const lastWsMessageAtRef = useRef(0)
+  const lastPollAtRef = useRef(0)
+  // Latest run status mirrored to a ref so the WebSocket onclose handler can
+  // decide whether to reconnect (a terminal run emits nothing more) without
+  // re-subscribing the socket on every status change.
+  const statusRef = useRef<string | undefined>(undefined)
   // True from when the user triggers a per-step retry until the run is observed
   // running again. Lets the otherwise-monotonic poll reducer accept the one
   // legitimate terminal->running transition a retry causes (see reconcileStatus).
@@ -104,12 +125,25 @@ export function usePipelineRun(runId: string) {
   useEffect(() => {
     retryInFlightRef.current = false
     setRetryInFlightState(false)
+    // Don't let the previous run's socket freshness suppress the new run's poll.
+    lastWsMessageAtRef.current = 0
   }, [runId])
 
-  // Authoritative status polling loop (Every 2 seconds)
+  // Status poll — a WS-aware *fallback*, not the primary feed.
+  //
+  // The WebSocket below pushes every change (steps, cost, terminal status), so
+  // while it is actively delivering for this run there's no need to read the DB
+  // at the old 2s cadence. Each tick we therefore SKIP the GET /status call when
+  // a WS message arrived recently (WS_FRESH_MS) AND we reconciled within
+  // POLL_RECONCILE_MS — collapsing a healthy session from ~30 DB reads/min to ~3.
+  // When the socket is silent (disconnected, or connected to a different replica
+  // than the one running the pipeline while the Redis broker is off — #80, #4),
+  // freshness goes stale and the poll reverts to its fast 2s cadence, so
+  // correctness is never traded for the saving.
   useEffect(() => {
     let isMounted = true
     const fetchStatus = async () => {
+      lastPollAtRef.current = Date.now()
       try {
         const data = await getRunStatus(runId)
         if (!isMounted) return
@@ -128,12 +162,25 @@ export function usePipelineRun(runId: string) {
       }
     }
 
-    // A terminal run never changes again on its own, so the ~3-DB-query/tick
-    // poll must stop once we observe a terminal status — except while a retry is
-    // in flight, the one case that legitimately flips terminal->running. There is
-    // no "run running" WebSocket event, so a resumed poll is the only thing that
-    // can pick up that transition (see reconcileStatus). Take one final snapshot
-    // to capture the authoritative terminal state, then leave the interval off.
+    // Per-tick gate. A still-OPEN socket is NOT proof of delivery — under
+    // horizontal scaling with the broker off it can be open yet silent — so we
+    // key on WS *message recency*, not readyState. The periodic reconcile still
+    // reads the DB every POLL_RECONCILE_MS to catch anything a healthy socket
+    // somehow dropped (and to keep cost/step counters honest).
+    const maybePoll = () => {
+      const now = Date.now()
+      const wsFresh = now - lastWsMessageAtRef.current < WS_FRESH_MS
+      const reconciledRecently = now - lastPollAtRef.current < POLL_RECONCILE_MS
+      if (wsFresh && reconciledRecently) return
+      fetchStatus()
+    }
+
+    // A terminal run never changes again on its own, so the poll stops once we
+    // observe a terminal status — except while a retry is in flight, the one case
+    // that legitimately flips terminal->running. There is no "run running"
+    // WebSocket event, so a resumed poll is the only thing that can pick up that
+    // transition (see reconcileStatus). Take one final snapshot to capture the
+    // authoritative terminal state, then leave the interval off.
     if (runStatus && TERMINAL_RUN_STATUSES.includes(runStatus.status) && !retryInFlight) {
       fetchStatus()
       return () => {
@@ -142,7 +189,7 @@ export function usePipelineRun(runId: string) {
     }
 
     fetchStatus()
-    const interval = setInterval(fetchStatus, 2000)
+    const interval = setInterval(maybePoll, POLL_FAST_MS)
     return () => {
       isMounted = false
       clearInterval(interval)
@@ -186,13 +233,33 @@ export function usePipelineRun(runId: string) {
     }
   }, [runId, currentStep, runStatus?.status, runStatus?.steps])
 
-  // Real-time asynchronous push infrastructure (WebSockets)
+  // Mirror the latest status into a ref for the WebSocket onclose handler.
   useEffect(() => {
-    const wsUrl = getWebSocketUrl(wsRoutes.runStream(runId))
-    const ws = new WebSocket(wsUrl)
-    wsRef.current = ws
+    statusRef.current = runStatus?.status
+  }, [runStatus?.status])
 
-    ws.onmessage = (event) => {
+  // Real-time push (WebSocket) — the primary update channel, with a keepalive
+  // heartbeat and auto-reconnect so it stays primary across long runs and
+  // recovers dropped sockets (restoring the low-DB-load regime of the poll above).
+  useEffect(() => {
+    let cancelled = false
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+    let heartbeatTimer: ReturnType<typeof setInterval> | null = null
+    let attempt = 0
+
+    const clearHeartbeat = () => {
+      if (heartbeatTimer) {
+        clearInterval(heartbeatTimer)
+        heartbeatTimer = null
+      }
+    }
+
+    // Apply a pushed event to local state. lastWsMessageAt marks the socket as
+    // delivering (this is what gates the poll above). statusRef is updated
+    // SYNCHRONOUSLY on terminal events so the onclose reconnect guard can't miss
+    // a run that just finished (the post-render mirror effect would lag it).
+    const handleMessage = (event: MessageEvent) => {
+      lastWsMessageAtRef.current = Date.now()
       const data = JSON.parse(event.data)
 
       switch (data.event) {
@@ -242,20 +309,85 @@ export function usePipelineRun(runId: string) {
           )
           break
         case 'RUN_FAILED':
+          statusRef.current = 'failed'
           setRunStatus((prev) =>
             prev ? { ...prev, status: 'failed', error_message: data.error ?? prev.error_message } : prev
           )
           break
         case 'RUN_CANCELLED':
+          statusRef.current = 'cancelled'
           setRunStatus((prev) => (prev ? { ...prev, status: 'cancelled' } : prev))
           break
         case 'RUN_COMPLETE':
+          statusRef.current = 'complete'
           setRunStatus((prev) => (prev ? { ...prev, status: 'complete' } : prev))
           break
       }
     }
 
-    return () => ws.close()
+    const connect = () => {
+      if (cancelled) return
+      clearHeartbeat() // defensive: never let two heartbeat intervals coexist
+      const ws = new WebSocket(getWebSocketUrl(wsRoutes.runStream(runId)))
+      wsRef.current = ws
+
+      ws.onopen = () => {
+        // Keepalive only: some load balancers/proxies drop an idle socket. The
+        // server reads and discards these — they keep the pipe open; they are NOT
+        // a liveness probe (the poll's freshness gate handles silent sockets).
+        // Backoff is intentionally NOT reset here — see onmessage.
+        heartbeatTimer = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            try {
+              ws.send('ping')
+            } catch {
+              /* ignore */
+            }
+          }
+        }, WS_HEARTBEAT_MS)
+      }
+
+      ws.onmessage = (event) => {
+        // Reset backoff on actual DELIVERY, not on open: a socket can open
+        // successfully yet never deliver (a different replica than the one
+        // running the pipeline, with the Redis broker off). Resetting on open
+        // would let such a socket reconnect at the 1s floor forever instead of
+        // backing off; only a real message proves the connection is useful.
+        attempt = 0
+        handleMessage(event)
+      }
+
+      ws.onclose = () => {
+        clearHeartbeat()
+        if (cancelled) return
+        // A finished run emits nothing more — don't reconnect it.
+        if (statusRef.current && TERMINAL_RUN_STATUSES.includes(statusRef.current)) return
+        // Reconnect with capped exponential backoff. While the socket is down (or
+        // open-but-silent), lastWsMessageAt goes stale, so the poll above reverts
+        // to its fast cadence and the user keeps getting updates until push is back.
+        attempt += 1
+        const delay = Math.min(WS_RECONNECT_BASE_MS * 2 ** (attempt - 1), WS_RECONNECT_MAX_MS)
+        reconnectTimer = setTimeout(connect, delay)
+      }
+
+      ws.onerror = () => {
+        // onclose fires next and owns the reconnect; nothing to do here.
+      }
+    }
+
+    connect()
+
+    return () => {
+      cancelled = true
+      if (reconnectTimer) clearTimeout(reconnectTimer)
+      clearHeartbeat()
+      const ws = wsRef.current
+      wsRef.current = null
+      if (ws) {
+        ws.onclose = null // prevent the teardown close from scheduling a reconnect
+        ws.close()
+      }
+    }
   }, [runId])
 
   // Explicit elapsed timing context loop and system stall guard
