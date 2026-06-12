@@ -90,14 +90,25 @@ export function usePipelineRun(runId: string) {
   // True from when the user triggers a per-step retry until the run is observed
   // running again. Lets the otherwise-monotonic poll reducer accept the one
   // legitimate terminal->running transition a retry causes (see reconcileStatus).
+  //
+  // Mirrored as state (retryInFlight) so flipping it can re-run the poll effect:
+  // the ref alone is read synchronously inside fetchStatus, but a ref mutation
+  // never re-runs an effect, so a retry at terminal status would not restart the
+  // stopped 2s poll without a reactive signal.
   const retryInFlightRef = useRef(false)
+  const [retryInFlight, setRetryInFlightState] = useState(false)
+
+  // New run (mount or restart navigation): clear the retry carve-out so it can't
+  // leak across runs. Keyed only on runId so a retry within the same run isn't
+  // wiped (the poll/elapsed effects close the carve-out once running is observed).
+  useEffect(() => {
+    retryInFlightRef.current = false
+    setRetryInFlightState(false)
+  }, [runId])
 
   // Authoritative status polling loop (Every 2 seconds)
   useEffect(() => {
     let isMounted = true
-    // New run (mount or restart navigation): clear the retry carve-out so it
-    // can't leak across runs.
-    retryInFlightRef.current = false
     const fetchStatus = async () => {
       try {
         const data = await getRunStatus(runId)
@@ -117,13 +128,26 @@ export function usePipelineRun(runId: string) {
       }
     }
 
+    // A terminal run never changes again on its own, so the ~3-DB-query/tick
+    // poll must stop once we observe a terminal status — except while a retry is
+    // in flight, the one case that legitimately flips terminal->running. There is
+    // no "run running" WebSocket event, so a resumed poll is the only thing that
+    // can pick up that transition (see reconcileStatus). Take one final snapshot
+    // to capture the authoritative terminal state, then leave the interval off.
+    if (runStatus && TERMINAL_RUN_STATUSES.includes(runStatus.status) && !retryInFlight) {
+      fetchStatus()
+      return () => {
+        isMounted = false
+      }
+    }
+
     fetchStatus()
     const interval = setInterval(fetchStatus, 2000)
     return () => {
       isMounted = false
       clearInterval(interval)
     }
-  }, [runId])
+  }, [runId, runStatus?.status, retryInFlight])
 
   // Polling fallback mechanism for individual active step log buffers
   useEffect(() => {
@@ -239,7 +263,9 @@ export function usePipelineRun(runId: string) {
     if (runStatus?.status === 'running') {
       // Running observed: the retry carve-out has served its purpose, so close
       // it before a later stale 'running' poll could be mistaken for a retry.
+      // (Status is now non-terminal, so the poll keeps ticking regardless.)
       retryInFlightRef.current = false
+      setRetryInFlightState(false)
       if (!startTimeRef.current) {
         startTimeRef.current = runStatus.total_duration_seconds
           ? Date.now() - runStatus.total_duration_seconds * 1000
@@ -311,8 +337,15 @@ export function usePipelineRun(runId: string) {
   // Opened by the component's retry handler so the poll reducer accepts the run
   // flipping from a terminal status back to "running"; auto-closed once running
   // is observed (above) and on runId change.
+  //
+  // Writes both the ref (read synchronously by fetchStatus's reconcile) and the
+  // state (a reactive signal that re-runs the poll effect). The state write is
+  // what restarts the stopped 2s poll when a retry is triggered at terminal
+  // status — there's no "run running" WebSocket event, so the resumed poll is
+  // the only path that observes the terminal->running transition.
   const setRetryInFlight = useCallback((value: boolean) => {
     retryInFlightRef.current = value
+    setRetryInFlightState(value)
   }, [])
 
   return {
