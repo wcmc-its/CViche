@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
-import { Loader2, Download, MessageSquare } from 'lucide-react'
+import { Loader2, Download, MessageSquare, Trash2 } from 'lucide-react'
 import type { FeedbackData, AggregatedScores } from '../types'
-import { exportFeedbackCsv } from '../api/admin'
+import { exportFeedbackCsv, deleteFeedback } from '../api/admin'
 import { adminRoutes } from '../api/routes'
+import DeleteFeedbackModal from './DeleteFeedbackModal'
 
 const EFFORT_LABELS: Record<string, string> = {
   '< 5 minutes': '< 5 min',
@@ -33,6 +34,10 @@ const EFFORT_ORDER = [
 export default function AdminFeedbackInsights() {
   const [feedback, setFeedback] = useState<FeedbackData[]>([])
   const [loading, setLoading] = useState(true)
+  // Row queued for deletion (drives the confirmation modal). Null when closed.
+  const [pendingDelete, setPendingDelete] = useState<FeedbackData | null>(null)
+  const [isDeleting, setIsDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   useEffect(() => {
     fetchFeedback()
@@ -53,8 +58,31 @@ export default function AdminFeedbackInsights() {
     }
   }
 
+  const handleConfirmDelete = async () => {
+    if (!pendingDelete) return
+    setIsDeleting(true)
+    setDeleteError(null)
+    try {
+      await deleteFeedback(pendingDelete.id)
+      setPendingDelete(null)
+      await fetchFeedback()
+    } catch (err) {
+      console.error('Failed to delete feedback:', err)
+      const message =
+        err && typeof err === 'object' && 'message' in err
+          ? String((err as { message: unknown }).message)
+          : 'Failed to delete feedback. Please try again.'
+      setDeleteError(message)
+    } finally {
+      setIsDeleting(false)
+    }
+  }
+
   const parseCSV = (csv: string): FeedbackData[] => {
-    const lines = csv.split('\n').filter((l) => l.trim())
+    // Split into rows on newlines that are NOT inside a quoted field — the
+    // free-text biggest_issue column can contain embedded newlines, which a
+    // naive split('\n') would shatter into bogus rows.
+    const lines = splitCSVRows(csv).filter((l) => l.trim())
     if (lines.length <= 1) return []
 
     const headers = lines[0].split(',')
@@ -74,10 +102,33 @@ export default function AdminFeedbackInsights() {
         overall_usefulness: parseInt(row['overall_usefulness']) || 0,
         manual_conversion_effort: row['manual_conversion_effort'] || '',
         correction_effort: row['correction_effort'] || '',
+        biggest_issue: row['biggest_issue'] || '',
         likelihood_to_recommend: parseInt(row['likelihood_to_recommend']) || 0,
         submitted_at: row['submitted_at'] || '',
       }
     })
+  }
+
+  const splitCSVRows = (csv: string): string[] => {
+    const rows: string[] = []
+    let current = ''
+    let inQuotes = false
+    for (let i = 0; i < csv.length; i++) {
+      const ch = csv[i]
+      if (ch === '"') {
+        inQuotes = !inQuotes
+        current += ch
+      } else if ((ch === '\n' || ch === '\r') && !inQuotes) {
+        // Treat \r\n as a single break; don't emit an empty row for the \n.
+        if (ch === '\r' && csv[i + 1] === '\n') i++
+        rows.push(current)
+        current = ''
+      } else {
+        current += ch
+      }
+    }
+    if (current) rows.push(current)
+    return rows
   }
 
   const parseCSVLine = (line: string): string[] => {
@@ -87,7 +138,13 @@ export default function AdminFeedbackInsights() {
     for (let i = 0; i < line.length; i++) {
       const ch = line[i]
       if (ch === '"') {
-        inQuotes = !inQuotes
+        // A doubled quote ("") inside a quoted field is an escaped literal quote.
+        if (inQuotes && line[i + 1] === '"') {
+          current += '"'
+          i++
+        } else {
+          inQuotes = !inQuotes
+        }
       } else if (ch === ',' && !inQuotes) {
         result.push(current)
         current = ''
@@ -210,6 +267,65 @@ export default function AdminFeedbackInsights() {
           from {new Set(feedback.map((f) => f.user_email)).size} users.
         </p>
       </div>
+
+      {/* Individual submissions — lets an admin purge a garbage/abusive
+          response that would otherwise pollute the aggregates above. */}
+      <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+        <h3 className="text-sm font-semibold text-gray-900 mb-4">
+          Individual Submissions
+        </h3>
+        {deleteError && (
+          <div className="mb-4 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {deleteError}
+          </div>
+        )}
+        <ul className="divide-y divide-gray-100">
+          {feedback.map((f) => (
+            <li key={f.id} className="flex items-start justify-between gap-4 py-3">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+                  <span className="font-mono font-medium text-gray-700">{f.run_id}</span>
+                  <span>·</span>
+                  <span className="truncate">{f.user_email || 'unknown'}</span>
+                  {f.submitted_at && (
+                    <>
+                      <span>·</span>
+                      <span>{f.submitted_at}</span>
+                    </>
+                  )}
+                </div>
+                <p className="mt-1 text-sm text-gray-800 break-words">
+                  {f.biggest_issue.trim() || (
+                    <span className="italic text-gray-400">(no biggest-issue text)</span>
+                  )}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setDeleteError(null)
+                  setPendingDelete(f)
+                }}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 transition-colors focus:outline-none focus:ring-2 focus:ring-red-500"
+                aria-label={`Delete feedback for run ${f.run_id}`}
+              >
+                <Trash2 className="h-4 w-4" aria-hidden="true" />
+                Delete
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <DeleteFeedbackModal
+        isOpen={pendingDelete !== null}
+        runId={pendingDelete?.run_id ?? ''}
+        biggestIssue={pendingDelete?.biggest_issue ?? ''}
+        isDeleting={isDeleting}
+        onConfirm={handleConfirmDelete}
+        onClose={() => {
+          if (!isDeleting) setPendingDelete(null)
+        }}
+      />
     </div>
   )
 }
