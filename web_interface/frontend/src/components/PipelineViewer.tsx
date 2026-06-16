@@ -194,7 +194,8 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     setIsRestarting(true)
     try {
       const data = await restartRun(runId)
-      if (onNavigateToRun) onNavigateToRun(data.new_run_id)
+      if (!data.run_id) throw new Error('Restart did not return a new run id')
+      if (onNavigateToRun) onNavigateToRun(data.run_id)
     } catch (err: any) {
       setApiError(`Failed to restart: ${err.message || 'Unknown error'}`)
     } finally { setIsRestarting(false) }
