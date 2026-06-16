@@ -28,6 +28,10 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   // an acknowledgement before spending a paid run. null = no warning pending.
   const [pendingWarning, setPendingWarning] = useState<{ runId: string } | null>(null)
   const [acknowledged, setAcknowledged] = useState(false)
+  // Output-rendering options (issue #153). Defaults match the backend Run
+  // column defaults: Track Changes on, classification comments off.
+  const [includeTrackChanges, setIncludeTrackChanges] = useState(true)
+  const [includeClassificationComments, setIncludeClassificationComments] = useState(false)
 
   // Shared selection path for both the file picker and drag-and-drop.
   const processFile = async (selectedFile: File) => {
@@ -114,7 +118,10 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
     setError(null)
 
     try {
-      const data = await uploadFile(file)
+      const data = await uploadFile(file, {
+        includeTrackChanges,
+        includeClassificationComments,
+      })
       // Blank-template heuristic tripped: don't start the run yet. Surface the
       // warning and require the acknowledgement checkbox before the next click
       // (which spends a paid run). The upload itself already created the run.
@@ -209,6 +216,35 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                 </label>
               </div>
             </div>
+
+            {/* Output-rendering options (issue #153) */}
+            <fieldset className="space-y-2">
+              <legend className="block text-sm font-semibold text-gray-900 mb-1">Output options</legend>
+              <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={includeTrackChanges}
+                  onChange={(e) => setIncludeTrackChanges(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                <span>
+                  Include Track Changes
+                  <span className="block text-xs text-gray-500">Show pipeline edits as Word tracked changes you can accept or reject.</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={includeClassificationComments}
+                  onChange={(e) => setIncludeClassificationComments(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                <span>
+                  Include classification comments
+                  <span className="block text-xs text-gray-500">Add Word comments explaining how each entry was classified.</span>
+                </span>
+              </label>
+            </fieldset>
 
             {estimating && (
               <div className="bg-primary-50 border border-primary-200 rounded-lg p-4" role="status" aria-live="polite">
