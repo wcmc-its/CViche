@@ -13,4 +13,4 @@ pyyaml==6.0.3
 lxml==6.0.2
 boto3==1.43.23
 pymysql==1.1.0
-cryptography==42.0.5
+cryptography==48.0.1
