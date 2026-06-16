@@ -10,6 +10,7 @@ on:
       - "web_interface/backend/requirements.txt"
       - "web_interface/backend/requirements-dev.txt"
       - ".github/workflows/deps-audit.yml"
+      - ".pip-audit-ignore.txt"
   push:
     branches: [dev, main]
   workflow_dispatch:
@@ -31,41 +32,18 @@ jobs:
       # pysaml2 -> pyopenssl/cryptography -- and audits those too. A hash-pinned
       # lockfile follow-up will make the audited set fully reproducible.
       #
-      # The --ignore-vuln entries below are PRE-EXISTING advisories in the
-      # versions prod currently builds; remediating them is tracked in #126.
-      # These ignores are LOAD-BEARING: pip-audit does flag the transitive
-      # pyopenssl/cryptography vulns (see above), so removing one turns the gate
-      # red. Most fixes are direct-pin bumps; the cryptography CVEs can also be
-      # forced via a lockfile override. The two pyopenssl CVEs CANNOT -- pysaml2
-      # 7.5.4 caps pyopenssl<24.3.0 (24.2.1 is the highest allowed), so they are
-      # blocked on a pysaml2 upgrade (none available yet), not a lockfile
-      # override. Remove each ignore as #126 lands its fix. New advisories in any
-      # dep still fail this gate.
-      #   CVE-2026-25645      requests 2.32.5      -> 2.33.0
-      #   CVE-2024-36039      pymysql 1.1.0        -> 1.1.1
-      #   PYSEC-2026-35       cryptography 42.0.5  -> 46.0.6
-      #   GHSA-h4gh-qq45-vh27 cryptography 42.0.5  -> 43.0.1
-      #   CVE-2024-12797      cryptography 42.0.5  -> 44.0.1
-      #   CVE-2026-26007      cryptography 42.0.5  -> 46.0.5
-      #   PYSEC-2026-87       lxml 6.0.2           -> 6.1.0
-      #   CVE-2026-27448      pyopenssl 24.2.1     (blocked: pysaml2 caps <24.3.0)
-      #   CVE-2026-27459      pyopenssl 24.2.1     (blocked: pysaml2 caps <24.3.0)
+      # Ignored advisories are maintained in .pip-audit-ignore.txt (tracked in #126).
+      # Both this workflow and buildspec.yaml reference that file so the ignore
+      # list stays in sync. Remove each entry from that file as #126 lands its fix.
+      # New advisories in any dep still fail this gate.
       - name: Audit pinned dependencies for known vulnerabilities
         run: |
+          IGNORE_FLAGS=$(grep -v '^#' .pip-audit-ignore.txt | grep -v '^$' | sed 's/^/--ignore-vuln /' | tr '\n' ' ')
           for req in \
             requirements.txt \
             web_interface/backend/requirements.txt \
             web_interface/backend/requirements-dev.txt; do
             echo "::group::pip-audit $req"
-            pip-audit --no-deps -r "$req" \
-              --ignore-vuln CVE-2026-25645 \
-              --ignore-vuln CVE-2024-36039 \
-              --ignore-vuln PYSEC-2026-35 \
-              --ignore-vuln GHSA-h4gh-qq45-vh27 \
-              --ignore-vuln CVE-2024-12797 \
-              --ignore-vuln CVE-2026-26007 \
-              --ignore-vuln PYSEC-2026-87 \
-              --ignore-vuln CVE-2026-27448 \
-              --ignore-vuln CVE-2026-27459
+            pip-audit --no-deps -r "$req" $IGNORE_FLAGS
             echo "::endgroup::"
           done

@@ -22,6 +22,17 @@ phases:
         echo "All required environment variables are set."
   pre_build:
      commands:
+       # Audit pinned dependencies for known vulnerabilities
+       # Ignore list is maintained in .pip-audit-ignore.txt (tracked in #126)
+       - |
+         IGNORE_FLAGS=$(grep -v '^#' .pip-audit-ignore.txt | grep -v '^$' | sed 's/^/--ignore-vuln /' | tr '\n' ' ')
+         for req in \
+          requirements.txt \
+          web_interface/backend/requirements.txt \
+          web_interface/backend/requirements-dev.txt; do
+          echo "pip-audit $req"
+          pip-audit --no-deps -r "$req" $IGNORE_FLAGS
+         done
        # Fetch Docker credentials from AWS Secrets Manager
        - echo "Fetching Docker credentials from AWS Secrets Manager"
        - SECRET=$(aws secretsmanager get-secret-value --secret-id docker-hub-credentials --query "SecretString" --output text)

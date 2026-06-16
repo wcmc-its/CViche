@@ -1,0 +1,22 @@
+# Tracked under issue #126 - pre-existing advisories in prod build versions.
+# Remove each entry as #126 lands its fix.
+# New advisories in any dep still fail the gate.
+#
+# CVE-2026-25645      requests 2.32.5      -> 2.33.0
+# CVE-2024-36039      pymysql 1.1.0        -> 1.1.1
+# PYSEC-2026-35       cryptography 42.0.5  -> 46.0.6
+# GHSA-h4gh-qq45-vh27 cryptography 42.0.5  -> 43.0.1
+# CVE-2024-12797      cryptography 42.0.5  -> 44.0.1
+# CVE-2026-26007      cryptography 42.0.5  -> 46.0.5
+# PYSEC-2026-87       lxml 6.0.2           -> 6.1.0
+# CVE-2026-27448      pyopenssl 24.2.1     (blocked: pysaml2 caps <24.3.0)
+# CVE-2026-27459      pyopenssl 24.2.1     (blocked: pysaml2 caps <24.3.0)
+CVE-2026-25645
+CVE-2024-36039
+PYSEC-2026-35
+GHSA-h4gh-qq45-vh27
+CVE-2024-12797
+CVE-2026-26007
+PYSEC-2026-87
+CVE-2026-27448
+CVE-2026-27459
