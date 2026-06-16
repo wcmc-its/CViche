@@ -22,6 +22,8 @@ phases:
         echo "All required environment variables are set."
   pre_build:
      commands:
+       # Install and audit dependencies
+       - pip install pip-audit
        # Audit pinned dependencies for known vulnerabilities
        # Ignore list is maintained in .pip-audit-ignore.txt (tracked in #126)
        - |
