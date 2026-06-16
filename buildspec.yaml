@@ -6,9 +6,11 @@ phases:
       - kubectl version --client
       # Validate required environment variables
       - |
+        set -e
         MISSING=""
         for VAR in DB_HOST DB_NAME DB_PORT CVICHE_REDIS_URL; do
-          if [ -z "${!VAR}" ]; then
+          eval "value=\$$VAR"
+          if [ -z "$value" ]; then
             echo "ERROR: Required environment variable '$VAR' is not set"
             MISSING="$MISSING $VAR"
           fi
