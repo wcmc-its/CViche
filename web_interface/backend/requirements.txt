@@ -11,13 +11,13 @@ pydantic==2.13.4
 openai==2.20.0
 pdfplumber==0.11.9
 pdf2image==1.17.0
-requests==2.32.5
+requests==2.33.0
 tiktoken==0.12.0
 python-multipart==0.0.32
 websockets==16.0
 alembic==1.18.4
 python-docx==1.2.0
-pymysql==1.1.0
+pymysql==1.1.1
 itsdangerous==2.2.0
 pyyaml==6.0.3
 boto3==1.43.23
@@ -27,4 +27,4 @@ cachetools==7.1.4
 redis==8.0.0
 # Directly imported by app/saml_client.py (x509 / hazmat); pinned here so a
 # standalone backend install does not rely on pysaml2 pulling it transitively.
-cryptography==48.0.1
+cryptography==43.0.1
