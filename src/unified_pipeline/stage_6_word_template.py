@@ -1644,6 +1644,37 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         return None
 
+    # Phrases a CV uses to mark a degree that has not yet been conferred.
+    _IN_PROGRESS_DEGREE_MARKERS = (
+        'expected', 'anticipated', 'in progress', 'in-progress', 'ongoing',
+        'to be conferred', 'to be awarded', 'candidate', 'pending', 'present',
+    )
+
+    def _degree_is_in_progress(self, raw_text: str, year_awarded: str) -> bool:
+        """Return True when a degree has not yet been conferred.
+
+        Two general signals, neither tied to any specific CV:
+        1. The source line carries an explicit "not yet awarded" marker
+           ("expected", "anticipated", "in progress", "candidate", ...).
+        2. The award year parses to a year later than the current (run) year, so
+           it cannot already have been conferred.
+        """
+        text = (raw_text or '').lower()
+        for marker in self._IN_PROGRESS_DEGREE_MARKERS:
+            if marker in text:
+                return True
+
+        # Future award year => not yet conferred. year_awarded is already
+        # normalized to a 4-digit year by format_date_for_section(..., 'H').
+        match = re.search(r'(19|20)\d{2}', str(year_awarded))
+        if match:
+            try:
+                if int(match.group(0)) > datetime.now().year:
+                    return True
+            except ValueError:
+                pass
+        return False
+
     def _is_from_enrichment(self, entry: Dict, field: str) -> bool:
         """Check if a field value came from enrichment rather than extraction."""
         enriched_fields = entry.get('enriched_fields', [])
@@ -2962,6 +2993,12 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             if year_awarded:
                 year_awarded = format_date_for_section(year_awarded, 'H')  # H uses yyyy format
 
+            # A degree that is still in progress ("expected May 2026", a future
+            # award year, etc.) must NOT be presented as a conferred year. Mark it
+            # as anticipated so the reader can tell it has not been awarded yet.
+            if year_awarded and self._degree_is_in_progress(raw_text, year_awarded):
+                year_awarded = f"Expected {year_awarded}"
+
             # Build cell contents with mixed normal/track-change content
             # Cell 0: Degree (never enriched)
             degree_content = [(degree, False, "")]
@@ -3150,6 +3187,178 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             print(f"    Propagated institution to {propagated} sub-entries")
         return entries
 
+    # Title strings that field extraction sometimes emits when the source CV had
+    # a column header instead of a real role (mirrors the filter in
+    # ``_add_position_row``). Treated as "no title" for grouping purposes.
+    _PLACEHOLDER_TITLES = frozenset({'title', 'position', 'role', 'name',
+                                     'description', 'activity'})
+
+    @classmethod
+    def _position_title(cls, entry: Dict) -> str:
+        """Real title for a position entry, with column-header placeholders removed."""
+        fields = entry.get('extracted_fields', {}) or {}
+        title = (fields.get('title') or '').strip()
+        if title.lower() in cls._PLACEHOLDER_TITLES:
+            return ''
+        return title
+
+    @staticmethod
+    def _position_has_dates(entry: Dict) -> bool:
+        """True if the entry carries any date of its own (start or end)."""
+        fields = entry.get('extracted_fields', {}) or {}
+        return bool(fields.get('start_date') or fields.get('end_date'))
+
+    @classmethod
+    def _merge_grouped_appointments(cls, entries: List[Dict],
+                                    verbose: bool = False) -> List[Dict]:
+        """Reassemble appointments fragmented across title / employer rows.
+
+        Source CVs commonly list one employer with a date range on its own line
+        and the several roles held there on the lines beneath it (or vice-versa:
+        a role line followed by the unit + date range).  Stage 4 field extraction
+        treats each line as a separate entry, so the same appointment is split
+        into a title-less "employer + dates" row and one or more date-less
+        "title only" rows.  Rendered straight, that produces blank-TITLE rows
+        (which read as active/"Present" once sorted) and blank-DATES rows.
+
+        This pass works in document order on a single taxonomy-code list (run
+        after institution propagation) and applies three general rules:
+
+        Rule 2 (header + children): a title-less dated entry immediately followed
+            by one or more title-only entries at the same employer is an employer
+            header over the roles held there — copy its dates onto each child and
+            drop the now-redundant bare header.
+        Rule 1 (adjacent pair): a remaining title-only entry document-adjacent to
+            a title-less dated entry (either order) is one appointment split in
+            two — copy the dates onto the titled row and drop the bare dates row.
+        Rule 3 (employer summary): a title-less dated header whose date span is
+            already covered by an overlapping *titled* row at the same employer is
+            redundant — drop it (but keep it if it is the only record).
+
+        Rules 2 then 1 run as separate passes so a header is never mistaken for a
+        lone adjacent dates row. Dates are only ever *copied into* a row that
+        lacks them; an entry that already carries its own dates is never
+        overwritten. No titles or dates are fabricated — a row stays blank if the
+        group genuinely has no source.
+        """
+        if not entries or len(entries) < 2:
+            return entries
+
+        ordered = sorted(entries,
+                         key=lambda e: element_idx_sort_key(e.get('element_idx_start')))
+
+        def _copy_dates(src: Dict, dst: Dict) -> None:
+            src_f = src.get('extracted_fields', {}) or {}
+            dst_f = dst.get('extracted_fields')
+            if not dst_f:
+                dst['extracted_fields'] = dst_f = {}
+            if not (dst_f.get('start_date') or dst_f.get('end_date')):
+                dst_f['start_date'] = src_f.get('start_date', '')
+                dst_f['end_date'] = src_f.get('end_date', '')
+
+        def _employer(e: Dict) -> str:
+            f = e.get('extracted_fields', {}) or {}
+            return (f.get('institution') or f.get('organization') or '').strip().lower()
+
+        dropped = set()  # id() of header entries fully absorbed by children
+        merged = 0
+
+        # Pass 1 — Rule 2: a title-less dated entry is an employer header; the
+        # immediately-following title-only rows are the roles held there. Copy the
+        # header's dates onto each child, then drop the redundant bare header.
+        # Children must share the header's employer (institution propagation has
+        # already pushed the header's institution onto its sub-rows, so a mismatch
+        # means the run has reached a different employer). Done before Rule 1 so a
+        # header is never mistaken for a lone adjacent dates row.
+        for i, entry in enumerate(ordered):
+            if id(entry) in dropped:
+                continue
+            if cls._position_title(entry) or not cls._position_has_dates(entry):
+                continue
+            header_employer = _employer(entry)
+            children = []
+            for nxt in ordered[i + 1:]:
+                if id(nxt) in dropped:
+                    continue
+                nxt_employer = _employer(nxt)
+                same_employer = (not nxt_employer or not header_employer
+                                 or nxt_employer == header_employer)
+                if (cls._position_title(nxt) and not cls._position_has_dates(nxt)
+                        and same_employer):
+                    children.append(nxt)
+                else:
+                    break
+            if children:
+                for child in children:
+                    _copy_dates(entry, child)
+                    merged += 1
+                dropped.add(id(entry))
+
+        # Pass 2 — Rule 1: a title-only row immediately adjacent (in document
+        # order) to a remaining bare dates row, in either order, is one
+        # appointment split across two lines (e.g. "Staff Nurse" /
+        # "Medical/Surgical Unit (07/04-04/10)"). Physical adjacency is the
+        # fingerprint; the bare dates row often carries a sub-unit/department in
+        # its institution field rather than a distinct employer, so the employer
+        # strings need not match here.
+        for i, entry in enumerate(ordered):
+            if id(entry) in dropped:
+                continue
+            if not cls._position_title(entry) or cls._position_has_dates(entry):
+                continue
+
+            def _date_neighbor(cand):
+                if cand is None or id(cand) in dropped:
+                    return None
+                if cls._position_title(cand) or not cls._position_has_dates(cand):
+                    return None
+                return cand
+
+            neighbor = _date_neighbor(ordered[i + 1] if i + 1 < len(ordered) else None)
+            if neighbor is None:
+                neighbor = _date_neighbor(ordered[i - 1] if i > 0 else None)
+            if neighbor is not None:
+                _copy_dates(neighbor, entry)
+                dropped.add(id(neighbor))
+                merged += 1
+
+        # Rule 3: a title-less dated "employer summary" header whose date range is
+        # already represented by titled sub-positions at the same employer is
+        # redundant — its only content (institution + a date span) reappears, with
+        # a title, on the rows beneath it.  Drop it so it does not render as a
+        # blank-TITLE row.  Requires an overlapping *titled* sibling at the same
+        # institution; a header with no such sibling is the sole record and kept.
+        for entry in ordered:
+            if id(entry) in dropped:
+                continue
+            if cls._position_title(entry) or not cls._position_has_dates(entry):
+                continue
+            employer = _employer(entry)
+            if not employer:
+                continue
+            for other in ordered:
+                if other is entry or id(other) in dropped:
+                    continue
+                if not cls._position_title(other) or not cls._position_has_dates(other):
+                    continue
+                if _employer(other) != employer:
+                    continue
+                if _dates_overlap_or_match(entry, other):
+                    dropped.add(id(entry))
+                    merged += 1
+                    break
+
+        if not dropped:
+            if verbose and merged:
+                print(f"    Merged dates into {merged} fragmented appointment rows")
+            return entries
+
+        result = [e for e in ordered if id(e) not in dropped]
+        if verbose:
+            print(f"    Merged {len(dropped)} fragmented appointment row(s); "
+                  f"propagated dates to {merged} role row(s)")
+        return result
+
     def _fill_positions(self, entries_by_code: Dict[str, List[Dict]]):
         """Fill positions tables with track changes for enriched content.
 
@@ -3164,9 +3373,15 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         d2_entries = entries_by_code.get('D2', [])
         d3_entries = entries_by_code.get('D3', [])
 
-        # Propagate institution from parent entries to blank sub-entries
-        for entry_list in (d1_entries, d2_entries, d3_entries):
+        # Propagate institution from parent entries to blank sub-entries, then
+        # reassemble appointments that were fragmented into separate title /
+        # employer+dates rows (see _merge_grouped_appointments).
+        for code, entry_list in (('D1', d1_entries), ('D2', d2_entries), ('D3', d3_entries)):
             self._propagate_institution_to_subentries(entry_list, verbose=self.verbose)
+            merged = self._merge_grouped_appointments(entry_list, verbose=self.verbose)
+            if merged is not entry_list:
+                entry_list[:] = merged
+                entries_by_code[code] = entry_list
 
         total_positions = len(d1_entries) + len(d2_entries) + len(d3_entries)
         if self.verbose:
