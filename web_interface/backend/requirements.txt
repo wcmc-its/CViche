@@ -27,4 +27,4 @@ cachetools==7.1.4
 redis==8.0.0
 # Directly imported by app/saml_client.py (x509 / hazmat); pinned here so a
 # standalone backend install does not rely on pysaml2 pulling it transitively.
-cryptography==42.0.5
+cryptography==48.0.1
