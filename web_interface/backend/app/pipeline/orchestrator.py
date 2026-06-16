@@ -521,14 +521,21 @@ class PipelineOrchestrator:
 
             # Compute & cache the advisory quality score for the admin view.
             # Best-effort, run off the event loop; never affects run status.
+            score = None
             try:
                 import asyncio
                 from app.services.quality_score_service import compute_and_cache_score
-                await asyncio.get_running_loop().run_in_executor(
+                score = await asyncio.get_running_loop().run_in_executor(
                     None, compute_and_cache_score, self.run_id
                 )
             except Exception as e:
                 logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
+
+            # Notify on terminal success, passing the freshly-computed score so
+            # the Teams message includes it. Fully decoupled and best-effort:
+            # notify_run_terminal swallows all failures, so this never affects
+            # run status (which is already committed above).
+            await self._notify_terminal(run, score)
 
         except CancelledException:
             # Run was cancelled - status already updated by API endpoint
@@ -570,11 +577,45 @@ class PipelineOrchestrator:
             await event_emitter.emit_run_failed(
                 self.run_id, run.error_message or str(e), self.failed_step_number
             )
+
+            # Notify on terminal failure too (failures are the most important to
+            # push). No score is computed on the failure path; pass a best-effort
+            # cached read (usually None) and let the payload render "n/a".
+            await self._notify_terminal(run, self._cached_score())
+
             raise
 
         finally:
             # Clean up cancellation flag
             clear_cancelled(self.run_id)
+
+    def _cached_score(self):
+        """Best-effort read of the run's cached quality score (or None).
+
+        Used on the failure path, where no score is computed; the notification
+        renders "n/a" when this is None.
+        """
+        try:
+            from app.services.quality_score_service import get_cached_score
+            return get_cached_score(self.run_id)
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    async def _notify_terminal(self, run, score):
+        """Best-effort outbound notification for a terminal run.
+
+        Runs off the event loop (the HTTP POST is blocking) and swallows all
+        failures; notify_run_terminal is itself best-effort, but the executor
+        dispatch is wrapped too so a webhook problem can never affect run
+        status or bubble out of the pipeline.
+        """
+        try:
+            from app.services.notifications import notify_run_terminal
+            await asyncio.get_running_loop().run_in_executor(
+                None, notify_run_terminal, run, score
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Run notification failed for run %s: %s", self.run_id, e)
 
     async def execute_step(self, step_number: int, stage_id: str, cv_path: str):
         """Execute a single stage."""
