@@ -11,6 +11,7 @@
 # PYSEC-2026-87       lxml 6.0.2           -> 6.1.0
 # CVE-2026-27448      pyopenssl 24.2.1     (blocked: pysaml2 caps <24.3.0)
 # CVE-2026-27459      pyopenssl 24.2.1     (blocked: pysaml2 caps <24.3.0)
+# GHSA-537c-gmf6-5ccf cryptography 43.0.1  -> 48.0.1 (blocked: pysaml2 caps cryptography<44)
 CVE-2026-25645
 CVE-2024-36039
 PYSEC-2026-35
@@ -20,3 +21,4 @@ CVE-2026-26007
 PYSEC-2026-87
 CVE-2026-27448
 CVE-2026-27459
+GHSA-537c-gmf6-5ccf
