@@ -37,6 +37,7 @@ from core.validators.hierarchy_mismatch_flagger import flag_hierarchy_mismatches
 from core.validators.teaching_leadership_corrector import apply_teaching_leadership_corrections
 from core.validators.leadership_level_corrector import apply_leadership_level_corrections
 from core.validators.adjunct_position_corrector import apply_adjunct_position_corrections
+from core.validators.position_subcode_reconciler import apply_position_subcode_reconciliation
 from core.validators.training_compliance_corrector import apply_training_compliance_corrections
 from core.validators.invited_talk_corrector import apply_invited_talk_corrections
 from core.validators.grant_position_corrector import apply_grant_position_corrections
@@ -2072,6 +2073,23 @@ def run_stage_3b(
     else:
         print("   ✓ No adjunct position corrections needed")
 
+    # 8b. Cross-code position reconciliation (stray D1/D2/D3 title fragment →
+    #     the subcode of the appointment group it is embedded in). Runs AFTER
+    #     the per-entry position correctors (#4 grant→position, #8 adjunct) so
+    #     it reconciles against already-stabilised D-codes. Deterministic; pairs
+    #     with the Stage 6 grouped-appointment merge (#156) to rebuild the row.
+    print()
+    print("8b. Position subcode reconciliation (stray D1/D2/D3 fragment)...")
+    all_classified, position_reconcile_stats = apply_position_subcode_reconciliation(all_classified)
+    post_correction_stats['position_reconcile'] = position_reconcile_stats
+    if position_reconcile_stats['corrections_applied'] > 0:
+        print(f"   ✓ Reconciled {position_reconcile_stats['corrections_applied']} stray position fragment(s) to their appointment group")
+        for detail in position_reconcile_stats['correction_details'][:3]:
+            corr = detail['correction']
+            print(f"     - {corr['from']} → {corr['to']}: {corr['reason'][:60]}...")
+    else:
+        print("   ✓ No stray position fragments to reconcile")
+
     # 9. Training/compliance corrections (P → B2 for trainings received)
     print()
     print("9. Training/compliance corrections (P → B2)...")
@@ -2160,6 +2178,7 @@ def run_stage_3b(
         teaching_stats['corrections_applied'] +
         leadership_stats['corrections_applied'] +
         adjunct_stats['corrections_applied'] +
+        position_reconcile_stats['corrections_applied'] +
         training_stats['corrections_applied'] +
         invited_stats['corrections_applied']
     )

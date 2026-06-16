@@ -1,0 +1,132 @@
+{
+  "document_uid": "I5NKUG",
+  "note": "De-identified: contains only the D1/D2/D3 (position-family) classified entries from run I5NKUG; no personal identifiers. Regression fixture for issue #161.",
+  "entries": [
+    {
+      "element_idx_start": 7,
+      "element_idx_end": 7,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "PROFESSIONAL      Weill Cornell Medical College, New York, New York (February 2013-present)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Hospital/clinical appointment at Weill Cornell Medical College with clinical titles and dates",
+      "classification_source": "llm"
+    },
+    {
+      "element_idx_start": 9,
+      "element_idx_end": 9,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Chief Nurse Practitioner for Gastroenterology and Hepatology",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.92,
+      "classification_reasoning": "Clinical title (Chief Nurse Practitioner) at hospital/medical college",
+      "classification_source": "llm"
+    },
+    {
+      "element_idx_start": 10,
+      "element_idx_end": 10,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Senior Clinical Nurse Practitioner of Advanced Endoscopy",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.92,
+      "classification_reasoning": "Clinical title (Senior Clinical Nurse Practitioner) at hospital/medical college",
+      "classification_source": "llm"
+    },
+    {
+      "element_idx_start": 11,
+      "element_idx_end": 11,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Clinical Coordinator of Bariatric & Metabolic Endoscopy",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Clinical coordinator role in clinical department",
+      "classification_source": "llm"
+    },
+    {
+      "element_idx_start": 17,
+      "element_idx_end": 17,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "New York Presbyterian Hospital, New York, New York (September 2004-February 2013)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Past clinical appointment at hospital with dates",
+      "classification_source": "llm"
+    },
+    {
+      "element_idx_start": 19,
+      "element_idx_end": 19,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Nurse Practitioner",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D3",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Job title/professional position (Nurse Practitioner) indicating employment status",
+      "classification_source": "llm"
+    },
+    {
+      "element_idx_start": 20,
+      "element_idx_end": 20,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Greenberg 14 South-Medical/Surgical Inpatient Unit (April 2010-February 2013)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Clinical appointment with specific unit, dates, and role (Nurse Practitioner in hospital inpatient unit)",
+      "classification_source": "llm"
+    },
+    {
+      "element_idx_start": 28,
+      "element_idx_end": 28,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Staff Nurse",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Clinical position title (Staff Nurse) in hospital setting",
+      "classification_source": "llm"
+    },
+    {
+      "element_idx_start": 29,
+      "element_idx_end": 29,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Medical/Surgical Unit (July 2004-April 2010)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Clinical appointment with specific unit and date range (Staff Nurse in Medical/Surgical Unit)",
+      "classification_source": "llm"
+    }
+  ]
+}
