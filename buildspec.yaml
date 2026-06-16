@@ -4,6 +4,20 @@ phases:
   install:
     commands:
       - kubectl version --client
+      # Validate required environment variables
+      - |
+        MISSING=""
+        for VAR in DB_HOST DB_NAME DB_PORT CVICHE_REDIS_URL; do
+          if [ -z "${!VAR}" ]; then
+            echo "ERROR: Required environment variable '$VAR' is not set"
+            MISSING="$MISSING $VAR"
+          fi
+        done
+        if [ -n "$MISSING" ]; then
+          echo "Build failed: Missing required environment variables:$MISSING"
+          exit 1
+        fi
+        echo "All required environment variables are set."
   pre_build:
      commands:
        # Fetch Docker credentials from AWS Secrets Manager
