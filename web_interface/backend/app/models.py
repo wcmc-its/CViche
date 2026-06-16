@@ -1,5 +1,5 @@
 """SQLAlchemy database models."""
-from sqlalchemy import Column, String, Integer, Float, Text, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, String, Integer, Float, Text, DateTime, ForeignKey, UniqueConstraint, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from app.base_class import Base
@@ -118,6 +118,10 @@ class Run(Base):
     # (it spans the idle time a run sat failed before retry). NULL for runs that
     # predate this column or never reached a terminal status here.
     total_duration_seconds = Column(Integer)
+    # Number of pipeline execution attempts; 1 = initial run; incremented by
+    # auto-retry (issue #145). MySQL-portable Integer; NOT NULL so existing rows
+    # backfill to 1 via the server_default.
+    attempt_count = Column(Integer, nullable=False, default=1, server_default=text("1"))
     total_cost = Column(Float, default=0.0)
     total_tokens = Column(Integer, default=0)
     input_tokens = Column(Integer, default=0)

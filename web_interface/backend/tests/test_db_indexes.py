@@ -64,7 +64,13 @@ def test_index_migration_roundtrips_on_sqlite(tmp_path, monkeypatch):
         f"missing after upgrade: {EXPECTED_INDEXES - after_upgrade}"
     )
 
-    command.downgrade(cfg, "-1")
+    # Downgrade THROUGH the index migration by targeting its parent revision,
+    # not a relative "-1": "-1" only undoes whatever happens to be head, so it
+    # silently stops testing the indexes the moment any newer head migration is
+    # added on top of 5a74eb0f9645 (the index migration). f1a2b3c4d5e6 is that
+    # migration's down_revision, so rolling back to it always exercises the
+    # index drop regardless of later migrations stacked above.
+    command.downgrade(cfg, "f1a2b3c4d5e6")
     leftover = EXPECTED_INDEXES & _index_names(eng)
     assert not leftover, f"indexes not dropped on downgrade: {leftover}"
 
