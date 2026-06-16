@@ -293,7 +293,10 @@ async def restart_run(
     new_file = UPLOAD_DIR / f"{new_run_id}.{original_run.file_type}"
     shutil.copy2(str(original_file), str(new_file))
 
-    # Create new Run record, inheriting submission_type from original
+    # Create new Run record, inheriting submission_type and the user's
+    # output-rendering choices (issue #153) from the original. Without this the
+    # restarted run silently reverts to the column defaults (track changes ON,
+    # classification comments OFF), discarding a choice the user made at upload.
     new_run = Run(
         id=new_run_id,
         filename=original_run.filename,
@@ -302,6 +305,8 @@ async def restart_run(
         started_at=datetime.now(),
         user_id=current_user.id,
         submission_type=original_run.submission_type,
+        show_track_changes=original_run.show_track_changes,
+        show_pipeline_comments=original_run.show_pipeline_comments,
     )
     db.add(new_run)
 
