@@ -71,6 +71,7 @@ export interface FeedbackData {
   overall_usefulness: number
   manual_conversion_effort: string
   correction_effort: string
+  biggest_issue: string
   likelihood_to_recommend: number
   submitted_at: string
 }

@@ -51,6 +51,17 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     }),
+  delete: async (path: string): Promise<void> => {
+    // 204 No Content responses have no body to parse, so we don't go through
+    // request<T> (which always calls res.json()).
+    const res = await fetch(`${API_BASE}${path}`, { method: 'DELETE' })
+    if (!res.ok) {
+      maybeHandleUnauthorized(path, res.status)
+      const body = await res.json().catch(() => null)
+      const message = body?.detail?.message || body?.detail || `Request failed: ${res.status}`
+      throw { status: res.status, message } as ApiError
+    }
+  },
   postRaw: async (path: string, body?: unknown): Promise<Response> => {
     const res = await fetch(`${API_BASE}${path}`, {
       method: 'POST',

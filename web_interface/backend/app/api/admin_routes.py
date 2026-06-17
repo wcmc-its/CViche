@@ -201,6 +201,37 @@ async def update_user(
 
 
 # ---------------------------------------------------------------------------
+# DELETE /api/admin/feedback/{feedback_id}
+# ---------------------------------------------------------------------------
+@router.delete("/admin/feedback/{feedback_id}", status_code=204)
+async def delete_feedback(
+    feedback_id: int,
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Hard-delete a single feedback submission.
+
+    Used to purge a garbage/abusive response that would otherwise pollute the
+    aggregated Feedback Insights. 404 if the row does not exist. The deletion is
+    logged with the acting admin and the affected run so the action is auditable.
+    """
+    feedback = db.query(Feedback).filter(Feedback.id == feedback_id).first()
+    if not feedback:
+        raise not_found("Feedback not found.")
+
+    run_id = feedback.run_id
+    db.delete(feedback)
+    db.commit()
+
+    logger.info(
+        "admin_feedback_deleted: admin=%s feedback_id=%s run_id=%s",
+        admin.email,
+        feedback_id,
+        run_id,
+    )
+
+
+# ---------------------------------------------------------------------------
 # GET /api/admin/runs
 # ---------------------------------------------------------------------------
 @router.get("/admin/runs", response_model=AdminRunsResponse)

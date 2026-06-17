@@ -67,6 +67,8 @@ export const adminRoutes = {
   export: (type: string) => `/api/admin/export/${type}` as const,
   /** Convenience for the single hard-coded feedback export (== export('feedback')) */
   exportFeedback: () => `/api/admin/export/feedback` as const,
+  /** DELETE /api/admin/feedback/:feedbackId */
+  feedback: (feedbackId: number) => `/api/admin/feedback/${feedbackId}` as const,
 } as const
 
 export const authRoutes = {

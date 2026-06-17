@@ -34,3 +34,7 @@ export async function exportFeedbackCsv(): Promise<Response> {
   // Returns raw Response because this is CSV text, not JSON
   return api.getRaw(adminRoutes.exportFeedback())
 }
+
+export async function deleteFeedback(feedbackId: number): Promise<void> {
+  await api.delete(adminRoutes.feedback(feedbackId))
+}
