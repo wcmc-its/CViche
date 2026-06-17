@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { MapPin, XCircle, AlertCircle, CheckCircle2, Download, LifeBuoy } from 'lucide-react'
-import { getRunDataJson, cancelRun, restartRun, retryStep } from '../api/runs'
+import { getRunDataJson, cancelRun, restartRun, retryStep, startRun } from '../api/runs'
 import { runRoutes } from '../api/routes'
 import { formatCost } from '../utils'
 import { usePipelineRun } from '../hooks/usePipelineRun'
@@ -84,6 +84,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
   const [isCancelling, setIsCancelling] = useState(false)
   const [isRestarting, setIsRestarting] = useState(false)
   const [isRetrying, setIsRetrying] = useState(false)
+  const [isStarting, setIsStarting] = useState(false)
   
   const cvInsightsAttemptedRef = useRef<string | null>(null)
   const logsEndRef = useRef<HTMLDivElement>(null)
@@ -195,10 +196,27 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
     try {
       const data = await restartRun(runId)
       if (!data.run_id) throw new Error('Restart did not return a new run id')
+      // Restart only *creates* the new run; start it too so "Restart with file"
+      // yields a running job instead of a stuck "created" one (mirrors the
+      // upload flow's beginRun). Navigate once the start request is accepted.
+      await startRun(data.run_id)
       if (onNavigateToRun) onNavigateToRun(data.run_id)
     } catch (err: any) {
       setApiError(`Failed to restart: ${err.message || 'Unknown error'}`)
     } finally { setIsRestarting(false) }
+  }
+
+  // A "created" run already exists with its steps — it just never started.
+  // Start the existing run rather than spawning a new one (the restart path),
+  // so we don't pile up orphaned "created" rows.
+  const handleStart = async () => {
+    if (isStarting) return
+    setIsStarting(true)
+    try {
+      await startRun(runId)
+    } catch (err: any) {
+      setApiError(`Failed to start: ${err.message || 'Unknown error'}`)
+    } finally { setIsStarting(false) }
   }
 
   const handleRetry = async () => {
@@ -338,7 +356,7 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         <div className="bg-gray-50 border-b border-gray-300 px-6 py-3" role="status">
           <div className="flex items-center justify-between max-w-full">
             <p className="text-sm font-medium text-gray-700">Pipeline has not been started yet</p>
-            <button onClick={handleRestart} disabled={isRestarting} className="ml-4 shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-55">Restart with file</button>
+            <button onClick={handleStart} disabled={isStarting} className="ml-4 shrink-0 rounded-lg px-4 py-1.5 text-sm font-medium bg-gray-100 text-gray-700 hover:bg-gray-200 disabled:opacity-55">{isStarting ? 'Starting...' : 'Start pipeline'}</button>
           </div>
         </div>
       )}
