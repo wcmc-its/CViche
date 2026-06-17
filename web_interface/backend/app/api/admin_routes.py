@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, contains_eager
 
 from app.database import get_db
 from app.models import User, Run, Feedback, SystemConfig, Consent
-from app.auth import require_admin
+from app.auth import require_admin, get_session_epoch
 from app.errors import not_found, validation_error
 from app.schemas import (
     AdminStats,
@@ -466,6 +466,40 @@ async def update_config(
 
     # Return updated config
     return await get_config(db=db, admin=admin)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/admin/sessions/revoke-all
+# ---------------------------------------------------------------------------
+@router.post("/admin/sessions/revoke-all")
+async def revoke_all_sessions(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Invalidate every active session ("sign out everyone").
+
+    Bumps the global session epoch in SystemConfig. Each cookie carries the
+    epoch in force when it was minted, so the next request from any existing
+    session -- including the admin who pressed this -- fails the epoch check in
+    get_current_user (and the websocket auth) and is bounced to login. This is
+    the only way to revoke stateless signed-cookie sessions before their TTL --
+    use it after a credential leak, a permissions change, or to force re-auth.
+    """
+    new_epoch = get_session_epoch(db) + 1
+    row = db.query(SystemConfig).filter(SystemConfig.key == "session_epoch").first()
+    if row:
+        row.value = json.dumps(new_epoch)
+        row.updated_by = admin.id
+    else:
+        db.add(SystemConfig(key="session_epoch", value=json.dumps(new_epoch),
+                            updated_by=admin.id))
+    db.commit()
+
+    logger.info("admin_sessions_revoked_all: admin=%s new_epoch=%d", admin.email, new_epoch)
+    return {
+        "message": "All sessions revoked. Everyone must log in again.",
+        "session_epoch": new_epoch,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.schemas import LoginRequest, LoginResponse, AuthConfigResponse, MeResponse, QuotaInfo
-from app.auth import create_session_cookie, get_cookie_settings, get_current_user, COOKIE_NAME
+from app.auth import create_session_cookie, get_cookie_settings, get_current_user, get_session_epoch, COOKIE_NAME
 from app.config_loader import get_config_value
 from app.rate_limiter import get_quota
 from app.services.user_service import provision_user
@@ -117,7 +117,7 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
 
     response = JSONResponse(content=response_data.model_dump())
     cookie_settings = get_cookie_settings()
-    token = create_session_cookie(user)
+    token = create_session_cookie(user, get_session_epoch(db))
     response.set_cookie(value=token, **cookie_settings)
     return response
 

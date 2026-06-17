@@ -7,8 +7,12 @@ import os
 
 from app.config_loader import get_config
 # Session
-
-SESSION_TTL = int(get_config("auth", "CVICHE_SESSION_TTL", default=7 * 24 * 3600)[0])
+# Absolute session lifetime. Lowered from 7 days to 12 hours so a signed cookie
+# can't keep a session alive for a week of inactivity; combined with the
+# client-side idle logout and the server-side session epoch (revocation), this
+# bounds how long a stolen or forgotten session stays valid. Tunable via
+# CVICHE_SESSION_TTL (seconds).
+SESSION_TTL = int(get_config("auth", "CVICHE_SESSION_TTL", default=12 * 3600)[0])
 
 # Auth rate limiting (in-memory login attempt limiter)
 LOGIN_RATE_LIMIT_MAX = int(get_config("auth", "CVICHE_LOGIN_RATE_LIMIT", default=10)[0])

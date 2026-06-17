@@ -39,6 +39,11 @@ ADMIN_MANAGED_KEYS = frozenset({
     "rate_limit_daily",
     "rate_limit_monthly",
     "consent_version",
+    # Global session epoch (revocation counter). Owned at runtime (bumped by the
+    # admin "sign out everyone" endpoint), so it must be insert-if-absent only --
+    # a per-boot reconcile to the YAML/default would reset it to 0 and silently
+    # un-revoke every session on the next deploy.
+    "session_epoch",
 })
 
 # All other keys (auth_mode, saml_*, ed_*) have no admin-UI path, so the YAML
@@ -63,6 +68,9 @@ def seed_system_config(db: Session) -> None:
         "rate_limit_daily": json.dumps(config.get("rate_limits", {}).get("daily", 10)),
         "rate_limit_monthly": json.dumps(config.get("rate_limits", {}).get("monthly", 50)),
         "consent_version": json.dumps(config.get("consent", {}).get("version", "1.0")),
+        # Global session epoch; see ADMIN_MANAGED_KEYS. Seeded once at 0; bumped
+        # only by the admin revoke-all endpoint.
+        "session_epoch": json.dumps(0),
         # SAML config
         "saml_entity_id": json.dumps(config.get("saml", {}).get("entity_id", "")),
         "saml_idp_metadata_url": json.dumps(config.get("saml", {}).get("idp_metadata_url", "")),
