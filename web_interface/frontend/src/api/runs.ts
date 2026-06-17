@@ -27,8 +27,8 @@ export async function cancelRun(runId: string): Promise<void> {
   await api.post(runRoutes.cancel(runId))
 }
 
-export async function restartRun(runId: string): Promise<{ new_run_id: string }> {
-  return api.post<{ new_run_id: string }>(runRoutes.restart(runId))
+export async function restartRun(runId: string): Promise<{ run_id: string }> {
+  return api.post<{ run_id: string }>(runRoutes.restart(runId))
 }
 
 export async function retryStep(runId: string, step: number): Promise<void> {
