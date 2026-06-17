@@ -44,6 +44,11 @@ class LocalRunStorage(RunStorage):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
 
+    def put_global(self, key: str, data: bytes) -> None:
+        path = self._base / key
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
     def get_file(self, run_id: str, key: str) -> bytes:
         path = self._resolve(run_id, key)
         if not path.exists():
