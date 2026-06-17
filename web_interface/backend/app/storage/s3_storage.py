@@ -67,6 +67,11 @@ class S3RunStorage(RunStorage):
         self._s3.put_object(Bucket=self._bucket, Key=s3_key, Body=data)
         logger.debug("Uploaded s3://%s/%s (%d bytes)", self._bucket, s3_key, len(data))
 
+    def put_global(self, key: str, data: bytes) -> None:
+        s3_key = f"{self._prefix}/{key}"
+        self._s3.put_object(Bucket=self._bucket, Key=s3_key, Body=data)
+        logger.debug("Uploaded s3://%s/%s (%d bytes)", self._bucket, s3_key, len(data))
+
     def get_file(self, run_id: str, key: str) -> bytes:
         s3_key = self._s3_key(run_id, key)
         try:

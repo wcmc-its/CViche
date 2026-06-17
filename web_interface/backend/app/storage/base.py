@@ -25,6 +25,21 @@ class RunStorage(ABC):
         ...
 
     @abstractmethod
+    def put_global(self, key: str, data: bytes) -> None:
+        """Store a file at a top-level key, outside any run's namespace.
+
+        Unlike put_file (which namespaces under runs/{run_id}/), this writes to
+        {prefix}/{key} directly. Used for cross-run index objects that make the
+        store browsable along a different axis -- e.g. a by-submitter index at
+        "by-submitter/{email}/{run_id}/manifest.json".
+
+        Args:
+            key: Full relative key from the storage root (no run_id prefix).
+            data: File contents as bytes.
+        """
+        ...
+
+    @abstractmethod
     def get_file(self, run_id: str, key: str) -> bytes:
         """Retrieve a file for a run.
 

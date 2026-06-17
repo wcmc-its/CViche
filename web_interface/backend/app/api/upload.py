@@ -226,7 +226,7 @@ async def upload_cv(
     try:
         storage = get_storage()
         storage.put_file(run_id, f"input/{stored_name}", content)
-        storage.put_file(run_id, "input/manifest.json", json.dumps({
+        manifest = json.dumps({
             "run_id": run_id,
             "original_filename": file.filename,  # only record of the real name
             "stored_as": stored_name,
@@ -236,7 +236,17 @@ async def upload_cv(
             "content_type": file.content_type,
             "uploaded_at": datetime.now().isoformat(),
             "user_email": current_user.email,
-        }, indent=2).encode("utf-8"))
+        }, indent=2).encode("utf-8")
+        storage.put_file(run_id, "input/manifest.json", manifest)
+        # Cross-run, browsable-by-submitter index: the same manifest keyed under
+        # the submitter so runs can be found by who uploaded them in S3 without
+        # opening each run folder. The run artifacts stay under runs/{run_id}/;
+        # this is a navigation pointer. Submitter is the email (we have no CWID),
+        # already in hand here -- no DB lookup. Best-effort like the archive.
+        storage.put_global(
+            f"by-submitter/{current_user.email.lower()}/{run_id}/manifest.json",
+            manifest,
+        )
     except Exception as e:
         logger.warning("Failed to archive original upload to storage (run=%s): %s", run_id, e)
 
