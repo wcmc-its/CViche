@@ -175,10 +175,16 @@ async def start_run(
             status_code=429,
             detail={
                 "error": "server_busy",
+                # Keep the user-facing text free of a bare per-pod number: the
+                # cap is per server instance, but a user's own run list (shown in
+                # the side panel) is cross-pod and user-wide, so "maximum of N"
+                # reads as wrong when they can see more than N of their own runs
+                # in flight. The exact limit/active counts stay in `details` for
+                # diagnostics. (issue #170)
                 "message": (
-                    f"The server is already running the maximum of "
-                    f"{concurrency.get_max_concurrent_runs()} pipelines. "
-                    f"Please try again in a moment."
+                    "The system is temporarily at capacity and can't start a new "
+                    "run right now. Any runs already in progress will keep going -- "
+                    "please wait a moment and try again."
                 ),
                 "details": {
                     "limit_type": "concurrency",
@@ -373,10 +379,16 @@ async def retry_step(
             status_code=429,
             detail={
                 "error": "server_busy",
+                # Keep the user-facing text free of a bare per-pod number: the
+                # cap is per server instance, but a user's own run list (shown in
+                # the side panel) is cross-pod and user-wide, so "maximum of N"
+                # reads as wrong when they can see more than N of their own runs
+                # in flight. The exact limit/active counts stay in `details` for
+                # diagnostics. (issue #170)
                 "message": (
-                    f"The server is already running the maximum of "
-                    f"{concurrency.get_max_concurrent_runs()} pipelines. "
-                    f"Please try again in a moment."
+                    "The system is temporarily at capacity and can't start a new "
+                    "run right now. Any runs already in progress will keep going -- "
+                    "please wait a moment and try again."
                 ),
                 "details": {
                     "limit_type": "concurrency",
