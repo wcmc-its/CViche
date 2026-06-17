@@ -27,6 +27,7 @@ from app.schemas import (
 )
 from app.services.admin_service import get_users_with_stats, get_single_user_stats
 from app.services.quality_score_service import get_cached_score, compute_and_cache_score
+from app.services.run_service import reap_orphaned_created_runs
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
@@ -229,6 +230,37 @@ async def delete_feedback(
         feedback_id,
         run_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# POST /api/admin/runs/reap-orphans
+# ---------------------------------------------------------------------------
+@router.post("/admin/runs/reap-orphans")
+async def reap_orphan_runs(
+    dry_run: bool = Query(False, description="Preview candidates without deleting anything."),
+    older_than_hours: Optional[int] = Query(
+        None, ge=1, description="Override the age threshold in hours (default 24)."
+    ),
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+):
+    """Reap runs stuck at status='created' (uploaded but never started) along
+    with their child rows and leftover storage objects (runs/{id}/input/ and the
+    by-submitter index).
+
+    These accumulate when an upload's run is never started -- a declined
+    WCM-template upload, or a failed/abandoned start -- and are hidden from the
+    Runs dashboard but stay visible in S3. Call with ?dry_run=true first to
+    preview which runs would be removed.
+    """
+    result = reap_orphaned_created_runs(
+        db, older_than_hours=older_than_hours, dry_run=dry_run
+    )
+    logger.info(
+        "admin_reap_orphans: admin=%s dry_run=%s candidates=%d reaped=%d objects=%d",
+        admin.email, dry_run, result["candidates"], result["reaped"], result["objects_deleted"],
+    )
+    return result
 
 
 # ---------------------------------------------------------------------------
