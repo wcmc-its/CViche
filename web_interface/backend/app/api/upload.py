@@ -8,7 +8,7 @@ import secrets
 import tempfile
 import zipfile
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, Depends, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime
 from pydantic import BaseModel
@@ -135,6 +135,12 @@ def generate_run_id() -> str:
 @router.post("/upload", response_model=UploadResponse)
 async def upload_cv(
     file: UploadFile = File(...),
+    # Output-rendering options (issue #153). Sent as multipart form fields
+    # alongside the file. Defaults mirror the Run model column defaults
+    # (track changes ON, classification comments OFF) and are applied when the
+    # fields are absent, keeping older clients backward compatible.
+    include_track_changes: bool = Form(True),
+    include_classification_comments: bool = Form(False),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -234,7 +240,8 @@ async def upload_cv(
     except Exception as e:
         logger.warning("Failed to archive original upload to storage (run=%s): %s", run_id, e)
 
-    # Create run record
+    # Create run record. Persist the user's output-rendering choices (issue
+    # #153) as the truthy ints the Stage 6 generator reads at render time.
     run = Run(
         id=run_id,
         filename=file.filename,
@@ -242,6 +249,8 @@ async def upload_cv(
         status="created",
         started_at=datetime.now(),
         user_id=current_user.id,
+        show_track_changes=1 if include_track_changes else 0,
+        show_pipeline_comments=1 if include_classification_comments else 0,
     )
     db.add(run)
 

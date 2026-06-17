@@ -21,8 +21,23 @@ export interface UploadResult {
   wcm_template_match_ratio: number | null
 }
 
-export async function uploadFile(file: File): Promise<UploadResult> {
+// Output-rendering options the user picks at upload (issue #153). Defaults
+// mirror the backend Run column defaults: track changes ON, classification
+// comments OFF. Omitting the argument keeps that behavior.
+export interface UploadOptions {
+  includeTrackChanges: boolean
+  includeClassificationComments: boolean
+}
+
+export async function uploadFile(
+  file: File,
+  options: UploadOptions = { includeTrackChanges: true, includeClassificationComments: false },
+): Promise<UploadResult> {
   const formData = new FormData()
   formData.append('file', file)
+  // FastAPI bool Form parsing accepts 'true'/'false' (and 1/0). Send explicit
+  // strings so an unchecked box is transmitted as false rather than omitted.
+  formData.append('include_track_changes', String(options.includeTrackChanges))
+  formData.append('include_classification_comments', String(options.includeClassificationComments))
   return api.post<UploadResult>(uploadRoutes.upload(), formData)
 }

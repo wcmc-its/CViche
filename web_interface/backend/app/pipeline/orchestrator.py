@@ -1116,11 +1116,21 @@ class PipelineOrchestrator:
                 if not input_path:
                     raise ValueError("No input available for Stage 6")
 
+                # Issue #153: honor the user's output-rendering choices recorded
+                # on the Run row. Columns default to track changes ON (1) and
+                # classification comments OFF (0); treat as truthy ints, falling
+                # back to those defaults if the row/column is unexpectedly None.
+                run = self.db.query(Run).filter(Run.id == self.run_id).first()
+                emit_track_changes = bool(run.show_track_changes) if run and run.show_track_changes is not None else True
+                emit_comments = bool(run.show_pipeline_comments) if run and run.show_pipeline_comments is not None else False
+
                 stage6_output_path = await self._run_with_stdout_capture(
                     run_stage6,
                     step_number,
                     input_path=input_path,
-                    verbose=True
+                    verbose=True,
+                    emit_track_changes=emit_track_changes,
+                    emit_comments=emit_comments,
                 )
 
                 self.stage_outputs['6'] = stage6_output_path

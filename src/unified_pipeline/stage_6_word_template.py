@@ -682,11 +682,21 @@ class WCMTemplateGenerator:
     Generates WCM Word documents from enriched CV data.
     """
 
-    def __init__(self, template_path: str = None, verbose: bool = True):
+    def __init__(self, template_path: str = None, verbose: bool = True,
+                 emit_track_changes: bool = True, emit_comments: bool = False):
         # Find a valid template path
         self.template_path = self._find_template(template_path)
         self.verbose = verbose
         self.doc = None
+
+        # Output-rendering options (issue #153). Defaults mirror the Run model
+        # column defaults: track changes ON, classification comments OFF.
+        # When emit_track_changes is False, insertions/deletions render as plain
+        # runs (final text only) so the document stays valid and readable.
+        # When emit_comments is False, no commentReference is emitted and no
+        # comments.xml part is created.
+        self.emit_track_changes = emit_track_changes
+        self.emit_comments = emit_comments
 
         # CV owner location context for geographic scope classification
         self.cv_owner_location = None
@@ -7503,6 +7513,11 @@ Now analyze the text above:"""
         - commentReference in the text
         - comment content stored for comments.xml
         """
+        # Issue #153: when classification comments are disabled, emit nothing.
+        # Skipping here means no commentReference is added and _comments stays
+        # empty, so _finalize_comments never creates a comments.xml part.
+        if not self.emit_comments:
+            return
         try:
             comment_id = str(self._comment_id)
             self._comment_id += 1
@@ -7549,6 +7564,13 @@ Now analyze the text above:"""
 
         Creates proper Word track change structure with w:ins element.
         """
+        # Issue #153: when track changes are disabled, render the inserted text
+        # as a plain run (no w:ins). The text is the final/accepted content, so
+        # the document reads as if the change were already accepted.
+        if not self.emit_track_changes:
+            run = para.add_run(text)
+            self._set_font(run)
+            return run
         try:
             revision_id = str(self._revision_id)
             self._revision_id += 1
@@ -7601,6 +7623,12 @@ Now analyze the text above:"""
         Creates proper Word track change structure with w:del element.
         The deleted text will appear struck-through in Word's track changes view.
         """
+        # Issue #153: when track changes are disabled, omit the deletion entirely
+        # (the deleted text is the superseded/original content). The paired
+        # insertion still emits the final text as a plain run, so the accepted
+        # version is what remains.
+        if not self.emit_track_changes:
+            return None
         try:
             revision_id = str(self._revision_id)
             self._revision_id += 1
@@ -8088,6 +8116,11 @@ Now analyze the text above:"""
         This creates proper Word track change structure with w:ins element,
         and includes bold formatting for the target author within the insertion.
         """
+        # Issue #153: when track changes are disabled, render the citation as a
+        # plain (non-tracked) paragraph with the target author bolded.
+        if not self.emit_track_changes:
+            self._add_citation_with_bold_author(para, citation, target_name, cv_owner_last_name)
+            return
         try:
             revision_id = str(self._revision_id)
             self._revision_id += 1
@@ -8240,7 +8273,8 @@ Now analyze the text above:"""
         return issues
 
 
-def run_stage6(input_path: str, output_path: str = None, verbose: bool = True) -> str:
+def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
+               emit_track_changes: bool = True, emit_comments: bool = False) -> str:
     """
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -8248,11 +8282,18 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True) -
         input_path: Path to enriched JSON file
         output_path: Optional output path
         verbose: Print progress
+        emit_track_changes: Render edits as Word track changes (default True).
+            When False, edits render as plain accepted text.
+        emit_comments: Emit Word classification/pipeline comments (default False).
 
     Returns:
         Path to generated document
     """
-    generator = WCMTemplateGenerator(verbose=verbose)
+    generator = WCMTemplateGenerator(
+        verbose=verbose,
+        emit_track_changes=emit_track_changes,
+        emit_comments=emit_comments,
+    )
     return generator.generate(input_path, output_path)
 
 
