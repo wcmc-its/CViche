@@ -17,6 +17,18 @@ default:
   model: us.anthropic.claude-sonnet-4-6
   temperature: 0
   retry_count: 3
+  # Global output ceiling for any call that does not pass an explicit
+  # max_tokens=. Without it, Bedrock applies the MODEL's own default ceiling
+  # (~64,000 tokens for these Claude models), so a misbehaving prompt can run
+  # uncapped to ~64K and bill every emitted token. 16,000 is a deliberately
+  # generous floor: the largest legitimate output ever seen in prompt_logs is
+  # ~8.1K, so it never truncates a real response while cutting worst-case spend
+  # 4x. This is a SAFETY/cost-RISK bound, NOT a cost reduction -- Bedrock bills
+  # tokens actually generated, never the ceiling. The client (_call_bedrock)
+  # enforces the same DEFAULT_MAX_TOKENS=16000 as a last-resort floor even if
+  # this key is ever removed. To tighten per stage, see the stages: block below.
+  # See docs/analysis/HANDOFF-runaway-generation-maxtokens-2026-06-17.md.
+  max_tokens: 16000
   # Bedrock prompt caching. When true, _call_bedrock appends a cachePoint
   # checkpoint after the system block so the (large, stable) system prompt
   # is read from cache on subsequent calls within the 5-minute TTL. Cache
@@ -35,6 +47,40 @@ default:
 # this stages block (3b then inherits the Sonnet 4.6 default above).
 stages:
   stage_3b: {model: us.anthropic.claude-haiku-4-5-20251001-v1:0}
+
+# --- Per-stage max_tokens (optional tightening of the 16K global floor) ---
+#
+# Every stage already inherits the default.max_tokens: 16000 floor above, so no
+# call is uncapped. Setting a tighter per-stage value here narrows the worst-
+# case bound for stages whose legitimate output is far below 16K. A per-stage
+# value here is overridden by an explicit call-site max_tokens= (kwargs win), so
+# these only affect the call sites that pass no cap of their own.
+#
+# DO NOT activate a tight cap without first verifying it against a representative
+# CV set: confirm finish_reason never flips to `max_tokens` (the client logs it
+# to prompt_logs). A cap that truncates real output is worse than the cost risk
+# it bounds. Evidence from local prompt_logs (max observed completion_tokens per
+# stage) is given below as a STARTING point, NOT a verified ceiling:
+#
+#   stage              observed max   note
+#   core_personal_info        151     name/contact; does not scale with CV size
+#   segmentation_signature    385     full-structure output
+#   segmentation_header_validator 593
+#   stage_5b                  903     institution enrichment
+#   stage_3b                 1730     classifier (explicit-cap sites use 2000)
+#   stage_2                  2809     entry extraction; scales with CV size
+#   stage_4                  8144     field extraction; closest to the floor
+#
+# WARNING -- do not re-impose the legacy tight caps that were REMOVED for
+# truncating real output: `service_parsing` was historically capped at 400 and
+# truncated 27 logged calls (finish_reason=length); the current parser_service
+# call site is deliberately uncapped. Big-section parsers (parser_publications,
+# parser_positions, parser_grants, parser_service) and the segmentation/repair
+# stages scale with CV size -- leave them on the 16K floor.
+#
+# Example (uncomment + verify per stage before relying on it):
+#   stage_3b: {model: us.anthropic.claude-haiku-4-5-20251001-v1:0, max_tokens: 4000}
+#   core_personal_info: {max_tokens: 2000}
 
 # Other stages inherit the Sonnet 4.6 default above.
 #
