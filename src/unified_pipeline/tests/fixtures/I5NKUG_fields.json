@@ -1,0 +1,2532 @@
+{
+  "document_uid": "I5NKUG",
+  "stage": "4",
+  "stage_name": "Field Extraction",
+  "source_stage": "3b",
+  "cv_owner": {
+    "first_name": "Jordan",
+    "middle_name": "Taylor",
+    "last_name": "Doe",
+    "suffix": "",
+    "full_name": "Jordan Taylor Doe",
+    "full_name_with_credentials": "Jordan Taylor Doe"
+  },
+  "cv_owner_location": {
+    "locations": [
+      {
+        "institution": "Weill Cornell Medical College",
+        "city": "New York",
+        "state": "NY",
+        "country": "USA",
+        "confidence": 1.0
+      }
+    ],
+    "metro_area": "New York City",
+    "primary_location": {
+      "institution": "Weill Cornell Medical College",
+      "city": "New York",
+      "state": "NY",
+      "country": "USA",
+      "confidence": 1.0
+    },
+    "inference_success": true,
+    "tokens": 545,
+    "cost": 0.0033510000000000002
+  },
+  "total_entries": 71,
+  "total_cost": 0.167247,
+  "total_tokens": 25837,
+  "cache_read_tokens": 0,
+  "cache_write_tokens": 0,
+  "stats": {
+    "total_entries": 71,
+    "extracted": 71,
+    "skipped": 0,
+    "batches_processed": 8,
+    "entries_reformatted": 3,
+    "cache_read_tokens": 0,
+    "cache_write_tokens": 0,
+    "fragments_skipped": 2,
+    "duplicates_skipped": 0
+  },
+  "entries": [
+    {
+      "element_idx_start": 0,
+      "element_idx_end": 0,
+      "element_type": "paragraph",
+      "confidence": 0.99,
+      "text": "JORDAN TAYLOR DOE",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "A",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": null,
+      "classification_source": "llm",
+      "extracted_fields": {
+        "name": "JORDAN TAYLOR DOE",
+        "email": null,
+        "phone": null,
+        "address": null,
+        "npi_number": null,
+        "dea_number": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 3,
+        "total_extracted_words": 3
+      }
+    },
+    {
+      "element_idx_start": 1,
+      "element_idx_end": 1,
+      "element_type": "paragraph",
+      "confidence": 0.99,
+      "text": "100 Example Street",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "A",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": null,
+      "classification_source": "llm",
+      "extracted_fields": {
+        "name": null,
+        "email": null,
+        "phone": null,
+        "address": "100 Example Street",
+        "npi_number": null,
+        "dea_number": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 2,
+        "total_extracted_words": 2
+      }
+    },
+    {
+      "element_idx_start": 2,
+      "element_idx_end": 2,
+      "element_type": "paragraph",
+      "confidence": 0.99,
+      "text": "Anytown, NY 10001",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "A",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": null,
+      "classification_source": "llm",
+      "extracted_fields": {
+        "name": null,
+        "email": null,
+        "phone": null,
+        "address": "Anytown, NY 10001",
+        "npi_number": null,
+        "dea_number": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 2,
+        "total_extracted_words": 2
+      }
+    },
+    {
+      "element_idx_start": 3,
+      "element_idx_end": 3,
+      "element_type": "paragraph",
+      "confidence": 0.99,
+      "text": "555-555-0100",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "A",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": null,
+      "classification_source": "llm",
+      "extracted_fields": {
+        "name": null,
+        "email": null,
+        "phone": "555-555-0100",
+        "address": null,
+        "npi_number": null,
+        "dea_number": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 0,
+        "total_extracted_words": 0
+      }
+    },
+    {
+      "element_idx_start": 4,
+      "element_idx_end": 4,
+      "element_type": "paragraph",
+      "confidence": 0.99,
+      "text": "jordan.t.doe@example.com",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "A",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": null,
+      "classification_source": "llm",
+      "extracted_fields": {
+        "name": null,
+        "email": "jordan.t.doe@example.com",
+        "phone": null,
+        "address": null,
+        "npi_number": null,
+        "dea_number": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 4,
+        "total_extracted_words": 4
+      }
+    },
+    {
+      "element_idx_start": 7,
+      "element_idx_end": 7,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "PROFESSIONAL      Weill Cornell Medical College, New York, New York (February 2013-present)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Hospital/clinical appointment at Weill Cornell Medical College with clinical titles and dates",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "title": null,
+        "institution": "Weill Cornell Medical College, New York, New York",
+        "start_date": "2013-02",
+        "end_date": "present"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "february",
+          "professional"
+        ],
+        "extraction_coverage_percent": 77.8,
+        "total_original_words": 9,
+        "total_extracted_words": 7
+      }
+    },
+    {
+      "element_idx_start": 8,
+      "element_idx_end": 8,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "EXPERIENCE",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "T",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "[T-validation confirmed] This is a section header ('EXPERIENCE') with no substantive content. It is a structural artifact of CV formatting and does not contain any classifiable information about the CV owner. Section headers are appendix/structural material and appropriately classified as T.",
+      "classification_source": "llm",
+      "t_validation_applied": true,
+      "reasoning_conflict_detected": {
+        "suggested_code": "A",
+        "confidence": 0.7,
+        "evidence": "Reasoning mentions A but assigned T: 'lidation confirmed] This is a section header ('EX'",
+        "action": "skipped_low_confidence"
+      },
+      "extracted_fields": {
+        "content_type": "section_header",
+        "description": "EXPERIENCE"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 1,
+        "total_extracted_words": 1
+      }
+    },
+    {
+      "element_idx_start": 9,
+      "element_idx_end": 9,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Chief Nurse Practitioner for Gastroenterology and Hepatology",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.92,
+      "classification_reasoning": "Clinical title (Chief Nurse Practitioner) at hospital/medical college",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "title": "Chief Nurse Practitioner for Gastroenterology and Hepatology",
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 5,
+        "total_extracted_words": 5
+      }
+    },
+    {
+      "element_idx_start": 10,
+      "element_idx_end": 10,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Senior Clinical Nurse Practitioner of Advanced Endoscopy",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.92,
+      "classification_reasoning": "Clinical title (Senior Clinical Nurse Practitioner) at hospital/medical college",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "title": "Senior Clinical Nurse Practitioner of Advanced Endoscopy",
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 6,
+        "total_extracted_words": 6
+      }
+    },
+    {
+      "element_idx_start": 11,
+      "element_idx_end": 11,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Clinical Coordinator of Bariatric & Metabolic Endoscopy",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Clinical coordinator role in clinical department",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "title": "Clinical Coordinator of Bariatric & Metabolic Endoscopy",
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 5,
+        "total_extracted_words": 5
+      }
+    },
+    {
+      "element_idx_start": 12,
+      "element_idx_end": 12,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Department of Medicine- Division of Gastroenterology & Hepatology, Advanced Endoscopy",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "G",
+      "taxonomy_confidence": 0.88,
+      "classification_reasoning": "Departmental affiliation at home institution",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "organization": "Department of Medicine- Division of Gastroenterology & Hepatology, Advanced Endoscopy",
+        "affiliation_type": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 7,
+        "total_extracted_words": 7
+      }
+    },
+    {
+      "element_idx_start": 13,
+      "element_idx_end": 13,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Provide direct patient care to Gastroenterology and Advanced Endoscopy patients in an outpatient clinic setting. Responsibilities include new patient consults and follow-up care of patients in the practice. Diagnose, treat, and provide follow-up care for patients as an autonomous provider in the practice. In addition, collaborate with service attending physicians providing support in their clinic, diagnosis, treatment, and follow-up care of those patients in the practice as well. Additional responsibilities include co-investigating sponsor-initiated device and drug trials, participating in research, and publishing. Manage the bariatric and metabolic endoscopy program, including patient care, research, and continued growth.",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "L1",
+      "taxonomy_confidence": 0.93,
+      "classification_reasoning": "Direct patient care responsibilities in outpatient clinic setting",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "clinical_role": "Gastroenterology and Advanced Endoscopy Nurse Practitioner/Provider (outpatient clinic, bariatric and metabolic endoscopy program)",
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "addition",
+          "additional",
+          "attending",
+          "autonomous",
+          "care",
+          "collaborate",
+          "consults",
+          "continued",
+          "device",
+          "diagnose",
+          "diagnosis",
+          "direct",
+          "drug",
+          "follow",
+          "growth",
+          "include",
+          "including",
+          "initiated",
+          "investigating",
+          "manage",
+          "new",
+          "participating",
+          "patient",
+          "patients",
+          "physicians",
+          "practice",
+          "provide",
+          "providing",
+          "publishing",
+          "research",
+          "responsibilities",
+          "service",
+          "setting",
+          "sponsor",
+          "support",
+          "treat",
+          "treatment",
+          "trials",
+          "well"
+        ],
+        "extraction_coverage_percent": 18.8,
+        "total_original_words": 48,
+        "total_extracted_words": 9
+      }
+    },
+    {
+      "element_idx_start": 14,
+      "element_idx_end": 14,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "As Chief Nurse Practitioner of gastroenterology and hepatology. Responsibilities include managing twenty 26 advanced practitioner providers and registered nurses within five subspecialties in gastroenterology.  This role includes operational effectiveness and revenue optimization for each subspecialty group, recruitment, onboarding, clinical education, running monthly meetings, mentorship, completing yearly appraisals/reviews, and fostering a sense of community amongst the clinical staff. Project leader for the optimization of the endoscopy utilization, lead for the direct access screening colonoscopy program, and lead for the pre-procedure endoscopy team.",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "L3",
+      "taxonomy_confidence": 0.92,
+      "classification_reasoning": "Clinical leadership role managing advanced practitioner providers and nurses, operational effectiveness, revenue optimization",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "leadership_role": "Chief Nurse Practitioner",
+        "institution": null,
+        "unit_program": "Gastroenterology and Hepatology",
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "access",
+          "advanced",
+          "amongst",
+          "appraisals",
+          "clinical",
+          "colonoscopy",
+          "community",
+          "completing",
+          "direct",
+          "each",
+          "education",
+          "effectiveness",
+          "endoscopy",
+          "five",
+          "fostering",
+          "group",
+          "include",
+          "includes",
+          "lead",
+          "leader",
+          "managing",
+          "meetings",
+          "mentorship",
+          "monthly",
+          "nurses",
+          "onboarding",
+          "operational",
+          "optimization",
+          "pre",
+          "procedure",
+          "program",
+          "project",
+          "providers",
+          "recruitment",
+          "registered",
+          "responsibilities",
+          "revenue",
+          "reviews",
+          "role",
+          "running",
+          "screening",
+          "sense",
+          "staff",
+          "subspecialties",
+          "subspecialty",
+          "team",
+          "twenty",
+          "utilization",
+          "within",
+          "yearly"
+        ],
+        "extraction_coverage_percent": 9.1,
+        "total_original_words": 55,
+        "total_extracted_words": 5
+      }
+    },
+    {
+      "element_idx_start": 15,
+      "element_idx_end": 15,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Active member of the advanced practice provider council and its additional work group, creating updated job descriptions for clinical staff, career ladder, and job types.",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "P",
+      "taxonomy_confidence": 0.88,
+      "classification_reasoning": "Internal institutional service on advanced practice provider council",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "committee_name": "Advanced Practice Provider Council",
+        "role": "Active member",
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "additional",
+          "career",
+          "clinical",
+          "creating",
+          "descriptions",
+          "group",
+          "its",
+          "job",
+          "ladder",
+          "staff",
+          "types",
+          "updated",
+          "work"
+        ],
+        "extraction_coverage_percent": 31.6,
+        "total_original_words": 19,
+        "total_extracted_words": 6
+      }
+    },
+    {
+      "element_idx_start": 17,
+      "element_idx_end": 17,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "New York Presbyterian Hospital, New York, New York (September 2004-February 2013)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Past clinical appointment at hospital with dates",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "title": null,
+        "institution": "New York Presbyterian Hospital, New York, New York",
+        "start_date": "2004-09",
+        "end_date": "2013-02"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "february",
+          "september"
+        ],
+        "extraction_coverage_percent": 66.7,
+        "total_original_words": 6,
+        "total_extracted_words": 4
+      }
+    },
+    {
+      "element_idx_start": 19,
+      "element_idx_end": 19,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Nurse Practitioner",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D3",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Job title/professional position (Nurse Practitioner) indicating employment status",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "title": "Nurse Practitioner",
+        "organization": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 2,
+        "total_extracted_words": 2
+      }
+    },
+    {
+      "element_idx_start": 20,
+      "element_idx_end": 20,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Greenberg 14 South-Medical/Surgical Inpatient Unit (April 2010-February 2013)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Clinical appointment with specific unit, dates, and role (Nurse Practitioner in hospital inpatient unit)",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "title": "Greenberg 14 South-Medical/Surgical Inpatient Unit",
+        "institution": null,
+        "start_date": "2010-04",
+        "end_date": "2013-02"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "april",
+          "february"
+        ],
+        "extraction_coverage_percent": 75.0,
+        "total_original_words": 8,
+        "total_extracted_words": 6
+      }
+    },
+    {
+      "element_idx_start": 21,
+      "element_idx_end": 21,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Provide direct patient care to a variety of surgical patients on a twenty-bed inpatient unit.",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "L1",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Direct patient care responsibilities on inpatient unit",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "clinical_role": "Inpatient Surgical Nurse Practitioner/Provider",
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "bed",
+          "care",
+          "direct",
+          "patient",
+          "patients",
+          "provide",
+          "twenty",
+          "unit",
+          "variety"
+        ],
+        "extraction_coverage_percent": 18.2,
+        "total_original_words": 11,
+        "total_extracted_words": 2
+      }
+    },
+    {
+      "element_idx_start": 22,
+      "element_idx_end": 22,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Responsibilities include admitting and discharging patients, performing physical examinations",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "L1",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Clinical responsibilities including patient assessment and examination",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "clinical_role": null,
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "admitting",
+          "discharging",
+          "examinations",
+          "include",
+          "patients",
+          "performing",
+          "physical",
+          "responsibilities"
+        ],
+        "extraction_coverage_percent": 0.0,
+        "total_original_words": 8,
+        "total_extracted_words": 0
+      }
+    },
+    {
+      "element_idx_start": 23,
+      "element_idx_end": 23,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "and recording findings, ordering and interpreting diagnostic tests, assessing patients' clinical",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "L1",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Continuation of clinical duties (diagnostic testing, clinical assessment, treatment planning)",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "clinical_role": null,
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "assessing",
+          "clinical",
+          "diagnostic",
+          "findings",
+          "interpreting",
+          "ordering",
+          "patients",
+          "recording",
+          "tests"
+        ],
+        "extraction_coverage_percent": 0.0,
+        "total_original_words": 9,
+        "total_extracted_words": 0
+      }
+    },
+    {
+      "element_idx_start": 24,
+      "element_idx_end": 24,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "problems and health care needs, and formulating a treatment plan. Collaborating with the",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "L1",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Continuation of clinical responsibilities and collaboration with clinical staff",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "clinical_role": null,
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "care",
+          "collaborating",
+          "formulating",
+          "health",
+          "needs",
+          "plan",
+          "problems",
+          "treatment"
+        ],
+        "extraction_coverage_percent": 0.0,
+        "total_original_words": 8,
+        "total_extracted_words": 0
+      }
+    },
+    {
+      "element_idx_start": 25,
+      "element_idx_end": 25,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "attending and resident staff. Educate patients and/or families regarding the disease process,",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "K2",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Patient and family education as part of clinical teaching role",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "teaching_role": null,
+        "institution": null,
+        "setting": null,
+        "start_date": null,
+        "end_date": null,
+        "learner_level": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "attending",
+          "disease",
+          "educate",
+          "families",
+          "patients",
+          "process",
+          "regarding",
+          "resident",
+          "staff"
+        ],
+        "extraction_coverage_percent": 0.0,
+        "total_original_words": 9,
+        "total_extracted_words": 0
+      }
+    },
+    {
+      "element_idx_start": 26,
+      "element_idx_end": 26,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "medical intervention, and health promotion.",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "K2",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Continuation of patient/family education and health promotion activities",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "teaching_role": null,
+        "institution": null,
+        "setting": null,
+        "start_date": null,
+        "end_date": null,
+        "learner_level": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "health",
+          "intervention",
+          "medical",
+          "promotion"
+        ],
+        "extraction_coverage_percent": 0.0,
+        "total_original_words": 4,
+        "total_extracted_words": 0
+      }
+    },
+    {
+      "element_idx_start": 28,
+      "element_idx_end": 28,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Staff Nurse",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Clinical position title (Staff Nurse) in hospital setting",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "title": "Staff Nurse",
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 2,
+        "total_extracted_words": 2
+      }
+    },
+    {
+      "element_idx_start": 29,
+      "element_idx_end": 29,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Medical/Surgical Unit (July 2004-April 2010)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "D2",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Clinical appointment with specific unit and date range (Staff Nurse in Medical/Surgical Unit)",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "title": null,
+        "institution": "Medical/Surgical Unit",
+        "start_date": "2004-07",
+        "end_date": "2010-04"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "april",
+          "july"
+        ],
+        "extraction_coverage_percent": 60.0,
+        "total_original_words": 5,
+        "total_extracted_words": 3
+      }
+    },
+    {
+      "element_idx_start": 30,
+      "element_idx_end": 30,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Responsibilities include direct medical care of patients, admitting, discharging, and",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "L1",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Direct medical care and patient management responsibilities",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "clinical_role": null,
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "admitting",
+          "care",
+          "direct",
+          "discharging",
+          "include",
+          "medical",
+          "patients",
+          "responsibilities"
+        ],
+        "extraction_coverage_percent": 0.0,
+        "total_original_words": 8,
+        "total_extracted_words": 0
+      }
+    },
+    {
+      "element_idx_start": 31,
+      "element_idx_end": 31,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "monitoring patients’ care. Strong teaching skills exemplified as a preceptor to new nurses:",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "K2",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Clinical teaching role as preceptor to new nurses (hands-on supervision and training)",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "teaching_role": "Preceptor",
+        "institution": null,
+        "setting": null,
+        "start_date": null,
+        "end_date": null,
+        "learner_level": "New Nurses"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "care",
+          "exemplified",
+          "monitoring",
+          "patients",
+          "skills",
+          "strong",
+          "teaching"
+        ],
+        "extraction_coverage_percent": 30.0,
+        "total_original_words": 10,
+        "total_extracted_words": 3
+      }
+    },
+    {
+      "element_idx_start": 32,
+      "element_idx_end": 32,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "training, educating, and guiding. Excellent leadership skills demonstrated as floor Charge",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "L3",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Clinical leadership roles (Charge Nurse, floor leadership responsibilities)",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "leadership_role": "Charge Nurse (floor)",
+        "institution": null,
+        "unit_program": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "demonstrated",
+          "educating",
+          "excellent",
+          "guiding",
+          "leadership",
+          "skills",
+          "training"
+        ],
+        "extraction_coverage_percent": 22.2,
+        "total_original_words": 9,
+        "total_extracted_words": 2
+      }
+    },
+    {
+      "element_idx_start": 33,
+      "element_idx_end": 33,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Nurse and also as Nurse Residency Charge Night Mentor: included mentoring to new",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "N1",
+      "taxonomy_confidence": 0.85,
+      "classification_reasoning": "Leadership in mentoring program (Nurse Residency Charge Night Mentor) with structured mentoring of multiple units",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "program_name": "Nurse Residency",
+        "role": "Charge Night Mentor",
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "also",
+          "included",
+          "mentoring",
+          "new"
+        ],
+        "extraction_coverage_percent": 55.6,
+        "total_original_words": 9,
+        "total_extracted_words": 5
+      }
+    },
+    {
+      "element_idx_start": 34,
+      "element_idx_end": 34,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "nurses from 4 medical units, organizing meetings and building strong positive relationships.",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "N1",
+      "taxonomy_confidence": 0.85,
+      "classification_reasoning": "Continuation of mentoring leadership activities (organizing meetings, mentoring new nurses from multiple units)",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "program_name": null,
+        "role": null,
+        "institution": null,
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "building",
+          "medical",
+          "meetings",
+          "nurses",
+          "organizing",
+          "positive",
+          "relationships",
+          "strong",
+          "units"
+        ],
+        "extraction_coverage_percent": 0.0,
+        "total_original_words": 9,
+        "total_extracted_words": 0
+      }
+    },
+    {
+      "element_idx_start": 36,
+      "element_idx_end": 36,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "EDUCATIONCUNY Hunter College, New York, New York",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "T",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "[T-validation confirmed] This is a fragmented entry containing only an institution name ('CUNY Hunter College') with no degree information, dates, or educational context. Without degree type or other substantive educational details, this cannot be classified as B1 (Academic Degrees) or B2 (Other Educational Experiences). It appears to be a structural fragment or incomplete data entry, appropriately classified as T.",
+      "classification_source": "llm",
+      "t_validation_applied": true,
+      "reasoning_conflict_detected": {
+        "suggested_code": "A",
+        "confidence": 0.7,
+        "evidence": "Reasoning mentions A but assigned T: 'lidation confirmed] This is a fragmented entry co'",
+        "action": "skipped_low_confidence"
+      },
+      "extracted_fields": {
+        "content_type": "Education",
+        "description": "CUNY Hunter College, New York, New York"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "educationcuny"
+        ],
+        "extraction_coverage_percent": 80.0,
+        "total_original_words": 5,
+        "total_extracted_words": 4
+      }
+    },
+    {
+      "element_idx_start": 37,
+      "element_idx_end": 37,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Master of Science in Nursing, Adult Nurse Practitioner, May 2009",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "B1",
+      "taxonomy_confidence": 0.98,
+      "classification_reasoning": "Master's degree in Nursing with specialization and completion date",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "degree": "Master of Science in Nursing",
+        "institution": null,
+        "discipline": "Adult Nurse Practitioner",
+        "dates_attended": null,
+        "year": "2009-05"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 6,
+        "total_extracted_words": 6
+      }
+    },
+    {
+      "element_idx_start": 40,
+      "element_idx_end": 40,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Bachelor of Science in Nursing, May 2004",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "B1",
+      "taxonomy_confidence": 0.98,
+      "classification_reasoning": "Bachelor's degree in Nursing with completion date",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "degree": "Bachelor of Science in Nursing",
+        "institution": null,
+        "discipline": null,
+        "dates_attended": null,
+        "year": "2004-05"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 3,
+        "total_extracted_words": 3
+      }
+    },
+    {
+      "element_idx_start": 42,
+      "element_idx_end": 42,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Doctor of Nurse Practitioner- Nursing Leadership, expected May 2026",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "B1",
+      "taxonomy_confidence": 0.98,
+      "classification_reasoning": "Doctoral degree in Nursing with expected completion date",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "degree": "Doctor of Nurse Practitioner",
+        "institution": null,
+        "discipline": "Nursing Leadership",
+        "dates_attended": null,
+        "year": "2026-05"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "expected"
+        ],
+        "extraction_coverage_percent": 83.3,
+        "total_original_words": 6,
+        "total_extracted_words": 5
+      }
+    },
+    {
+      "element_idx_start": 44,
+      "element_idx_end": 44,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "HONORSWCM NP of the Year Award- 2024- recognized by colleagues across the WCM institution for outstanding mentorship, exceptional care, and leadership.",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "H",
+      "taxonomy_confidence": 0.98,
+      "classification_reasoning": "One-time award recognizing outstanding mentorship, care, and leadership",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "award_name": "WCM NP of the Year Award",
+        "granting_body": "WCM",
+        "date": "2024"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "across",
+          "care",
+          "colleagues",
+          "exceptional",
+          "honorswcm",
+          "institution",
+          "leadership",
+          "mentorship",
+          "outstanding",
+          "recognized"
+        ],
+        "extraction_coverage_percent": 23.1,
+        "total_original_words": 13,
+        "total_extracted_words": 3
+      }
+    },
+    {
+      "element_idx_start": 45,
+      "element_idx_end": 45,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Falcon Award – 2010- recognized by patients and family for providing exceptional care.",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "H",
+      "taxonomy_confidence": 0.98,
+      "classification_reasoning": "One-time award recognizing exceptional patient care",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "award_name": "Falcon Award",
+        "granting_body": null,
+        "date": "2010"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "care",
+          "exceptional",
+          "family",
+          "patients",
+          "providing",
+          "recognized"
+        ],
+        "extraction_coverage_percent": 25.0,
+        "total_original_words": 8,
+        "total_extracted_words": 2
+      }
+    },
+    {
+      "element_idx_start": 46,
+      "element_idx_end": 46,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Falcon Award- 2009- recognized by the patient services department and a patient’s family for providing compassionate care to both the patient and his/her family.",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "H",
+      "taxonomy_confidence": 0.98,
+      "classification_reasoning": "One-time award recognizing compassionate patient care",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "award_name": "Falcon Award",
+        "granting_body": "patient services department",
+        "date": "2009"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "both",
+          "care",
+          "compassionate",
+          "family",
+          "providing",
+          "recognized"
+        ],
+        "extraction_coverage_percent": 45.5,
+        "total_original_words": 11,
+        "total_extracted_words": 5
+      }
+    },
+    {
+      "element_idx_start": 47,
+      "element_idx_end": 47,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "Care Award- 2008- Each month, the COO recognizes one employee who exemplifies the motto of “We Put Patients First” as well as the NYP Values: Respect, Teamwork, Excellence, Empathy, Innovation, and Responsibility.",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "H",
+      "taxonomy_confidence": 0.98,
+      "classification_reasoning": "One-time monthly recognition award for exemplifying institutional values",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "award_name": "Care Award",
+        "granting_body": "NewYork-Presbyterian (NYP) / COO",
+        "date": "2008"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "each",
+          "empathy",
+          "employee",
+          "excellence",
+          "exemplifies",
+          "first",
+          "innovation",
+          "month",
+          "motto",
+          "one",
+          "patients",
+          "put",
+          "recognizes",
+          "respect",
+          "responsibility",
+          "teamwork",
+          "values",
+          "well",
+          "who"
+        ],
+        "extraction_coverage_percent": 17.4,
+        "total_original_words": 23,
+        "total_extracted_words": 4
+      },
+      "llm_recovery_applied": true
+    },
+    {
+      "element_idx_start": 49,
+      "element_idx_end": 49,
+      "element_type": "break",
+      "confidence": 1.0,
+      "text": "LICENSURE/American Nurses Credentialing Center Certification – (2009-present)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "F1",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "[WCM-table corrected F2->F1] Board certification from American Nurses Credentialing Center with active status",
+      "classification_source": "llm",
+      "wcm_table_correction": {
+        "original_code": "F2",
+        "reason": "WCM licensure signature (DEA/NPI/license number)"
+      },
+      "extracted_fields": {
+        "state_country": null,
+        "license_number": null,
+        "issue_date": "2009",
+        "expiration_date": "present"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "american",
+          "center",
+          "certification",
+          "credentialing",
+          "licensure",
+          "nurses"
+        ],
+        "extraction_coverage_percent": 14.3,
+        "total_original_words": 7,
+        "total_extracted_words": 1
+      }
+    },
+    {
+      "element_idx_start": 50,
+      "element_idx_end": 50,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "CERTIFICATIONS Adult Nurse Practitioner - New York (2009-present)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "F1",
+      "taxonomy_confidence": 0.98,
+      "classification_reasoning": "Professional license (Adult Nurse Practitioner) in New York with active status",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "state_country": "New York",
+        "license_number": null,
+        "issue_date": "2009",
+        "expiration_date": "present"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "adult",
+          "certifications",
+          "nurse",
+          "practitioner"
+        ],
+        "extraction_coverage_percent": 42.9,
+        "total_original_words": 7,
+        "total_extracted_words": 3
+      }
+    },
+    {
+      "element_idx_start": 51,
+      "element_idx_end": 51,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Registered Professional Nurse - New York (2004-present)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "F1",
+      "taxonomy_confidence": 0.98,
+      "classification_reasoning": "Professional license (Registered Professional Nurse) in New York with active status",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "state_country": "New York",
+        "license_number": null,
+        "issue_date": "2004",
+        "expiration_date": "present"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "nurse",
+          "professional",
+          "registered"
+        ],
+        "extraction_coverage_percent": 50.0,
+        "total_original_words": 6,
+        "total_extracted_words": 3
+      }
+    },
+    {
+      "element_idx_start": 52,
+      "element_idx_end": 52,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "American Heart Association - Basic Cardiac Life Support",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "F2",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Professional certification from American Heart Association",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "certifying_board": "American Heart Association - Basic Cardiac Life Support",
+        "certificate_number": null,
+        "year_certified": null,
+        "recertification_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 7,
+        "total_extracted_words": 7
+      }
+    },
+    {
+      "element_idx_start": 54,
+      "element_idx_end": 54,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "PROFESSIONALNurse Practitioner Student Clinical Preceptor (2011-2013)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "K2",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Clinical teaching role as preceptor supervising student clinical practice",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "teaching_role": "Clinical Preceptor",
+        "institution": null,
+        "setting": null,
+        "learner_level": "Nurse Practitioner Student",
+        "start_date": "2011",
+        "end_date": "2013"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "professionalnurse"
+        ],
+        "extraction_coverage_percent": 80.0,
+        "total_original_words": 5,
+        "total_extracted_words": 4
+      }
+    },
+    {
+      "element_idx_start": 55,
+      "element_idx_end": 55,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "ACTIVITIES Surgical Barrier Reduction team member (2011- 2013)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "P",
+      "taxonomy_confidence": 0.85,
+      "classification_reasoning": "Team member on institutional quality/safety initiative (Surgical Barrier Reduction) at home institution; internal committee/project service.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "committee_name": "Surgical Barrier Reduction team",
+        "role": "member",
+        "institution": null,
+        "start_date": "2011",
+        "end_date": "2013"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "activities"
+        ],
+        "extraction_coverage_percent": 83.3,
+        "total_original_words": 6,
+        "total_extracted_words": 5
+      }
+    },
+    {
+      "element_idx_start": 56,
+      "element_idx_end": 56,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "New York Presbyterian Hospital Nurse Residency Program Mentor",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "K2",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Mentor role in hospital residency program involves clinical teaching and supervision of trainees in a structured educational program.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "teaching_role": "Mentor",
+        "institution": "New York Presbyterian Hospital",
+        "setting": null,
+        "learner_level": "Nurse Residency Program",
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 8,
+        "total_extracted_words": 8
+      }
+    },
+    {
+      "element_idx_start": 57,
+      "element_idx_end": 57,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "New York Presbyterian Hospital Staff Nurse Preceptor",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "K2",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Preceptor role involves direct clinical teaching and supervision of nursing staff/trainees in patient care settings.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "teaching_role": "Preceptor",
+        "institution": "New York Presbyterian Hospital",
+        "setting": null,
+        "learner_level": "Staff Nurse",
+        "start_date": null,
+        "end_date": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 7,
+        "total_extracted_words": 7
+      }
+    },
+    {
+      "element_idx_start": 58,
+      "element_idx_end": 58,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "WCM APP Council member (2022- current)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "P",
+      "taxonomy_confidence": 0.85,
+      "classification_reasoning": "Council member at home institution (WCM = Weill Cornell Medicine); internal committee service.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "committee_name": "APP Council",
+        "role": "member",
+        "institution": "WCM",
+        "start_date": "2022",
+        "end_date": "current"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 5,
+        "total_extracted_words": 5
+      }
+    },
+    {
+      "element_idx_start": 59,
+      "element_idx_end": 59,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "WCM Peer Messenger (2025-current)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "P",
+      "taxonomy_confidence": 0.8,
+      "classification_reasoning": "Peer Messenger role at home institution; internal service/committee participation.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "committee_name": "Peer Messenger",
+        "role": null,
+        "institution": "WCM",
+        "start_date": "2025",
+        "end_date": "current"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 4,
+        "total_extracted_words": 4
+      }
+    },
+    {
+      "element_idx_start": 60,
+      "element_idx_end": 60,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "WCM Quality & Safety GI Committee (2024-current)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "P",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Committee member on institutional Quality & Safety GI Committee at WCM; internal committee service.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "committee_name": "Quality & Safety GI Committee",
+        "role": null,
+        "institution": "WCM",
+        "start_date": "2024",
+        "end_date": "current"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 5,
+        "total_extracted_words": 5
+      }
+    },
+    {
+      "element_idx_start": 61,
+      "element_idx_end": 61,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "WCM Care Delivery and Innovations Sub Committee (2025- Current)",
+      "hierarchy": [
+        "Personal Data"
+      ],
+      "taxonomy_code": "P",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Sub-committee member on institutional Care Delivery and Innovations committee at WCM; internal committee service.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "committee_name": "Care Delivery and Innovations Sub Committee",
+        "role": null,
+        "institution": "WCM",
+        "start_date": "2025",
+        "end_date": "current"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 7,
+        "total_extracted_words": 7
+      }
+    },
+    {
+      "element_idx_start": 65,
+      "element_idx_end": 65,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Endoscopic gallbladder drainage compared with percutaneous drainage. Kedia P, Sharaiha RZ, Kumta NA, Widmer J, Jamal-Kabani A, Weaver K, Benvenuto A, Millman J, Barve R, Gaidhane M, Kahaleh M. Gastrointest Endosc. 2015 Dec;82(6):1031-6. doi: 10.1016/j.gie.2015.03.1912. Epub 2015 May 5.",
+      "hierarchy": [
+        "PUBLICATIONS"
+      ],
+      "taxonomy_code": "S1",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Peer-reviewed original research article comparing two clinical procedures with methods and results.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "authors": "Kedia P, Sharaiha RZ, Kumta NA, Widmer J, Jamal-Kabani A, Weaver K, Benvenuto A, Millman J, Barve R, Gaidhane M, Kahaleh M",
+        "year": "2015",
+        "title": "Endoscopic gallbladder drainage compared with percutaneous drainage",
+        "journal": "Gastrointest Endosc",
+        "volume": "82",
+        "issue": "6",
+        "pages": "1031-6",
+        "doi": "10.1016/j.gie.2015.03.1912",
+        "pmid": null,
+        "pmcid": null,
+        "target_name": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "dec",
+          "doi",
+          "epub"
+        ],
+        "extraction_coverage_percent": 87.0,
+        "total_original_words": 23,
+        "total_extracted_words": 20
+      }
+    },
+    {
+      "element_idx_start": 66,
+      "element_idx_end": 66,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Endoscopic ultrasound-guided biliary drainage versus percutaneous transhepatic biliary drainage: predictors of successful outcome in patients who fail endoscopic retrograde cholangiopancreatography. Sharaiha RZ, Kumta NA, Desai AP, DeFilippis EM, Gabr M, Sarkisian AM, Salgado S, Millman J, Benvenuto A, Cohen M, Tyberg A, Gaidhane M, Kahaleh M. Surg Endosc. 2016 Dec;30(12):5500-5505. Epub 2016 Apr 29.",
+      "hierarchy": [
+        "PUBLICATIONS"
+      ],
+      "taxonomy_code": "S1",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Peer-reviewed original research article examining predictors of successful outcomes in a clinical study.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "authors": "Sharaiha RZ, Kumta NA, Desai AP, DeFilippis EM, Gabr M, Sarkisian AM, Salgado S, Millman J, Benvenuto A, Cohen M, Tyberg A, Gaidhane M, Kahaleh M",
+        "year": "2016",
+        "title": "Endoscopic ultrasound-guided biliary drainage versus percutaneous transhepatic biliary drainage: predictors of successful outcome in patients who fail endoscopic retrograde cholangiopancreatography",
+        "journal": "Surg Endosc",
+        "volume": "30",
+        "issue": "12",
+        "pages": "5500-5505",
+        "doi": null,
+        "pmid": null,
+        "pmcid": null,
+        "target_name": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "apr",
+          "dec",
+          "epub"
+        ],
+        "extraction_coverage_percent": 91.2,
+        "total_original_words": 34,
+        "total_extracted_words": 31
+      }
+    },
+    {
+      "element_idx_start": 67,
+      "element_idx_end": 67,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Endoscopic Sleeve Gastroplasty for Obesity: a Multicenter Study of 248 Patients with 24 Months Follow-Up. Lopez-Nava G1, Sharaiha RZ2, Vargas EJ3, Bazerbachi F3, Manoel GN4, Bautista-Castaño I1, Acosta A3, Topazian MD3, Mundi MS5, Kumta N2, Kahaleh M2, Doe AM2, Shukla A2, Aronne L6, Gostout CJ3, Abu Dayyeh BK7.. Gastrointest Endosc. 2015 Dec;82(6):1031-6. doi: 10.1016/j.gie.2015.03.1912. Epub 2015 May 5.",
+      "hierarchy": [
+        "PUBLICATIONS"
+      ],
+      "taxonomy_code": "S1",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Peer-reviewed multicenter research study with 248 patients and 24-month follow-up data.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "authors": "Lopez-Nava G, Sharaiha RZ, Vargas EJ, Bazerbachi F, Manoel GN, Bautista-Castaño I, Acosta A, Topazian MD, Mundi MS, Kumta N, Kahaleh M, Doe AM, Shukla A, Aronne L, Gostout CJ, Abu Dayyeh BK",
+        "year": "2015",
+        "title": "Endoscopic Sleeve Gastroplasty for Obesity: a Multicenter Study of 248 Patients with 24 Months Follow-Up",
+        "journal": "Gastrointest Endosc",
+        "volume": "82",
+        "issue": "6",
+        "pages": "1031-6",
+        "doi": "10.1016/j.gie.2015.03.1912",
+        "pmid": null,
+        "pmcid": null,
+        "target_name": "Doe AM"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "am2",
+          "bk7",
+          "cj3",
+          "dec",
+          "doi",
+          "ej3",
+          "epub",
+          "gn4",
+          "md3",
+          "ms5",
+          "rz2"
+        ],
+        "extraction_coverage_percent": 73.2,
+        "total_original_words": 41,
+        "total_extracted_words": 30
+      }
+    },
+    {
+      "element_idx_start": 68,
+      "element_idx_end": 68,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Doe, A.M. (2017) Gallbladder and biliary tract disease. In Fitzpatrick, J.J., Alfes, C., and Hickman, R. (Eds.), Guide to Mastery in Clinical Nursing: A Comprehensive Reference. Springer Publishing Company.",
+      "hierarchy": [
+        "PUBLICATIONS"
+      ],
+      "taxonomy_code": "S4",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Book chapter contributed to an edited volume (Guide to Mastery in Clinical Nursing).",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "authors": "Doe, AM",
+        "year": "2017",
+        "chapter_title": "Gallbladder and biliary tract disease",
+        "book_title": "Guide to Mastery in Clinical Nursing: A Comprehensive Reference",
+        "editors": "Fitzpatrick, J.J., Alfes, C., and Hickman, R.",
+        "publisher": "Springer Publishing Company",
+        "pages": null,
+        "doi": null,
+        "target_name": "Doe, A.M."
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "eds"
+        ],
+        "extraction_coverage_percent": 94.4,
+        "total_original_words": 18,
+        "total_extracted_words": 17
+      },
+      "reformatted_fields": {
+        "authors": {
+          "original": "Doe, A.M.",
+          "reformatted": "Doe, AM",
+          "reason": "Normalized to Vancouver author format"
+        }
+      }
+    },
+    {
+      "element_idx_start": 69,
+      "element_idx_end": 69,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Single Fluid-Filled Intragastric Balloon Safe and Effective for Inducing Weight Loss in a Real-World Population.. Vargas EJ, Pesta CM, Bali A, Ibegbu E, Bazerbachi F, Moore RL, Kumbhari V, Sharaiha RZ, Curry TW, DosSantos G, Schmitz R, Agnihotri A, Novikov AA, Pitt T, Dunlap MK, Doe A, Aronne L, Ledonne E, Kadouh HC, Cheskin LJ, Mundi MS, Acosta A, Gostout CJ, Abu Dayyeh BK. Clin Gastroenterol Hepatol. 2018 Jul;16(7):1073-1080.e1. doi: 10.1016/j.cgh.2018.01.046.",
+      "hierarchy": [
+        "PUBLICATIONS"
+      ],
+      "taxonomy_code": "S1",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Peer-reviewed original research article reporting safety and efficacy outcomes of an intervention.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "authors": "Vargas EJ, Pesta CM, Bali A, Ibegbu E, Bazerbachi F, Moore RL, Kumbhari V, Sharaiha RZ, Curry TW, DosSantos G, Schmitz R, Agnihotri A, Novikov AA, Pitt T, Dunlap MK, Doe A, Aronne L, Ledonne E, Kadouh HC, Cheskin LJ, Mundi MS, Acosta A, Gostout CJ, Abu Dayyeh BK",
+        "year": "2018",
+        "title": "Single Fluid-Filled Intragastric Balloon Safe and Effective for Inducing Weight Loss in a Real-World Population",
+        "journal": "Clin Gastroenterol Hepatol",
+        "volume": "16",
+        "issue": "7",
+        "pages": "1073-1080.e1",
+        "doi": "10.1016/j.cgh.2018.01.046",
+        "pmid": null,
+        "pmcid": null,
+        "target_name": "Doe A"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "doi",
+          "jul"
+        ],
+        "extraction_coverage_percent": 95.5,
+        "total_original_words": 44,
+        "total_extracted_words": 42
+      }
+    },
+    {
+      "element_idx_start": 70,
+      "element_idx_end": 70,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Five-Year Outcomes of Endoscopic Sleeve Gastroplasty for the Treatment of Obesity. Clin Gastroenterol Hepatol. Sharaiha RZ, Hajifathalian K, Kumar R, Saunders K, Mehta A, Ang B, Skaf D, Shah S, Doe A, Igel L, Dawod Q, Dawod E, Sampath K, Carr-Locke D, Brown R, Cohen D, Dannenberg AJ, Mahadev S, Shukla A, Aronne LJ. Clin Gastroenterol Hepatol. 2021 May;19(5):1051-1057.e2. doi: 10.1016/j.cgh.2020.09.055.",
+      "hierarchy": [
+        "PUBLICATIONS"
+      ],
+      "taxonomy_code": "S1",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Peer-reviewed original research article reporting five-year outcomes from a prospective study.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "authors": "Sharaiha RZ, Hajifathalian K, Kumar R, Saunders K, Mehta A, Ang B, Skaf D, Shah S, Doe A, Igel L, Dawod Q, Dawod E, Sampath K, Carr-Locke D, Brown R, Cohen D, Dannenberg AJ, Mahadev S, Shukla A, Aronne LJ",
+        "year": "2021",
+        "title": "Five-Year Outcomes of Endoscopic Sleeve Gastroplasty for the Treatment of Obesity",
+        "journal": "Clin Gastroenterol Hepatol",
+        "volume": "19",
+        "issue": "5",
+        "pages": "1051-1057.e2",
+        "doi": "10.1016/j.cgh.2020.09.055",
+        "pmid": null,
+        "pmcid": null,
+        "target_name": "Doe A"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "doi"
+        ],
+        "extraction_coverage_percent": 97.0,
+        "total_original_words": 33,
+        "total_extracted_words": 32
+      }
+    },
+    {
+      "element_idx_start": 71,
+      "element_idx_end": 71,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Simultaneous EUS-guided portosystemic pressure measurement and liver biopsy sampling correlate with clinically meaningful outcomes. Hajifathalian K, Westerveld D, Kaplan A, Dawod E, Doe A, Ianelli M, Saggese A, Kumar S, Fortune BE, Sharaiha RZ. Gastrointest Endosc. 2022 Apr;95(4):703-710. doi: 10.1016/j.gie.2021.11.037.",
+      "hierarchy": [
+        "PUBLICATIONS"
+      ],
+      "taxonomy_code": "S1",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Peer-reviewed original research article correlating EUS-guided measurements with clinical outcomes.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "authors": "Hajifathalian K, Westerveld D, Kaplan A, Dawod E, Doe A, Ianelli M, Saggese A, Kumar S, Fortune BE, Sharaiha RZ",
+        "year": "2022",
+        "title": "Simultaneous EUS-guided portosystemic pressure measurement and liver biopsy sampling correlate with clinically meaningful outcomes",
+        "journal": "Gastrointest Endosc",
+        "volume": "95",
+        "issue": "4",
+        "pages": "703-710",
+        "doi": "10.1016/j.gie.2021.11.037",
+        "pmid": null,
+        "pmcid": null,
+        "target_name": "Doe A"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "apr",
+          "doi"
+        ],
+        "extraction_coverage_percent": 92.9,
+        "total_original_words": 28,
+        "total_extracted_words": 26
+      }
+    },
+    {
+      "element_idx_start": 72,
+      "element_idx_end": 72,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "S2063 Ten-Year Outcomes of Endoscopic Sleeve Gastroplasty for the Treatment of Obesity. Lahooti, Ali BS1,*; Rizvi, Anam MD1; Baig, Muhammad Usman. MBBS1; Akagbosu, Cynthia MD, MA1; Mahadev, SriHari MD2; Sampath, Kartik MD1; Carr-Locke, David L. MA, MD, FACG1; Aronne, Louis MD1; Shukla, Alpana MD1; Johnson, Kate E. BS1; Doe, Jordan NP1; Newberry, Carolyn MD2; Kumar, Sonal MD, MPH1; Sharaiha, Reem MD1. The American Journal of Gastroenterology 119(10S):p S1473-S1474, October 2024. | DOI: 10.14309/01.ajg.0000000000.30740.d4",
+      "hierarchy": [
+        "PUBLICATIONS"
+      ],
+      "taxonomy_code": "S8",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Conference abstract (S2063 identifier) published in American Journal of Gastroenterology supplement for annual meeting.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "authors": "Lahooti, Ali BS, Rizvi, Anam MD, Baig, Muhammad Usman MBBS, Akagbosu, Cynthia MD, MA, Mahadev, SriHari MD, Sampath, Kartik MD, Carr-Locke, David L MA, MD, FACG, Aronne, Louis MD, Shukla, Alpana MD, Johnson, Kate E BS, Doe, Jordan NP, Newberry, Carolyn MD, Kumar, Sonal MD, MPH, Sharaiha, Reem MD",
+        "year": "2024",
+        "title": "Ten-Year Outcomes of Endoscopic Sleeve Gastroplasty for the Treatment of Obesity",
+        "conference_name": "The American Journal of Gastroenterology",
+        "location": null,
+        "abstract_number": "S2063",
+        "doi": "10.14309/01.ajg.0000000000.30740.d4",
+        "target_name": "Doe, Jordan NP"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "bs1",
+          "doi",
+          "facg1",
+          "ma1",
+          "mbbs1",
+          "md1",
+          "md2",
+          "mph1",
+          "np1",
+          "october",
+          "s1473",
+          "s1474"
+        ],
+        "extraction_coverage_percent": 78.2,
+        "total_original_words": 55,
+        "total_extracted_words": 43
+      },
+      "reformatted_fields": {
+        "authors": {
+          "original": "Lahooti, Ali BS; Rizvi, Anam MD; Baig, Muhammad Usman MBBS; Akagbosu, Cynthia MD, MA; Mahadev, SriHari MD; Sampath, Kartik MD; Carr-Locke, David L. MA, MD, FACG; Aronne, Louis MD; Shukla, Alpana MD; Johnson, Kate E. BS; Doe, Jordan NP; Newberry, Carolyn MD; Kumar, Sonal MD, MPH; Sharaiha, Reem MD",
+          "reformatted": "Lahooti, Ali BS, Rizvi, Anam MD, Baig, Muhammad Usman MBBS, Akagbosu, Cynthia MD, MA, Mahadev, SriHari MD, Sampath, Kartik MD, Carr-Locke, David L MA, MD, FACG, Aronne, Louis MD, Shukla, Alpana MD, Johnson, Kate E BS, Doe, Jordan NP, Newberry, Carolyn MD, Kumar, Sonal MD, MPH, Sharaiha, Reem MD",
+          "reason": "Normalized to Vancouver author format"
+        }
+      }
+    },
+    {
+      "element_idx_start": 73,
+      "element_idx_end": 73,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Improvement in obesity-related comorbidities 5 years after endoscopic sleeve gastroplasty: a prospective cohort study. Lahooti A, Westerveld D, Johnson K, Aneke-Nash C, Baig MU, Akagbosu C, Hanscom M, Buckholz A, Newberry C, Doe A, Schwartz R, Yeung M, Sampath K, Mahadev S, Kumar S, Carr-Locke D, Aronne L, Shukla A, Sharaiha RZ. Gastrointest Endosc. 2025 Jul;102(1):26-36. doi: 10.1016/j.gie.2024.12.017.",
+      "hierarchy": [
+        "PUBLICATIONS"
+      ],
+      "taxonomy_code": "S1",
+      "taxonomy_confidence": 0.95,
+      "classification_reasoning": "Peer-reviewed original research article reporting prospective cohort study outcomes at 5-year follow-up.",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "authors": "Lahooti A, Westerveld D, Johnson K, Aneke-Nash C, Baig MU, Akagbosu C, Hanscom M, Buckholz A, Newberry C, Doe A, Schwartz R, Yeung M, Sampath K, Mahadev S, Kumar S, Carr-Locke D, Aronne L, Shukla A, Sharaiha RZ",
+        "year": "2025",
+        "title": "Improvement in obesity-related comorbidities 5 years after endoscopic sleeve gastroplasty: a prospective cohort study",
+        "journal": "Gastrointest Endosc",
+        "volume": "102",
+        "issue": "1",
+        "pages": "26-36",
+        "doi": "10.1016/j.gie.2024.12.017",
+        "pmid": null,
+        "pmcid": null,
+        "target_name": "Doe A"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "doi",
+          "jul"
+        ],
+        "extraction_coverage_percent": 94.7,
+        "total_original_words": 38,
+        "total_extracted_words": 36
+      }
+    },
+    {
+      "element_idx_start": 76,
+      "element_idx_end": 76,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Multicenter, open-label, randomized, controlled phase III clinical study of the efficacy and safety of photodynamic therapy using porfimer sodium for injection as treatment for unresectable advanced perihilar cholangiocarcinoma",
+      "hierarchy": [
+        "RESEARCH"
+      ],
+      "taxonomy_code": "M2A",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Multicenter randomized controlled phase III clinical trial with explicit intervention (photodynamic therapy); classified as active clinical trial research funding/activity",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "grant_number": null,
+        "title": "Multicenter, open-label, randomized, controlled phase III clinical study of the efficacy and safety of photodynamic therapy using porfimer sodium for injection as treatment for unresectable advanced perihilar cholangiocarcinoma",
+        "pi_role": null,
+        "co_investigators": null,
+        "agency": null,
+        "start_date": null,
+        "end_date": null,
+        "total_funding": null,
+        "annual_funding": null,
+        "percent_effort": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 22,
+        "total_extracted_words": 22
+      }
+    },
+    {
+      "element_idx_start": 77,
+      "element_idx_end": 77,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Prospective, Multicenter, Single Blind, Randomized Study Comparing the EndoMAXX EVT Fully Covered Esophageal Stent with Valve to the EndoMAXX Fully Covered Esophageal Stent for Malignant Strictures Requiring Stent Placement Across the Gastroesophageal Junction",
+      "hierarchy": [
+        "RESEARCH"
+      ],
+      "taxonomy_code": "M2A",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Prospective multicenter randomized controlled study comparing two medical devices; structured clinical trial with intervention",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "grant_number": null,
+        "title": "Prospective, Multicenter, Single Blind, Randomized Study Comparing the EndoMAXX EVT Fully Covered Esophageal Stent with Valve to the EndoMAXX Fully Covered Esophageal Stent for Malignant Strictures Requiring Stent Placement Across the Gastroesophageal Junction",
+        "pi_role": null,
+        "co_investigators": null,
+        "agency": null,
+        "start_date": null,
+        "end_date": null,
+        "total_funding": null,
+        "annual_funding": null,
+        "percent_effort": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 21,
+        "total_extracted_words": 21
+      }
+    },
+    {
+      "element_idx_start": 78,
+      "element_idx_end": 78,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Endoscopic bariatric therapies (EBTs): A Retrospective and Prospective Multicenter Registry",
+      "hierarchy": [
+        "RESEARCH"
+      ],
+      "taxonomy_code": "M2B",
+      "taxonomy_confidence": 0.85,
+      "classification_reasoning": "Retrospective and prospective multicenter registry study; observational clinical trial structure without explicit intervention protocol",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "grant_number": null,
+        "title": "Endoscopic bariatric therapies (EBTs): A Retrospective and Prospective Multicenter Registry",
+        "pi_name": null,
+        "pi_role": null,
+        "co_investigators": null,
+        "agency": null,
+        "start_date": null,
+        "end_date": null,
+        "total_funding": null,
+        "percent_effort": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 8,
+        "total_extracted_words": 8
+      }
+    },
+    {
+      "element_idx_start": 79,
+      "element_idx_end": 79,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Safety, tolerability and sustained weight loss of immediate Endoscopic Sleeve Gastroplasty with Diet modification and exercise vs. early Diet modification and exercise and delayed endoscopic sleeve gastroplasty for the treatment of Obesity, a randomized controlled study",
+      "hierarchy": [
+        "RESEARCH"
+      ],
+      "taxonomy_code": "M2A",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Randomized controlled study comparing endoscopic intervention with delayed intervention; active clinical trial with explicit intervention arms",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "grant_number": null,
+        "title": "Safety, tolerability and sustained weight loss of immediate Endoscopic Sleeve Gastroplasty with Diet modification and exercise vs. early Diet modification and exercise and delayed endoscopic sleeve gastroplasty for the treatment of Obesity, a randomized controlled study",
+        "pi_role": null,
+        "co_investigators": null,
+        "agency": null,
+        "start_date": null,
+        "end_date": null,
+        "total_funding": null,
+        "annual_funding": null,
+        "percent_effort": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 19,
+        "total_extracted_words": 19
+      }
+    },
+    {
+      "element_idx_start": 80,
+      "element_idx_end": 80,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "A Randomized, Multi-Center, Phased, Pivotal Safety and Efficacy Study Comparing the Elipse Gastric Balloon System vs. Sham for the Treatment of Obese Adults",
+      "hierarchy": [
+        "RESEARCH"
+      ],
+      "taxonomy_code": "M2A",
+      "taxonomy_confidence": 0.92,
+      "classification_reasoning": "Randomized multi-center pivotal safety and efficacy study with device intervention (gastric balloon); active clinical trial structure",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "grant_number": null,
+        "title": "A Randomized, Multi-Center, Phased, Pivotal Safety and Efficacy Study Comparing the Elipse Gastric Balloon System vs. Sham for the Treatment of Obese Adults",
+        "pi_role": null,
+        "co_investigators": null,
+        "agency": null,
+        "start_date": null,
+        "end_date": null,
+        "total_funding": null,
+        "annual_funding": null,
+        "percent_effort": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 17,
+        "total_extracted_words": 17
+      }
+    },
+    {
+      "element_idx_start": 81,
+      "element_idx_end": 81,
+      "element_type": "paragraph",
+      "confidence": 0.95,
+      "text": "Multi-center ESG Randomized Interventional trial (MERIT-Trial)",
+      "hierarchy": [
+        "RESEARCH"
+      ],
+      "taxonomy_code": "M2A",
+      "taxonomy_confidence": 0.88,
+      "classification_reasoning": "Named randomized interventional trial (MERIT-Trial) with multicenter structure; active clinical trial",
+      "classification_source": "llm",
+      "extracted_fields": {
+        "grant_number": null,
+        "title": "Multi-center ESG Randomized Interventional trial (MERIT-Trial)",
+        "pi_role": null,
+        "co_investigators": null,
+        "agency": null,
+        "start_date": null,
+        "end_date": null,
+        "total_funding": null,
+        "annual_funding": null,
+        "percent_effort": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 7,
+        "total_extracted_words": 7
+      }
+    },
+    {
+      "element_idx_start": 84,
+      "element_idx_end": 84,
+      "element_type": "paragraph",
+      "confidence": 0.99,
+      "text": "Endobariatrics: What is New? 49th  NYSGE Nurses and Associates Course. Dec, 18th 2025.",
+      "hierarchy": [
+        "LECTURE/POSTER"
+      ],
+      "taxonomy_code": "R",
+      "taxonomy_confidence": 0.85,
+      "classification_reasoning": "Invited lecture at a named professional nursing course (NYSGE Nurses and Associates Course); future date indicates scheduled invited presentation.",
+      "classification_source": "llm",
+      "hierarchy_mismatch_flag": true,
+      "hierarchy_mismatch_detail": {
+        "hierarchy": [
+          "LECTURE/POSTER"
+        ],
+        "assigned_code": "R",
+        "expected_codes": [
+          "S8"
+        ],
+        "reason": "Code 'R' may not match section 'LECTURE/POSTER'"
+      },
+      "extracted_fields": {
+        "title": "Endobariatrics: What is New",
+        "location": null,
+        "date": "2025-12-18",
+        "event_name": "49th NYSGE Nurses and Associates Course"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "dec"
+        ],
+        "extraction_coverage_percent": 87.5,
+        "total_original_words": 8,
+        "total_extracted_words": 7
+      },
+      "reformatted_fields": {
+        "title": {
+          "original": "Endobariatrics: What is New?",
+          "reformatted": "Endobariatrics: What is New",
+          "reason": "Removed prefix label from title"
+        }
+      }
+    },
+    {
+      "element_idx_start": 85,
+      "element_idx_end": 85,
+      "element_type": "paragraph",
+      "confidence": 0.99,
+      "text": "PEC Clearance/Anesthesia Standards & Perioperative DOAC/Hot new meds. NYP- Nursing & Technician Endoscopy course. April 12th, 2025.",
+      "hierarchy": [
+        "LECTURE/POSTER"
+      ],
+      "taxonomy_code": "R",
+      "taxonomy_confidence": 0.85,
+      "classification_reasoning": "Invited lecture at a named institutional nursing/technician course (NYP Endoscopy course); future date indicates scheduled invited presentation.",
+      "classification_source": "llm",
+      "hierarchy_mismatch_flag": true,
+      "hierarchy_mismatch_detail": {
+        "hierarchy": [
+          "LECTURE/POSTER"
+        ],
+        "assigned_code": "R",
+        "expected_codes": [
+          "S8"
+        ],
+        "reason": "Code 'R' may not match section 'LECTURE/POSTER'"
+      },
+      "extracted_fields": {
+        "title": "PEC Clearance/Anesthesia Standards & Perioperative DOAC/Hot new meds",
+        "location": "NYP",
+        "date": "2025-04-12",
+        "event_name": "NYP- Nursing & Technician Endoscopy course"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "april"
+        ],
+        "extraction_coverage_percent": 93.3,
+        "total_original_words": 15,
+        "total_extracted_words": 14
+      }
+    },
+    {
+      "element_idx_start": 86,
+      "element_idx_end": 86,
+      "element_type": "paragraph",
+      "confidence": 0.99,
+      "text": "Behind the Scenes of Minimally Invasive Weight Loss Procedures. Professional Practice Education Day. May 11, 2016. Weill Cornell Medical College",
+      "hierarchy": [
+        "LECTURE/POSTER"
+      ],
+      "taxonomy_code": "R",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Invited lecture at a named institutional professional education event (Professional Practice Education Day) at Weill Cornell Medical College.",
+      "classification_source": "llm",
+      "hierarchy_mismatch_flag": true,
+      "hierarchy_mismatch_detail": {
+        "hierarchy": [
+          "LECTURE/POSTER"
+        ],
+        "assigned_code": "R",
+        "expected_codes": [
+          "S8"
+        ],
+        "reason": "Code 'R' may not match section 'LECTURE/POSTER'"
+      },
+      "extracted_fields": {
+        "title": "Behind the Scenes of Minimally Invasive Weight Loss Procedures",
+        "location": "Weill Cornell Medical College",
+        "date": "2016-05-11",
+        "event_name": "Professional Practice Education Day"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [],
+        "extraction_coverage_percent": 100.0,
+        "total_original_words": 15,
+        "total_extracted_words": 15
+      }
+    },
+    {
+      "element_idx_start": 87,
+      "element_idx_end": 87,
+      "element_type": "paragraph",
+      "confidence": 0.99,
+      "text": "Behind the Scenes of Minimally Invasive Bariatric Procedures, The 5th Annual Peter D. Stevens Course on Innovations in Digestive Care. April 21th, 2016. Columbia Medical Center.",
+      "hierarchy": [
+        "LECTURE/POSTER"
+      ],
+      "taxonomy_code": "R",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Invited lecture at a named annual course (Peter D. Stevens Course on Innovations in Digestive Care) at Columbia Medical Center.",
+      "classification_source": "llm",
+      "hierarchy_mismatch_flag": true,
+      "hierarchy_mismatch_detail": {
+        "hierarchy": [
+          "LECTURE/POSTER"
+        ],
+        "assigned_code": "R",
+        "expected_codes": [
+          "S8"
+        ],
+        "reason": "Code 'R' may not match section 'LECTURE/POSTER'"
+      },
+      "extracted_fields": {
+        "title": "Behind the Scenes of Minimally Invasive Bariatric Procedures",
+        "location": "Columbia Medical Center",
+        "date": "2016-04-21",
+        "event_name": "The 5th Annual Peter D. Stevens Course on Innovations in Digestive Care"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "april"
+        ],
+        "extraction_coverage_percent": 94.1,
+        "total_original_words": 17,
+        "total_extracted_words": 16
+      }
+    },
+    {
+      "element_idx_start": 88,
+      "element_idx_end": 88,
+      "element_type": "paragraph",
+      "confidence": 0.99,
+      "text": "Pre-, Intra-, and Postoperative Nursing Considerations for Patient Undergoing ERCP, The 5th Annual Peter D. Stevens Course on Innovations in Digestive Care. April 21th, 2016. Columbia Medical Center.",
+      "hierarchy": [
+        "LECTURE/POSTER"
+      ],
+      "taxonomy_code": "R",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Invited lecture at a named annual course (Peter D. Stevens Course on Innovations in Digestive Care) at Columbia Medical Center.",
+      "classification_source": "llm",
+      "hierarchy_mismatch_flag": true,
+      "hierarchy_mismatch_detail": {
+        "hierarchy": [
+          "LECTURE/POSTER"
+        ],
+        "assigned_code": "R",
+        "expected_codes": [
+          "S8"
+        ],
+        "reason": "Code 'R' may not match section 'LECTURE/POSTER'"
+      },
+      "extracted_fields": {
+        "title": "Pre-, Intra-, and Postoperative Nursing Considerations for Patient Undergoing ERCP",
+        "location": "Columbia Medical Center",
+        "date": "2016-04-21",
+        "event_name": "The 5th Annual Peter D. Stevens Course on Innovations in Digestive Care"
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "april"
+        ],
+        "extraction_coverage_percent": 94.7,
+        "total_original_words": 19,
+        "total_extracted_words": 18
+      }
+    },
+    {
+      "element_idx_start": 89,
+      "element_idx_end": 89,
+      "element_type": "paragraph",
+      "confidence": 0.99,
+      "text": "Clinical management and complications or pancreatitis and Pre , The 4th Annual Peter D. Stevens Course on Innovations in Digestive Care. April 17th, 2015. Weill Cornell Medical Center.",
+      "hierarchy": [
+        "LECTURE/POSTER"
+      ],
+      "taxonomy_code": "R",
+      "taxonomy_confidence": 0.9,
+      "classification_reasoning": "Invited lecture at a named annual course (Peter D. Stevens Course on Innovations in Digestive Care) at Weill Cornell Medical Center.",
+      "classification_source": "llm",
+      "hierarchy_mismatch_flag": true,
+      "hierarchy_mismatch_detail": {
+        "hierarchy": [
+          "LECTURE/POSTER"
+        ],
+        "assigned_code": "R",
+        "expected_codes": [
+          "S8"
+        ],
+        "reason": "Code 'R' may not match section 'LECTURE/POSTER'"
+      },
+      "extracted_fields": {
+        "title": "Clinical management and complications or pancreatitis and Pre",
+        "location": "Weill Cornell Medical Center",
+        "date": "2015-04-17",
+        "event_name": "The 4th Annual Peter D. Stevens Course on Innovations in Digestive Care",
+        "target_name": null
+      },
+      "extraction_success": true,
+      "extraction_coverage": {
+        "unextracted_words": [
+          "april"
+        ],
+        "extraction_coverage_percent": 94.1,
+        "total_original_words": 17,
+        "total_extracted_words": 16
+      }
+    }
+  ]
+}
