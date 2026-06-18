@@ -220,35 +220,62 @@ async def upload_cv(
     with open(file_path, "wb") as f:
         f.write(content)
 
-    # Durably archive the ORIGINAL upload (same bucket/prefix as outputs) so the
-    # run is reproducible and restart/retry survive a pod recycle. The pod-local
-    # copy above is ephemeral. Non-fatal: never block a run on archival.
+    # Durably archive the ORIGINAL upload to the run's storage namespace BEFORE
+    # creating the run record. The pod-local copy above is ephemeral (lost on a
+    # pod recycle), so this S3 object is the run's only recoverable input. A
+    # failure here is therefore FATAL: we abort with an error and create NO run
+    # record, rather than commit a "created" run whose input can't be recovered
+    # and which would linger as an orphan in the DB and on the Runs dashboard
+    # (and leave half-written objects in the store). Stop on error -- do not
+    # proceed. (issue #170)
+    storage = get_storage()
+    manifest = json.dumps({
+        "run_id": run_id,
+        "original_filename": file.filename,  # only record of the real name
+        "stored_as": stored_name,
+        "file_type": file_ext[1:],
+        "size_bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "content_type": file.content_type,
+        "uploaded_at": datetime.now().isoformat(),
+        "user_email": current_user.email,
+    }, indent=2).encode("utf-8")
     try:
-        storage = get_storage()
         storage.put_file(run_id, f"input/{stored_name}", content)
-        manifest = json.dumps({
-            "run_id": run_id,
-            "original_filename": file.filename,  # only record of the real name
-            "stored_as": stored_name,
-            "file_type": file_ext[1:],
-            "size_bytes": len(content),
-            "sha256": hashlib.sha256(content).hexdigest(),
-            "content_type": file.content_type,
-            "uploaded_at": datetime.now().isoformat(),
-            "user_email": current_user.email,
-        }, indent=2).encode("utf-8")
         storage.put_file(run_id, "input/manifest.json", manifest)
-        # Cross-run, browsable-by-submitter index: the same manifest keyed under
-        # the submitter so runs can be found by who uploaded them in S3 without
-        # opening each run folder. The run artifacts stay under runs/{run_id}/;
-        # this is a navigation pointer. Submitter is the email (we have no CWID),
-        # already in hand here -- no DB lookup. Best-effort like the archive.
+    except Exception as e:
+        logger.error("Durable archive of upload failed; aborting upload (run=%s): %s", run_id, e)
+        # Nothing has been committed to the DB yet, so there is no run to roll
+        # back. Remove the ephemeral pod-local copy so the failed attempt leaves
+        # nothing behind, then surface a clear error to the user.
+        try:
+            file_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "storage_unavailable",
+                "message": (
+                    "We couldn't store your file securely, so no run was created. "
+                    "Please try again in a moment."
+                ),
+            },
+        )
+
+    # Cross-run, browsable-by-submitter index: the same manifest keyed under the
+    # submitter so runs can be found by who uploaded them in S3 without opening
+    # each run folder. This is a navigation pointer only -- the run and its input
+    # are already durably stored above and the pipeline does not read it. So,
+    # unlike the archive, this stays BEST-EFFORT: a failure here must never fail
+    # the upload or orphan a run.
+    try:
         storage.put_global(
             f"by-submitter/{current_user.email.lower()}/{run_id}/manifest.json",
             manifest,
         )
     except Exception as e:
-        logger.warning("Failed to archive original upload to storage (run=%s): %s", run_id, e)
+        logger.warning("Failed to write by-submitter index (run=%s): %s", run_id, e)
 
     # Create run record. Persist the user's output-rendering choices (issue
     # #153) as the truthy ints the Stage 6 generator reads at render time.

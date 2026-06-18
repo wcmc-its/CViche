@@ -129,12 +129,27 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
         setPendingWarning({ runId: data.run_id })
         return
       }
-      await beginRun(data.run_id)
+      // The upload succeeded and the run exists. Starting it is a SEPARATE step
+      // with its own failure modes (most often HTTP 429 when the server is at
+      // capacity). Report those as a start failure, not an upload failure, so
+      // the message reflects what actually happened -- the file is already
+      // safely uploaded.
+      try {
+        await beginRun(data.run_id)
+      } catch (startErr: any) {
+        setError(
+          startErr.message ||
+            'Your file was uploaded, but processing could not start. Please try again in a moment.',
+        )
+        console.error(startErr)
+      }
     } catch (err: any) {
       if (err.message?.includes('consent_required') || err.status === 403) {
         navigate('/consent')
         return
       }
+      // The upload itself failed (bad file, storage unavailable, rate limit).
+      // No run was created -- surface the server's reason as an upload error.
       setError(err.message || 'Failed to upload file. Please try again.')
       console.error(err)
     } finally {
