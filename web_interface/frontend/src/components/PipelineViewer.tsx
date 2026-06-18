@@ -378,7 +378,13 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
         <div className="flex items-center gap-3 max-w-full">
           <span className="text-sm font-medium text-gray-700 min-w-[80px]">Progress:</span>
           <div className="flex-1 bg-gray-200 rounded-full h-6 overflow-hidden">
-            <div className="h-full bg-gradient-to-r from-primary-500 to-primary-600 transition-all duration-100 ease-linear relative overflow-hidden" style={{ width: `${displayProgress}%` }} />
+            <div className="h-full bg-gradient-to-r from-primary-500 to-primary-600 transition-all duration-100 ease-linear relative overflow-hidden" style={{ width: `${displayProgress}%` }}>
+              {/* Animated barber-pole stripes over the fill. Dropped in the
+                  hooks refactor (f342f08), which left the relative/overflow
+                  wrappers without their overlay; the keyframe + reduced-motion
+                  rule still live in index.css (.bg-stripe-animation). */}
+              <div className="absolute inset-0 bg-stripe-animation" aria-hidden="true"></div>
+            </div>
           </div>
           <span className="text-sm font-semibold text-gray-900 min-w-[50px] text-right">{displayProgress}%</span>
         </div>
