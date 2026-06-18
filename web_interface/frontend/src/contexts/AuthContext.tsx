@@ -2,6 +2,7 @@ import { createContext, useContext, useState, useEffect, ReactNode } from 'react
 import type { User, ConsentStatus, AuthConfig } from '../types'
 import * as authApi from '../api/auth'
 import { getConsentStatus as fetchConsentStatus } from '../api/consent'
+import { useIdleLogout } from '../hooks/useIdleLogout'
 
 interface AuthContextType {
   user: User | null
@@ -91,6 +92,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null)
     setConsentStatus(null)
   }
+
+  // Idle auto-logout: sign out after a period of no interaction. Armed only
+  // while signed in. Sessions are stateless long-TTL cookies with no server
+  // idle window, so this is enforced client-side. Fall back to clearAuth if the
+  // server logout call fails, so the user is signed out locally regardless.
+  useIdleLogout(!!user, () => {
+    logout().catch(() => clearAuth())
+  })
 
   const needsConsent = !!(
     user &&
