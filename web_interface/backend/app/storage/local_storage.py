@@ -5,6 +5,7 @@ Used in development. Reads/writes to a configurable base directory
 """
 
 import os
+import shutil
 from pathlib import Path
 
 from app.storage.base import RunStorage
@@ -48,6 +49,28 @@ class LocalRunStorage(RunStorage):
         path = self._base / key
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+
+    def _delete_tree(self, path: Path) -> int:
+        """Recursively delete a directory tree, returning the file count removed.
+
+        Idempotent (returns 0 if absent). Refuses to delete the storage base
+        itself, so an empty/degenerate key can't wipe the whole store.
+        """
+        if path.resolve() == self._base.resolve():
+            raise ValueError("refusing to delete the storage base directory")
+        if not path.exists():
+            return 0
+        count = sum(1 for p in path.rglob("*") if p.is_file())
+        shutil.rmtree(path)
+        return count
+
+    def delete_run(self, run_id: str) -> int:
+        return self._delete_tree(self._base / run_id)
+
+    def delete_global_prefix(self, prefix: str) -> int:
+        if not prefix or not prefix.strip("/"):
+            raise ValueError("delete prefix must be non-empty")
+        return self._delete_tree(self._base / prefix)
 
     def get_file(self, run_id: str, key: str) -> bytes:
         path = self._resolve(run_id, key)

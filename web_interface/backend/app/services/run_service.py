@@ -4,9 +4,10 @@ import os
 from datetime import datetime, timedelta
 
 from sqlalchemy.orm import Session
-from app.models import Run, Step, User
+from app.models import Run, Step, User, Log, LLMUsage, Feedback, RunMetrics
 from app.errors import not_found, forbidden
 from app.config_loader import get_config
+from app.storage import get_storage
 from app.services import auto_retry
 
 logger = logging.getLogger(__name__)
@@ -15,6 +16,12 @@ logger = logging.getLogger(__name__)
 # orphaned by a server restart. Generous relative to the ~15-20 min a real run
 # takes, so a sibling replica's genuinely in-flight run is never swept.
 DEFAULT_STALE_RUN_MINUTES = 60
+
+# A run still at status="created" this many hours after upload was never started
+# (or its start failed / was abandoned) and is safe to reap along with its
+# storage. Generous so a just-uploaded run that is about to be started is never
+# swept.
+DEFAULT_ORPHAN_REAP_HOURS = 24
 
 
 def _mark_run_failed(run: Run, db: Session, now: datetime) -> None:
@@ -150,6 +157,113 @@ def reconcile_stale_runs(db: Session) -> int:
             failed_count, minutes,
         )
     return failed_count
+
+
+def reap_orphaned_created_runs(
+    db: Session,
+    *,
+    older_than_hours: int | None = None,
+    dry_run: bool = False,
+) -> dict:
+    """Delete runs stuck at status="created" plus their child rows and storage.
+
+    A run leaves "created" only when /start succeeds (-> "running"), and a
+    restart mints a NEW run id (runs.py), so a row still at "created" provably
+    never advanced -- it is an upload whose run was never started: a declined
+    WCM-template upload, a failed/abandoned start, or (pre-#171) a swallowed
+    storage error. These are hidden from the Runs dashboard (status != "created"
+    filter) but their S3 objects -- runs/{id}/input/ and the by-submitter index
+    -- linger in the store. PR #171 stops NEW such orphans; this reaps the
+    backlog.
+
+    NOTE: started_at is set at UPLOAD time, not at start (upload.py), so it is a
+    reliable *age* gauge for a created row but is NOT a "was started" signal --
+    "never started" is established by status == "created" alone.
+
+    Deletes child rows explicitly because the run_id foreign keys are declared
+    without ON DELETE CASCADE, so a bare Run delete would fail on MySQL (or
+    orphan children on SQLite). Storage cleanup is best-effort and idempotent so
+    an S3 hiccup never blocks the DB cleanup and a re-run is safe.
+
+    Args:
+        older_than_hours: Age threshold; defaults to CVICHE_ORPHAN_REAP_HOURS
+            (24h) when None.
+        dry_run: When True, return the candidates without deleting anything.
+
+    Returns:
+        {"candidates", "reaped", "objects_deleted", "run_ids", "dry_run"}.
+    """
+    if older_than_hours is None:
+        try:
+            hours_cfg, _ = get_config("llm", "CVICHE_ORPHAN_REAP_HOURS",
+                                      default=DEFAULT_ORPHAN_REAP_HOURS)
+            older_than_hours = int(hours_cfg)
+        except (TypeError, ValueError):
+            older_than_hours = DEFAULT_ORPHAN_REAP_HOURS
+
+    cutoff = datetime.now() - timedelta(hours=older_than_hours)
+    orphans = (
+        db.query(Run)
+        .filter(Run.status == "created", Run.started_at < cutoff)
+        .all()
+    )
+
+    # Resolve the submitter email now (Run.user is lazy="raise_on_sql"), before
+    # the rows are deleted, so we can also remove the by-submitter index entry.
+    targets = []  # list of (run_id, submitter_email_or_None)
+    for run in orphans:
+        email = None
+        if run.user_id is not None:
+            u = db.query(User).filter(User.id == run.user_id).first()
+            if u and u.email:
+                email = u.email.lower()
+        targets.append((run.id, email))
+
+    result = {
+        "candidates": len(targets),
+        "reaped": 0,
+        "objects_deleted": 0,
+        "run_ids": [rid for rid, _ in targets],
+        "dry_run": dry_run,
+    }
+    if dry_run or not targets:
+        return result
+
+    storage = get_storage()
+    for run_id, email in targets:
+        try:
+            # Children first -- bare FKs (no ON DELETE CASCADE).
+            db.query(Step).filter(Step.run_id == run_id).delete(synchronize_session=False)
+            db.query(Log).filter(Log.run_id == run_id).delete(synchronize_session=False)
+            db.query(LLMUsage).filter(LLMUsage.run_id == run_id).delete(synchronize_session=False)
+            db.query(Feedback).filter(Feedback.run_id == run_id).delete(synchronize_session=False)
+            db.query(RunMetrics).filter(RunMetrics.run_id == run_id).delete(synchronize_session=False)
+            db.query(Run).filter(Run.id == run_id).delete(synchronize_session=False)
+            db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.warning("Failed to reap orphan run %s from DB: %s", run_id, e)
+            continue
+        result["reaped"] += 1
+
+        # Best-effort, idempotent storage cleanup -- never block on the store.
+        try:
+            result["objects_deleted"] += storage.delete_run(run_id)
+        except Exception as e:
+            logger.warning("Failed to delete storage for reaped run %s: %s", run_id, e)
+        if email is not None:
+            try:
+                result["objects_deleted"] += storage.delete_global_prefix(
+                    f"by-submitter/{email}/{run_id}/"
+                )
+            except Exception as e:
+                logger.warning("Failed to delete by-submitter index for run %s: %s", run_id, e)
+
+    logger.info(
+        "Reaped %d/%d orphaned 'created' run(s) older than %dh (%d storage objects removed)",
+        result["reaped"], result["candidates"], older_than_hours, result["objects_deleted"],
+    )
+    return result
 
 
 def _transition_run_for_retry(run: Run, db: Session, start_step_number: int) -> None:

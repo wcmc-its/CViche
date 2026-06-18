@@ -72,6 +72,40 @@ class S3RunStorage(RunStorage):
         self._s3.put_object(Bucket=self._bucket, Key=s3_key, Body=data)
         logger.debug("Uploaded s3://%s/%s (%d bytes)", self._bucket, s3_key, len(data))
 
+    def _delete_by_prefix(self, s3_prefix: str) -> int:
+        """List and bulk-delete every object under a full S3 key prefix.
+
+        Idempotent (no objects -> 0). Batches into delete_objects calls of up to
+        1000 keys (the API hard limit), reusing the same paginator idiom as
+        list_files.
+        """
+        if not s3_prefix or not s3_prefix.strip("/"):
+            # Refuse to delete the entire bucket/prefix on an empty argument.
+            raise ValueError("delete prefix must be non-empty")
+        paginator = self._s3.get_paginator("list_objects_v2")
+        deleted = 0
+        batch: list[dict] = []
+        for page in paginator.paginate(Bucket=self._bucket, Prefix=s3_prefix):
+            for obj in page.get("Contents", []):
+                batch.append({"Key": obj["Key"]})
+                if len(batch) == 1000:
+                    self._s3.delete_objects(Bucket=self._bucket, Delete={"Objects": batch})
+                    deleted += len(batch)
+                    batch = []
+        if batch:
+            self._s3.delete_objects(Bucket=self._bucket, Delete={"Objects": batch})
+            deleted += len(batch)
+        if deleted:
+            logger.debug("Deleted %d object(s) under s3://%s/%s", deleted, self._bucket, s3_prefix)
+        return deleted
+
+    def delete_run(self, run_id: str) -> int:
+        # Everything under {prefix}/runs/{run_id}/
+        return self._delete_by_prefix(f"{self._prefix}/runs/{run_id}/")
+
+    def delete_global_prefix(self, prefix: str) -> int:
+        return self._delete_by_prefix(f"{self._prefix}/{prefix}")
+
     def get_file(self, run_id: str, key: str) -> bytes:
         s3_key = self._s3_key(run_id, key)
         try:

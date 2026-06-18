@@ -40,6 +40,40 @@ class RunStorage(ABC):
         ...
 
     @abstractmethod
+    def delete_run(self, run_id: str) -> int:
+        """Delete every stored artifact for a run (its whole namespace).
+
+        Idempotent: a no-op returning 0 when the run has nothing stored, so a
+        reaper can re-run safely. Used to clean up runs that never ran (see the
+        orphaned-run reaper) so abandoned uploads don't linger in the store.
+
+        Args:
+            run_id: The run identifier.
+
+        Returns:
+            Number of objects/files removed.
+        """
+        ...
+
+    @abstractmethod
+    def delete_global_prefix(self, prefix: str) -> int:
+        """Delete every object under a top-level key prefix written via
+        put_global (e.g. "by-submitter/{email}/{run_id}/").
+
+        Idempotent like delete_run. The prefix must be non-empty and name a
+        sub-path of the store -- implementations refuse an empty prefix so a
+        bug can't wipe the whole store.
+
+        Args:
+            prefix: Full relative key prefix from the storage root (no run_id
+                namespace), e.g. "by-submitter/jdoe@example.edu/A1B2C3/".
+
+        Returns:
+            Number of objects/files removed.
+        """
+        ...
+
+    @abstractmethod
     def get_file(self, run_id: str, key: str) -> bytes:
         """Retrieve a file for a run.
 
