@@ -41,6 +41,8 @@ export const runRoutes = {
     `/api/runs?offset=${offset}&limit=${limit}` as const,
   /** GET /api/runs/feedback-status */
   feedbackStatus: () => `/api/runs/feedback-status` as const,
+  /** GET /api/capacity  (read-only run-admission snapshot) */
+  capacity: () => `/api/capacity` as const,
 } as const
 
 export const feedbackRoutes = {
