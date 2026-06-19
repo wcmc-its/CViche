@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Run, User
 from app.auth import decode_session_cookie, COOKIE_NAME
+from app.session_idle import get_idle_store
 from app.pipeline.event_emitter import event_emitter
 from app.services.run_service import check_run_access
 
@@ -78,6 +79,17 @@ async def websocket_stream(websocket: WebSocket, run_id: str):
         if not user or user.status != "active":
             await websocket.accept()
             await websocket.close(code=4001, reason="User not found or disabled")
+            return
+
+        # Server-side idle enforcement: a stale cookie must not open a new stream.
+        # Touch once at upgrade (counts as activity); we deliberately don't keep
+        # refreshing for the life of the socket, so a tab left open on a finished
+        # run still idles out via the user's REST activity. Cookies without a
+        # `sid` (pre-feature) bypass; no-op / fail-open when Valkey is off.
+        sid = payload.get("sid")
+        if sid and not get_idle_store().touch(sid):
+            await websocket.accept()
+            await websocket.close(code=4001, reason="Session timed out")
             return
 
         # Verify run exists and user has access
