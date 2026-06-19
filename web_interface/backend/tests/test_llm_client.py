@@ -1057,3 +1057,77 @@ def test_call_semaphore_released_on_success_and_failure(monkeypatch):
     with pytest.raises(ClientError):
         mod._call_with_retry(fails, retry_count=2)
     assert sem._value == initial  # released after failure too
+
+
+# ---------------------------------------------------------------------------
+# maxTokens runaway-generation floor
+# (docs/analysis/HANDOFF-runaway-generation-maxtokens-2026-06-17.md)
+# ---------------------------------------------------------------------------
+
+def test_bedrock_floors_maxtokens_when_none():
+    """When neither call site nor config sets max_tokens, _call_bedrock must
+    still send a bounded maxTokens (the DEFAULT_MAX_TOKENS floor) instead of
+    omitting it -- an omitted maxTokens lets Bedrock apply the model's ~64K
+    default ceiling, the runaway tail this floor exists to bound."""
+    from unified_pipeline.llm_client import call_llm, DEFAULT_MAX_TOKENS
+
+    cfg = _bedrock_config()
+    assert cfg["max_tokens"] is None  # precondition: nothing caps this call
+
+    mock_response = _make_bedrock_response()
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=cfg), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        call_llm("stage_2", [{"role": "user", "content": "runaway"}])
+
+        passed = mock_client.converse.call_args.kwargs
+        # The key is ALWAYS present...
+        assert "maxTokens" in passed["inferenceConfig"]
+        # ...floored at the conservative default...
+        assert passed["inferenceConfig"]["maxTokens"] == DEFAULT_MAX_TOKENS
+        # ...and well under the ~64K model default it replaces.
+        assert passed["inferenceConfig"]["maxTokens"] < 64000
+
+
+def test_bedrock_explicit_maxtokens_overrides_floor():
+    """An explicit call-site max_tokens= is respected verbatim -- the floor
+    only fills in the None case, it never clobbers a tighter explicit cap."""
+    from unified_pipeline.llm_client import call_llm
+
+    mock_response = _make_bedrock_response()
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        call_llm("stage_4", [{"role": "user", "content": "extract"}],
+                 max_tokens=500)
+
+        passed = mock_client.converse.call_args.kwargs
+        assert passed["inferenceConfig"]["maxTokens"] == 500
+
+
+def test_bedrock_config_maxtokens_respected():
+    """A per-stage YAML max_tokens (surfaced via config) is passed through and
+    is not overridden by the floor."""
+    from unified_pipeline.llm_client import call_llm
+
+    cfg = _bedrock_config()
+    cfg["max_tokens"] = 8000
+
+    mock_response = _make_bedrock_response()
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=cfg), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = mock_response
+        mock_get_client.return_value = mock_client
+
+        call_llm("stage_2", [{"role": "user", "content": "test"}])
+
+        passed = mock_client.converse.call_args.kwargs
+        assert passed["inferenceConfig"]["maxTokens"] == 8000
