@@ -63,6 +63,27 @@ def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> No
         logger.warning("Failed to write re-materialized input for run %s: %s", run_id, e)
 
 
+@router.get("/capacity")
+async def get_capacity(current_user: User = Depends(get_current_user)):
+    """Read-only snapshot of this pod's run-admission capacity.
+
+    Lets the upload UI warn before spending an upload when the pod is already at
+    its concurrency cap, so a busy window stops minting `created` runs that can't
+    start (issue #177). ADVISORY ONLY: it deliberately does not acquire a slot.
+    Admission is per-pod and racy (see concurrency.py), so the authoritative gate
+    stays the slot acquisition in start_run -- a check that passes here can still
+    429 at start (the client retries that run in place), and a different pod may
+    have a free slot. Never gate correctness on this value.
+    """
+    limit = concurrency.get_max_concurrent_runs()
+    active = concurrency.active_count()
+    return {
+        "available": active < limit,
+        "active": active,
+        "limit": limit,
+    }
+
+
 @router.get("/runs", response_model=PaginatedRuns)
 async def list_runs(
     offset: int = 0,

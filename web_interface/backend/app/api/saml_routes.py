@@ -152,7 +152,7 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
     # Build redirect response with session cookie
     # relay_state is already a validated, non-empty same-site path.
     response = RedirectResponse(relay_state, status_code=302)
-    token = create_session_cookie(user)
+    token = create_session_cookie(user, get_session_epoch(db))
     cookie_settings = get_cookie_settings()
     response.set_cookie(value=token, **cookie_settings)
     return response

@@ -4,7 +4,7 @@ import { Upload, FileText, Loader2, Shield, HelpCircle, AlertTriangle } from 'lu
 import { useAuth } from '../contexts/AuthContext'
 import type { Estimate } from '../types'
 import { getEstimate, uploadFile } from '../api/upload'
-import { startRun } from '../api/runs'
+import { startRun, getCapacity } from '../api/runs'
 import { formatDuration, formatCost } from '../utils'
 import ErrorBanner from './ErrorBanner'
 import RunHistory from './RunHistory'
@@ -28,6 +28,13 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   // an acknowledgement before spending a paid run. null = no warning pending.
   const [pendingWarning, setPendingWarning] = useState<{ runId: string } | null>(null)
   const [acknowledged, setAcknowledged] = useState(false)
+  // The upload succeeded and a run was created, but starting it failed (most
+  // often a 429 when the server is at capacity). We hold the existing run id
+  // here so the next click RETRIES that run instead of re-uploading -- otherwise
+  // each retry mints a brand-new `created` run and a capacity window produces a
+  // pile of duplicate "Pending" rows for one file (issue #177). null = nothing
+  // to retry; the upload path runs normally.
+  const [pendingStart, setPendingStart] = useState<{ runId: string } | null>(null)
   // Output-rendering options (issue #153). Defaults match the backend Run
   // column defaults: Track Changes on, classification comments off.
   const [includeTrackChanges, setIncludeTrackChanges] = useState(true)
@@ -40,9 +47,11 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
       setFile(selectedFile)
       setError(null)
       setEstimate(null)
-      // A new file invalidates any pending template warning/acknowledgement.
+      // A new file invalidates any pending template warning/acknowledgement and
+      // any not-yet-started run left over from a prior failed start.
       setPendingWarning(null)
       setAcknowledged(false)
+      setPendingStart(null)
 
       setEstimating(true)
       try {
@@ -59,6 +68,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
       setEstimate(null)
       setPendingWarning(null)
       setAcknowledged(false)
+      setPendingStart(null)
     }
   }
 
@@ -114,8 +124,49 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
       return
     }
 
+    // A prior upload succeeded but its start failed (e.g. server at capacity).
+    // The run already exists, so retry starts THAT run -- we must not re-upload,
+    // which would create another duplicate `created` run (issue #177).
+    if (pendingStart) {
+      setUploading(true)
+      setError(null)
+      try {
+        await beginRun(pendingStart.runId)
+      } catch (startErr: any) {
+        setError(
+          startErr.message ||
+            'Your file was uploaded, but processing could not start. Please try again in a moment.',
+        )
+        console.error(startErr)
+      } finally {
+        setUploading(false)
+      }
+      return
+    }
+
     setUploading(true)
     setError(null)
+
+    // Pre-upload capacity check (issue #177): if this pod is already at its
+    // concurrency cap, warn and skip the upload rather than minting a `created`
+    // run that immediately fails to start. This is ADVISORY -- the start-time
+    // gate in beginRun stays authoritative (capacity is per-pod and racy) -- so
+    // a probe error must not block the upload: on failure we fall through and
+    // let the normal upload + start path (and its retry) handle it.
+    try {
+      const capacity = await getCapacity()
+      if (!capacity.available) {
+        setError(
+          "The system is temporarily at capacity and can't start a new run " +
+            'right now. Any runs already in progress will keep going -- please ' +
+            'wait a moment and try again.',
+        )
+        setUploading(false)
+        return
+      }
+    } catch (capErr) {
+      console.error('Capacity probe failed; proceeding with upload', capErr)
+    }
 
     try {
       const data = await uploadFile(file, {
@@ -137,6 +188,9 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
       try {
         await beginRun(data.run_id)
       } catch (startErr: any) {
+        // Keep a handle to the already-created run so the next click retries it
+        // in place rather than re-uploading and minting a duplicate (issue #177).
+        setPendingStart({ runId: data.run_id })
         setError(
           startErr.message ||
             'Your file was uploaded, but processing could not start. Please try again in a moment.',
@@ -348,6 +402,8 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                 </span>
               ) : pendingWarning ? (
                 'Process Anyway'
+              ) : pendingStart ? (
+                'Retry Processing'
               ) : estimate ? (
                 'Start Processing'
               ) : (

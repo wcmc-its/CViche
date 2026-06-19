@@ -118,7 +118,7 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
 
     response = JSONResponse(content=response_data.model_dump())
     cookie_settings = get_cookie_settings()
-    token = create_session_cookie(user)
+    token = create_session_cookie(user, get_session_epoch(db))
     response.set_cookie(value=token, **cookie_settings)
     return response
 

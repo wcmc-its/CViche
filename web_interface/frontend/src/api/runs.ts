@@ -57,3 +57,17 @@ export async function getFeedbackStatuses(): Promise<FeedbackStatus[]> {
 export async function startRun(runId: string): Promise<void> {
   await api.post(runRoutes.start(runId))
 }
+
+export interface Capacity {
+  available: boolean
+  active: number
+  limit: number
+}
+
+// Read-only, advisory snapshot of this pod's run-admission capacity (issue
+// #177). The upload flow uses it to avoid spending an upload when the pod is
+// already at capacity. It is NOT authoritative -- the start-time gate still
+// applies -- so callers should fail open if this request errors.
+export async function getCapacity(): Promise<Capacity> {
+  return api.get<Capacity>(runRoutes.capacity())
+}

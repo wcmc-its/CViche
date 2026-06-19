@@ -44,10 +44,28 @@ def create_session_cookie(user: User) -> str:
     # Valkey (independent of the absolute cookie TTL). Seeded here so every cookie
     # mint (login / SAML ACS) starts an idle key in lockstep with the cookie.
     sid = secrets.token_urlsafe(18)
+def get_session_epoch(db: Session) -> int:
+    """Current global session epoch.
+
+    A monotonically-increasing counter in SystemConfig. Every cookie is stamped
+    with the epoch in force when it was minted; bumping the epoch (the admin
+    "sign out everyone" endpoint) invalidates every cookie carrying an older
+    value on its next request -- the revocation primitive that stateless signed
+    cookies otherwise lack. Defaults to 0 when unset.
+    """
+    try:
+        return int(get_config_value(db, "session_epoch") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def create_session_cookie(user: User, epoch: int = 0) -> str:
     payload = {
         "user_id": user.id,
         "email": user.email,
         "role": user.role,
+        # Stamp the revocation epoch in force at mint time (see get_session_epoch).
+        "epoch": epoch,
         "issued_at": int(time.time()),
         "sid": sid,
     }
@@ -95,6 +113,16 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
     payload = decode_session_cookie(cookie)
     if not payload:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "auth_required", "message": "Session expired. Please log in again."}
+        )
+
+    # Global revocation gate: a cookie minted before the current session epoch
+    # (bumped by the admin "sign out everyone" action) is dead. A missing epoch
+    # -- cookies minted before this feature shipped -- is read as 0, so the
+    # rollout itself does not force a mass re-login; the first epoch bump does.
+    if int(payload.get("epoch", 0)) != get_session_epoch(db):
         raise HTTPException(
             status_code=401,
             detail={"error": "auth_required", "message": "Session expired. Please log in again."}

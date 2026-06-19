@@ -80,6 +80,22 @@ BEDROCK_RETRYABLE_CODES = frozenset({
     "ServiceUnavailableException",
 })
 
+# Hard ceiling for any Bedrock call that reaches _call_bedrock without an
+# explicit max_tokens. When `maxTokens` is omitted, Bedrock applies the MODEL's
+# own default ceiling -- ~64,000 output tokens for the Claude models in use --
+# so an uncapped call that misbehaves (repetition, a model that won't stop, a
+# pathological input) can run all the way to ~64K and you are billed for every
+# token it actually emits. This floor turns that unbounded tail into a bounded
+# one. It is deliberately generous: the largest legitimate output ever observed
+# across the prompt_logs is ~8.1K tokens, and the largest explicit per-call cap
+# in the codebase is 16K (segmentation / pdf_vision), so 16K never truncates a
+# real response while still cutting worst-case spend 4x vs the 64K model default.
+# Per-stage caps in llm_config.yaml tighten this further where it is safe to do
+# so. This is belt-and-suspenders: it guarantees no path is uncapped regardless
+# of call-site or YAML discipline. See
+# docs/analysis/HANDOFF-runaway-generation-maxtokens-2026-06-17.md.
+DEFAULT_MAX_TOKENS = 16000
+
 # Lazy-initialized OpenAI client (NOT created at import time per Pitfall 2)
 _openai_client = None
 
@@ -409,8 +425,13 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     }
     if system_prompts:
         call_kwargs["system"] = system_prompts
-    if max_tokens is not None:
-        call_kwargs["inferenceConfig"]["maxTokens"] = max_tokens
+    # Always send maxTokens. When the caller (and config) leave it None, fall
+    # back to the conservative DEFAULT_MAX_TOKENS floor instead of omitting the
+    # field -- omitting it lets Bedrock apply the model's ~64K default ceiling,
+    # which is the runaway-generation tail risk this floor exists to bound.
+    call_kwargs["inferenceConfig"]["maxTokens"] = (
+        max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS
+    )
 
     try:
         return client.converse(**call_kwargs)
