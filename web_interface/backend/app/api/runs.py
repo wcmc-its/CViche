@@ -1,4 +1,6 @@
 """Run status and management API endpoints."""
+import hashlib
+import json
 import logging
 import shutil
 from typing import Optional
@@ -52,8 +54,20 @@ def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> No
         return
     try:
         data = get_storage().get_file(run_id, f"input/{run_id}.{file_type}")
-    except Exception as e:
+    except FileNotFoundError as e:
+        # The run genuinely has no durable copy (e.g. a legacy run predating the
+        # S3 archive). Expected; the caller keeps its own missing-file handling.
         logger.info("No durable input copy for run %s (%s); using local only", run_id, e)
+        return
+    except Exception as e:
+        # Anything other than a missing object (S3 AccessDenied, KMS, network)
+        # means durable storage is reachable-but-failing. Surface it at WARNING
+        # so a real outage isn't silently misread as "file simply not there".
+        logger.warning(
+            "Durable input lookup FAILED for run %s (%s); using local copy only. "
+            "May indicate an S3/IAM/KMS problem rather than a missing object.",
+            run_id, e,
+        )
         return
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -180,13 +194,16 @@ async def start_run(
     if run.status not in ["created", "paused"]:
         raise bad_request(f"Cannot start run in status: {run.status}")
 
-    # Get the uploaded file path
-    upload_dir = Path(__file__).parent.parent.parent.parent / "uploads"
-    file_path = upload_dir / f"{run_id}.{run.file_type}"
+    # Get the uploaded file path. Use the shared UPLOAD_DIR constant (same path
+    # restart/retry use) so the three handlers can never resolve it differently.
+    file_path = UPLOAD_DIR / f"{run_id}.{run.file_type}"
 
     _materialize_input_if_missing(run_id, run.file_type, file_path)
     if not file_path.exists():
-        raise not_found("Uploaded file not found")
+        # Friendly, actionable wording (matches retry/restart). Hit when neither
+        # the pod-local copy nor a durable S3 archive exists -- e.g. a legacy run
+        # predating the archive, whose input cannot be recovered.
+        raise not_found("Uploaded file no longer available — please upload again.")
 
     # Admission control: cap concurrent in-process pipelines per pod. Acquire a
     # slot before marking the run "running" so a rejected start leaves the run
@@ -315,10 +332,67 @@ async def restart_run(
             },
         )
 
-    # Generate new run and copy file
+    # Generate new run and copy the original input to the new run's local path.
     new_run_id = generate_run_id()
-    new_file = UPLOAD_DIR / f"{new_run_id}.{original_run.file_type}"
+    stored_name = f"{new_run_id}.{original_run.file_type}"
+    new_file = UPLOAD_DIR / stored_name
     shutil.copy2(str(original_file), str(new_file))
+
+    # Durably archive the new run's input to storage, exactly as /upload does.
+    # The local copy above lives only on THIS pod; with multiple replicas behind
+    # the load balancer a later start/retry routinely lands on another pod, where
+    # only this S3 object can re-materialize the input. Without it the restarted
+    # run is unstartable the moment a request hits a different pod -- the very
+    # "Uploaded file not found / Original file no longer available" failure this
+    # restart exists to recover from. FATAL on failure, mirroring /upload: a child
+    # whose input can't be recovered should not be created at all. (issue #180)
+    content = original_file.read_bytes()
+    storage = get_storage()
+    manifest = json.dumps({
+        "run_id": new_run_id,
+        "original_filename": original_run.filename,
+        "stored_as": stored_name,
+        "file_type": original_run.file_type,
+        "size_bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "restarted_from": run_id,  # provenance: the run this was restarted from
+        "uploaded_at": datetime.now().isoformat(),
+        "user_email": current_user.email,
+    }, indent=2).encode("utf-8")
+    try:
+        storage.put_file(new_run_id, f"input/{stored_name}", content)
+        storage.put_file(new_run_id, "input/manifest.json", manifest)
+    except Exception as e:
+        logger.error(
+            "Durable archive of restarted input failed; aborting restart (run=%s): %s",
+            new_run_id, e,
+        )
+        # No run row has been committed, so there is nothing to roll back. Remove
+        # the ephemeral local copy so the failed attempt leaves nothing behind.
+        try:
+            new_file.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "storage_unavailable",
+                "message": (
+                    "We couldn't store the file securely, so no new run was created. "
+                    "Please try again in a moment."
+                ),
+            },
+        )
+
+    # Cross-run, browsable-by-submitter index (best-effort; never fail the
+    # restart). Mirrors /upload so restarted runs are findable by submitter too.
+    try:
+        storage.put_global(
+            f"by-submitter/{current_user.email.lower()}/{new_run_id}/manifest.json",
+            manifest,
+        )
+    except Exception as e:
+        logger.warning("Failed to write by-submitter index (run=%s): %s", new_run_id, e)
 
     # Create new Run record, inheriting submission_type and the user's
     # output-rendering choices (issue #153) from the original. Without this the

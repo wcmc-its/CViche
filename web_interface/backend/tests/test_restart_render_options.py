@@ -13,7 +13,7 @@ row inherits the original's non-default render options.
 """
 
 import asyncio
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 
 def test_restart_inherits_render_options(db):
@@ -46,7 +46,10 @@ def test_restart_inherits_render_options(db):
     with patch.object(runs_api, "check_run_access", return_value=original), \
          patch.object(runs_api, "check_rate_limit", return_value=None), \
          patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
+         patch.object(runs_api, "get_storage", return_value=MagicMock()), \
          patch("shutil.copy2", return_value=None), \
+         patch("pathlib.Path.read_bytes", return_value=b"PK\x03\x04fake-docx"), \
+         patch("pathlib.Path.unlink", return_value=None), \
          patch("pathlib.Path.exists", return_value=True):
         result = asyncio.run(
             runs_api.restart_run(run_id="ORIG001", db=db, current_user=user)
