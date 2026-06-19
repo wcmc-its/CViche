@@ -14,6 +14,12 @@ from app.config_loader import get_config
 # CVICHE_SESSION_TTL (seconds).
 SESSION_TTL = int(get_config("auth", "CVICHE_SESSION_TTL", default=12 * 3600)[0])
 
+# Server-side idle timeout (seconds). A session whose Valkey idle key has not
+# been refreshed within this window is rejected and must re-authenticate,
+# independent of the absolute cookie TTL above. Enforced only when a Redis/Valkey
+# endpoint is configured (see app/session_idle.py); otherwise it is a no-op.
+SESSION_IDLE_TIMEOUT = int(get_config("auth", "CVICHE_SESSION_IDLE_TIMEOUT", default=20 * 60)[0])
+
 # Auth rate limiting (in-memory login attempt limiter)
 LOGIN_RATE_LIMIT_MAX = int(get_config("auth", "CVICHE_LOGIN_RATE_LIMIT", default=10)[0])
 LOGIN_RATE_LIMIT_WINDOW = int(get_config("auth", "CVICHE_LOGIN_RATE_WINDOW", default=60)[0])

@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import User
 from app.schemas import LoginRequest, LoginResponse, AuthConfigResponse, MeResponse, QuotaInfo
-from app.auth import create_session_cookie, get_cookie_settings, get_current_user, get_session_epoch, COOKIE_NAME
+from app.auth import create_session_cookie, decode_session_cookie, get_cookie_settings, get_current_user, COOKIE_NAME
+from app.session_idle import get_idle_store
 from app.config_loader import get_config_value
 from app.rate_limiter import get_quota
 from app.services.user_service import provision_user
@@ -126,8 +127,15 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
 # POST /api/auth/logout
 # ---------------------------------------------------------------------------
 @router.post("/auth/logout")
-async def logout():
-    """Clear the session cookie."""
+async def logout(request: Request):
+    """Clear the session cookie and drop its server-side idle key."""
+    # Best-effort: delete the Valkey idle key so the session can't be revived by
+    # replaying the (now-cleared) cookie before its absolute TTL lapses.
+    cookie = request.cookies.get(COOKIE_NAME)
+    payload = decode_session_cookie(cookie) if cookie else None
+    if payload and payload.get("sid"):
+        get_idle_store().end(payload["sid"])
+
     response = JSONResponse(content={"message": "Logged out."})
     response.delete_cookie(
         key=COOKIE_NAME,

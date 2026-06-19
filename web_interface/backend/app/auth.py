@@ -1,6 +1,7 @@
 """Authentication middleware using itsdangerous signed cookies."""
 import os
 import time
+import secrets
 import logging
 from datetime import datetime
 
@@ -20,6 +21,7 @@ from app.ed_group_lookup import (
     EdUnavailableError,
 )
 from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
+from app.session_idle import get_idle_store
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +39,11 @@ _serializer = URLSafeTimedSerializer(_secret)
 _secure_cookies = os.environ.get("CVICHE_SECURE_COOKIES", "true").lower() == "true"
 
 
+def create_session_cookie(user: User) -> str:
+    # Per-session id: lets the server track idle activity for THIS session in
+    # Valkey (independent of the absolute cookie TTL). Seeded here so every cookie
+    # mint (login / SAML ACS) starts an idle key in lockstep with the cookie.
+    sid = secrets.token_urlsafe(18)
 def get_session_epoch(db: Session) -> int:
     """Current global session epoch.
 
@@ -60,7 +67,9 @@ def create_session_cookie(user: User, epoch: int = 0) -> str:
         # Stamp the revocation epoch in force at mint time (see get_session_epoch).
         "epoch": epoch,
         "issued_at": int(time.time()),
+        "sid": sid,
     }
+    get_idle_store().start(sid)
     return _serializer.dumps(payload)
 
 
@@ -130,6 +139,19 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
         raise HTTPException(
             status_code=401,
             detail={"error": "account_disabled", "message": "Your account has been disabled. Contact an administrator."}
+        )
+
+    # Server-side idle enforcement: reject (and refresh) the session's sliding
+    # idle window in Valkey. Checked before the ED lookup so an idle session
+    # short-circuits the (potentially slow) LDAP call. Cookies minted before this
+    # feature carry no `sid` and bypass the check -- they stay bounded by the
+    # absolute cookie TTL. No-op / fail-open when Valkey is unset or unreachable.
+    sid = payload.get("sid")
+    if sid and not get_idle_store().touch(sid):
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "session_idle",
+                    "message": "Your session timed out due to inactivity. Please log in again."}
         )
 
     # ED group re-check for SAML users (if enabled)

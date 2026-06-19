@@ -10,7 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
-from app.auth import create_session_cookie, get_cookie_settings, get_session_epoch, COOKIE_NAME
+from app.auth import create_session_cookie, decode_session_cookie, get_cookie_settings, COOKIE_NAME
+from app.session_idle import get_idle_store
 from app.config_loader import get_config_value
 from app.saml_client import get_saml_client, extract_user_attrs
 from app.ed_group_lookup import check_ed_membership, set_cached_membership, EdUnavailableError
@@ -182,20 +183,27 @@ async def saml_metadata(db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 # POST/GET /api/saml/logout -- local session logout
 # ---------------------------------------------------------------------------
-async def _saml_logout():
+async def _saml_logout(request: Request):
     """Clear local session and redirect to login page (no IdP SLO round-trip)."""
+    # Best-effort: drop the server-side idle key so the cleared cookie can't be
+    # replayed before its absolute TTL lapses.
+    cookie = request.cookies.get(COOKIE_NAME)
+    payload = decode_session_cookie(cookie) if cookie else None
+    if payload and payload.get("sid"):
+        get_idle_store().end(payload["sid"])
+
     response = RedirectResponse("/login", status_code=302)
     response.delete_cookie(key=COOKIE_NAME, httponly=True, samesite="lax")
     return response
 
 
 @router.post("/saml/logout")
-async def saml_logout_post():
+async def saml_logout_post(request: Request):
     """SAML logout via POST."""
-    return await _saml_logout()
+    return await _saml_logout(request)
 
 
 @router.get("/saml/logout")
-async def saml_logout_get():
+async def saml_logout_get(request: Request):
     """SAML logout via GET (browser convenience)."""
-    return await _saml_logout()
+    return await _saml_logout(request)
