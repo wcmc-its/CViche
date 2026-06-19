@@ -72,8 +72,17 @@ async def websocket_stream(websocket: WebSocket, run_id: str):
         return
 
     from app.database import SessionLocal
+    from app.auth import get_session_epoch
     db = SessionLocal()
     try:
+        # Same global revocation gate as get_current_user -- this is the second
+        # cookie-decode site, so a revoked/old-epoch cookie must be rejected here
+        # too or a long-lived socket would outlive a "sign out everyone".
+        if int(payload.get("epoch", 0)) != get_session_epoch(db):
+            await websocket.accept()
+            await websocket.close(code=4001, reason="Session expired")
+            return
+
         user = db.query(User).filter(User.id == payload["user_id"]).first()
         if not user or user.status != "active":
             await websocket.accept()
