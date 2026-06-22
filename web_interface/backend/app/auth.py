@@ -39,11 +39,6 @@ _serializer = URLSafeTimedSerializer(_secret)
 _secure_cookies = os.environ.get("CVICHE_SECURE_COOKIES", "true").lower() == "true"
 
 
-def create_session_cookie(user: User) -> str:
-    # Per-session id: lets the server track idle activity for THIS session in
-    # Valkey (independent of the absolute cookie TTL). Seeded here so every cookie
-    # mint (login / SAML ACS) starts an idle key in lockstep with the cookie.
-    sid = secrets.token_urlsafe(18)
 def get_session_epoch(db: Session) -> int:
     """Current global session epoch.
 
@@ -60,6 +55,10 @@ def get_session_epoch(db: Session) -> int:
 
 
 def create_session_cookie(user: User, epoch: int = 0) -> str:
+    # Per-session id: lets the server track idle activity for THIS session in
+    # Valkey (independent of the absolute cookie TTL). Seeded here so every cookie
+    # mint (login / SAML ACS) starts an idle key in lockstep with the cookie.
+    sid = secrets.token_urlsafe(18)
     payload = {
         "user_id": user.id,
         "email": user.email,

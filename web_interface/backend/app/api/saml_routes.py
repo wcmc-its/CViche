@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
-from app.auth import create_session_cookie, decode_session_cookie, get_cookie_settings, COOKIE_NAME
+from app.auth import create_session_cookie, decode_session_cookie, get_cookie_settings, get_session_epoch, COOKIE_NAME
 from app.session_idle import get_idle_store
 from app.config_loader import get_config_value
 from app.saml_client import get_saml_client, extract_user_attrs
