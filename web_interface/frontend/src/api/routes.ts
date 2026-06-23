@@ -21,9 +21,9 @@ export const runRoutes = {
   /** GET /api/run/:id/prompt-logs?step=:step */
   promptLogs: (id: string, step: number) =>
     `/api/run/${id}/prompt-logs?step=${step}` as const,
-  /** GET /api/run/:id/data/:file/json  (JSON-parsed data file) */
+  /** GET /api/run/:id/json/:file  (JSON-parsed data file) */
   dataJson: (id: string, file: string) =>
-    `/api/run/${id}/data/${file}/json` as const,
+    `/api/run/${id}/json/${file}` as const,
   /** GET/href /api/run/:id/data/:file  (raw data file download / open) */
   dataFile: (id: string, file: string) =>
     `/api/run/${id}/data/${file}` as const,

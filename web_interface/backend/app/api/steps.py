@@ -304,7 +304,10 @@ def _parse_json_to_preview(data) -> OutputPreview | None:
     return None
 
 
-@router.get("/run/{run_id}/data/{filename:path}/json")
+# Distinct prefix from the download route on purpose: /data/{filename:path} has a
+# greedy :path that would otherwise swallow a trailing "/json" and shadow this
+# route (whichever registers first wins). /json/{filename:path} can't collide.
+@router.get("/run/{run_id}/json/{filename:path}")
 async def get_json_content(
     run_id: str,
     filename: str,
@@ -315,21 +318,45 @@ async def get_json_content(
 
     check_run_access(run_id, current_user, db)
 
-    file_path = _resolve_safe_path(filename, run_id)
-
-    if not str(file_path).endswith(".json"):
-        raise bad_request("Only JSON files can be viewed")
-
+    # Local pod filesystem first. _resolve_safe_path also runs the security guard
+    # (absolute/traversal -> 400 "Invalid filename"), so it must come first.
     try:
+        file_path = _resolve_safe_path(filename, run_id)
+        if not str(file_path).endswith(".json"):
+            raise bad_request("Only JSON files can be viewed")
         with open(file_path, "r") as f:
             data = json.load(f)
-
         return JSONResponse(content={
             "filename": filename,
             "size_bytes": file_path.stat().st_size,
-            "content": data
+            "content": data,
         })
-    except Exception as e:
+    except HTTPException as e:
+        if e.status_code != 404:
+            raise  # 400 invalid/traversal/non-json -> propagate; only a local miss falls through
+    except Exception:
+        raise internal_error("Error reading file")
+
+    # Durable storage fallback (S3 in prod): the file may live in S3 but not on
+    # this pod. Mirrors get_data_file (#38) so the viewer survives pod recycles /
+    # multi-replica routing the same way the download button does.
+    download_name = Path(filename).name
+    if not download_name.endswith(".json"):
+        raise not_found("File not found")
+    storage = get_storage()
+    storage_key = f"outputs/{download_name}"
+    try:
+        raw = storage.get_file(run_id, storage_key)
+        data = json.loads(raw)
+        return JSONResponse(content={
+            "filename": filename,
+            "size_bytes": len(raw),
+            "content": data,
+        })
+    except FileNotFoundError:
+        raise not_found("File not found")
+    except Exception:
+        logger.warning("Storage JSON read failed for %s/%s", run_id, storage_key, exc_info=True)
         raise internal_error("Error reading file")
 
 

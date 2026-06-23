@@ -204,11 +204,11 @@ class TestPathTraversal:
         assert response.json()["detail"] == "Invalid filename"
 
     def test_json_endpoint_absolute_path_rejected(self, client, db, seed_simple_mode):
-        """GET /run/{id}/data//etc/passwd/json returns 400."""
+        """GET /run/{id}/json//etc/passwd returns 400."""
         user, run = self._create_test_user_and_run(db)
         self._auth_cookie(client, user)
 
-        response = client.get(f"/api/run/{run.id}/data//etc/passwd/json")
+        response = client.get(f"/api/run/{run.id}/json//etc/passwd")
         assert response.status_code == 400
         assert response.json()["detail"] == "Invalid filename"
 
@@ -217,7 +217,7 @@ class TestPathTraversal:
         user, run = self._create_test_user_and_run(db)
         self._auth_cookie(client, user)
 
-        response = client.get(f"/api/run/{run.id}/data/..%2F..%2Fetc%2Fpasswd/json")
+        response = client.get(f"/api/run/{run.id}/json/..%2F..%2Fetc%2Fpasswd")
         assert response.status_code == 400
         assert response.json()["detail"] == "Invalid filename"
 
