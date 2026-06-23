@@ -28,9 +28,21 @@ spec:
             requests:
               cpu: "300m"
               memory: "512Mi"
+            # Burstable: limits raised to 2 vCPU / 2Gi so a pod can absorb 3
+            # concurrent runs (CVICHE_MAX_CONCURRENT_RUNS below). Requests kept
+            # modest so scheduling/footprint is unchanged (nodegroup headroom is
+            # tracked separately in #82); for prod-identical guaranteed QoS, raise
+            # requests to match limits once the nodegroup is sized for it.
             limits:
-              cpu: "1000m"
-              memory: "1Gi"
+              cpu: "2"
+              memory: "2Gi"
+          env:
+            # Stopgap: dev defaulted to 2 (the per-pod cap is sized to memory),
+            # so the 3rd concurrent run got the "at capacity" 429. Bump to 3 to
+            # match prod now that the memory limit is 2Gi. The real fix for the
+            # ceiling is the pub/sub->Streams + worker migration.
+            - name: CVICHE_MAX_CONCURRENT_RUNS
+              value: "3"
           envFrom:
             - secretRef:
                 name: cviche-secrets
