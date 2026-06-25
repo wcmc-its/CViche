@@ -8,7 +8,6 @@ import logging
 
 from .utils import clean_text, is_section_header
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
