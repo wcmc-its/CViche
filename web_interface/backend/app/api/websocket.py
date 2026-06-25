@@ -1,5 +1,6 @@
 """WebSocket endpoint for real-time pipeline updates."""
 import json
+import logging
 from http.cookies import SimpleCookie
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, Depends
@@ -13,6 +14,7 @@ from app.pipeline.event_emitter import event_emitter
 from app.services.run_service import check_run_access
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 # Terminal run statuses -> the live event the orchestrator emits for each.
 _TERMINAL_STATUSES = {"complete", "failed", "cancelled"}
@@ -146,8 +148,8 @@ async def websocket_stream(websocket: WebSocket, run_id: str):
             except WebSocketDisconnect:
                 break
 
-    except Exception as e:
-        print(f"WebSocket error: {e}")
+    except Exception:
+        logger.exception("WebSocket connection error")
 
     finally:
         # Disconnect when done
