@@ -147,7 +147,9 @@ class TestConfigService:
     """ARCH-04: Config values centralized with correct defaults."""
 
     def test_session_ttl_default(self):
-        assert SESSION_TTL == 7 * 24 * 3600  # 604800
+        # Shortened from 7d to 12h in 5ee9538 (session revocation + shorter TTL,
+        # #110/#127); the assertion was not updated at the time.
+        assert SESSION_TTL == 12 * 3600  # 43200
 
     def test_login_rate_limit_defaults(self):
         assert LOGIN_RATE_LIMIT_MAX == 10
