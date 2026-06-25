@@ -107,7 +107,7 @@ try:
     from enrich_publication_ids import PubMedEnricher
     LEGACY_HANDLERS_AVAILABLE = True
 except ImportError as e:
-    logger.info(f"Warning: Legacy handlers not available: {e}")
+    logger.warning(f"Legacy handlers not available: {e}")
     LEGACY_HANDLERS_AVAILABLE = False
     from .wcm_template_filler_v2 import WCMTemplateFiller
 
@@ -564,7 +564,7 @@ class CVPipeline:
                     parsed_data["education"] = normalized_education
                     logger.info(f"  ✓ Normalized {len(normalized_education)} pre-structured education entries")
             except Exception as e:
-                logger.info(f"  ✗ Error parsing education: {e}")
+                logger.exception(f"  ✗ Error parsing education: {e}")
 
         # Parse positions
         if parsed_data["positions"]:
@@ -575,7 +575,7 @@ class CVPipeline:
                 parsed_data["positions"] = result.get("positions", result) if isinstance(result, dict) else result
                 logger.info(f"  ✓ Parsed {len(parsed_data['positions'])} position entries")
             except Exception as e:
-                logger.info(f"  ✗ Error parsing positions: {e}")
+                logger.exception(f"  ✗ Error parsing positions: {e}")
 
         # Parse grants
         if parsed_data["grants"]:
@@ -586,7 +586,7 @@ class CVPipeline:
                 parsed_data["grants"] = result.get("grants", result) if isinstance(result, dict) else result
                 logger.info(f"  ✓ Parsed {len(parsed_data['grants'])} grant entries")
             except Exception as e:
-                logger.info(f"  ✗ Error parsing grants: {e}")
+                logger.exception(f"  ✗ Error parsing grants: {e}")
 
         # Parse publications (more complex due to subsections)
         if parsed_data["publications"]:
@@ -608,7 +608,7 @@ class CVPipeline:
                 parsed_data["publications"] = result.get("publications", result) if isinstance(result, dict) else result
                 logger.info(f"  ✓ Parsed {len(parsed_data['publications'])} publication entries")
             except Exception as e:
-                logger.info(f"  ✗ Error parsing publications: {e}")
+                logger.exception(f"  ✗ Error parsing publications: {e}")
 
         # Parse certifications
         if parsed_data["certifications"]:
@@ -619,7 +619,7 @@ class CVPipeline:
                 parsed_data["certifications"] = result.get("certifications", result) if isinstance(result, dict) else result
                 logger.info(f"  ✓ Parsed {len(parsed_data['certifications'])} certification entries")
             except Exception as e:
-                logger.info(f"  ✗ Error parsing certifications: {e}")
+                logger.exception(f"  ✗ Error parsing certifications: {e}")
 
         # Parse honors
         if parsed_data["honors"]:
@@ -630,7 +630,7 @@ class CVPipeline:
                 parsed_data["honors"] = result.get("honors", result) if isinstance(result, dict) else result
                 logger.info(f"  ✓ Parsed {len(parsed_data['honors'])} honors/awards entries")
             except Exception as e:
-                logger.info(f"  ✗ Error parsing honors: {e}")
+                logger.exception(f"  ✗ Error parsing honors: {e}")
 
         # Parse memberships
         if parsed_data["memberships"]:
@@ -641,7 +641,7 @@ class CVPipeline:
                 parsed_data["memberships"] = result.get("memberships", result) if isinstance(result, dict) else result
                 logger.info(f"  ✓ Parsed {len(parsed_data['memberships'])} membership entries")
             except Exception as e:
-                logger.info(f"  ✗ Error parsing memberships: {e}")
+                logger.exception(f"  ✗ Error parsing memberships: {e}")
 
         # Parse service
         if parsed_data["service"]:
@@ -652,7 +652,7 @@ class CVPipeline:
                 parsed_data["service"] = result.get("service", result) if isinstance(result, dict) else result
                 logger.info(f"  ✓ Parsed {len(parsed_data['service'])} service entries")
             except Exception as e:
-                logger.info(f"  ✗ Error parsing service: {e}")
+                logger.exception(f"  ✗ Error parsing service: {e}")
 
         # Parse licensure
         if parsed_data["licensure"]:
@@ -663,7 +663,7 @@ class CVPipeline:
                 parsed_data["licensure"] = result.get("licensure", result) if isinstance(result, dict) else result
                 logger.info(f"  ✓ Parsed {len(parsed_data['licensure'])} licensure entries")
             except Exception as e:
-                logger.info(f"  ✗ Error parsing licensure: {e}")
+                logger.exception(f"  ✗ Error parsing licensure: {e}")
 
         # Parse mentoring
         if parsed_data["mentoring"]:
@@ -674,7 +674,7 @@ class CVPipeline:
                 parsed_data["mentoring"] = result.get("mentoring", result) if isinstance(result, dict) else result
                 logger.info(f"  ✓ Parsed {len(parsed_data['mentoring'])} mentoring entries")
             except Exception as e:
-                logger.info(f"  ✗ Error parsing mentoring: {e}")
+                logger.exception(f"  ✗ Error parsing mentoring: {e}")
 
         logger.info("")
         logger.info("=" * 80)
@@ -1219,7 +1219,7 @@ class CVPipeline:
                 # VALIDATION: Only include entries that have a degree field
                 # This filters out misclassified professional positions
                 if not edu.get('degree', '').strip():
-                    logger.info(f"  ⚠️  Skipping education entry without degree: {edu.get('institution', 'Unknown')}")
+                    logger.warning(f"  ⚠️  Skipping education entry without degree: {edu.get('institution', 'Unknown')}")
                     continue
 
                 # Parse location into City, State/Province, Country
@@ -1589,9 +1589,9 @@ class CVPipeline:
             if result.get('verified_has_data'):
                 logger.info(f"✓ Output: {output_path.name} (VERIFIED WITH DATA)")
             else:
-                logger.info(f"⚠️  Output: {output_path.name} (FILE EXISTS BUT MAY BE EMPTY)")
+                logger.warning(f"⚠️  Output: {output_path.name} (FILE EXISTS BUT MAY BE EMPTY)")
         else:
-            logger.info(f"✗ Output file NOT created: {output_path.name}")
+            logger.error(f"✗ Output file NOT created: {output_path.name}")
 
         logger.info("="*80)
         logger.info("")
@@ -1703,7 +1703,7 @@ class CVPipeline:
             personal_info = self.personal_info
             if not personal_info:
                 # Fallback: extract now if not already done (shouldn't happen)
-                logger.info("  ⚠️  Personal info not found, extracting now...")
+                logger.warning("  ⚠️  Personal info not found, extracting now...")
                 personal_info = extract_personal_info(str(self.cv_path))
                 self.personal_info = personal_info
             logger.info(f"  ✓ Name: {personal_info.get('full_name', 'NOT FOUND')}")
@@ -1737,7 +1737,7 @@ class CVPipeline:
             if personal_result.get('success'):
                 logger.info(f"  ✓ Personal data populated successfully")
             else:
-                logger.info(f"  ⚠️  {personal_result.get('error', 'Unknown error')}")
+                logger.warning(f"  ⚠️  {personal_result.get('error', 'Unknown error')}")
             logger.info("")
 
             # Convert parsed data to legacy format
@@ -1785,7 +1785,7 @@ class CVPipeline:
             if cv_owner_name:
                 logger.info(f"✓ CV Owner Name: {cv_owner_name}")
             else:
-                logger.info("⚠️  Warning: Could not extract CV owner name for author bolding")
+                logger.warning("⚠️  Could not extract CV owner name for author bolding")
 
             # Populate bibliography with advanced features (categorization, bolding, etc.)
             if 'bibliography' in legacy_data:
@@ -1823,7 +1823,7 @@ class CVPipeline:
                 if result.get('success'):
                     logger.info(f"  ✓ Inserted {result['entries_inserted']} education entries")
                 else:
-                    logger.info(f"  ⚠️  {result.get('error', 'Unknown error')}")
+                    logger.warning(f"  ⚠️  {result.get('error', 'Unknown error')}")
                 logger.info("")
 
             # Populate positions
@@ -1870,7 +1870,7 @@ class CVPipeline:
                 if result.get('success'):
                     logger.info(f"  ✓ Inserted {result.get('entries_inserted', 0)} grant entries")
                 else:
-                    logger.info(f"  ⚠️  {result.get('error', 'Unknown error')}")
+                    logger.warning(f"  ⚠️  {result.get('error', 'Unknown error')}")
                 logger.info("")
 
             # Save populated template
@@ -2022,10 +2022,8 @@ class CVPipeline:
 
             return self.results
 
-        except Exception as e:
-            logger.info(f"✗ Pipeline failed: {e}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            logger.exception("✗ Pipeline failed")
             raise
 
     # ========================================================================
@@ -2163,7 +2161,7 @@ def main():
 
     # Validate input
     if not os.path.exists(args.cv_path):
-        logger.info(f"Error: CV file not found: {args.cv_path}")
+        logger.error(f"Error: CV file not found: {args.cv_path}")
         sys.exit(1)
 
     # Run pipeline
@@ -2173,7 +2171,7 @@ def main():
         sys.exit(0)
 
     except Exception as e:
-        logger.info(f"Error: {e}")
+        logger.exception(f"Error: {e}")
         sys.exit(1)
 
 
