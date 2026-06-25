@@ -51,6 +51,12 @@ spec:
               port: 8000
             initialDelaySeconds: 10
             periodSeconds: 10
+            # /readyz does a DB SELECT 1 plus an S3 head_bucket whose own
+            # client timeout is ~2s. The probe default timeoutSeconds is 1s,
+            # so a transient DB/S3 hiccup would trip the 1s deadline and flap
+            # every replica out of the LB at once. Give the probe more budget
+            # than the handler's own dependency timeouts.
+            timeoutSeconds: 5
           livenessProbe:
             httpGet:
               path: /livez

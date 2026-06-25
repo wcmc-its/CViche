@@ -113,6 +113,18 @@ class S3RunStorage(RunStorage):
             return response["Body"].read()
         except self._s3.exceptions.NoSuchKey:
             raise FileNotFoundError(f"No such S3 object: s3://{self._bucket}/{s3_key}")
+        except self._s3.exceptions.ClientError as e:
+            # A genuinely-absent object can surface as a 404 ClientError (or
+            # NoSuchBucket) rather than the modeled NoSuchKey -- map those to
+            # FileNotFoundError so callers treat it as an expected miss. A 403
+            # AccessDenied is deliberately NOT mapped: it signals a real
+            # IAM/KMS problem the caller should log as an outage. (It is also
+            # what a missing key looks like without s3:ListBucket -- grant
+            # ListBucket to get a clean 404 here instead of a 403.)
+            code = e.response.get("Error", {}).get("Code", "")
+            if code in ("NoSuchKey", "404", "NoSuchBucket"):
+                raise FileNotFoundError(f"No such S3 object: s3://{self._bucket}/{s3_key}")
+            raise
 
     def list_files(self, run_id: str, prefix: str = "") -> list[str]:
         s3_prefix = self._s3_key(run_id, prefix)
