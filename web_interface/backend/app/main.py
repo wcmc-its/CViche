@@ -1,4 +1,5 @@
 """Main FastAPI application."""
+import asyncio
 import logging
 import os
 import traceback
@@ -134,6 +135,44 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+async def _stale_run_reaper_loop(interval_seconds: int):
+    """Periodically reap runs stuck in 'running' after a pod died mid-run.
+
+    The once-at-startup reconcile only heals a stuck run on the *next* restart;
+    in steady state a run whose in-process task died (pod evicted, OOM, or the
+    failure-handler commit itself failed) would count elapsed time upward
+    forever until something restarts the pod. This loop is the steady-state
+    backstop. ``reconcile_stale_runs`` is age-based and idempotent, so running
+    it on every replica on an interval is safe -- a sibling's genuinely
+    in-flight run isn't touched until it passes the stale threshold. The DB
+    work runs in a thread so it never blocks the event loop, and one bad sweep
+    is logged and the loop keeps going.
+    """
+    from app.services.run_service import reconcile_stale_runs
+    from app.database import SessionLocal
+
+    def _sweep() -> int:
+        db = SessionLocal()
+        try:
+            return reconcile_stale_runs(db)
+        finally:
+            db.close()
+
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            swept = await asyncio.to_thread(_sweep)
+            if swept:
+                logger.info("Periodic reaper marked %d stale run(s) failed", swept)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Periodic stale-run reaper sweep failed; will retry next interval",
+                exc_info=True,
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
@@ -184,9 +223,32 @@ async def lifespan(app: FastAPI):
     else:
         print("ℹ️  Redis broker disabled — in-process events (single-worker mode)")
 
+    # Steady-state backstop to the startup reconcile: periodically reap runs
+    # left stuck in "running" by a pod death mid-run. Set the interval to 0 to
+    # disable. Age-based + idempotent, so it is multi-replica safe.
+    reap_interval_raw, _ = get_config(
+        "llm", "CVICHE_STALE_RUN_REAP_INTERVAL_SECONDS", default=300
+    )
+    try:
+        reap_interval = int(reap_interval_raw)
+    except (TypeError, ValueError):
+        reap_interval = 300
+    reaper_task = (
+        asyncio.create_task(_stale_run_reaper_loop(reap_interval))
+        if reap_interval > 0 else None
+    )
+    if reaper_task:
+        print(f"♻️  Periodic stale-run reaper started (every {reap_interval}s)")
+
     yield
 
-    # Shutdown: stop the subscriber loop and close broker connections.
+    # Shutdown: cancel the reaper, stop the subscriber loop, close broker conns.
+    if reaper_task:
+        reaper_task.cancel()
+        try:
+            await reaper_task
+        except asyncio.CancelledError:
+            pass
     await event_emitter.shutdown()
     await broker.shutdown()
     print("👋 Shutting down CViche Pipeline Viewer")
