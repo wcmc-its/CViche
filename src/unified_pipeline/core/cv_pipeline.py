@@ -48,11 +48,14 @@ See Also
 import os
 import sys
 import json
+import logging
 import argparse
 import asyncio
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Callable, Awaitable
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 # Import centralized configuration
 from ..config import (
@@ -104,7 +107,7 @@ try:
     from enrich_publication_ids import PubMedEnricher
     LEGACY_HANDLERS_AVAILABLE = True
 except ImportError as e:
-    print(f"Warning: Legacy handlers not available: {e}")
+    logger.info(f"Warning: Legacy handlers not available: {e}")
     LEGACY_HANDLERS_AVAILABLE = False
     from .wcm_template_filler_v2 import WCMTemplateFiller
 
@@ -210,7 +213,7 @@ class CVPipeline:
         if self.progress_callback:
             await self.progress_callback(stage, message, level)
         else:
-            print(message)
+            logger.info(message)
 
     def run_stage_1_segmentation(self) -> Dict[str, Any]:
         """
@@ -219,12 +222,12 @@ class CVPipeline:
         Returns:
             Segmented CV data
         """
-        print("="*80)
-        print("STAGE 1: CV SEGMENTATION")
-        print("="*80)
-        print(f"Input: {self.cv_path}")
-        print(f"Output: {self.stage_dirs['stage_1']}")
-        print()
+        logger.info("="*80)
+        logger.info("STAGE 1: CV SEGMENTATION")
+        logger.info("="*80)
+        logger.info(f"Input: {self.cv_path}")
+        logger.info(f"Output: {self.stage_dirs['stage_1']}")
+        logger.info("")
 
         # Run segmentation using CVSegmenter
         segmenter = CVSegmenter()
@@ -245,8 +248,8 @@ class CVPipeline:
             "total_entries": segmented_data.get("meta", {}).get("total_entries", 0)
         }
 
-        print(f"✓ Segmentation complete: {segmented_path}")
-        print()
+        logger.info(f"✓ Segmentation complete: {segmented_path}")
+        logger.info("")
 
         return segmented_data
 
@@ -263,11 +266,11 @@ class CVPipeline:
         Returns:
             Mapped sections data
         """
-        print("="*80)
-        print("STAGE 3: TAXONOMY MAPPING")
-        print("="*80)
-        print(f"Output: {self.stage_dirs['stage_3']}")
-        print()
+        logger.info("="*80)
+        logger.info("STAGE 3: TAXONOMY MAPPING")
+        logger.info("="*80)
+        logger.info(f"Output: {self.stage_dirs['stage_3']}")
+        logger.info("")
 
         # Use OutputManager for consistent output paths
         from .output_manager import OutputManager
@@ -287,8 +290,8 @@ class CVPipeline:
             "avg_confidence": result["stats"]["avg_confidence"]
         }
 
-        print(f"✓ Taxonomy mapping complete: {result['output_file']}")
-        print()
+        logger.info(f"✓ Taxonomy mapping complete: {result['output_file']}")
+        logger.info("")
 
         # Load mapped data
         with open(result["output_file"], 'r') as f:
@@ -320,11 +323,11 @@ class CVPipeline:
         Returns:
             Dictionary with all parsed section data organized by section ID
         """
-        print("="*80)
-        print("STAGE 3: FULL WCM SECTION EXTRACTION")
-        print("="*80)
-        print("Using 71 specialized extractors organized by WCM section ID")
-        print()
+        logger.info("="*80)
+        logger.info("STAGE 3: FULL WCM SECTION EXTRACTION")
+        logger.info("="*80)
+        logger.info("Using 71 specialized extractors organized by WCM section ID")
+        logger.info("")
 
         # Import the section extraction orchestrator
         from .section_extraction_orchestrator import SectionExtractionOrchestrator
@@ -343,15 +346,15 @@ class CVPipeline:
             with open(mapped_file, 'w') as f:
                 json.dump(mapped_data, f, indent=2)
 
-        print("Step 1: Creating classified format...")
+        logger.info("Step 1: Creating classified format...")
         classified_file = orchestrator.create_classified_format(
             segmented_file=segmented_file,
             mapped_file=mapped_file,
             verbose=True
         )
 
-        print()
-        print("Step 2: Running WCM section extractors...")
+        logger.info("")
+        logger.info("Step 2: Running WCM section extractors...")
         extracted_files = orchestrator.run_section_extractors(
             classified_file=classified_file,
             sections_to_extract=None,  # Extract all sections
@@ -359,8 +362,8 @@ class CVPipeline:
         )
 
         # Load all extracted data from extractor outputs
-        print()
-        print("Step 3: Organizing extracted data...")
+        logger.info("")
+        logger.info("Step 3: Organizing extracted data...")
 
         # Map WCM section IDs to legacy entity type names for backward compatibility
         # Includes both letter codes (B1, D1), canonical names (doctoral_degree), and numeric taxonomy IDs (1, 2, 3...)
@@ -432,12 +435,12 @@ class CVPipeline:
                 # Convert to unified format
                 for entry in entries:
                     parsed_data[entity_type].append(entry.get('structured_data', entry))
-                print(f"  [Section {section_id}] → {entity_type}: {len(entries)} entries")
+                logger.info(f"  [Section {section_id}] → {entity_type}: {len(entries)} entries")
 
         # ALSO load segmented entries grouped by taxonomy section
         # This gives us the raw text_snippet data for LLM parsing
-        print()
-        print("Loading segmented data grouped by taxonomy...")
+        logger.info("")
+        logger.info("Loading segmented data grouped by taxonomy...")
         segmented_by_section = self._group_segmented_by_taxonomy(segmented_path, taxonomy_path or mapped_file)
         for section_id, section_info in segmented_by_section.items():
             entries = section_info.get('entries', [])
@@ -452,20 +455,20 @@ class CVPipeline:
             if entity_type:
                 # These entries should already have text_snippet fields
                 parsed_data[entity_type].extend(entries)
-                print(f"  [Section {section_id}] → {entity_type}: {len(entries)} entries (from segmentation)")
+                logger.info(f"  [Section {section_id}] → {entity_type}: {len(entries)} entries (from segmentation)")
 
-        print()
-        print(f"Total entries extracted: {total_entries_extracted}")
+        logger.info("")
+        logger.info(f"Total entries extracted: {total_entries_extracted}")
         for entity_type, data in parsed_data.items():
-            print(f"  {entity_type}: {len(data)} entries")
+            logger.info(f"  {entity_type}: {len(data)} entries")
 
         # ============================================================================
         # STEP 3: Parse extracted data with LLM parsers
         # ============================================================================
-        print()
-        print("=" * 80)
-        print("Step 3: Parsing extracted data with LLM parsers...")
-        print("=" * 80)
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info("Step 3: Parsing extracted data with LLM parsers...")
+        logger.info("=" * 80)
 
         # Prepare entries for parsing (convert from legacy format to parser format)
         def prepare_entries_for_parsing(entries):
@@ -519,7 +522,7 @@ class CVPipeline:
 
                 # Skip entries that match the CV owner's name
                 if is_cv_owner_name(text):
-                    print(f"  ⊘ Skipping CV owner name: {text[:60]}...")
+                    logger.info(f"  ⊘ Skipping CV owner name: {text[:60]}...")
                     continue
 
                 prepared.append({
@@ -531,7 +534,7 @@ class CVPipeline:
 
         # Parse education
         if parsed_data["education"]:
-            print(f"\nParsing education entries ({len(parsed_data['education'])} entries)...")
+            logger.info(f"\nParsing education entries ({len(parsed_data['education'])} entries)...")
             try:
                 education_entries = prepare_entries_for_parsing(parsed_data["education"])
                 # Filter for entries that need parsing (have text_snippet)
@@ -543,7 +546,7 @@ class CVPipeline:
                     result = parse_education_section(entries_to_parse)
                     education_list = result.get("education", result) if isinstance(result, dict) else result
                     parsed_data["education"] = structured_entries + education_list
-                    print(f"  ✓ Parsed {len(education_list)} education entries ({len(structured_entries)} already structured)")
+                    logger.info(f"  ✓ Parsed {len(education_list)} education entries ({len(structured_entries)} already structured)")
                 else:
                     # All entries are already structured, normalize field names
                     normalized_education = []
@@ -559,35 +562,35 @@ class CVPipeline:
                         }
                         normalized_education.append(normalized)
                     parsed_data["education"] = normalized_education
-                    print(f"  ✓ Normalized {len(normalized_education)} pre-structured education entries")
+                    logger.info(f"  ✓ Normalized {len(normalized_education)} pre-structured education entries")
             except Exception as e:
-                print(f"  ✗ Error parsing education: {e}")
+                logger.info(f"  ✗ Error parsing education: {e}")
 
         # Parse positions
         if parsed_data["positions"]:
-            print(f"\nParsing positions entries ({len(parsed_data['positions'])} entries)...")
+            logger.info(f"\nParsing positions entries ({len(parsed_data['positions'])} entries)...")
             try:
                 position_entries = prepare_entries_for_parsing(parsed_data["positions"])
                 result = parse_positions_section(position_entries)
                 parsed_data["positions"] = result.get("positions", result) if isinstance(result, dict) else result
-                print(f"  ✓ Parsed {len(parsed_data['positions'])} position entries")
+                logger.info(f"  ✓ Parsed {len(parsed_data['positions'])} position entries")
             except Exception as e:
-                print(f"  ✗ Error parsing positions: {e}")
+                logger.info(f"  ✗ Error parsing positions: {e}")
 
         # Parse grants
         if parsed_data["grants"]:
-            print(f"\nParsing grants entries ({len(parsed_data['grants'])} entries)...")
+            logger.info(f"\nParsing grants entries ({len(parsed_data['grants'])} entries)...")
             try:
                 grant_entries = prepare_entries_for_parsing(parsed_data["grants"])
                 result = parse_grants_section(grant_entries)
                 parsed_data["grants"] = result.get("grants", result) if isinstance(result, dict) else result
-                print(f"  ✓ Parsed {len(parsed_data['grants'])} grant entries")
+                logger.info(f"  ✓ Parsed {len(parsed_data['grants'])} grant entries")
             except Exception as e:
-                print(f"  ✗ Error parsing grants: {e}")
+                logger.info(f"  ✗ Error parsing grants: {e}")
 
         # Parse publications (more complex due to subsections)
         if parsed_data["publications"]:
-            print(f"\nParsing publication entries ({len(parsed_data['publications'])} entries)...")
+            logger.info(f"\nParsing publication entries ({len(parsed_data['publications'])} entries)...")
             try:
                 publication_entries = prepare_entries_for_parsing(parsed_data["publications"])
 
@@ -603,84 +606,84 @@ class CVPipeline:
                     target_author=cv_owner_name
                 )
                 parsed_data["publications"] = result.get("publications", result) if isinstance(result, dict) else result
-                print(f"  ✓ Parsed {len(parsed_data['publications'])} publication entries")
+                logger.info(f"  ✓ Parsed {len(parsed_data['publications'])} publication entries")
             except Exception as e:
-                print(f"  ✗ Error parsing publications: {e}")
+                logger.info(f"  ✗ Error parsing publications: {e}")
 
         # Parse certifications
         if parsed_data["certifications"]:
-            print(f"\nParsing certification entries ({len(parsed_data['certifications'])} entries)...")
+            logger.info(f"\nParsing certification entries ({len(parsed_data['certifications'])} entries)...")
             try:
                 cert_entries = prepare_entries_for_parsing(parsed_data["certifications"])
                 result = parse_certifications_section(cert_entries)
                 parsed_data["certifications"] = result.get("certifications", result) if isinstance(result, dict) else result
-                print(f"  ✓ Parsed {len(parsed_data['certifications'])} certification entries")
+                logger.info(f"  ✓ Parsed {len(parsed_data['certifications'])} certification entries")
             except Exception as e:
-                print(f"  ✗ Error parsing certifications: {e}")
+                logger.info(f"  ✗ Error parsing certifications: {e}")
 
         # Parse honors
         if parsed_data["honors"]:
-            print(f"\nParsing honors/awards entries ({len(parsed_data['honors'])} entries)...")
+            logger.info(f"\nParsing honors/awards entries ({len(parsed_data['honors'])} entries)...")
             try:
                 honor_entries = prepare_entries_for_parsing(parsed_data["honors"])
                 result = parse_honors_section(honor_entries)
                 parsed_data["honors"] = result.get("honors", result) if isinstance(result, dict) else result
-                print(f"  ✓ Parsed {len(parsed_data['honors'])} honors/awards entries")
+                logger.info(f"  ✓ Parsed {len(parsed_data['honors'])} honors/awards entries")
             except Exception as e:
-                print(f"  ✗ Error parsing honors: {e}")
+                logger.info(f"  ✗ Error parsing honors: {e}")
 
         # Parse memberships
         if parsed_data["memberships"]:
-            print(f"\nParsing membership entries ({len(parsed_data['memberships'])} entries)...")
+            logger.info(f"\nParsing membership entries ({len(parsed_data['memberships'])} entries)...")
             try:
                 membership_entries = prepare_entries_for_parsing(parsed_data["memberships"])
                 result = parse_memberships_section(membership_entries)
                 parsed_data["memberships"] = result.get("memberships", result) if isinstance(result, dict) else result
-                print(f"  ✓ Parsed {len(parsed_data['memberships'])} membership entries")
+                logger.info(f"  ✓ Parsed {len(parsed_data['memberships'])} membership entries")
             except Exception as e:
-                print(f"  ✗ Error parsing memberships: {e}")
+                logger.info(f"  ✗ Error parsing memberships: {e}")
 
         # Parse service
         if parsed_data["service"]:
-            print(f"\nParsing service entries ({len(parsed_data['service'])} entries)...")
+            logger.info(f"\nParsing service entries ({len(parsed_data['service'])} entries)...")
             try:
                 service_entries = prepare_entries_for_parsing(parsed_data["service"])
                 result = parse_service_section(service_entries)
                 parsed_data["service"] = result.get("service", result) if isinstance(result, dict) else result
-                print(f"  ✓ Parsed {len(parsed_data['service'])} service entries")
+                logger.info(f"  ✓ Parsed {len(parsed_data['service'])} service entries")
             except Exception as e:
-                print(f"  ✗ Error parsing service: {e}")
+                logger.info(f"  ✗ Error parsing service: {e}")
 
         # Parse licensure
         if parsed_data["licensure"]:
-            print(f"\nParsing licensure entries ({len(parsed_data['licensure'])} entries)...")
+            logger.info(f"\nParsing licensure entries ({len(parsed_data['licensure'])} entries)...")
             try:
                 licensure_entries = prepare_entries_for_parsing(parsed_data["licensure"])
                 result = parse_licensure_section(licensure_entries)
                 parsed_data["licensure"] = result.get("licensure", result) if isinstance(result, dict) else result
-                print(f"  ✓ Parsed {len(parsed_data['licensure'])} licensure entries")
+                logger.info(f"  ✓ Parsed {len(parsed_data['licensure'])} licensure entries")
             except Exception as e:
-                print(f"  ✗ Error parsing licensure: {e}")
+                logger.info(f"  ✗ Error parsing licensure: {e}")
 
         # Parse mentoring
         if parsed_data["mentoring"]:
-            print(f"\nParsing mentoring entries ({len(parsed_data['mentoring'])} entries)...")
+            logger.info(f"\nParsing mentoring entries ({len(parsed_data['mentoring'])} entries)...")
             try:
                 mentoring_entries = prepare_entries_for_parsing(parsed_data["mentoring"])
                 result = parse_mentoring_section(mentoring_entries)
                 parsed_data["mentoring"] = result.get("mentoring", result) if isinstance(result, dict) else result
-                print(f"  ✓ Parsed {len(parsed_data['mentoring'])} mentoring entries")
+                logger.info(f"  ✓ Parsed {len(parsed_data['mentoring'])} mentoring entries")
             except Exception as e:
-                print(f"  ✗ Error parsing mentoring: {e}")
+                logger.info(f"  ✗ Error parsing mentoring: {e}")
 
-        print()
-        print("=" * 80)
-        print("LLM Parsing Complete")
-        print("=" * 80)
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info("LLM Parsing Complete")
+        logger.info("=" * 80)
         for entity_type, data in parsed_data.items():
             high_conf = sum(1 for item in data if item.get("confidence", 0) >= 0.8)
-            print(f"  {entity_type}: {len(data)} entries ({high_conf} high confidence)")
-        print()
+            logger.info(f"  {entity_type}: {len(data)} entries ({high_conf} high confidence)")
+        logger.info("")
 
         # Save entity-specific files with section codes
         base_name = Path(segmented_path).stem.replace("_segmented", "")
@@ -717,16 +720,16 @@ class CVPipeline:
 
         # Generate individual section files based on taxonomy mappings (if taxonomy_path provided)
         if taxonomy_path:
-            print()
-            print("Generating individual section files based on taxonomy...")
+            logger.info("")
+            logger.info("Generating individual section files based on taxonomy...")
             section_files = self._generate_section_specific_files(
                 segmented_path=segmented_path,
                 taxonomy_path=taxonomy_path,
                 parsed_data=parsed_data,
                 base_name=base_name
             )
-            print(f"  ✓ Generated {len(section_files)} section-specific files")
-            print()
+            logger.info(f"  ✓ Generated {len(section_files)} section-specific files")
+            logger.info("")
 
         return parsed_data
 
@@ -983,7 +986,7 @@ class CVPipeline:
             if not section_code:
                 # Fallback for unmapped sections (shouldn't happen with complete taxonomy)
                 section_code = section_id.replace("/", "_").replace(" ", "_").upper()
-                print(f"  WARNING: No section code found for '{section_id}', using fallback: {section_code}")
+                logger.info(f"  WARNING: No section code found for '{section_id}', using fallback: {section_code}")
 
             # Use section code in filename: P_institutional_admin_CV_2050_parsed.json
             # Keep section_id in filename for readability but code comes first
@@ -1006,7 +1009,7 @@ class CVPipeline:
                 json.dump(output_data, f, indent=2)
 
             output_files.append(str(output_path))
-            print(f"  • {section_code} ({section_id}): {len(data['entries'])} entries → {output_path.name}")
+            logger.info(f"  • {section_code} ({section_id}): {len(data['entries'])} entries → {output_path.name}")
 
         # Store in results for orchestrator
         self.results["stages"]["stage_3_sections"] = {
@@ -1113,7 +1116,7 @@ class CVPipeline:
                     confidence = pub.get('pubmed_classification_confidence', 0.0)
                     conf_display = f" (conf: {confidence:.2f})" if confidence > 0 else ""
                     conf_emoji = "🔵" if confidence >= 0.9 else "🟢" if confidence >= 0.7 else "🟡" if confidence > 0 else "✅"
-                    print(f"  {conf_emoji} Using PubMed type: {title[:50]}... → {subsection_id}{conf_display}")
+                    logger.info(f"  {conf_emoji} Using PubMed type: {title[:50]}... → {subsection_id}{conf_display}")
 
                 else:
                     # PRIORITY 2: Check for preprints via DOI or manuscript status terms
@@ -1131,7 +1134,7 @@ class CVPipeline:
 
                     if is_preprint or has_status_term:
                         subsection_id = 'S7'  # In review / Manuscripts (Submitted/In Press)
-                        print(f"  ℹ️  Detected preprint/manuscript: {title[:50]}... → S7")
+                        logger.info(f"  ℹ️  Detected preprint/manuscript: {title[:50]}... → S7")
 
                     else:
                         # PRIORITY 3: Enhanced keyword detection for publication types
@@ -1147,10 +1150,10 @@ class CVPipeline:
 
                         # Override LLM classification if keywords strongly indicate a specific type
                         if is_review and pub_type not in ['review', 'editorial']:
-                            print(f"  ℹ️  Reclassifying as review (keyword match): {title[:50]}...")
+                            logger.info(f"  ℹ️  Reclassifying as review (keyword match): {title[:50]}...")
                             pub_type = 'review'
                         elif is_editorial and pub_type not in ['review', 'editorial']:
-                            print(f"  ℹ️  Reclassifying as editorial (keyword match): {title[:50]}...")
+                            logger.info(f"  ℹ️  Reclassifying as editorial (keyword match): {title[:50]}...")
                             pub_type = 'editorial'
 
                         # PRIORITY 4: Map LLM-extracted publication types to subsections
@@ -1216,7 +1219,7 @@ class CVPipeline:
                 # VALIDATION: Only include entries that have a degree field
                 # This filters out misclassified professional positions
                 if not edu.get('degree', '').strip():
-                    print(f"  ⚠️  Skipping education entry without degree: {edu.get('institution', 'Unknown')}")
+                    logger.info(f"  ⚠️  Skipping education entry without degree: {edu.get('institution', 'Unknown')}")
                     continue
 
                 # Parse location into City, State/Province, Country
@@ -1325,16 +1328,16 @@ class CVPipeline:
         Returns:
             Stage results dictionary
         """
-        print("="*80)
-        print("STAGE 4: WCM TEMPLATE GENERATION (COMPLETE LEGACY INTEGRATION)")
-        print("="*80)
-        print(f"Output: {self.stage_dirs['stage_4']}")
-        print()
-        print("Using FULL legacy system:")
-        print("  • 71 specialized extractors (Stage 2C)")
-        print("  • PubMed + ROR enrichment (Stage 2D)")
-        print("  • populate_cv.py with ALL 7 special handlers (Stage 3)")
-        print()
+        logger.info("="*80)
+        logger.info("STAGE 4: WCM TEMPLATE GENERATION (COMPLETE LEGACY INTEGRATION)")
+        logger.info("="*80)
+        logger.info(f"Output: {self.stage_dirs['stage_4']}")
+        logger.info("")
+        logger.info("Using FULL legacy system:")
+        logger.info("  • 71 specialized extractors (Stage 2C)")
+        logger.info("  • PubMed + ROR enrichment (Stage 2D)")
+        logger.info("  • populate_cv.py with ALL 7 special handlers (Stage 3)")
+        logger.info("")
 
         # Get the CV name from the path
         cv_name = self.cv_path.stem
@@ -1355,8 +1358,8 @@ class CVPipeline:
         # ========================================================================
         # STEP 1: Convert unified → classified format
         # ========================================================================
-        print("STEP 1: Converting unified → classified format")
-        print("="*80)
+        logger.info("STEP 1: Converting unified → classified format")
+        logger.info("="*80)
 
         from .unified_to_classified_converter import convert_unified_to_classified
 
@@ -1381,8 +1384,8 @@ class CVPipeline:
         # ========================================================================
         # STEP 2: Run legacy extractors (71 specialized scripts)
         # ========================================================================
-        print("STEP 2: Running legacy extractors")
-        print("="*80)
+        logger.info("STEP 2: Running legacy extractors")
+        logger.info("="*80)
 
         from .legacy_extractor_orchestrator import LegacyExtractorOrchestrator
 
@@ -1397,8 +1400,8 @@ class CVPipeline:
         # ========================================================================
         # STEP 3: Run legacy enrichment (PubMed + ROR)
         # ========================================================================
-        print("STEP 3: Running legacy enrichment")
-        print("="*80)
+        logger.info("STEP 3: Running legacy enrichment")
+        logger.info("="*80)
 
         from .legacy_enrichment_orchestrator import LegacyEnrichmentOrchestrator
 
@@ -1415,9 +1418,9 @@ class CVPipeline:
         # ========================================================================
         from datetime import datetime
         step_3_5_start = datetime.now()
-        print("STEP 3.5: Converting unified parsed data to legacy format")
-        print("="*80)
-        print(f"[TRACE] Step 3.5 started at: {step_3_5_start.strftime('%H:%M:%S.%f')[:-3]}")
+        logger.info("STEP 3.5: Converting unified parsed data to legacy format")
+        logger.info("="*80)
+        logger.info(f"[TRACE] Step 3.5 started at: {step_3_5_start.strftime('%H:%M:%S.%f')[:-3]}")
 
         from .legacy_format_adapter import UnifiedToLegacyAdapter
 
@@ -1429,34 +1432,34 @@ class CVPipeline:
         stage3_sections_dir = self.stage_dirs.get("stage_3_sections", self.output_dir / "stage_3_sections")
         section_files = []
 
-        print(f"[TRACE] stage3_sections_dir: {stage3_sections_dir}")
-        print(f"[TRACE] Directory exists: {stage3_sections_dir.exists()}")
+        logger.info(f"[TRACE] stage3_sections_dir: {stage3_sections_dir}")
+        logger.info(f"[TRACE] Directory exists: {stage3_sections_dir.exists()}")
 
         if stage3_sections_dir.exists():
             # Match both old (section_*) and new ({code}_*) naming patterns
             glob_pattern = f"*_{cv_name}_parsed.json"
-            print(f"[TRACE] Glob pattern: {glob_pattern}")
+            logger.info(f"[TRACE] Glob pattern: {glob_pattern}")
             section_files = list(stage3_sections_dir.glob(glob_pattern))
-            print(f"[TRACE] Found {len(section_files)} matching files:")
+            logger.info(f"[TRACE] Found {len(section_files)} matching files:")
             for f in section_files:
-                print(f"[TRACE]   - {f.name}")
+                logger.info(f"[TRACE]   - {f.name}")
 
             if section_files:
-                print(f"Converting {len(section_files)} section files from unified pipeline...")
-                print("  (Using taxonomy-mapped sections as primary data source)")
+                logger.info(f"Converting {len(section_files)} section files from unified pipeline...")
+                logger.info("  (Using taxonomy-mapped sections as primary data source)")
 
                 # Log enriched_dir status BEFORE conversion
-                print(f"[TRACE] enriched_dir BEFORE conversion: {enriched_dir}")
-                print(f"[TRACE] enriched_dir exists: {enriched_dir.exists()}")
+                logger.info(f"[TRACE] enriched_dir BEFORE conversion: {enriched_dir}")
+                logger.info(f"[TRACE] enriched_dir exists: {enriched_dir.exists()}")
                 if enriched_dir.exists():
                     existing_enriched = list(enriched_dir.glob("*.json"))
-                    print(f"[TRACE] Existing enriched files BEFORE: {len(existing_enriched)}")
+                    logger.info(f"[TRACE] Existing enriched files BEFORE: {len(existing_enriched)}")
                     for f in existing_enriched:
-                        print(f"[TRACE]   - {f.name}")
+                        logger.info(f"[TRACE]   - {f.name}")
 
                 # Run adapter conversion
                 conversion_start = datetime.now()
-                print(f"[TRACE] Starting adapter.convert_all_sections() at: {conversion_start.strftime('%H:%M:%S.%f')[:-3]}")
+                logger.info(f"[TRACE] Starting adapter.convert_all_sections() at: {conversion_start.strftime('%H:%M:%S.%f')[:-3]}")
 
                 created_files = adapter.convert_all_sections(
                     unified_sections_dir=stage3_sections_dir,
@@ -1466,20 +1469,20 @@ class CVPipeline:
                 )
 
                 conversion_end = datetime.now()
-                print(f"[TRACE] Adapter conversion completed at: {conversion_end.strftime('%H:%M:%S.%f')[:-3]}")
-                print(f"[TRACE] Conversion took: {(conversion_end - conversion_start).total_seconds():.3f}s")
-                print(f"[TRACE] Adapter returned {len(created_files) if created_files else 0} created files")
+                logger.info(f"[TRACE] Adapter conversion completed at: {conversion_end.strftime('%H:%M:%S.%f')[:-3]}")
+                logger.info(f"[TRACE] Conversion took: {(conversion_end - conversion_start).total_seconds():.3f}s")
+                logger.info(f"[TRACE] Adapter returned {len(created_files) if created_files else 0} created files")
 
                 # Log enriched_dir status AFTER conversion
                 if enriched_dir.exists():
                     enriched_after = list(enriched_dir.glob("*.json"))
-                    print(f"[TRACE] Enriched files AFTER conversion: {len(enriched_after)}")
+                    logger.info(f"[TRACE] Enriched files AFTER conversion: {len(enriched_after)}")
                     for f in enriched_after:
-                        print(f"[TRACE]   - {f.name}")
+                        logger.info(f"[TRACE]   - {f.name}")
                 else:
-                    print(f"[TRACE] ERROR: enriched_dir does not exist after conversion!")
+                    logger.info(f"[TRACE] ERROR: enriched_dir does not exist after conversion!")
         else:
-            print(f"[TRACE] stage3_sections_dir does NOT exist")
+            logger.info(f"[TRACE] stage3_sections_dir does NOT exist")
 
         # SECOND: Only convert entity-type files if NO section-specific files exist
         # Entity-type files are a fallback for when taxonomy mapping didn't run
@@ -1497,8 +1500,8 @@ class CVPipeline:
                         entity_files[entity_type] = entity_file
 
             if entity_files:
-                print(f"Converting {len(entity_files)} entity types from unified pipeline...")
-                print("  (Fallback mode - no taxonomy-mapped sections found)")
+                logger.info(f"Converting {len(entity_files)} entity types from unified pipeline...")
+                logger.info("  (Fallback mode - no taxonomy-mapped sections found)")
                 adapter.convert_entity_parser_files(
                     entity_files=entity_files,
                     cv_id=cv_id,
@@ -1506,23 +1509,23 @@ class CVPipeline:
                     verbose=True
                 )
         else:
-            print("  Skipping entity-type files (using taxonomy-mapped sections instead)")
+            logger.info("  Skipping entity-type files (using taxonomy-mapped sections instead)")
 
         if not section_files and len(entity_files) == 0:
-            print("No unified parsed data found to convert")
+            logger.info("No unified parsed data found to convert")
 
         step_3_5_end = datetime.now()
-        print(f"[TRACE] Step 3.5 completed at: {step_3_5_end.strftime('%H:%M:%S.%f')[:-3]}")
-        print(f"[TRACE] Step 3.5 total time: {(step_3_5_end - step_3_5_start).total_seconds():.3f}s")
-        print()
+        logger.info(f"[TRACE] Step 3.5 completed at: {step_3_5_end.strftime('%H:%M:%S.%f')[:-3]}")
+        logger.info(f"[TRACE] Step 3.5 total time: {(step_3_5_end - step_3_5_start).total_seconds():.3f}s")
+        logger.info("")
 
         # ========================================================================
         # STEP 4: Run legacy populate_cv.py (with all 7 special handlers)
         # ========================================================================
         step_4_start = datetime.now()
-        print("STEP 4: Populating WCM template")
-        print("="*80)
-        print(f"[TRACE] Step 4 started at: {step_4_start.strftime('%H:%M:%S.%f')[:-3]}")
+        logger.info("STEP 4: Populating WCM template")
+        logger.info("="*80)
+        logger.info(f"[TRACE] Step 4 started at: {step_4_start.strftime('%H:%M:%S.%f')[:-3]}")
 
         # Get WCM template path
         template_path = get_template_path()
@@ -1532,27 +1535,27 @@ class CVPipeline:
 
         output_path = template_dir / f"{cv_name}_WCM.docx"
 
-        print(f"Using direct python-docx CV populator...")
-        print(f"  CV ID: {cv_id}")
-        print(f"  Template: {template_path.name}")
-        print(f"  Enriched files: {enriched_dir}")
+        logger.info(f"Using direct python-docx CV populator...")
+        logger.info(f"  CV ID: {cv_id}")
+        logger.info(f"  Template: {template_path.name}")
+        logger.info(f"  Enriched files: {enriched_dir}")
 
         # CRITICAL: Check what enriched files exist RIGHT BEFORE populate_cv runs
-        print(f"[TRACE] Checking enriched_dir status BEFORE populate_cv...")
-        print(f"[TRACE] enriched_dir: {enriched_dir}")
-        print(f"[TRACE] enriched_dir exists: {enriched_dir.exists()}")
+        logger.info(f"[TRACE] Checking enriched_dir status BEFORE populate_cv...")
+        logger.info(f"[TRACE] enriched_dir: {enriched_dir}")
+        logger.info(f"[TRACE] enriched_dir exists: {enriched_dir.exists()}")
         if enriched_dir.exists():
             enriched_files_pre_populate = list(enriched_dir.glob("*.json"))
-            print(f"[TRACE] Enriched files available for populate_cv: {len(enriched_files_pre_populate)}")
+            logger.info(f"[TRACE] Enriched files available for populate_cv: {len(enriched_files_pre_populate)}")
             for f in enriched_files_pre_populate:
                 file_size = f.stat().st_size
-                print(f"[TRACE]   - {f.name} ({file_size} bytes)")
+                logger.info(f"[TRACE]   - {f.name} ({file_size} bytes)")
         else:
-            print(f"[TRACE] ERROR: enriched_dir does NOT exist before populate_cv!")
-        print()
+            logger.info(f"[TRACE] ERROR: enriched_dir does NOT exist before populate_cv!")
+        logger.info("")
 
         populate_start = datetime.now()
-        print(f"[TRACE] Calling populate_cv_direct() at: {populate_start.strftime('%H:%M:%S.%f')[:-3]}")
+        logger.info(f"[TRACE] Calling populate_cv_direct() at: {populate_start.strftime('%H:%M:%S.%f')[:-3]}")
 
         result = populate_cv_direct(
             cv_id=cv_id,
@@ -1563,35 +1566,35 @@ class CVPipeline:
         )
 
         populate_end = datetime.now()
-        print(f"[TRACE] populate_cv_direct() returned at: {populate_end.strftime('%H:%M:%S.%f')[:-3]}")
-        print(f"[TRACE] populate_cv_direct() took: {(populate_end - populate_start).total_seconds():.3f}s")
+        logger.info(f"[TRACE] populate_cv_direct() returned at: {populate_end.strftime('%H:%M:%S.%f')[:-3]}")
+        logger.info(f"[TRACE] populate_cv_direct() took: {(populate_end - populate_start).total_seconds():.3f}s")
 
         # NEW: Result includes verification data
         verification = result.get('verification', {})
 
-        print()
-        print("="*80)
-        print("WCM TEMPLATE GENERATION COMPLETE!")
-        print("="*80)
-        print(f"✓ Sections populated: {result.get('sections_populated', 0)}")
-        print(f"✓ Total entries: {result.get('total_entries', 0)}")
+        logger.info("")
+        logger.info("="*80)
+        logger.info("WCM TEMPLATE GENERATION COMPLETE!")
+        logger.info("="*80)
+        logger.info(f"✓ Sections populated: {result.get('sections_populated', 0)}")
+        logger.info(f"✓ Total entries: {result.get('total_entries', 0)}")
 
         # NEW: Show verification results
-        print(f"✓ Verified has data: {result.get('verified_has_data', False)}")
-        print(f"✓ Name found: {verification.get('name_found', False)} - '{verification.get('name_text', '')}'")
-        print(f"✓ Data rows in tables: {verification.get('data_rows', 0)}")
+        logger.info(f"✓ Verified has data: {result.get('verified_has_data', False)}")
+        logger.info(f"✓ Name found: {verification.get('name_found', False)} - '{verification.get('name_text', '')}'")
+        logger.info(f"✓ Data rows in tables: {verification.get('data_rows', 0)}")
 
         # CHECK IF FILE ACTUALLY EXISTS AND HAS DATA
         if output_path.exists():
             if result.get('verified_has_data'):
-                print(f"✓ Output: {output_path.name} (VERIFIED WITH DATA)")
+                logger.info(f"✓ Output: {output_path.name} (VERIFIED WITH DATA)")
             else:
-                print(f"⚠️  Output: {output_path.name} (FILE EXISTS BUT MAY BE EMPTY)")
+                logger.info(f"⚠️  Output: {output_path.name} (FILE EXISTS BUT MAY BE EMPTY)")
         else:
-            print(f"✗ Output file NOT created: {output_path.name}")
+            logger.info(f"✗ Output file NOT created: {output_path.name}")
 
-        print("="*80)
-        print()
+        logger.info("="*80)
+        logger.info("")
 
         # Extract record counts
         records_processed = {}  # Not used in new implementation
@@ -1652,13 +1655,13 @@ class CVPipeline:
         # Old code preserved but not executed
         if False:  # Disabled old inline approach
             # Old approach - kept for reference but disabled
-            print("Using advanced legacy handlers for template population...")
-            print()
+            logger.info("Using advanced legacy handlers for template population...")
+            logger.info("")
 
             # This code is preserved but not executed
             parsed_data = {}
             if False and parsed_data.get("publications"):
-                print("Enriching publications with PMID/PMCID lookup...")
+                logger.info("Enriching publications with PMID/PMCID lookup...")
                 enricher = PubMedEnricher(verbose=False)
                 enriched_count = 0
 
@@ -1687,24 +1690,24 @@ class CVPipeline:
                         enriched_count += 1
 
                 if enriched_count > 0:
-                    print(f"  ✓ Enriched {enriched_count} publications with identifiers")
+                    logger.info(f"  ✓ Enriched {enriched_count} publications with identifiers")
                 else:
-                    print(f"  ℹ️  No publications needed enrichment")
-                print()
+                    logger.info(f"  ℹ️  No publications needed enrichment")
+                logger.info("")
 
             # Load template using legacy navigator
             doc = load_template(str(template_path))
 
             # Use personal information extracted at pipeline start (Section A)
-            print("Using personal information from pipeline initialization...")
+            logger.info("Using personal information from pipeline initialization...")
             personal_info = self.personal_info
             if not personal_info:
                 # Fallback: extract now if not already done (shouldn't happen)
-                print("  ⚠️  Personal info not found, extracting now...")
+                logger.info("  ⚠️  Personal info not found, extracting now...")
                 personal_info = extract_personal_info(str(self.cv_path))
                 self.personal_info = personal_info
-            print(f"  ✓ Name: {personal_info.get('full_name', 'NOT FOUND')}")
-            print()
+            logger.info(f"  ✓ Name: {personal_info.get('full_name', 'NOT FOUND')}")
+            logger.info("")
 
             # Convert personal_info to expected format for populate function
             # populate_section_a_personal_data expects: {'parsed_entries': [{'Full Name': '...'}]}
@@ -1725,17 +1728,17 @@ class CVPipeline:
             }
 
             # Populate Section A (Personal Data) using legacy handler
-            print("Populating Section A: Personal Data...")
+            logger.info("Populating Section A: Personal Data...")
             personal_result = populate_section_a_personal_data(
                 doc,
                 personal_data_formatted,
                 verbose=True
             )
             if personal_result.get('success'):
-                print(f"  ✓ Personal data populated successfully")
+                logger.info(f"  ✓ Personal data populated successfully")
             else:
-                print(f"  ⚠️  {personal_result.get('error', 'Unknown error')}")
-            print()
+                logger.info(f"  ⚠️  {personal_result.get('error', 'Unknown error')}")
+            logger.info("")
 
             # Convert parsed data to legacy format
             legacy_data = self._convert_to_legacy_format(parsed_data)
@@ -1755,7 +1758,7 @@ class CVPipeline:
                     last_name = name_parts[-1]
                     first_names = ' '.join(name_parts[:-1])
                     cv_owner_name = f"{last_name}, {first_names}"
-                    print(f"Converted name: '{cv_owner_name_raw}' → '{cv_owner_name}'")
+                    logger.info(f"Converted name: '{cv_owner_name_raw}' → '{cv_owner_name}'")
                 elif len(name_parts) == 1:
                     # Single name - use as-is
                     cv_owner_name = name_parts[0]
@@ -1777,16 +1780,16 @@ class CVPipeline:
                         cv_owner_name = f"{last_name}, {first_name}"
                     else:
                         cv_owner_name = name_parts[-1]  # Use last part as name
-                print(f"Extracted name from filename: '{cv_owner_name}'")
+                logger.info(f"Extracted name from filename: '{cv_owner_name}'")
 
             if cv_owner_name:
-                print(f"✓ CV Owner Name: {cv_owner_name}")
+                logger.info(f"✓ CV Owner Name: {cv_owner_name}")
             else:
-                print("⚠️  Warning: Could not extract CV owner name for author bolding")
+                logger.info("⚠️  Warning: Could not extract CV owner name for author bolding")
 
             # Populate bibliography with advanced features (categorization, bolding, etc.)
             if 'bibliography' in legacy_data:
-                print("Populating bibliography with subsection categorization...")
+                logger.info("Populating bibliography with subsection categorization...")
                 result = populate_section_s_bibliography(
                     doc,
                     legacy_data['bibliography'],
@@ -1794,12 +1797,12 @@ class CVPipeline:
                     verbose=True
                 )
                 if result.get('success'):
-                    print(f"  ✓ Inserted {result['entries_inserted']} publications across {len(result.get('subsections_populated', {}))} subsections")
-                print()
+                    logger.info(f"  ✓ Inserted {result['entries_inserted']} publications across {len(result.get('subsections_populated', {}))} subsections")
+                logger.info("")
 
             # Populate education using generic table insertion
             if 'education' in legacy_data and legacy_data['education']['entries']:
-                print(f"Populating education ({len(legacy_data['education']['entries'])} entries)...")
+                logger.info(f"Populating education ({len(legacy_data['education']['entries'])} entries)...")
                 section_title = "EDUCATION"
                 fields_order = ['Degree', 'Major/Field', 'Institution', 'City', 'State/Province', 'Country', 'Dates', 'Year Awarded']
 
@@ -1818,14 +1821,14 @@ class CVPipeline:
                     enriched_entries=legacy_data['education']['entries']
                 )
                 if result.get('success'):
-                    print(f"  ✓ Inserted {result['entries_inserted']} education entries")
+                    logger.info(f"  ✓ Inserted {result['entries_inserted']} education entries")
                 else:
-                    print(f"  ⚠️  {result.get('error', 'Unknown error')}")
-                print()
+                    logger.info(f"  ⚠️  {result.get('error', 'Unknown error')}")
+                logger.info("")
 
             # Populate positions
             if 'positions' in legacy_data and legacy_data['positions']['entries']:
-                print(f"Populating positions ({len(legacy_data['positions']['entries'])} entries)...")
+                logger.info(f"Populating positions ({len(legacy_data['positions']['entries'])} entries)...")
 
                 # Split into academic and other positions
                 academic_positions = [p for p in legacy_data['positions']['entries'] if p.get('_is_academic')]
@@ -1844,7 +1847,7 @@ class CVPipeline:
                         enriched_entries=academic_positions
                     )
                     if result.get('success'):
-                        print(f"  ✓ Inserted {result['entries_inserted']} academic positions")
+                        logger.info(f"  ✓ Inserted {result['entries_inserted']} academic positions")
 
                 # Populate Other Professional Positions
                 if other_positions:
@@ -1857,29 +1860,29 @@ class CVPipeline:
                         enriched_entries=other_positions
                     )
                     if result.get('success'):
-                        print(f"  ✓ Inserted {result['entries_inserted']} other positions")
-                print()
+                        logger.info(f"  ✓ Inserted {result['entries_inserted']} other positions")
+                logger.info("")
 
             # Populate grants using Section M handler
             if 'grants' in legacy_data and legacy_data['grants']['entries']:
-                print(f"Populating grants ({len(legacy_data['grants']['entries'])} entries)...")
+                logger.info(f"Populating grants ({len(legacy_data['grants']['entries'])} entries)...")
                 result = populate_section_m_research(doc, legacy_data['grants'], verbose=False)
                 if result.get('success'):
-                    print(f"  ✓ Inserted {result.get('entries_inserted', 0)} grant entries")
+                    logger.info(f"  ✓ Inserted {result.get('entries_inserted', 0)} grant entries")
                 else:
-                    print(f"  ⚠️  {result.get('error', 'Unknown error')}")
-                print()
+                    logger.info(f"  ⚠️  {result.get('error', 'Unknown error')}")
+                logger.info("")
 
             # Save populated template
             output_path = template_dir / f"{cv_name}_wcm_template.docx"
             doc.save(str(output_path))
-            print(f"✓ Template saved: {output_path.name}")
-            print()
+            logger.info(f"✓ Template saved: {output_path.name}")
+            logger.info("")
 
         else:
             # Fallback to simple filler
-            print("Using simple template filler (legacy handlers not available)...")
-            print()
+            logger.info("Using simple template filler (legacy handlers not available)...")
+            logger.info("")
 
             from .wcm_template_filler_v2 import WCMTemplateFiller
             filler = WCMTemplateFiller(str(template_path))
@@ -1900,8 +1903,8 @@ class CVPipeline:
             # Save populated template
             output_path = template_dir / f"{cv_name}_wcm_template.docx"
             filler.save(str(output_path))
-            print(f"✓ Template saved: {output_path.name}")
-            print()
+            logger.info(f"✓ Template saved: {output_path.name}")
+            logger.info("")
 
         # Save metadata
         metadata = {
@@ -1935,18 +1938,18 @@ class CVPipeline:
         Returns:
             Path to summary report JSON
         """
-        print("="*80)
-        print("GENERATING SUMMARY REPORT")
-        print("="*80)
-        print()
+        logger.info("="*80)
+        logger.info("GENERATING SUMMARY REPORT")
+        logger.info("="*80)
+        logger.info("")
 
         summary_path = self.output_dir / f"{self.cv_path.stem}_pipeline_summary.json"
 
         with open(summary_path, 'w') as f:
             json.dump(self.results, f, indent=2)
 
-        print(f"✓ Summary report: {summary_path}")
-        print()
+        logger.info(f"✓ Summary report: {summary_path}")
+        logger.info("")
 
         return str(summary_path)
 
@@ -1957,22 +1960,22 @@ class CVPipeline:
         Returns:
             Pipeline results dictionary
         """
-        print("="*80)
-        print("CV PARSING PIPELINE")
-        print("="*80)
-        print(f"Input: {self.cv_path}")
-        print(f"Output directory: {self.output_dir}")
-        print()
+        logger.info("="*80)
+        logger.info("CV PARSING PIPELINE")
+        logger.info("="*80)
+        logger.info(f"Input: {self.cv_path}")
+        logger.info(f"Output directory: {self.output_dir}")
+        logger.info("")
 
         try:
             # Extract personal info FIRST (used to filter name from other sections)
-            print("="*80)
-            print("PRELIMINARY: EXTRACTING PERSONAL INFORMATION")
-            print("="*80)
-            print("Extracting name and contact info from first page...")
+            logger.info("="*80)
+            logger.info("PRELIMINARY: EXTRACTING PERSONAL INFORMATION")
+            logger.info("="*80)
+            logger.info("Extracting name and contact info from first page...")
             self.personal_info = extract_personal_info(str(self.cv_path))
-            print(f"✓ Extracted name: {self.personal_info.get('full_name', 'NOT FOUND')}")
-            print()
+            logger.info(f"✓ Extracted name: {self.personal_info.get('full_name', 'NOT FOUND')}")
+            logger.info("")
 
             # Stage 1: Segmentation
             segmented_data = self.run_stage_1_segmentation()
@@ -1996,31 +1999,31 @@ class CVPipeline:
             summary_path = self.generate_summary_report()
 
             # Print final summary
-            print("="*80)
-            print("PIPELINE COMPLETE")
-            print("="*80)
-            print(f"Stage 1 - Segmentation: {self.results['stages']['stage_1_segmentation']['num_groups']} groups, {self.results['stages']['stage_1_segmentation']['total_entries']} entries")
-            print(f"Stage 3 - Taxonomy Mapping: {self.results['stages']['stage_3_taxonomy_mapping']['total_sections']} sections, avg confidence {self.results['stages']['stage_3_taxonomy_mapping']['avg_confidence']:.2f}")
-            print()
-            print("Stage 4 - Section Parsing:")
+            logger.info("="*80)
+            logger.info("PIPELINE COMPLETE")
+            logger.info("="*80)
+            logger.info(f"Stage 1 - Segmentation: {self.results['stages']['stage_1_segmentation']['num_groups']} groups, {self.results['stages']['stage_1_segmentation']['total_entries']} entries")
+            logger.info(f"Stage 3 - Taxonomy Mapping: {self.results['stages']['stage_3_taxonomy_mapping']['total_sections']} sections, avg confidence {self.results['stages']['stage_3_taxonomy_mapping']['avg_confidence']:.2f}")
+            logger.info("")
+            logger.info("Stage 4 - Section Parsing:")
             for section_type in ["publications", "education", "positions", "grants", "certifications", "honors", "memberships", "service", "licensure", "mentoring"]:
                 key = f"stage_3_{section_type}_parsing"
                 if key in self.results["stages"]:
-                    print(f"  {section_type.capitalize()}: {self.results['stages'][key]['total_items']} items ({self.results['stages'][key]['high_confidence']} high confidence)")
-            print()
-            print(f"Stage 4 - WCM Template Generation:")
+                    logger.info(f"  {section_type.capitalize()}: {self.results['stages'][key]['total_items']} items ({self.results['stages'][key]['high_confidence']} high confidence)")
+            logger.info("")
+            logger.info(f"Stage 4 - WCM Template Generation:")
             if "stage_4_template_generation" in self.results["stages"]:
                 stage_4 = self.results["stages"]["stage_4_template_generation"]
-                print(f"  Template: {Path(stage_4['output_file']).name}")
-                print(f"  Total records: {stage_4['total_records']}")
-            print()
-            print(f"Summary report: {summary_path}")
-            print()
+                logger.info(f"  Template: {Path(stage_4['output_file']).name}")
+                logger.info(f"  Total records: {stage_4['total_records']}")
+            logger.info("")
+            logger.info(f"Summary report: {summary_path}")
+            logger.info("")
 
             return self.results
 
         except Exception as e:
-            print(f"✗ Pipeline failed: {e}")
+            logger.info(f"✗ Pipeline failed: {e}")
             import traceback
             traceback.print_exc()
             raise
@@ -2160,7 +2163,7 @@ def main():
 
     # Validate input
     if not os.path.exists(args.cv_path):
-        print(f"Error: CV file not found: {args.cv_path}", file=sys.stderr)
+        logger.info(f"Error: CV file not found: {args.cv_path}")
         sys.exit(1)
 
     # Run pipeline
@@ -2170,9 +2173,11 @@ def main():
         sys.exit(0)
 
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        logger.info(f"Error: {e}")
         sys.exit(1)
 
 
 if __name__ == '__main__':
+    from ..pipeline_logging import ensure_logging
+    ensure_logging()
     main()
