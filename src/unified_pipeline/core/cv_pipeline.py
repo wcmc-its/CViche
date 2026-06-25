@@ -2176,6 +2176,4 @@ def main():
 
 
 if __name__ == '__main__':
-    from ..pipeline_logging import ensure_logging
-    ensure_logging()
     main()
