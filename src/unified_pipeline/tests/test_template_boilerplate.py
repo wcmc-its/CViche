@@ -64,6 +64,10 @@ NEGATIVES = [
     "Smith, J | Harvard | Research",
     "Director | Dept of Medicine | Administrative",
     "License # | State | Date",
+    # Real table rows that retain ONE distinctive leftover instruction cell must
+    # keep the row (the real data cells win). Whole-row drop was a data-loss bug.
+    "Cardiovascular Disease | 123456 | (indicate if board eligible) | 2015-2025",
+    "Internal Medicine | 98765 | (indicate if board eligible) | 06/2010-06/2020",
     # Bare single-word entries that collide with template field labels.
     "Teaching", "Clinical", "Administrative", "Research",
     "International", "National", "Regional",

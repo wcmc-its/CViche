@@ -683,8 +683,7 @@ class WCMTemplateGenerator:
     """
 
     def __init__(self, template_path: str = None, verbose: bool = True,
-                 emit_track_changes: bool = True, emit_comments: bool = False,
-                 strip_template_instructions: bool = True):
+                 emit_track_changes: bool = True, emit_comments: bool = False):
         # Find a valid template path
         self.template_path = self._find_template(template_path)
         self.verbose = verbose
@@ -698,11 +697,6 @@ class WCMTemplateGenerator:
         # comments.xml part is created.
         self.emit_track_changes = emit_track_changes
         self.emit_comments = emit_comments
-
-        # When False, keep WCM-template instruction text in the output instead
-        # of scrubbing it (issue #141 follow-up). Mirrors the Run column default
-        # (ON) so existing behavior is unchanged unless the user opts out.
-        self.strip_template_instructions = strip_template_instructions
 
         # CV owner location context for geographic scope classification
         self.cv_owner_location = None
@@ -2257,11 +2251,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             start_para_idx: Paragraph index to start searching from
             max_paragraphs: Maximum number of paragraphs to check after the header
         """
-        # Honor the user's choice: when stripping is disabled, keep instruction
-        # paragraphs in the output (mirrors the Stage 2 filter gate).
-        if not self.strip_template_instructions:
-            return
-
         if start_para_idx >= len(self.doc.paragraphs):
             return
 
@@ -8500,8 +8489,7 @@ Now analyze the text above:"""
 
 
 def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
-               emit_track_changes: bool = True, emit_comments: bool = False,
-               strip_template_instructions: bool = True) -> str:
+               emit_track_changes: bool = True, emit_comments: bool = False) -> str:
     """
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -8512,8 +8500,6 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
         emit_track_changes: Render edits as Word track changes (default True).
             When False, edits render as plain accepted text.
         emit_comments: Emit Word classification/pipeline comments (default False).
-        strip_template_instructions: Scrub WCM-template instruction paragraphs
-            from the output (default True). When False, keep the instruction text.
 
     Returns:
         Path to generated document
@@ -8522,7 +8508,6 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
         verbose=verbose,
         emit_track_changes=emit_track_changes,
         emit_comments=emit_comments,
-        strip_template_instructions=strip_template_instructions,
     )
     return generator.generate(input_path, output_path)
 
