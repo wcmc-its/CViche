@@ -23,10 +23,6 @@ except ImportError:
     from data_structurer import DataStructurer
     from template_mapper import TemplateMapper
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
 

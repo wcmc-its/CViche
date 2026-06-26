@@ -14,7 +14,6 @@ from .config import (
 )
 from .utils import clean_text, normalize_section_name, is_section_header
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
