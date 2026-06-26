@@ -1,3 +1,4 @@
+import logging
 import os
 import boto3
 import pymysql
@@ -5,12 +6,18 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from app.config_loader import get_config
 
+logger = logging.getLogger(__name__)
+
+
 def create_cviche_engine(db_host: str, db_port: str, db_name: str, db_user: str):
     """
     Pure engine compiler. Accepts configuration values directly,
     eliminating pathing or duplicate file-reading bugs.
     """
-    print(f"==> DB Factory: Compiling Engine -> HOST: '{db_host}', PORT: '{db_port}', USER: '{db_user}'")
+    # NOTE: this module is imported both by the app (root logger at INFO) and by
+    # alembic (root at WARNING per alembic.ini), so this line shows in the app
+    # logs and is filtered during migrations -- which is fine for a diagnostic.
+    logger.info("DB factory: compiling engine -> host=%s port=%s user=%s", db_host, db_port, db_user)
 
     if not all([db_host, db_port, db_name, db_user]):
         raise RuntimeError(

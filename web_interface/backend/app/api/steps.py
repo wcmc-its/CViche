@@ -203,8 +203,8 @@ async def _generate_preview_from_path(file_path: Path) -> OutputPreview | None:
 
         return _parse_json_to_preview(data)
 
-    except Exception as e:
-        print(f"Error generating preview: {e}")
+    except Exception:
+        logger.exception("Error generating preview")
         return None
 
 
@@ -223,8 +223,8 @@ async def _generate_preview(run_id: str, filename: str) -> OutputPreview | None:
 
         return _parse_json_to_preview(data)
 
-    except Exception as e:
-        print(f"Error generating preview: {e}")
+    except Exception:
+        logger.exception("Error generating preview")
         return None
 
 
@@ -297,8 +297,8 @@ def _parse_json_to_preview(data) -> OutputPreview | None:
             rows = [[str(k), str(v)[:200]] for k, v in list(data.items())]
             return OutputPreview(headers=headers, rows=rows)
 
-    except Exception as e:
-        print(f"Error generating preview: {e}")
+    except Exception:
+        logger.exception("Error generating preview")
         return None
 
     return None

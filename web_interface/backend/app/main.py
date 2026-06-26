@@ -138,7 +138,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup: Initialize database
-    print("🚀 Starting CViche Pipeline Viewer...")
+    logger.info("🚀 Starting CViche Pipeline Viewer...")
     # init_db() emits CREATE TABLE IF NOT EXISTS via metadata.create_all().
     # In production the runtime DB role is DML-only (IAM-auth'd cviche_app_user
     # with SELECT/INSERT/UPDATE/DELETE) and Alembic owns schema via a separate
@@ -146,9 +146,9 @@ async def lifespan(app: FastAPI):
     # don't fail at boot trying to issue DDL they aren't authorized for.
     if os.environ.get("CVICHE_INIT_DB", "1") == "1":
         init_db()
-        print("✅ Database initialized")
+        logger.info("✅ Database initialized")
     else:
-        print("⏭️  Skipping init_db() (CVICHE_INIT_DB=0); Alembic owns schema.")
+        logger.info("⏭️  Skipping init_db() (CVICHE_INIT_DB=0); Alembic owns schema.")
     from app.config_loader import seed_system_config
     from app.consent import load_consent_text, check_consent_integrity
     from app.services.run_service import reconcile_stale_runs
@@ -156,15 +156,15 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         seed_system_config(db)
-        print("✅ System config seeded")
+        logger.info("✅ System config seeded")
         load_consent_text()
-        print("✅ Consent text loaded")
+        logger.info("✅ Consent text loaded")
         check_consent_integrity(db)
         # Resolve runs orphaned by a previous restart so they don't hang
         # in "running" forever (the UI would count elapsed time up endlessly).
         swept = reconcile_stale_runs(db)
         if swept:
-            print(f"♻️  Reconciled {swept} stale run(s) from a previous restart")
+            logger.info("♻️  Reconciled %d stale run(s) from a previous restart", swept)
     finally:
         db.close()
 
@@ -180,16 +180,16 @@ async def lifespan(app: FastAPI):
     orchestrator_module.set_broker(broker)
     await event_emitter.startup()
     if broker.enabled:
-        print("✅ Redis broker enabled (cross-worker events + cancellation)")
+        logger.info("✅ Redis broker enabled (cross-worker events + cancellation)")
     else:
-        print("ℹ️  Redis broker disabled — in-process events (single-worker mode)")
+        logger.info("ℹ️  Redis broker disabled — in-process events (single-worker mode)")
 
     yield
 
     # Shutdown: stop the subscriber loop and close broker connections.
     await event_emitter.shutdown()
     await broker.shutdown()
-    print("👋 Shutting down CViche Pipeline Viewer")
+    logger.info("👋 Shutting down CViche Pipeline Viewer")
 
 
 # Create FastAPI app
