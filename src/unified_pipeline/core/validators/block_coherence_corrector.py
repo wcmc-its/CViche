@@ -263,7 +263,13 @@ def apply_block_coherence_corrections(
             if verdict["applied"]:
                 for e, new in zip(b["entries"], verdict["codes"]):
                     old = e.get("taxonomy_code")
-                    if new and new != old:
+                    # SCOPE GUARD: only the actual bug -- a row reattributed from a
+                    # subject-self family to a third-party (N) family. Never let the
+                    # judge re-subcode the subject's own records or service blocks;
+                    # that is 3b's job and would be a huge blast radius.
+                    # ponytail: N-only for now; widen the OTHER set (co-author S, N4)
+                    # once each target is separately validated.
+                    if new and new != old and _family(new) == "N" and _family(old) != "N":
                         e["taxonomy_code"] = new
                         e["taxonomy_confidence"] = verdict.get("confidence", min_confidence)
                         e["block_coherence_correction"] = {"original_code": old, "evidence": verdict.get("evidence", "")}
