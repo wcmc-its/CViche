@@ -43,6 +43,12 @@ spec:
             # ceiling is the pub/sub->Streams + worker migration.
             - name: CVICHE_MAX_CONCURRENT_RUNS
               value: "3"
+            # Dev-first rollout of the #198 block-coherence repair (off by default
+            # in code). Replays passed: fixes misrouted mentees/staff, zero
+            # subject-own rows touched. Watch the "10c." log line + Bedrock cost
+            # here before enabling in prod.
+            - name: CVICHE_BLOCK_COHERENCE_REPAIR
+              value: "1"
           envFrom:
             - secretRef:
                 name: cviche-secrets
