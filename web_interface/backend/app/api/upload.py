@@ -127,6 +127,24 @@ UPLOAD_DIR = Path(__file__).parent.parent.parent.parent / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def estimate_run_seconds(text_char_count: int) -> tuple[int, int]:
+    """(min, max) wall-clock seconds for a full run, scaled to document size.
+
+    Token-based (≈4 chars/token), tuned to observed runs (~8 min for 3500
+    tokens). Used by /estimate for the pre-run quote AND stored per-run so the
+    client stall watchdog can scale its "taking longer than expected" threshold
+    to the actual CV instead of a fixed constant. Single source of truth for
+    both, so the quote shown and the threshold applied never drift.
+    """
+    text_char_count = max(text_char_count, 1000)
+    estimated_tokens = text_char_count // 4
+    base_time = BASE_OVERHEAD_SECONDS + (estimated_tokens / 1000) * TIME_PER_1K_TOKENS
+    total_time = base_time + len(STEP_REGISTRY) * 20  # ~20s/stage init + API overhead
+    time_min = max(int(total_time * 0.6), 180)        # at least 3 min
+    time_max = max(int(total_time * 1.3), time_min + 180)
+    return time_min, time_max
+
+
 def generate_run_id() -> str:
     """Generate a unique 6-character run ID like 'A1B2C3'."""
     return secrets.token_urlsafe(4)[:6].upper()
@@ -277,6 +295,14 @@ async def upload_cv(
     except Exception as e:
         logger.warning("Failed to write by-submitter index (run=%s): %s", run_id, e)
 
+    # Input-scaled wall-clock estimate, stored so the client stall watchdog can
+    # scale its "taking longer than expected" threshold to this CV instead of a
+    # fixed constant (large CVs were false-positiving as "may be stuck"). Same
+    # helper as /estimate. extracted is None only when text extraction couldn't
+    # run; fall back to a size-based char estimate then.
+    est_char_count = len(extracted) if extracted else max(1, len(content) // 30000) * 2000
+    _, estimated_duration_seconds = estimate_run_seconds(est_char_count)
+
     # Create run record. Persist the user's output-rendering choices (issue
     # #153) as the truthy ints the Stage 6 generator reads at render time.
     run = Run(
@@ -286,6 +312,7 @@ async def upload_cv(
         status="created",
         started_at=datetime.now(),
         user_id=current_user.id,
+        estimated_duration_seconds=estimated_duration_seconds,
         show_track_changes=1 if include_track_changes else 0,
         show_pipeline_comments=1 if include_classification_comments else 0,
     )
@@ -422,25 +449,12 @@ async def estimate_processing(
     # mapping, field extraction, research summary, enrichment, and doc gen.
     cost_min, cost_max = get_estimated_run_cost(text_char_count)
 
-    # Time estimation based on empirical data
-    # Actual processing observed: ~8 minutes for 3500 tokens
-    # Time is highly variable due to API latency and document complexity
-    # Use conservative estimates to avoid misleading users
-    base_overhead_seconds = BASE_OVERHEAD_SECONDS
-    time_per_1k_tokens = TIME_PER_1K_TOKENS
-
-    base_time = base_overhead_seconds + (estimated_tokens / 1000) * time_per_1k_tokens
+    # Time estimate (input-scaled). Shared helper with the per-run value the
+    # stall watchdog uses, so the quote shown here and the threshold applied
+    # during the run can't drift apart.
+    time_min, time_max = estimate_run_seconds(text_char_count)
     num_stages = len(STEP_REGISTRY)
 
-    # Each stage adds overhead for initialization and API calls
-    total_time = base_time + (num_stages * 20)  # ~20 seconds per stage average
-
-    time_min = int(total_time * 0.6)
-    time_max = int(total_time * 1.3)
-
-    # Ensure reasonable minimums
-    time_min = max(time_min, 180)  # At least 3 minutes
-    time_max = max(time_max, time_min + 180)  # At least 3 minutes more than min
     cost_min = max(cost_min, 0.10)  # At least $0.10
     cost_max = max(cost_max, cost_min * 1.3)  # At least 1.3x the min
 

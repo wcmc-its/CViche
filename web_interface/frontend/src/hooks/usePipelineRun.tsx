@@ -5,9 +5,15 @@ import { getWebSocketUrl } from '../api/websocket'
 import { wsRoutes } from '../api/routes'
 
 // Tuning Constants matching your design requirements
+// Fallback only — runs now carry a per-document estimated_duration_seconds; this
+// fixed value is used solely for older runs created before that column existed.
 const EXPECTED_TOTAL_SECONDS = 475 // Weighted estimates sum (~8 min)
 const STALL_NO_PROGRESS_MS = 5 * 60 * 1000
-const STALL_ELAPSED_MULTIPLIER = 3
+// "Taking longer than expected" fires past this multiple of the run's OWN
+// input-scaled estimate, so a legitimately large CV no longer trips it just for
+// exceeding a one-size-fits-all constant. The genuine-stall signal is the
+// no-progress timer above, which is independent of run size.
+const STALL_PAD_MULTIPLIER = 2
 const POLL_FAILURE_THRESHOLD = 3
 
 // Run/step statuses that are terminal — once observed, a stale poll snapshot must
@@ -273,6 +279,10 @@ export function usePipelineRun(runId: string) {
         setLocalElapsedSeconds(runStatus.total_duration_seconds || 0)
       }
 
+      // Scale the "longer than expected" threshold to THIS run's input-scaled
+      // estimate; fall back to the fixed constant for runs predating it.
+      const expectedSeconds = runStatus.estimated_duration_seconds || EXPECTED_TOTAL_SECONDS
+
       const timer = setInterval(() => {
         if (!startTimeRef.current) return
         const elapsed = Math.floor((Date.now() - startTimeRef.current) / 1000)
@@ -280,7 +290,7 @@ export function usePipelineRun(runId: string) {
 
         const noProgressMs = Date.now() - lastProgressRef.current.at
         setMaybeStuck(
-          noProgressMs > STALL_NO_PROGRESS_MS || elapsed > EXPECTED_TOTAL_SECONDS * STALL_ELAPSED_MULTIPLIER
+          noProgressMs > STALL_NO_PROGRESS_MS || elapsed > expectedSeconds * STALL_PAD_MULTIPLIER
         )
       }, 1000)
 
@@ -292,7 +302,7 @@ export function usePipelineRun(runId: string) {
       startTimeRef.current = null
       setMaybeStuck(false)
     }
-  }, [runStatus?.status, runStatus?.total_duration_seconds])
+  }, [runStatus?.status, runStatus?.total_duration_seconds, runStatus?.estimated_duration_seconds])
 
   // Monitors backend progress signature (Resets stall alert upon data advancement)
   useEffect(() => {

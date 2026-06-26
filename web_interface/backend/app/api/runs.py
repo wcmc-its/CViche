@@ -175,6 +175,7 @@ async def get_run_status(
         input_tokens=run.input_tokens or 0,
         output_tokens=run.output_tokens or 0,
         total_duration_seconds=total_duration_seconds,
+        estimated_duration_seconds=run.estimated_duration_seconds,
         error_message=run.error_message,
         steps=step_summaries
     )
