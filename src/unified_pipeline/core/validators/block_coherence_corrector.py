@@ -125,18 +125,43 @@ def _detect(entries: List[Dict]) -> List[Dict]:
     return kept
 
 
-def build_punt_package(entries: List[Dict], block: Dict) -> str:
-    """The context the per-entry classifier never saw -- for the LLM judge."""
+def build_punt_package(entries: List[Dict], block: Dict, subject_name: Optional[str] = None) -> str:
+    """Restore the context the per-entry classifier never saw, for the LLM judge:
+    the profile subject's identity, the subject's own education (a self-vs-other
+    anchor), the recovered sub-header ancestry, and the block at full width."""
     ordered = sorted(entries, key=_idx)
     start = _idx(block["entries"][0])
-    preceding = [e for e in ordered if _idx(e) < start][-6:]
-    headers = [e for e in preceding if _is_header_like(e)] or preceding[-2:]
-    lines = ["PRECEDING CONTEXT (header-like rows the per-entry classifier ignored):"]
-    lines += [f"   [{e.get('taxonomy_code')}] {(e.get('text') or '').strip()[:70]}" for e in headers]
-    lines.append("\nBLOCK (a contiguous sibling list; current per-entry codes disagree):")
+
+    # recovered sub-header ancestry: header-like rows in the ~20 rows above the
+    # block (wide enough to reach grouping headers like "Trainees (laboratory)",
+    # not just the direct parent), nearest last.
+    window = [e for e in ordered if _idx(e) < start][-20:]
+    # genuine orphaned sub-headers land in the T bucket; prefer those (drops a real
+    # content row like "X (editorial board member)" that the ")"-rule would catch).
+    headers = [e for e in window if _is_header_like(e) and _family(e.get("taxonomy_code")) == "T"][-4:]
+    if not headers:
+        headers = [e for e in window if _is_header_like(e)][-2:]
+    # subject's own degrees: the B family is reliably the subject, so it anchors
+    # "these ARE the subject" against the third parties in the block.
+    education = [e for e in ordered if _family(e.get("taxonomy_code")) == "B"][:3]
+
+    lines: List[str] = []
+    if subject_name:
+        lines.append(f"PROFILE SUBJECT: {subject_name}")
+    section = " > ".join(str(x) for x in (block["entries"][0].get("hierarchy") or []))
+    if section:
+        lines.append(f"SECTION (as classified): {section}")
+    if education:
+        lines.append("SUBJECT'S OWN EDUCATION (these ARE the subject -- contrast against the block):")
+        for e in education:
+            lines.append(f"   [{e.get('taxonomy_code')}] {(e.get('text') or '').replace(chr(9), ' ').strip()[:140]}")
+    lines.append("\nRECOVERED SUB-HEADERS above the block (nearest last; the per-entry "
+                 "classifier never saw these):")
+    lines += [f"   [{e.get('taxonomy_code')}] {(e.get('text') or '').replace(chr(9), ' ').strip()[:90]}" for e in headers]
+    lines.append("\nBLOCK (a contiguous sibling list; current per-entry codes shown -- they disagree):")
     for e in block["entries"]:
         raw = (e.get("text", "") or "").replace("\t", " ⇥ ")
-        lines.append(f"   {str(e.get('taxonomy_code')):4} | {raw[:88]}")
+        lines.append(f"   {str(e.get('taxonomy_code')):4} | {raw[:300]}")
     lines.append("\nWHOSE FACT IS EACH ROW -- the profile SUBJECT's own, or a THIRD PARTY's "
                  "(mentee / co-author / co-PI)? If these form one coherent subsection, give the "
                  "single taxonomy family + evidence; if genuinely mixed, say leave-it.")
@@ -216,6 +241,7 @@ def apply_block_coherence_corrections(
     llm: Optional[Callable[[str], str]] = None,
     apply: bool = False,
     min_confidence: float = 0.8,
+    subject_name: Optional[str] = None,
 ) -> Tuple[List[Dict], Dict]:
     """Notice incoherent / orphaned-header blocks; repair via LLM when ``apply``.
 
@@ -228,7 +254,7 @@ def apply_block_coherence_corrections(
     corrections_made = 0
     flagged = []
     for b in blocks:
-        punt = build_punt_package(entries, b)
+        punt = build_punt_package(entries, b, subject_name)
         rec = {"reason": b["reason"], "hierarchy": b["hierarchy"],
                "families": b["families"], "n": len(b["entries"]), "punt": punt}
         if apply and llm is not None:
