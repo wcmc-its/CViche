@@ -823,6 +823,7 @@ def run_stage_2(
     docx_path: str,
     hierarchy_json_path: str = None,
     cancel_check: Optional[Callable[[], None]] = None,
+    strip_template_instructions: bool = True,
 ):
     """
     Main Stage 2: Extract entries from CV sections using LLM
@@ -839,6 +840,10 @@ def run_stage_2(
                             check a cancel would not land until all ~86 sections
                             finished. None (the standalone CLI default) is a
                             no-op, leaving CLI behavior unchanged.
+        strip_template_instructions: When True (default), drop WCM-template
+                            instruction boilerplate from the extracted entries.
+                            When False, keep the instruction text so it survives
+                            into the output.
     """
 
     print(f"Input: {docx_path}")
@@ -1115,15 +1120,17 @@ def run_stage_2(
     # Faculty leave the blank template's instruction scaffolding in their CVs;
     # those blocks get parsed as entries and pollute downstream output. The
     # detector is precision-biased (never drops real CV content). Section
-    # headers are intentionally NOT dropped here.
-    _pre_filter_count = len(all_entries)
-    all_entries = [
-        e for e in all_entries
-        if not is_template_instruction(e.get("text", ""))
-    ]
-    _filtered_count = _pre_filter_count - len(all_entries)
-    if _filtered_count:
-        print(f"Filtered {_filtered_count} WCM-template instruction entries")
+    # headers are intentionally NOT dropped here. Gated on the user's choice:
+    # when strip_template_instructions is False, the instruction text is kept.
+    if strip_template_instructions:
+        _pre_filter_count = len(all_entries)
+        all_entries = [
+            e for e in all_entries
+            if not is_template_instruction(e.get("text", ""))
+        ]
+        _filtered_count = _pre_filter_count - len(all_entries)
+        if _filtered_count:
+            print(f"Filtered {_filtered_count} WCM-template instruction entries")
 
     # Recompute coverage buckets after filtering so reported counts are accurate.
     content_entries = [e for e in all_entries if e["element_type"] not in ("header", "break")]

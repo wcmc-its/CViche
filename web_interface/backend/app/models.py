@@ -140,6 +140,7 @@ class Run(Base):
     submission_type = Column(String(50), nullable=True)
     show_track_changes = Column(Integer, default=1)
     show_pipeline_comments = Column(Integer, default=0)
+    strip_template_instructions = Column(Integer, default=1, server_default="1", nullable=False)
 
     # ORM relationships (see User for the lazy/cascade rationale). user_id is
     # nullable, so run.user can be None for anonymous/simple-mode runs.
