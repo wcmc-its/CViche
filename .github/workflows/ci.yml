@@ -1,0 +1,61 @@
+name: ci
+
+# Build + test gate (the long-deferred #34). deps-audit.yml covers vulnerability
+# scanning; this runs the backend test suite and a frontend typecheck/build so a
+# broken test or type error is caught before it reaches dev/main.
+on:
+  pull_request:
+    branches: [dev, main]
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    env:
+      # conftest.py uses in-memory SQLite, but app.database builds its engine at
+      # import time and the factory raises on incomplete config, so the import
+      # needs DB_* set. These are dummies -- no real DB is ever connected.
+      DB_HOST: localhost
+      DB_PORT: "3306"
+      DB_NAME: test
+      DB_USER: test
+      CVICHE_SESSION_SECRET: test-secret-not-for-production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"  # match the build image (python:3.11-slim)
+          cache: pip
+      # Runtime system libs the app imports at test time (same set the backend
+      # Dockerfile installs): xmlsec1 for pysaml2, poppler-utils for PDF parsing.
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xmlsec1 poppler-utils
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          # requirements-dev.txt pulls in the backend runtime set (-r requirements.txt)
+          # plus pytest/fakeredis; the repo-root requirements.txt adds the pipeline deps.
+          pip install -r web_interface/backend/requirements-dev.txt -r requirements.txt
+      - name: Run backend tests
+        working-directory: web_interface/backend
+        run: python -m pytest -q -p no:cacheprovider
+
+  frontend-typecheck:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web_interface/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"  # match the build image (node:20-alpine)
+          cache: npm
+          cache-dependency-path: web_interface/frontend/package-lock.json
+      - run: npm ci
+      # Vite does not typecheck on build, so run tsc explicitly, then build to
+      # catch anything that breaks the production bundle.
+      - run: npx tsc --noEmit
+      - run: npm run build

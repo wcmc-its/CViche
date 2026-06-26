@@ -8,6 +8,25 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 
+@pytest.fixture(autouse=True)
+def _restore_auth_module():
+    """Several SEC-03 tests reload app.auth to prove it reads the session secret
+    at import. importlib.reload rebinds app.auth's module-level functions
+    (get_current_user, require_admin, ...) to NEW objects, which no longer match
+    the references the route modules captured via `from app.auth import ...` at
+    import time. Any later test that overrides those deps by re-importing them
+    from app.auth then silently misses (FastAPI matches overrides by object
+    identity) and the request falls through to real auth -> 401. Snapshot the
+    module namespace and restore it after each test so a reload here cannot leak
+    into the rest of the suite.
+    """
+    import app.auth as auth_module
+    saved = dict(auth_module.__dict__)
+    yield
+    auth_module.__dict__.clear()
+    auth_module.__dict__.update(saved)
+
+
 class TestSessionSecret:
     """SEC-03: Application refuses to start without CVICHE_SESSION_SECRET."""
 
