@@ -44,6 +44,7 @@ from core.validators.grant_position_corrector import apply_grant_position_correc
 from core.validators.wcm_table_corrector import apply_wcm_table_corrections
 from core.validators.prose_mentee_corrector import apply_prose_mentee_corrections
 from core.validators.template_scaffold import apply_template_scaffold_corrections
+from core.validators.block_coherence_corrector import apply_block_coherence_corrections
 
 
 @dataclass
@@ -2154,6 +2155,37 @@ def run_stage_3b(
         print(f"   ✓ Recoded {scaffold_stats['corrections_made']} template-scaffold entries to T")
     else:
         print("   ✓ No template-scaffold entries detected")
+
+    # 10c. Block-coherence repair (#198): third-party records (mentees, lab staff,
+    #      students) misrouted into the SUBJECT's own sections when a body-styled
+    #      sub-header was flattened. Notices incoherent / orphaned-header people
+    #      blocks and punts each to an LLM judge; applies only self-family -> N
+    #      reattributions. Default OFF (one LLM call per flagged block) until the
+    #      gold-set regression lands -- enable with CVICHE_BLOCK_COHERENCE_REPAIR=1.
+    if os.getenv("CVICHE_BLOCK_COHERENCE_REPAIR", "0") == "1":
+        print()
+        print("10c. Block-coherence repair (subject vs third-party)...")
+
+        def _block_coherence_llm(prompt: str) -> str:
+            return call_llm(
+                stage="stage_3b_block_coherence",
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+                temperature=0.0,
+                max_tokens=1500,
+            )["content"]
+
+        all_classified, block_coherence_stats = apply_block_coherence_corrections(
+            all_classified, llm=_block_coherence_llm, apply=True, subject_name=person_name
+        )
+        post_correction_stats['block_coherence'] = block_coherence_stats
+        if block_coherence_stats['corrections_made'] > 0:
+            print(f"   ✓ Reattributed {block_coherence_stats['corrections_made']} third-party rows to N")
+            for f in block_coherence_stats['flagged'][:3]:
+                v = f.get('verdict') or {}
+                print(f"     - block n={f['n']} {f['families']} -> {v.get('verdict')} (conf {v.get('confidence')})")
+        else:
+            print("   ✓ No third-party misroutes corrected")
 
     # 11. Hierarchy-taxonomy mismatch flagging (QA review flags)
     print()
