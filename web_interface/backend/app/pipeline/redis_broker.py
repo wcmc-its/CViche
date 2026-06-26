@@ -59,7 +59,12 @@ class RedisBroker:
             with self._sync_lock:
                 if self._sync_client is None:
                     import redis
-                    self._sync_client = redis.Redis.from_url(self.url)
+                    # Bound socket ops so a hung Valkey raises instead of
+                    # blocking the orchestrator thread; the except-branches
+                    # below already degrade to process-local state.
+                    self._sync_client = redis.Redis.from_url(
+                        self.url, socket_timeout=2, socket_connect_timeout=2
+                    )
         return self._sync_client
 
     def publish_event(self, run_id: str, event: dict) -> None:
@@ -100,7 +105,12 @@ class RedisBroker:
     async def async_client(self):
         if self._async_client is None:
             import redis.asyncio as aioredis
-            self._async_client = aioredis.Redis.from_url(self.url)
+            # Only bound the connect: the subscriber's listen() blocks waiting
+            # for messages, so a socket_timeout would spuriously break idle
+            # pub/sub reads. socket_connect_timeout just stops a hung connect.
+            self._async_client = aioredis.Redis.from_url(
+                self.url, socket_connect_timeout=2
+            )
         return self._async_client
 
     async def shutdown(self) -> None:

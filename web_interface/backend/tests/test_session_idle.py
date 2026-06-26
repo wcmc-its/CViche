@@ -80,6 +80,33 @@ def test_touch_fails_open_when_redis_errors():
     assert store.touch("s1") is True      # unreachable -> fail open, not 401
 
 
+def test_touch_fails_open_on_timeout():
+    """A hung/partitioned Valkey surfaces as TimeoutError once socket_timeout is
+    set; it must fail open exactly like a refused connection, not block or 401."""
+    store = IdleSessionStore("redis://fake", 1200)
+    client = MagicMock()
+    client.expire.side_effect = TimeoutError("valkey hung")
+    store._client = client
+    assert store.touch("s1") is True
+
+
+def test_client_is_built_with_socket_timeouts(monkeypatch):
+    """The lazily-built client must bound socket ops so a hung Valkey raises
+    (and then fails open) instead of blocking the request thread forever."""
+    import redis
+    captured = {}
+
+    def fake_from_url(url, **kwargs):
+        captured.update(kwargs)
+        return MagicMock()
+
+    monkeypatch.setattr(redis.Redis, "from_url", staticmethod(fake_from_url))
+    store = IdleSessionStore("redis://fake", 1200)
+    store._redis()                        # trigger lazy construction
+    assert captured.get("socket_timeout") == 2
+    assert captured.get("socket_connect_timeout") == 2
+
+
 # --- integration through the auth dependency ---------------------------------
 
 @pytest.fixture

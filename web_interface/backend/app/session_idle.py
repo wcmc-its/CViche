@@ -61,7 +61,14 @@ class IdleSessionStore:
             with self._lock:
                 if self._client is None:
                     import redis
-                    self._client = redis.Redis.from_url(self.url)
+                    # Bound socket ops so a hung/black-holed Valkey raises
+                    # TimeoutError (which the except-branches fail open on)
+                    # instead of blocking the request thread forever. A refused
+                    # connection already raises; a partition would not without
+                    # this. ponytail: 2s ceiling, only hit on a hang.
+                    self._client = redis.Redis.from_url(
+                        self.url, socket_timeout=2, socket_connect_timeout=2
+                    )
         return self._client
 
     def start(self, sid: str) -> None:
