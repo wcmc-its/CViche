@@ -167,4 +167,11 @@ phases:
       - echo "Forcing a zero-downtime rolling update to clear configuration caches..."
       - kubectl rollout restart deployment/cviche-backend -n cviche-${ENV_NAME}
       - kubectl rollout restart deployment/cviche-frontend -n cviche-${ENV_NAME}
-      
+
+      # Fail the pipeline if the new pods don't actually become Ready. Without
+      # this, `rollout restart` returns immediately and the deploy reports green
+      # even when the new ReplicaSet never rolls out (e.g. a failing migration
+      # init container), silently leaving the previous image serving traffic.
+      - kubectl rollout status deployment/cviche-backend -n cviche-${ENV_NAME} --timeout=300s
+      - kubectl rollout status deployment/cviche-frontend -n cviche-${ENV_NAME} --timeout=300s
+
