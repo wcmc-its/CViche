@@ -17,6 +17,9 @@ export interface RunStatus {
   input_tokens: number
   output_tokens: number
   total_duration_seconds?: number
+  /** Input-scaled wall-clock estimate (s) from upload; stall watchdog scales its
+   *  "taking longer than expected" threshold off this. Absent on older runs. */
+  estimated_duration_seconds?: number | null
   error_message?: string
   steps: StepSummary[]
 }
