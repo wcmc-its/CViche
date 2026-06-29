@@ -27,11 +27,12 @@ export interface UploadResult {
 export interface UploadOptions {
   includeTrackChanges: boolean
   includeClassificationComments: boolean
+  stripWcmInstructions: boolean
 }
 
 export async function uploadFile(
   file: File,
-  options: UploadOptions = { includeTrackChanges: true, includeClassificationComments: false },
+  options: UploadOptions = { includeTrackChanges: true, includeClassificationComments: false, stripWcmInstructions: true },
 ): Promise<UploadResult> {
   const formData = new FormData()
   formData.append('file', file)
@@ -39,5 +40,6 @@ export async function uploadFile(
   // strings so an unchecked box is transmitted as false rather than omitted.
   formData.append('include_track_changes', String(options.includeTrackChanges))
   formData.append('include_classification_comments', String(options.includeClassificationComments))
+  formData.append('strip_wcm_instructions', String(options.stripWcmInstructions))
   return api.post<UploadResult>(uploadRoutes.upload(), formData)
 }

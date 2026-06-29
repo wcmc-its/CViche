@@ -39,6 +39,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   // column defaults: Track Changes on, classification comments off.
   const [includeTrackChanges, setIncludeTrackChanges] = useState(true)
   const [includeClassificationComments, setIncludeClassificationComments] = useState(false)
+  const [stripWcmInstructions, setStripWcmInstructions] = useState(true)
 
   // Shared selection path for both the file picker and drag-and-drop.
   const processFile = async (selectedFile: File) => {
@@ -172,6 +173,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
       const data = await uploadFile(file, {
         includeTrackChanges,
         includeClassificationComments,
+        stripWcmInstructions,
       })
       // Blank-template heuristic tripped: don't start the run yet. Surface the
       // warning and require the acknowledgement checkbox before the next click
@@ -311,6 +313,18 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                 <span>
                   Include classification comments
                   <span className="block text-xs text-gray-500">Add Word comments explaining how each entry was classified.</span>
+                </span>
+              </label>
+              <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={stripWcmInstructions}
+                  onChange={(e) => setStripWcmInstructions(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                <span>
+                  Strip WCM template instructions
+                  <span className="block text-xs text-gray-500">Remove the WCM CV template&apos;s instructional text (e.g. &quot;When preparing the WCM CV template&hellip;&quot;) from the output. On by default.</span>
                 </span>
               </label>
             </fieldset>

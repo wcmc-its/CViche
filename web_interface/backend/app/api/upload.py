@@ -141,6 +141,7 @@ async def upload_cv(
     # fields are absent, keeping older clients backward compatible.
     include_track_changes: bool = Form(True),
     include_classification_comments: bool = Form(False),
+    strip_wcm_instructions: bool = Form(True),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -288,6 +289,7 @@ async def upload_cv(
         user_id=current_user.id,
         show_track_changes=1 if include_track_changes else 0,
         show_pipeline_comments=1 if include_classification_comments else 0,
+        strip_template_instructions=1 if strip_wcm_instructions else 0,
     )
     db.add(run)
 

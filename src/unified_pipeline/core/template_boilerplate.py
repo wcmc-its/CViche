@@ -156,15 +156,22 @@ def is_template_instruction(text: str) -> bool:
     if len(normalized) >= _MIN_EXACT_LEN and normalized in _INSTRUCTION_SET:
         return True
 
-    # Rule (b): pipe-split cell match. Real table rows arrive as "cell | cell |
-    # cell"; only a distinctive, non-protected instruction cell triggers a drop.
+    # Rule (b): pipe-split. Real table rows arrive as "cell | cell | cell".
+    # Drop the row ONLY if EVERY non-empty cell is recognized scaffolding (a
+    # known instruction or a protected header/label) AND at least one cell is a
+    # distinctive instruction. A single unrecognized cell means real faculty
+    # data, so the whole row is kept -- e.g. a filled board-cert row that still
+    # carries a leftover "(indicate if board eligible)" cell. Pure header/label
+    # concatenations still drop; anything that slips through is caught by the
+    # Stage 6 appendix backstop.
     if "|" in text:
-        for cell in (_normalize(c) for c in text.split("|")):
-            if (
-                cell
-                and cell not in _PROTECTED
-                and len(cell) >= _MIN_EXACT_LEN
-                and cell in _INSTRUCTION_SET
+        cells = [c for c in (_normalize(c) for c in text.split("|")) if c]
+        if cells and all(c in _INSTRUCTION_SET or c in _PROTECTED for c in cells):
+            if any(
+                c not in _PROTECTED
+                and len(c) >= _MIN_EXACT_LEN
+                and c in _INSTRUCTION_SET
+                for c in cells
             ):
                 return True
 

@@ -934,11 +934,18 @@ class PipelineOrchestrator:
 
                 stage1b_path = self.stage_outputs.get('1b') or str(output_paths['1b'])
 
+                # Honor the user's WCM-instruction-stripping choice recorded on
+                # the Run row. Column defaults to ON (1); treat as a truthy int,
+                # falling back to True if the row/column is unexpectedly None.
+                run = self.db.query(Run).filter(Run.id == self.run_id).first()
+                strip_template_instructions = bool(run.strip_template_instructions) if run and run.strip_template_instructions is not None else True
+
                 stage2_data, stage2_path = await self._run_with_stdout_capture(
                     run_stage_2,
                     step_number,
                     docx_path=cv_path,
                     hierarchy_json_path=stage1b_path,
+                    strip_template_instructions=strip_template_instructions,
                     # Stage 2 makes one LLM call per section (~86 total); pass an
                     # intra-stage cancel check so an abort lands mid-stage rather
                     # than only at the stage boundary. check_cancelled() is sync,
