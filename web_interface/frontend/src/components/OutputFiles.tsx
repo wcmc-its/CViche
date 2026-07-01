@@ -1,5 +1,6 @@
 import { FileText, Download } from 'lucide-react'
 import { runRoutes } from '../api/routes'
+import { useAuth } from '../contexts/AuthContext'
 
 interface OutputFilesProps {
   runId: string
@@ -13,6 +14,9 @@ interface OutputFilesProps {
 }
 
 export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProps) {
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'admin'
+
   let outputFiles: string[] = []
   try {
     outputFiles = step.output_files ? JSON.parse(step.output_files) : []
@@ -27,11 +31,17 @@ export default function OutputFiles({ runId, step, onOpenJson }: OutputFilesProp
   const isFinalStep = step.stage_id === '6'
   const docxFile = outputFiles.find(f => f.endsWith('.docx'))
 
+  // Stage JSON files are internal pipeline artifacts -- admin-only (the backend
+  // enforces this too). Hide them entirely from non-admins; the final .docx and
+  // other outputs stay visible to the run owner.
+  const isJsonName = (f: string) => (f.split('/').pop() || f).endsWith('.json')
+
   // For the final step, exclude the docx from the additional files list
   // since it's already shown prominently in the Final Output section
-  const additionalFiles = isFinalStep && docxFile
+  const additionalFiles = (isFinalStep && docxFile
     ? outputFiles.filter(f => f !== docxFile)
     : outputFiles
+  ).filter(f => isAdmin || !isJsonName(f))
 
   return (
     <section className="mt-6" aria-label="Output files">

@@ -14,12 +14,14 @@ from app.models import User, Run
 from app.auth import create_session_cookie, COOKIE_NAME
 
 
-def _user_and_run(db):
-    user = User(email="test@example.com", display_name="Test User", role="user")
+def _user_and_run(db, role="admin", suffix=""):
+    # Stage JSON is admin-only, so the viewer/fallback tests run as admin;
+    # the 403 tests below pass role="user".
+    user = User(email=f"test{suffix}@example.com", display_name="Test User", role=role)
     db.add(user)
     db.commit()
     db.refresh(user)
-    run = Run(id="run-fallback-1", user_id=user.id, status="completed",
+    run = Run(id=f"run-fallback{suffix or '-1'}", user_id=user.id, status="completed",
               filename="cv.docx", file_type="docx")
     db.add(run)
     db.commit()
@@ -41,6 +43,12 @@ class _FakeStorage:
             return self.files[key]
         except KeyError:
             raise FileNotFoundError(key)
+
+    def exists(self, run_id, key):
+        return key in self.files
+
+    def get_download_url(self, run_id, key, download_name=None):
+        return None
 
 
 def test_viewer_falls_back_to_storage_when_not_on_local_pod(
@@ -75,3 +83,32 @@ def test_viewer_404_when_absent_in_both_local_and_storage(
     assert resp.status_code == 404
     # Generic catch-all must not leak as a 500.
     assert resp.json().get("detail", {}).get("error") != "internal_error"
+
+
+# --- Stage JSON is admin-only (internal pipeline artifact) ---
+
+
+def test_viewer_forbidden_for_non_admin(client, db, seed_simple_mode):
+    """A non-admin (even the run owner) cannot view stage JSON."""
+    user, run = _user_and_run(db, role="user", suffix="-va")
+    _auth(client, user)
+    resp = client.get(f"/api/run/{run.id}/json/stage1a.json")
+    assert resp.status_code == 403
+
+
+def test_data_json_download_forbidden_for_non_admin(client, db, seed_simple_mode):
+    """The download route also blocks .json for non-admins (before file lookup)."""
+    user, run = _user_and_run(db, role="user", suffix="-dj")
+    _auth(client, user)
+    resp = client.get(f"/api/run/{run.id}/data/stage1a.json")
+    assert resp.status_code == 403
+
+
+def test_data_docx_still_allowed_for_owner(client, db, seed_simple_mode, monkeypatch):
+    """The .docx (real output) stays downloadable by a non-admin owner -- the
+    gate must not blanket-block the data route. Absent file -> 404, never 403."""
+    user, run = _user_and_run(db, role="user", suffix="-dd")
+    _auth(client, user)
+    monkeypatch.setattr(steps_mod, "get_storage", lambda: _FakeStorage({}))
+    resp = client.get(f"/api/run/{run.id}/data/cv.docx")
+    assert resp.status_code != 403

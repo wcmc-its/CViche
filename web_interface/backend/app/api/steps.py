@@ -12,10 +12,10 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Step, Log, Run, User
 from app.schemas import StepDetail, LogEntry, OutputPreview
-from app.auth import get_current_user
+from app.auth import get_current_user, require_admin
 from app.services.run_service import check_run_access
 from app.storage import get_storage
-from app.errors import bad_request, not_found, internal_error
+from app.errors import bad_request, not_found, internal_error, forbidden
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +144,13 @@ async def get_data_file(
     """Download or preview a data file."""
 
     check_run_access(run_id, current_user, db)
+
+    # Stage JSON files are internal pipeline artifacts -- restrict to admins.
+    # The final .docx (and any other non-JSON output) stays available to the
+    # run owner. Gate before the storage short-circuit so the S3 redirect path
+    # is covered too.
+    if Path(filename).name.endswith(".json") and current_user.role != "admin":
+        raise forbidden("Admin access required to access stage JSON.")
 
     # Prefer durable storage (S3 in prod) so downloads survive pod recycling
     # (#38): the pipeline writes outputs to the pod's ephemeral filesystem, so
@@ -312,9 +319,10 @@ async def get_json_content(
     run_id: str,
     filename: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
-    """Get raw JSON content for display in viewer."""
+    """Get raw JSON content for display in viewer. Admin-only: stage JSON is an
+    internal pipeline artifact, not user-facing output."""
 
     check_run_access(run_id, current_user, db)
 

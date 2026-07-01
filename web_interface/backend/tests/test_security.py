@@ -174,10 +174,10 @@ class TestSamlSignature:
 class TestPathTraversal:
     """SEC-01: File download endpoints reject path traversal and absolute paths."""
 
-    def _create_test_user_and_run(self, db):
+    def _create_test_user_and_run(self, db, role="user"):
         """Helper to create a user and run for file access tests."""
         from app.models import User, Run
-        user = User(email="test@example.com", display_name="Test User", role="user")
+        user = User(email="test@example.com", display_name="Test User", role=role)
         db.add(user)
         db.commit()
         db.refresh(user)
@@ -223,8 +223,9 @@ class TestPathTraversal:
         assert response.json()["detail"] == "Invalid filename"
 
     def test_json_endpoint_absolute_path_rejected(self, client, db, seed_simple_mode):
-        """GET /run/{id}/json//etc/passwd returns 400."""
-        user, run = self._create_test_user_and_run(db)
+        """GET /run/{id}/json//etc/passwd returns 400. (Admin: /json is admin-only,
+        and traversal must still be rejected even for admins.)"""
+        user, run = self._create_test_user_and_run(db, role="admin")
         self._auth_cookie(client, user)
 
         response = client.get(f"/api/run/{run.id}/json//etc/passwd")
@@ -232,8 +233,8 @@ class TestPathTraversal:
         assert response.json()["detail"] == "Invalid filename"
 
     def test_json_endpoint_traversal_rejected(self, client, db, seed_simple_mode):
-        """URL-encoded traversal in JSON endpoint returns 400."""
-        user, run = self._create_test_user_and_run(db)
+        """URL-encoded traversal in JSON endpoint returns 400 (admin-authenticated)."""
+        user, run = self._create_test_user_and_run(db, role="admin")
         self._auth_cookie(client, user)
 
         response = client.get(f"/api/run/{run.id}/json/..%2F..%2Fetc%2Fpasswd")
@@ -241,11 +242,13 @@ class TestPathTraversal:
         assert response.json()["detail"] == "Invalid filename"
 
     def test_valid_relative_path_returns_404_when_file_missing(self, client, db, seed_simple_mode):
-        """A valid relative path that doesn't exist returns 404, not 400."""
+        """A valid relative path that doesn't exist returns 404, not 400. Uses a
+        .docx (owner-accessible) so this exercises path resolution, not the
+        admin-only .json gate."""
         user, run = self._create_test_user_and_run(db)
         self._auth_cookie(client, user)
 
-        response = client.get(f"/api/run/{run.id}/data/nonexistent.json")
+        response = client.get(f"/api/run/{run.id}/data/nonexistent.docx")
         assert response.status_code == 404
 
     def test_error_message_reveals_no_internal_paths(self, client, db, seed_simple_mode):
