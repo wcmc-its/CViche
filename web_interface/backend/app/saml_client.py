@@ -157,12 +157,24 @@ def get_saml_client(db: Session) -> Saml2Client:
     return Saml2Client(config=conf)
 
 
+# Attribute keys we consume; anything else the IdP releases is not stored.
+_MAPPED_ATTR_KEYS = frozenset({
+    ATTR_MAIL, "mail",
+    ATTR_DISPLAY_NAME, "displayName",
+    ATTR_EPPN, "eduPersonPrincipalName",
+})
+
+
 def extract_user_attrs(identity: dict) -> dict:
     """Extract user attributes from a SAML assertion identity dict.
 
     Handles both OID-keyed and friendly-name-keyed attributes.
     Returns dict with keys: email, display_name, eppn.
     Raises ValueError if required 'mail' attribute is missing.
+
+    Only mail/displayName/eppn are consumed; any other attribute the IdP
+    releases is not stored. Log the dropped attribute *names* (not values --
+    they may be PII) so the loss is visible instead of silent.
     """
 
     def _get(oid: str, friendly: str) -> str | None:
@@ -172,6 +184,13 @@ def extract_user_attrs(identity: dict) -> dict:
             if vals:
                 return vals[0] if isinstance(vals, list) else vals
         return None
+
+    unmapped = sorted(k for k in identity if k not in _MAPPED_ATTR_KEYS)
+    if unmapped:
+        logger.info(
+            "SAML: %d unmapped attribute(s) released by IdP, not stored: %s",
+            len(unmapped), unmapped,
+        )
 
     mail = _get(ATTR_MAIL, "mail")
     if mail is None:
