@@ -197,3 +197,32 @@ def is_template_instruction(text: str) -> bool:
 def filter_template_instructions(texts: List[str]) -> List[str]:
     """Convenience: return only the texts that are NOT template instructions."""
     return [t for t in texts if not is_template_instruction(t)]
+
+
+# Source-document furniture (NOT WCM-template scaffolding): title lines, date
+# stamps, and page markers from the ORIGINAL CV ("CURRICULUM VITAE",
+# "Last Updated - JUN 2026", "Page 3 of 12"). These carry no CV content and
+# only pollute the Appendix as "unmapped content" (#213). Single short lines
+# only, and the updated/revised forms require a separator or a date-like tail
+# so that real content ("Updated the curriculum for ...") is never matched.
+_MONTHS = r"jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
+_SOURCE_FURNITURE = re.compile(
+    rf"""^(?:
+        curriculum\s+vitae
+      | (?:last\s+)?(?:updated|revised)\s*[:\-–—]\s*\S.{{0,30}}
+      | (?:last\s+)?(?:updated|revised)\b\s*(?:on\s+)?(?:\d|{_MONTHS})[\w\s,./-]{{0,25}}
+      | page\s+\d+(?:\s+of\s+\d+)?
+    )$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def is_source_boilerplate(text: str) -> bool:
+    """True if ``text`` is source-CV furniture that should never surface as
+    Appendix "unmapped content". Precision-biased, like everything above."""
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped or "\n" in stripped or len(stripped) > 60:
+        return False
+    return bool(_SOURCE_FURNITURE.match(stripped))
