@@ -71,6 +71,16 @@ export interface FeedbackData {
   overall_usefulness: number
   manual_conversion_effort: string
   correction_effort: string
+  enrichment_quality: number | null
+  summary_generated: number | null
+  summary_quality: number | null
+  issue_missing_content: string
+  issue_split_merged: string
+  issue_wrong_section: string
+  issue_inaccurate: string
+  issue_ai_enrichment: string
+  issue_formatting: string
+  issue_locations: string
   biggest_issue: string
   likelihood_to_recommend: number
   submitted_at: string

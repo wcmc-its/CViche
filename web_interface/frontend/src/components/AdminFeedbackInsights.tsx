@@ -31,6 +31,44 @@ const EFFORT_ORDER = [
   'not_sure',
 ]
 
+// Every structured answer, in questionnaire order. The Individual Submissions
+// list renders each non-empty one so admins see the full response, not just the
+// biggest-issue free text.
+const ANSWER_FIELDS: { key: keyof FeedbackData; label: string }[] = [
+  { key: 'reviewer_role', label: 'Reviewer role' },
+  { key: 'overall_accuracy', label: 'Accuracy (1-10)' },
+  { key: 'overall_completeness', label: 'Completeness (1-10)' },
+  { key: 'overall_usefulness', label: 'Usefulness (1-5)' },
+  { key: 'enrichment_quality', label: 'Enrichment quality (1-5)' },
+  { key: 'summary_generated', label: 'Summary generated' },
+  { key: 'summary_quality', label: 'Summary quality (1-5)' },
+  { key: 'manual_conversion_effort', label: 'Manual conversion effort' },
+  { key: 'correction_effort', label: 'Correction effort' },
+  { key: 'issue_missing_content', label: 'Missing content' },
+  { key: 'issue_split_merged', label: 'Split / merged' },
+  { key: 'issue_wrong_section', label: 'Wrong section' },
+  { key: 'issue_inaccurate', label: 'Inaccurate' },
+  { key: 'issue_ai_enrichment', label: 'AI enrichment' },
+  { key: 'issue_formatting', label: 'Formatting' },
+  { key: 'issue_locations', label: 'Issue locations' },
+  { key: 'likelihood_to_recommend', label: 'Likelihood to recommend (1-5)' },
+]
+
+// Render an answer as a display string; '' means "not answered" (hide it).
+function formatAnswer(key: keyof FeedbackData, value: string | number | null): string {
+  if (value === null || value === undefined || value === '') return ''
+  if (key === 'summary_generated') return value ? 'Yes' : 'No'
+  if (key === 'issue_locations') {
+    try {
+      const arr = JSON.parse(String(value))
+      return Array.isArray(arr) ? arr.join(', ') : String(value)
+    } catch {
+      return String(value)
+    }
+  }
+  return String(value)
+}
+
 export default function AdminFeedbackInsights() {
   const [feedback, setFeedback] = useState<FeedbackData[]>([])
   const [loading, setLoading] = useState(true)
@@ -92,16 +130,27 @@ export default function AdminFeedbackInsights() {
       headers.forEach((h, i) => {
         row[h.trim()] = (values[i] || '').trim()
       })
+      const intOrNull = (k: string) => (row[k] ? parseInt(row[k]) : null)
       return {
         id: parseInt(row['id']) || 0,
         run_id: row['run_id'] || '',
         user_email: row['user_email'] || '',
         reviewer_role: row['reviewer_role'] || '',
-        overall_accuracy: row['overall_accuracy'] ? parseInt(row['overall_accuracy']) : null,
-        overall_completeness: row['overall_completeness'] ? parseInt(row['overall_completeness']) : null,
+        overall_accuracy: intOrNull('overall_accuracy'),
+        overall_completeness: intOrNull('overall_completeness'),
         overall_usefulness: parseInt(row['overall_usefulness']) || 0,
         manual_conversion_effort: row['manual_conversion_effort'] || '',
         correction_effort: row['correction_effort'] || '',
+        enrichment_quality: intOrNull('enrichment_quality'),
+        summary_generated: intOrNull('summary_generated'),
+        summary_quality: intOrNull('summary_quality'),
+        issue_missing_content: row['issue_missing_content'] || '',
+        issue_split_merged: row['issue_split_merged'] || '',
+        issue_wrong_section: row['issue_wrong_section'] || '',
+        issue_inaccurate: row['issue_inaccurate'] || '',
+        issue_ai_enrichment: row['issue_ai_enrichment'] || '',
+        issue_formatting: row['issue_formatting'] || '',
+        issue_locations: row['issue_locations'] || '',
         biggest_issue: row['biggest_issue'] || '',
         likelihood_to_recommend: parseInt(row['likelihood_to_recommend']) || 0,
         submitted_at: row['submitted_at'] || '',
@@ -294,7 +343,20 @@ export default function AdminFeedbackInsights() {
                     </>
                   )}
                 </div>
-                <p className="mt-1 text-sm text-gray-800 break-words">
+                <dl className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-3">
+                  {ANSWER_FIELDS.map(({ key, label }) => {
+                    const val = formatAnswer(key, f[key] as string | number | null)
+                    if (!val) return null
+                    return (
+                      <div key={key} className="min-w-0">
+                        <dt className="text-gray-400">{label}</dt>
+                        <dd className="text-gray-800 break-words">{val}</dd>
+                      </div>
+                    )
+                  })}
+                </dl>
+                <p className="mt-2 text-sm text-gray-800 break-words">
+                  <span className="text-xs text-gray-400">Biggest issue: </span>
                   {f.biggest_issue.trim() || (
                     <span className="italic text-gray-400">(no biggest-issue text)</span>
                   )}
