@@ -42,7 +42,10 @@ except ImportError:
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
-from unified_pipeline.core.template_boilerplate import is_template_instruction
+from unified_pipeline.core.template_boilerplate import (
+    is_source_boilerplate,
+    is_template_instruction,
+)
 
 
 def _clean_inline_tabs(text: str) -> str:
@@ -675,6 +678,64 @@ TAXONOMY_TO_SECTION = {
     # Misc
     'T': 'miscellaneous',
 }
+
+
+# Fields whose values identify a specific record (vs. generic values like a
+# status string shared by many records). Used by segment_already_rendered.
+_IDENTIFYING_FIELDS = (
+    'title', 'project_title', 'agency', 'award_source',
+    'mentee_name', 'organization', 'grant_number',
+)
+
+
+def segment_already_rendered(segment_text: str, extracted_fields: Dict) -> bool:
+    """True if an overflow segment duplicates content already rendered from
+    this entry's extracted fields — e.g. the first grant of an under-extracted
+    multi-record entry, which DID make it into a funding table (#209).
+
+    Matches only identifying fields (title/agency/name), never generic ones
+    (a status like "Submitted 2026, Under review" is shared across records
+    and would wrongly mark unrendered siblings as duplicates).
+
+    ponytail: normalized substring match; upgrade to token-overlap scoring if
+    false positives appear.
+    """
+    if not extracted_fields:
+        return False
+    seg = re.sub(r'\s+', ' ', segment_text or '').lower()
+    for key in _IDENTIFYING_FIELDS:
+        value = extracted_fields.get(key)
+        if not isinstance(value, str):
+            continue
+        v = re.sub(r'\s+', ' ', value).lower().strip()
+        if len(v) >= 15 and v in seg:
+            return True
+    return False
+
+
+def grant_status_rebucket_target(status: str) -> Tuple[Optional[str], Optional[str]]:
+    """Map a grant's extracted status string to the funding bucket it belongs
+    in (#210). Returns (target_code, reclassification_note); (None, None)
+    when the status doesn't force a move.
+
+    An explicit status beats date inference: "Under review" / "Submitted" is
+    Pending (M2C) no matter what dates say; "Not funded" is kept under
+    Pending with a review comment rather than silently dropped.
+    """
+    status = (status or '').strip()
+    if not status:
+        return None, None
+    lowered = status.lower()
+    if re.search(r'not\s+funded|unfunded|declined|rejected', lowered):
+        return 'M2C', (
+            f"Status is '{status}' — kept under Pending Funding rather than "
+            "dropped; confirm whether to keep this entry on the CV"
+        )
+    if 'award' not in lowered and re.search(r'under\s+review|submitted|pending', lowered):
+        return 'M2C', f"Reclassified to Pending (M2C): status is '{status}'"
+    if re.search(r'\bcompleted?\b|\bclosed\b|\bexpired\b', lowered):
+        return 'M2B', f"Reclassified to Completed (M2B): status is '{status}'"
+    return None, None
 
 
 class WCMTemplateGenerator:
@@ -2154,8 +2215,13 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             'L3': 'Clinical Leadership',
             # Research (M codes)
             'M': 'Research Activities',
+            'M2A': 'Current Research Funding',
+            'M2B': 'Past (Completed) Funding',
+            'M2C': 'Pending Funding',
             # Mentoring (N codes)
             'N': 'Mentees',
+            'N3A': 'Current Mentees:',
+            'N3B': 'Past Mentees:',
             # Leadership (O codes)
             'O': 'INSTITUTIONAL LEADERSHIP',
             # Administrative (P codes)
@@ -3865,6 +3931,21 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         apply_effort_to_grants(m2a_entries)
         apply_effort_to_grants(m2b_entries)
         apply_effort_to_grants(m2c_entries)
+
+        # Rebucket by each grant's own extracted status BEFORE date inference:
+        # an explicit "Under review" / "Not funded" beats everything (#210).
+        bucket_lists = {'M2B': m2b_entries, 'M2C': m2c_entries}
+        for source_code, source_list in (('M2A', m2a_entries), ('M2B', m2b_entries)):
+            for entry in list(source_list):
+                fields = entry.get('extracted_fields') or {}
+                target, note = grant_status_rebucket_target(fields.get('status'))
+                if target and target != source_code:
+                    source_list.remove(entry)
+                    entry.setdefault('reclassification_note', note)
+                    bucket_lists[target].append(entry)
+                    if self.verbose:
+                        title = str(fields.get('title') or 'Unknown')
+                        print(f"  Status rebucket {source_code}->{target}: '{title[:40]}'")
 
         # Check each M2A entry for past end dates
         entries_to_move = []
@@ -7259,11 +7340,19 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             if reclassified:
                 for segment_text, new_code in reclassified:
-                    if new_code and new_code != 'T' and new_code != original_code:
+                    if segment_already_rendered(segment_text, entry.get('extracted_fields') or {}):
+                        # Already visible in the document (e.g. the one grant
+                        # that DID get extracted from an under-extracted
+                        # multi-record entry) — don't duplicate it anywhere.
+                        continue
+                    if new_code and new_code != 'T':
+                        # Route confirmed-code segments home too: a segment
+                        # keeping its (correct) code is usually an unrendered
+                        # sibling record, not unmappable content (#209).
                         segments_to_route.append((segment_text, new_code, entry))
                     else:
                         # Couldn't reclassify this segment
-                        remaining_for_appendix.append((segment_text, original_code, coverage_pct))
+                        remaining_for_appendix.append((segment_text, new_code or original_code, coverage_pct))
             else:
                 # LLM couldn't process - keep original in appendix
                 remaining_for_appendix.append((original_text, original_code, coverage_pct))
@@ -7295,6 +7384,11 @@ K5: Other Teaching Activities
 L1: Clinical Practice activities
 L2: Clinical Innovations
 L3: Clinical/Administrative Leadership
+M2A: Current Research Funding (active/awarded grants)
+M2B: Past/Completed Research Funding
+M2C: Pending Funding (submitted, under review, or not funded)
+N3A: Current Mentees (trainees currently supervised)
+N3B: Past Mentees (graduated/former trainees)
 O: Institutional Leadership (department head, director)
 P: Institutional Committee Service
 Q1: Leadership in External Organizations
@@ -7318,6 +7412,8 @@ RULES:
 - Committee service → P or Q2
 - External organization leadership → Q1
 - Clinical practice details → L1
+- Grants/funding → M2A (active/awarded), M2B (completed), M2C (submitted/under review/not funded)
+- Mentees/advisees → N3A (current) or N3B (past/graduated)
 - Only reclassify segments that CLEARLY belong elsewhere
 - Use "KEEP" for segments that should stay with original code
 
@@ -7340,7 +7436,9 @@ Now analyze the text above:"""
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
-                max_tokens=1000
+                # Generous cap: a truncated segment list silently loses the
+                # trailing records (#209) — never tighten this back down.
+                max_tokens=4000
             )
 
             result_text = llm_result["content"].strip()
@@ -7357,9 +7455,11 @@ Now analyze the text above:"""
                     code = parts[0].strip().upper()
                     segment_text = parts[1].strip()
                     if segment_text and len(segment_text) > 10:
-                        # Normalize code (handle KEEP, L3, K2, etc.)
-                        if code == 'KEEP' or code == original_code:
-                            code = None  # Will go to appendix
+                        # KEEP means "correct as originally coded" — resolve to
+                        # the original code so the caller can route it home
+                        # instead of dumping it in the appendix (#209).
+                        if code == 'KEEP':
+                            code = original_code if original_code != '?' else None
                         segments.append((segment_text, code))
 
             return segments if segments else None
@@ -7401,7 +7501,7 @@ Now analyze the text above:"""
             # Add explanatory comment
             self._add_word_comment(
                 new_para,
-                f"Reconsidered content: This segment was reclassified from appendix to {taxonomy_code}. "
+                f"Recovered from unmapped overflow content and routed to {taxonomy_code}. "
                 f"Review and edit as appropriate.",
                 author="CViche Reconsideration"
             )
@@ -7481,6 +7581,14 @@ Now analyze the text above:"""
 
     def _add_remaining_to_appendix(self, remaining: List[Tuple[str, str, float]]):
         """Add remaining unmappable segments to the appendix."""
+        # Filter BEFORE creating the section header so an all-noise batch
+        # doesn't leave an empty T. APPENDIX behind (#213).
+        remaining = [
+            (text, code, cov) for text, code, cov in remaining
+            if text and text.strip()
+            and not is_template_instruction(text)
+            and not is_source_boilerplate(text)
+        ]
         if not remaining:
             return
 
@@ -7502,12 +7610,19 @@ Now analyze the text above:"""
             self._set_font(run)
             self.doc.add_paragraph()
 
-        # Add each remaining segment
+        # Add each remaining segment. The taxonomy code is an internal
+        # pipeline identifier — keep it in a reviewer comment, never in the
+        # faculty-facing text (#213).
         for segment_text, original_code, coverage_pct in remaining:
             entry_para = self.doc.add_paragraph()
-            bullet_text = f"• [{original_code}] {segment_text}"
-            run = entry_para.add_run(bullet_text)
+            run = entry_para.add_run(f"• {segment_text}")
             self._set_font(run)
+            self._add_word_comment(
+                entry_para,
+                f"Originally classified {original_code}; could not be mapped "
+                f"to a template section.",
+                author="Classification",
+            )
 
     def _fill_appendix(self, unmapped_entries: List[Dict]):
         """Add appendix section for unmapped content.
@@ -7518,17 +7633,20 @@ Now analyze the text above:"""
         if not unmapped_entries:
             return
 
-        # Layer 3 backstop: drop any WCM-template instruction boilerplate that
-        # slipped through to the unmapped pile so it does not pollute the
+        # Layer 3 backstop: drop WCM-template instruction boilerplate, source-CV
+        # furniture (title lines, date stamps — #213), and empty entries that
+        # slipped through to the unmapped pile so they do not pollute the
         # Appendix. Precision-biased: real CV content is never dropped.
         _pre_filter = len(unmapped_entries)
         unmapped_entries = [
             e for e in unmapped_entries
-            if not is_template_instruction(e.get("text", ""))
+            if e.get("text", "").strip()
+            and not is_template_instruction(e.get("text", ""))
+            and not is_source_boilerplate(e.get("text", ""))
         ]
         _appendix_filtered = _pre_filter - len(unmapped_entries)
         if _appendix_filtered:
-            print(f"Filtered {_appendix_filtered} WCM-template instruction entries from Appendix")
+            print(f"Filtered {_appendix_filtered} boilerplate/empty entries from Appendix")
 
         if not unmapped_entries:
             return
@@ -7557,7 +7675,7 @@ Now analyze the text above:"""
         if _appendix_filtered:
             self._add_word_comment(
                 intro_para,
-                f"{_appendix_filtered} WCM template-instruction block"
+                f"{_appendix_filtered} boilerplate/empty block"
                 f"{'s' if _appendix_filtered != 1 else ''} removed",
                 author="Template Filter",
             )
