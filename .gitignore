@@ -84,6 +84,7 @@ src/logs/
 # Temp artifacts
 .temp_analysis/
 .planning/
+/analysis/
 
 # Deprecated files
 *_DEPRECATED*
