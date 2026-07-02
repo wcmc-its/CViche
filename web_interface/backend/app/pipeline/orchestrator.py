@@ -1213,6 +1213,7 @@ class PipelineOrchestrator:
                 run = self.db.query(Run).filter(Run.id == self.run_id).first()
                 emit_track_changes = bool(run.show_track_changes) if run and run.show_track_changes is not None else True
                 emit_comments = bool(run.show_pipeline_comments) if run and run.show_pipeline_comments is not None else False
+                strip_template_instructions = bool(run.strip_template_instructions) if run and run.strip_template_instructions is not None else True
 
                 stage6_output_path = await self._run_with_stdout_capture(
                     run_stage6,
@@ -1221,6 +1222,7 @@ class PipelineOrchestrator:
                     verbose=True,
                     emit_track_changes=emit_track_changes,
                     emit_comments=emit_comments,
+                    strip_template_instructions=strip_template_instructions,
                 )
 
                 self.stage_outputs['6'] = stage6_output_path

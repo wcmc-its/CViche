@@ -683,11 +683,18 @@ class WCMTemplateGenerator:
     """
 
     def __init__(self, template_path: str = None, verbose: bool = True,
-                 emit_track_changes: bool = True, emit_comments: bool = False):
+                 emit_track_changes: bool = True, emit_comments: bool = False,
+                 strip_template_instructions: bool = True):
         # Find a valid template path
         self.template_path = self._find_template(template_path)
         self.verbose = verbose
         self.doc = None
+
+        # When True, drop the WCM template's leading gray "instruction box"
+        # (table[0]) from the generated document. That box is template
+        # scaffolding baked into the .docx, not extracted CV content, so the
+        # Stage 2 entry filter never sees it — it has to be removed here.
+        self.strip_template_instructions = strip_template_instructions
 
         # Output-rendering options (issue #153). Defaults mirror the Run model
         # column defaults: track changes ON, classification comments OFF.
@@ -838,6 +845,32 @@ class WCMTemplateGenerator:
             print(f"  Replaced {replaced_count} K-code entries with Stage 5c formatted versions")
 
         return merged
+
+    # Distinctive header of the WCM template's gray instruction box. This
+    # phrase never appears in real CV content, so a substring match on it
+    # uniquely identifies the box and nothing else.
+    _INSTRUCTION_BOX_SIGNATURE = "when preparing the wcm cv template"
+
+    def _remove_instruction_box(self) -> None:
+        """Remove the leading gray "instruction box" table(s) from self.doc.
+
+        The box is a shaded table baked into the template that tells the author
+        how to fill it in ("When preparing the WCM CV template ... delete this
+        instruction box"). We match it by its distinctive header text rather
+        than by index so real content tables are never touched.
+        ponytail: signature-substring match on one table; upgrade to a phrase
+        set only if a future template ships a differently-worded box.
+        """
+        removed = 0
+        for tbl in list(self.doc.tables):
+            text = " ".join(
+                cell.text for row in tbl.rows for cell in row.cells
+            ).lower()
+            if self._INSTRUCTION_BOX_SIGNATURE in text:
+                tbl._element.getparent().remove(tbl._element)
+                removed += 1
+        if removed and self.verbose:
+            print(f"Removed {removed} WCM-template instruction box(es)")
 
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
                  original_doc_path: str = None) -> str:
@@ -1049,6 +1082,12 @@ class WCMTemplateGenerator:
 
         # Apply table styling (header background color, borders)
         self._apply_table_styling_to_all_tables()
+
+        # Drop the WCM template's gray instruction box last, after all
+        # content-search-based filling is done, so table removal can't shift
+        # anything the fill logic relied on.
+        if self.strip_template_instructions:
+            self._remove_instruction_box()
 
         # Determine output path
         if output_path is None:
@@ -8489,7 +8528,8 @@ Now analyze the text above:"""
 
 
 def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
-               emit_track_changes: bool = True, emit_comments: bool = False) -> str:
+               emit_track_changes: bool = True, emit_comments: bool = False,
+               strip_template_instructions: bool = True) -> str:
     """
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -8508,6 +8548,7 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
         verbose=verbose,
         emit_track_changes=emit_track_changes,
         emit_comments=emit_comments,
+        strip_template_instructions=strip_template_instructions,
     )
     return generator.generate(input_path, output_path)
 
