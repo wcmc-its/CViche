@@ -55,6 +55,27 @@ class TestExtractUserAttrs:
         result = extract_user_attrs(identity)
         assert result["email"] == "testuser@med.cornell.edu"
 
+    def test_unmapped_attrs_are_logged_not_silent(self, caplog):
+        """Attributes the IdP releases that we don't consume are logged (by
+        name) so the drop is visible -- and their VALUES are never logged."""
+        identity = {
+            ATTR_MAIL: ["testuser@med.cornell.edu"],
+            "eduPersonAffiliation": ["staff"],
+            "isMemberOf": ["cn=secret-group"],
+        }
+        with caplog.at_level("INFO", logger="app.saml_client"):
+            extract_user_attrs(identity)
+        msg = "\n".join(r.getMessage() for r in caplog.records)
+        assert "eduPersonAffiliation" in msg and "isMemberOf" in msg
+        # names only -- attribute values must not leak into logs
+        assert "staff" not in msg and "secret-group" not in msg
+
+    def test_no_log_when_all_attrs_mapped(self, mock_saml_identity, caplog):
+        """No unmapped-attribute noise when the IdP releases only known attrs."""
+        with caplog.at_level("INFO", logger="app.saml_client"):
+            extract_user_attrs(mock_saml_identity)
+        assert "unmapped" not in "\n".join(r.getMessage() for r in caplog.records)
+
 
 # --- Unit test: certificate generation ---
 
