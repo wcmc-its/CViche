@@ -1,0 +1,384 @@
+"""Gold-set segmentation regression harness (precondition for #208/#212).
+
+Segmentation changes (stage 1a hierarchy detection, stage 2 entry
+extraction) affect EVERY CV, and their failures are silent: content doesn't
+error out, it just vanishes into mega-entries, the appendix, or thin air
+(run 89HQVQ lost 7 of 8 grants this way). This harness makes those failures
+measurable before a segmentation PR lands.
+
+It works on STRUCTURAL metrics, not exact text diffs, because stages 1a/2a
+call an LLM and are not run-to-run deterministic. Metrics per CV:
+
+- text coverage: % of substantive source lines (paragraphs AND table-cell
+  paragraphs — the 89HQVQ lesson) whose text survives into some entry,
+  plus the list of lost lines
+- entry counts (content/header/break), empty content entries, duplicates
+- mega-entries (one entry holding several record-like lines: the
+  layout-table collapse smell) and max entry size
+- headers detected in the 1a hierarchy (count + titles, so a compare shows
+  exactly which headers appeared/disappeared)
+
+Workflow for a segmentation PR:
+
+    # on dev (baseline):
+    PYTHONPATH=src python -m unified_pipeline.segmentation_regression snapshot baseline
+    # on the PR branch (candidate):
+    PYTHONPATH=src python -m unified_pipeline.segmentation_regression snapshot candidate
+    PYTHONPATH=src python -m unified_pipeline.segmentation_regression compare baseline candidate
+
+`compare` exits non-zero on regression. `lint <label>` flags absolute
+problems in one snapshot without a baseline. Snapshots cost real LLM money
+(~$0.25/CV, ~$2.50 for the 10-CV gold corpus) — `--uids` runs a subset.
+
+The gold corpus lives in outputs/gold_set/<stamp>/originals/ (local only,
+gitignored, PII — see its README). Snapshots are written next to it under
+outputs/gold_set/segsnap_<label>/ and are likewise never committed.
+"""
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+# Substantive-line threshold: shorter lines ("2016", "PhD", bare bullets)
+# match by accident and only add noise to the coverage metric.
+SUBSTANTIVE_LINE_CHARS = 15
+
+# A content entry counts as a mega-entry when it packs this many
+# record-like lines (the layout-table collapse smell, #208).
+MEGA_ENTRY_MIN_RECORDS = 3
+
+# Coverage may wobble slightly between runs of IDENTICAL code because the
+# delimiter LLM is not deterministic; only a drop beyond this is a regression.
+COVERAGE_DROP_TOLERANCE_PTS = 1.0
+
+
+def _norm(text: str) -> str:
+    return " ".join(str(text or "").split()).lower()
+
+
+def _squash(text: str) -> str:
+    """Whitespace-FREE normalization for the coverage check: stage 2 joins
+    text across in-paragraph line breaks with no whitespace at all
+    ('Present position:' + break + 'Attending' -> 'position:Attending'),
+    and tab-joined label/value lines re-emerge with tabs dropped. Comparing
+    with whitespace removed on both sides is immune to all of that."""
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+# --------------------------------------------------------------- source lines
+
+def iter_source_lines(docx_path: str) -> List[str]:
+    """Every text line of the source document, INCLUDING paragraphs inside
+    table cells (recursively): CVs routinely use 1×1 layout tables as section
+    containers, and a coverage metric that can't see into cells would have
+    missed the 89HQVQ grant loss entirely."""
+    from docx import Document  # local import: harness is optional tooling
+
+    lines: List[str] = []
+
+    def walk_cell(cell):
+        for para in cell.paragraphs:
+            if para.text.strip():
+                lines.append(para.text)
+        for tbl in cell.tables:
+            for row in tbl.rows:
+                for c in row.cells:
+                    walk_cell(c)
+
+    doc = Document(docx_path)
+    for para in doc.paragraphs:
+        if para.text.strip():
+            lines.append(para.text)
+    for tbl in doc.tables:
+        for row in tbl.rows:
+            for cell in row.cells:
+                walk_cell(cell)
+    return lines
+
+
+# ------------------------------------------------------------------- metrics
+
+def _looks_like_record(line: str) -> bool:
+    line = line.strip()
+    return len(line) > 60 and (" | " in line or "\t" in line)
+
+
+def _walk_headers(nodes: List[Dict], titles: List[str]) -> None:
+    for node in nodes or []:
+        title = _norm(node.get("text", ""))
+        if title:
+            titles.append(title)
+        _walk_headers(node.get("children"), titles)
+
+
+def compute_metrics(source_lines: List[str], stage1a: Dict, stage2: Dict) -> Dict:
+    """Pure: structural metrics for one CV from its source lines + stage
+    1a/2 outputs. Everything the compare/lint verdicts read comes from here."""
+    entries = stage2.get("entries", [])
+    content = [e for e in entries if e.get("element_type") not in ("header", "break")]
+
+    # --- text coverage: does each substantive source line survive anywhere?
+    # Whitespace-free comparison (see _squash); the \x00 sentinel between
+    # entries survives squashing, so a line can never match by spanning two
+    # unrelated entries.
+    haystack = "\x00".join(_squash(e.get("text", "")) for e in entries)
+    substantive = [l for l in source_lines if len(_norm(l)) >= SUBSTANTIVE_LINE_CHARS]
+    lost = [l.strip() for l in substantive if _squash(l) not in haystack]
+    coverage = 100.0 if not substantive else round(
+        100.0 * (len(substantive) - len(lost)) / len(substantive), 1
+    )
+
+    # --- noise counts (dup key mirrors stage 2's filter_extraction_noise)
+    seen, dups, empty = set(), 0, 0
+    for e in entries:
+        text = _norm(e.get("text", ""))
+        if e.get("element_type") not in ("header", "break") and not text:
+            empty += 1
+            continue
+        key = (e.get("element_type"), text, str(e.get("element_idx_start")))
+        if key in seen:
+            dups += 1
+        seen.add(key)
+
+    # --- mega-entries: several record-like lines fused into one entry
+    mega = 0
+    for e in content:
+        records = sum(1 for line in str(e.get("text", "")).split("\n")
+                      if _looks_like_record(line))
+        if records >= MEGA_ENTRY_MIN_RECORDS:
+            mega += 1
+
+    header_titles: List[str] = []
+    _walk_headers(stage1a.get("hierarchy"), header_titles)
+
+    per_h1: Dict[str, int] = {}
+    for e in content:
+        hierarchy = e.get("hierarchy") or ["(none)"]
+        top = _norm(hierarchy[0]) or "(none)"
+        per_h1[top] = per_h1.get(top, 0) + 1
+
+    return {
+        "source_lines": len(source_lines),
+        "substantive_lines": len(substantive),
+        "text_coverage_pct": coverage,
+        "lost_lines": lost,
+        "entries_total": len(entries),
+        "entries_content": len(content),
+        "empty_content": empty,
+        "duplicate_entries": dups,
+        "mega_entries": mega,
+        "max_entry_chars": max((len(str(e.get("text", ""))) for e in entries), default=0),
+        "headers_detected": len(header_titles),
+        "header_titles": header_titles,
+        "per_h1_content_counts": per_h1,
+    }
+
+
+# ------------------------------------------------------------------- compare
+
+def compare_metrics(baseline: Dict, candidate: Dict) -> Tuple[str, List[str]]:
+    """Pure: verdict for one CV. Returns (verdict, reasons); verdict is
+    REGRESSION / IMPROVED / OK."""
+    reasons: List[str] = []
+
+    drop = baseline["text_coverage_pct"] - candidate["text_coverage_pct"]
+    if drop > COVERAGE_DROP_TOLERANCE_PTS:
+        reasons.append(f"coverage {baseline['text_coverage_pct']}% -> {candidate['text_coverage_pct']}%")
+    lost_before = set(map(_norm, baseline["lost_lines"]))
+    newly_lost = [l for l in candidate["lost_lines"] if _norm(l) not in lost_before]
+    if newly_lost:
+        reasons.append(f"{len(newly_lost)} newly lost line(s), e.g. '{newly_lost[0][:60]}'")
+    if candidate["headers_detected"] < baseline["headers_detected"]:
+        gone = set(baseline["header_titles"]) - set(candidate["header_titles"])
+        sample = next(iter(gone), "?")
+        reasons.append(
+            f"headers {baseline['headers_detected']} -> {candidate['headers_detected']}"
+            f" (lost e.g. '{sample[:40]}')"
+        )
+    for key in ("mega_entries", "duplicate_entries", "empty_content"):
+        if candidate[key] > baseline[key]:
+            reasons.append(f"{key} {baseline[key]} -> {candidate[key]}")
+
+    if reasons:
+        return "REGRESSION", reasons
+
+    improved = []
+    if candidate["text_coverage_pct"] > baseline["text_coverage_pct"]:
+        improved.append(f"coverage +{round(candidate['text_coverage_pct'] - baseline['text_coverage_pct'], 1)}pt")
+    for key in ("mega_entries", "duplicate_entries", "empty_content"):
+        if candidate[key] < baseline[key]:
+            improved.append(f"{key} {baseline[key]} -> {candidate[key]}")
+    if candidate["headers_detected"] > baseline["headers_detected"]:
+        improved.append(f"headers +{candidate['headers_detected'] - baseline['headers_detected']}")
+    return ("IMPROVED", improved) if improved else ("OK", [])
+
+
+def lint_metrics(metrics: Dict) -> List[str]:
+    """Pure: absolute red flags for one CV, no baseline needed."""
+    flags = []
+    if metrics["text_coverage_pct"] < 97.0:
+        sample = metrics["lost_lines"][0][:60] if metrics["lost_lines"] else ""
+        flags.append(
+            f"coverage {metrics['text_coverage_pct']}% "
+            f"({len(metrics['lost_lines'])} lost, e.g. '{sample}')"
+        )
+    for key in ("mega_entries", "duplicate_entries", "empty_content"):
+        if metrics[key]:
+            flags.append(f"{key}={metrics[key]}")
+    return flags
+
+
+# ---------------------------------------------------------------- snapshotting
+
+def _outputs_root() -> Path:
+    return Path(__file__).resolve().parent / "outputs"
+
+
+def _snapshot_dir(label: str) -> Path:
+    return _outputs_root() / "gold_set" / f"segsnap_{label}"
+
+
+def _default_cv_dir() -> Optional[Path]:
+    gold_root = _outputs_root() / "gold_set"
+    if not gold_root.exists():
+        return None
+    candidates = sorted(
+        d / "originals" for d in gold_root.iterdir()
+        if d.is_dir() and (d / "originals").is_dir()
+    )
+    return candidates[-1] if candidates else None
+
+
+def snapshot(label: str, cv_dir: Optional[str], uids: Optional[List[str]]) -> Path:
+    """Run stages 1a -> 1b -> 2 on each gold CV and record outputs + metrics.
+    Costs real LLM calls (~$0.25/CV)."""
+    from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
+        get_cv_hierarchy_chunked,
+    )
+    from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
+    from unified_pipeline.stage_2_entry_extraction import run_stage_2
+
+    source = Path(cv_dir) if cv_dir else _default_cv_dir()
+    if not source or not source.is_dir():
+        sys.exit("No gold CV directory found. Pass --cvs <dir of .docx files>.")
+
+    docx_files = sorted(source.glob("*.docx"))
+    if uids:
+        docx_files = [f for f in docx_files if f.stem in set(uids)]
+    if not docx_files:
+        sys.exit(f"No .docx files matched in {source}")
+
+    snap = _snapshot_dir(label)
+    snap.mkdir(parents=True, exist_ok=True)
+    all_metrics: Dict[str, Dict] = {}
+    total_cost = 0.0
+
+    for docx in docx_files:
+        uid = docx.stem
+        print(f"\n=== {uid} ===")
+        cv_snap = snap / uid
+        cv_snap.mkdir(exist_ok=True)
+
+        hierarchy, stats = get_cv_hierarchy_chunked(cv_path=str(docx))
+        stage1a = {"document_uid": uid, "hierarchy": hierarchy, "meta": stats}
+        stage1a_path = cv_snap / f"{uid}_segmented.json"
+        stage1a_path.write_text(json.dumps(stage1a, indent=2))
+        total_cost += stats.get("extraction_cost", 0) or 0
+
+        _, stage1b_path = run_stage_1b(str(docx), hierarchy_json_path=str(stage1a_path))
+        stage2, _ = run_stage_2(str(docx), hierarchy_json_path=str(stage1b_path))
+        (cv_snap / f"{uid}_entries.json").write_text(json.dumps(stage2, indent=2))
+        total_cost += stage2.get("total_cost", 0) or 0
+
+        metrics = compute_metrics(iter_source_lines(str(docx)), stage1a, stage2)
+        all_metrics[uid] = metrics
+        print(f"  coverage={metrics['text_coverage_pct']}% "
+              f"entries={metrics['entries_total']} mega={metrics['mega_entries']} "
+              f"dups={metrics['duplicate_entries']} headers={metrics['headers_detected']}")
+
+    (snap / "metrics.json").write_text(json.dumps(all_metrics, indent=2))
+    print(f"\nSnapshot '{label}': {len(all_metrics)} CVs, LLM cost ${total_cost:.2f}")
+    print(f"Metrics: {snap / 'metrics.json'}")
+    return snap
+
+
+# --------------------------------------------------------------------- report
+
+def _load_metrics(label: str) -> Dict[str, Dict]:
+    path = _snapshot_dir(label) / "metrics.json"
+    if not path.exists():
+        sys.exit(f"No snapshot '{label}' ({path} missing). Run: snapshot {label}")
+    return json.loads(path.read_text())
+
+
+def run_compare(baseline_label: str, candidate_label: str) -> int:
+    baseline = _load_metrics(baseline_label)
+    candidate = _load_metrics(candidate_label)
+    shared = sorted(set(baseline) & set(candidate))
+    if not shared:
+        sys.exit("Snapshots share no CVs — nothing to compare.")
+
+    rows, regressions = [], 0
+    for uid in shared:
+        verdict, reasons = compare_metrics(baseline[uid], candidate[uid])
+        if verdict == "REGRESSION":
+            regressions += 1
+        rows.append((uid, verdict, "; ".join(reasons)))
+
+    width = max(len(u) for u in shared)
+    lines = [f"Segmentation regression: {baseline_label} -> {candidate_label}", ""]
+    for uid, verdict, detail in rows:
+        lines.append(f"{uid:<{width}}  {verdict:<10}  {detail}")
+    lines.append("")
+    lines.append(f"{regressions} regression(s) across {len(shared)} CVs")
+    report = "\n".join(lines)
+    print(report)
+    (_snapshot_dir(candidate_label) / "REPORT.md").write_text(report + "\n")
+    return 1 if regressions else 0
+
+
+def run_lint(label: str) -> int:
+    metrics = _load_metrics(label)
+    flagged = 0
+    for uid in sorted(metrics):
+        flags = lint_metrics(metrics[uid])
+        if flags:
+            flagged += 1
+            print(f"{uid}: " + "; ".join(flags))
+        else:
+            print(f"{uid}: clean")
+    print(f"\n{flagged} of {len(metrics)} CVs flagged")
+    return 1 if flagged else 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_snap = sub.add_parser("snapshot", help="run stages 1a->2 on the gold CVs and record metrics")
+    p_snap.add_argument("label")
+    p_snap.add_argument("--cvs", help="directory of .docx files (default: latest gold_set originals)")
+    p_snap.add_argument("--uids", nargs="*", help="subset of CV stems to run")
+
+    p_cmp = sub.add_parser("compare", help="diff two snapshots; exit 1 on regression")
+    p_cmp.add_argument("baseline")
+    p_cmp.add_argument("candidate")
+
+    p_lint = sub.add_parser("lint", help="absolute red flags in one snapshot")
+    p_lint.add_argument("label")
+
+    args = parser.parse_args()
+    if args.command == "snapshot":
+        snapshot(args.label, args.cvs, args.uids)
+        sys.exit(0)
+    if args.command == "compare":
+        sys.exit(run_compare(args.baseline, args.candidate))
+    if args.command == "lint":
+        sys.exit(run_lint(args.label))
+
+
+if __name__ == "__main__":
+    main()
