@@ -42,3 +42,12 @@ notifications:
   # CodeBuild variable into db.env -> the cviche-secrets Secret -> the pod env.
   # This file entry is mainly for local dev if you'd rather not export the env var.
   CVICHE_TEAMS_WEBHOOK_URL: ""
+
+doctor:
+  # Post-run artifact doctor: cross-stage lints over a completed run's stage
+  # outputs (pure local file reads, no LLM). Runs by default after every
+  # successful run and never affects run status; set to "0" to disable.
+  # Config precedence: the CVICHE_RUN_DOCTOR env var wins over this file.
+  # Quote the value ("0") — an unquoted YAML 0 is falsy and gets ignored by
+  # the config loader, leaving the doctor enabled.
+  CVICHE_RUN_DOCTOR: ""

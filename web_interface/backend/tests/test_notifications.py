@@ -157,6 +157,39 @@ def test_started_payload_action_uses_first_allowed_origin(monkeypatch):
     )
 
 
+# --- doctor line on the terminal card ---------------------------------------
+
+def test_payload_includes_doctor_summary(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    doctor = {
+        "counts": {"ERROR": 1, "WARN": 2, "INFO": 3},
+        "findings": [
+            {"lint": "output_hygiene", "severity": "WARN"},
+            {"lint": "segmentation", "severity": "ERROR"},
+        ],
+    }
+
+    facts = _facts(notifications.build_teams_payload(_run(), None, doctor=doctor))
+
+    # 3 substantive findings (INFO excluded); the most severe names the lint.
+    assert facts["Doctor"] == "3 findings (top: segmentation)"
+
+
+def test_payload_doctor_reports_zero_findings_when_clean(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    doctor = {"counts": {"ERROR": 0, "WARN": 0, "INFO": 7}, "findings": []}
+
+    facts = _facts(notifications.build_teams_payload(_run(), None, doctor=doctor))
+
+    assert facts["Doctor"] == "0 findings"
+
+
+def test_payload_omits_doctor_when_unavailable(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+
+    assert "Doctor" not in _facts(notifications.build_teams_payload(_run(), None))
+
+
 # --- notify_run_terminal --------------------------------------------------
 
 def test_notify_is_noop_when_webhook_unconfigured(monkeypatch):
