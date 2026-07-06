@@ -112,3 +112,42 @@ def test_data_docx_still_allowed_for_owner(client, db, seed_simple_mode, monkeyp
     monkeypatch.setattr(steps_mod, "get_storage", lambda: _FakeStorage({}))
     resp = client.get(f"/api/run/{run.id}/data/cv.docx")
     assert resp.status_code != 403
+
+
+# --- CV Insights: the two user-facing fields stay owner-accessible ---
+
+
+def test_cv_insights_allowed_for_non_admin_owner(client, db, seed_simple_mode, monkeypatch):
+    """A non-admin owner can read cv_owner + location (the "CV Insights" panel),
+    but ONLY those fields -- the rest of the stage JSON is not leaked."""
+    user, run = _user_and_run(db, role="user", suffix="-ci")
+    _auth(client, user)
+    payload = {
+        "cv_owner": {"full_name": "Jane Doe"},
+        "cv_owner_location": {"inference_success": True},
+        "secret_internal_field": "should not leak",
+    }
+    monkeypatch.setattr(
+        steps_mod, "get_storage",
+        lambda: _FakeStorage({"outputs/x_fields.json": json.dumps(payload).encode()}),
+    )
+    resp = client.get(f"/api/run/{run.id}/cv-insights/x_fields.json")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body == {
+        "cv_owner": {"full_name": "Jane Doe"},
+        "cv_owner_location": {"inference_success": True},
+    }
+    assert "secret_internal_field" not in body
+
+
+def test_cv_insights_rejects_non_fields_json(client, db, seed_simple_mode, monkeypatch):
+    """Not a generic 2-key reader: only *_fields.json is accepted."""
+    user, run = _user_and_run(db, role="user", suffix="-cin")
+    _auth(client, user)
+    monkeypatch.setattr(
+        steps_mod, "get_storage",
+        lambda: _FakeStorage({"outputs/stage1a.json": json.dumps({"cv_owner": {}}).encode()}),
+    )
+    resp = client.get(f"/api/run/{run.id}/cv-insights/stage1a.json")
+    assert resp.status_code == 404

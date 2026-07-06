@@ -23,6 +23,13 @@ export async function getRunDataJson(runId: string, filename: string): Promise<a
   return api.get(runRoutes.dataJson(runId, name))
 }
 
+// Owner-accessible: returns only { cv_owner, cv_owner_location } from a stage
+// _fields.json. The full raw JSON (getRunDataJson / dataJson) is admin-only.
+export async function getCvInsights(runId: string, filename: string): Promise<any> {
+  const name = filename.split('/').pop() || filename
+  return api.get(runRoutes.cvInsights(runId, name))
+}
+
 export async function cancelRun(runId: string): Promise<void> {
   await api.post(runRoutes.cancel(runId))
 }

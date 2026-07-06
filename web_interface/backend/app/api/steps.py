@@ -311,20 +311,10 @@ def _parse_json_to_preview(data) -> OutputPreview | None:
     return None
 
 
-# Distinct prefix from the download route on purpose: /data/{filename:path} has a
-# greedy :path that would otherwise swallow a trailing "/json" and shadow this
-# route (whichever registers first wins). /json/{filename:path} can't collide.
-@router.get("/run/{run_id}/json/{filename:path}")
-async def get_json_content(
-    run_id: str,
-    filename: str,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(require_admin),
-):
-    """Get raw JSON content for display in viewer. Admin-only: stage JSON is an
-    internal pipeline artifact, not user-facing output."""
-
-    check_run_access(run_id, current_user, db)
+def _read_json_output(run_id: str, filename: str):
+    """Read a run's JSON output file: local pod filesystem first, then durable
+    storage (S3). Returns (parsed_json, size_bytes). Raises 400 (bad name / not
+    JSON), 404 (missing), or 500 (read error). Callers own the access check."""
 
     # Local pod filesystem first. _resolve_safe_path also runs the security guard
     # (absolute/traversal -> 400 "Invalid filename"), so it must come first.
@@ -333,12 +323,7 @@ async def get_json_content(
         if not str(file_path).endswith(".json"):
             raise bad_request("Only JSON files can be viewed")
         with open(file_path, "r") as f:
-            data = json.load(f)
-        return JSONResponse(content={
-            "filename": filename,
-            "size_bytes": file_path.stat().st_size,
-            "content": data,
-        })
+            return json.load(f), file_path.stat().st_size
     except HTTPException as e:
         if e.status_code != 404:
             raise  # 400 invalid/traversal/non-json -> propagate; only a local miss falls through
@@ -355,17 +340,61 @@ async def get_json_content(
     storage_key = f"outputs/{download_name}"
     try:
         raw = storage.get_file(run_id, storage_key)
-        data = json.loads(raw)
-        return JSONResponse(content={
-            "filename": filename,
-            "size_bytes": len(raw),
-            "content": data,
-        })
+        return json.loads(raw), len(raw)
     except FileNotFoundError:
         raise not_found("File not found")
     except Exception:
         logger.warning("Storage JSON read failed for %s/%s", run_id, storage_key, exc_info=True)
         raise internal_error("Error reading file")
+
+
+# Distinct prefix from the download route on purpose: /data/{filename:path} has a
+# greedy :path that would otherwise swallow a trailing "/json" and shadow this
+# route (whichever registers first wins). /json/{filename:path} can't collide.
+@router.get("/run/{run_id}/json/{filename:path}")
+async def get_json_content(
+    run_id: str,
+    filename: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Get raw JSON content for display in viewer. Admin-only: stage JSON is an
+    internal pipeline artifact, not user-facing output."""
+
+    check_run_access(run_id, current_user, db)
+    data, size_bytes = _read_json_output(run_id, filename)
+    return JSONResponse(content={
+        "filename": filename,
+        "size_bytes": size_bytes,
+        "content": data,
+    })
+
+
+@router.get("/run/{run_id}/cv-insights/{filename:path}")
+async def get_cv_insights(
+    run_id: str,
+    filename: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """CV owner name + inferred location from a stage `_fields.json`, for the run
+    owner's pipeline view ("CV Insights" panel). Returns ONLY those two whitelisted
+    fields -- the rest of the stage JSON stays admin-only (get_json_content). This
+    stays owner-accessible so the panel keeps working for non-admins."""
+
+    check_run_access(run_id, current_user, db)
+    # Only the fields file feeds this panel; refuse to be a generic 2-key reader
+    # for arbitrary stage JSON.
+    if not Path(filename).name.endswith("_fields.json"):
+        raise not_found("File not found")
+
+    data, _ = _read_json_output(run_id, filename)
+    if not isinstance(data, dict):
+        raise not_found("File not found")
+    return JSONResponse(content={
+        "cv_owner": data.get("cv_owner"),
+        "cv_owner_location": data.get("cv_owner_location"),
+    })
 
 
 # Mapping of stage IDs to the set of `purpose` values written into prompt log

@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react'
 import { MapPin, XCircle, AlertCircle, CheckCircle2, Download, LifeBuoy } from 'lucide-react'
-import { getRunDataJson, cancelRun, restartRun, retryStep, startRun } from '../api/runs'
+import { getRunDataJson, getCvInsights, cancelRun, restartRun, retryStep, startRun } from '../api/runs'
 import { runRoutes } from '../api/routes'
 import { formatCost } from '../utils'
 import { usePipelineRun } from '../hooks/usePipelineRun'
@@ -166,9 +166,9 @@ export default function PipelineViewer({ runId, onBack, onNavigateToRun }: Pipel
 
       cvInsightsAttemptedRef.current = runId
       try {
-        const data = await getRunDataJson(runId, fieldsJson)
-        if (data.content) {
-          setCvInsights({ cv_owner: data.content.cv_owner, cv_owner_location: data.content.cv_owner_location })
+        const data = await getCvInsights(runId, fieldsJson)
+        if (data) {
+          setCvInsights({ cv_owner: data.cv_owner, cv_owner_location: data.cv_owner_location })
         }
       } catch (err) {
         console.error('Error loading CV insights:', err)

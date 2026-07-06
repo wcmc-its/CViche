@@ -24,6 +24,9 @@ export const runRoutes = {
   /** GET /api/run/:id/json/:file  (JSON-parsed data file) */
   dataJson: (id: string, file: string) =>
     `/api/run/${id}/json/${file}` as const,
+  /** GET /api/run/:id/cv-insights/:file  (cv_owner + location only; owner-accessible) */
+  cvInsights: (id: string, file: string) =>
+    `/api/run/${id}/cv-insights/${file}` as const,
   /** GET/href /api/run/:id/data/:file  (raw data file download / open) */
   dataFile: (id: string, file: string) =>
     `/api/run/${id}/data/${file}` as const,
