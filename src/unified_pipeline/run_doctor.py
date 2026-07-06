@@ -210,10 +210,34 @@ def iter_header_candidates(docx_path: str) -> List[str]:
     return candidates
 
 
+def _table_lines(tbl) -> List[str]:
+    """Text lines of one Word table: each non-empty cell, nested tables
+    recursed into (cell.text never surfaces them), and every row with more
+    than one non-empty cell ALSO joined as one line — a record rendered as a
+    structured row (label/value cells) keeps its tokens together the way one
+    source line does only in the joined view. KEEP IN SYNC with the by-name
+    mirror in stage_6_word_template.py's _rendered_output_lines() (the #221
+    recovery pass, PR #225): both sides must agree on what counts as
+    rendered. Extra lines only ever prove presence — strictly fewer false
+    'absent' verdicts, never more."""
+    lines: List[str] = []
+    for row in tbl.rows:
+        cell_texts = []
+        for cell in row.cells:
+            if cell.text.strip():
+                cell_texts.append(cell.text)
+                lines.append(cell.text)
+            for nested in cell.tables:
+                lines.extend(_table_lines(nested))
+        if len(cell_texts) > 1:
+            lines.append(" | ".join(" ".join(t.split()) for t in cell_texts))
+    return lines
+
+
 def read_docx_blocks(docx_path: str) -> List[Tuple[str, str]]:
     """Body-order blocks of a docx: ("p", text) per paragraph, ("table",
-    cell texts joined by newlines) per table. Grants render as one Word table
-    per grant, so any output check must read tables AND paragraphs."""
+    _table_lines joined by newlines) per table. Grants render as one Word
+    table per grant, so any output check must read tables AND paragraphs."""
     from docx import Document  # local import: doctor is optional tooling
     from docx.oxml.ns import qn
     from docx.table import Table
@@ -225,12 +249,7 @@ def read_docx_blocks(docx_path: str) -> List[Tuple[str, str]]:
         if child.tag == qn("w:p"):
             blocks.append(("p", Paragraph(child, doc).text))
         elif child.tag == qn("w:tbl"):
-            cell_texts = []
-            for row in Table(child, doc).rows:
-                for cell in row.cells:
-                    if cell.text.strip():
-                        cell_texts.append(cell.text)
-            blocks.append(("table", "\n".join(cell_texts)))
+            blocks.append(("table", "\n".join(_table_lines(Table(child, doc)))))
     return blocks
 
 

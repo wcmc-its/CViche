@@ -258,6 +258,26 @@ def test_read_docx_blocks_body_order_paragraphs_and_tables(tmp_path):
     assert "Second cell content" in blocks[1][1]
 
 
+def test_read_docx_blocks_joins_rows_and_recurses_nested_tables(tmp_path):
+    # Mirror of stage 6's _rendered_output_lines() table walk (PR #225): a
+    # multi-cell row is ALSO emitted joined as one line, and nested tables
+    # (invisible to python-docx cell.text) are recursed into.
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text = "First cell content"
+    table.rows[0].cells[1].text = "Second cell content"
+    host = doc.add_table(rows=1, cols=1)
+    nested = host.rows[0].cells[0].add_table(rows=1, cols=1)
+    nested.rows[0].cells[0].text = "Nested table content line"
+    path = tmp_path / "out.docx"
+    doc.save(path)
+
+    blocks = read_docx_blocks(str(path))
+    assert [k for k, _ in blocks] == ["table", "table"]
+    assert "First cell content | Second cell content" in blocks[0][1].split("\n")
+    assert "Nested table content line" in blocks[1][1].split("\n")
+
+
 # ------------------------------------------------ lint 5: classified-unrendered
 
 def test_classified_unrendered_fires_when_code_vanishes():
@@ -455,6 +475,47 @@ def test_unrendered_records_skips_single_record_and_appendix_entries():
     fused_t = _entry(_ROW_SILVERLAKE + "\n" + _ROW_FOXGLOVE,
                      start=9, taxonomy_code="T")
     assert lint_unrendered_records({"entries": [single, fused_t]}, blocks) == []
+
+
+# A record whose tokens split across the cells of ONE structured table row:
+# no pipe-fragment squashes to a >=15-char verbatim piece and no single CELL
+# holds 3+ distinctive tokens, so only the row read as a whole can prove it
+# rendered — the 2054 shape (grant label/value tables) lint 8 false-flagged
+# until it mirrored stage 6's row-joined _rendered_output_lines() view.
+_ROW_SPLITTABLE = "Ruby Grant | Asthma study | Vasquez lab | Peds wing | Bronx site | 2021-2024"
+
+
+def test_unrendered_records_quiet_when_record_splits_across_row_cells(tmp_path):
+    doc = Document()
+    doc.add_paragraph("D. GRANTS")
+    doc.add_paragraph(_ROW_HARBORVIEW)
+    table = doc.add_table(rows=1, cols=6)
+    for i, cell_text in enumerate(_ROW_SPLITTABLE.split(" | ")):
+        table.rows[0].cells[i].text = cell_text
+    path = tmp_path / "out.docx"
+    doc.save(path)
+
+    fused = _ROW_SPLITTABLE + "\n" + _ROW_HARBORVIEW
+    stage4 = {"entries": [_entry(fused, start=12, taxonomy_code="M2A")]}
+    assert lint_unrendered_records(stage4, read_docx_blocks(str(path))) == []
+
+
+def test_unrendered_records_quiet_when_record_rendered_in_nested_table(tmp_path):
+    # Grants render as one Word table per grant, sometimes nested inside a
+    # layout table — cell.text never surfaces nested-table text, so the walk
+    # must recurse (mirroring stage 6's _rendered_output_lines()).
+    doc = Document()
+    doc.add_paragraph("D. GRANTS")
+    doc.add_paragraph(_ROW_HARBORVIEW)
+    host = doc.add_table(rows=1, cols=1)
+    nested = host.rows[0].cells[0].add_table(rows=1, cols=1)
+    nested.rows[0].cells[0].text = _ROW_BLUERIDGE
+    path = tmp_path / "out.docx"
+    doc.save(path)
+
+    fused = _ROW_BLUERIDGE + "\n" + _ROW_HARBORVIEW
+    stage4 = {"entries": [_entry(fused, start=33, taxonomy_code="M2B")]}
+    assert lint_unrendered_records(stage4, read_docx_blocks(str(path))) == []
 
 
 def test_unrendered_records_counts_generic_lines_unverifiable_not_missing():
