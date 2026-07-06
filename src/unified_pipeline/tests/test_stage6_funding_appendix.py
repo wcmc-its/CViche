@@ -176,7 +176,9 @@ def test_reconsider_routes_unrendered_siblings_home(monkeypatch):
 
     routed, appended = [], []
     monkeypatch.setattr(
-        gen, "_insert_reconsidered_segment", lambda text, code: routed.append((text, code))
+        gen, "_insert_reconsidered_segment",
+        # Returns True: a failed insert now falls back to the appendix (#221).
+        lambda text, code: routed.append((text, code)) or True,
     )
     monkeypatch.setattr(
         gen, "_add_remaining_to_appendix", lambda remaining: appended.extend(remaining)
