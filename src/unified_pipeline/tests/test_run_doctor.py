@@ -27,10 +27,12 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dead_sections,
+    lint_enrichment_failures,
     lint_missed_headers,
     lint_output_hygiene,
     lint_segmentation,
     lint_under_extraction,
+    lint_unrendered_records,
     main,
     read_docx_blocks,
     run_doctor,
@@ -397,6 +399,127 @@ def test_dead_sections_quiet_when_section_has_content_or_no_match():
     assert lint_dead_sections(_STAGE2_GRANTS, unmatched) == []
 
 
+# --------------------------------------------------- lint 8: unrendered records
+
+# Five synthetic pipe-delimited grant rows: token-distinct titles so an absent
+# row can't reach the 0.7 overlap through its rendered siblings.
+_ROW_HARBORVIEW = ("Harborview Medical Simulation Grant | Tanaka, R. (PI), "
+                   "Whitfield, P. (Co-PI) | Role: Co-PI | Amount: $80,000 | "
+                   "Status: Awarded 2023")
+_ROW_BLUERIDGE = ("Blue Ridge Educational Technology Award | Okafor, C. (PI) | "
+                  "Role: PI | Amount: $45,000 | Status: Completed 2022")
+_ROW_CEDARBROOK = ("Cedarbrook Curriculum Innovation Fund | Marchetti, L. (PI) | "
+                   "Role: Co-Investigator | Amount: $30,000 | Status: Awarded 2024")
+_ROW_SILVERLAKE = ("Silverlake Assessment Consortium Grant | Petrov, D. (PI) | "
+                   "Role: Co-PI | Amount: $65,000 | Status: Under review 2025")
+_ROW_FOXGLOVE = ("Foxglove Interprofessional Training Grant | Nakamura, S. (PI) | "
+                 "Role: PI | Amount: $120,000 | Status: Submitted 2025")
+
+_CITE_RAW = ("Epigenetic Regulation of Tumor Suppressor Genes in Breast Cancer | "
+             "Quimby F, Farrow C, Blackwell D | Journal of Synthetic Oncology | 2024")
+_CITE_RENDERED = ("Quimby F., Farrow C., Blackwell D. Epigenetic regulation of "
+                  "tumor-suppressor genes in breast cancer. J Synth Oncol. 2024.")
+
+
+def test_unrendered_records_fires_on_dropped_remainder():
+    # The #221 shape: five records fused into one entry, stage 6 rendered
+    # three and silently dropped two (no bullet fallback).
+    fused = "\n".join([_ROW_HARBORVIEW, _ROW_BLUERIDGE, _ROW_CEDARBROOK,
+                       _ROW_SILVERLAKE, _ROW_FOXGLOVE])
+    stage4 = {"entries": [_entry(fused, etype="break", start=21,
+                                 taxonomy_code="M2A")]}
+    blocks = [("p", "RESEARCH"), ("table", _ROW_HARBORVIEW),
+              ("table", _ROW_BLUERIDGE), ("table", _ROW_CEDARBROOK)]
+    findings = lint_unrendered_records(stage4, blocks)
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "WARN"
+    assert "entry 21 (M2A): 2 of 5 records absent" in findings[0]["message"]
+    assert findings[0]["evidence"] == [_ROW_SILVERLAKE[:100], _ROW_FOXGLOVE[:100]]
+
+
+def test_unrendered_records_quiet_when_all_rendered_incl_reformatted():
+    # One record survives verbatim (table cell); the other only via token
+    # overlap because 5d re-rendered the citation from extracted fields.
+    fused = _ROW_HARBORVIEW + "\n" + _CITE_RAW
+    stage4 = {"entries": [_entry(fused, start=5, taxonomy_code="S1")]}
+    blocks = [("table", _ROW_HARBORVIEW), ("p", _CITE_RENDERED)]
+    assert lint_unrendered_records(stage4, blocks) == []
+
+
+def test_unrendered_records_skips_single_record_and_appendix_entries():
+    blocks = [("p", "D. GRANTS"), ("table", _ROW_HARBORVIEW)]
+    # One record line: not a fused candidate, even though it never rendered.
+    single = _entry(_ROW_SILVERLAKE + "\nNarrative description of the award.",
+                    start=7, taxonomy_code="M2C")
+    # 'T' catch-all is skipped whatever its shape.
+    fused_t = _entry(_ROW_SILVERLAKE + "\n" + _ROW_FOXGLOVE,
+                     start=9, taxonomy_code="T")
+    assert lint_unrendered_records({"entries": [single, fused_t]}, blocks) == []
+
+
+def test_unrendered_records_counts_generic_lines_unverifiable_not_missing():
+    # Date-prefixed record lines whose payload carries too few distinctive
+    # tokens ("Assistant Professor") cannot be proven absent: no finding.
+    fused = ("Jun 2020-Jun 2025, Assistant Professor\n"
+             "Sep 2015-Sep 2020, Research Fellow")
+    stage4 = {"entries": [_entry(fused, etype="break", start=21,
+                                 taxonomy_code="D1")]}
+    blocks = [("p", "D. GRANTS"), ("table", _ROW_HARBORVIEW)]
+    assert lint_unrendered_records(stage4, blocks) == []
+
+
+# -------------------------------------------------- lint 9: enrichment failures
+
+def _enriched_entry(text, status=None):
+    e = {"text": text, "element_type": "paragraph", "taxonomy_code": "S1"}
+    if status:
+        e["enrichment_status"] = status
+    return e
+
+
+def test_enrichment_failures_fires_with_counts_by_status():
+    entries = [
+        _enriched_entry("Rivera T. (2024). Adaptive tutoring in clinical "
+                        "reasoning. J Synth Med Educ.", "doi_found_but_fetch_failed"),
+        _enriched_entry("Okafor C. (2023). Simulation debriefing at scale. "
+                        "Ann Fict Acad Med.", "doi_found_but_fetch_failed"),
+        _enriched_entry("Petrov D. (2022). Rubric drift in OSCE scoring. "
+                        "Clin Educ Quarterly.", "lookup_failed"),
+        _enriched_entry("Nakamura S. (2021). Feedback literacy.", "enriched"),
+        _enriched_entry("Marchetti L. (2020). Cohort attrition.", "no_identifier"),
+        _enriched_entry("Tanaka R. (2019). Preprint culture.", "doi_not_in_pubmed"),
+        _enriched_entry("A non-publication entry with no status at all"),
+    ]
+    findings = lint_enrichment_failures({"entries": entries})
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "WARN"
+    assert findings[0]["message"].startswith("3 publication(s) failed")
+    assert "doi_found_but_fetch_failed: 2" in findings[0]["message"]
+    assert "lookup_failed: 1" in findings[0]["message"]
+    assert "#222" in findings[0]["message"]
+    assert len(findings[0]["evidence"]) == 3
+    assert findings[0]["evidence"][0].startswith("Rivera T.")
+
+
+def test_enrichment_failures_quiet_on_non_failure_statuses():
+    entries = [_enriched_entry("Nakamura S. (2021). Feedback literacy.", "enriched"),
+               _enriched_entry("Marchetti L. (2020). Cohort attrition.", "no_identifier"),
+               _enriched_entry("Tanaka R. (2019). Preprint culture.", "doi_not_in_pubmed"),
+               _enriched_entry("No status entry")]
+    assert lint_enrichment_failures({"entries": entries}) == []
+
+
+def test_enrichment_failures_missing_artifact_info_skip(tmp_path):
+    root = _build_clean_run(tmp_path)
+    next((root / "stage_5_enrichment").glob("*.json")).unlink()
+    payload = run_doctor(root, _UID)
+    skips = [f for f in payload["findings"] if f["lint"] == "enrichment_failures"]
+    assert len(skips) == 1
+    assert skips[0]["severity"] == "INFO"
+    assert "stage_5_enrichment" in skips[0]["message"]
+    assert payload["artifacts"]["stage_5_enrichment"] is None
+
+
 # ------------------------------------------------------------ full doctor runs
 
 _UID = "89TEST"
@@ -435,6 +558,12 @@ def _build_clean_run(tmp_path, uid=_UID):
                  {"document_uid": uid, "entries": [
                      _grant4(g, c, start=i + 1)
                      for i, (g, c) in enumerate(zip(grants, codes))]})
+    _write_stage(root, "stage_5_enrichment", f"{uid}_cv_enriched.json",
+                 {"document_uid": uid, "entries": [
+                     _enriched_entry("Sample citation resolved in PubMed",
+                                     "enriched"),
+                     _enriched_entry("Sample citation without identifiers",
+                                     "no_identifier")]})
 
     output = Document()
     output.add_paragraph("D. GRANTS")
@@ -458,7 +587,7 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    assert len(payload["findings"]) == 7
+    assert len(payload["findings"]) == 9
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
     assert payload["counts"]["ERROR"] == 0

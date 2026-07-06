@@ -25,6 +25,12 @@ Lints, ranked by the severity of the failure class they catch:
                           size, boilerplate rendered in the appendix
 7. dead_sections          substantive source sections whose name-matched WCM
                           output section is empty
+8. unrendered_records     record lines of a fused multi-record stage-4 entry
+                          definitively absent from the stage-6 output — the
+                          structured-fields-only render paths drop the
+                          unextracted remainder with no bullet fallback (#221)
+9. enrichment_failures    stage-5 PubMed enrichment lookups that failed, so
+                          those citations degrade to CV-extracted fields (#222)
 
 Usage:
 
@@ -87,6 +93,15 @@ APPENDIX_WARN_ENTRIES = 15
 # Lint 7: a source section with at least this many substantive lines whose
 # output section is empty did not just "have nothing to say".
 DEAD_SECTION_MIN_LINES = 3
+
+# Lint 8: an entry is a fused multi-record candidate at this many record-like
+# lines. _looks_like_record only sees pipe/tab rows; employment/appointment
+# records are date-range-prefixed comma lines ("Jun 2020-Jun 2025, Assistant
+# Professor"), caught by the prefix pattern when the line carries a payload
+# beyond the bare date range.
+UNRENDERED_MIN_RECORD_LINES = 2
+RECORD_DATE_LINE_MIN_CHARS = 20
+_RECORD_DATE_PREFIX_RE = re.compile(r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]")
 
 _SEVERITIES = ("ERROR", "WARN", "INFO")
 
@@ -543,6 +558,98 @@ def lint_dead_sections(stage2: Dict,
     return findings
 
 
+# -------------------------------------------------------------------- lint 8
+
+def _record_lines(text) -> List[str]:
+    return [line.strip() for line in str(text or "").split("\n")
+            if _looks_like_record(line)
+            or (len(line.strip()) >= RECORD_DATE_LINE_MIN_CHARS
+                and _RECORD_DATE_PREFIX_RE.match(line.strip()))]
+
+
+def _line_token_sets(blocks: List[Tuple[str, str]]) -> List[set]:
+    """Distinctive-token set per OUTPUT LINE. Lint 8 verifies each record line
+    against single output lines: the pooled document tokens of _haystacks let
+    common academic words scattered across unrelated sections vouch for a
+    dropped record, while a 5c/5d-reformatted citation still matches here
+    because its surname/title tokens stay together on one line."""
+    return [set(_RENDER_TOKEN_RE.findall(_norm(line)))
+            for _, text in blocks for line in str(text).split("\n")
+            if line.strip()]
+
+
+def _record_rendered(line: str, haystack: str,
+                     line_token_sets: List[set]) -> Optional[bool]:
+    """Whether one record line surfaces in the output: verbatim piece first,
+    then per-output-line token overlap. Verbatim absence alone proves nothing
+    (stage 6 reformats dates/fields), so False requires a token-verifiable
+    miss; a line without enough distinctive tokens is None, not missing."""
+    if any(piece in haystack for piece in _entry_pieces(line)):
+        return True
+    rendered = None
+    for chunk in [line] + _entry_fragments(line):
+        tokens = set(_RENDER_TOKEN_RE.findall(_norm(chunk)))
+        if len(tokens) < RENDER_TOKEN_MIN_COUNT:
+            continue
+        if any(len(tokens & line_tokens) / len(tokens) >= RENDER_TOKEN_OVERLAP
+               for line_tokens in line_token_sets):
+            return True
+        rendered = False
+    return rendered
+
+
+def lint_unrendered_records(stage4: Dict,
+                            blocks: List[Tuple[str, str]]) -> List[Dict]:
+    """Per-record render check over fused multi-record stage-4 entries: the
+    structured-fields-only render paths keep the extracted record and drop
+    the unextracted remainder lines with no bullet fallback (#221). No
+    element_type filter — the KFGXBW loss was on a 'break' entry; 'T' is
+    skipped (appendix catch-all)."""
+    haystack, _ = _haystacks(blocks)
+    line_tokens = _line_token_sets(blocks)
+    findings = []
+    for e in stage4.get("entries", []):
+        code = e.get("taxonomy_code")
+        if code == "T":
+            continue
+        records = _record_lines(e.get("text"))
+        if len(records) < UNRENDERED_MIN_RECORD_LINES:
+            continue
+        absent = [r for r in records
+                  if _record_rendered(r, haystack, line_tokens) is False]
+        if not absent:
+            continue
+        findings.append(_finding(
+            "unrendered_records", "WARN",
+            f"entry {e.get('element_idx_start')} ({code}): {len(absent)} of "
+            f"{len(records)} records absent from output",
+            [r[:100] for r in absent[:5]]))
+    return findings
+
+
+# -------------------------------------------------------------------- lint 9
+
+def lint_enrichment_failures(stage5e: Dict) -> List[Dict]:
+    """Publications whose stage-5 PubMed enrichment ended in a *_failed status
+    (lookup_failed, pmcid_conversion_failed, doi_found_but_fetch_failed):
+    their citations degrade to CV-extracted fields. Non-failure outcomes
+    (enriched, no_identifier, doi_not_in_pubmed) are expected vocabulary."""
+    failed = [e for e in stage5e.get("entries", [])
+              if str(e.get("enrichment_status") or "").endswith("_failed")]
+    if not failed:
+        return []
+    counts: Dict[str, int] = {}
+    for e in failed:
+        status = str(e.get("enrichment_status"))
+        counts[status] = counts.get(status, 0) + 1
+    breakdown = ", ".join(f"{s}: {n}" for s, n in sorted(counts.items()))
+    return [_finding(
+        "enrichment_failures", "WARN",
+        f"{len(failed)} publication(s) failed PubMed enrichment ({breakdown}) "
+        f"— citations degrade to CV-extracted fields (#222)",
+        [str(e.get("text", ""))[:100] for e in failed[:3]])]
+
+
 # --------------------------------------------------------- artifact resolution
 
 _ARTIFACTS = {
@@ -550,6 +657,7 @@ _ARTIFACTS = {
     "stage_2": ("stage_2_entry_extraction", "_entries.json"),
     "stage_3b": ("stage_3b_classified_entries", "_classified.json"),
     "stage_4": ("stage_4_field_extraction", "_fields.json"),
+    "stage_5_enrichment": ("stage_5_enrichment", "_enriched.json"),
     "stage_6_docx": ("stage_6_wcm_documents", "_wcm.docx"),
 }
 
@@ -603,6 +711,7 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     stage_2 = _load_json(paths["stage_2"])
     stage_3b = _load_json(paths["stage_3b"])
     stage_4 = _load_json(paths["stage_4"])
+    stage_5e = _load_json(paths["stage_5_enrichment"])
     source_lines = _try(lambda: iter_source_lines(str(source_path))) if source_path else None
     candidates = _try(lambda: iter_header_candidates(str(source_path))) if source_path else None
     blocks = _try(lambda: read_docx_blocks(str(paths["stage_6_docx"]))) if paths["stage_6_docx"] else None
@@ -631,6 +740,10 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
         findings.extend(lint_output_hygiene(blocks))
     if ready("dead_sections", stage_2=stage_2, stage_6_docx=blocks):
         findings.extend(lint_dead_sections(stage_2, blocks))
+    if ready("unrendered_records", stage_4=stage_4, stage_6_docx=blocks):
+        findings.extend(lint_unrendered_records(stage_4, blocks))
+    if ready("enrichment_failures", stage_5_enrichment=stage_5e):
+        findings.extend(lint_enrichment_failures(stage_5e))
 
     counts = {severity: 0 for severity in _SEVERITIES}
     for f in findings:
