@@ -148,7 +148,33 @@ def build_started_payload(run, submitter=None) -> dict:
     )
 
 
-def build_teams_payload(run, score=None, submitter=None) -> dict:
+def _doctor_text(doctor):
+    """One-line summary of the run-doctor report, or None to omit the line.
+
+    Counts substantive findings only (ERROR + WARN; INFO covers skipped-lint
+    notices and informational counts), naming the most severe finding's lint
+    when there is one.
+    """
+    if not isinstance(doctor, dict):
+        return None
+    try:
+        counts = doctor.get("counts") or {}
+        total = int(counts.get("ERROR") or 0) + int(counts.get("WARN") or 0)
+        if not total:
+            return "0 findings"
+        top = next(
+            (f.get("lint") for severity in ("ERROR", "WARN")
+             for f in doctor.get("findings") or []
+             if f.get("severity") == severity and f.get("lint")),
+            None,
+        )
+        return f"{total} findings (top: {top})" if top else f"{total} findings"
+    except Exception:
+        # A malformed report must cost only its own line, never the card.
+        return None
+
+
+def build_teams_payload(run, score=None, submitter=None, doctor=None) -> dict:
     """Build the Teams card for a terminal run (complete or failed).
 
     Args:
@@ -157,6 +183,8 @@ def build_teams_payload(run, score=None, submitter=None) -> dict:
         score: the cached quality-score dict ({"totalScore": int, "band": str})
             or None when unavailable (e.g. on failure).
         submitter: display name/email of who submitted the run, or None to omit.
+        doctor: the run-doctor report dict (run_doctor payload) or None to omit
+            the Doctor line (doctor disabled, failed, or a failed run).
     """
     status = getattr(run, "status", None) or "unknown"
     run_id = getattr(run, "id", None) or "unknown"
@@ -187,6 +215,10 @@ def build_teams_payload(run, score=None, submitter=None) -> dict:
         {"name": "Total cost", "value": cost_text},
         {"name": "Duration", "value": duration_text},
     ]
+
+    doctor_text = _doctor_text(doctor)
+    if doctor_text:
+        facts.append({"name": "Doctor", "value": doctor_text})
 
     color = _STATUS_COLOR.get(status, _DEFAULT_COLOR)
     return _adaptive_card(f"CViche run {run_id} {status}", color, facts, run_id)
@@ -221,10 +253,10 @@ def notify_run_started(run, submitter=None) -> None:
     _post(build_started_payload(run, submitter), getattr(run, "id", "unknown"))
 
 
-def notify_run_terminal(run, score=None, submitter=None) -> None:
+def notify_run_terminal(run, score=None, submitter=None, doctor=None) -> None:
     """Best-effort: POST a Teams notification for a terminal run.
 
     No-ops silently when the webhook URL is not configured. Catches and logs
     every exception so it can never raise or affect run status.
     """
-    _post(build_teams_payload(run, score, submitter), getattr(run, "id", "unknown"))
+    _post(build_teams_payload(run, score, submitter, doctor), getattr(run, "id", "unknown"))

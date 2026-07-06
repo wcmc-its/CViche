@@ -538,11 +538,27 @@ class PipelineOrchestrator:
             except Exception as e:
                 logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
 
+            # Post-run artifact doctor: cross-stage lints over the stage
+            # outputs just written (pure local file reads, no LLM). Gated by
+            # CVICHE_RUN_DOCTOR and best-effort: the run is already committed
+            # complete above, so a doctor problem can never fail the run.
+            doctor = None
+            try:
+                doctor = await self._run_doctor()
+            except Exception as e:
+                logger.warning("Run doctor failed for run %s: %s", self.run_id, e)
+                try:
+                    # A failed output_files commit would leave the session in
+                    # pending-rollback and strip the submitter off the card.
+                    self.db.rollback()
+                except Exception:
+                    pass
+
             # Notify on terminal success, passing the freshly-computed score so
             # the Teams message includes it. Fully decoupled and best-effort:
             # notify_run_terminal swallows all failures, so this never affects
             # run status (which is already committed above).
-            await self._notify_terminal(run, score)
+            await self._notify_terminal(run, score, doctor)
 
         except CancelledException:
             # Run was cancelled - status already updated by API endpoint
@@ -642,7 +658,7 @@ class PipelineOrchestrator:
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("Run start notification failed for run %s: %s", self.run_id, e)
 
-    async def _notify_terminal(self, run, score):
+    async def _notify_terminal(self, run, score, doctor=None):
         """Best-effort outbound notification for a terminal run.
 
         Runs off the event loop (the HTTP POST is blocking) and swallows all
@@ -654,10 +670,67 @@ class PipelineOrchestrator:
             from app.services.notifications import notify_run_terminal
             submitter = self._submitter_label(run)
             await asyncio.get_running_loop().run_in_executor(
-                None, notify_run_terminal, run, score, submitter
+                None, notify_run_terminal, run, score, submitter, doctor
             )
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("Run notification failed for run %s: %s", self.run_id, e)
+
+    async def _run_doctor(self):
+        """Run cross-stage lints over this run's artifacts and publish the report.
+
+        Gated by CVICHE_RUN_DOCTOR (unset or "1" = on, "0" = off). The lints
+        are pure local file reads (no LLM, no network), run off the event
+        loop. The report lands in the pipeline outputs dir at
+        stage_7_doctor/<uid>_doctor.json -- a location the stage-JSON viewer
+        already serves -- then is attached to the final step's output_files so
+        the UI lists it, and mirrored to durable storage for the S3 fallback.
+        Returns the report dict, or None when disabled.
+        """
+        enabled, _ = get_config("doctor", "CVICHE_RUN_DOCTOR", default="1")
+        if str(enabled).strip() == "0":
+            return None
+
+        loop = asyncio.get_running_loop()
+        payload, out_path = await loop.run_in_executor(None, self._doctor_report)
+
+        # Attach the report to the last step's output_files here, on the
+        # orchestrator's thread (like _submitter_label: the session must not
+        # be touched from an executor thread).
+        step = (
+            self.db.query(Step)
+            .filter(Step.run_id == self.run_id)
+            .order_by(Step.step_number.desc())
+            .first()
+        )
+        if step is not None:
+            files = json.loads(step.output_files) if step.output_files else []
+            if str(out_path) not in files:
+                files.append(str(out_path))
+                step.output_files = json.dumps(files)
+                self.db.commit()
+
+        await loop.run_in_executor(
+            None, self._persist_outputs_to_storage, [str(out_path)]
+        )
+        return payload
+
+    def _doctor_report(self):
+        """Run the doctor lints and write the JSON report; returns (payload, path)."""
+        from unified_pipeline.run_doctor import run_doctor
+
+        source = PARENT_DIR / 'data' / 'sample_cvs' / 'word' / f'{self.document_uid}.docx'
+        payload = run_doctor(
+            self.pipeline_output_dir,
+            self.document_uid,
+            source=source if source.exists() else None,
+        )
+        out_path = (
+            self.pipeline_output_dir / 'stage_7_doctor'
+            / f'{self.document_uid}_doctor.json'
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload, indent=2))
+        return payload, out_path
 
     async def execute_step(self, step_number: int, stage_id: str, cv_path: str):
         """Execute a single stage."""
