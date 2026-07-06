@@ -687,6 +687,23 @@ _IDENTIFYING_FIELDS = (
     'mentee_name', 'organization', 'grant_number',
 )
 
+# Month words (>=4 alphabetic chars) allowed inside a date-like field value.
+_MONTH_WORDS = frozenset((
+    'january', 'february', 'march', 'april', 'june', 'july', 'august',
+    'september', 'sept', 'october', 'november', 'december',
+))
+
+
+def _value_is_datelike(v: str) -> bool:
+    """True when a normalized field value carries no identifying prose —
+    only date/number/punctuation content (month names allowed). Date ranges
+    are shared across the sibling records of a fused entry, and bare
+    alphanumeric codes ('1F30AG032861-01A1') read the same wherever they
+    land, so such values must never vouch on their own that a specific
+    record rendered (#221 post-review: on corpus CV 2054 entry 66.16 they
+    outvoted a genuinely absent grant record line)."""
+    return all(word in _MONTH_WORDS for word in re.findall(r'[a-z]{4,}', v))
+
 
 def segment_already_rendered(segment_text: str, extracted_fields: Dict) -> bool:
     """True if an overflow segment duplicates content already rendered from
@@ -695,7 +712,10 @@ def segment_already_rendered(segment_text: str, extracted_fields: Dict) -> bool:
 
     Matches only identifying fields (title/agency/name), never generic ones
     (a status like "Submitted 2026, Under review" is shared across records
-    and would wrongly mark unrendered siblings as duplicates). A title too
+    and would wrongly mark unrendered siblings as duplicates). Within those
+    fields, values with no alphabetic word beyond month names (date ranges,
+    bare grant numbers) never vouch either — dates are shared across sibling
+    records (#221 post-review). A title too
     short to identify a record on its own ("Professor", "Chair") counts only
     together with the record's other anchors: BOTH extracted date endpoints
     (fused career-progression siblings share a boundary date and title
@@ -721,7 +741,7 @@ def segment_already_rendered(segment_text: str, extracted_fields: Dict) -> bool:
 
     for key in _IDENTIFYING_FIELDS:
         v = _norm_val(extracted_fields.get(key))
-        if len(v) >= 15 and v in seg:
+        if len(v) >= 15 and v in seg and not _value_is_datelike(v):
             return True
 
     # Short-title conjunction (#221 review): the extracted record's source

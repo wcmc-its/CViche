@@ -433,6 +433,85 @@ def test_m2b_sibling_routed_home_extracted_grant_guarded():
     assert not any("T. APPENDIX" in t for t in texts)
 
 
+def test_m2b_datelike_field_values_do_not_vouch_sibling_recovered():
+    """#221 post-review (corpus CV 2054, entry 66.16): sibling records of a
+    fused grant entry share their leading date ranges, so a date-like
+    identifying-field value ('07/01/2016-06/30/2019', 21 chars — over the
+    guard's length bar) textually present in a sibling line must not mark
+    that sibling as already rendered. Same for the extracted grant's bare
+    grant number, which carries no alphabetic word at all. Before the fix
+    the guard vouched on these and the recovery pass skipped a genuinely
+    absent grant record line."""
+    gen = _generator()
+    entry = {
+        "element_idx_start": "66.16",
+        "element_idx_end": "66.16",
+        "parent_idx": 66,
+        "element_type": "table_row",
+        "hierarchy": ["PROFESSIONAL ACTIVITIES", "2. Research and Training"],
+        "taxonomy_code": "M2B",
+        "text": "\n".join([
+            "07/01/2016-06/30/2019 | 07/01/2016-06/30/2019 | Cartography of "
+            "Subterranean Cloud Formations, 5R01ZZ049917-04",
+            "07/01/2016-06/30/2019 | 07/01/2016-06/30/2019 | Meandering "
+            "Auditors Guild Junior Fellowship, 3R21QX041776-02",
+        ]),
+        "extracted_fields": {
+            "grant_number": "5R01ZZ049917-04",
+            "title": "Cartography of Subterranean Cloud Formations",
+            "agency": "NIOF",
+            # Extraction noise mirroring the corpus shape: a shared date
+            # range landed in an identifying field.
+            "award_source": "07/01/2016-06/30/2019",
+        },
+    }
+
+    # Neither record rendered anywhere (the 2054 case). Only prose values may
+    # block recovery: the extracted grant's own line is vouched by its title;
+    # the sibling shares nothing with the fields but dates + punctuation.
+    assert not segment_already_rendered(
+        "07/01/2016-06/30/2019 | 07/01/2016-06/30/2019 | Meandering "
+        "Auditors Guild Junior Fellowship, 3R21QX041776-02",
+        entry["extracted_fields"])
+
+    gen._recover_unrendered_records({"M2B": [entry]})
+
+    texts = [p.text for p in gen.doc.paragraphs]
+    bullets = [t for t in texts if t.strip().startswith("•")]
+    hits = [b for b in bullets if "Meandering Auditors Guild Junior" in b]
+    assert len(hits) == 1  # sibling recovered, exactly once
+    # The extracted grant's line still blocked by its (prose) title.
+    assert not any("Cartography of Subterranean" in b for b in bullets)
+
+
+def test_prose_identifying_values_still_vouch_and_block_recovery():
+    """Regression for the date-like tightening: an extracted record whose
+    title and organization DO appear in its record line is still treated as
+    rendered — the guard must keep vouching on prose values."""
+    gen = _generator()
+    entry = {
+        "element_idx_start": 12,
+        "taxonomy_code": "P",
+        "text": "\n".join([
+            "Chair | Panel of Improbable Weights and Measures | Norvale "
+            "Metrology Circle | 2013-2016",
+            "Member | Committee on Subterranean Balloon Safety Standards | "
+            "Guild of Meandering Auditors | 2017-2020",
+        ]),
+        "extracted_fields": {
+            "title": "Panel of Improbable Weights and Measures",
+            "organization": "Norvale Metrology Circle",
+        },
+    }
+
+    gen._recover_unrendered_records({"P": [entry]})
+
+    texts = [p.text for p in gen.doc.paragraphs]
+    bullets = [t for t in texts if t.strip().startswith("•")]
+    assert not any("Improbable Weights" in b for b in bullets)
+    assert any("Subterranean Balloon" in b for b in bullets)
+
+
 def test_recovery_not_swallowed_by_appendix_group_head():
     """The KFGXBW re-render regression: _fill_appendix leaves bold
     'From "ACADEMIC APPOINTMENTS":' group heads at document end, and the
