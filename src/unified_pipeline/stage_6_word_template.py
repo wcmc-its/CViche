@@ -362,6 +362,36 @@ def _dates_overlap_or_match(entry_a: Dict, entry_b: Dict) -> bool:
     return sa <= eb and sb <= ea
 
 
+# _drop_is_safe: a reworded true duplicate ("Associate Professor, HPE, USUHS"
+# inside "...Department of Health Professions Education (HPE) Uniformed
+# Services University...") has EVERY significant word contained in the kept
+# entry — but so does a 3-token degree line whose distinguishing token the
+# tokenizer destroyed ('M.S' vs 'PhD', the 2Q1_ZQ B1 loss). Full containment
+# only proves duplication when the dropped entry carries enough tokens.
+DEDUP_FULL_CONTAINMENT_MIN_TOKENS = 5
+
+
+def _drop_is_safe(dropped_entry: Dict, kept_entry: Dict) -> bool:
+    """#227 guard: only drop an entry when the loss is provably recoverable.
+
+    Safe when the dropped text is verbatim-contained in the kept entry, or
+    every significant word of a token-rich dropped entry appears in the kept
+    entry (both are true-duplicate shapes), or the dropped entry is a fused
+    multi-record candidate — those the #221/#225 recovery pass re-verifies
+    line by line against the rendered document. A single-line entry that
+    merely SCORES similar is the #227 loss class: distinct records sharing
+    role/date/venue boilerplate (7 of 8 drops on 2Q1_ZQ were real content
+    loss, all single-line)."""
+    dropped_squashed = _squash(dropped_entry.get('text', ''))
+    if dropped_squashed and dropped_squashed in _squash(kept_entry.get('text', '')):
+        return True
+    dropped_sig = _entry_signature_words(dropped_entry)
+    if (len(dropped_sig) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS
+            and dropped_sig <= _entry_signature_words(kept_entry)):
+        return True
+    return len(_record_lines(dropped_entry.get('text', ''))) >= UNRENDERED_MIN_RECORD_LINES
+
+
 def deduplicate_entries(entries: List[Dict], verbose: bool = False,
                         require_date_overlap: bool = False,
                         decisions: Optional[List[Dict]] = None) -> List[Dict]:
@@ -447,6 +477,13 @@ def deduplicate_entries(entries: List[Dict], verbose: bool = False,
                 len_j = len(entries[j].get('text', ''))
                 drop = j if len_i >= len_j else i
                 kept = i if drop == j else j
+                if not _drop_is_safe(entries[drop], entries[kept]):
+                    if verbose:
+                        print(f"    Dedup: skipping (similar but not "
+                              f"verbatim-contained, single record — keeping "
+                              f"both, #227) "
+                              f"[{entries[drop].get('text', '')[:50]}...]")
+                    continue
                 if jaccard >= 0.6:
                     metric = f"jaccard={jaccard:.2f}"
                 elif containment >= 0.75:
@@ -466,6 +503,10 @@ def deduplicate_entries(entries: List[Dict], verbose: bool = False,
                         "kept_text": entries[kept].get('text', '')[:500],
                     })
                 drop_indices.add(drop)
+                if drop == i:
+                    # i is gone: it must not keep vouching to drop later j's
+                    # (observed over-drop vector in the 2Q1_ZQ S8 trace, #227)
+                    break
 
     if drop_indices:
         return [e for idx, e in enumerate(entries) if idx not in drop_indices]
