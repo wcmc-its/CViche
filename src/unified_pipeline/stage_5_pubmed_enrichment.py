@@ -24,6 +24,7 @@ Date: 2025-11-29
 import os
 import sys
 import json
+import logging
 import re
 import time
 import requests
@@ -31,6 +32,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 # Configuration
@@ -95,6 +98,9 @@ class PubMedEnricher:
             'failed_lookups': 0,
             'api_errors': 0
         }
+
+        # (operation, status/exception) classes already logged at ERROR this run
+        self._logged_failure_classes = set()
 
     def enrich_stage4_output(self, stage4_path: str) -> Dict[str, Any]:
         """
@@ -319,12 +325,26 @@ class PubMedEnricher:
     def _enrich_by_doi(self, entries_with_doi: List[Tuple[Dict, str]]) -> List[Dict]:
         """
         Enrich entries by DOI search in PubMed, then lookup.
+
+        Outcome classes are distinct (#222): 'doi_not_in_pubmed' means esearch
+        succeeded with an empty idlist (a normal-vocabulary outcome), while an
+        API failure (non-2xx after retries, connection error) is recorded as
+        'doi_lookup_failed' so failure lints can surface it.
         """
         results = []
 
         for entry, doi in entries_with_doi:
-            pmid = self._search_pmid_by_doi(doi)
             self.stats['doi_searches'] += 1
+            search_failed = False
+            try:
+                pmid = self._search_pmid_by_doi(doi)
+            except Exception as e:
+                pmid = None
+                search_failed = True
+                self.stats['api_errors'] += 1
+                self._log_api_failure('doi_search', e)
+                if self.verbose:
+                    print(f"    ⚠️ DOI search error for {doi}: {_sanitize_error(e)}")
 
             if pmid:
                 records = self._fetch_pubmed_batch([pmid])
@@ -339,6 +359,9 @@ class PubMedEnricher:
                 else:
                     entry['enrichment_status'] = 'doi_found_but_fetch_failed'
                     self.stats['failed_lookups'] += 1
+            elif search_failed:
+                entry['enrichment_status'] = 'doi_lookup_failed'
+                self.stats['failed_lookups'] += 1
             else:
                 entry['enrichment_status'] = 'doi_not_in_pubmed'
                 self.stats['failed_lookups'] += 1
@@ -354,6 +377,27 @@ class PubMedEnricher:
         if PUBMED_CONTACT_EMAIL:
             params['email'] = PUBMED_CONTACT_EMAIL
         return params
+
+    def _log_api_failure(self, operation: str, error: Exception) -> None:
+        """
+        Log an API failure at ERROR level, once per failure class per run.
+
+        A bad API key fails every call identically (e.g. HTTP 400
+        {"error":"API key invalid"}); per-citation logging would flood the log
+        while burying the one response body that explains the failure.
+        """
+        response = getattr(error, 'response', None)
+        status = getattr(response, 'status_code', None)
+        failure_class = (operation, status if status is not None else type(error).__name__)
+        if failure_class in self._logged_failure_classes:
+            return
+        self._logged_failure_classes.add(failure_class)
+
+        message = f"PubMed {operation} failed: {_sanitize_error(error)}"
+        body = str(getattr(response, 'text', '') or '').strip()
+        if body:
+            message += f" | response body: {_sanitize_error(body[:500])}"
+        logger.error(message)
 
     def _get_with_retry(self, url: str, params: Dict[str, Any]) -> requests.Response:
         """
@@ -430,6 +474,7 @@ class PubMedEnricher:
 
         except Exception as e:
             self.stats['api_errors'] += 1
+            self._log_api_failure('efetch', e)
             if self.verbose:
                 print(f"    ❌ API error: {_sanitize_error(e)}")
             return {}
@@ -564,6 +609,7 @@ class PubMedEnricher:
 
         except Exception as e:
             self.stats['api_errors'] += 1
+            self._log_api_failure('pmcid_conversion', e)
             if self.verbose:
                 print(f"    ❌ ID conversion error: {_sanitize_error(e)}")
             return {}
@@ -571,31 +617,28 @@ class PubMedEnricher:
     def _search_pmid_by_doi(self, doi: str) -> Optional[str]:
         """
         Search PubMed for a DOI to get the PMID.
+
+        Returns None only when esearch succeeds with an empty idlist (DOI
+        genuinely not in PubMed). API failures propagate to the caller so
+        they are not conflated with a legitimate no-match (#222).
         """
-        try:
-            params = {
-                'db': 'pubmed',
-                'term': f'{doi}[doi]',
-                'retmode': 'json',
-                **self._identity_params()
-            }
-            if self.api_key:
-                params['api_key'] = self.api_key
+        params = {
+            'db': 'pubmed',
+            'term': f'{doi}[doi]',
+            'retmode': 'json',
+            **self._identity_params()
+        }
+        if self.api_key:
+            params['api_key'] = self.api_key
 
-            response = self._get_with_retry(ESEARCH_URL, params)
+        response = self._get_with_retry(ESEARCH_URL, params)
 
-            data = response.json()
-            id_list = data.get('esearchresult', {}).get('idlist', [])
+        data = response.json()
+        id_list = data.get('esearchresult', {}).get('idlist', [])
 
-            if id_list:
-                return id_list[0]  # First match
-            return None
-
-        except Exception as e:
-            self.stats['api_errors'] += 1
-            if self.verbose:
-                print(f"    ⚠️ DOI search error for {doi}: {_sanitize_error(e)}")
-            return None
+        if id_list:
+            return id_list[0]  # First match
+        return None
 
     def _merge_pubmed_data(self, entry: Dict, pubmed_record: Dict):
         """
