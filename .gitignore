@@ -115,8 +115,12 @@ src/unified_pipeline/config/institution_cache.json
 docs/architecture/*.png
 
 # Rendered secret material for k8s overlays (generated at build time by buildspec.yaml; never commit)
-# The committed db.env files are intentionally empty placeholders and stay tracked;
-# this only blocks future *rendered* secrets (session secret, OpenAI key, SAML SP key/cert) from being added.
+# The db.env, auth_config.yaml and cviche-saml-sp-prod.*.pem files are committed
+# as intentionally empty/placeholder content and stay tracked, so the overlays
+# render from a clean checkout / CI (issue #108); buildspec.yaml overwrites them
+# with real values at deploy time. This ignore only blocks *rendered* secrets
+# (session secret, OpenAI key, SAML SP key/cert) from being re-added once a local
+# build has populated them.
 k8s/overlays/*/db.env
 k8s/overlays/*/auth_config.yaml
 k8s/overlays/*/*.pem

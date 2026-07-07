@@ -20,6 +20,14 @@ phases:
           exit 1
         fi
         echo "All required environment variables are set."
+      # Smoke: both overlays must render from the checked-out source before we
+      # spend time building/pushing images. Runs against the committed
+      # placeholder auth_config.yaml/.pem (issue #108) -- pre_build overwrites
+      # those with real secrets later. Catches a missing referenced file or a
+      # broken patch here instead of at `kubectl apply -k` after the build.
+      - kubectl kustomize k8s/overlays/dev > /dev/null
+      - kubectl kustomize k8s/overlays/prod > /dev/null
+      - echo "Both kustomize overlays render."
   pre_build:
      commands:
        # Install and audit dependencies
