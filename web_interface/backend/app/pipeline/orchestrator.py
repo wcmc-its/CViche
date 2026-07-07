@@ -1300,6 +1300,12 @@ class PipelineOrchestrator:
 
                 self.stage_outputs['6'] = stage6_output_path
                 output_files.append(stage6_output_path)
+                # Render-warnings sidecar (#227/#228): persist alongside the
+                # docx so the doctor's inputs stay reconstructable off-pod.
+                sidecar = Path(stage6_output_path).with_name(
+                    f"{self.document_uid}_render_warnings.json")
+                if sidecar.is_file():
+                    output_files.append(str(sidecar))
 
                 await self.log(step_number, f"WCM template generated: {Path(stage6_output_path).name}")
 
