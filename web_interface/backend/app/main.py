@@ -173,6 +173,32 @@ async def _stale_run_reaper_loop(interval_seconds: int):
             )
 
 
+def _guard_deployed_auth_mode(auth_mode: str, storage_backend: str, allow_simple: bool) -> None:
+    """Fail closed if a deployed instance resolved to password-less simple auth.
+
+    On a real deployment (S3 storage backend) auth_config.yaml is expected to
+    set auth.mode=saml. If auth_mode resolved to "simple" instead, login is
+    email-allowlist only with NO credential (see auth_routes.login) -- almost
+    always a broken or empty auth_config.yaml (issue #111). Refuse to boot so
+    the misconfiguration can't silently expose the instance. An operator who
+    genuinely wants simple auth in a deployed env sets CVICHE_ALLOW_SIMPLE_AUTH=1.
+    Local dev (storage_backend="local") is never affected.
+    """
+    if auth_mode != "simple" or storage_backend != "s3":
+        return
+    msg = (
+        "[SECURITY] auth_mode=simple on a deployed (S3 storage) instance: login "
+        "is email-allowlist only with no credential. Expected auth.mode=saml from "
+        "auth_config.yaml -- check that the overlay's auth_config.yaml rendered."
+    )
+    if allow_simple:
+        logger.warning("%s Proceeding anyway because CVICHE_ALLOW_SIMPLE_AUTH=1.", msg)
+    else:
+        raise RuntimeError(
+            f"{msg} Refusing to start; set CVICHE_ALLOW_SIMPLE_AUTH=1 to override."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
@@ -188,7 +214,7 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Database initialized")
     else:
         logger.info("⏭️  Skipping init_db() (CVICHE_INIT_DB=0); Alembic owns schema.")
-    from app.config_loader import seed_system_config
+    from app.config_loader import seed_system_config, get_config_value
     from app.consent import load_consent_text, check_consent_integrity
     from app.services.run_service import reconcile_stale_runs
     from app.database import SessionLocal
@@ -196,6 +222,16 @@ async def lifespan(app: FastAPI):
     try:
         seed_system_config(db)
         logger.info("✅ System config seeded")
+        # Fail closed: a deployed (S3) instance must not silently fall back to
+        # password-less email-allowlist auth if auth_config.yaml didn't render
+        # auth.mode=saml (issue #111). No-op in local dev (local storage).
+        auth_mode = get_config_value(db, "auth_mode") or "simple"
+        storage_backend, _ = get_config("s3", "CVICHE_STORAGE_BACKEND", default="local")
+        _guard_deployed_auth_mode(
+            auth_mode, storage_backend,
+            allow_simple=os.environ.get("CVICHE_ALLOW_SIMPLE_AUTH") == "1",
+        )
+        logger.info("✅ Auth mode: %s", auth_mode)
         load_consent_text()
         logger.info("✅ Consent text loaded")
         check_consent_integrity(db)
