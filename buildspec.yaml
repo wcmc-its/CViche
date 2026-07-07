@@ -133,6 +133,7 @@ phases:
        #- echo "CVICHE_DATABASE_URL=${DATABASE_URL}" >> k8s/overlays/${ENV_NAME}/db.env
        - echo "CVICHE_SESSION_SECRET=${SESSION_SECRET}" > k8s/overlays/${ENV_NAME}/db.env
        - echo "CVICHE_OPENAI_API_KEY=${OPENAI_API_KEY}" >> k8s/overlays/${ENV_NAME}/db.env
+       - echo "PUBMED_API_KEY=${PUBMED_API_KEY}" >> k8s/overlays/${ENV_NAME}/db.env
        
        # --- Write your SAML cryptographic assets securely ---
        - echo "Extracting SAML Cryptographic Key Pair..."
