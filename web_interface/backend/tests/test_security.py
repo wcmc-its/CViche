@@ -67,6 +67,45 @@ class TestSessionSecret:
                 os.environ["CVICHE_SESSION_SECRET"] = saved
             importlib.reload(auth_module)
 
+    def test_placeholder_secret_raises_on_module_load(self):
+        """A template placeholder secret hard-fails boot, same as a missing one."""
+        import app.auth as auth_module
+        with patch.dict(os.environ, {"CVICHE_SESSION_SECRET": "change-me-to-a-long-random-string"}):
+            with pytest.raises(RuntimeError, match="placeholder"):
+                importlib.reload(auth_module)
+        importlib.reload(auth_module)
+
+    @pytest.mark.parametrize("placeholder", [
+        "changeme",
+        "change-me",
+        "secret",
+        "dev-secret",
+        "change-me-to-a-long-random-string",   # backend/.env.example
+        "dev-secret-change-in-production",     # web_interface/docker-compose.yml
+        "ChangeMe",                            # match is case-insensitive
+        "  secret  ",                          # and whitespace-insensitive
+    ])
+    def test_known_placeholder_values_rejected(self, placeholder):
+        from app.auth import _validate_session_secret
+        with pytest.raises(RuntimeError, match="placeholder"):
+            _validate_session_secret(placeholder)
+
+    def test_short_secret_warns_but_does_not_fail(self, caplog):
+        """Length is only a warning: hard-failing on it could take down a live
+        deployment whose real (non-placeholder) secret is merely short."""
+        from app.auth import _validate_session_secret
+        with caplog.at_level(logging.WARNING, logger="app.auth"):
+            assert _validate_session_secret("short-but-real") == "short-but-real"
+        assert any("[SECURITY]" in r.getMessage() for r in caplog.records), \
+            "expected a [SECURITY] warning for a <32-char secret"
+
+    def test_strong_secret_accepted_silently(self, caplog):
+        from app.auth import _validate_session_secret
+        secret = "f" * 64
+        with caplog.at_level(logging.WARNING, logger="app.auth"):
+            assert _validate_session_secret(secret) == secret
+        assert not [r for r in caplog.records if "[SECURITY]" in r.getMessage()]
+
 
 class TestSamlSignature:
     """SEC-02: SAML assertions require valid IdP signatures."""
@@ -458,6 +497,87 @@ class TestCorsLockdown:
         )
         allowed_headers = response.headers.get("access-control-allow-headers", "")
         assert "content-type" in allowed_headers.lower()
+
+
+class TestCsrfExactOrigin:
+    """CSRF Origin check compares parsed scheme+host+port exactly, not by
+    prefix -- startswith() accepted lookalike extensions of an allowed origin."""
+
+    def _post(self, client, origin):
+        # The middleware runs before routing, so a nonexistent path isolates
+        # the origin decision: 403 = rejected by CSRF, 404 = passed through.
+        return client.post("/api/nonexistent-csrf-probe", headers={"Origin": origin})
+
+    def test_exact_allowed_origin_passes(self, client, db, seed_simple_mode):
+        assert self._post(client, "http://localhost:3000").status_code == 404
+
+    def test_host_suffix_lookalike_rejected(self, client, db, seed_simple_mode):
+        """Prefix comparison accepted this (it extends an allowed origin)."""
+        resp = self._post(client, "http://localhost:3000.evil.com")
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "forbidden"
+
+    def test_port_extension_lookalike_rejected(self, client, db, seed_simple_mode):
+        """Prefix comparison accepted :30001 because it starts with :3000."""
+        assert self._post(client, "http://localhost:30001").status_code == 403
+
+    def test_scheme_mismatch_rejected(self, client, db, seed_simple_mode):
+        assert self._post(client, "https://localhost:3000").status_code == 403
+
+    def test_unlisted_origin_rejected(self, client, db, seed_simple_mode):
+        assert self._post(client, "https://evil.com").status_code == 403
+
+    def test_unparseable_origin_rejected(self, client, db, seed_simple_mode):
+        assert self._post(client, "null").status_code == 403
+
+    def test_absent_origin_skips_check(self, client, db, seed_simple_mode):
+        """Same-origin browser requests may omit Origin; behavior unchanged."""
+        resp = client.post("/api/nonexistent-csrf-probe")
+        assert resp.status_code == 404
+
+    def test_get_requests_not_gated(self, client, db, seed_simple_mode):
+        resp = client.get("/health", headers={"Origin": "https://evil.com"})
+        assert resp.status_code == 200
+
+    def test_origin_key_normalizes_default_ports(self):
+        from app.main import _origin_key
+        assert _origin_key("https://cviche.weill.cornell.edu") == \
+            _origin_key("https://cviche.weill.cornell.edu:443")
+        assert _origin_key("http://example.com") == _origin_key("http://example.com:80")
+        assert _origin_key("http://example.com") != _origin_key("https://example.com")
+
+    def test_origin_key_unparseable_is_none(self):
+        from app.main import _origin_key
+        for bad in ("null", "", "http://", "http://host:notaport"):
+            assert _origin_key(bad) is None, bad
+
+
+class TestDocsGating:
+    """/docs, /redoc and /openapi.json are opt-in; default posture is off."""
+
+    def test_docs_endpoints_disabled_by_default(self, client, db, seed_simple_mode):
+        for path in ("/docs", "/redoc", "/openapi.json"):
+            assert client.get(path).status_code == 404, path
+
+    def test_root_does_not_advertise_docs(self, client, db, seed_simple_mode):
+        assert client.get("/").json()["docs"] is None
+
+    def test_enable_docs_env_flag(self, monkeypatch):
+        from app.main import _docs_enabled
+        monkeypatch.setenv("CVICHE_ENABLE_DOCS", "true")
+        assert _docs_enabled() is True
+
+    def test_debug_flag_enables_docs(self, monkeypatch):
+        from app.main import _docs_enabled
+        monkeypatch.delenv("CVICHE_ENABLE_DOCS", raising=False)
+        monkeypatch.setenv("CVICHE_DEBUG", "true")
+        assert _docs_enabled() is True
+
+    def test_docs_disabled_without_flags(self, monkeypatch):
+        from app.main import _docs_enabled
+        monkeypatch.delenv("CVICHE_ENABLE_DOCS", raising=False)
+        monkeypatch.delenv("CVICHE_DEBUG", raising=False)
+        assert _docs_enabled() is False
 
 
 class TestUploadValidation:

@@ -55,8 +55,10 @@ services:
       # Real-time broker: enables cross-worker events + cancellation. Remove to
       # exercise the in-process (single-worker) fallback path.
       CVICHE_REDIS_URL: "redis://redis:6379/0"
-      # Session (random for dev -- sessions lost on restart, as expected)
-      CVICHE_SESSION_SECRET: "dev-secret-change-in-production"
+      # Session cookie signing key. No shipped default: known placeholder
+      # values hard-fail at boot (app/auth.py), so set it in the host env or
+      # a .env file next to this compose file.
+      CVICHE_SESSION_SECRET: "${CVICHE_SESSION_SECRET:?generate with python -c 'import secrets; print(secrets.token_hex(32))'}"
       # Cookies: no TLS in local dev
       CVICHE_SECURE_COOKIES: "false"
       # CORS: allow frontend dev server and nginx

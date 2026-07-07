@@ -28,12 +28,43 @@ logger = logging.getLogger(__name__)
 SESSION_TTL = _CFG_SESSION_TTL
 COOKIE_NAME = "cviche_session"
 
-_secret = os.environ.get("CVICHE_SESSION_SECRET")
-if not _secret:
-    raise RuntimeError(
-        "CVICHE_SESSION_SECRET environment variable is required. "
-        'Generate one with: python -c "import secrets; print(secrets.token_hex(32))"'
-    )
+# Known placeholder secrets shipped in templates/examples. Booting with one of
+# these means every session cookie is forgeable by anyone who has read the
+# repo, so refuse outright. Exact matches only, deliberately conservative: a
+# hard length gate could take down a live deployment whose real secret is
+# merely short, so short secrets only warn below.
+_PLACEHOLDER_SECRETS = frozenset({
+    "changeme",
+    "change-me",
+    "secret",
+    "dev-secret",
+    "change-me-to-a-long-random-string",   # backend/.env.example
+    "dev-secret-change-in-production",     # web_interface/docker-compose.yml
+})
+
+_GENERATE_HINT = 'Generate one with: python -c "import secrets; print(secrets.token_hex(32))"'
+
+
+def _validate_session_secret(secret: str | None) -> str:
+    if not secret:
+        raise RuntimeError(
+            "CVICHE_SESSION_SECRET environment variable is required. "
+            + _GENERATE_HINT
+        )
+    if secret.strip().lower() in _PLACEHOLDER_SECRETS:
+        raise RuntimeError(
+            "CVICHE_SESSION_SECRET is a known placeholder value; session "
+            "cookies signed with it are forgeable. " + _GENERATE_HINT
+        )
+    if len(secret) < 32:
+        logger.warning(
+            "[SECURITY] CVICHE_SESSION_SECRET is shorter than 32 characters; "
+            "session cookies are easier to brute-force. %s", _GENERATE_HINT,
+        )
+    return secret
+
+
+_secret = _validate_session_secret(os.environ.get("CVICHE_SESSION_SECRET"))
 
 _serializer = URLSafeTimedSerializer(_secret)
 _secure_cookies = os.environ.get("CVICHE_SECURE_COOKIES", "true").lower() == "true"

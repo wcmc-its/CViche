@@ -1,5 +1,10 @@
 auth:
   mode: simple  # "simple" or "saml"
+  # Serve /docs, /redoc and /openapi.json (interactive API docs). Off unless
+  # explicitly enabled -- they enumerate every route and schema to
+  # unauthenticated clients. Set to "true" to enable; the CVICHE_ENABLE_DOCS
+  # env var wins over this file, and CVICHE_DEBUG=true also enables them.
+  CVICHE_ENABLE_DOCS: ""
 
 saml:
   entity_id: ""                    # SP entity ID (e.g., "https://cviche.weill.cornell.edu/shibboleth")
