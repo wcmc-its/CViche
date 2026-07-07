@@ -28,7 +28,9 @@ def get_storage() -> RunStorage:
             from app.storage.s3_storage import S3RunStorage
 
             _storage = S3RunStorage()
-            bucket, source = get_config("s3", "CVICHE_S3_BUCKET", default="local")
+            # S3RunStorage() above already raised if the bucket was unset; this
+            # is only for the log line. Default "" not "local" (issue #109).
+            bucket, source = get_config("s3", "CVICHE_S3_BUCKET", default="")
             logger.info("Storage backend: S3 (bucket=%s)", bucket)
         else:
             from app.storage.local_storage import LocalRunStorage

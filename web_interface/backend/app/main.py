@@ -340,9 +340,12 @@ def readyz(response: Response, db: Session = Depends(get_db)):
     except Exception as exc:
         checks["db"] = {"ok": False, "error": str(exc)}
 
-    storage_backend = cviche_storage_backend;
+    storage_backend = cviche_storage_backend
     if storage_backend == "s3":
-        bucket, source = get_config("s3", "CVICHE_S3_BUCKET", default="local")
+        # Default "" not "local": an unset bucket must hit the clean "not set"
+        # error below rather than head_bucket a phantom bucket named "local"
+        # and fail with a confusing AWS error (issue #109).
+        bucket, source = get_config("s3", "CVICHE_S3_BUCKET", default="")
         if not bucket:
             checks["s3"] = {"ok": False, "error": "CVICHE_S3_BUCKET not set"}
         else:

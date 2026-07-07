@@ -33,8 +33,11 @@ class S3RunStorage(RunStorage):
         from botocore.config import Config
 
         from app.config_loader import get_config
-        s3_bucket, source = get_config("s3", "CVICHE_S3_BUCKET", default="local")
-       
+        # Default to "" (falsy), NOT "local": an s3 backend with CVICHE_S3_BUCKET
+        # unset must trip the guard below, not silently operate on a bucket
+        # literally named "local" (issue #109).
+        s3_bucket, source = get_config("s3", "CVICHE_S3_BUCKET", default="")
+
         self._bucket = bucket or s3_bucket
         if not self._bucket:
             raise ValueError(

@@ -19,6 +19,14 @@ def _storage():
     return S3RunStorage(bucket="test-bucket", prefix="cviche")
 
 
+def test_unset_bucket_raises_instead_of_using_local(monkeypatch):
+    """An s3 backend with CVICHE_S3_BUCKET unset must raise, not silently
+    operate on a bucket literally named 'local' (#109)."""
+    monkeypatch.delenv("CVICHE_S3_BUCKET", raising=False)
+    with pytest.raises(ValueError, match="bucket not configured"):
+        S3RunStorage()  # no explicit bucket -> resolves from config -> "" -> raise
+
+
 def test_get_file_nosuchkey_is_filenotfound():
     storage = _storage()
     stub = Stubber(storage._s3)
