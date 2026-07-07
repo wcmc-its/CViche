@@ -156,15 +156,22 @@ def is_template_instruction(text: str) -> bool:
     if len(normalized) >= _MIN_EXACT_LEN and normalized in _INSTRUCTION_SET:
         return True
 
-    # Rule (b): pipe-split cell match. Real table rows arrive as "cell | cell |
-    # cell"; only a distinctive, non-protected instruction cell triggers a drop.
+    # Rule (b): pipe-split. Real table rows arrive as "cell | cell | cell".
+    # Drop the row ONLY if EVERY non-empty cell is recognized scaffolding (a
+    # known instruction or a protected header/label) AND at least one cell is a
+    # distinctive instruction. A single unrecognized cell means real faculty
+    # data, so the whole row is kept -- e.g. a filled board-cert row that still
+    # carries a leftover "(indicate if board eligible)" cell. Pure header/label
+    # concatenations still drop; anything that slips through is caught by the
+    # Stage 6 appendix backstop.
     if "|" in text:
-        for cell in (_normalize(c) for c in text.split("|")):
-            if (
-                cell
-                and cell not in _PROTECTED
-                and len(cell) >= _MIN_EXACT_LEN
-                and cell in _INSTRUCTION_SET
+        cells = [c for c in (_normalize(c) for c in text.split("|")) if c]
+        if cells and all(c in _INSTRUCTION_SET or c in _PROTECTED for c in cells):
+            if any(
+                c not in _PROTECTED
+                and len(c) >= _MIN_EXACT_LEN
+                and c in _INSTRUCTION_SET
+                for c in cells
             ):
                 return True
 
@@ -190,3 +197,32 @@ def is_template_instruction(text: str) -> bool:
 def filter_template_instructions(texts: List[str]) -> List[str]:
     """Convenience: return only the texts that are NOT template instructions."""
     return [t for t in texts if not is_template_instruction(t)]
+
+
+# Source-document furniture (NOT WCM-template scaffolding): title lines, date
+# stamps, and page markers from the ORIGINAL CV ("CURRICULUM VITAE",
+# "Last Updated - JUN 2026", "Page 3 of 12"). These carry no CV content and
+# only pollute the Appendix as "unmapped content" (#213). Single short lines
+# only, and the updated/revised forms require a separator or a date-like tail
+# so that real content ("Updated the curriculum for ...") is never matched.
+_MONTHS = r"jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec"
+_SOURCE_FURNITURE = re.compile(
+    rf"""^(?:
+        curriculum\s+vitae
+      | (?:last\s+)?(?:updated|revised)\s*[:\-–—]\s*\S.{{0,30}}
+      | (?:last\s+)?(?:updated|revised)\b\s*(?:on\s+)?(?:\d|{_MONTHS})[\w\s,./-]{{0,25}}
+      | page\s+\d+(?:\s+of\s+\d+)?
+    )$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+
+def is_source_boilerplate(text: str) -> bool:
+    """True if ``text`` is source-CV furniture that should never surface as
+    Appendix "unmapped content". Precision-biased, like everything above."""
+    if not text:
+        return False
+    stripped = text.strip()
+    if not stripped or "\n" in stripped or len(stripped) > 60:
+        return False
+    return bool(_SOURCE_FURNITURE.match(stripped))

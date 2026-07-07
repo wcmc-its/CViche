@@ -12,10 +12,10 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import Step, Log, Run, User
 from app.schemas import StepDetail, LogEntry, OutputPreview
-from app.auth import get_current_user
+from app.auth import get_current_user, require_admin
 from app.services.run_service import check_run_access
 from app.storage import get_storage
-from app.errors import bad_request, not_found, internal_error
+from app.errors import bad_request, not_found, internal_error, forbidden
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +145,13 @@ async def get_data_file(
 
     check_run_access(run_id, current_user, db)
 
+    # Stage JSON files are internal pipeline artifacts -- restrict to admins.
+    # The final .docx (and any other non-JSON output) stays available to the
+    # run owner. Gate before the storage short-circuit so the S3 redirect path
+    # is covered too.
+    if Path(filename).name.endswith(".json") and current_user.role != "admin":
+        raise forbidden("Admin access required to access stage JSON.")
+
     # Prefer durable storage (S3 in prod) so downloads survive pod recycling
     # (#38): the pipeline writes outputs to the pod's ephemeral filesystem, so
     # a restart wipes them and the local FileResponse below 404s. JSON previews
@@ -203,8 +210,8 @@ async def _generate_preview_from_path(file_path: Path) -> OutputPreview | None:
 
         return _parse_json_to_preview(data)
 
-    except Exception as e:
-        print(f"Error generating preview: {e}")
+    except Exception:
+        logger.exception("Error generating preview")
         return None
 
 
@@ -223,8 +230,8 @@ async def _generate_preview(run_id: str, filename: str) -> OutputPreview | None:
 
         return _parse_json_to_preview(data)
 
-    except Exception as e:
-        print(f"Error generating preview: {e}")
+    except Exception:
+        logger.exception("Error generating preview")
         return None
 
 
@@ -297,39 +304,67 @@ def _parse_json_to_preview(data) -> OutputPreview | None:
             rows = [[str(k), str(v)[:200]] for k, v in list(data.items())]
             return OutputPreview(headers=headers, rows=rows)
 
-    except Exception as e:
-        print(f"Error generating preview: {e}")
+    except Exception:
+        logger.exception("Error generating preview")
         return None
 
     return None
 
 
-@router.get("/run/{run_id}/data/{filename:path}/json")
+# Distinct prefix from the download route on purpose: /data/{filename:path} has a
+# greedy :path that would otherwise swallow a trailing "/json" and shadow this
+# route (whichever registers first wins). /json/{filename:path} can't collide.
+@router.get("/run/{run_id}/json/{filename:path}")
 async def get_json_content(
     run_id: str,
     filename: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_admin),
 ):
-    """Get raw JSON content for display in viewer."""
+    """Get raw JSON content for display in viewer. Admin-only: stage JSON is an
+    internal pipeline artifact, not user-facing output."""
 
     check_run_access(run_id, current_user, db)
 
-    file_path = _resolve_safe_path(filename, run_id)
-
-    if not str(file_path).endswith(".json"):
-        raise bad_request("Only JSON files can be viewed")
-
+    # Local pod filesystem first. _resolve_safe_path also runs the security guard
+    # (absolute/traversal -> 400 "Invalid filename"), so it must come first.
     try:
+        file_path = _resolve_safe_path(filename, run_id)
+        if not str(file_path).endswith(".json"):
+            raise bad_request("Only JSON files can be viewed")
         with open(file_path, "r") as f:
             data = json.load(f)
-
         return JSONResponse(content={
             "filename": filename,
             "size_bytes": file_path.stat().st_size,
-            "content": data
+            "content": data,
         })
-    except Exception as e:
+    except HTTPException as e:
+        if e.status_code != 404:
+            raise  # 400 invalid/traversal/non-json -> propagate; only a local miss falls through
+    except Exception:
+        raise internal_error("Error reading file")
+
+    # Durable storage fallback (S3 in prod): the file may live in S3 but not on
+    # this pod. Mirrors get_data_file (#38) so the viewer survives pod recycles /
+    # multi-replica routing the same way the download button does.
+    download_name = Path(filename).name
+    if not download_name.endswith(".json"):
+        raise not_found("File not found")
+    storage = get_storage()
+    storage_key = f"outputs/{download_name}"
+    try:
+        raw = storage.get_file(run_id, storage_key)
+        data = json.loads(raw)
+        return JSONResponse(content={
+            "filename": filename,
+            "size_bytes": len(raw),
+            "content": data,
+        })
+    except FileNotFoundError:
+        raise not_found("File not found")
+    except Exception:
+        logger.warning("Storage JSON read failed for %s/%s", run_id, storage_key, exc_info=True)
         raise internal_error("Error reading file")
 
 

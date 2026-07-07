@@ -2,10 +2,11 @@
 
 ``POST /run/{id}/restart`` creates a brand-new Run from a previous one. It
 already inherits ``submission_type``; issue #153 added the per-run output flags
-``show_track_changes`` / ``show_pipeline_comments``. If restart does NOT carry
-them over, a run created with (say) track changes OFF or classification comments
-ON silently reverts to the column defaults (track ON / comments OFF) on restart,
-discarding a choice the user made at upload.
+``show_track_changes`` / ``show_pipeline_comments`` and #199 added
+``strip_template_instructions``. If restart does NOT carry them over, a run
+created with (say) track changes OFF or strip-instructions OFF silently reverts
+to the column defaults on restart -- and because the restarted run can execute
+on any pod, the user's upload-time choice is lost cross-pod.
 
 This test drives ``restart_run`` directly against the in-memory ``db`` fixture,
 stubbing only the file-I/O and rate-limit side effects, and asserts the new Run
@@ -25,8 +26,8 @@ def test_restart_inherits_render_options(db):
     db.commit()
     db.refresh(user)
 
-    # Original run with BOTH flags flipped away from the column defaults so an
-    # accidental fall-back to defaults (1/0) would be caught.
+    # Original run with ALL option flags flipped away from the column defaults
+    # so an accidental fall-back to defaults (1/0/1) would be caught.
     original = Run(
         id="ORIG001",
         filename="cv.docx",
@@ -36,6 +37,7 @@ def test_restart_inherits_render_options(db):
         submission_type="standard",
         show_track_changes=0,
         show_pipeline_comments=1,
+        strip_template_instructions=0,
     )
     db.add(original)
     db.commit()
@@ -61,5 +63,6 @@ def test_restart_inherits_render_options(db):
     # The whole point: the user's choices survive the restart.
     assert new_run.show_track_changes == 0, "restart must inherit track-changes OFF"
     assert new_run.show_pipeline_comments == 1, "restart must inherit comments ON"
+    assert new_run.strip_template_instructions == 0, "restart must inherit strip-instructions OFF"
     # And the previously-inherited field still works.
     assert new_run.submission_type == "standard"

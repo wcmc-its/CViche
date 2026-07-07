@@ -73,6 +73,10 @@ class RunStatus(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
     total_duration_seconds: Optional[int] = None
+    # Input-scaled wall-clock estimate from upload; the client stall watchdog
+    # scales its "taking longer than expected" threshold off this. NULL for runs
+    # created before the column existed (watchdog falls back to a default).
+    estimated_duration_seconds: Optional[int] = None
     error_message: Optional[str] = None
     steps: List["StepSummary"]
 

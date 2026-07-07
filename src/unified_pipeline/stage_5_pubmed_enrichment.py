@@ -35,7 +35,12 @@ from datetime import datetime
 
 # Configuration
 NCBI_API_KEY = os.getenv('NCBI_API_KEY', os.getenv('PUBMED_API_KEY', ''))
+PUBMED_CONTACT_EMAIL = os.getenv('PUBMED_CONTACT_EMAIL', os.getenv('NCBI_CONTACT_EMAIL', ''))
 RATE_LIMIT_DELAY = 0.1 if NCBI_API_KEY else 0.34  # 10/s with key, 3/s without
+
+# Retry policy for transient NCBI API failures (429 / 5xx / connection errors)
+MAX_ATTEMPTS = 3
+BACKOFF_BASE_SECONDS = 1.0  # 1s, 2s, ... doubling; Retry-After honored when larger
 
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5_enrichment"
@@ -45,6 +50,16 @@ EFETCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
 ELINK_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi"
 ID_CONVERTER_URL = "https://www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0/"
+
+
+def _sanitize_error(error: Any) -> str:
+    """
+    Redact NCBI API keys from error text before it reaches logs.
+
+    Exception messages from requests embed the full request URL, which
+    includes api_key as a query parameter.
+    """
+    return re.sub(r'api_key=[^&\s]+', 'api_key=***', str(error))
 
 
 class PubMedEnricher:
@@ -61,9 +76,10 @@ class PubMedEnricher:
         self.api_key = api_key or NCBI_API_KEY
         self.verbose = verbose
         self.session = requests.Session()
-        self.session.headers.update({
-            'User-Agent': 'Scholar-Signals-CV-Pipeline/1.0 (mailto:support@example.com)'
-        })
+        user_agent = 'Scholar-Signals-CV-Pipeline/1.0'
+        if PUBMED_CONTACT_EMAIL:
+            user_agent += f' (mailto:{PUBMED_CONTACT_EMAIL})'
+        self.session.headers.update({'User-Agent': user_agent})
 
         # Stats tracking
         self.stats = {
@@ -332,6 +348,53 @@ class PubMedEnricher:
 
         return results
 
+    def _identity_params(self) -> Dict[str, str]:
+        """NCBI identification params; email omitted when not configured."""
+        params = {'tool': 'scholar_signals_cv_pipeline'}
+        if PUBMED_CONTACT_EMAIL:
+            params['email'] = PUBMED_CONTACT_EMAIL
+        return params
+
+    def _get_with_retry(self, url: str, params: Dict[str, Any]) -> requests.Response:
+        """
+        HTTP GET with retry on transient failures.
+
+        Retries 429s, 5xx responses, and connection/timeout errors up to
+        MAX_ATTEMPTS total attempts with exponential backoff (1s, 2s, ...),
+        honoring a Retry-After header when larger. Other HTTP errors
+        (e.g. 404) raise immediately, exactly as before.
+        """
+        last_error = None
+        for attempt in range(MAX_ATTEMPTS):
+            retry_after = None
+            try:
+                response = self.session.get(url, params=params, timeout=30)
+                if response.status_code == 429 or response.status_code >= 500:
+                    retry_after = response.headers.get('Retry-After')
+                    last_error = requests.HTTPError(
+                        f"{response.status_code} transient error for url: {response.url}",
+                        response=response
+                    )
+                else:
+                    response.raise_for_status()  # non-transient 4xx raises here
+                    return response
+            except (requests.ConnectionError, requests.Timeout) as e:
+                last_error = e
+
+            if attempt < MAX_ATTEMPTS - 1:
+                delay = BACKOFF_BASE_SECONDS * (2 ** attempt)
+                if retry_after:
+                    try:
+                        delay = max(delay, float(retry_after))
+                    except ValueError:
+                        pass
+                if self.verbose:
+                    print(f"    ⏳ Transient API error ({_sanitize_error(last_error)}); "
+                          f"retry {attempt + 1}/{MAX_ATTEMPTS - 1} in {delay:g}s")
+                time.sleep(delay)
+
+        raise last_error
+
     def _fetch_pubmed_batch(self, pmids: List[str]) -> Dict[str, Dict]:
         """
         Fetch multiple PubMed records via efetch.
@@ -345,14 +408,12 @@ class PubMedEnricher:
                 'id': ','.join(pmids),
                 'retmode': 'xml',
                 'rettype': 'abstract',
-                'tool': 'scholar_signals_cv_pipeline',
-                'email': 'support@example.com'
+                **self._identity_params()
             }
             if self.api_key:
                 params['api_key'] = self.api_key
 
-            response = self.session.get(EFETCH_URL, params=params, timeout=30)
-            response.raise_for_status()
+            response = self._get_with_retry(EFETCH_URL, params)
 
             root = ET.fromstring(response.content)
 
@@ -370,7 +431,7 @@ class PubMedEnricher:
         except Exception as e:
             self.stats['api_errors'] += 1
             if self.verbose:
-                print(f"    ❌ API error: {e}")
+                print(f"    ❌ API error: {_sanitize_error(e)}")
             return {}
 
     def _parse_pubmed_article(self, article: ET.Element) -> Tuple[Optional[str], Optional[Dict]]:
@@ -482,12 +543,10 @@ class PubMedEnricher:
             params = {
                 'ids': ','.join(pmcids),
                 'format': 'json',
-                'tool': 'scholar_signals_cv_pipeline',
-                'email': 'support@example.com'
+                **self._identity_params()
             }
 
-            response = self.session.get(ID_CONVERTER_URL, params=params, timeout=30)
-            response.raise_for_status()
+            response = self._get_with_retry(ID_CONVERTER_URL, params)
 
             data = response.json()
 
@@ -506,7 +565,7 @@ class PubMedEnricher:
         except Exception as e:
             self.stats['api_errors'] += 1
             if self.verbose:
-                print(f"    ❌ ID conversion error: {e}")
+                print(f"    ❌ ID conversion error: {_sanitize_error(e)}")
             return {}
 
     def _search_pmid_by_doi(self, doi: str) -> Optional[str]:
@@ -518,14 +577,12 @@ class PubMedEnricher:
                 'db': 'pubmed',
                 'term': f'{doi}[doi]',
                 'retmode': 'json',
-                'tool': 'scholar_signals_cv_pipeline',
-                'email': 'support@example.com'
+                **self._identity_params()
             }
             if self.api_key:
                 params['api_key'] = self.api_key
 
-            response = self.session.get(ESEARCH_URL, params=params, timeout=30)
-            response.raise_for_status()
+            response = self._get_with_retry(ESEARCH_URL, params)
 
             data = response.json()
             id_list = data.get('esearchresult', {}).get('idlist', [])
@@ -537,7 +594,7 @@ class PubMedEnricher:
         except Exception as e:
             self.stats['api_errors'] += 1
             if self.verbose:
-                print(f"    ⚠️ DOI search error for {doi}: {e}")
+                print(f"    ⚠️ DOI search error for {doi}: {_sanitize_error(e)}")
             return None
 
     def _merge_pubmed_data(self, entry: Dict, pubmed_record: Dict):

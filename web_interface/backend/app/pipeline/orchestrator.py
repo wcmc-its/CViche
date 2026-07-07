@@ -475,6 +475,13 @@ class PipelineOrchestrator:
             await event_emitter.emit_run_start(self.run_id)
             start_time = time.time()
 
+            # Notify Teams that a fresh run started processing (issue #154).
+            # Only on a true start, not a per-step retry/resume (which passes a
+            # start_step_number), so a re-run doesn't re-announce. Best-effort:
+            # _notify_started runs off the loop and swallows all failures.
+            if start_step_number is None:
+                await self._notify_started(run)
+
             # Copy file to pipeline input directory
             cv_path = self._copy_to_pipeline_input()
 
@@ -531,11 +538,27 @@ class PipelineOrchestrator:
             except Exception as e:
                 logger.warning("Quality score caching failed for run %s: %s", self.run_id, e)
 
+            # Post-run artifact doctor: cross-stage lints over the stage
+            # outputs just written (pure local file reads, no LLM). Gated by
+            # CVICHE_RUN_DOCTOR and best-effort: the run is already committed
+            # complete above, so a doctor problem can never fail the run.
+            doctor = None
+            try:
+                doctor = await self._run_doctor()
+            except Exception as e:
+                logger.warning("Run doctor failed for run %s: %s", self.run_id, e)
+                try:
+                    # A failed output_files commit would leave the session in
+                    # pending-rollback and strip the submitter off the card.
+                    self.db.rollback()
+                except Exception:
+                    pass
+
             # Notify on terminal success, passing the freshly-computed score so
             # the Teams message includes it. Fully decoupled and best-effort:
             # notify_run_terminal swallows all failures, so this never affects
             # run status (which is already committed above).
-            await self._notify_terminal(run, score)
+            await self._notify_terminal(run, score, doctor)
 
         except CancelledException:
             # Run was cancelled - status already updated by API endpoint
@@ -601,7 +624,41 @@ class PipelineOrchestrator:
         except Exception:  # pragma: no cover - defensive
             return None
 
-    async def _notify_terminal(self, run, score):
+    def _submitter_label(self, run):
+        """Best-effort display name (or email) of the run's submitter, or None.
+
+        Resolved here, on the orchestrator's thread, and passed down as a plain
+        string: Run.user is lazy="raise_on_sql" (so run.user would raise), and
+        the notification POST runs in another thread where the session must not
+        be touched.
+        """
+        try:
+            if not getattr(run, "user_id", None):
+                return None
+            from app.models import User
+            user = self.db.query(User).filter(User.id == run.user_id).first()
+            if not user:
+                return None
+            return user.display_name or user.email
+        except Exception:  # pragma: no cover - defensive
+            return None
+
+    async def _notify_started(self, run):
+        """Best-effort outbound notification that a run started processing.
+
+        Mirrors _notify_terminal: runs the blocking POST off the event loop and
+        swallows every failure so a webhook problem can never affect the run.
+        """
+        try:
+            from app.services.notifications import notify_run_started
+            submitter = self._submitter_label(run)
+            await asyncio.get_running_loop().run_in_executor(
+                None, notify_run_started, run, submitter
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.warning("Run start notification failed for run %s: %s", self.run_id, e)
+
+    async def _notify_terminal(self, run, score, doctor=None):
         """Best-effort outbound notification for a terminal run.
 
         Runs off the event loop (the HTTP POST is blocking) and swallows all
@@ -611,11 +668,69 @@ class PipelineOrchestrator:
         """
         try:
             from app.services.notifications import notify_run_terminal
+            submitter = self._submitter_label(run)
             await asyncio.get_running_loop().run_in_executor(
-                None, notify_run_terminal, run, score
+                None, notify_run_terminal, run, score, submitter, doctor
             )
         except Exception as e:  # pragma: no cover - defensive
             logger.warning("Run notification failed for run %s: %s", self.run_id, e)
+
+    async def _run_doctor(self):
+        """Run cross-stage lints over this run's artifacts and publish the report.
+
+        Gated by CVICHE_RUN_DOCTOR (unset or "1" = on, "0" = off). The lints
+        are pure local file reads (no LLM, no network), run off the event
+        loop. The report lands in the pipeline outputs dir at
+        stage_7_doctor/<uid>_doctor.json -- a location the stage-JSON viewer
+        already serves -- then is attached to the final step's output_files so
+        the UI lists it, and mirrored to durable storage for the S3 fallback.
+        Returns the report dict, or None when disabled.
+        """
+        enabled, _ = get_config("doctor", "CVICHE_RUN_DOCTOR", default="1")
+        if str(enabled).strip() == "0":
+            return None
+
+        loop = asyncio.get_running_loop()
+        payload, out_path = await loop.run_in_executor(None, self._doctor_report)
+
+        # Attach the report to the last step's output_files here, on the
+        # orchestrator's thread (like _submitter_label: the session must not
+        # be touched from an executor thread).
+        step = (
+            self.db.query(Step)
+            .filter(Step.run_id == self.run_id)
+            .order_by(Step.step_number.desc())
+            .first()
+        )
+        if step is not None:
+            files = json.loads(step.output_files) if step.output_files else []
+            if str(out_path) not in files:
+                files.append(str(out_path))
+                step.output_files = json.dumps(files)
+                self.db.commit()
+
+        await loop.run_in_executor(
+            None, self._persist_outputs_to_storage, [str(out_path)]
+        )
+        return payload
+
+    def _doctor_report(self):
+        """Run the doctor lints and write the JSON report; returns (payload, path)."""
+        from unified_pipeline.run_doctor import run_doctor
+
+        source = PARENT_DIR / 'data' / 'sample_cvs' / 'word' / f'{self.document_uid}.docx'
+        payload = run_doctor(
+            self.pipeline_output_dir,
+            self.document_uid,
+            source=source if source.exists() else None,
+        )
+        out_path = (
+            self.pipeline_output_dir / 'stage_7_doctor'
+            / f'{self.document_uid}_doctor.json'
+        )
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload, indent=2))
+        return payload, out_path
 
     async def execute_step(self, step_number: int, stage_id: str, cv_path: str):
         """Execute a single stage."""
@@ -892,11 +1007,18 @@ class PipelineOrchestrator:
 
                 stage1b_path = self.stage_outputs.get('1b') or str(output_paths['1b'])
 
+                # Honor the user's WCM-instruction-stripping choice recorded on
+                # the Run row. Column defaults to ON (1); treat as a truthy int,
+                # falling back to True if the row/column is unexpectedly None.
+                run = self.db.query(Run).filter(Run.id == self.run_id).first()
+                strip_template_instructions = bool(run.strip_template_instructions) if run and run.strip_template_instructions is not None else True
+
                 stage2_data, stage2_path = await self._run_with_stdout_capture(
                     run_stage_2,
                     step_number,
                     docx_path=cv_path,
                     hierarchy_json_path=stage1b_path,
+                    strip_template_instructions=strip_template_instructions,
                     # Stage 2 makes one LLM call per section (~86 total); pass an
                     # intra-stage cancel check so an abort lands mid-stage rather
                     # than only at the stage boundary. check_cancelled() is sync,
@@ -1164,6 +1286,7 @@ class PipelineOrchestrator:
                 run = self.db.query(Run).filter(Run.id == self.run_id).first()
                 emit_track_changes = bool(run.show_track_changes) if run and run.show_track_changes is not None else True
                 emit_comments = bool(run.show_pipeline_comments) if run and run.show_pipeline_comments is not None else False
+                strip_template_instructions = bool(run.strip_template_instructions) if run and run.strip_template_instructions is not None else True
 
                 stage6_output_path = await self._run_with_stdout_capture(
                     run_stage6,
@@ -1172,6 +1295,7 @@ class PipelineOrchestrator:
                     verbose=True,
                     emit_track_changes=emit_track_changes,
                     emit_comments=emit_comments,
+                    strip_template_instructions=strip_template_instructions,
                 )
 
                 self.stage_outputs['6'] = stage6_output_path

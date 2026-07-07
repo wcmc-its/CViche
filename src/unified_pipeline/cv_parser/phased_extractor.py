@@ -19,7 +19,6 @@ try:
 except ImportError:
     from cv_parser.cv_taxonomy import CV_SECTIONS, build_taxonomy_index
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

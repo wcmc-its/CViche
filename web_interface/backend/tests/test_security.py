@@ -8,6 +8,25 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 
+@pytest.fixture(autouse=True)
+def _restore_auth_module():
+    """Several SEC-03 tests reload app.auth to prove it reads the session secret
+    at import. importlib.reload rebinds app.auth's module-level functions
+    (get_current_user, require_admin, ...) to NEW objects, which no longer match
+    the references the route modules captured via `from app.auth import ...` at
+    import time. Any later test that overrides those deps by re-importing them
+    from app.auth then silently misses (FastAPI matches overrides by object
+    identity) and the request falls through to real auth -> 401. Snapshot the
+    module namespace and restore it after each test so a reload here cannot leak
+    into the rest of the suite.
+    """
+    import app.auth as auth_module
+    saved = dict(auth_module.__dict__)
+    yield
+    auth_module.__dict__.clear()
+    auth_module.__dict__.update(saved)
+
+
 class TestSessionSecret:
     """SEC-03: Application refuses to start without CVICHE_SESSION_SECRET."""
 
@@ -155,10 +174,10 @@ class TestSamlSignature:
 class TestPathTraversal:
     """SEC-01: File download endpoints reject path traversal and absolute paths."""
 
-    def _create_test_user_and_run(self, db):
+    def _create_test_user_and_run(self, db, role="user"):
         """Helper to create a user and run for file access tests."""
         from app.models import User, Run
-        user = User(email="test@example.com", display_name="Test User", role="user")
+        user = User(email="test@example.com", display_name="Test User", role=role)
         db.add(user)
         db.commit()
         db.refresh(user)
@@ -204,29 +223,32 @@ class TestPathTraversal:
         assert response.json()["detail"] == "Invalid filename"
 
     def test_json_endpoint_absolute_path_rejected(self, client, db, seed_simple_mode):
-        """GET /run/{id}/data//etc/passwd/json returns 400."""
-        user, run = self._create_test_user_and_run(db)
+        """GET /run/{id}/json//etc/passwd returns 400. (Admin: /json is admin-only,
+        and traversal must still be rejected even for admins.)"""
+        user, run = self._create_test_user_and_run(db, role="admin")
         self._auth_cookie(client, user)
 
-        response = client.get(f"/api/run/{run.id}/data//etc/passwd/json")
+        response = client.get(f"/api/run/{run.id}/json//etc/passwd")
         assert response.status_code == 400
         assert response.json()["detail"] == "Invalid filename"
 
     def test_json_endpoint_traversal_rejected(self, client, db, seed_simple_mode):
-        """URL-encoded traversal in JSON endpoint returns 400."""
-        user, run = self._create_test_user_and_run(db)
+        """URL-encoded traversal in JSON endpoint returns 400 (admin-authenticated)."""
+        user, run = self._create_test_user_and_run(db, role="admin")
         self._auth_cookie(client, user)
 
-        response = client.get(f"/api/run/{run.id}/data/..%2F..%2Fetc%2Fpasswd/json")
+        response = client.get(f"/api/run/{run.id}/json/..%2F..%2Fetc%2Fpasswd")
         assert response.status_code == 400
         assert response.json()["detail"] == "Invalid filename"
 
     def test_valid_relative_path_returns_404_when_file_missing(self, client, db, seed_simple_mode):
-        """A valid relative path that doesn't exist returns 404, not 400."""
+        """A valid relative path that doesn't exist returns 404, not 400. Uses a
+        .docx (owner-accessible) so this exercises path resolution, not the
+        admin-only .json gate."""
         user, run = self._create_test_user_and_run(db)
         self._auth_cookie(client, user)
 
-        response = client.get(f"/api/run/{run.id}/data/nonexistent.json")
+        response = client.get(f"/api/run/{run.id}/data/nonexistent.docx")
         assert response.status_code == 404
 
     def test_error_message_reveals_no_internal_paths(self, client, db, seed_simple_mode):

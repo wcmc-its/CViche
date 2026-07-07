@@ -9,7 +9,6 @@ from unified_pipeline.llm_client import call_llm
 from .config import ENTITY_EXTRACTION_PROMPT
 from .utils import extract_dates, extract_email, is_likely_publication
 
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 

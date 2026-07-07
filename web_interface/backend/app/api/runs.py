@@ -175,6 +175,7 @@ async def get_run_status(
         input_tokens=run.input_tokens or 0,
         output_tokens=run.output_tokens or 0,
         total_duration_seconds=total_duration_seconds,
+        estimated_duration_seconds=run.estimated_duration_seconds,
         error_message=run.error_message,
         steps=step_summaries
     )
@@ -395,9 +396,10 @@ async def restart_run(
         logger.warning("Failed to write by-submitter index (run=%s): %s", new_run_id, e)
 
     # Create new Run record, inheriting submission_type and the user's
-    # output-rendering choices (issue #153) from the original. Without this the
-    # restarted run silently reverts to the column defaults (track changes ON,
-    # classification comments OFF), discarding a choice the user made at upload.
+    # output-rendering choices (issues #153, #199) from the original. Without
+    # this the restarted run silently reverts to the column defaults (track
+    # changes ON, classification comments OFF, strip instructions ON),
+    # discarding a choice the user made at upload.
     new_run = Run(
         id=new_run_id,
         filename=original_run.filename,
@@ -408,6 +410,7 @@ async def restart_run(
         submission_type=original_run.submission_type,
         show_track_changes=original_run.show_track_changes,
         show_pipeline_comments=original_run.show_pipeline_comments,
+        strip_template_instructions=original_run.strip_template_instructions,
     )
     db.add(new_run)
 

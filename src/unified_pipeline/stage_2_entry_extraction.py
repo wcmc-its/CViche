@@ -334,6 +334,66 @@ def remove_subset_delimiters(delimiters: list) -> list:
     return kept
 
 
+def _dedup_idx_key(idx):
+    """Normalize an element index to a comparable (main, sub) tuple.
+
+    Handles the mixed representations stage 2 emits for the SAME element:
+    int 30, float 30.0, str "30.0", sub-row "22.2", and "table_3".
+    """
+    if isinstance(idx, str):
+        if idx.startswith("table_"):
+            try:
+                return (1000000 + int(idx.split("_")[1]), 0.0)
+            except (ValueError, IndexError):
+                return (str(idx), 0.0)
+        if "." in idx:
+            parts = idx.split(".", 1)
+            try:
+                return (float(parts[0]), float(parts[1]))
+            except ValueError:
+                return (str(idx), 0.0)
+    try:
+        return (float(idx), 0.0)
+    except (TypeError, ValueError):
+        return (str(idx), 0.0)
+
+
+def filter_extraction_noise(entries: List[Dict]) -> List[Dict]:
+    """Drop noise from the final entry list (#211): empty content entries and
+    exact duplicates. Every survivor rides through the 3b/4/5 LLM stages, so
+    noise here is paid for several times over downstream.
+
+    - Empty text: content entries (paragraph/table/table_row) with no text
+      carry nothing downstream. Structural ``header``/``break`` records are
+      kept regardless of text (breaks are legitimately empty).
+    - Duplicates: the same element emitted more than once — e.g. a table cell
+      that spans two sub-section boundaries gets one copy per sub-section,
+      with conflicting hierarchies, and each copy is then classified and
+      field-extracted separately. Key = (element_type, normalized text,
+      normalized element_idx_start); the first copy in document order wins.
+      Same text at a DIFFERENT index is kept: repeated names/lines are real
+      (e.g. the same mentee listed under two degree programs).
+    """
+    seen = set()
+    kept = []
+    dropped_empty = dropped_dup = 0
+    for entry in entries:
+        etype = entry.get("element_type", "")
+        text = " ".join(str(entry.get("text", "")).split())
+        if etype not in ("header", "break") and not text:
+            dropped_empty += 1
+            continue
+        key = (etype, text.lower(), _dedup_idx_key(entry.get("element_idx_start")))
+        if key in seen:
+            dropped_dup += 1
+            continue
+        seen.add(key)
+        kept.append(entry)
+    if dropped_empty or dropped_dup:
+        print(f"Filtered extraction noise: {dropped_empty} empty, {dropped_dup} duplicate entries")
+    return kept
+
+
 def detect_entries_for_section(
     section_hierarchy: List[str],
     doc_elements: List[Dict],
@@ -823,6 +883,7 @@ def run_stage_2(
     docx_path: str,
     hierarchy_json_path: str = None,
     cancel_check: Optional[Callable[[], None]] = None,
+    strip_template_instructions: bool = True,
 ):
     """
     Main Stage 2: Extract entries from CV sections using LLM
@@ -839,6 +900,10 @@ def run_stage_2(
                             check a cancel would not land until all ~86 sections
                             finished. None (the standalone CLI default) is a
                             no-op, leaving CLI behavior unchanged.
+        strip_template_instructions: When True (default), drop WCM-template
+                            instruction boilerplate from the extracted entries.
+                            When False, keep the instruction text so it survives
+                            into the output.
     """
 
     print(f"Input: {docx_path}")
@@ -1115,15 +1180,21 @@ def run_stage_2(
     # Faculty leave the blank template's instruction scaffolding in their CVs;
     # those blocks get parsed as entries and pollute downstream output. The
     # detector is precision-biased (never drops real CV content). Section
-    # headers are intentionally NOT dropped here.
-    _pre_filter_count = len(all_entries)
-    all_entries = [
-        e for e in all_entries
-        if not is_template_instruction(e.get("text", ""))
-    ]
-    _filtered_count = _pre_filter_count - len(all_entries)
-    if _filtered_count:
-        print(f"Filtered {_filtered_count} WCM-template instruction entries")
+    # headers are intentionally NOT dropped here. Gated on the user's choice:
+    # when strip_template_instructions is False, the instruction text is kept.
+    if strip_template_instructions:
+        _pre_filter_count = len(all_entries)
+        all_entries = [
+            e for e in all_entries
+            if not is_template_instruction(e.get("text", ""))
+        ]
+        _filtered_count = _pre_filter_count - len(all_entries)
+        if _filtered_count:
+            print(f"Filtered {_filtered_count} WCM-template instruction entries")
+
+    # Drop empty content entries and exact duplicates (#211). Unconditional:
+    # unlike the instruction filter above, this never removes real content.
+    all_entries = filter_extraction_noise(all_entries)
 
     # Recompute coverage buckets after filtering so reported counts are accurate.
     content_entries = [e for e in all_entries if e["element_type"] not in ("header", "break")]

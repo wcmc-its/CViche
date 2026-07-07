@@ -230,3 +230,16 @@ def get_cookie_settings() -> dict:
         "secure": _secure_cookies,
         "max_age": SESSION_TTL,
     }
+
+
+def get_cookie_delete_settings() -> dict:
+    """Attributes for clearing the session cookie at logout. These must mirror
+    the set-time secure/samesite/path (default '/'); a deletion cookie whose
+    attributes differ from the original is ignored by some browsers."""
+    return {
+        "key": COOKIE_NAME,
+        "httponly": True,
+        "samesite": "lax",
+        "secure": _secure_cookies,
+        "path": "/",
+    }

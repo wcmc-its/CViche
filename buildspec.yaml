@@ -113,7 +113,7 @@ phases:
           CVICHE_STAGE_TIMEOUT_SECONDS: "${CVICHE_STAGE_TIMEOUT_SECONDS}"
           CVICHE_STALE_RUN_MINUTES: "${CVICHE_STALE_RUN_MINUTES}"
         redis:
-          CVICHE_REDIS_URL: "${CVICHE_REDIS_URL}"    
+          CVICHE_REDIS_URL: "${CVICHE_REDIS_URL}"
         allowed_users: []
         admin_users: []
         rate_limits:
@@ -134,6 +134,10 @@ phases:
        - echo "CVICHE_SESSION_SECRET=${SESSION_SECRET}" > k8s/overlays/${ENV_NAME}/db.env
        - echo "CVICHE_OPENAI_API_KEY=${OPENAI_API_KEY}" >> k8s/overlays/${ENV_NAME}/db.env
        - echo "PUBMED_API_KEY=${PUBMED_API_KEY}" >> k8s/overlays/${ENV_NAME}/db.env
+       # Teams run-notification webhook (bearer credential -> secret, like the keys above).
+       # Optional: unset -> empty value -> notifier no-ops. Set the CVICHE_TEAMS_WEBHOOK_URL
+       # CodeBuild env var (ideally from Secrets Manager) to enable notifications.
+       - echo "CVICHE_TEAMS_WEBHOOK_URL=${CVICHE_TEAMS_WEBHOOK_URL}" >> k8s/overlays/${ENV_NAME}/db.env
        
        # --- Write your SAML cryptographic assets securely ---
        - echo "Extracting SAML Cryptographic Key Pair..."
@@ -168,4 +172,11 @@ phases:
       - echo "Forcing a zero-downtime rolling update to clear configuration caches..."
       - kubectl rollout restart deployment/cviche-backend -n cviche-${ENV_NAME}
       - kubectl rollout restart deployment/cviche-frontend -n cviche-${ENV_NAME}
-      
+
+      # Fail the pipeline if the new pods don't actually become Ready. Without
+      # this, `rollout restart` returns immediately and the deploy reports green
+      # even when the new ReplicaSet never rolls out (e.g. a failing migration
+      # init container), silently leaving the previous image serving traffic.
+      - kubectl rollout status deployment/cviche-backend -n cviche-${ENV_NAME} --timeout=300s
+      - kubectl rollout status deployment/cviche-frontend -n cviche-${ENV_NAME} --timeout=300s
+

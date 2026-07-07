@@ -31,3 +31,23 @@ ed:
   admin_group: ""   # DN of admin group, e.g., "cn=ITS:Library:CViche/admin-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
   contact_name: ""  # Name shown in access denial message
   contact_email: "" # Email shown in access denial message
+
+notifications:
+  # Teams channel alerts on run start / terminal state. Leave empty to disable
+  # (the notifier silently no-ops when unset). Must be a Teams *Workflows*
+  # incoming-webhook URL — the retired Office 365 connector will not render the
+  # Adaptive Cards. Config precedence: the CVICHE_TEAMS_WEBHOOK_URL *env var*
+  # wins over this file. In DEPLOYED envs the URL is a bearer credential, so it
+  # is delivered as a secret: buildspec.yaml writes the CVICHE_TEAMS_WEBHOOK_URL
+  # CodeBuild variable into db.env -> the cviche-secrets Secret -> the pod env.
+  # This file entry is mainly for local dev if you'd rather not export the env var.
+  CVICHE_TEAMS_WEBHOOK_URL: ""
+
+doctor:
+  # Post-run artifact doctor: cross-stage lints over a completed run's stage
+  # outputs (pure local file reads, no LLM). Runs by default after every
+  # successful run and never affects run status; set to "0" to disable.
+  # Config precedence: the CVICHE_RUN_DOCTOR env var wins over this file.
+  # Quote the value ("0") — an unquoted YAML 0 is falsy and gets ignored by
+  # the config loader, leaving the doctor enabled.
+  CVICHE_RUN_DOCTOR: ""

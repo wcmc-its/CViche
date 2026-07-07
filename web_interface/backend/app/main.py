@@ -1,4 +1,5 @@
 """Main FastAPI application."""
+import asyncio
 import logging
 import os
 import traceback
@@ -134,11 +135,49 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+async def _stale_run_reaper_loop(interval_seconds: int):
+    """Periodically reap runs stuck in 'running' after a pod died mid-run.
+
+    The once-at-startup reconcile only heals a stuck run on the *next* restart;
+    in steady state a run whose in-process task died (pod evicted, OOM, or the
+    failure-handler commit itself failed) would count elapsed time upward
+    forever until something restarts the pod. This loop is the steady-state
+    backstop. ``reconcile_stale_runs`` is age-based and idempotent, so running
+    it on every replica on an interval is safe -- a sibling's genuinely
+    in-flight run isn't touched until it passes the stale threshold. The DB
+    work runs in a thread so it never blocks the event loop, and one bad sweep
+    is logged and the loop keeps going.
+    """
+    from app.services.run_service import reconcile_stale_runs
+    from app.database import SessionLocal
+
+    def _sweep() -> int:
+        db = SessionLocal()
+        try:
+            return reconcile_stale_runs(db)
+        finally:
+            db.close()
+
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            swept = await asyncio.to_thread(_sweep)
+            if swept:
+                logger.info("Periodic reaper marked %d stale run(s) failed", swept)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Periodic stale-run reaper sweep failed; will retry next interval",
+                exc_info=True,
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
     # Startup: Initialize database
-    print("🚀 Starting CViche Pipeline Viewer...")
+    logger.info("🚀 Starting CViche Pipeline Viewer...")
     # init_db() emits CREATE TABLE IF NOT EXISTS via metadata.create_all().
     # In production the runtime DB role is DML-only (IAM-auth'd cviche_app_user
     # with SELECT/INSERT/UPDATE/DELETE) and Alembic owns schema via a separate
@@ -146,9 +185,9 @@ async def lifespan(app: FastAPI):
     # don't fail at boot trying to issue DDL they aren't authorized for.
     if os.environ.get("CVICHE_INIT_DB", "1") == "1":
         init_db()
-        print("✅ Database initialized")
+        logger.info("✅ Database initialized")
     else:
-        print("⏭️  Skipping init_db() (CVICHE_INIT_DB=0); Alembic owns schema.")
+        logger.info("⏭️  Skipping init_db() (CVICHE_INIT_DB=0); Alembic owns schema.")
     from app.config_loader import seed_system_config
     from app.consent import load_consent_text, check_consent_integrity
     from app.services.run_service import reconcile_stale_runs
@@ -156,15 +195,15 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         seed_system_config(db)
-        print("✅ System config seeded")
+        logger.info("✅ System config seeded")
         load_consent_text()
-        print("✅ Consent text loaded")
+        logger.info("✅ Consent text loaded")
         check_consent_integrity(db)
         # Resolve runs orphaned by a previous restart so they don't hang
         # in "running" forever (the UI would count elapsed time up endlessly).
         swept = reconcile_stale_runs(db)
         if swept:
-            print(f"♻️  Reconciled {swept} stale run(s) from a previous restart")
+            logger.info("♻️  Reconciled %d stale run(s) from a previous restart", swept)
     finally:
         db.close()
 
@@ -180,16 +219,39 @@ async def lifespan(app: FastAPI):
     orchestrator_module.set_broker(broker)
     await event_emitter.startup()
     if broker.enabled:
-        print("✅ Redis broker enabled (cross-worker events + cancellation)")
+        logger.info("✅ Redis broker enabled (cross-worker events + cancellation)")
     else:
-        print("ℹ️  Redis broker disabled — in-process events (single-worker mode)")
+        logger.info("ℹ️  Redis broker disabled — in-process events (single-worker mode)")
+
+    # Steady-state backstop to the startup reconcile: periodically reap runs
+    # left stuck in "running" by a pod death mid-run. Set the interval to 0 to
+    # disable. Age-based + idempotent, so it is multi-replica safe.
+    reap_interval_raw, _ = get_config(
+        "llm", "CVICHE_STALE_RUN_REAP_INTERVAL_SECONDS", default=300
+    )
+    try:
+        reap_interval = int(reap_interval_raw)
+    except (TypeError, ValueError):
+        reap_interval = 300
+    reaper_task = (
+        asyncio.create_task(_stale_run_reaper_loop(reap_interval))
+        if reap_interval > 0 else None
+    )
+    if reaper_task:
+        print(f"♻️  Periodic stale-run reaper started (every {reap_interval}s)")
 
     yield
 
-    # Shutdown: stop the subscriber loop and close broker connections.
+    # Shutdown: cancel the reaper, stop the subscriber loop, close broker conns.
+    if reaper_task:
+        reaper_task.cancel()
+        try:
+            await reaper_task
+        except asyncio.CancelledError:
+            pass
     await event_emitter.shutdown()
     await broker.shutdown()
-    print("👋 Shutting down CViche Pipeline Viewer")
+    logger.info("👋 Shutting down CViche Pipeline Viewer")
 
 
 # Create FastAPI app

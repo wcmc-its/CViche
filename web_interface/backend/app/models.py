@@ -118,6 +118,11 @@ class Run(Base):
     # (it spans the idle time a run sat failed before retry). NULL for runs that
     # predate this column or never reached a terminal status here.
     total_duration_seconds = Column(Integer)
+    # Input-scaled wall-clock estimate (whole seconds) computed from the document
+    # at upload, so the client stall watchdog can scale its "taking longer than
+    # expected" threshold to the actual CV instead of a fixed constant. NULL for
+    # runs created before this column existed (watchdog falls back to a default).
+    estimated_duration_seconds = Column(Integer)
     # Number of pipeline execution attempts; 1 = initial run; incremented by
     # auto-retry (issue #145). MySQL-portable Integer; NOT NULL so existing rows
     # backfill to 1 via the server_default.
@@ -140,6 +145,7 @@ class Run(Base):
     submission_type = Column(String(50), nullable=True)
     show_track_changes = Column(Integer, default=1)
     show_pipeline_comments = Column(Integer, default=0)
+    strip_template_instructions = Column(Integer, default=1, server_default="1", nullable=False)
 
     # ORM relationships (see User for the lazy/cascade rationale). user_id is
     # nullable, so run.user can be None for anonymous/simple-mode runs.
