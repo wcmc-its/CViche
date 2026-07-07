@@ -687,6 +687,23 @@ _IDENTIFYING_FIELDS = (
     'mentee_name', 'organization', 'grant_number',
 )
 
+# Month words (>=4 alphabetic chars) allowed inside a date-like field value.
+_MONTH_WORDS = frozenset((
+    'january', 'february', 'march', 'april', 'june', 'july', 'august',
+    'september', 'sept', 'october', 'november', 'december',
+))
+
+
+def _value_is_datelike(v: str) -> bool:
+    """True when a normalized field value carries no identifying prose —
+    only date/number/punctuation content (month names allowed). Date ranges
+    are shared across the sibling records of a fused entry, and bare
+    alphanumeric codes ('1F30AG032861-01A1') read the same wherever they
+    land, so such values must never vouch on their own that a specific
+    record rendered (#221 post-review: on corpus CV 2054 entry 66.16 they
+    outvoted a genuinely absent grant record line)."""
+    return all(word in _MONTH_WORDS for word in re.findall(r'[a-z]{4,}', v))
+
 
 def segment_already_rendered(segment_text: str, extracted_fields: Dict) -> bool:
     """True if an overflow segment duplicates content already rendered from
@@ -695,7 +712,15 @@ def segment_already_rendered(segment_text: str, extracted_fields: Dict) -> bool:
 
     Matches only identifying fields (title/agency/name), never generic ones
     (a status like "Submitted 2026, Under review" is shared across records
-    and would wrongly mark unrendered siblings as duplicates).
+    and would wrongly mark unrendered siblings as duplicates). Within those
+    fields, values with no alphabetic word beyond month names (date ranges,
+    bare grant numbers) never vouch either — dates are shared across sibling
+    records (#221 post-review). A title too
+    short to identify a record on its own ("Professor", "Chair") counts only
+    together with the record's other anchors: BOTH extracted date endpoints
+    (fused career-progression siblings share a boundary date and title
+    suffixes — "Associate Professor" contains "Professor" — but not both
+    endpoints) plus the extracted institution/organization when there is one.
 
     ponytail: normalized substring match; upgrade to token-overlap scoring if
     false positives appear.
@@ -703,14 +728,150 @@ def segment_already_rendered(segment_text: str, extracted_fields: Dict) -> bool:
     if not extracted_fields:
         return False
     seg = re.sub(r'\s+', ' ', segment_text or '').lower()
-    for key in _IDENTIFYING_FIELDS:
-        value = extracted_fields.get(key)
+
+    def _norm_val(value) -> str:
         if not isinstance(value, str):
-            continue
-        v = re.sub(r'\s+', ' ', value).lower().strip()
-        if len(v) >= 15 and v in seg:
+            return ''
+        return re.sub(r'\s+', ' ', value).lower().strip()
+
+    def _word_in_seg(v: str) -> bool:
+        # Word-bounded so 'present' can't match inside 'presentation'.
+        return bool(v) and bool(
+            re.search(r'(?<!\w)' + re.escape(v) + r'(?!\w)', seg))
+
+    for key in _IDENTIFYING_FIELDS:
+        v = _norm_val(extracted_fields.get(key))
+        if len(v) >= 15 and v in seg and not _value_is_datelike(v):
             return True
-    return False
+
+    # Short-title conjunction (#221 review): the extracted record's source
+    # line often carries department/descriptor tokens the table render omits,
+    # so the recovery token check alone can't recognize it as rendered.
+    title = _norm_val(extracted_fields.get('title')
+                      or extracted_fields.get('project_title'))
+    if not (title and len(title) < 15 and _word_in_seg(title)):
+        return False
+    dates = [_norm_val(d) for d in (extracted_fields.get('start_date'),
+                                    extracted_fields.get('end_date'))]
+    if not all(dates) or not all(_word_in_seg(d) for d in dates):
+        return False
+    org = _norm_val(extracted_fields.get('institution')
+                    or extracted_fields.get('organization')
+                    or extracted_fields.get('agency'))
+    return not org or org in seg
+
+
+# ---------------------------------------------------------------------------
+# Unrendered-record recovery (#221).
+#
+# The structured-fields-only render paths (positions, licensure, honors,
+# committees, presentations, ...) render ONE row/bullet from an entry's
+# extracted_fields and silently drop the unextracted remainder record lines of
+# a fused multi-record entry. The constants and helpers below mirror
+# run_doctor's lint 8 ("unrendered_records") so the offline doctor and this
+# render-time safety net agree on what "a record line" and "rendered" mean.
+# run_doctor is optional tooling and must not become a pipeline import — keep
+# the two copies in sync by name.
+
+RENDER_TOKEN_MIN_COUNT = 3
+RENDER_TOKEN_OVERLAP = 0.7
+_RENDER_TOKEN_RE = re.compile(r"[a-z]{5,}")
+RENDER_PIECE_MIN_CHARS = 15
+RENDER_PIECE_WINDOW = 40
+
+# An entry is a fused multi-record candidate at this many record-like lines.
+# _looks_like_record only sees pipe/tab rows; employment/appointment records
+# are date-range-prefixed comma lines ("Jun 2020-Jun 2025, Assistant
+# Professor"), caught by the prefix pattern when the line carries a payload
+# beyond the bare date range.
+UNRENDERED_MIN_RECORD_LINES = 2
+RECORD_DATE_LINE_MIN_CHARS = 20
+_RECORD_DATE_PREFIX_RE = re.compile(r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]")
+
+
+def _norm(text) -> str:
+    return " ".join(str(text or "").split()).lower()
+
+
+def _squash(text) -> str:
+    """Whitespace-FREE normalization for verbatim containment checks."""
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def _looks_like_record(line: str) -> bool:
+    line = line.strip()
+    return len(line) > 60 and (" | " in line or "\t" in line)
+
+
+# Column-label vocabulary for the no-digit row filter below: a multi-cell row
+# with no year/number payload is only header furniture when a majority of its
+# words are table labels — dateless multi-cell rows can be real records
+# ("Member | Committee on X | Organization Y | description").
+_COLUMN_HEADER_WORDS = frozenset({
+    'state', 'country', 'license', 'number', 'status', 'date', 'dates',
+    'issue', 'issued', 'expiration', 'expires', 'title', 'organization',
+    'role', 'committee', 'type', 'location', 'institution', 'certification',
+    'name', 'year', 'years', 'description',
+})
+
+
+def _is_column_header_row(line: str) -> bool:
+    """True when a majority of the row's words are column-label vocabulary
+    ("State/Country  License Number  Status  Date of Issue ...")."""
+    words = [w.strip('.,;:()') for w in re.split(r'[\s\t|/]+', _norm(line))]
+    words = [w for w in words if w]
+    if not words:
+        return True
+    hits = sum(1 for w in words if w in _COLUMN_HEADER_WORDS)
+    return hits / len(words) >= 0.5
+
+
+def _record_lines(text) -> List[str]:
+    """Record-like lines of an entry: pipe/tab rows plus date-range-prefixed
+    lines that carry a payload beyond the bare date range."""
+    return [line.strip() for line in str(text or "").split("\n")
+            if _looks_like_record(line)
+            or (len(line.strip()) >= RECORD_DATE_LINE_MIN_CHARS
+                and _RECORD_DATE_PREFIX_RE.match(line.strip()))]
+
+
+def _entry_fragments(text) -> List[str]:
+    """An entry's fragments: per line, per '|' cell, and per tab cell."""
+    return [frag for line in str(text or "").split("\n")
+            for cell in line.split("|") for frag in cell.split("\t")]
+
+
+def _entry_pieces(text) -> List[str]:
+    """Squashed fragments of an entry long enough to be looked up verbatim in
+    the rendered-output haystack."""
+    pieces = []
+    for frag in _entry_fragments(text):
+        squashed = _squash(frag)
+        if len(squashed) >= RENDER_PIECE_MIN_CHARS:
+            pieces.append(squashed[:RENDER_PIECE_WINDOW])
+    return pieces
+
+
+def _record_rendered(line: str, haystack: str,
+                     line_token_sets: List[set]) -> Optional[bool]:
+    """Whether one record line surfaces in the output: verbatim piece first,
+    then per-output-line token overlap (per-line, not pooled, so common
+    academic words scattered across unrelated sections can't vouch for a
+    dropped record). Verbatim absence alone proves nothing — stage 6
+    reformats dates/fields — so False requires a token-verifiable miss; a
+    line without enough distinctive tokens is None, not missing."""
+    if any(piece in haystack for piece in _entry_pieces(line)):
+        return True
+    rendered = None
+    for chunk in [line] + _entry_fragments(line):
+        tokens = set(_RENDER_TOKEN_RE.findall(_norm(chunk)))
+        if len(tokens) < RENDER_TOKEN_MIN_COUNT:
+            continue
+        if any(len(tokens & line_tokens) / len(tokens) >= RENDER_TOKEN_OVERLAP
+               for line_tokens in line_token_sets):
+            return True
+        rendered = False
+    return rendered
 
 
 def grant_status_rebucket_target(status: str) -> Tuple[Optional[str], Optional[str]]:
@@ -745,7 +906,8 @@ class WCMTemplateGenerator:
 
     def __init__(self, template_path: str = None, verbose: bool = True,
                  emit_track_changes: bool = True, emit_comments: bool = False,
-                 strip_template_instructions: bool = True):
+                 strip_template_instructions: bool = True,
+                 recover_unrendered_records: bool = True):
         # Find a valid template path
         self.template_path = self._find_template(template_path)
         self.verbose = verbose
@@ -765,6 +927,12 @@ class WCMTemplateGenerator:
         # comments.xml part is created.
         self.emit_track_changes = emit_track_changes
         self.emit_comments = emit_comments
+
+        # Post-render safety net (#221): after all sections render, re-emit
+        # record lines of fused multi-record entries that provably did not
+        # surface anywhere in the document (the structured-fields-only render
+        # paths keep the extracted record and drop the remainder).
+        self.recover_unrendered_records = recover_unrendered_records
 
         # CV owner location context for geographic scope classification
         self.cv_owner_location = None
@@ -791,6 +959,7 @@ class WCMTemplateGenerator:
             'overflow_bullets_added': 0,
             'overflow_to_appendix': 0,
             'appendix_segments_reconsidered': 0,
+            'unrendered_records_recovered': 0,
         }
 
     def _find_template(self, template_path: str = None) -> str:
@@ -1043,6 +1212,13 @@ class WCMTemplateGenerator:
         # stages that share most words but differ in rank — use date-aware dedup
         # that only merges entries whose date ranges overlap or match.
         DATE_AWARE_DEDUP_CODES = {'D1', 'D2', 'D3', 'C', 'B1'}
+        # Snapshot the pre-dedup groups for the #221 recovery pass: dedup keeps
+        # the longer near-duplicate, which can eat a unique record line fused
+        # into the dropped entry. Recovery re-verifies every line against the
+        # rendered document, so scanning dropped entries is safe — content the
+        # surviving duplicate rendered is seen as rendered.
+        pre_dedup_entries_by_code = {code: list(group)
+                                     for code, group in entries_by_code.items()}
         total_deduped = 0
         for code in list(entries_by_code.keys()):
             before = len(entries_by_code[code])
@@ -1134,6 +1310,14 @@ class WCMTemplateGenerator:
 
         # Reconsider appendix entries - reclassify segments to appropriate sections
         self._reconsider_appendix_entries()
+
+        # Post-render safety net: re-emit record lines the structured render
+        # dropped (#221). Runs after the overflow/reconsider passes so their
+        # inserts count as rendered, and before comment finalization and
+        # instruction-box removal (anchor lookups are text-based). Scans the
+        # PRE-dedup entries so records fused into a deduped-away entry are
+        # still checked.
+        self._recover_unrendered_records(pre_dedup_entries_by_code)
 
         # Finalize comments (add to comments.xml)
         self._finalize_comments()
@@ -2203,6 +2387,16 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         # Map specific taxonomy codes to WCM subsection headers
         # More specific codes first, then fall back to section-level
         subsection_map = {
+            # Education / positions / licensure / honors — the exact header
+            # strings the corresponding _fill_* methods search for, so a
+            # recovered record lands next to the table its siblings rendered
+            # into (#221).
+            'B1': 'EDUCATION',
+            'D1': 'Academic Appointments',
+            'D2': 'Hospital Appointments',
+            'D3': 'Other Professional Positions',
+            'F1': 'Licensure',
+            'H': 'HONORS',
             # Teaching (K codes) - map to specific teaching subsections
             'K1': 'Didactic Teaching',
             'K2': 'Clinical Teaching',
@@ -2259,6 +2453,24 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         search = search_text.lower()
         for i, para in enumerate(self.doc.paragraphs):
             if search in para.text.lower():
+                return i
+        return None
+
+    def _find_header_paragraph(self, search_text: str) -> Optional[int]:
+        """First paragraph containing search_text that is formatted like a
+        section header (ALL-CAPS text or a bold run) — never plain body text.
+
+        Content-insertion anchors must not match instruction prose: the
+        MENTORING section's '**Optional: List publications...' paragraph
+        contains 'bibliography' by substring and would swallow S-code
+        recoveries mid-Mentoring if plain substring search were used.
+        """
+        search = search_text.lower()
+        for i, para in enumerate(self.doc.paragraphs):
+            text = para.text.strip()
+            if len(text) < 3 or search not in text.lower():
+                continue
+            if text.isupper() or (para.runs and para.runs[0].bold):
                 return i
         return None
 
@@ -7359,8 +7571,12 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Route reclassified segments to their new sections
         for segment_text, new_code, original_entry in segments_to_route:
-            self._insert_reconsidered_segment(segment_text, new_code)
-            self.stats['appendix_segments_reconsidered'] += 1
+            if self._insert_reconsidered_segment(segment_text, new_code):
+                self.stats['appendix_segments_reconsidered'] += 1
+            else:
+                # No usable anchor for this code — keep the segment visible
+                # in the appendix rather than dropping it silently (#221).
+                remaining_for_appendix.append((segment_text, new_code, 0.0))
 
         # Add remaining unmappable content to appendix
         if remaining_for_appendix:
@@ -7469,26 +7685,45 @@ Now analyze the text above:"""
                 print(f"  Warning: LLM reclassification failed: {e}")
             return None
 
-    def _insert_reconsidered_segment(self, text: str, taxonomy_code: str):
-        """Insert a reclassified segment into the appropriate WCM subsection."""
+    def _insert_reconsidered_segment(self, text: str, taxonomy_code: str,
+                                     comment: str = None) -> bool:
+        """Insert a reclassified segment into the appropriate WCM subsection.
+
+        Returns True when the bullet was actually inserted, so callers can
+        fall back to the appendix instead of silently losing the segment.
+        """
         # Find the subsection header for this code
         section_header = self._get_wcm_section_header(taxonomy_code)
         if not section_header:
-            return
+            return False
+
+        # Never anchor inside the appendix: its bold 'From "SECTION":' group
+        # heads echo source section names and would swallow content meant for
+        # the real section (the appendix always sits at document end, and
+        # _fill_appendix runs before this).
+        appendix_idx = self._find_paragraph_with_text("T. APPENDIX")
 
         # Use precise subsection search to avoid matching main section headers
-        header_idx = self._find_subsection_header(section_header)
+        header_idx = self._find_subsection_header(section_header,
+                                                  before_idx=appendix_idx)
         if header_idx is None:
-            # Fall back to regular search
-            header_idx = self._find_paragraph_with_text(section_header)
+            # Fall back to a header-looking match only (ALL-CAPS main section
+            # headers the subsection search skips by design). A plain
+            # substring fallback anchored S-code recoveries on the MENTORING
+            # instruction paragraph containing 'bibliography'; failing to
+            # anchor is safe — callers fall back to the appendix.
+            header_idx = self._find_header_paragraph(section_header)
+            if (header_idx is not None and appendix_idx is not None
+                    and header_idx >= appendix_idx):
+                header_idx = None
         if header_idx is None:
-            return
+            return False
 
         # Find the right insertion point: after the subsection header and any
         # instructional text, but before the next subsection or table
         insert_idx = self._find_subsection_insert_point(header_idx)
         if insert_idx is None:
-            return
+            return False
 
         # Insert as a bullet
         try:
@@ -7501,28 +7736,37 @@ Now analyze the text above:"""
             # Add explanatory comment
             self._add_word_comment(
                 new_para,
-                f"Recovered from unmapped overflow content and routed to {taxonomy_code}. "
-                f"Review and edit as appropriate.",
+                comment or (
+                    f"Recovered from unmapped overflow content and routed to {taxonomy_code}. "
+                    f"Review and edit as appropriate."
+                ),
                 author="CViche Reconsideration"
             )
 
             if self.verbose:
                 print(f"    Inserted [{taxonomy_code}]: {text[:60]}...")
+            return True
 
         except Exception as e:
             if self.verbose:
                 print(f"  Warning: Could not insert reconsidered segment: {e}")
+            return False
 
-    def _find_subsection_header(self, search_text: str) -> Optional[int]:
+    def _find_subsection_header(self, search_text: str,
+                                before_idx: int = None) -> Optional[int]:
         """Find a subsection header that exactly matches the search text.
 
         Unlike _find_paragraph_with_text which does substring matching,
         this looks for paragraphs where the text closely matches the search
         and it's formatted as a subsection (bold but not all-caps main section).
+        When before_idx is given, only paragraphs before it are considered
+        (e.g. to keep the search out of the appendix).
         """
         search_lower = search_text.lower().strip()
 
         for i, para in enumerate(self.doc.paragraphs):
+            if before_idx is not None and i >= before_idx:
+                break
             text = para.text.strip()
             text_lower = text.lower()
 
@@ -7623,6 +7867,132 @@ Now analyze the text above:"""
                 f"to a template section.",
                 author="Classification",
             )
+
+    def _rendered_output_lines(self) -> List[str]:
+        """Every rendered text line of the in-memory document: body paragraphs
+        plus table cells. Two render-time divergences from run_doctor's
+        read_docx_blocks (which walks only top-level tables, cell by cell):
+        nested tables are recursed into, and each table row is ALSO emitted
+        with its cells joined as one line, so a record rendered as a
+        structured row (title / dates / institution cells) keeps its tokens
+        together the way one source line does. Extra lines only ever ADD
+        matches — fewer false "absent" verdicts, never more; the offline
+        doctor may still WARN on rows this pass correctly judged rendered
+        (reconciling lint 8's semantics is PR #223 scope)."""
+        lines: List[str] = []
+
+        def add(text: str):
+            for ln in str(text or '').split('\n'):
+                if ln.strip():
+                    lines.append(ln)
+
+        def walk_table(tbl):
+            for row in tbl.rows:
+                cell_texts = []
+                for cell in row.cells:
+                    if cell.text.strip():
+                        cell_texts.append(cell.text)
+                        add(cell.text)
+                    for nested in cell.tables:
+                        walk_table(nested)
+                if len(cell_texts) > 1:
+                    add(' | '.join(' '.join(t.split()) for t in cell_texts))
+
+        for para in self.doc.paragraphs:
+            add(para.text)
+        for tbl in self.doc.tables:
+            walk_table(tbl)
+        return lines
+
+    def _recover_unrendered_records(self, entries_by_code: Dict[str, List[Dict]]):
+        """Post-render safety net (#221): re-emit record lines the structured
+        render dropped.
+
+        The structured-fields-only render paths keep the stage-4-extracted
+        record and silently drop the unextracted remainder record lines of a
+        fused multi-record entry (and most of those paths never reach the #214
+        overflow pipeline at all). This pass runs after every section — and the
+        overflow/reconsider passes — has rendered, checks each record-like line
+        of every entry (pre-dedup, so records fused into a deduped-away entry
+        are covered) against the in-memory document (mirroring run_doctor
+        lint 8), and re-inserts the provably-absent ones as verbatim bullets in
+        the entry's own section, with the appendix as the guaranteed-no-loss
+        fallback. Lines that cannot be VERIFIED absent are never re-inserted:
+        duplicating faculty-facing content is worse than leaving a loss for the
+        offline doctor to flag.
+        """
+        if not self.recover_unrendered_records:
+            return
+
+        out_lines = self._rendered_output_lines()
+        haystack = "\x00".join(_squash(line) for line in out_lines)
+        line_token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line)))
+                           for line in out_lines]
+
+        appendix_batch = []   # (text, code, coverage) for _add_remaining_to_appendix
+        n_recovered = 0
+
+        for code, entries in entries_by_code.items():
+            if code == 'T':
+                # Appendix catch-all — _fill_appendix already carries these.
+                continue
+            for entry in entries:
+                records = _record_lines(entry.get('text'))
+                if len(records) < UNRENDERED_MIN_RECORD_LINES:
+                    continue  # not a fused multi-record entry
+                fields = entry.get('extracted_fields') or {}
+                coverage = (entry.get('extraction_coverage') or {}).get(
+                    'extraction_coverage_percent', 0)
+                for line in records:
+                    if _record_rendered(line, haystack, line_token_sets) is not False:
+                        # Rendered (possibly reformatted), or too short to
+                        # verify either way — never re-insert.
+                        continue
+                    if segment_already_rendered(line, fields):
+                        # The record that DID render from extracted fields: a
+                        # grant table splits its tokens across label/value
+                        # rows, so the token check alone can miss it (#209).
+                        continue
+                    if (not re.search(r'\d', line)
+                            and line.count('\t') + line.count('|') >= 2
+                            and _is_column_header_row(line)):
+                        # Multi-column rows with no year/number payload AND
+                        # majority column-label words are tabular header rows
+                        # ("State/Country  License Number  Status ...")
+                        # satisfying the tab-record heuristic — not CV
+                        # records. A dateless multi-cell row of real content
+                        # (committee membership: "Member | Committee on X |
+                        # Organization") is still recovered.
+                        continue
+                    if is_template_instruction(line) or is_source_boilerplate(line):
+                        continue
+                    inserted = self._insert_reconsidered_segment(
+                        line, code,
+                        comment=(
+                            f"Recovered: this record from the source CV was not "
+                            f"rendered by the structured {code} section. "
+                            f"Review placement and formatting."
+                        ))
+                    if not inserted:
+                        appendix_batch.append((line, code, coverage))
+                    # Count the re-inserted line as rendered so a
+                    # near-identical variant in another pre-dedup entry
+                    # (trailing period, 'Sep' vs 'Sept') is verified rendered
+                    # instead of inserted a second time — dedup drops entries
+                    # precisely because they near-duplicate a kept one, so
+                    # exact-squash matching is not enough.
+                    haystack += "\x00" + _squash(line)
+                    line_token_sets.append(
+                        set(_RENDER_TOKEN_RE.findall(_norm(line))))
+                    self.stats['unrendered_records_recovered'] += 1
+                    n_recovered += 1
+
+        if appendix_batch:
+            self._add_remaining_to_appendix(appendix_batch)
+
+        if self.verbose and n_recovered:
+            print(f"  Recovered {n_recovered} unrendered record line(s) "
+                  f"({len(appendix_batch)} routed to appendix)")
 
     def _fill_appendix(self, unmapped_entries: List[Dict]):
         """Add appendix section for unmapped content.
@@ -8647,7 +9017,8 @@ Now analyze the text above:"""
 
 def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
                emit_track_changes: bool = True, emit_comments: bool = False,
-               strip_template_instructions: bool = True) -> str:
+               strip_template_instructions: bool = True,
+               recover_unrendered_records: bool = True) -> str:
     """
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -8658,6 +9029,9 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
         emit_track_changes: Render edits as Word track changes (default True).
             When False, edits render as plain accepted text.
         emit_comments: Emit Word classification/pipeline comments (default False).
+        recover_unrendered_records: Re-emit record lines of fused multi-record
+            entries that the structured render provably dropped (#221;
+            default True).
 
     Returns:
         Path to generated document
@@ -8667,6 +9041,7 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
         emit_track_changes=emit_track_changes,
         emit_comments=emit_comments,
         strip_template_instructions=strip_template_instructions,
+        recover_unrendered_records=recover_unrendered_records,
     )
     return generator.generate(input_path, output_path)
 
