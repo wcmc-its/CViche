@@ -363,7 +363,8 @@ def _dates_overlap_or_match(entry_a: Dict, entry_b: Dict) -> bool:
 
 
 def deduplicate_entries(entries: List[Dict], verbose: bool = False,
-                        require_date_overlap: bool = False) -> List[Dict]:
+                        require_date_overlap: bool = False,
+                        decisions: Optional[List[Dict]] = None) -> List[Dict]:
     """Remove near-duplicate entries within a code group.
 
     Uses two metrics to catch duplicates:
@@ -377,6 +378,11 @@ def deduplicate_entries(entries: List[Dict], verbose: bool = False,
     their date ranges match or overlap.  This prevents false positives on career
     progression sequences (e.g., Intern -> Resident -> Chief Resident at same
     institution) where word overlap is high but dates differ.
+
+    If decisions is a list, every drop is appended to it as a dict (metric
+    values plus dropped/kept text) so the caller can persist the decision
+    trail for the run doctor (#227: at these thresholds a drop is not always
+    a true duplicate).
     """
     if len(entries) <= 1:
         return entries
@@ -441,15 +447,24 @@ def deduplicate_entries(entries: List[Dict], verbose: bool = False,
                 len_j = len(entries[j].get('text', ''))
                 drop = j if len_i >= len_j else i
                 kept = i if drop == j else j
+                if jaccard >= 0.6:
+                    metric = f"jaccard={jaccard:.2f}"
+                elif containment >= 0.75:
+                    metric = f"containment={containment:.2f}"
+                else:
+                    metric = f"title={title_containment:.2f}"
                 if verbose:
-                    if jaccard >= 0.6:
-                        metric = f"jaccard={jaccard:.2f}"
-                    elif containment >= 0.75:
-                        metric = f"containment={containment:.2f}"
-                    else:
-                        metric = f"title={title_containment:.2f}"
                     print(f"    Dedup: dropping entry ({metric}), "
                           f"keeping [{entries[kept].get('text', '')[:60]}...]")
+                if decisions is not None:
+                    decisions.append({
+                        "metric": metric,
+                        "jaccard": round(jaccard, 2),
+                        "containment": round(containment, 2),
+                        "title_containment": round(title_containment, 2),
+                        "dropped_text": entries[drop].get('text', '')[:500],
+                        "kept_text": entries[kept].get('text', '')[:500],
+                    })
                 drop_indices.add(drop)
 
     if drop_indices:
@@ -1220,12 +1235,18 @@ class WCMTemplateGenerator:
         pre_dedup_entries_by_code = {code: list(group)
                                      for code, group in entries_by_code.items()}
         total_deduped = 0
+        dedup_decisions: List[Dict] = []
         for code in list(entries_by_code.keys()):
             before = len(entries_by_code[code])
             date_aware = code in DATE_AWARE_DEDUP_CODES
+            group_decisions: List[Dict] = []
             entries_by_code[code] = deduplicate_entries(
                 entries_by_code[code], verbose=self.verbose,
-                require_date_overlap=date_aware)
+                require_date_overlap=date_aware,
+                decisions=group_decisions)
+            for decision in group_decisions:
+                decision["code"] = code
+            dedup_decisions.extend(group_decisions)
             removed = before - len(entries_by_code[code])
             if removed > 0:
                 total_deduped += removed
@@ -1349,8 +1370,24 @@ class WCMTemplateGenerator:
             print("VALIDATION WARNINGS")
             print(f"{'!'*60}")
             for issue in validation_issues:
-                print(f"  ⚠ {issue}")
+                print(f"  ⚠ {issue['message']}")
             print(f"{'!'*60}")
+
+        # Persist the self-check warnings and dedup decision trail next to
+        # the docx so the run doctor can re-emit them (#227/#228) — until now
+        # they only ever reached the pod log. Written even when empty, so the
+        # doctor can tell a clean run from a pre-sidecar build. Fail-soft: a
+        # sidecar failure must never fail the render.
+        try:
+            report_path = Path(output_path).with_name(
+                f"{document_uid}_render_warnings.json")
+            report_path.write_text(json.dumps({
+                "document_uid": document_uid,
+                "warnings": validation_issues,
+                "dedup_decisions": dedup_decisions,
+            }, indent=2))
+        except Exception as exc:
+            print(f"  ⚠ could not write render-warnings sidecar: {exc}")
 
         if self.verbose:
             print(f"\n{'='*60}")
@@ -8937,10 +8974,13 @@ Now analyze the text above:"""
             # Fall back to normal citation
             self._add_citation_with_bold_author(para, citation, target_name, cv_owner_last_name)
 
-    def _validate_output(self) -> List[str]:
+    def _validate_output(self) -> List[Dict]:
         """Validate the generated document for common issues.
 
-        Returns list of warning messages for any issues found.
+        Returns a list of structured warning dicts ({check, code, section,
+        message, evidence}) — the message strings are what the VALIDATION
+        WARNINGS banner prints, and the whole dict is persisted to the
+        render-warnings sidecar for the run doctor (#228).
         This catches regressions in:
         - K sections: content should be bulleted, not combined into single entries
         - P section tables: should not have bare dates in column A
@@ -8971,9 +9011,13 @@ Now analyze the text above:"""
                     continue
                 # Check if this looks like a combined entry (semicolon-separated list)
                 if para_text.startswith('•') and para_text.count(';') > 3:
-                    issues.append(
-                        f"{code} ({section_text}): Content appears combined with semicolons instead of separate bullets"
-                    )
+                    issues.append({
+                        "check": "semicolon_fused_bullets",
+                        "code": code,
+                        "section": section_text,
+                        "message": f"{code} ({section_text}): Content appears combined with semicolons instead of separate bullets",
+                        "evidence": [para_text[:200]],
+                    })
                 break
 
         # Check 2: Committee/Administrative tables should not have bare dates in column A
@@ -8985,16 +9029,20 @@ Now analyze the text above:"""
             if 'Committee' not in first_cell and 'Activity' not in first_cell:
                 continue
 
-            bare_date_count = 0
+            bare_dates = []
             for row in table.rows[1:]:
                 col_a = row.cells[0].text.strip() if row.cells else ''
                 if bare_date_pattern.match(col_a):
-                    bare_date_count += 1
+                    bare_dates.append(col_a)
 
-            if bare_date_count > 0:
-                issues.append(
-                    f"Table '{first_cell[:30]}': {bare_date_count} rows have bare dates in column A (should be filtered)"
-                )
+            if bare_dates:
+                issues.append({
+                    "check": "bare_dates_in_table",
+                    "code": None,
+                    "section": first_cell[:30],
+                    "message": f"Table '{first_cell[:30]}': {len(bare_dates)} rows have bare dates in column A (should be filtered)",
+                    "evidence": bare_dates[:3],
+                })
 
         # Check 3: Teaching section should have visible content (not just track changes)
         teaching_idx = self._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
@@ -9008,9 +9056,13 @@ Now analyze the text above:"""
                     has_visible_bullets = True
                     break
             if not has_visible_bullets:
-                issues.append(
-                    "K (Teaching): No visible bulleted content found - may be using track changes only"
-                )
+                issues.append({
+                    "check": "no_visible_teaching_content",
+                    "code": "K",
+                    "section": "EDUCATIONAL CONTRIBUTIONS",
+                    "message": "K (Teaching): No visible bulleted content found - may be using track changes only",
+                    "evidence": [],
+                })
 
         return issues
 

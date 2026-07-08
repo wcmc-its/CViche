@@ -27,14 +27,19 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dead_sections,
+    lint_dedup_drops,
     lint_enrichment_failures,
     lint_missed_headers,
     lint_output_hygiene,
+    lint_pipe_leaks,
     lint_segmentation,
+    lint_stage6_warnings,
+    lint_table_shape,
     lint_under_extraction,
     lint_unrendered_records,
     main,
     read_docx_blocks,
+    read_docx_table_rows,
     run_doctor,
 )
 
@@ -581,6 +586,178 @@ def test_enrichment_failures_missing_artifact_info_skip(tmp_path):
     assert payload["artifacts"]["stage_5_enrichment"] is None
 
 
+# ------------------------------------------------- lint 10: stage-6 warnings
+
+def test_stage6_warnings_reemitted_as_warn():
+    report = {"document_uid": "X", "warnings": [
+        {"check": "semicolon_fused_bullets", "code": "K3",
+         "section": "Administrative teaching",
+         "message": "K3 (Administrative teaching): Content appears combined "
+                    "with semicolons instead of separate bullets",
+         "evidence": ["• a; b; c; d; e"]},
+        {"check": "no_visible_teaching_content", "code": "K",
+         "section": "EDUCATIONAL CONTRIBUTIONS",
+         "message": "K (Teaching): No visible bulleted content found - may "
+                    "be using track changes only",
+         "evidence": []},
+    ]}
+    findings = lint_stage6_warnings(report)
+    assert len(findings) == 2
+    assert all(f["lint"] == "stage6_render_warnings" and f["severity"] == "WARN"
+               for f in findings)
+    assert "K3 (Administrative teaching)" in findings[0]["message"]
+    assert findings[0]["evidence"] == ["• a; b; c; d; e"]
+
+
+def test_stage6_warnings_quiet_on_clean_sidecar():
+    assert lint_stage6_warnings({"warnings": [], "dedup_decisions": []}) == []
+
+
+# ----------------------------------------------------- lint 11: dedup drops
+
+def test_dedup_drops_flags_distinct_record_quiet_on_true_dup():
+    report = {"dedup_decisions": [
+        # 2Q1_ZQ drop 4: different journals sharing only date tokens — LOSS.
+        {"code": "Q4D", "metric": "containment=0.75",
+         "dropped_text": "Diagnosis (Jan 2024-Present)",
+         "kept_text": "Academic Medicine (Jan 2024-Present)"},
+        # 2Q1_ZQ drop 2: same line inside a longer fused entry — true dup.
+        {"code": "D1", "metric": "containment=1.00",
+         "dropped_text": "Associate Professor, Health Professions Education",
+         "kept_text": "Oct 2025-Present\nAssociate Professor, Health "
+                      "Professions Education\nDepartment of Medicine"},
+    ]}
+    findings = lint_dedup_drops(report)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["lint"] == "dedup_drops" and f["severity"] == "WARN"
+    assert "1 dedup drop(s)" in f["message"]
+    assert "Diagnosis" in f["evidence"][0]
+    assert not any("Associate Professor" in e for e in f["evidence"])
+
+
+def test_dedup_drops_quiet_with_no_decisions():
+    assert lint_dedup_drops({"warnings": [], "dedup_decisions": []}) == []
+
+
+# ------------------------------------------------------ lint 12: pipe leaks
+
+def test_pipe_leaks_flags_multi_pipe_paragraphs_not_tables():
+    blocks = [("p", "M. RESEARCH"),
+              ("p", "• FY2023 Award VPR-23-001 | Jung, E. (PI) | Needs "
+                    "assessment | Status: Awarded."),
+              ("p", "• NBME Stemmler Grant | Jung, E. (PI) | Use of AI | "
+                    "Status: Submitted."),
+              # grant tables legitimately synthesize ' | ' row joins
+              ("table", "Title | PI | Amount | Status")]
+    findings = lint_pipe_leaks(blocks)
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "WARN"
+    assert "2 rendered line(s)" in findings[0]["message"]
+
+
+def test_pipe_leaks_flags_single_pipe_bullet_cluster():
+    blocks = [("p", "K. EDUCATIONAL CONTRIBUTIONS")] + [
+        ("p", f"• Instructor, Course {i} | June 2020 – Present")
+        for i in range(3)]
+    findings = lint_pipe_leaks(blocks)
+    assert len(findings) == 1
+    assert "3 single-pipe bullet(s)" in findings[0]["message"]
+    assert "educational contributions" in findings[0]["message"]
+
+
+def test_pipe_leaks_quiet_below_cluster_threshold_and_in_appendix():
+    blocks = [("p", "K. EDUCATIONAL CONTRIBUTIONS"),
+              ("p", "• Instructor, Course A | June 2020 – Present"),
+              ("p", "T. APPENDIX"),
+              ("p", "• leftover | raw | source | line"),
+              ("p", "• another | raw | leftover | line"),
+              ("p", "• third | raw | leftover | line")]
+    assert lint_pipe_leaks(blocks) == []
+
+
+def test_pipe_leaks_flags_pipe_free_fused_citation():
+    fused = ("31. Hyer A, Jung E. AI confidence. OLC Accelerate 2025; "
+             "2025 November 20; Orlando, FL. Weissman P, Samuel A. Teaching "
+             "large courses. AMEE; 2024 August 26; Basel, Switzerland.")
+    blocks = [("p", "S. BIBLIOGRAPHY"), ("p", fused),
+              ("p", "30. Normal citation. Journal of Things; 2024 May; 12(3).")]
+    findings = lint_pipe_leaks(blocks)
+    assert len(findings) == 1
+    assert "venue-date" in findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith("[bibliography] 31.")
+
+
+# ----------------------------------------------------- lint 13: table shape
+
+_HONORS_HEADER = ["Name of award", "Organization", "Date awarded (yyyy)"]
+_BLOB = ("Basic Science Innovation in Education Award – Runner-up "
+         "Presentation. Saibal Day, Eulho Jung, and Thomas Flagg. Basic "
+         "Science Innovation in Education. Uniformed Services University "
+         "Education Day, Bethesda, MD, August 2025.")
+
+
+def test_table_shape_flags_malformed_honors_rows():
+    tables = [[_HONORS_HEADER,
+               [_BLOB, "MD", ""],
+               ["2020 AECT Outstanding Article Award, Association for "
+                "Educational Communication and Technology (AECT)",
+                "Association for Educational Communication and Technology "
+                "(AECT)", ""],
+               ["Distinguished Teaching Award", "Indiana University", "2013"]]]
+    findings = lint_table_shape(tables)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["lint"] == "table_shape" and f["severity"] == "WARN"
+    assert "2/3 row(s) malformed" in f["message"]
+    assert any("state abbrev" in e for e in f["evidence"])
+    assert any("blob" in e for e in f["evidence"])
+    assert any("empty date" in e for e in f["evidence"])
+    assert any("duplicated in name" in e for e in f["evidence"])
+
+
+def test_table_shape_ignores_non_honors_tables_and_clean_rows():
+    tables = [
+        # not honors-shaped: ignored even with a giant cell
+        [["Committee", "Role"], [_BLOB, "Chair"]],
+        # honors-shaped and clean
+        [_HONORS_HEADER, ["Distinguished Teaching Award",
+                          "Indiana University", "2013"]],
+    ]
+    assert lint_table_shape(tables) == []
+
+
+def test_read_docx_table_rows_keeps_empty_cells(tmp_path):
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    for i, text in enumerate(_HONORS_HEADER):
+        table.rows[0].cells[i].text = text
+    table.rows[1].cells[0].text = "Award X, Some University"
+    path = tmp_path / "t.docx"
+    doc.save(path)
+    rows = read_docx_table_rows(str(path))
+    assert rows == [[_HONORS_HEADER, ["Award X, Some University", "", ""]]]
+
+
+# --------------------------------------- lint 4 addendum: year-edge records
+
+def test_under_extraction_counts_year_edge_lines_as_records():
+    # 2Q1_ZQ honors entry shape: plain newline award lines, no pipes/tabs —
+    # invisible to _looks_like_record before #229.
+    lines = [
+        "2020 AECT ST&C Outstanding Article Award, Association for "
+        "Educational Communication and Technology (AECT)",
+        "2015-2017 Featured Research Article Award, AECT ST&C Division",
+        "Basic Science Innovation Award. USU Education Day, August 2025.",
+    ]
+    entry = _entry("\n".join(lines) + "\nfiller " * 100, taxonomy_code="H",
+                   extracted_fields={"award_name": lines[0]})
+    entry["extraction_coverage"] = {"extraction_coverage_percent": 19.0}
+    findings = lint_under_extraction({"entries": [entry]})
+    assert len(findings) == 1
+    assert "3 record-like lines" in findings[0]["message"]
+
+
 # ------------------------------------------------------------ full doctor runs
 
 _UID = "89TEST"
@@ -641,6 +818,8 @@ def _build_clean_run(tmp_path, uid=_UID):
     out_dir = root / "stage_6_wcm_documents"
     out_dir.mkdir(parents=True)
     output.save(out_dir / f"{uid}_cv_wcm.docx")
+    _write_stage(root, "stage_6_wcm_documents", f"{uid}_cv_render_warnings.json",
+                 {"document_uid": uid, "warnings": [], "dedup_decisions": []})
     return root
 
 
@@ -648,7 +827,7 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    assert len(payload["findings"]) == 9
+    assert len(payload["findings"]) == 13
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
     assert payload["counts"]["ERROR"] == 0
@@ -666,6 +845,24 @@ def test_run_doctor_clean_run_end_to_end(tmp_path):
     assert payload["counts"]["ERROR"] == 0
     assert payload["counts"]["WARN"] == 0
     assert payload["worst_severity"] == "INFO"
+
+
+def test_run_doctor_reemits_sidecar_findings_end_to_end(tmp_path):
+    root = _build_clean_run(tmp_path)
+    _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",
+                 {"document_uid": _UID,
+                  "warnings": [{"check": "semicolon_fused_bullets",
+                                "code": "K3", "section": "Administrative teaching",
+                                "message": "K3 (Administrative teaching): fused",
+                                "evidence": []}],
+                  "dedup_decisions": [
+                      {"code": "Q4D", "metric": "containment=0.75",
+                       "dropped_text": "Diagnosis (Jan 2024-Present)",
+                       "kept_text": "Academic Medicine (Jan 2024-Present)"}]})
+    payload = run_doctor(root, _UID)
+    lints = {f["lint"] for f in payload["findings"] if f["severity"] == "WARN"}
+    assert "stage6_render_warnings" in lints
+    assert "dedup_drops" in lints
 
 
 def test_run_doctor_accepts_source_override(tmp_path):

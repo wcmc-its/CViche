@@ -31,6 +31,20 @@ Lints, ranked by the severity of the failure class they catch:
                           unextracted remainder with no bullet fallback (#221)
 9. enrichment_failures    stage-5 PubMed enrichment lookups that failed, so
                           those citations degrade to CV-extracted fields (#222)
+10. stage6_render_warnings stage 6's own post-generation self-check findings,
+                          re-emitted from the render-warnings sidecar — they
+                          used to die in the pod log (#228)
+11. dedup_drops           stage-6 dedup decisions whose dropped text is not
+                          near-fully contained in the kept entry — at loose
+                          thresholds these are distinct records lost, not
+                          duplicates (#227: 7 of 8 drops on 2Q1_ZQ were real)
+12. pipe_leaks            raw ' | '-delimited source lines rendered as output
+                          paragraphs — verbatim-fallback formatting reaching
+                          the faculty-facing document (#208 costs)
+13. table_shape           honors-table rows that are mis-shaped: citation
+                          blobs in the name cell, empty date column with a
+                          year in the name, state-abbrev organizations,
+                          organization duplicated inside the name (#229)
 
 Usage:
 
@@ -70,6 +84,12 @@ from unified_pipeline.stage_6_word_template import grant_status_rebucket_target
 UNDER_EXTRACTION_MAX_PCT = 40.0
 UNDER_EXTRACTION_MIN_CHARS = 800
 UNDER_EXTRACTION_MIN_RECORDS = 2
+# _looks_like_record only sees pipe/tab rows; fused award/honor lines are
+# plain newline lines carrying a leading or trailing year ("2020 AECT ...",
+# "... August 2025.") — the 2Q1_ZQ honors mega-entry (19% coverage) was
+# invisible without counting them (#229).
+_YEAR_EDGE_LINE_RE = re.compile(
+    r"^\s*(?:19|20)\d{2}\b|\b(?:19|20)\d{2}\s*[.)]?\s*$")
 
 # Lint 5: a squashed text piece shorter than this matches by accident; a
 # longer fragment is matched by its leading window, so a reformatted tail
@@ -253,6 +273,17 @@ def read_docx_blocks(docx_path: str) -> List[Tuple[str, str]]:
     return blocks
 
 
+def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
+    """Raw per-row cell texts of every top-level table, EMPTY CELLS INCLUDED
+    — _table_lines drops empty cells, which hides an empty date column from
+    the shape checks (lint 13)."""
+    from docx import Document  # local import: doctor is optional tooling
+
+    doc = Document(docx_path)
+    return [[[cell.text.strip() for cell in row.cells] for row in tbl.rows]
+            for tbl in doc.tables]
+
+
 def _haystacks(blocks: List[Tuple[str, str]]) -> Tuple[str, set]:
     """(squashed containment haystack, distinctive-token set) for the output
     blocks; the \\x00 sentinel keeps a piece from matching across two
@@ -387,7 +418,11 @@ def lint_under_extraction(stage4: Dict) -> List[Dict]:
         text = str(e.get("text", ""))
         if len(text) <= UNDER_EXTRACTION_MIN_CHARS:
             continue
-        records = sum(1 for line in text.split("\n") if _looks_like_record(line))
+        records = sum(
+            1 for line in text.split("\n")
+            if _looks_like_record(line)
+            or (len(line.strip()) >= SUBSTANTIVE_LINE_CHARS
+                and _YEAR_EDGE_LINE_RE.search(line)))
         if records < UNDER_EXTRACTION_MIN_RECORDS:
             continue
         findings.append(_finding(
@@ -669,6 +704,197 @@ def lint_enrichment_failures(stage5e: Dict) -> List[Dict]:
         [str(e.get("text", ""))[:100] for e in failed[:3]])]
 
 
+# ------------------------------------------------------------------- lint 10
+
+def lint_stage6_warnings(report: Dict) -> List[Dict]:
+    """Stage 6's post-generation self-check (_validate_output) findings,
+    re-emitted from the render-warnings sidecar so they reach the doctor
+    report and the Teams card instead of dying in the pod log (#228)."""
+    findings = []
+    for w in report.get("warnings", []):
+        findings.append(_finding(
+            "stage6_render_warnings", "WARN",
+            f"stage 6 self-check: {w.get('message', '')}",
+            [str(e)[:100] for e in (w.get("evidence") or [])[:3]]))
+    return findings
+
+
+# ------------------------------------------------------------------- lint 11
+
+# A dropped entry this well contained (token-wise) in the kept entry is a
+# true duplicate; anything below carries content the kept entry lacks. On
+# 2Q1_ZQ the one true duplicate scored 1.00 and the seven real losses
+# 0.60-0.89 (#227).
+DEDUP_SAFE_CONTAINMENT = 0.9
+_DEDUP_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def lint_dedup_drops(report: Dict) -> List[Dict]:
+    """Stage-6 dedup decisions whose dropped text is NOT near-fully contained
+    in the kept entry: at loose similarity thresholds these are distinct
+    records lost, not duplicates (#227)."""
+    suspect = []
+    for d in report.get("dedup_decisions", []):
+        dropped = set(_DEDUP_TOKEN_RE.findall(_norm(d.get("dropped_text", ""))))
+        kept = set(_DEDUP_TOKEN_RE.findall(_norm(d.get("kept_text", ""))))
+        if not dropped:
+            continue
+        coverage = len(dropped & kept) / len(dropped)
+        if coverage >= DEDUP_SAFE_CONTAINMENT:
+            continue
+        suspect.append(
+            f"{d.get('code', '?')} ({d.get('metric', '?')}, {coverage:.0%} "
+            f"covered by kept): dropped '{d.get('dropped_text', '')[:80]}' "
+            f"vs kept '{d.get('kept_text', '')[:80]}'")
+    if not suspect:
+        return []
+    return [_finding(
+        "dedup_drops", "WARN",
+        f"{len(suspect)} dedup drop(s) poorly covered by the kept entry — "
+        f"possible distinct records lost (#227)",
+        suspect[:6])]
+
+
+# ------------------------------------------------------------------- lint 12
+
+# One legitimate pipe can appear in a title; a cluster of single-pipe bullets
+# under one section is the fused-cell fallback shape (19 under K4 on 2Q1_ZQ).
+PIPE_LEAK_MIN_SEPS = 2
+PIPE_CLUSTER_MIN = 3
+_NUMBERED_LINE_RE = re.compile(r"^\s*\d+\.\s")
+# "...; 2025 November 20; Orlando, FL." — the venue-date wedge of one
+# citation; two or more in a single numbered item means fused citations.
+_VENUE_DATE_RE = re.compile(r";\s*(?:19|20)\d{2}\b[^;.\n]*;")
+
+
+def lint_pipe_leaks(blocks: List[Tuple[str, str]]) -> List[Dict]:
+    """Verbatim-fallback formatting reaching the output document: paragraphs
+    carrying multiple raw ' | ' field separators, clusters of single-pipe
+    bullets under one section, and numbered citations fusing several
+    venue-date patterns (#208 rendered costs). Paragraph blocks only:
+    _table_lines synthesizes ' | ' row joins by design. The appendix is
+    excluded — it is verbatim-by-contract."""
+    multi: List[str] = []
+    fused: List[str] = []
+    clusters: Dict[str, List[str]] = {}
+    section = None
+    in_appendix = False
+    for kind, text in blocks:
+        if kind != "p":
+            continue
+        line = str(text).strip()
+        if not line:
+            continue
+        if line == _APPENDIX_HEADER:
+            in_appendix = True
+            continue
+        header = _output_section_header(line)
+        if header is not None:
+            section = header
+            continue
+        if in_appendix or is_template_instruction(line) or is_source_boilerplate(line):
+            continue
+        seps = line.count(" | ")
+        if seps >= PIPE_LEAK_MIN_SEPS:
+            multi.append(f"[{section or '?'}] {line[:100]}")
+        elif seps == 1 and line.startswith("•"):
+            clusters.setdefault(section or "?", []).append(line[:100])
+        if (seps < PIPE_LEAK_MIN_SEPS and _NUMBERED_LINE_RE.match(line)
+                and len(_VENUE_DATE_RE.findall(line)) >= 2):
+            fused.append(f"[{section or '?'}] {line[:100]}")
+    findings = []
+    if multi:
+        findings.append(_finding(
+            "pipe_leaks", "WARN",
+            f"{len(multi)} rendered line(s) with >={PIPE_LEAK_MIN_SEPS} "
+            f"' | ' field separators — verbatim-fallback formatting reached "
+            f"the output",
+            multi[:5]))
+    for sec, lines in clusters.items():
+        if len(lines) >= PIPE_CLUSTER_MIN:
+            findings.append(_finding(
+                "pipe_leaks", "WARN",
+                f"{len(lines)} single-pipe bullet(s) under '{sec}' — "
+                f"fused-cell fallback shape",
+                lines[:5]))
+    if fused:
+        findings.append(_finding(
+            "pipe_leaks", "WARN",
+            f"{len(fused)} numbered citation(s) fusing multiple venue-date "
+            f"patterns",
+            fused[:5]))
+    return findings
+
+
+# ------------------------------------------------------------------- lint 13
+
+HONORS_NAME_BLOB_CHARS = 150
+_SENTENCE_BOUNDARY_RE = re.compile(r"\.\s+[A-Z]")
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_US_STATE_ABBREVS = {
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "ID",
+    "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS",
+    "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH", "OK",
+    "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV",
+    "WI", "WY", "DC"}
+
+
+def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
+    """Honors-like tables whose rows are mis-shaped (#229): the stage-6
+    multi-award fallback puts citation blobs in the name cell, leaks state
+    abbreviations into the organization column, leaves the date column empty
+    while the year sits in the name, and duplicates the organization inside
+    the name."""
+    findings = []
+    for tbl in tables:
+        if len(tbl) < 2 or not tbl[0]:
+            continue
+        header = [_norm(cell) for cell in tbl[0]]
+        header_all = " ".join(header)
+        if "name of award" not in header_all and "date awarded" not in header_all:
+            continue
+
+        def col(*keys):
+            for idx, h in enumerate(header):
+                if any(k in h for k in keys):
+                    return idx
+            return None
+
+        name_i = col("award", "honor")
+        org_i = col("organization", "granting")
+        date_i = col("date", "yyyy", "year")
+        if name_i is None:
+            continue
+        rows = [r for r in tbl[1:] if any(r)]
+        defective_rows = set()
+        defects: List[str] = []
+
+        def flag(rn, msg):
+            defective_rows.add(rn)
+            defects.append(f"row {rn}: {msg}")
+
+        for rn, row in enumerate(rows, start=1):
+            name = row[name_i] if name_i < len(row) else ""
+            org = row[org_i] if org_i is not None and org_i < len(row) else ""
+            date = row[date_i] if date_i is not None and date_i < len(row) else ""
+            if (len(name) > HONORS_NAME_BLOB_CHARS
+                    or len(_SENTENCE_BOUNDARY_RE.findall(name)) >= 2):
+                flag(rn, f"name-cell blob ({len(name)} chars): {name[:80]}")
+            if date_i is not None and not date and _YEAR_RE.search(name):
+                flag(rn, f"empty date but year in name: {name[:80]}")
+            if org in _US_STATE_ABBREVS:
+                flag(rn, f"organization is a bare state abbrev: '{org}'")
+            elif org and len(org) > 8 and _norm(org) in _norm(name):
+                flag(rn, f"organization duplicated in name: {org[:60]}")
+        if defects:
+            findings.append(_finding(
+                "table_shape", "WARN",
+                f"honors table: {len(defective_rows)}/{len(rows)} row(s) "
+                f"malformed ({len(defects)} defect(s)) — #229",
+                defects[:6]))
+    return findings
+
+
 # --------------------------------------------------------- artifact resolution
 
 _ARTIFACTS = {
@@ -678,6 +904,7 @@ _ARTIFACTS = {
     "stage_4": ("stage_4_field_extraction", "_fields.json"),
     "stage_5_enrichment": ("stage_5_enrichment", "_enriched.json"),
     "stage_6_docx": ("stage_6_wcm_documents", "_wcm.docx"),
+    "stage_6_report": ("stage_6_wcm_documents", "_render_warnings.json"),
 }
 
 
@@ -731,9 +958,11 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     stage_3b = _load_json(paths["stage_3b"])
     stage_4 = _load_json(paths["stage_4"])
     stage_5e = _load_json(paths["stage_5_enrichment"])
+    stage_6_report = _load_json(paths["stage_6_report"])
     source_lines = _try(lambda: iter_source_lines(str(source_path))) if source_path else None
     candidates = _try(lambda: iter_header_candidates(str(source_path))) if source_path else None
     blocks = _try(lambda: read_docx_blocks(str(paths["stage_6_docx"]))) if paths["stage_6_docx"] else None
+    table_rows = _try(lambda: read_docx_table_rows(str(paths["stage_6_docx"]))) if paths["stage_6_docx"] else None
 
     findings: List[Dict] = []
 
@@ -763,6 +992,14 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
         findings.extend(lint_unrendered_records(stage_4, blocks))
     if ready("enrichment_failures", stage_5_enrichment=stage_5e):
         findings.extend(lint_enrichment_failures(stage_5e))
+    if ready("stage6_render_warnings", stage_6_report=stage_6_report):
+        findings.extend(lint_stage6_warnings(stage_6_report))
+    if ready("dedup_drops", stage_6_report=stage_6_report):
+        findings.extend(lint_dedup_drops(stage_6_report))
+    if ready("pipe_leaks", stage_6_docx=blocks):
+        findings.extend(lint_pipe_leaks(blocks))
+    if ready("table_shape", stage_6_docx=table_rows):
+        findings.extend(lint_table_shape(table_rows))
 
     counts = {severity: 0 for severity in _SEVERITIES}
     for f in findings:
