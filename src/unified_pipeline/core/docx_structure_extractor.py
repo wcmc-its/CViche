@@ -47,11 +47,23 @@ def get_paragraph_text(para: Paragraph) -> str:
     """
     from docx.oxml.ns import qn
 
-    texts = []
-    for t in para._p.iter(qn('w:t')):
-        if t.text:
-            texts.append(t.text)
-    return ''.join(texts)
+    # Walk w:t (text), w:br/w:cr (line breaks) and w:tab in document order so the
+    # returned text keeps the paragraph's internal line structure. Bare w:t iteration
+    # mashed multi-line paragraphs into run-on text ("CURRICULUM VITAEZachary..."),
+    # which hid sub-headers from the chunk LLM once stage 1a converged onto this reader.
+    # w:tab -> space (not "\t") on purpose: a literal tab would trip the mega-entry
+    # record heuristic downstream. iter() also descends into smartTag/hyperlink/sdt.
+    WT, WBR, WCR, WTAB = qn('w:t'), qn('w:br'), qn('w:cr'), qn('w:tab')
+    parts = []
+    for node in para._p.iter(WT, WBR, WCR, WTAB):
+        if node.tag == WT:
+            if node.text:
+                parts.append(node.text)
+        elif node.tag == WTAB:
+            parts.append(' ')
+        else:  # w:br / w:cr -> line break
+            parts.append('\n')
+    return ''.join(parts)
 
 
 def extract_paragraph_metadata(para: Paragraph, idx: int) -> Dict[str, Any]:
@@ -604,6 +616,34 @@ def extract_unified_elements(docx_path: str) -> Dict[str, Any]:
         elif isinstance(element, CT_Tbl):
             # Table
             table = Table(element, doc)
+
+            # Single-column tables are LAYOUT boxes, not tabular data: python-docx's
+            # cell.text fuses every paragraph in the cell with '\n', collapsing a whole
+            # section into one mega-entry (#208 -- e.g. 89HQVQ's 3716-char TEACHING cell
+            # buried 35 paragraphs). Explode the cell paragraphs into individual paragraph
+            # elements so header detection and stage-2 splitting see them. Multi-column rows
+            # are real data (Year | Institution | Degree) and keep the joined path below.
+            # ponytail: direct cell paragraphs only; a nested table inside a cell (rare) still blobs via cell.text.
+            if table.rows and all(len(row.cells) == 1 for row in table.rows):
+                seen_cells = set()
+                for row in table.rows:
+                    cell = row.cells[0]
+                    if cell._tc in seen_cells:   # vertical merge repeats one cell across rows
+                        continue
+                    seen_cells.add(cell._tc)
+                    for cell_para in cell.paragraphs:
+                        if not get_paragraph_text(cell_para).strip():
+                            continue
+                        para_data = extract_paragraph_metadata(cell_para, para_idx)
+                        para_data["unified_idx"] = unified_idx
+                        para_data["para_idx"] = para_idx
+                        elements.append(para_data)
+                        num_paragraphs += 1
+                        unified_idx += 1
+                        para_idx += 1
+                num_tables += 1
+                continue
+
             table_data = extract_table_metadata(table, f"table_{num_tables}")
             table_data["table_index"] = num_tables
 

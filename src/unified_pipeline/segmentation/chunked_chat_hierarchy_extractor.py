@@ -23,7 +23,6 @@ from typing import List, Dict, Tuple
 from dataclasses import dataclass, field
 from unified_pipeline.llm_client import call_llm
 import re
-from docx import Document
 import tiktoken
 
 # Add parent directory to path to import from signature_based_segmentation
@@ -88,42 +87,31 @@ def count_tokens(text: str) -> int:
 
 def extract_text_from_docx(docx_path: str) -> List[str]:
     """
-    Extract all text from a DOCX file as a list of paragraphs and table content.
+    Extract document text as a list of lines, in document order.
 
-    Preserves document order by iterating through the document element tree.
-
-    Args:
-        docx_path: Path to the DOCX file
-
-    Returns:
-        List of text elements (paragraphs and table rows) in document order
+    Converged onto the shared table-aware reader
+    (core.docx_structure_extractor.extract_unified_elements) so stage 1a reads
+    the docx through the SAME reader as stage 2. The old bespoke reader here
+    tab-joined table rows via cell.text, which fused 1-cell layout tables into
+    one mega-blob and buried their sub-headers (#208); the shared reader explodes
+    those layout cells into individual lines.
     """
-    doc = Document(docx_path)
-    text_elements = []
+    try:
+        from ..core.docx_structure_extractor import extract_unified_elements
+    except ImportError:
+        from core.docx_structure_extractor import extract_unified_elements
 
-    # Iterate through document body elements to preserve order
-    for element in doc.element.body:
-        # Check if it's a paragraph
-        if element.tag.endswith('}p'):
-            # Find the corresponding paragraph object
-            for para in doc.paragraphs:
-                if para._element == element:
-                    text_elements.append(para.text)
-                    break
-        # Check if it's a table
-        elif element.tag.endswith('}tbl'):
-            # Find the corresponding table object
-            for table in doc.tables:
-                if table._element == element:
-                    # Extract all rows from this table
-                    for row in table.rows:
-                        # Join all cells in the row with tab separator
-                        row_text = "\t".join(cell.text.strip() for cell in row.cells)
-                        if row_text.strip():  # Only add non-empty rows
-                            text_elements.append(row_text)
-                    break
-
-    return text_elements
+    doc = extract_unified_elements(docx_path)
+    # Keep blank paragraphs as "" lines: the old reader emitted one line per body
+    # paragraph including empties, and those blank-line boundaries help the chunk
+    # LLM spot sub-headers. Dropping them cost real headers on blank-separated CVs.
+    lines = []
+    for el in doc["elements"]:
+        if el.get("type") == "empty":
+            lines.append("")
+        elif el.get("text", "").strip():
+            lines.append(el["text"])
+    return lines
 
 
 def split_into_chunks(paragraphs: List[str], max_tokens: int = 10000) -> List[str]:
