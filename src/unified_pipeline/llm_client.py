@@ -305,6 +305,53 @@ def _wants_json(response_format):
     )
 
 
+def _schema_tool_config(response_format):
+    """Build a Bedrock Converse `toolConfig` that FORCES the model to emit
+    output matching an OpenAI-style json_schema response_format.
+
+    OpenAI enforces json_schema server-side; Bedrock's plain Converse call does
+    not, so the prompt-hint path returns well-formed-but-off-schema JSON that
+    downstream field extraction mis-reads (#46). A forced single-tool call whose
+    inputSchema IS the caller's schema constrains the model the same way, and we
+    read the structured tool input instead of parsing free text.
+
+    Returns None (caller falls back to the prompt-hint path) when the caller
+    didn't request json_schema, or the schema isn't a top-level `object` -- the
+    only shape Converse inputSchema accepts. No keyword normalization: this
+    corpus's schemas use only object/enum/format/additionalProperties, all of
+    which Converse accepts as-is. A future schema with an unsupported keyword
+    ($ref, oneOf) makes Bedrock raise ValidationException loudly rather than
+    silently degrade -- see the hard-fail in call_llm's bedrock branch.
+    # ponytail: no schema normalizer; add one only if a real schema needs it.
+    """
+    if not (response_format and response_format.get("type") == "json_schema"):
+        return None
+    js = response_format.get("json_schema") or {}
+    schema = js.get("schema")
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return None
+    name = js.get("name") or "structured_output"
+    return {
+        "tools": [{"toolSpec": {
+            "name": name,
+            "description": js.get("description")
+            or "Return the extracted record using exactly this schema.",
+            "inputSchema": {"json": schema},
+        }}],
+        "toolChoice": {"tool": {"name": name}},
+    }
+
+
+def _extract_tool_use_input(response):
+    """Return the `input` dict of the first toolUse block in a Converse
+    response, or None if the model emitted no tool call (a text-only reply)."""
+    content = response.get("output", {}).get("message", {}).get("content", [])
+    for block in content:
+        if "toolUse" in block:
+            return block["toolUse"].get("input")
+    return None
+
+
 def _strip_markdown_fences(text):
     """Remove a surrounding ```json … ``` or ``` … ``` block.
 
@@ -323,7 +370,7 @@ def _strip_markdown_fences(text):
         return text
     return stripped[first_newline + 1 : -3].rstrip()
 
-def _translate_messages(messages, response_format=None):
+def _translate_messages(messages, response_format=None, use_schema_tool=False):
     """Translate OpenAI-style messages to Bedrock Converse format.
 
     Bedrock Converse API separates system messages from conversation messages.
@@ -333,13 +380,17 @@ def _translate_messages(messages, response_format=None):
     Args:
         messages: OpenAI-style message list [{"role": "...", "content": "..."}]
         response_format: Optional response format dict
+        use_schema_tool: True when the schema is being enforced via a forced
+            Converse toolConfig (json_schema path). In that case the
+            "respond with valid JSON only" prompt hint is suppressed -- it
+            contradicts a forced tool call and can confuse the model.
 
     Returns:
         Tuple of (system_prompts, converse_messages)
     """
     system_prompts = []
     converse_messages = []
-    json_hint = _wants_json(response_format)
+    json_hint = _wants_json(response_format) and not use_schema_tool
 
     for msg in messages:
         if msg["role"] == "system":
@@ -408,7 +459,10 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     from botocore.exceptions import ClientError
 
     client = _get_bedrock_client()
-    system_prompts, converse_messages = _translate_messages(messages, response_format)
+    tool_config = _schema_tool_config(response_format)
+    system_prompts, converse_messages = _translate_messages(
+        messages, response_format, use_schema_tool=tool_config is not None
+    )
 
     if enable_prompt_caching and system_prompts:
         # Cache the system block: the large, stable schema / instruction prefix
@@ -432,6 +486,12 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     call_kwargs["inferenceConfig"]["maxTokens"] = (
         max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS
     )
+    # json_schema callers: force a single-tool call whose inputSchema is the
+    # caller's schema, so Bedrock constrains the output the way OpenAI does
+    # server-side (#46). json_object / non-schema callers keep the prompt-hint
+    # path (no toolConfig).
+    if tool_config is not None:
+        call_kwargs["toolConfig"] = tool_config
 
     try:
         return client.converse(**call_kwargs)
@@ -468,6 +528,46 @@ def _extract_cache_tokens(usage: dict) -> tuple:
                    or usage.get("CacheWriteInputTokens")
                    or 0)
     return int(cache_read), int(cache_write)
+
+
+def _finalize_bedrock_result(content, usage, cache_read_tokens, cache_write_tokens,
+                             finish_reason, model, latency_ms):
+    """Build the normalized result dict shared by both Bedrock response paths
+    (forced-tool json_schema and text / json_object).
+
+    With caching on, Bedrock's `inputTokens` reports ONLY the uncached input
+    tokens; the cached portion shows up in cacheRead/cacheWrite. calculate_cost
+    prices each bucket separately, and we synthesize totals from the three so
+    downstream cost/token tracking still sees the full input regardless of
+    caching.
+    """
+    uncached_input_tokens = usage["inputTokens"]
+    output_tokens = usage["outputTokens"]
+    total_input_tokens = uncached_input_tokens + cache_read_tokens + cache_write_tokens
+    total_tokens = total_input_tokens + output_tokens
+
+    cost = calculate_cost(
+        uncached_input_tokens,
+        output_tokens,
+        model=model,
+        provider="bedrock",
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+    )
+
+    return {
+        "content": content,
+        "prompt_tokens": total_input_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "cost": cost,
+        "model": model,
+        "provider": "bedrock",
+        "finish_reason": finish_reason,
+        "latency_ms": latency_ms,
+    }
 
 
 def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict:
@@ -585,12 +685,42 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
 
         latency_ms = int((time.time() - start_time) * 1000)
 
-        # Extract and normalize Bedrock response
-        content = response["output"]["message"]["content"][0]["text"]
         usage = response["usage"]
+        cache_read_tokens, cache_write_tokens = _extract_cache_tokens(usage)
+
+        if _schema_tool_config(response_format) is not None:
+            # #46 json_schema path: the forced tool's structured `input` IS the
+            # answer. Re-serialize it so every caller's json.loads(content)
+            # keeps working, and skip the text-validation/fence-strip below
+            # (structured tool output is guaranteed valid JSON).
+            stop_reason = response.get("stopReason")
+            tool_input = _extract_tool_use_input(response)
+            if stop_reason != "tool_use" or tool_input is None:
+                # Forced tool call that didn't fire => schema not enforced.
+                # Fail loud rather than silently parsing free text.
+                raise RuntimeError(
+                    f"Bedrock forced json_schema tool call did not fire "
+                    f"(stopReason={stop_reason!r}, tool_input="
+                    f"{'present' if tool_input is not None else 'missing'})"
+                )
+            content = json_module.dumps(tool_input)
+            finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
+            result = _finalize_bedrock_result(
+                content, usage, cache_read_tokens, cache_write_tokens,
+                finish_reason, model, latency_ms,
+            )
+            log_prompt_response(
+                log_id=log_id,
+                response=result,
+                purpose=stage,
+                elapsed_time=latency_ms / 1000.0,
+            )
+            return result
+
+        # Extract and normalize Bedrock response (text / json_object path)
+        content = response["output"]["message"]["content"][0]["text"]
         stop_reason = response.get("stopReason", "end_turn")
         finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
-        cache_read_tokens, cache_write_tokens = _extract_cache_tokens(usage)
 
         # D-05: Validate JSON when response_format was requested
         if not _validate_json_response(content, response_format):
@@ -633,38 +763,10 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
         if _wants_json(response_format):
             content = _strip_markdown_fences(content)
 
-        # With caching on, Bedrock's `inputTokens` reports ONLY the uncached
-        # input tokens; the cached portion shows up in cacheRead/cacheWrite.
-        # calculate_cost prices each bucket separately, and we synthesize
-        # totals from the three so downstream cost/token tracking still sees
-        # the full input regardless of caching.
-        uncached_input_tokens = usage["inputTokens"]
-        output_tokens = usage["outputTokens"]
-        total_input_tokens = uncached_input_tokens + cache_read_tokens + cache_write_tokens
-        total_tokens = total_input_tokens + output_tokens
-
-        cost = calculate_cost(
-            uncached_input_tokens,
-            output_tokens,
-            model=model,
-            provider="bedrock",
-            cache_read_tokens=cache_read_tokens,
-            cache_write_tokens=cache_write_tokens,
+        result = _finalize_bedrock_result(
+            content, usage, cache_read_tokens, cache_write_tokens,
+            finish_reason, model, latency_ms,
         )
-
-        result = {
-            "content": content,
-            "prompt_tokens": total_input_tokens,
-            "completion_tokens": output_tokens,
-            "total_tokens": total_tokens,
-            "cache_read_tokens": cache_read_tokens,
-            "cache_write_tokens": cache_write_tokens,
-            "cost": cost,
-            "model": model,
-            "provider": "bedrock",
-            "finish_reason": finish_reason,
-            "latency_ms": latency_ms,
-        }
         log_prompt_response(
             log_id=log_id,
             response=result,
