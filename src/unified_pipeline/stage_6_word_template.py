@@ -653,6 +653,45 @@ def sort_entries_reverse_chronological(entries: List[Dict]) -> List[Dict]:
     return sorted(entries, key=extract_sort_date, reverse=True)
 
 
+def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
+    """Un-fuse publication entries whose stage-5d ``formatted_citation`` carries
+    multiple newline-separated citations.
+
+    The #208 fusion class reaches the bibliography too: when several source
+    citations collapse into one entry, stage 5d formats the whole block into a
+    single ``formatted_citation`` (newline-separated), and _fill_bibliography
+    then renders ONE numbered item followed by unnumbered ``<w:br/>``
+    continuation lines (the "no numbering on some pubs" symptom, HNFLBA S8).
+
+    Splitting each non-blank line into its own entry lets the caller number them
+    individually. A non-fused citation is a single line (verified: 100/101 of a
+    real CV's formatted_citations have zero internal newlines), so it passes
+    through untouched. Only stage-5d LLM citations with >=2 lines are split;
+    other bibliography shapes (parts-built citations) never carry newlines.
+    Continuation lines (i>0) are distinct records, so per-entry provenance that
+    belongs to the block as a whole (classification comment, enrichment
+    track-change, original text) is kept on the first line only, not replayed
+    on each.
+    """
+    out: List[Dict] = []
+    for pub in pubs:
+        fields = pub.get('extracted_fields') or {}
+        fc = fields.get('formatted_citation') or ''
+        lines = [ln.strip() for ln in fc.splitlines() if ln.strip()]
+        if fields.get('formatting_source') == 'stage_5d_llm' and len(lines) >= 2:
+            for i, line in enumerate(lines):
+                clone = dict(pub)
+                clone['extracted_fields'] = {**fields, 'formatted_citation': line}
+                if i > 0:
+                    clone['enrichment_status'] = ''
+                    clone['text'] = ''
+                    clone.pop('classification_reasoning', None)
+                out.append(clone)
+        else:
+            out.append(pub)
+    return out
+
+
 # Paths - Use the official WCM template
 TEMPLATE_PATH = Path(__file__).parent.parent.parent / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_6_wcm_documents"
@@ -8645,6 +8684,10 @@ Now analyze the text above:"""
 
             # Sort reverse chronologically (most recent first)
             pubs_sorted = sort_entries_reverse_chronological(pubs)
+            # Un-fuse any entry that collapsed several citations into one
+            # (#208), so each is numbered instead of rendering as unnumbered
+            # <w:br/> continuation lines under one number.
+            pubs_sorted = split_fused_citation_entries(pubs_sorted)
 
             # Insert after the section header - numbering restarts at 1 for each section
             insert_idx = section_idx + 1
