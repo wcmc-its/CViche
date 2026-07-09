@@ -14,7 +14,7 @@ from app.auth import create_session_cookie, decode_session_cookie, get_cookie_se
 from app.session_idle import get_idle_store
 from app.config_loader import get_config_value
 from app.saml_client import get_saml_client, extract_user_attrs
-from app.saml_replay import get_replay_cache, assertion_ids, replay_ttl
+from app.saml_replay import get_replay_cache, assertion_ids, replay_ttl, replay_fail_closed
 from app.ed_group_lookup import check_ed_membership, set_cached_membership, EdUnavailableError
 from app.services.user_service import provision_user
 from app.redirect_safety import safe_relative_path
@@ -89,15 +89,22 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
         # response would otherwise replay until its NotOnOrAfter lapses. Each
         # assertion ID is accepted exactly once (see app/saml_replay.py).
         ids = assertion_ids(authn_response)
-        if ids and not get_replay_cache().check_and_record(ids, replay_ttl(authn_response)):
-            # Redirect like every other ACS failure: the benign replay case is
-            # a human re-POSTing the ACS form (back button), not an attacker.
-            logger.warning("[SECURITY] SAML assertion replay rejected (ID already presented)")
+        replay_cache = get_replay_cache()
+        if ids:
+            if not replay_cache.check_and_record(ids, replay_ttl(authn_response)):
+                # Redirect like every other ACS failure: the benign replay case
+                # is a human re-POSTing the ACS form (back button), not an attacker.
+                logger.warning("[SECURITY] SAML assertion replay rejected (ID already presented)")
+                return RedirectResponse("/login?error=auth_failed", status_code=302)
+        elif replay_fail_closed():
+            # Real pysaml2 responses always carry assertion IDs; a missing ID
+            # means replay can't be verified, so reject when configured to fail
+            # closed (prod).
+            logger.warning("[SECURITY] SAML assertion carried no ID; failing closed -- rejecting")
             return RedirectResponse("/login?error=auth_failed", status_code=302)
-        if not ids:
-            # Real pysaml2 responses always carry assertion IDs; only stubbed
-            # parsers land here. Fail open but leave a trace.
-            logger.warning("SAML ACS: no assertion ID extractable; replay gate skipped")
+        else:
+            # No ID and failing open: only stubbed parsers land here in practice.
+            logger.warning("SAML ACS: no assertion ID extractable; replay gate skipped (fail open)")
 
         identity = authn_response.get_identity()
         attrs = extract_user_attrs(identity)

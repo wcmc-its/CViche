@@ -78,6 +78,29 @@ def test_fails_open_when_redis_errors(caplog):
     assert security_logs, "expected a loud [SECURITY] log on fail-open"
 
 
+def test_fails_closed_when_configured(monkeypatch, caplog):
+    monkeypatch.setattr(saml_replay, "replay_fail_closed", lambda: True)
+    cache = SamlReplayCache("redis://fake")
+    client = MagicMock()
+    client.set.side_effect = ConnectionError("valkey down")
+    cache._client = client
+    with caplog.at_level(logging.ERROR, logger="app.saml_replay"):
+        assert cache.check_and_record(["id-1"], 60) is False  # reject, not open
+    assert any("FAILING CLOSED" in r.getMessage() for r in caplog.records)
+
+
+def test_redis_key_is_hashed_not_raw():
+    """The IdP-supplied assertion ID must never be used raw as a Redis key."""
+    cache = _fake_cache()
+    weird = "id with spaces / and : colons"
+    cache.check_and_record([weird], 60)
+    keys = [k.decode() if isinstance(k, bytes) else k
+            for k in cache._client.keys("*")]
+    assert keys, "expected a key to be written"
+    assert all(weird not in k for k in keys), "raw assertion ID leaked into key"
+    assert all(len(k.rsplit(":", 1)[-1]) == 64 for k in keys), "expected sha256 hex"
+
+
 def test_client_is_built_with_socket_timeouts(monkeypatch):
     """A hung Valkey must raise (then fail open) instead of blocking the login."""
     import redis

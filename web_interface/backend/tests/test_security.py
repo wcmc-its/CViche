@@ -567,11 +567,13 @@ class TestDocsGating:
         monkeypatch.setenv("CVICHE_ENABLE_DOCS", "true")
         assert _docs_enabled() is True
 
-    def test_debug_flag_enables_docs(self, monkeypatch):
+    def test_debug_flag_does_not_enable_docs(self, monkeypatch):
+        # CVICHE_DEBUG must NOT expose the API docs: an accidental debug flag in
+        # prod should not enumerate the API surface. Docs require their own flag.
         from app.main import _docs_enabled
         monkeypatch.delenv("CVICHE_ENABLE_DOCS", raising=False)
         monkeypatch.setenv("CVICHE_DEBUG", "true")
-        assert _docs_enabled() is True
+        assert _docs_enabled() is False
 
     def test_docs_disabled_without_flags(self, monkeypatch):
         from app.main import _docs_enabled

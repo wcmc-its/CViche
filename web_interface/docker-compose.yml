@@ -53,7 +53,10 @@ services:
       # Database
       CVICHE_DATABASE_URL: "mysql+pymysql://root:cviche_dev@db:3306/cviche"
       # Real-time broker: enables cross-worker events + cancellation. Remove to
-      # exercise the in-process (single-worker) fallback path.
+      # exercise the in-process (single-worker) fallback path. LOCAL DEV ONLY:
+      # unauthenticated plaintext to the compose-local redis. Production uses an
+      # authenticated TLS endpoint (rediss://... with a token) injected via the
+      # deployment's buildspec-generated ConfigMap/secret, not this value.
       CVICHE_REDIS_URL: "redis://redis:6379/0"
       # Session cookie signing key. No shipped default: known placeholder
       # values hard-fail at boot (app/auth.py), so set it in the host env or

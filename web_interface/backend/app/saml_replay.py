@@ -15,13 +15,16 @@ idle-session store, with the same fail-open posture:
     ``SET NX EX``; the key TTL covers the assertion's own validity window
     (plus clock-skew slack), after which the ID can no longer be accepted
     by pysaml2 anyway.
-  - URL configured, Valkey unreachable -> FAIL OPEN: log loudly and let the
-    login proceed. A Valkey outage must not lock everyone out; the replay
-    window this reopens is bounded by the assertion's validity window.
+  - URL configured, Valkey unreachable -> fail open BY DEFAULT: log loudly and
+    let the login proceed. A Valkey outage must not lock everyone out; the
+    replay window this reopens is bounded by the assertion's validity window.
+    Set ``CVICHE_SAML_REPLAY_FAIL_CLOSED=1`` (prod) to reject logins instead
+    when replay cannot be verified -- safety over availability.
   - No URL configured -> in-process dict fallback. Per-pod best-effort only:
     replicas do not share it and it dies with the process. Deployments get
     cross-pod protection once CVICHE_REDIS_URL is set.
 """
+import hashlib
 import logging
 import threading
 import time
@@ -31,8 +34,26 @@ from app.config_loader import get_config
 logger = logging.getLogger(__name__)
 
 # Namespaced so it can never collide with the broker's run-event keys
-# (cviche:run:*) or the idle-session keys (cviche:session:*).
+# (cviche:run:*) or the idle-session keys (cviche:session:*). The assertion ID
+# is IdP-supplied free text, so it is sha256-hashed (never used raw) to give a
+# fixed, safe key shape regardless of its contents -- see _redis_key.
 _KEY = "cviche:saml:assertion:{aid}"
+
+
+def _redis_key(aid: str) -> str:
+    return _KEY.format(aid=hashlib.sha256(aid.encode()).hexdigest())
+
+
+def replay_fail_closed() -> bool:
+    """Whether to REJECT a login when replay protection cannot be verified --
+    Valkey unreachable, or an assertion carrying no ID.
+
+    Default False (fail open): a Valkey outage must not lock every SAML user
+    out. Set ``CVICHE_SAML_REPLAY_FAIL_CLOSED=1`` (env, or auth_config.yaml
+    under `auth`) in production to prefer safety over availability.
+    """
+    raw, _ = get_config("auth", "CVICHE_SAML_REPLAY_FAIL_CLOSED", default="")
+    return str(raw).strip().lower() in ("1", "true", "yes")
 
 # Fallback TTL when the response carries no NotOnOrAfter, and slack added on
 # top of the assertion window to absorb SP/IdP clock skew (matches pysaml2's
@@ -122,11 +143,19 @@ class SamlReplayCache:
                     # SET NX EX: atomic first-presentation check + record, so
                     # concurrent replays across pods cannot both win.
                     if not self._redis().set(
-                        _KEY.format(aid=aid), "1", nx=True, ex=ttl_seconds
+                        _redis_key(aid), "1", nx=True, ex=ttl_seconds
                     ):
                         fresh = False
                 return fresh
             except Exception:
+                if replay_fail_closed():
+                    logger.error(
+                        "[SECURITY] SAML replay cache unreachable; FAILING CLOSED "
+                        "(CVICHE_SAML_REPLAY_FAIL_CLOSED) -- rejecting login until "
+                        "Valkey recovers",
+                        exc_info=True,
+                    )
+                    return False
                 logger.error(
                     "[SECURITY] SAML replay cache unreachable; failing open -- "
                     "assertion replay protection suspended until Valkey recovers",

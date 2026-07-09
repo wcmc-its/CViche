@@ -71,7 +71,9 @@ def _origin_key(origin: str) -> tuple[str, str, int] | None:
         return None
     if port is None:
         port = {"http": 80, "https": 443}.get(parts.scheme, 0)
-    return (parts.scheme, host, port)
+    # urlsplit/.hostname already lowercase these, but normalize explicitly so a
+    # non-normalized configured origin (e.g. "HTTPS://Host") still compares equal.
+    return (parts.scheme.lower(), host.lower(), port)
 
 
 _allowed_origin_keys = frozenset(
@@ -83,14 +85,13 @@ def _docs_enabled() -> bool:
     """Serve /docs, /redoc and /openapi.json only when explicitly enabled.
 
     Default off: the interactive docs enumerate every route and schema to
-    unauthenticated clients. Enable with CVICHE_ENABLE_DOCS=true (env var, or
-    auth_config.yaml under `auth` -- same wiring as CVICHE_ALLOWED_ORIGINS) or
-    with the existing CVICHE_DEBUG=true flag.
+    unauthenticated clients. Enable ONLY with CVICHE_ENABLE_DOCS=true (env var,
+    or auth_config.yaml under `auth` -- same wiring as CVICHE_ALLOWED_ORIGINS).
+    Deliberately NOT tied to CVICHE_DEBUG: an accidental CVICHE_DEBUG=true in
+    prod must not expose the API surface -- docs require their own explicit flag.
     """
     raw, _ = get_config("auth", "CVICHE_ENABLE_DOCS", default="")
-    if str(raw).strip().lower() in ("1", "true", "yes"):
-        return True
-    return os.environ.get("CVICHE_DEBUG", "").lower() == "true"
+    return str(raw).strip().lower() in ("1", "true", "yes")
 
 
 _DOCS_ENABLED = _docs_enabled()
