@@ -6,6 +6,19 @@ then adversarially verified every top finding against the raw output docx to
 strip heuristic false positives. The verified ranking below **is** the accuracy
 backlog.
 
+> **CORRECTION (2026-07-09, post-verification).** A second verification pass found
+> that the first pass — and the doctor's own docx readers — were **blind to
+> tracked-change `<w:ins>` content**. Stage 6 inserts LLM-enriched content
+> (research summaries, reformatted citations) as tracked *insertions*, which
+> python-docx's `.text` skips. So two "top" findings were **false positives**: the
+> "M1 research-summary drop" (was ranked #1 new bug) and the "bibliography
+> truncation" — both render fine as tracked insertions. Fixed the reader in
+> **#249 / PR #255** (`_docx_text` reads `<w:ins>`, excludes `<w:delText>`);
+> **#250 closed** as not-a-bug. The tables and backlog below are **corrected** to
+> the track-change-aware counts. Net: `classified_unrendered` genuine-loss CVs
+> dropped from 5 to **2**; the real backlog is the #248 fusion cluster, #229
+> honors tables, the #251 code-leak (PR #254), and two narrow residual losses.
+
 ## Method (reproducible)
 
 - Corpus: `s3://wcm-cviche-storage/cviche/runs/` — 121 run dirs, 93 with a
@@ -40,29 +53,40 @@ so the `fusion_cluster` findings stand.
 
 Distinct CVs (of 12) with ≥1 finding, before and after verification:
 
-| lint | raw | **verified real** | notes |
-|---|---:|---:|---|
-| classified_unrendered | 9 | **5** | 8/18 findings real; halved by FP |
-| table_shape (#229) | 7 | **5** | 4 REAL + 1 PARTIAL; 2 FP |
-| output_hygiene | 8 | **2** | only the 2 ERROR code-leaks are real |
-| pipe_leaks (#248) | 3 | **3** | |
-| under_extraction (#248) | 2 | **2** | } same 3 CVs — 16/19 findings real |
-| unrendered_records (#248) | 2 | **2** | |
-| enrichment_failures (#222) | 2 | **0** | citations render fine from CV fields |
-| dead_sections | 1 | **1** | leadership section misrouted |
-| bucket_status | 0 | 0 | ran clean on all 12 |
-| segmentation / missed_headers | – | – | no source docx (not run) |
-| stage6_render_warnings / dedup_drops | – | – | no #228 sidecar (not run) |
+Distinct CVs (of 12) with ≥1 finding: raw lint → first verification →
+**track-change-aware** (the trustworthy column):
+
+| lint | raw | verify-1 | **corrected** | notes |
+|---|---:|---:|---:|---|
+| classified_unrendered | 9 | 5 | **2** | M1 + reformatted-citation "losses" were `<w:ins>` FPs; real = Bennett mentee-counts, Miller invention |
+| table_shape (#229) | 7 | 5 | **5** | tables aren't track-changed; 4 REAL + 1 PARTIAL, 2 FP |
+| output_hygiene | 8 | 2 | **2** | only the 2 ERROR code-leaks (#251) |
+| pipe_leaks (#248) | 3 | 3 | **3** | raw pipes visible plain-text — real |
+| under_extraction (#248) | 2 | 2 | **2** | same 3 fusion CVs |
+| unrendered_records (#248) | 2 | 2 | **2** | major-goals / mentee / grant genuinely absent |
+| enrichment_failures (#222) | 2 | 0 | **0** | citations render fine from CV fields |
+| dead_sections | 1 | 1 | **1** | leadership misrouted (absent even w/ track-changes) |
+| bucket_status | 0 | 0 | 0 | ran clean on all 12 |
+| segmentation / missed_headers | – | – | – | no source docx (not run) |
+| stage6_render_warnings / dedup_drops | – | – | – | no #228 sidecar (not run) |
+
+The `<w:ins>` blind spot inflated only the "content-absent" lints
+(`classified_unrendered`, `unrendered_records`, `dead_sections`); it does **not**
+touch `table_shape` (reads table cells, not track-changed) or `pipe_leaks` (the
+raw pipes are visible plain text). Fixed in #249 / PR #255.
 
 ## The accuracy backlog (verified, ranked by broad × real × severity)
 
-**1. Research-summary narrative silently dropped (M1) — NEW, no ticket — 3/12 CVs.**
-The M1 research statement/narrative is replaced in the output by the bare WCM
-template instruction `Research Activities:`. Confirmed lost on Vasquez (2BXUXG),
-Kim (B2RRRA), Arbini (CQXGKG) — distinctive phrases (`pathological myocardial
-remodeling`, `culturally competent`, `Ilya Kister`) appear nowhere in the docx.
-Broadest **new** real bug; clean fix (route the M1 narrative to the research
-section instead of the template prompt). Almost certainly not touched by #243.
+**1. Pipe-delimited multi-record fusion (#248) — 3/12 CVs, highest per-CV severity.**
+Now the top real bug. The WCM-template CVs (Jung/Miller/Borys) with
+`Award Source: … | Project title:` grant tables. Two faculty-visible failure
+modes: (a) raw ` | ` cells + template scaffolding (`Award Source:`, `Duplicate
+table below as needed`) dumped verbatim into the output (visible plain text — not
+a track-change artifact); (b) genuine record loss — EH4XXA drops both training
+grants and 2/3 mentee records that exist in stage-4 JSON; 9TUVGW drops the "major
+goals" narrative of 4 grants that survive only as raw pipe rows (absent even with
+track-changes). Ticketed, **unblocked by #243**, deterministic fix on #243's
+explode machinery. Narrow but catastrophic where it hits.
 
 **2. Honors/awards table mis-shape (#229) — 5/12 CVs (4 REAL + 1 PARTIAL).**
 Real: run-together name-cell blobs, whole-table duplication with names leaking
@@ -72,31 +96,25 @@ name and org columns (redundant, no loss). 2 FP where the org is legitimately
 part of the award name (`ASCO Foundation Merit Award`). Already ticketed; some of
 the blob slice may improve post-#243.
 
-**3. Pipe-delimited multi-record fusion (#248) — 3/12 CVs, highest per-CV severity.**
-The WCM-template CVs (Jung/Miller/Borys) with `Award Source: … | Project title:`
-grant tables. 16/19 findings real, two faculty-visible failure modes: (a) raw
-` | ` cells + template scaffolding (`Award Source:`, `Duplicate table below as
-needed`) dumped verbatim into the output; (b) genuine record loss — EH4XXA drops
-both training grants and 2/3 mentee records that exist in stage-4 JSON; 9TUVGW
-drops the "major goals" narrative of 4 grants that survive only as raw pipe rows.
-Low FP (~11%). Ticketed, **unblocked by #243**, deterministic fix on #243's
-explode machinery. Narrow but catastrophic where it hits.
-
-**4. Taxonomy-code leak in output text (`• [M2B]`, `• [D1]`) — 2/12 CVs, ERROR.**
+**3. Taxonomy-code leak in output text (`• [M2B]`, `• [D1]`) — 2/12 CVs, ERROR — SHIPPED.**
 Raw bracketed taxonomy codes render on grant/pub/appointment bullets (9TUVGW ×22,
-EH4XXA ×2) — plainly visible to a reader. Cheap render-time strip. NEW-ish
-(output-hygiene ERROR); file if no ticket covers it.
+EH4XXA ×2) — plainly visible (not a track-change artifact). Cheap render-time
+strip; **fixed in #251 / PR #254** (`_strip_taxonomy_code`).
 
-**5. Bibliography mid-range truncation — NEW — 2/12 CVs.**
-Arbini (CQXGKG) renders only bibliography items 8/48/49 — ~all mid-range pubs
-(19,23,25,33,34,36,44,47) absent. Kim (B2RRRA) loses one pub. Distinct from the
-fusion class; needs its own look at the citation render path.
+**4. Two narrow residual `classified_unrendered` losses — 2/12 CVs.**
+Genuinely absent even with track-changes: Bennett (PZ69YW) mentee-supervision
+count totals + outcome narrative (`Current Ph.D. Students: 12`, `Ph.D.
+Graduated: 38`), and Miller (9TUVGW) a named invention (`Biotia-HSS … Orthopedic
+Assay`, tax M4C). Narrow; the Miller case rides with the #248 template-form CV.
 
-**6. Leadership section misrouted (tax 'O') — 1/12 CV.**
+**5. Leadership section misrouted (tax 'O') — 1/12 CV.**
 9TUVGW: 3 real leadership positions present in classified/fields/enriched JSON but
 absent from the output; the section renders only its template prompt.
 
 ### Non-defects (do not chase)
+- **M1 research-summary "drop" & bibliography "truncation": FALSE POSITIVES.**
+  Both render as tracked-change `<w:ins>` insertions the flattened reader missed
+  (#249 reader fix / PR #255; #250 closed). No content lost.
 - **`enrichment_failures` (#222): 0/2 real.** `doi_found_but_fetch_failed`
   citations still render complete from CV-extracted fields — no visible
   degradation. The lint over-warns; consider downgrading to INFO or gating it on
@@ -106,13 +124,17 @@ absent from the output; the section renders only its template prompt.
   title echoes, WCM template prompts, empty `| |` cells) — content is visibly
   parked, not lost. A boilerplate-strip would be a nicety, not an accuracy fix.
 
-## Doctor-tool follow-ups (bonus, cheap)
-- `classified_unrendered` should pipe-normalize/split the run-together stage-3b
-  blob and skip empty-template-header entries before the containment check —
-  would ~halve its FP rate (10 of 18 findings here were FP).
-- File: `_render_warnings.json` sidecar not written to S3 outputs → 2 lints dark
-  server-side. And/or reconstruct source lines from `prompt_logs/` to re-enable
-  `segmentation`/`missed_headers` on server artifacts.
+## Doctor-tool follow-ups
+- **SHIPPED (#249 / PR #255):** the docx readers now read tracked-change `<w:ins>`
+  content — the single biggest FP source. Without it the sweep over-reported
+  every "content-absent" lint.
+- **Still open:** `classified_unrendered` should also pipe-normalize/split the
+  run-together stage-3b blob and skip empty-template-header entries before the
+  containment check — that's the *remaining* FP mechanism (cell-split rendering,
+  e.g. Rahman K1, Kim N3A/N3B), separate from track-changes.
+- File (#252): `_render_warnings.json` sidecar not written to S3 outputs → 2 lints
+  dark server-side. And/or reconstruct source lines from `prompt_logs/` to
+  re-enable `segmentation`/`missed_headers` on server artifacts.
 
 ## Artifacts
 - `scripts/corpus_doctor_sweep.py` (new, this branch) — stage + sweep + rank.
