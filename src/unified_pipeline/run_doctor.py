@@ -230,6 +230,24 @@ def iter_header_candidates(docx_path: str) -> List[str]:
     return candidates
 
 
+def _docx_text(element) -> str:
+    """All ``w:t`` text under a docx element in document order. Unlike
+    python-docx's ``.text``, this INCLUDES text inside tracked-change ``<w:ins>``
+    runs and EXCLUDES ``<w:delText>`` — the accepted-changes view a reader sees.
+    Stage 6 inserts LLM-enriched content (research summaries, reformatted
+    citations) as tracked INSERTIONS, so a reader that ignores ``<w:ins>``
+    under-reports what actually rendered and false-flags content as 'unrendered'
+    (issue #249: M1 summaries and reformatted citations read as dropped)."""
+    from docx.oxml.ns import qn
+    return "".join(node.text or "" for node in element.iter(qn("w:t")))
+
+
+def _cell_text(cell) -> str:
+    """Track-change-aware equivalent of ``cell.text``: the cell's own paragraphs
+    (nested tables excluded, matching python-docx), including ``<w:ins>`` text."""
+    return "\n".join(_docx_text(p._p) for p in cell.paragraphs)
+
+
 def _table_lines(tbl) -> List[str]:
     """Text lines of one Word table: each non-empty cell, nested tables
     recursed into (cell.text never surfaces them), and every row with more
@@ -244,9 +262,10 @@ def _table_lines(tbl) -> List[str]:
     for row in tbl.rows:
         cell_texts = []
         for cell in row.cells:
-            if cell.text.strip():
-                cell_texts.append(cell.text)
-                lines.append(cell.text)
+            ctext = _cell_text(cell)
+            if ctext.strip():
+                cell_texts.append(ctext)
+                lines.append(ctext)
             for nested in cell.tables:
                 lines.extend(_table_lines(nested))
         if len(cell_texts) > 1:
@@ -261,13 +280,12 @@ def read_docx_blocks(docx_path: str) -> List[Tuple[str, str]]:
     from docx import Document  # local import: doctor is optional tooling
     from docx.oxml.ns import qn
     from docx.table import Table
-    from docx.text.paragraph import Paragraph
 
     doc = Document(docx_path)
     blocks: List[Tuple[str, str]] = []
     for child in doc.element.body.iterchildren():
         if child.tag == qn("w:p"):
-            blocks.append(("p", Paragraph(child, doc).text))
+            blocks.append(("p", _docx_text(child)))
         elif child.tag == qn("w:tbl"):
             blocks.append(("table", "\n".join(_table_lines(Table(child, doc)))))
     return blocks
@@ -280,7 +298,7 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
     from docx import Document  # local import: doctor is optional tooling
 
     doc = Document(docx_path)
-    return [[[cell.text.strip() for cell in row.cells] for row in tbl.rows]
+    return [[[_cell_text(cell).strip() for cell in row.cells] for row in tbl.rows]
             for tbl in doc.tables]
 
 
