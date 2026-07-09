@@ -4882,6 +4882,55 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return f"{start}-present"
         return ''
 
+    # "MD" (from "Bethesda, MD") and "Bloomington" are comma segments the
+    # short-proper-noun org fallback happily returns (#229) — never treat a
+    # bare state abbreviation as an organization.
+    _US_STATE_ABBREVS = frozenset({
+        'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI',
+        'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI',
+        'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC',
+        'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT',
+        'VT', 'VA', 'WA', 'WV', 'WI', 'WY', 'DC'})
+
+    _MONTH_TAIL_RE = re.compile(
+        r'[\s,]*(?:January|February|March|April|May|June|July|August|'
+        r'September|October|November|December)$', re.IGNORECASE)
+
+    def _split_award_year(self, text: str) -> Tuple[str, str]:
+        """Split an award line into (name-without-year, year-or-range).
+
+        Handles the shapes the honors fallback parser actually sees (#229):
+        leading years/ranges ("2020 AECT ...", "2015-2017 Featured ...") and
+        trailing years with punctuation ("..., August 2025." / "... (2021)").
+        Returns the original text and '' when no year is found.
+        """
+        m = re.match(r'^\s*((?:19|20)\d{2}(?:\s*[-–]\s*'
+                     r'(?:(?:19|20)\d{2}|present))?)\b[\s,.:–-]*',
+                     text, re.IGNORECASE)
+        if m:
+            return text[m.end():].strip(' ,.;'), m.group(1)
+        m = re.search(r'(?:^|[\s,(])((?:19|20)\d{2})\s*[).]?\s*$', text)
+        if m:
+            cleaned = text[:m.start()].rstrip(' ,.(;')
+            # "..., August 2025." leaves a dangling month — drop it too
+            cleaned = self._MONTH_TAIL_RE.sub('', cleaned).rstrip(' ,.;')
+            return cleaned, m.group(1)
+        return text, ''
+
+    @staticmethod
+    def _strip_org_tail(name: str, org: str) -> str:
+        """Remove a trailing organization segment (plus one short comma-led
+        city tail, "..., Indiana University, Bloomington") from an award name
+        so the org isn't duplicated across the name and Organization cells
+        (#229). Conservative: only strips at end-of-string."""
+        if not org:
+            return name
+        stripped = re.sub(
+            r'[\s,]*' + re.escape(org) +
+            r'(?:,\s*[A-Z][\w.-]+(?:\s+[A-Z][\w.-]+)?)?[\s,.]*$',
+            '', name).strip()
+        return stripped or name
+
     def _fill_honors(self, entries: List[Dict]):
         """Fill H. HONORS, AWARDS section.
 
@@ -4992,19 +5041,25 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     ordered_years = year_lines
 
                 for i, award_text in enumerate(award_lines):
+                    # Stage 4 extracted clean fields for (at most) one award of
+                    # the fused entry — use them for the line they belong to
+                    # instead of re-parsing it from raw text (#229).
+                    if award_name and award_name.lower() in award_text.lower():
+                        self._add_honors_row(
+                            table, award_name,
+                            granting_body or self._extract_organization_from_award(award_text),
+                            format_date_for_section(date, 'H') if date else '')
+                        continue
+
                     # Try to get corresponding year from ordered list
                     year_for_award = ''
                     if i < len(ordered_years):
                         year_for_award = ordered_years[i]
 
-                    # If no year found from text, try to extract inline year from award_text
-                    # Common formats: "Award Name, 2021" or "2021 Award Name" or "Award Name (2021)"
+                    # If no year found from text, extract the inline year
+                    # (leading "2020 Award ...", range, or trailing "... 2025.")
                     if not year_for_award:
-                        inline_year_match = re.search(r'(?:^|\s|,|\()\s*(\d{4})\s*(?:$|,|\))', award_text)
-                        if inline_year_match:
-                            year_for_award = inline_year_match.group(1)
-                            # Remove the year from award_text to avoid duplication
-                            award_text = re.sub(r'[\s,]*\(?\s*' + year_for_award + r'\s*\)?[\s,]*$', '', award_text).strip()
+                        award_text, year_for_award = self._split_award_year(award_text)
 
                     # Format date
                     if year_for_award:
@@ -5013,6 +5068,10 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     # Extract organization from award text
                     org = self._extract_organization_from_award(award_text)
 
+                    # The org is usually a trailing segment of the raw line —
+                    # keep it out of the name cell (#229)
+                    award_text = self._strip_org_tail(award_text, org)
+
                     # Add row
                     self._add_honors_row(table, award_text, org, year_for_award)
             else:
@@ -5020,14 +5079,13 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 if not award_name:
                     award_name = original_text[:150]
 
-                # If no extracted date, try to parse from original text
-                # Common formats: "Award Name, 2021" or "2021 Award Name" or "Award Name (2021)"
+                # If no extracted date, parse the inline year out of the name
+                # (leading "2021 Award ...", range, or trailing "... 2021.");
+                # fall back to the original text for the year alone.
                 if not date:
-                    inline_year_match = re.search(r'(?:^|\s|,|\()\s*(\d{4})\s*(?:$|,|\))', original_text)
-                    if inline_year_match:
-                        date = inline_year_match.group(1)
-                        # Remove the year from award_name to avoid duplication in column A
-                        award_name = re.sub(r'[\s,]*\(?\s*' + date + r'\s*\)?[\s,]*$', '', award_name).strip()
+                    award_name, date = self._split_award_year(award_name)
+                    if not date:
+                        _, date = self._split_award_year(original_text)
 
                 # Format date as yyyy
                 if date:
@@ -5036,6 +5094,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 # Extract organization if field extraction didn't provide one
                 if not granting_body:
                     granting_body = self._extract_organization_from_award(award_name)
+
+                # Same duplication hazard as the multi-award path (#229)
+                award_name = self._strip_org_tail(award_name, granting_body)
 
                 self._add_honors_row(table, award_name, granting_body, date)
 
@@ -5106,15 +5167,19 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             if len(org.split()) >= 2:
                 return org
 
-        # Strategy 2: comma-separated segments (check last segments first)
+        # Strategy 2: comma-separated segments (check last segments first).
+        # Two passes: an institutional-keyword segment anywhere beats the
+        # short-proper-noun fallback — a single reversed pass used to return
+        # "MD" or a bare city before ever reaching the real org (#229).
         if ',' in text:
-            segs = [s.strip() for s in text.split(',')]
+            segs = [s.strip().rstrip('.,;') for s in text.split(',')]
             for seg in reversed(segs):
-                seg = seg.strip().rstrip('.,;')
-                if not seg:
-                    continue
-                if re.search(IKW, seg, re.IGNORECASE) and len(seg.split()) <= 10:
+                if seg and re.search(IKW, seg, re.IGNORECASE) and len(seg.split()) <= 10:
                     return seg
+            for seg in reversed(segs):
+                if not seg or seg.upper() in self._US_STATE_ABBREVS \
+                        or any(ch.isdigit() for ch in seg):
+                    continue
                 # Short proper-noun segment (e.g., "Weill Cornell")
                 if re.match(r'^[A-Z][\w.-]+(?:\s+[A-Z][\w.-]+){0,2}$', seg):
                     return seg
