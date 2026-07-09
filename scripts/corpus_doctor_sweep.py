@@ -6,12 +6,13 @@ can rank defect classes by how many DISTINCT CVs each affects.
     PYTHONPATH=src python3 scripts/corpus_doctor_sweep.py <corpus_dir> \
         <run_id>[,<run_id>...] [--out sweep.json]
 
-corpus_dir holds `<run_id>/outputs/<uid>_*.json` + `<uid>_wcm.docx` (a flat
-`aws s3 sync s3://wcm-cviche-storage/cviche/runs/ <dir>`). Pass ONE run per
+corpus_dir holds `<run_id>/outputs/<uid>_*.json` + `<uid>_wcm.docx` AND the
+original upload at `<run_id>/input/<uid>.docx` (durably archived by the backend
+since 2026-06-02; sync the whole run dir, not just outputs/). Pass ONE run per
 distinct CV (pick reps with scripts/corpus_distinct_cvs.py first) so the
-aggregate counts distinct CVs, not runs. Source docx is absent from S3 outputs,
-so the segmentation/missed_headers lints skip -- under_extraction still catches
-the fused-entry class from stage_4 alone.
+aggregate counts distinct CVs, not runs. The source docx is staged into the run
+root so the segmentation/missed_headers lints run (they skip only for runs
+predating the input-archiving feature).
 """
 import argparse
 import json
@@ -47,6 +48,7 @@ def _uid_of(run_dir: Path):
 def stage(run_dir: Path, uid: str, work: Path) -> Path:
     """Symlink the flat outputs into `<work>/<uid>/stage_*/` and return the root."""
     root = work / uid
+    root.mkdir(parents=True, exist_ok=True)
     for suffix, stagedir in SUFFIX_DIR.items():
         src = run_dir / f"{uid}{suffix}"
         if not src.exists():
@@ -56,6 +58,19 @@ def stage(run_dir: Path, uid: str, work: Path) -> Path:
         link = d / src.name
         if not link.exists():
             link.symlink_to(src.resolve())
+    # Source docx: the original upload is durably archived at runs/<id>/input/
+    # (since 2026-06-02, commit 8358c0b). Symlink it into root so _find_source
+    # picks it up and the segmentation/missed_headers lints (1-2) can run.
+    for cand_dir in (run_dir.parent / "input", run_dir):
+        if not cand_dir.is_dir():
+            continue
+        cands = [p for p in sorted(cand_dir.glob(f"{uid}*.docx"))
+                 if not p.name.endswith("_wcm.docx")]
+        if cands:
+            link = root / cands[0].name
+            if not link.exists():
+                link.symlink_to(cands[0].resolve())
+            break
     return root
 
 

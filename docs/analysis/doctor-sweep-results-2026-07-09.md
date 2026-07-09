@@ -32,20 +32,26 @@ backlog.
   docx (paragraphs **+** table cells) and stage JSON to label each finding
   REAL / PARTIAL / FALSE_POSITIVE with a cited reason.
 
-### Two coverage gaps (server artifacts, not the doctor)
-- **No source docx on S3** (only `outputs/` + `prompt_logs/`), so `segmentation`
-  and `missed_headers` (lints 1–2, the top-severity ones) **could not run**.
-  `under_extraction` catches the same fused-entry class from stage_4 alone.
+### Coverage
+- **Source docx IS retained** at `runs/<id>/input/<uid>.docx` (durably archived on
+  every upload since 2026-06-02, commit 8358c0b). Staging it lets the top-severity
+  `segmentation` + `missed_headers` lints run: they fire on **5/12** and **6/12**
+  CVs respectively (ran on the 9 reps with source; the 3 oldest runs predate the
+  archiving feature). These need the same track-change-aware verification before
+  they're trusted. (An earlier draft wrongly said "no source docx on S3" — that
+  was an artifact of a `--include '*/outputs/*'` sync filter, not reality.)
 - **`_render_warnings.json` (#228 sidecar) is absent from every run**, including
-  the July ones, so `dedup_drops` and `stage6_render_warnings` **never ran**. The
-  sidecar isn't landing in S3 outputs — worth a ticket on its own.
+  the July ones, so `dedup_drops` and `stage6_render_warnings` **never ran** — the
+  sidecar isn't landing in S3 outputs (#252).
 
 ### The vintage caveat that reframes the ranking
 **#243 (layout-table explode) merged to dev today; all 12 rep artifacts predate
 it** (newest run 2026-07-08). So this sweep bounds **pre-#243** behavior. The
 classes whose defects come from run-together blobs / 1-cell layout tables
 (`table_shape`, the cell-split slice of `classified_unrendered`) may already be
-partly fixed on current code — re-run the top CVs post-#243 before building.
+partly fixed on current code — and because the **source docx is retained**
+(`runs/<id>/input/`), the top CVs **can be re-run** post-#243 to confirm before
+building (no need to wait for a fresh user upload).
 **#248 (pipe-fusion) is explicitly the #243 follow-up and is _not_ fixed by it**,
 so the `fusion_cluster` findings stand.
 
@@ -67,7 +73,8 @@ Distinct CVs (of 12) with ≥1 finding: raw lint → first verification →
 | enrichment_failures (#222) | 2 | 0 | **0** | citations render fine from CV fields |
 | dead_sections | 1 | 1 | **1** | leadership misrouted (absent even w/ track-changes) |
 | bucket_status | 0 | 0 | 0 | ran clean on all 12 |
-| segmentation / missed_headers | – | – | – | no source docx (not run) |
+| segmentation | – | – | **5** | ran on 9 (source staged); UNVERIFIED |
+| missed_headers | – | – | **6** | ran on 9 (source staged); UNVERIFIED |
 | stage6_render_warnings / dedup_drops | – | – | – | no #228 sidecar (not run) |
 
 The `<w:ins>` blind spot inflated only the "content-absent" lints
@@ -133,8 +140,9 @@ absent from the output; the section renders only its template prompt.
   containment check — that's the *remaining* FP mechanism (cell-split rendering,
   e.g. Rahman K1, Kim N3A/N3B), separate from track-changes.
 - File (#252): `_render_warnings.json` sidecar not written to S3 outputs → 2 lints
-  dark server-side. And/or reconstruct source lines from `prompt_logs/` to
-  re-enable `segmentation`/`missed_headers` on server artifacts.
+  dark server-side. (The `segmentation`/`missed_headers` gap is NOT a coverage
+  problem — the source docx is retained at `runs/<id>/input/`; stage it and they
+  run.)
 
 ## Artifacts
 - `scripts/corpus_doctor_sweep.py` (new, this branch) — stage + sweep + rank.
