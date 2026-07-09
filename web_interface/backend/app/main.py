@@ -184,6 +184,14 @@ def _guard_deployed_auth_mode(auth_mode: str, storage_backend: str, allow_simple
     genuinely wants simple auth in a deployed env sets CVICHE_ALLOW_SIMPLE_AUTH=1.
     Local dev (storage_backend="local") is never affected.
     """
+    # Normalize before comparing: config values can arrive with stray case or
+    # whitespace ("S3", "s3 ", "Simple"). An exact-match compare would let those
+    # slip past the guard and boot a deployed simple-auth instance (bypass).
+    # A missing/empty auth_mode also resolves to "simple" here -- so a
+    # deployment with no rendered auth.mode fails closed regardless of the
+    # caller's own defaulting, while local dev (non-s3) stays unaffected.
+    auth_mode = (auth_mode or "").strip().lower() or "simple"
+    storage_backend = (storage_backend or "").strip().lower()
     if auth_mode != "simple" or storage_backend != "s3":
         return
     msg = (

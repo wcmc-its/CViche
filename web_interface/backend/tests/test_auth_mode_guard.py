@@ -29,3 +29,24 @@ def test_saml_on_deployed_s3_is_fine():
 def test_simple_on_local_dev_is_fine():
     # Local storage == not a deployment; simple auth is expected here.
     _guard_deployed_auth_mode("simple", "local", allow_simple=False)
+
+
+@pytest.mark.parametrize("storage_backend", ["S3", "s3 ", " S3", "s3\n"])
+def test_noncanonical_s3_still_guarded(storage_backend):
+    # Stray case/whitespace in the storage backend must NOT bypass the guard.
+    with pytest.raises(RuntimeError):
+        _guard_deployed_auth_mode("simple", storage_backend, allow_simple=False)
+
+
+@pytest.mark.parametrize("auth_mode", ["Simple", "SIMPLE", "simple "])
+def test_noncanonical_simple_still_guarded(auth_mode):
+    # Stray case/whitespace in the auth mode must NOT bypass the guard.
+    with pytest.raises(RuntimeError):
+        _guard_deployed_auth_mode(auth_mode, "s3", allow_simple=False)
+
+
+def test_missing_auth_mode_defaults_to_simple_and_is_guarded():
+    # Caller passes "" (get_config_value(...) or "simple" upstream); an empty
+    # mode on a deployment normalizes to simple and is still caught.
+    with pytest.raises(RuntimeError):
+        _guard_deployed_auth_mode("", "s3", allow_simple=False)
