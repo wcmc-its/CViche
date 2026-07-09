@@ -1,0 +1,3 @@
+# Placeholder — overwritten at deploy time by buildspec.yaml (pre_build).
+# Committed empty so `kubectl kustomize k8s/overlays/<env>` renders from a
+# clean checkout / CI (issue #108). Never commit real auth config here.
