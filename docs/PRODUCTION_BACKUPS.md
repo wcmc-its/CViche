@@ -35,7 +35,7 @@ Prod uses managed MariaDB (`$CVICHE_USER@$CVICHE_HOST:3306/cviche`). Confirmed s
 Run these with the WCM AWS profile that has `rds:DescribeDBInstances` permission:
 
 ```bash
-aws rds describe-db-instances --db-instance-identifier cviche-prod \
+aws rds describe-db-instances --db-instance-identifier cviche \
   --query 'DBInstances[0].{
       Retention: BackupRetentionPeriod,
       PITR: BackupTarget,
@@ -46,7 +46,7 @@ aws rds describe-db-instances --db-instance-identifier cviche-prod \
   }'
 
 # Confirm the latest automated snapshot exists and is recent:
-aws rds describe-db-snapshots --db-instance-identifier cviche-prod \
+aws rds describe-db-snapshots --db-instance-identifier cviche \
   --snapshot-type automated \
   --query 'DBSnapshots[?Status==`available`] | sort_by(@, &SnapshotCreateTime) | [-1]'
 ```
@@ -64,7 +64,7 @@ Expected output: `Retention: 30`, `PITR: <target>`, `DeletionProtection: true`, 
 2. **Option A — Point-in-Time restore:**
    ```bash
    aws rds restore-db-instance-to-point-in-time \
-     --source-db-instance-identifier cviche-prod \
+     --source-db-instance-identifier cviche \
      --target-db-instance-identifier cviche-restore-$(date +%Y%m%d-%H%M) \
      --restore-time 2026-XX-XXTHH:MM:SSZ \
      --db-subnet-group-name <subnet-group> \
@@ -74,7 +74,7 @@ Expected output: `Retention: 30`, `PITR: <target>`, `DeletionProtection: true`, 
 
 3. **Option B — Restore from a specific snapshot:**
    ```bash
-   aws rds describe-db-snapshots --db-instance-identifier cviche-prod \
+   aws rds describe-db-snapshots --db-instance-identifier cviche \
      --query 'DBSnapshots[?Status==`available`].[DBSnapshotIdentifier,SnapshotCreateTime]' \
      --output table
    aws rds restore-db-instance-from-db-snapshot \
@@ -101,7 +101,7 @@ Expected output: `Retention: 30`, `PITR: <target>`, `DeletionProtection: true`, 
 
 6. **Promote.** Two strategies:
 
-   - **Cut over (fastest):** Update the production deployment's `CVICHE_DATABASE_URL` to point at the restore instance, roll a new deployment. The old instance stays around as a frozen archive. Renames are cheap (`aws rds modify-db-instance --db-instance-identifier ... --new-db-instance-identifier cviche-prod-old --apply-immediately`, then rename the restore to `cviche-prod`).
+   - **Cut over (fastest):** Update the production deployment's `CVICHE_DATABASE_URL` to point at the restore instance, roll a new deployment. The old instance stays around as a frozen archive. Renames are cheap (`aws rds modify-db-instance --db-instance-identifier ... --new-db-instance-identifier cviche-old --apply-immediately`, then rename the restore to `cviche`).
    - **Copy-back (safer):** Dump from the restore instance, import into a fresh prod (or use `mysqldump | mysql` for table-level recovery). Slower but lets you keep the live instance unchanged.
 
 7. **Delete the temporary restore** once the issue is resolved (skip if you cut over):
