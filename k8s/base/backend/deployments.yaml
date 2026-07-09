@@ -36,6 +36,8 @@ spec:
               value: "8000"
             - name: CVICHE_RUN_MIGRATIONS
               value: "0" # ◄ Tells the app container to skip migrations on boot
+            - name: CVICHE_INIT_DB
+              value: "0" # ◄ Alembic owns schema; no metadata.create_all() DDL at boot (#191)
           # Probes: the app serves /livez and /readyz at the root. The startupProbe
           # gives a slow boot up to 30*10s=300s before the livenessProbe takes over,
           # so a cold start is never killed prematurely.
