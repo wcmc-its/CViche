@@ -17,6 +17,7 @@ resolve ambiguity and provides constraints.
 """
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
@@ -45,6 +46,8 @@ from core.validators.wcm_table_corrector import apply_wcm_table_corrections
 from core.validators.prose_mentee_corrector import apply_prose_mentee_corrections
 from core.validators.template_scaffold import apply_template_scaffold_corrections
 from core.validators.block_coherence_corrector import apply_block_coherence_corrections
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -325,6 +328,8 @@ def classify_entries_batch(
     total_input_tokens = 0
     total_output_tokens = 0
     total_cost = 0.0
+    llm_batches = 0     # batches that attempted an LLM call
+    failed_batches = 0  # batches whose LLM call raised (entries fell back)
 
     # Get ALL suggested codes from ALL hierarchy levels for taxonomy filtering
     # This ensures we don't miss codes suggested at parent levels
@@ -1165,6 +1170,7 @@ Return ONLY valid JSON with the classifications array."""
         ]
 
         # Call LLM
+        llm_batches += 1
         try:
             llm_result = call_llm(
                 stage="stage_3b",
@@ -1184,8 +1190,17 @@ Return ONLY valid JSON with the classifications array."""
             total_output_tokens += llm_result["completion_tokens"]
             total_cost += llm_result["cost"]
 
-        except Exception as e:
-            print(f"    ⚠️ Batch classification error: {e}")
+        except Exception:
+            # Every entry in this batch falls back to the default code below;
+            # the caller aggregates failed_batches and fails the run if NO
+            # batch ever produced a real classification (#61).
+            failed_batches += 1
+            hierarchy_path = " > ".join(batch_entries[0].get("hierarchy", [])) or "(no hierarchy)"
+            logger.exception(
+                "Stage 3b batch classification failed; %d entries fall back to "
+                "default codes (batch at offset %d, hierarchy: %s)",
+                len(entries_with_text), batch_start, hierarchy_path
+            )
             classifications = []
 
         # Build index lookup for classifications
@@ -1236,7 +1251,12 @@ Return ONLY valid JSON with the classifications array."""
         "output_tokens": total_output_tokens,
         "total_tokens": total_input_tokens + total_output_tokens,
         "cost": total_cost,
-        "entries_classified": len(all_results)
+        "entries_classified": len(all_results),
+        "llm_batches": llm_batches,
+        "failed_batches": failed_batches,
+        "llm_classified": sum(1 for r in all_results if r.get("classification_source") == "llm"),
+        "fallback_entries": sum(1 for r in all_results if r.get("classification_source") == "fallback"),
+        "empty_entries": sum(1 for r in all_results if r.get("classification_source") == "empty_entry"),
     }
 
     return all_results, stats
@@ -1833,7 +1853,12 @@ def run_stage_3b(
         "total_tokens": 0,
         "cost": 0.0,
         "entries_classified": 0,
-        "groups_processed": 0
+        "groups_processed": 0,
+        "llm_batches": 0,
+        "failed_batches": 0,
+        "llm_classified": 0,
+        "fallback_entries": 0,
+        "empty_entries": 0
     }
 
     for group_idx, (hierarchy_key, group_entries) in enumerate(groups.items(), 1):
@@ -1870,6 +1895,11 @@ def run_stage_3b(
         total_stats["cost"] += stats["cost"]
         total_stats["entries_classified"] += stats["entries_classified"]
         total_stats["groups_processed"] += 1
+        total_stats["llm_batches"] += stats["llm_batches"]
+        total_stats["failed_batches"] += stats["failed_batches"]
+        total_stats["llm_classified"] += stats["llm_classified"]
+        total_stats["fallback_entries"] += stats["fallback_entries"]
+        total_stats["empty_entries"] += stats["empty_entries"]
 
         print(f"    ✓ Classified {stats['entries_classified']} entries (${stats['cost']:.4f})")
 
@@ -1877,6 +1907,27 @@ def run_stage_3b(
     print(f"Total: {total_stats['entries_classified']} entries classified")
     print(f"Cost: ${total_stats['cost']:.4f}")
     print(f"Tokens: {total_stats['total_tokens']:,}")
+
+    # A run whose every LLM batch failed emits all-default codes that look
+    # like real data (#61: invalid Bedrock model id classified an entire A/B
+    # run to fallbacks at $0 with no error). Failing the run is strictly
+    # better than completing it with meaningless classifications.
+    if total_stats["llm_batches"] > 0 and total_stats["llm_classified"] == 0:
+        raise RuntimeError(
+            f"Stage 3b produced zero LLM classifications across "
+            f"{total_stats['llm_batches']} batches ({total_stats['failed_batches']} raised "
+            f"errors) for {total_stats['entries_classified']} entries ({document_uid}). "
+            f"Refusing to emit all-fallback default codes; see batch errors above."
+        )
+
+    # Partial batch failures stay non-fatal, but must be visible per-run
+    if total_stats["failed_batches"] > 0:
+        msg = (
+            f"{total_stats['failed_batches']} of {total_stats['llm_batches']} classification "
+            f"batches failed; {total_stats['fallback_entries']} entries fell back to default codes"
+        )
+        print(f"⚠️ {msg}")
+        logger.warning("Stage 3b (%s): %s", document_uid, msg)
 
     # T-validation gate: re-evaluate any T classifications
     t_count_before = sum(1 for e in all_classified if e.get("taxonomy_code") == "T")
@@ -2249,6 +2300,20 @@ def run_stage_3b(
             "unique_entries": len(all_classified) - duplicate_count,
             "hierarchy_groups": len(groups),
             "stats": total_stats,
+            # LLM-vs-fallback provenance for the initial classification pass
+            # (#61); monitoring reads fallback_rate / had_classification_errors
+            "classification_stats": {
+                "total_entries": total_stats["entries_classified"],
+                "llm_classified": total_stats["llm_classified"],
+                "fallback_entries": total_stats["fallback_entries"],
+                "empty_entries": total_stats["empty_entries"],
+                "llm_batches": total_stats["llm_batches"],
+                "failed_batches": total_stats["failed_batches"],
+                "fallback_rate": round(
+                    total_stats["fallback_entries"] / total_stats["entries_classified"], 4
+                ) if total_stats["entries_classified"] else 0.0,
+                "had_classification_errors": total_stats["failed_batches"] > 0
+            },
             "post_correction_summary": {
                 "total_corrections": total_post_corrections,
                 "structural_corrections": structural_stats['corrections_made'],
