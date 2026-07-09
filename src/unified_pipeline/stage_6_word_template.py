@@ -48,7 +48,7 @@ from unified_pipeline.core.template_boilerplate import (
 )
 
 
-def _clean_cell_separators(text: str) -> str:
+def _clean_inline_tabs(text: str) -> str:
     """Render the pipeline's internal cell separators readably.
 
     Two separators are artifacts of how the readers flatten a source CV, and
@@ -64,6 +64,10 @@ def _clean_cell_separators(text: str) -> str:
 
     Properly structured content (mentee/board tables) is routed to real Word
     tables upstream via classification; this is the fallback for residual text.
+
+    ponytail: the name says "tabs" but it now handles both separators. Kept as-is
+    so this change does not collide with the three bullet call sites that #254
+    also edits; rename to _clean_cell_separators once that has landed.
     """
     if not text:
         return text
@@ -1877,7 +1881,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Use a simple bullet character prefix for reliable rendering
         # This avoids Word numbering system issues across different templates
-        run = entry_para.add_run(f"• {_clean_cell_separators(text)}")
+        run = entry_para.add_run(f"• {_clean_inline_tabs(text)}")
         self._set_font(run)
 
         if entry:
@@ -3283,7 +3287,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for entry in reversed(s0_entries):
             text = entry.get('text', '').strip()
             entry_para = self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
-            run = entry_para.add_run(f"• {_clean_cell_separators(text)}")
+            run = entry_para.add_run(f"• {_clean_inline_tabs(text)}")
             self._set_font(run)
             self.stats['entries_inserted'] += 1
 
@@ -7887,7 +7891,7 @@ Now analyze the text above:"""
             insert_para = self.doc.paragraphs[insert_idx]
             new_para = insert_para.insert_paragraph_before()
 
-            run = new_para.add_run(f"• {_clean_cell_separators(text)}")
+            run = new_para.add_run(f"• {_clean_inline_tabs(text)}")
             self._set_font(run)
 
             # Add explanatory comment
@@ -8177,7 +8181,7 @@ Now analyze the text above:"""
         # row, e.g. "|  |  |") is non-empty as raw text but renders to "" — it
         # carries no information, so it is dropped rather than shown as a bullet.
         rendered_entries = [
-            (e, _clean_cell_separators(e.get("text", "")))
+            (e, _clean_inline_tabs(e.get("text", "")))
             for e in unmapped_entries
         ]
         rendered_entries = [(e, t) for e, t in rendered_entries if t.strip()]
