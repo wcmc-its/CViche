@@ -63,6 +63,21 @@ def _clean_inline_tabs(text: str) -> str:
     return parts[0] + ": " + " — ".join(parts[1:])
 
 
+# A leading 3b taxonomy code (M2B, D1, S6, N3A …) that leaked into a rendered
+# bullet — code letter + 1-2 digits + optional trailing letter, bracketed at the
+# very start and followed by whitespace. Seen verbatim in output on the WCM-
+# template CVs (issue #251): "• [M2B] Project title: …", "• [D1] Visiting Prof…".
+_TAXONOMY_CODE_PREFIX = re.compile(r"^\s*\[[A-Z]\d{1,2}[A-Z]?\]\s+")
+
+
+def _strip_taxonomy_code(text: str) -> str:
+    """Drop a leading bracketed taxonomy code from bullet text before render.
+    # ponytail: shape-match, not a code allowlist — could also strip a leading
+    # grant-mechanism token like "[R01] " (rare as a bullet's first token); switch
+    # to the TAXONOMY_TO_SECTION key set if that ever shows up in output."""
+    return _TAXONOMY_CODE_PREFIX.sub("", text) if text else text
+
+
 # XML namespaces for Word documents
 WORD_NAMESPACE = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 W14_NAMESPACE = 'http://schemas.microsoft.com/office/word/2010/wordml'
@@ -1863,7 +1878,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Use a simple bullet character prefix for reliable rendering
         # This avoids Word numbering system issues across different templates
-        run = entry_para.add_run(f"• {_clean_inline_tabs(text)}")
+        run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
         self._set_font(run)
 
         if entry:
@@ -3269,7 +3284,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for entry in reversed(s0_entries):
             text = entry.get('text', '').strip()
             entry_para = self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
-            run = entry_para.add_run(f"• {_clean_inline_tabs(text)}")
+            run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
             self._set_font(run)
             self.stats['entries_inserted'] += 1
 
@@ -7873,7 +7888,7 @@ Now analyze the text above:"""
             insert_para = self.doc.paragraphs[insert_idx]
             new_para = insert_para.insert_paragraph_before()
 
-            run = new_para.add_run(f"• {_clean_inline_tabs(text)}")
+            run = new_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
             self._set_font(run)
 
             # Add explanatory comment
