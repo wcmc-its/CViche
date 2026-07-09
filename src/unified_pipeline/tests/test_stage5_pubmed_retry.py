@@ -1,5 +1,5 @@
-"""Retry/backoff, identity, and secret-redaction guards for Stage 5 PubMed
-enrichment (#222).
+"""Retry/backoff, identity, secret-redaction, and failure-classification
+guards for Stage 5 PubMed enrichment (#222).
 
 NCBI E-utilities return 429 when the shared rate limit is hit; previously a
 single 429 aborted the whole efetch batch (catch-all -> {}). These tests pin
@@ -9,6 +9,13 @@ larger), non-transient HTTP errors still fail immediately, exhausted retries
 degrade exactly as before, api_key never leaks into logged errors, and the
 fake support@example.com identity is gone (email sent only when configured).
 
+They also pin DOI-path outcome classification: an empty esearch idlist stays
+'doi_not_in_pubmed', while an API failure becomes 'doi_lookup_failed' (a
+*_failed status the run_doctor enrichment_failures lint can see) with the
+error body logged at ERROR once per failure class per run — the invalid-key
+incident masked by the old catch-all (every esearch 400ed, 28 DOIs silently
+classified 'doi_not_in_pubmed').
+
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage5_pubmed_retry.py -p no:cacheprovider
@@ -16,6 +23,7 @@ Run with:
 Self-contained: requests layer fully mocked, sleeps monkeypatched, no network.
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -63,6 +71,10 @@ class FakeResponse:
 
     def json(self):
         return self._json
+
+    @property
+    def text(self):
+        return self.content.decode('utf-8', 'replace')
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -239,3 +251,119 @@ def test_logged_error_is_redacted_end_to_end(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert 'dummy-test-key' not in out
     assert 'api_key=***' in out
+
+
+# ------------------------------------ (g) DOI-path outcome classification
+
+DOI = '10.1000/test.123'
+ESEARCH_EMPTY_JSON = {'esearchresult': {'idlist': []}}
+API_KEY_INVALID_BODY = b'{"error":"API key invalid"}'
+
+
+def _doi_entry():
+    return {'extracted_fields': {'doi': DOI}}
+
+
+def test_empty_idlist_stays_doi_not_in_pubmed(monkeypatch, caplog):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(200, json_data=ESEARCH_EMPTY_JSON)])
+    with caplog.at_level(logging.ERROR, logger=stage5.__name__):
+        results = enricher._enrich_by_doi([(_doi_entry(), DOI)])
+    assert results[0]['enrichment_status'] == 'doi_not_in_pubmed'
+    assert enricher.stats['api_errors'] == 0
+    assert caplog.records == []  # a legitimate no-match is not an API failure
+
+
+def test_esearch_400_becomes_doi_lookup_failed(monkeypatch, caplog):
+    enricher, session, _ = _make(
+        monkeypatch, [FakeResponse(400, content=API_KEY_INVALID_BODY)],
+        api_key='dummy-test-key')
+    with caplog.at_level(logging.ERROR, logger=stage5.__name__):
+        results = enricher._enrich_by_doi([(_doi_entry(), DOI)])
+    assert results[0]['enrichment_status'] == 'doi_lookup_failed'
+    assert enricher.stats['failed_lookups'] == 1
+    assert enricher.stats['api_errors'] == 1
+    assert len(session.calls) == 1  # 400 is non-transient: no retry
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelno == logging.ERROR
+    assert 'API key invalid' in caplog.records[0].getMessage()
+
+
+def test_esearch_exhausted_429s_become_doi_lookup_failed(monkeypatch):
+    enricher, session, _ = _make(monkeypatch, [FakeResponse(429)] * 3)
+    results = enricher._enrich_by_doi([(_doi_entry(), DOI)])
+    assert results[0]['enrichment_status'] == 'doi_lookup_failed'
+    assert len(session.calls) == 3  # retries still exhausted first
+
+
+def test_esearch_connection_error_becomes_doi_lookup_failed(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [requests.ConnectionError('reset')] * 3)
+    results = enricher._enrich_by_doi([(_doi_entry(), DOI)])
+    assert results[0]['enrichment_status'] == 'doi_lookup_failed'
+
+
+def test_doi_path_success_still_enriches(monkeypatch):
+    enricher, _, _ = _make(monkeypatch, [
+        FakeResponse(200, json_data=ESEARCH_JSON),
+        FakeResponse(200, content=PUBMED_XML),
+    ])
+    results = enricher._enrich_by_doi([(_doi_entry(), DOI)])
+    assert results[0]['enrichment_status'] == 'enriched'
+    assert results[0]['enrichment_source'] == 'doi_search'
+    assert results[0]['extracted_fields']['pmid'] == PMID
+
+
+def test_new_status_matches_doctor_failed_vocabulary():
+    # run_doctor lint 9 matches enrichment_status.endswith('_failed')
+    assert 'doi_lookup_failed'.endswith('_failed')
+    assert not 'doi_not_in_pubmed'.endswith('_failed')
+
+
+# --------------------------- (h) ERROR body once per failure class per run
+
+def test_api_error_body_logged_once_per_class(monkeypatch, caplog, capsys):
+    enricher, _, _ = _make(
+        monkeypatch, [FakeResponse(400, content=API_KEY_INVALID_BODY)] * 2,
+        api_key='dummy-test-key')
+    entries = [(_doi_entry(), DOI), (_doi_entry(), DOI)]
+    with caplog.at_level(logging.ERROR, logger=stage5.__name__):
+        results = enricher._enrich_by_doi(entries)
+    assert [r['enrichment_status'] for r in results] == ['doi_lookup_failed'] * 2
+    assert len(caplog.records) == 1  # bad key 400s every call; body logged once
+    # per-citation verbose diagnostics remain on stdout
+    assert capsys.readouterr().out.count('⚠️ DOI search error') == 2
+
+
+def test_distinct_failure_classes_each_logged(monkeypatch, caplog):
+    enricher, _, _ = _make(
+        monkeypatch,
+        [FakeResponse(400, content=API_KEY_INVALID_BODY)]
+        + [requests.ConnectionError('reset')] * 3,
+        api_key='dummy-test-key')
+    entries = [(_doi_entry(), DOI), (_doi_entry(), DOI)]
+    with caplog.at_level(logging.ERROR, logger=stage5.__name__):
+        enricher._enrich_by_doi(entries)
+    assert len(caplog.records) == 2
+
+
+def test_efetch_failure_logged_at_error_with_redaction(monkeypatch, caplog):
+    leaky_url = ('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi'
+                 '?db=pubmed&api_key=dummy-test-key&retmode=xml')
+    enricher, _, _ = _make(
+        monkeypatch,
+        [FakeResponse(400, content=API_KEY_INVALID_BODY, url=leaky_url)],
+        api_key='dummy-test-key')
+    with caplog.at_level(logging.ERROR, logger=stage5.__name__):
+        enricher._fetch_pubmed_batch([PMID])
+    assert len(caplog.records) == 1
+    msg = caplog.records[0].getMessage()
+    assert 'dummy-test-key' not in msg
+    assert 'api_key=***' in msg
+    assert 'API key invalid' in msg
+
+
+def test_pmcid_conversion_failure_logged_at_error(monkeypatch, caplog):
+    enricher, _, _ = _make(monkeypatch, [FakeResponse(429)] * 3)
+    with caplog.at_level(logging.ERROR, logger=stage5.__name__):
+        enricher._convert_pmcids_to_pmids(['PMC1234567'])
+    assert len(caplog.records) == 1
+    assert 'pmcid_conversion' in caplog.records[0].getMessage()
