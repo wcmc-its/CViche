@@ -419,9 +419,24 @@ def _translate_messages(messages, response_format=None, use_schema_tool=False):
                 text += "\n\nRespond with valid JSON only."
             system_prompts.append({"text": text})
         else:
+            text = msg["content"]
+            if not isinstance(text, str):
+                # Multimodal / list content (e.g. pdf_vision's OpenAI image_url
+                # blocks) cannot be wrapped as {"text": <list>}: Bedrock's
+                # Converse `text` field must be a str, and images use a different
+                # block shape ({"image": {"format", "source": {"bytes"}}}).
+                # Wrapping the list silently produced a botocore
+                # ParamValidationError deep in the call; fail loud and actionable
+                # instead. Real multimodal support is tracked in #265.
+                raise NotImplementedError(
+                    "Bedrock Converse translation does not support multimodal "
+                    f"(list) message content (role={msg['role']!r}). A stage that "
+                    "sends image blocks must be pinned to a vision-capable "
+                    "provider in llm_config.yaml, or Bedrock image-block "
+                    "translation must be implemented -- see #265.")
             converse_messages.append({
                 "role": msg["role"],
-                "content": [{"text": msg["content"]}],
+                "content": [{"text": text}],
             })
 
     # If JSON format requested but no system message existed, create one

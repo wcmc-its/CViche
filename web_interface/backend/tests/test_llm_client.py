@@ -1306,3 +1306,28 @@ def test_bedrock_json_retry_backs_off_on_throttle():
 
     assert result["content"] == valid_json
     assert mock_client.converse.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# _translate_messages multimodal guard (review #244 #5 / issue #265)
+# ---------------------------------------------------------------------------
+
+def test_translate_messages_wraps_string_content():
+    """A plain string message becomes a Converse {"text": <str>} block."""
+    from unified_pipeline.llm_client import _translate_messages
+    system, msgs = _translate_messages([{"role": "user", "content": "hello"}])
+    assert msgs == [{"role": "user", "content": [{"text": "hello"}]}]
+
+
+def test_translate_messages_rejects_multimodal_list_content():
+    """List (image_url) content must fail loud, not silently wrap as
+    {"text": <list>} -- which botocore later rejects with ParamValidationError.
+    pdf_vision sends exactly this shape on the (default) Bedrock path."""
+    from unified_pipeline.llm_client import _translate_messages
+    multimodal = [
+        {"type": "text", "text": "segment this"},
+        {"type": "image_url",
+         "image_url": {"url": "data:image/jpeg;base64,AAAA", "detail": "low"}},
+    ]
+    with pytest.raises(NotImplementedError, match="multimodal"):
+        _translate_messages([{"role": "user", "content": multimodal}])
