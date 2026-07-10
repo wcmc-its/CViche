@@ -140,7 +140,7 @@ UNRENDERED_MIN_RECORD_LINES = 2
 RECORD_DATE_LINE_MIN_CHARS = 20
 _RECORD_DATE_PREFIX_RE = re.compile(r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]")
 
-_SEVERITIES = ("ERROR", "WARN", "INFO")
+SEVERITY_ORDER = ("ERROR", "WARN", "INFO")  # most to least severe
 
 # '• [M2A] ...' style taxonomy-code leak (the pre-#214 appendix format).
 _BRACKET_CODE_RE = re.compile(r"\[[A-Z]\d?[A-Z]?\d?\]")
@@ -200,6 +200,19 @@ def _hierarchy_titles(stage1a: Dict) -> List[str]:
 
 # ----------------------------------------------------------------- docx views
 
+def _get_docx_document():
+    """Lazy python-docx import. The doctor is optional tooling and must import
+    cleanly where python-docx isn't installed (JSON-only lints still run), so
+    the import stays out of module scope -- but it's the SAME import in three
+    docx views, so centralize it here and give a clear message when missing."""
+    try:
+        from docx import Document
+    except ImportError as e:  # pragma: no cover - only when the extra is absent
+        raise ImportError("python-docx is required for the docx lints: "
+                          "pip install python-docx") from e
+    return Document
+
+
 def iter_header_candidates(docx_path: str) -> List[str]:
     """Header-looking source lines: short, letters-only, ALL-CAPS bold (or
     styled as a Heading), from top-level paragraphs and single-column table
@@ -207,7 +220,7 @@ def iter_header_candidates(docx_path: str) -> List[str]:
     tables are data tables — their bold cells are column headers — and
     document furniture ('CURRICULUM VITAE', revision stamps) is not a header
     either. These are what stage 1a should have promoted to hierarchy nodes."""
-    from docx import Document  # local import: doctor is optional tooling
+    Document = _get_docx_document()
 
     candidates: List[str] = []
 
@@ -294,7 +307,7 @@ def read_docx_blocks(docx_path: str) -> List[Tuple[str, str]]:
     """Body-order blocks of a docx: ("p", text) per paragraph, ("table",
     _table_lines joined by newlines) per table. Grants render as one Word
     table per grant, so any output check must read tables AND paragraphs."""
-    from docx import Document  # local import: doctor is optional tooling
+    Document = _get_docx_document()
     from docx.oxml.ns import qn
     from docx.table import Table
 
@@ -312,7 +325,7 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
     """Raw per-row cell texts of every top-level table, EMPTY CELLS INCLUDED
     — _table_lines drops empty cells, which hides an empty date column from
     the shape checks (lint 13)."""
-    from docx import Document  # local import: doctor is optional tooling
+    Document = _get_docx_document()
 
     doc = Document(docx_path)
     return [[[_cell_text(cell).strip() for cell in row.cells] for row in tbl.rows]
@@ -1076,10 +1089,10 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     if ready("table_shape", stage_6_docx=table_rows):
         findings.extend(lint_table_shape(table_rows))
 
-    counts = {severity: 0 for severity in _SEVERITIES}
+    counts = {severity: 0 for severity in SEVERITY_ORDER}
     for f in findings:
         counts[f["severity"]] += 1
-    worst = next((s for s in _SEVERITIES if counts[s]), None)
+    worst = next((s for s in SEVERITY_ORDER if counts[s]), None)
 
     return {
         "document_uid": uid,
