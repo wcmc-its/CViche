@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import traceback
+from urllib.parse import urlsplit
 
 
 from fastapi import FastAPI, Request, Depends, Response, status
@@ -52,6 +53,48 @@ def _resolve_allowed_origins() -> list[str]:
     
 
 _allowed_origins = _resolve_allowed_origins()
+
+
+def _origin_key(origin: str) -> tuple[str, str, int] | None:
+    """Parse an Origin value into a comparable (scheme, host, port) triple.
+
+    Default ports are normalized so "https://host" == "https://host:443".
+    Returns None when unparseable (no scheme/host, bad port), which callers
+    must treat as not-allowed.
+    """
+    try:
+        parts = urlsplit(origin.strip())
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    if not parts.scheme or not host:
+        return None
+    if port is None:
+        port = {"http": 80, "https": 443}.get(parts.scheme, 0)
+    # urlsplit/.hostname already lowercase these, but normalize explicitly so a
+    # non-normalized configured origin (e.g. "HTTPS://Host") still compares equal.
+    return (parts.scheme.lower(), host.lower(), port)
+
+
+_allowed_origin_keys = frozenset(
+    key for key in (_origin_key(o) for o in _allowed_origins) if key is not None
+)
+
+
+def _docs_enabled() -> bool:
+    """Serve /docs, /redoc and /openapi.json only when explicitly enabled.
+
+    Default off: the interactive docs enumerate every route and schema to
+    unauthenticated clients. Enable ONLY with CVICHE_ENABLE_DOCS=true (env var,
+    or auth_config.yaml under `auth` -- same wiring as CVICHE_ALLOWED_ORIGINS).
+    Deliberately NOT tied to CVICHE_DEBUG: an accidental CVICHE_DEBUG=true in
+    prod must not expose the API surface -- docs require their own explicit flag.
+    """
+    raw, _ = get_config("auth", "CVICHE_ENABLE_DOCS", default="")
+    return str(raw).strip().lower() in ("1", "true", "yes")
+
+
+_DOCS_ENABLED = _docs_enabled()
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +158,9 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             if request.url.path in CSRF_EXEMPT_PATHS:
                 return await call_next(request)
             origin = request.headers.get("origin") or ""
-            if origin and not any(origin.startswith(o) for o in _allowed_origins):
+            # Exact scheme+host+port comparison; a prefix match would accept
+            # lookalike domains (https://cviche.weill.cornell.edu.evil.com).
+            if origin and _origin_key(origin) not in _allowed_origin_keys:
                 return JSONResponse(
                     status_code=403,
                     content={"error": "forbidden", "message": "Cross-origin request rejected."},
@@ -259,7 +304,12 @@ app = FastAPI(
     title="CViche Pipeline Viewer",
     description="Web interface for CViche with real-time progress tracking",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    # API docs are opt-in (see _docs_enabled); openapi_url=None also disables
+    # the schema endpoint the docs pages are rendered from.
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
 
 # CORS middleware (allow frontend to connect)
@@ -305,7 +355,7 @@ async def root():
     return {
         "message": "CViche Pipeline Viewer API",
         "version": "1.0.0",
-        "docs": "/docs",
+        "docs": "/docs" if _DOCS_ENABLED else None,
         "status": "running"
     }
 
