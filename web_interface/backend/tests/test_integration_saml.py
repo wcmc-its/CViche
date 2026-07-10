@@ -265,3 +265,92 @@ class TestSamlErrorPaths:
         assert response.status_code == 401
         data = response.json()
         assert data["detail"]["error"] == "directory_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Replay gate: an assertion with no extractable ID (#110)
+#
+# check_and_record() treats an empty ID list as a no-op, so the fail-closed
+# decision for a no-ID assertion lives in the ACS route itself. These pin that
+# branch, which was otherwise unexercised: the Valkey-outage fail-closed path
+# is covered by test_saml_replay.py, this is the missing-ID path.
+# ---------------------------------------------------------------------------
+
+def _mock_saml_client_with_assertion_id(identity_dict, assertion_id):
+    """A mock whose parsed response carries a real string assertion ID.
+
+    A bare MagicMock yields no *string* id, so assertion_ids() returns [] --
+    which is precisely the condition under test. Setting a real id lets the
+    same fixture drive the has-an-ID control case.
+    """
+    mock_client = _mock_saml_client(identity_dict)
+    response = mock_client.parse_authn_request_response.return_value
+    assertion = MagicMock()
+    assertion.id = assertion_id
+    response.assertions = [assertion]
+    response.assertion = assertion
+    return mock_client
+
+
+class TestSamlReplayNoAssertionId:
+
+    @patch("app.api.saml_routes.replay_fail_closed", return_value=True)
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_rejects_assertion_without_id_when_failing_closed(
+        self, mock_get_client, _fail_closed, client, seed_saml_mode
+    ):
+        """No assertion ID + CVICHE_SAML_REPLAY_FAIL_CLOSED -> reject the login."""
+        # A bare MagicMock response has no string .id, so assertion_ids() -> []
+        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data"},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 302
+        assert "error=auth_failed" in response.headers["location"]
+        assert COOKIE_NAME not in {c.name for c in response.cookies.jar}
+
+    @patch("app.api.saml_routes.replay_fail_closed", return_value=False)
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_admits_assertion_without_id_when_failing_open(
+        self, mock_get_client, _fail_closed, client, seed_saml_mode
+    ):
+        """Default (fail-open): the replay gate is skipped, login proceeds."""
+        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data"},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 302
+        assert "error=" not in response.headers["location"]
+        assert COOKIE_NAME in {c.name for c in response.cookies.jar}
+
+    @patch("app.api.saml_routes.replay_fail_closed", return_value=True)
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_admits_assertion_with_id_even_when_failing_closed(
+        self, mock_get_client, _fail_closed, client, seed_saml_mode
+    ):
+        """Control: fail-closed only rejects when the ID is *missing*.
+
+        A first-presentation assertion that carries an ID must still be let
+        through, or the flag would lock everyone out rather than close a gap.
+        """
+        mock_get_client.return_value = _mock_saml_client_with_assertion_id(
+            _SAML_IDENTITY, "_a1b2c3-first-presentation"
+        )
+
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data"},
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 302
+        assert "error=" not in response.headers["location"]
+        assert COOKIE_NAME in {c.name for c in response.cookies.jar}
