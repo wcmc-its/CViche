@@ -84,12 +84,12 @@ def scan(corpus_dir):
     runs = {}
     skipped = 0
     for p in paths:
-        d = _load_fields_json(p)
-        if d is None:
+        data = _load_fields_json(p)
+        if data is None:
             skipped += 1
             continue
-        entries = d.get("entries", [])
-        owner = _norm_owner(d.get("cv_owner"))
+        entries = data.get("entries", [])
+        owner = _norm_owner(data.get("cv_owner"))
         cfp = _content_fp(entries)
         runs[_run_id(p)] = {"owner": owner or f"<blank:{cfp}>", "content_fp": cfp}
     return runs, skipped
