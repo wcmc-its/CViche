@@ -167,14 +167,25 @@ def _get_llm_max_attempts() -> int:
     return value if value >= 1 else 3
 
 
+# Guards construction of the module-level clients below. call_llm runs on
+# several threads at once (see _llm_call_semaphore), so two threads can both
+# observe `_client is None`. For OpenAI that is merely wasteful -- the loser's
+# client is discarded and both are valid. For Bedrock it is not safe: boto3
+# builds clients off the shared default session, and only *use* of an existing
+# client is thread-safe, not its creation.
+_client_init_lock = threading.Lock()
+
+
 def _get_openai_client():
     """Get or create the OpenAI client (lazy initialization)."""
     global _openai_client
     if _openai_client is None:
-        # Bound every request so a non-responsive endpoint raises
-        # APITimeoutError (retried by _call_with_retry, then surfaced)
-        # instead of blocking forever. Reads OPENAI_API_KEY from the env.
-        _openai_client = OpenAI(timeout=_get_llm_timeout_seconds())
+        with _client_init_lock:
+            if _openai_client is None:
+                # Bound every request so a non-responsive endpoint raises
+                # APITimeoutError (retried by _call_with_retry, then surfaced)
+                # instead of blocking forever. Reads OPENAI_API_KEY from the env.
+                _openai_client = OpenAI(timeout=_get_llm_timeout_seconds())
     return _openai_client
 
 
@@ -191,21 +202,23 @@ def _get_bedrock_client():
     """
     global _bedrock_client
     if _bedrock_client is None:
-        import boto3
-        from botocore.config import Config
-        region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
-        # Explicit connect/read timeouts + bounded standard retries so a
-        # wedged Bedrock call can't block the worker thread indefinitely.
-        # botocore's default read_timeout (60s) and retry behavior are left
-        # implicit otherwise; here we make them explicit and tunable.
-        bedrock_config = Config(
-            connect_timeout=10,
-            read_timeout=_get_llm_timeout_seconds(),
-            retries={"mode": "standard", "max_attempts": _get_llm_max_attempts()},
-        )
-        _bedrock_client = boto3.client(
-            "bedrock-runtime", region_name=region, config=bedrock_config
-        )
+        with _client_init_lock:
+            if _bedrock_client is None:
+                import boto3
+                from botocore.config import Config
+                region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+                # Explicit connect/read timeouts + bounded standard retries so a
+                # wedged Bedrock call can't block the worker thread indefinitely.
+                # botocore's default read_timeout (60s) and retry behavior are left
+                # implicit otherwise; here we make them explicit and tunable.
+                bedrock_config = Config(
+                    connect_timeout=10,
+                    read_timeout=_get_llm_timeout_seconds(),
+                    retries={"mode": "standard", "max_attempts": _get_llm_max_attempts()},
+                )
+                _bedrock_client = boto3.client(
+                    "bedrock-runtime", region_name=region, config=bedrock_config
+                )
     return _bedrock_client
 
 
@@ -220,9 +233,16 @@ def _call_with_retry(call_fn, retry_count: int = 3):
         The return value of call_fn on success
 
     Raises:
+        ValueError: If retry_count is negative
         The last error if all retries are exhausted
         Non-retryable errors immediately (including non-retryable ClientError)
     """
+    # A negative retry_count would make the loop below run zero times and fall
+    # straight through to `raise last_error` with last_error still None, which
+    # surfaces as a bare TypeError instead of the misconfiguration that caused
+    # it. retry_count is a call-site kwarg passthrough, so this is reachable.
+    if retry_count < 0:
+        raise ValueError(f"retry_count must be >= 0, got {retry_count}")
     last_error = None
     for attempt in range(retry_count + 1):
         try:
@@ -731,12 +751,18 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
                 "role": "user",
                 "content": "Your previous response was not valid JSON. Please respond with ONLY valid JSON, no markdown fencing or explanation.",
             })
-            # Bound this in-flight call too, consistent with _call_with_retry.
-            with _llm_call_semaphore:
-                retry_response = _call_bedrock(model, stronger_messages, temperature,
-                                               response_format, max_tokens,
-                                               enable_prompt_caching=enable_prompt_caching,
-                                               **extra_kwargs)
+            # Go through _call_with_retry rather than calling _call_bedrock
+            # bare: this retry is a live Bedrock request like any other, and a
+            # transient throttle on it should back off instead of raising.
+            # _call_with_retry acquires _llm_call_semaphore itself, so this
+            # call stays bounded without nesting the acquire.
+            retry_response = _call_with_retry(
+                lambda: _call_bedrock(model, stronger_messages, temperature,
+                                      response_format, max_tokens,
+                                      enable_prompt_caching=enable_prompt_caching,
+                                      **extra_kwargs),
+                retry_count=retry_count,
+            )
             content = retry_response["output"]["message"]["content"][0]["text"]
             retry_usage = retry_response["usage"]
             retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)

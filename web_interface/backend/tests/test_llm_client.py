@@ -1254,3 +1254,55 @@ def test_schema_tool_config_falls_back_for_non_object_schema():
     assert _schema_tool_config(None) is None
     ok = _schema_tool_config(_JSON_SCHEMA_RF)
     assert ok["toolChoice"] == {"tool": {"name": "grant_record"}}
+
+
+# ---------------------------------------------------------------------------
+# Retry hardening (review follow-ups on #46)
+# ---------------------------------------------------------------------------
+
+def test_call_with_retry_rejects_negative_retry_count():
+    """A negative retry_count must raise ValueError, not `raise None`.
+
+    range(retry_count + 1) is empty for retry_count < 0, so the loop body never
+    runs and execution falls through to `raise last_error` with last_error
+    still None -- surfacing as a bare TypeError that names nothing useful.
+    """
+    from unified_pipeline.llm_client import _call_with_retry
+
+    with pytest.raises(ValueError, match="retry_count must be >= 0"):
+        _call_with_retry(lambda: "never called", retry_count=-1)
+
+
+def test_bedrock_json_retry_backs_off_on_throttle():
+    """A throttle on the stronger-hint JSON retry is retried, not raised.
+
+    The retry used to call _call_bedrock bare (semaphore only), bypassing
+    _call_with_retry -- so a ThrottlingException on that one call propagated
+    immediately instead of backing off.
+    """
+    from botocore.exceptions import ClientError
+    from unified_pipeline.llm_client import call_llm
+
+    throttle = ClientError(
+        {"Error": {"Code": "ThrottlingException", "Message": "slow down"}},
+        "Converse",
+    )
+    valid_json = '{"category": "publications"}'
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client.time.sleep"), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.side_effect = [
+            _make_bedrock_response(content="not json at all"),  # triggers retry
+            throttle,                                           # retry throttled
+            _make_bedrock_response(content=valid_json),         # backoff succeeds
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = call_llm("stage_2", [{"role": "user", "content": "test"}],
+                          response_format={"type": "json_object"})
+
+    assert result["content"] == valid_json
+    assert mock_client.converse.call_count == 3
