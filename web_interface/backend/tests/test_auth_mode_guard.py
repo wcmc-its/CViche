@@ -8,7 +8,7 @@ operator explicitly opts in via CVICHE_ALLOW_SIMPLE_AUTH=1.
 """
 import pytest
 
-from app.main import _guard_deployed_auth_mode
+from app.main import _guard_deployed_auth_mode, SECURE_AUTH_MODES
 
 
 def test_simple_on_deployed_s3_refuses_to_start():
@@ -50,3 +50,35 @@ def test_missing_auth_mode_defaults_to_simple_and_is_guarded():
     # mode on a deployment normalizes to simple and is still caught.
     with pytest.raises(RuntimeError):
         _guard_deployed_auth_mode("", "s3", allow_simple=False)
+
+
+# The guard is an ALLOWLIST: any mode not in SECURE_AUTH_MODES fails closed on a
+# deployment, so an unrecognized/future mode can't slip through unblocklisted
+# (mrj4001 follow-up on #111).
+@pytest.mark.parametrize("auth_mode", ["none", "dev", "oidc", "basic", "saaml"])
+def test_unknown_mode_on_deployed_s3_fails_closed(auth_mode):
+    # "oidc" is intentionally included: it is NOT implemented, so it must fail
+    # closed until it is added to SECURE_AUTH_MODES with a real credential path.
+    assert auth_mode not in SECURE_AUTH_MODES
+    with pytest.raises(RuntimeError) as exc:
+        _guard_deployed_auth_mode(auth_mode, "s3", allow_simple=False)
+    assert "[SECURITY]" in str(exc.value)
+    assert "not a recognized secure auth mode" in str(exc.value)
+
+
+@pytest.mark.parametrize("auth_mode", ["none", "dev", "oidc"])
+def test_unknown_mode_on_local_dev_is_fine(auth_mode):
+    # Not a deployment -> the guard never fires, whatever the mode.
+    _guard_deployed_auth_mode(auth_mode, "local", allow_simple=False)
+
+
+@pytest.mark.parametrize("auth_mode", ["Oidc", " none ", "DEV"])
+def test_unknown_mode_noncanonical_still_guarded(auth_mode):
+    # Stray case/whitespace must not let an unknown mode bypass the allowlist.
+    with pytest.raises(RuntimeError):
+        _guard_deployed_auth_mode(auth_mode, "s3", allow_simple=False)
+
+
+def test_only_saml_is_currently_allowed():
+    # Guards against someone widening the allowlist to an unimplemented mode.
+    assert SECURE_AUTH_MODES == frozenset({"saml"})

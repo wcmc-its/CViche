@@ -173,31 +173,49 @@ async def _stale_run_reaper_loop(interval_seconds: int):
             )
 
 
+# Auth modes with a real credential check, allowed on a deployed (S3) instance.
+# Only "saml" is implemented today (see auth_routes.login / auth.py); "oidc" is
+# NOT here yet and is deliberately NOT listed -- allow it only once it exists and
+# is proven to authenticate, or a config typo'd to "oidc" would boot into a
+# locked-out (login 403s, SAML inactive) state. This is an ALLOWLIST on purpose:
+# any mode not in it -- "simple", "none", a future permissive mode, a typo --
+# fails closed on a deployment by default, so a new mode can't slip the guard
+# just because nobody remembered to blocklist it (mrj4001 review on #111).
+SECURE_AUTH_MODES = frozenset({"saml"})
+
+
 def _guard_deployed_auth_mode(auth_mode: str, storage_backend: str, allow_simple: bool) -> None:
-    """Fail closed if a deployed instance resolved to password-less simple auth.
+    """Fail closed if a deployed instance's auth mode isn't a known-secure one.
 
     On a real deployment (S3 storage backend) auth_config.yaml is expected to
-    set auth.mode=saml. If auth_mode resolved to "simple" instead, login is
-    email-allowlist only with NO credential (see auth_routes.login) -- almost
-    always a broken or empty auth_config.yaml (issue #111). Refuse to boot so
-    the misconfiguration can't silently expose the instance. An operator who
-    genuinely wants simple auth in a deployed env sets CVICHE_ALLOW_SIMPLE_AUTH=1.
-    Local dev (storage_backend="local") is never affected.
+    render a mode in SECURE_AUTH_MODES (auth.mode=saml). Anything else -- most
+    often "simple" (email-allowlist login with NO credential, see
+    auth_routes.login) from a broken or empty auth_config.yaml, but also any
+    unrecognized/future mode -- means the instance can't authenticate the way a
+    deployment must. Refuse to boot so the misconfiguration can't silently
+    expose or brick the instance (issue #111). An operator who genuinely wants
+    to override sets CVICHE_ALLOW_SIMPLE_AUTH=1. Local dev
+    (storage_backend="local") is never affected.
     """
     # Normalize before comparing: config values can arrive with stray case or
     # whitespace ("S3", "s3 ", "Simple"). An exact-match compare would let those
-    # slip past the guard and boot a deployed simple-auth instance (bypass).
-    # A missing/empty auth_mode also resolves to "simple" here -- so a
-    # deployment with no rendered auth.mode fails closed regardless of the
-    # caller's own defaulting, while local dev (non-s3) stays unaffected.
+    # slip past the guard and boot a deployed non-secure instance (bypass).
+    # A missing/empty auth_mode resolves to "simple" here -- so a deployment
+    # with no rendered auth.mode fails closed regardless of the caller's own
+    # defaulting, while local dev (non-s3) stays unaffected.
     auth_mode = (auth_mode or "").strip().lower() or "simple"
     storage_backend = (storage_backend or "").strip().lower()
-    if auth_mode != "simple" or storage_backend != "s3":
+    if storage_backend != "s3" or auth_mode in SECURE_AUTH_MODES:
         return
+    if auth_mode == "simple":
+        detail = ("login is email-allowlist only with no credential")
+    else:
+        detail = (f"'{auth_mode}' is not a recognized secure auth mode "
+                  f"(expected one of: {', '.join(sorted(SECURE_AUTH_MODES))})")
     msg = (
-        "[SECURITY] auth_mode=simple on a deployed (S3 storage) instance: login "
-        "is email-allowlist only with no credential. Expected auth.mode=saml from "
-        "auth_config.yaml -- check that the overlay's auth_config.yaml rendered."
+        f"[SECURITY] auth_mode={auth_mode} on a deployed (S3 storage) instance: "
+        f"{detail}. Expected auth.mode=saml from auth_config.yaml -- check that "
+        "the overlay's auth_config.yaml rendered."
     )
     if allow_simple:
         logger.warning("%s Proceeding anyway because CVICHE_ALLOW_SIMPLE_AUTH=1.", msg)
