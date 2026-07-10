@@ -52,23 +52,50 @@ def _run_id(path):
     return os.path.basename(path).split("_fields.json")[0]
 
 
+def _load_fields_json(path):
+    """Load+validate one fields.json. Returns a dict, or None (warned) on skip.
+
+    `encoding="utf-8"` is the real fix, not the `with`: without it `open()` uses
+    the locale default and an accented owner (Jose, Muller) raises
+    UnicodeDecodeError on a non-UTF-8 locale -- which, silently skipped, would
+    drop that CV from the denominator. So skip-with-warning, never crash.
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        print(f"  [WARN] skipping {path}: {e}", file=sys.stderr)
+        return None
+    if not isinstance(data, dict):
+        print(f"  [WARN] skipping {path}: root is not a JSON object", file=sys.stderr)
+        return None
+    if not isinstance(data.get("entries", []), list):
+        # a dict-valued `entries` would make _content_fp iterate its keys and
+        # blow up in e.get("text"); treat as empty instead.
+        print(f"  [WARN] {path}: 'entries' is not a list, treating as empty",
+              file=sys.stderr)
+        data["entries"] = []
+    return data
+
+
 def scan(corpus_dir):
-    """Return {run_id: {"owner":..., "content_fp":...}} for every fields.json."""
+    """Return ({run_id: {"owner":..., "content_fp":...}}, n_skipped) per fields.json."""
     paths = glob.glob(os.path.join(corpus_dir, "**", "*_fields.json"), recursive=True)
     runs = {}
+    skipped = 0
     for p in paths:
-        try:
-            d = json.load(open(p))
-        except (OSError, json.JSONDecodeError):
+        d = _load_fields_json(p)
+        if d is None:
+            skipped += 1
             continue
-        entries = d.get("entries", []) if isinstance(d, dict) else []
-        owner = _norm_owner(d.get("cv_owner") if isinstance(d, dict) else None)
+        entries = d.get("entries", [])
+        owner = _norm_owner(d.get("cv_owner"))
         cfp = _content_fp(entries)
         runs[_run_id(p)] = {"owner": owner or f"<blank:{cfp}>", "content_fp": cfp}
-    return runs
+    return runs, skipped
 
 
-def report(runs, hits=None):
+def report(runs, hits=None, skipped=0):
     n = len(runs)
     if not n:
         print("no fields.json found under that directory", file=sys.stderr)
@@ -76,18 +103,22 @@ def report(runs, hits=None):
     by_owner = Counter(r["owner"] for r in runs.values())
     by_content = Counter(r["content_fp"] for r in runs.values())
     d_owner, d_content = len(by_owner), len(by_content)
+    d_lo, d_hi = min(d_owner, d_content), max(d_owner, d_content)
     top_owner, top_n = by_owner.most_common(1)[0]
     top_share = 100 * top_n / n
     dup2 = sum(c for c in by_owner.values() if c >= 2)
 
-    print(f"{n} runs  ->  ~{min(d_owner, d_content)}-{max(d_owner, d_content)} "
+    print(f"{n} runs  ->  ~{d_lo}-{d_hi} "
           f"distinct CVs  (by owner: {d_owner}, by content: {d_content})")
+    if skipped:
+        print(f"  !! {skipped} file(s) skipped (unreadable/corrupt; see warnings "
+              f"above) -- the {n} above is what actually loaded.")
     print(f"top CV: {top_owner!r} = {top_n} runs ({top_share:.0f}%)")
     if top_share >= 25 or dup2 / n >= 0.5:
         print(f"\n  !! DUP-DOMINATED: top CV is {top_share:.0f}% of runs; "
               f"{100*dup2/n:.0f}% of runs are a CV seen >=2x.")
-        print(f"     Quote prevalence over ~{min(d_owner,d_content)}-"
-              f"{max(d_owner,d_content)} distinct CVs, NOT {n} runs.")
+        print(f"     Quote prevalence over ~{d_lo}-{d_hi} distinct CVs, "
+              f"NOT {n} runs.")
         print("     This corpus is synthetic-dominated: a rate here bounds the "
               "class, it does\n     not estimate real-user frequency.")
 
@@ -129,6 +160,19 @@ def _selftest():
     assert _norm_owner(None) == ""
     assert _run_id("x/RUNID/outputs/UID_fields.json") == "RUNID"
     assert _run_id("UID_fields.json") == "UID"
+
+    # scan() must load the good file, skip+count the corrupt one, and not crash.
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        os.makedirs(os.path.join(td, "r1", "outputs"))
+        with open(os.path.join(td, "r1", "outputs", "UID_fields.json"),
+                  "w", encoding="utf-8") as fh:
+            fh.write('{"entries":[{"text":"hi"}],"cv_owner":"Z"}')
+        with open(os.path.join(td, "bad_fields.json"), "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        got, n_skipped = scan(td)
+        assert n_skipped == 1, "the corrupt file is counted as skipped"
+        assert list(got) == ["r1"] and got["r1"]["owner"] == "Z"
     print("selftest OK")
     return 0
 
@@ -145,7 +189,8 @@ def main(argv=None):
     if not a.corpus_dir:
         ap.error("corpus_dir is required (or use --selftest)")
     hits = [h.strip() for h in a.hits.split(",") if h.strip()] if a.hits else None
-    return report(scan(a.corpus_dir), hits)
+    runs, skipped = scan(a.corpus_dir)
+    return report(runs, hits, skipped)
 
 
 if __name__ == "__main__":
