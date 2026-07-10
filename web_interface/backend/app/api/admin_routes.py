@@ -72,10 +72,18 @@ async def get_stats(
     # be computed here rather than on the client because /admin/runs is paginated --
     # the browser never holds the whole population. Prefer the persisted pipeline
     # duration; fall back to wall-clock for runs that predate the column.
+    #
+    # Select only the three duration columns rather than hydrating a full Run ORM
+    # object per completed run (#128) -- at scale that was the dominant cost here.
+    # avg/p95 stay in Python: the wall-clock fallback needs a per-dialect timestamp
+    # diff the SQLite test suite can't exercise, and the nearest-rank p95 is already
+    # portable and correct.
     durations = sorted(
-        r.total_duration_seconds if r.total_duration_seconds is not None
-        else int((r.completed_at - r.started_at).total_seconds())
-        for r in db.query(Run)
+        total if total is not None
+        else int((completed_at - started_at).total_seconds())
+        for total, started_at, completed_at in db.query(
+            Run.total_duration_seconds, Run.started_at, Run.completed_at
+        )
         .filter(Run.status == "complete", Run.started_at.isnot(None), Run.completed_at.isnot(None))
         .all()
     )
