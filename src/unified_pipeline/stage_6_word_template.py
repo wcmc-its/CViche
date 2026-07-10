@@ -120,6 +120,59 @@ DATE_FORMATS = {
 }
 
 
+# Month name -> month number, for the date parser below. Includes the common
+# 3-4 letter abbreviations CVs use ("Aug", "Sept"). Distinct from _MONTH_NAMES
+# further down, which is the reverse (number -> name) for range formatting.
+_MONTH_NAME_TO_NUM = {
+    'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+    'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11,
+    'december': 12,
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7, 'aug': 8,
+    'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+}
+
+
+def _parse_date_components(date_str: str):
+    """Parse a date string into (year, month, day) ints; any component absent
+    from the input is None. Returns (None, None, None) when nothing parses.
+
+    Single source of truth for date parsing, shared by format_date_for_section
+    (rendering) and extract_sort_date (reverse-chron sorting) so the two cannot
+    drift. They previously carried near-duplicate copies that HAD drifted: the
+    sort copy lacked the '\\.?' in the month-name pattern, so "Aug. 2021" /
+    "Sept. 2019" failed every branch and the entry sorted to the bottom of its
+    section while still rendering its date correctly (issue #266).
+    """
+    s = str(date_str or '').strip()
+    if not s:
+        return (None, None, None)
+    # YYYY-MM-DD / YYYY/MM/DD
+    m = re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    # MM/DD/YYYY / MM-DD-YYYY
+    m = re.match(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', s)
+    if m:
+        return (int(m.group(3)), int(m.group(1)), int(m.group(2)))
+    # YYYY-MM / YYYY/MM (disjoint from MM/YYYY below: 4-digit lead vs 4-digit tail)
+    m = re.match(r'(\d{4})[-/](\d{1,2})$', s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), None)
+    # MM/YYYY / MM-YYYY
+    m = re.match(r'(\d{1,2})[-/](\d{4})', s)
+    if m:
+        return (int(m.group(2)), int(m.group(1)), None)
+    # Just YYYY
+    m = re.match(r'^(\d{4})$', s)
+    if m:
+        return (int(m.group(1)), None, None)
+    # Month YYYY -- "August 2021", "Aug 2021", "Aug. 2021", "Sept. 2019"
+    m = re.match(r'([a-zA-Z]+)\.?\s*(\d{4})', s)
+    if m:
+        return (int(m.group(2)), _MONTH_NAME_TO_NUM.get(m.group(1).lower()), None)
+    return (None, None, None)
+
+
 def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool = False) -> str:
     """
     Format a date string according to the WCM template requirements for a section.
@@ -144,79 +197,30 @@ def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool
     # Get required format for this taxonomy code
     required_format = DATE_FORMATS.get(taxonomy_code, 'yyyy')
 
-    # Try to parse the date and reformat
-    # First, extract components from various input formats
-    year = None
-    month = None
-    day = None
-
-    # Pattern: YYYY-MM-DD or YYYY/MM/DD
-    match = re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', date_str)
-    if match:
-        year, month, day = match.groups()
-
-    # Pattern: MM/DD/YYYY or MM-DD-YYYY
-    if not year:
-        match = re.match(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', date_str)
-        if match:
-            month, day, year = match.groups()
-
-    # Pattern: MM/YYYY or MM-YYYY
-    if not year:
-        match = re.match(r'(\d{1,2})[-/](\d{4})', date_str)
-        if match:
-            month, year = match.groups()
-            day = None
-
-    # Pattern: YYYY-MM (ISO format)
-    if not year:
-        match = re.match(r'(\d{4})[-/](\d{1,2})$', date_str)
-        if match:
-            year, month = match.groups()
-            day = None
-
-    # Pattern: Just YYYY
-    if not year:
-        match = re.match(r'^(\d{4})$', date_str)
-        if match:
-            year = match.group(1)
-
-    # Pattern: Month YYYY (e.g., "August 2021")
-    if not year:
-        month_names = {
-            'january': '01', 'february': '02', 'march': '03', 'april': '04',
-            'may': '05', 'june': '06', 'july': '07', 'august': '08',
-            'september': '09', 'october': '10', 'november': '11', 'december': '12',
-            'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
-            'jun': '06', 'jul': '07', 'aug': '08', 'sep': '09', 'sept': '09',
-            'oct': '10', 'nov': '11', 'dec': '12'
-        }
-        match = re.match(r'([a-zA-Z]+)\.?\s*(\d{4})', date_str)
-        if match:
-            month_name, year = match.groups()
-            month = month_names.get(month_name.lower())
+    year, month, day = _parse_date_components(date_str)
 
     # If we couldn't parse it, return as-is
     if not year:
         return date_str
+    year = str(year)
 
     # Format according to required format
     if required_format == 'yyyy':
         return year
     elif required_format == 'mm/yyyy':
         if month:
-            return f"{int(month):02d}/{year}"
+            return f"{month:02d}/{year}"
         return year  # Fall back to year only if no month
     elif required_format == 'mm/yy':
         if month:
-            return f"{int(month):02d}/{year[-2:]}"
+            return f"{month:02d}/{year[-2:]}"
         # If no month, use full 4-digit year (2-digit looks odd standalone)
         return year
     elif required_format == 'mm/dd/yyyy':
         if month and day:
-            return f"{int(month):02d}/{int(day):02d}/{year}"
+            return f"{month:02d}/{day:02d}/{year}"
         elif month:
-            return f"{int(month):02d}/01/{year}"  # Default to 1st of month
+            return f"{month:02d}/01/{year}"  # Default to 1st of month
         return year
 
     return date_str
@@ -581,57 +585,13 @@ def extract_sort_date(entry: Dict) -> tuple:
         if date_str in ('present', 'current', 'ongoing', 'now'):
             return (9999, 12, 31)
 
-        # Try to extract year, month, day
-        year, month, day = None, 1, 1
-
-        # Pattern: YYYY-MM-DD or YYYY/MM/DD
-        match = re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', date_str)
-        if match:
-            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-
-        # Pattern: MM/DD/YYYY or MM-DD-YYYY
-        if not year:
-            match = re.match(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', date_str)
-            if match:
-                month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
-
-        # Pattern: YYYY-MM (ISO format)
-        if not year:
-            match = re.match(r'(\d{4})[-/](\d{1,2})$', date_str)
-            if match:
-                year, month = int(match.group(1)), int(match.group(2))
-
-        # Pattern: MM/YYYY or MM-YYYY
-        if not year:
-            match = re.match(r'(\d{1,2})[-/](\d{4})', date_str)
-            if match:
-                month, year = int(match.group(1)), int(match.group(2))
-
-        # Pattern: Just YYYY
-        if not year:
-            match = re.match(r'^(\d{4})$', date_str)
-            if match:
-                year = int(match.group(1))
-
-        # Pattern: Month YYYY (e.g., "August 2021")
-        if not year:
-            month_names = {
-                'january': 1, 'february': 2, 'march': 3, 'april': 4,
-                'may': 5, 'june': 6, 'july': 7, 'august': 8,
-                'september': 9, 'october': 10, 'november': 11, 'december': 12,
-                'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4,
-                'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'sept': 9,
-                'oct': 10, 'nov': 11, 'dec': 12
-            }
-            match = re.match(r'([a-zA-Z]+)\s*(\d{4})', date_str)
-            if match:
-                month_name, year_str = match.groups()
-                year = int(year_str)
-                month = month_names.get(month_name.lower(), 1)
-
+        # Shared parser (see format_date_for_section). Month/day absent from the
+        # input default to 1 so partial dates ("2019", "Aug. 2021") still sort
+        # sensibly within their year.
+        year, month, day = _parse_date_components(date_str)
         if year:
-            # Defensive: ensure all values are integers for tuple comparison
-            return (int(year), int(month), int(day))
+            return (year, month if month is not None else 1,
+                    day if day is not None else 1)
 
     # No date found - sort last
     return (0, 0, 0)
@@ -695,6 +655,10 @@ def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
 # Paths - Use the official WCM template
 TEMPLATE_PATH = Path(__file__).parent.parent.parent / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_6_wcm_documents"
+# Local-dev only: where sample source CVs live, for the generate() fallback that
+# locates an original docx when the caller didn't pass one. Absent in the
+# deployed image (the server always passes original_doc_path explicitly).
+SAMPLE_CV_DIR = Path(__file__).parent.parent.parent / "data" / "sample_cvs" / "word"
 
 # Fallback template paths
 FALLBACK_TEMPLATES = [
@@ -1253,17 +1217,16 @@ class WCMTemplateGenerator:
             if primary:
                 print(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
-        # Try to find original document if not provided
+        # Try to find original document if not provided. Local-dev fallback
+        # only -- the server always passes original_doc_path, and SAMPLE_CV_DIR
+        # doesn't exist in the deployed image. Anchored on the module-relative
+        # SAMPLE_CV_DIR constant plus the process CWD, instead of a stack of
+        # brittle '..'/.parent chains that broke silently on any restructure.
         if not original_doc_path:
-            # Check common locations (relative to unified_pipeline/ and project root)
-            script_dir = Path(__file__).parent
-            project_root = script_dir.parent.parent  # CV parsing - AI project/
             possible_paths = [
-                Path('data/sample_cvs/word') / f"{document_uid}.docx",
-                Path('data/sample_cvs/word') / f"{document_uid}.doc",
-                script_dir / '..' / '..' / 'data' / 'sample_cvs' / 'word' / f"{document_uid}.docx",
-                project_root / 'data' / 'sample_cvs' / 'word' / f"{document_uid}.docx",
-                Path(input_path).parent.parent.parent.parent / 'data' / 'sample_cvs' / 'word' / f"{document_uid}.docx",
+                SAMPLE_CV_DIR / f"{document_uid}.docx",
+                SAMPLE_CV_DIR / f"{document_uid}.doc",
+                Path('data/sample_cvs/word') / f"{document_uid}.docx",  # relative to CWD
             ]
             for path in possible_paths:
                 if path.exists():
@@ -1271,6 +1234,10 @@ class WCMTemplateGenerator:
                     if self.verbose:
                         print(f"Found original document: {original_doc_path}")
                     break
+            else:
+                if self.verbose:
+                    print(f"No original document found for {document_uid} in "
+                          f"{SAMPLE_CV_DIR} or ./data/sample_cvs/word")
 
         # Load Stage 4.5 research summary if available
         research_summary_data = None
