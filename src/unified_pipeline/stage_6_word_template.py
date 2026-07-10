@@ -1043,6 +1043,10 @@ class WCMTemplateGenerator:
         # Appendix entries pending reconsideration
         self._appendix_pending = []  # List of (entry, coverage_pct) tuples
 
+        # Memoizes _classify_geographic_scope's LLM calls for the life of one
+        # render, keyed on (activity location, owner institutions).
+        self._geographic_scope_cache = {}
+
         # Statistics
         self.stats = {
             'sections_filled': 0,
@@ -1234,8 +1238,12 @@ class WCMTemplateGenerator:
                     cv_owner_location = stage4_data.get('cv_owner_location', {})
                     if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
                         print(f"Loaded cv_owner_location from Stage 4 output")
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Non-fatal: geographic-scope classification just falls back
+                    # to its default. Still say so -- a permission error or a
+                    # truncated stage-4 JSON should not vanish without a trace.
+                    if self.verbose:
+                        print(f"  Warning: Could not load cv_owner_location from Stage 4: {e}")
 
         # Store location context for geographic scope classification
         self.cv_owner_location = cv_owner_location if cv_owner_location and cv_owner_location.get('inference_success') else None
@@ -1564,7 +1572,14 @@ class WCMTemplateGenerator:
     def _set_table_border(self, table: Table, color: str = '808080', size: int = 4):
         """Set table borders to 1px (4 eighths of a point), 50% gray."""
         tbl = table._tbl
-        tblPr = tbl.tblPr if tbl.tblPr is not None else OxmlElement('w:tblPr')
+        # CT_Tbl.tblPr is a OneAndOnlyOne descriptor: it returns the element or
+        # raises InvalidXmlError -- it never returns None. (ECMA-376 makes
+        # w:tblPr required on w:tbl, so a valid document always has it.) The
+        # old `if tbl.tblPr is not None else OxmlElement(...)` ternary and its
+        # trailing `if tbl.tblPr is None: tbl.insert(0, tblPr)` were therefore
+        # both unreachable. Note there is no get_or_add_tblPr() to reach for --
+        # OneAndOnlyOne generates no such accessor.
+        tblPr = tbl.tblPr
 
         tblBorders = OxmlElement('w:tblBorders')
         for border_name in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
@@ -1579,9 +1594,6 @@ class WCMTemplateGenerator:
         if existing is not None:
             tblPr.remove(existing)
         tblPr.append(tblBorders)
-
-        if tbl.tblPr is None:
-            tbl.insert(0, tblPr)
 
     def _set_cell_vertical_alignment(self, cell, align='center'):
         """Set cell vertical alignment to center (middle)."""
@@ -1747,9 +1759,6 @@ class WCMTemplateGenerator:
 
         # Create cache key to avoid repeated LLM calls for same location
         cache_key = f"{activity_location[:100]}|{','.join(owner_institutions[:2])}"
-        if not hasattr(self, '_geographic_scope_cache'):
-            self._geographic_scope_cache = {}
-
         if cache_key in self._geographic_scope_cache:
             return self._geographic_scope_cache[cache_key]
 
@@ -2282,7 +2291,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             # Look for comma before a city name
                             for state in us_states:
                                 # Pattern: "..., CityName, StateName"
-                                import re
                                 pattern = rf',\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?),\s*{re.escape(state)}$'
                                 match = re.search(pattern, part)
                                 if match:
@@ -2610,7 +2618,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             'MENTORING', 'INSTITUTIONAL LEADERSHIP', 'INSTITUTIONAL ADMINISTRATIVE',
             'EXTRAMURAL PROFESSIONAL', 'INVITATIONS TO SPEAK', 'BIBLIOGRAPHY',
         }
-        import re
         letter_pattern = re.compile(r'^[A-T]\.\s')
         paragraphs = self.doc.paragraphs
 
@@ -4972,7 +4979,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Separate award lines from year lines
             # Years are typically 4-digit numbers or ranges like "2017-2020"
-            import re
             year_pattern = re.compile(r'^(\d{4}(?:\s*-\s*\d{4})?|\d{4}(?:\s*-\s*present)?)$', re.IGNORECASE)
 
             # Header patterns to skip (tab-separated column headers from source CV tables)
@@ -5089,7 +5095,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         Returns the organization name, or empty string if none identified.
         """
-        import re
         if not text:
             return ''
 
@@ -5780,7 +5785,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
-        import re
 
         for entry in entries:
             original_text = entry.get('text', '')
@@ -5817,7 +5821,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         - Date ranges at end of lines or in separate date block
         - Two-column table extractions where roles and dates are in separate columns
         """
-        import re
 
         # Patterns for date detection
         year_only_pattern = re.compile(r'^(\d{4})\s*$')
@@ -6166,7 +6169,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         WCM template has table with: State | Number | Date of issue | Date of last registration
         Also fills DEA and NPI numbers in a separate table (Table 9).
         """
-        import re
 
         if not entries:
             return
@@ -6390,7 +6392,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not text:
             return
 
-        import re
 
         # Handle pipe-separated format: "Specialty | CertNum | Year"
         # First, split on newlines and filter empty lines
@@ -6847,7 +6848,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         - "Committee Name    1999-2010" - trailing date
         - Lines followed by date-only lines (from table column extraction)
         """
-        import re
 
         # Date patterns
         year_pattern = re.compile(r'^(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)$', re.IGNORECASE)
@@ -6986,7 +6986,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # If dates not extracted, try to parse from parenthetical patterns in original text
             # Common patterns: "(Chair 2011-2013)", "(2010-present)", "(Member 1999-2012)"
             if not dates and original_text:
-                import re
                 # Pattern 1: (Role YYYY-YYYY) or (Role YYYY-present)
                 paren_match = re.search(r'\(([^)]*?)(\d{4})\s*[-–]\s*(\d{4}|present)\)', original_text, re.IGNORECASE)
                 if paren_match:
@@ -7048,7 +7047,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
     def _add_multiline_committee_rows(self, table, lines: List[str]):
         """Add multiple committee rows from multiline content, parsing dates from each line."""
-        import re
 
         # Pattern for bare date lines (orphaned from table extraction)
         bare_date_pattern = re.compile(r'^\s*\|?\s*\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?\s*$', re.IGNORECASE)
@@ -8938,7 +8936,6 @@ Now analyze the text above:"""
             name_to_bold = target_name
         elif cv_owner_last_name:
             # Fallback: find cv_owner's name in the citation using regex
-            import re
             # Look for patterns like "Wende ME", "Wende, M", "Wende M.", etc.
             pattern = rf'\b{re.escape(cv_owner_last_name)}\s*[A-Z]{{0,3}}\.?\b'
             match = re.search(pattern, citation, re.IGNORECASE)
@@ -8999,7 +8996,6 @@ Now analyze the text above:"""
             if target_name and target_name in citation:
                 name_to_bold = target_name
             elif cv_owner_last_name:
-                import re
                 pattern = rf'\b{re.escape(cv_owner_last_name)}\s*[A-Z]{{0,3}}\.?\b'
                 match = re.search(pattern, citation, re.IGNORECASE)
                 if match:
@@ -9070,7 +9066,6 @@ Now analyze the text above:"""
         - P section tables: should not have bare dates in column A
         - Other structural issues
         """
-        import re
         issues = []
 
         # Check 1: Bulleted sections should have separate bullets, not semicolon-combined entries
