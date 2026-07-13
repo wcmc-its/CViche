@@ -1259,6 +1259,86 @@ def test_schema_tool_config_falls_back_for_non_object_schema():
 
 
 # ---------------------------------------------------------------------------
+# Single logging exit point (#273)
+# ---------------------------------------------------------------------------
+
+def test_call_llm_logs_response_exactly_once_per_provider_path():
+    """Every provider path logs the response exactly once.
+
+    log_prompt_response used to be copy-pasted into all three return branches
+    (OpenAI, Bedrock forced-tool, Bedrock text), so adding a fourth exit meant
+    remembering a fourth copy -- and forgetting silently dropped the log. There
+    is now one exit point; this pins it for all three paths.
+    """
+    from unified_pipeline.llm_client import call_llm
+
+    openai_cfg = {"provider": "openai", "model": "gpt-4o-mini", "temperature": 0,
+                  "max_tokens": None, "retry_count": 3}
+    schema_fmt = {
+        "type": "json_schema",
+        "json_schema": {"name": "grant_record",
+                        "schema": {"type": "object", "properties": {}}},
+    }
+
+    paths = []
+
+    # 1. OpenAI
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=openai_cfg), \
+         patch("unified_pipeline.llm_client._get_openai_client") as mock_openai, \
+         patch("unified_pipeline.llm_client.log_prompt_response") as logged:
+        mock_openai.return_value.chat.completions.create.return_value = _make_mock_response()
+        call_llm("stage_2", [{"role": "user", "content": "hi"}])
+        paths.append(("openai", logged.call_count))
+
+    # 2. Bedrock text/json_object path
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm_client.log_prompt_response") as logged:
+        mock_get_client.return_value.converse.return_value = _make_bedrock_response()
+        call_llm("stage_2", [{"role": "user", "content": "hi"}])
+        paths.append(("bedrock-text", logged.call_count))
+
+    # 3. Bedrock forced-tool json_schema path (#46)
+    tool_response = {
+        "output": {"message": {"content": [
+            {"toolUse": {"name": "grant_record", "input": {"title": "x"}}},
+        ]}},
+        "stopReason": "tool_use",
+        "usage": {"inputTokens": 100, "outputTokens": 50, "totalTokens": 150},
+    }
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm_client.log_prompt_response") as logged:
+        mock_get_client.return_value.converse.return_value = tool_response
+        call_llm("stage_2", [{"role": "user", "content": "hi"}],
+                 response_format=schema_fmt)
+        paths.append(("bedrock-tool", logged.call_count))
+
+    assert paths == [("openai", 1), ("bedrock-text", 1), ("bedrock-tool", 1)]
+
+
+def test_call_llm_unsupported_provider_logs_no_orphan_prompt():
+    """An undispatchable provider must not leave a prompt log with no response.
+
+    The raise now happens before log_prompt_before_call, so there is no dangling
+    entry that nothing ever closes.
+    """
+    from unified_pipeline.llm_client import call_llm
+
+    bad_cfg = {"provider": "azure", "model": "gpt-4o-mini", "temperature": 0,
+               "max_tokens": None, "retry_count": 3}
+
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=bad_cfg), \
+         patch("unified_pipeline.llm_client.log_prompt_before_call") as before, \
+         patch("unified_pipeline.llm_client.log_prompt_response") as after:
+        with pytest.raises(ValueError, match="Unsupported provider"):
+            call_llm("stage_2", [{"role": "user", "content": "test"}])
+
+    assert before.call_count == 0
+    assert after.call_count == 0
+
+
+# ---------------------------------------------------------------------------
 # latency_ms excludes retry backoff (#274)
 # ---------------------------------------------------------------------------
 
