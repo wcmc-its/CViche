@@ -1,4 +1,4 @@
-# Exact pins captured via `pip freeze` in the python:3.13-slim build image (see
+# Exact pins captured via `pip freeze` in the python:3.14-slim build image (see
 # Dockerfile) for reproducible prod builds. Regenerate the same way when bumping:
 #   docker build -f web_interface/backend/Dockerfile -t cviche-deps --target deps .
 #   docker run --rm cviche-deps pip freeze
