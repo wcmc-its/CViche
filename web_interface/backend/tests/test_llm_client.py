@@ -1131,3 +1131,203 @@ def test_bedrock_config_maxtokens_respected():
 
         passed = mock_client.converse.call_args.kwargs
         assert passed["inferenceConfig"]["maxTokens"] == 8000
+
+
+# ---------------------------------------------------------------------------
+# #46: Bedrock json_schema enforced via forced Converse toolConfig
+# ---------------------------------------------------------------------------
+
+_GRANT_SCHEMA = {
+    "type": "object",
+    "properties": {"title": {"type": "string"}, "agency": {"type": "string"}},
+    "required": ["title", "agency"],
+    "additionalProperties": False,
+}
+_JSON_SCHEMA_RF = {
+    "type": "json_schema",
+    "json_schema": {"name": "grant_record", "strict": True, "schema": _GRANT_SCHEMA},
+}
+
+
+def _make_bedrock_tool_response(tool_input, name="grant_record",
+                                input_tokens=100, output_tokens=50,
+                                total_tokens=150):
+    """Mock a Converse response where the model called a forced tool."""
+    return {
+        "output": {"message": {"role": "assistant", "content": [
+            {"toolUse": {"toolUseId": "tu_1", "name": name, "input": tool_input}},
+        ]}},
+        "usage": {"inputTokens": input_tokens, "outputTokens": output_tokens,
+                  "totalTokens": total_tokens},
+        "stopReason": "tool_use",
+    }
+
+
+def test_bedrock_json_schema_sends_forced_toolconfig():
+    """json_schema on the Bedrock path forces a single-tool call whose
+    inputSchema IS the caller's schema (not just a prompt hint)."""
+    from unified_pipeline.llm_client import call_llm
+
+    resp = _make_bedrock_tool_response({"title": "T", "agency": "NIH"})
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = resp
+        mock_get_client.return_value = mock_client
+
+        result = call_llm("parser_grants",
+                          [{"role": "system", "content": "Parse grants."},
+                           {"role": "user", "content": "..."}],
+                          response_format=_JSON_SCHEMA_RF)
+
+    passed = mock_client.converse.call_args.kwargs
+    tc = passed["toolConfig"]
+    assert tc["toolChoice"] == {"tool": {"name": "grant_record"}}
+    spec = tc["tools"][0]["toolSpec"]
+    assert spec["name"] == "grant_record"
+    assert spec["inputSchema"] == {"json": _GRANT_SCHEMA}
+    # The "respond with valid JSON only" hint must NOT be appended when the
+    # schema is enforced via the tool (it contradicts a forced tool call).
+    assert all("Respond with valid JSON only" not in s["text"]
+               for s in passed.get("system", []))
+    # content is the tool input re-serialized, so callers' json.loads() works.
+    import json as _json
+    assert _json.loads(result["content"]) == {"title": "T", "agency": "NIH"}
+    assert result["finish_reason"] == "tool_calls"
+
+
+def test_bedrock_json_schema_hard_fails_when_tool_not_used():
+    """A forced tool that didn't fire means the schema wasn't enforced -- raise,
+    never silently parse free text."""
+    from unified_pipeline.llm_client import call_llm
+
+    # stopReason != tool_use and a text block instead of toolUse.
+    resp = {
+        "output": {"message": {"role": "assistant",
+                               "content": [{"text": "{\"title\": \"T\"}"}]}},
+        "usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15},
+        "stopReason": "end_turn",
+    }
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = resp
+        mock_get_client.return_value = mock_client
+
+        with pytest.raises(RuntimeError, match="tool call did not fire"):
+            call_llm("parser_grants", [{"role": "user", "content": "x"}],
+                     response_format=_JSON_SCHEMA_RF)
+
+
+def test_bedrock_json_object_still_uses_prompt_hint_not_toolconfig():
+    """json_object (non-schema) callers keep the prompt-hint path -- no
+    toolConfig -- so the fallback is unchanged."""
+    from unified_pipeline.llm_client import call_llm
+
+    resp = _make_bedrock_response(content='{"ok": true}', stop_reason="end_turn")
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.return_value = resp
+        mock_get_client.return_value = mock_client
+
+        call_llm("stage_2", [{"role": "system", "content": "Do it."}],
+                 response_format={"type": "json_object"})
+
+    passed = mock_client.converse.call_args.kwargs
+    assert "toolConfig" not in passed
+    assert any("Respond with valid JSON only" in s["text"]
+               for s in passed["system"])
+
+
+def test_schema_tool_config_falls_back_for_non_object_schema():
+    """Non-object top-level schema (Converse inputSchema requires object) ->
+    None, so the caller uses the prompt-hint path instead."""
+    from unified_pipeline.llm_client import _schema_tool_config
+    assert _schema_tool_config(
+        {"type": "json_schema",
+         "json_schema": {"name": "x", "schema": {"type": "array"}}}) is None
+    assert _schema_tool_config({"type": "json_object"}) is None
+    assert _schema_tool_config(None) is None
+    ok = _schema_tool_config(_JSON_SCHEMA_RF)
+    assert ok["toolChoice"] == {"tool": {"name": "grant_record"}}
+
+
+# ---------------------------------------------------------------------------
+# Retry hardening (review follow-ups on #46)
+# ---------------------------------------------------------------------------
+
+def test_call_with_retry_rejects_negative_retry_count():
+    """A negative retry_count must raise ValueError, not `raise None`.
+
+    range(retry_count + 1) is empty for retry_count < 0, so the loop body never
+    runs and execution falls through to `raise last_error` with last_error
+    still None -- surfacing as a bare TypeError that names nothing useful.
+    """
+    from unified_pipeline.llm_client import _call_with_retry
+
+    with pytest.raises(ValueError, match="retry_count must be >= 0"):
+        _call_with_retry(lambda: "never called", retry_count=-1)
+
+
+def test_bedrock_json_retry_backs_off_on_throttle():
+    """A throttle on the stronger-hint JSON retry is retried, not raised.
+
+    The retry used to call _call_bedrock bare (semaphore only), bypassing
+    _call_with_retry -- so a ThrottlingException on that one call propagated
+    immediately instead of backing off.
+    """
+    from botocore.exceptions import ClientError
+    from unified_pipeline.llm_client import call_llm
+
+    throttle = ClientError(
+        {"Error": {"Code": "ThrottlingException", "Message": "slow down"}},
+        "Converse",
+    )
+    valid_json = '{"category": "publications"}'
+
+    with patch("unified_pipeline.llm_client.get_stage_config",
+               return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client.time.sleep"), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.converse.side_effect = [
+            _make_bedrock_response(content="not json at all"),  # triggers retry
+            throttle,                                           # retry throttled
+            _make_bedrock_response(content=valid_json),         # backoff succeeds
+        ]
+        mock_get_client.return_value = mock_client
+
+        result = call_llm("stage_2", [{"role": "user", "content": "test"}],
+                          response_format={"type": "json_object"})
+
+    assert result["content"] == valid_json
+    assert mock_client.converse.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# _translate_messages multimodal guard (review #244 #5 / issue #265)
+# ---------------------------------------------------------------------------
+
+def test_translate_messages_wraps_string_content():
+    """A plain string message becomes a Converse {"text": <str>} block."""
+    from unified_pipeline.llm_client import _translate_messages
+    system, msgs = _translate_messages([{"role": "user", "content": "hello"}])
+    assert msgs == [{"role": "user", "content": [{"text": "hello"}]}]
+
+
+def test_translate_messages_rejects_multimodal_list_content():
+    """List (image_url) content must fail loud, not silently wrap as
+    {"text": <list>} -- which botocore later rejects with ParamValidationError.
+    pdf_vision sends exactly this shape on the (default) Bedrock path."""
+    from unified_pipeline.llm_client import _translate_messages
+    multimodal = [
+        {"type": "text", "text": "segment this"},
+        {"type": "image_url",
+         "image_url": {"url": "data:image/jpeg;base64,AAAA", "detail": "low"}},
+    ]
+    with pytest.raises(NotImplementedError, match="multimodal"):
+        _translate_messages([{"role": "user", "content": multimodal}])

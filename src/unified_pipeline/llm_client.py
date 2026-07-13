@@ -167,14 +167,25 @@ def _get_llm_max_attempts() -> int:
     return value if value >= 1 else 3
 
 
+# Guards construction of the module-level clients below. call_llm runs on
+# several threads at once (see _llm_call_semaphore), so two threads can both
+# observe `_client is None`. For OpenAI that is merely wasteful -- the loser's
+# client is discarded and both are valid. For Bedrock it is not safe: boto3
+# builds clients off the shared default session, and only *use* of an existing
+# client is thread-safe, not its creation.
+_client_init_lock = threading.Lock()
+
+
 def _get_openai_client():
     """Get or create the OpenAI client (lazy initialization)."""
     global _openai_client
     if _openai_client is None:
-        # Bound every request so a non-responsive endpoint raises
-        # APITimeoutError (retried by _call_with_retry, then surfaced)
-        # instead of blocking forever. Reads OPENAI_API_KEY from the env.
-        _openai_client = OpenAI(timeout=_get_llm_timeout_seconds())
+        with _client_init_lock:
+            if _openai_client is None:
+                # Bound every request so a non-responsive endpoint raises
+                # APITimeoutError (retried by _call_with_retry, then surfaced)
+                # instead of blocking forever. Reads OPENAI_API_KEY from the env.
+                _openai_client = OpenAI(timeout=_get_llm_timeout_seconds())
     return _openai_client
 
 
@@ -191,21 +202,23 @@ def _get_bedrock_client():
     """
     global _bedrock_client
     if _bedrock_client is None:
-        import boto3
-        from botocore.config import Config
-        region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
-        # Explicit connect/read timeouts + bounded standard retries so a
-        # wedged Bedrock call can't block the worker thread indefinitely.
-        # botocore's default read_timeout (60s) and retry behavior are left
-        # implicit otherwise; here we make them explicit and tunable.
-        bedrock_config = Config(
-            connect_timeout=10,
-            read_timeout=_get_llm_timeout_seconds(),
-            retries={"mode": "standard", "max_attempts": _get_llm_max_attempts()},
-        )
-        _bedrock_client = boto3.client(
-            "bedrock-runtime", region_name=region, config=bedrock_config
-        )
+        with _client_init_lock:
+            if _bedrock_client is None:
+                import boto3
+                from botocore.config import Config
+                region = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+                # Explicit connect/read timeouts + bounded standard retries so a
+                # wedged Bedrock call can't block the worker thread indefinitely.
+                # botocore's default read_timeout (60s) and retry behavior are left
+                # implicit otherwise; here we make them explicit and tunable.
+                bedrock_config = Config(
+                    connect_timeout=10,
+                    read_timeout=_get_llm_timeout_seconds(),
+                    retries={"mode": "standard", "max_attempts": _get_llm_max_attempts()},
+                )
+                _bedrock_client = boto3.client(
+                    "bedrock-runtime", region_name=region, config=bedrock_config
+                )
     return _bedrock_client
 
 
@@ -220,9 +233,16 @@ def _call_with_retry(call_fn, retry_count: int = 3):
         The return value of call_fn on success
 
     Raises:
+        ValueError: If retry_count is negative
         The last error if all retries are exhausted
         Non-retryable errors immediately (including non-retryable ClientError)
     """
+    # A negative retry_count would make the loop below run zero times and fall
+    # straight through to `raise last_error` with last_error still None, which
+    # surfaces as a bare TypeError instead of the misconfiguration that caused
+    # it. retry_count is a call-site kwarg passthrough, so this is reachable.
+    if retry_count < 0:
+        raise ValueError(f"retry_count must be >= 0, got {retry_count}")
     last_error = None
     for attempt in range(retry_count + 1):
         try:
@@ -305,6 +325,53 @@ def _wants_json(response_format):
     )
 
 
+def _schema_tool_config(response_format):
+    """Build a Bedrock Converse `toolConfig` that FORCES the model to emit
+    output matching an OpenAI-style json_schema response_format.
+
+    OpenAI enforces json_schema server-side; Bedrock's plain Converse call does
+    not, so the prompt-hint path returns well-formed-but-off-schema JSON that
+    downstream field extraction mis-reads (#46). A forced single-tool call whose
+    inputSchema IS the caller's schema constrains the model the same way, and we
+    read the structured tool input instead of parsing free text.
+
+    Returns None (caller falls back to the prompt-hint path) when the caller
+    didn't request json_schema, or the schema isn't a top-level `object` -- the
+    only shape Converse inputSchema accepts. No keyword normalization: this
+    corpus's schemas use only object/enum/format/additionalProperties, all of
+    which Converse accepts as-is. A future schema with an unsupported keyword
+    ($ref, oneOf) makes Bedrock raise ValidationException loudly rather than
+    silently degrade -- see the hard-fail in call_llm's bedrock branch.
+    # ponytail: no schema normalizer; add one only if a real schema needs it.
+    """
+    if not (response_format and response_format.get("type") == "json_schema"):
+        return None
+    js = response_format.get("json_schema") or {}
+    schema = js.get("schema")
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        return None
+    name = js.get("name") or "structured_output"
+    return {
+        "tools": [{"toolSpec": {
+            "name": name,
+            "description": js.get("description")
+            or "Return the extracted record using exactly this schema.",
+            "inputSchema": {"json": schema},
+        }}],
+        "toolChoice": {"tool": {"name": name}},
+    }
+
+
+def _extract_tool_use_input(response):
+    """Return the `input` dict of the first toolUse block in a Converse
+    response, or None if the model emitted no tool call (a text-only reply)."""
+    content = response.get("output", {}).get("message", {}).get("content", [])
+    for block in content:
+        if "toolUse" in block:
+            return block["toolUse"].get("input")
+    return None
+
+
 def _strip_markdown_fences(text):
     """Remove a surrounding ```json … ``` or ``` … ``` block.
 
@@ -323,7 +390,7 @@ def _strip_markdown_fences(text):
         return text
     return stripped[first_newline + 1 : -3].rstrip()
 
-def _translate_messages(messages, response_format=None):
+def _translate_messages(messages, response_format=None, use_schema_tool=False):
     """Translate OpenAI-style messages to Bedrock Converse format.
 
     Bedrock Converse API separates system messages from conversation messages.
@@ -333,13 +400,17 @@ def _translate_messages(messages, response_format=None):
     Args:
         messages: OpenAI-style message list [{"role": "...", "content": "..."}]
         response_format: Optional response format dict
+        use_schema_tool: True when the schema is being enforced via a forced
+            Converse toolConfig (json_schema path). In that case the
+            "respond with valid JSON only" prompt hint is suppressed -- it
+            contradicts a forced tool call and can confuse the model.
 
     Returns:
         Tuple of (system_prompts, converse_messages)
     """
     system_prompts = []
     converse_messages = []
-    json_hint = _wants_json(response_format)
+    json_hint = _wants_json(response_format) and not use_schema_tool
 
     for msg in messages:
         if msg["role"] == "system":
@@ -348,9 +419,24 @@ def _translate_messages(messages, response_format=None):
                 text += "\n\nRespond with valid JSON only."
             system_prompts.append({"text": text})
         else:
+            text = msg["content"]
+            if not isinstance(text, str):
+                # Multimodal / list content (e.g. pdf_vision's OpenAI image_url
+                # blocks) cannot be wrapped as {"text": <list>}: Bedrock's
+                # Converse `text` field must be a str, and images use a different
+                # block shape ({"image": {"format", "source": {"bytes"}}}).
+                # Wrapping the list silently produced a botocore
+                # ParamValidationError deep in the call; fail loud and actionable
+                # instead. Real multimodal support is tracked in #265.
+                raise NotImplementedError(
+                    "Bedrock Converse translation does not support multimodal "
+                    f"(list) message content (role={msg['role']!r}). A stage that "
+                    "sends image blocks must be pinned to a vision-capable "
+                    "provider in llm_config.yaml, or Bedrock image-block "
+                    "translation must be implemented -- see #265.")
             converse_messages.append({
                 "role": msg["role"],
-                "content": [{"text": msg["content"]}],
+                "content": [{"text": text}],
             })
 
     # If JSON format requested but no system message existed, create one
@@ -408,7 +494,10 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     from botocore.exceptions import ClientError
 
     client = _get_bedrock_client()
-    system_prompts, converse_messages = _translate_messages(messages, response_format)
+    tool_config = _schema_tool_config(response_format)
+    system_prompts, converse_messages = _translate_messages(
+        messages, response_format, use_schema_tool=tool_config is not None
+    )
 
     if enable_prompt_caching and system_prompts:
         # Cache the system block: the large, stable schema / instruction prefix
@@ -432,6 +521,12 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     call_kwargs["inferenceConfig"]["maxTokens"] = (
         max_tokens if max_tokens is not None else DEFAULT_MAX_TOKENS
     )
+    # json_schema callers: force a single-tool call whose inputSchema is the
+    # caller's schema, so Bedrock constrains the output the way OpenAI does
+    # server-side (#46). json_object / non-schema callers keep the prompt-hint
+    # path (no toolConfig).
+    if tool_config is not None:
+        call_kwargs["toolConfig"] = tool_config
 
     try:
         return client.converse(**call_kwargs)
@@ -468,6 +563,46 @@ def _extract_cache_tokens(usage: dict) -> tuple:
                    or usage.get("CacheWriteInputTokens")
                    or 0)
     return int(cache_read), int(cache_write)
+
+
+def _finalize_bedrock_result(content, usage, cache_read_tokens, cache_write_tokens,
+                             finish_reason, model, latency_ms):
+    """Build the normalized result dict shared by both Bedrock response paths
+    (forced-tool json_schema and text / json_object).
+
+    With caching on, Bedrock's `inputTokens` reports ONLY the uncached input
+    tokens; the cached portion shows up in cacheRead/cacheWrite. calculate_cost
+    prices each bucket separately, and we synthesize totals from the three so
+    downstream cost/token tracking still sees the full input regardless of
+    caching.
+    """
+    uncached_input_tokens = usage["inputTokens"]
+    output_tokens = usage["outputTokens"]
+    total_input_tokens = uncached_input_tokens + cache_read_tokens + cache_write_tokens
+    total_tokens = total_input_tokens + output_tokens
+
+    cost = calculate_cost(
+        uncached_input_tokens,
+        output_tokens,
+        model=model,
+        provider="bedrock",
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+    )
+
+    return {
+        "content": content,
+        "prompt_tokens": total_input_tokens,
+        "completion_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "cost": cost,
+        "model": model,
+        "provider": "bedrock",
+        "finish_reason": finish_reason,
+        "latency_ms": latency_ms,
+    }
 
 
 def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict:
@@ -585,12 +720,42 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
 
         latency_ms = int((time.time() - start_time) * 1000)
 
-        # Extract and normalize Bedrock response
-        content = response["output"]["message"]["content"][0]["text"]
         usage = response["usage"]
+        cache_read_tokens, cache_write_tokens = _extract_cache_tokens(usage)
+
+        if _schema_tool_config(response_format) is not None:
+            # #46 json_schema path: the forced tool's structured `input` IS the
+            # answer. Re-serialize it so every caller's json.loads(content)
+            # keeps working, and skip the text-validation/fence-strip below
+            # (structured tool output is guaranteed valid JSON).
+            stop_reason = response.get("stopReason")
+            tool_input = _extract_tool_use_input(response)
+            if stop_reason != "tool_use" or tool_input is None:
+                # Forced tool call that didn't fire => schema not enforced.
+                # Fail loud rather than silently parsing free text.
+                raise RuntimeError(
+                    f"Bedrock forced json_schema tool call did not fire "
+                    f"(stopReason={stop_reason!r}, tool_input="
+                    f"{'present' if tool_input is not None else 'missing'})"
+                )
+            content = json_module.dumps(tool_input)
+            finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
+            result = _finalize_bedrock_result(
+                content, usage, cache_read_tokens, cache_write_tokens,
+                finish_reason, model, latency_ms,
+            )
+            log_prompt_response(
+                log_id=log_id,
+                response=result,
+                purpose=stage,
+                elapsed_time=latency_ms / 1000.0,
+            )
+            return result
+
+        # Extract and normalize Bedrock response (text / json_object path)
+        content = response["output"]["message"]["content"][0]["text"]
         stop_reason = response.get("stopReason", "end_turn")
         finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
-        cache_read_tokens, cache_write_tokens = _extract_cache_tokens(usage)
 
         # D-05: Validate JSON when response_format was requested
         if not _validate_json_response(content, response_format):
@@ -601,12 +766,18 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
                 "role": "user",
                 "content": "Your previous response was not valid JSON. Please respond with ONLY valid JSON, no markdown fencing or explanation.",
             })
-            # Bound this in-flight call too, consistent with _call_with_retry.
-            with _llm_call_semaphore:
-                retry_response = _call_bedrock(model, stronger_messages, temperature,
-                                               response_format, max_tokens,
-                                               enable_prompt_caching=enable_prompt_caching,
-                                               **extra_kwargs)
+            # Go through _call_with_retry rather than calling _call_bedrock
+            # bare: this retry is a live Bedrock request like any other, and a
+            # transient throttle on it should back off instead of raising.
+            # _call_with_retry acquires _llm_call_semaphore itself, so this
+            # call stays bounded without nesting the acquire.
+            retry_response = _call_with_retry(
+                lambda: _call_bedrock(model, stronger_messages, temperature,
+                                      response_format, max_tokens,
+                                      enable_prompt_caching=enable_prompt_caching,
+                                      **extra_kwargs),
+                retry_count=retry_count,
+            )
             content = retry_response["output"]["message"]["content"][0]["text"]
             retry_usage = retry_response["usage"]
             retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)
@@ -633,38 +804,10 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
         if _wants_json(response_format):
             content = _strip_markdown_fences(content)
 
-        # With caching on, Bedrock's `inputTokens` reports ONLY the uncached
-        # input tokens; the cached portion shows up in cacheRead/cacheWrite.
-        # calculate_cost prices each bucket separately, and we synthesize
-        # totals from the three so downstream cost/token tracking still sees
-        # the full input regardless of caching.
-        uncached_input_tokens = usage["inputTokens"]
-        output_tokens = usage["outputTokens"]
-        total_input_tokens = uncached_input_tokens + cache_read_tokens + cache_write_tokens
-        total_tokens = total_input_tokens + output_tokens
-
-        cost = calculate_cost(
-            uncached_input_tokens,
-            output_tokens,
-            model=model,
-            provider="bedrock",
-            cache_read_tokens=cache_read_tokens,
-            cache_write_tokens=cache_write_tokens,
+        result = _finalize_bedrock_result(
+            content, usage, cache_read_tokens, cache_write_tokens,
+            finish_reason, model, latency_ms,
         )
-
-        result = {
-            "content": content,
-            "prompt_tokens": total_input_tokens,
-            "completion_tokens": output_tokens,
-            "total_tokens": total_tokens,
-            "cache_read_tokens": cache_read_tokens,
-            "cache_write_tokens": cache_write_tokens,
-            "cost": cost,
-            "model": model,
-            "provider": "bedrock",
-            "finish_reason": finish_reason,
-            "latency_ms": latency_ms,
-        }
         log_prompt_response(
             log_id=log_id,
             response=result,
