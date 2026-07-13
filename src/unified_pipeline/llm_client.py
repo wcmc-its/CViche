@@ -29,7 +29,7 @@ import os
 from pathlib import Path
 import sys
 import time
-import json as json_module
+import json
 import logging
 import random
 import threading
@@ -117,14 +117,30 @@ RETRYABLE_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, Interna
 # are admission-capped, so in-flight calls are already few; this default is
 # generous headroom rather than a bottleneck. Read once at import (a
 # deploy-time knob), since BoundedSemaphore is sized at construction.
-def _get_max_concurrent_llm_calls() -> int:
+def _get_llm_config_int(key: str, default: int, min_value: int = 1) -> int:
+    """Read an int LLM knob, falling back to default if unset, unparseable,
+    or below min_value."""
     try:
-        #value = int(os.environ.get("CVICHE_MAX_CONCURRENT_LLM_CALLS", 8))
-        max_concurrent_llm_calls, _ = get_config("llm","CVICHE_MAX_CONCURRENT_LLM_CALLS",default=8)
-        value = int(max_concurrent_llm_calls)
+        value, _ = get_config("llm", key, default=default)
+        result = int(value)
     except (TypeError, ValueError):
-        return 8
-    return value if value > 0 else 8
+        return default
+    return result if result >= min_value else default
+
+
+def _get_llm_config_float(key: str, default: float, min_value: float = 0.0) -> float:
+    """Read a float LLM knob, falling back to default if unset, unparseable,
+    or at/below min_value."""
+    try:
+        value, _ = get_config("llm", key, default=default)
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if result > min_value else default
+
+
+def _get_max_concurrent_llm_calls() -> int:
+    return _get_llm_config_int("CVICHE_MAX_CONCURRENT_LLM_CALLS", default=8)
 
 
 _llm_call_semaphore = threading.BoundedSemaphore(_get_max_concurrent_llm_calls())
@@ -141,13 +157,7 @@ def _get_llm_timeout_seconds() -> float:
     surfaces to the user. Generous by default so legitimately slow calls
     are not clipped; tune via CVICHE_LLM_TIMEOUT_SECONDS.
     """
-    try:
-        #value = float(os.environ.get("CVICHE_LLM_TIMEOUT_SECONDS", 180))
-        timeout, _ = get_config("llm","CVICHE_LLM_TIMEOUT_SECONDS", default=180)
-        value = float(timeout)
-    except (TypeError, ValueError):
-        return 180.0
-    return value if value > 0 else 180.0
+    return _get_llm_config_float("CVICHE_LLM_TIMEOUT_SECONDS", default=180.0)
 
 
 def _get_llm_max_attempts() -> int:
@@ -158,13 +168,7 @@ def _get_llm_max_attempts() -> int:
     wedged Bedrock endpoint fails deterministically instead of hanging.
     Tune via CVICHE_LLM_MAX_ATTEMPTS.
     """
-    try:
-        #value = int(os.environ.get("CVICHE_LLM_MAX_ATTEMPTS", 3))
-        max_attempts,_ = get_config("llm","CVICHE_LLM_MAX_ATTEMPTS",3)
-        value = int(max_attempts)
-    except (TypeError, ValueError):
-        return 3
-    return value if value >= 1 else 3
+    return _get_llm_config_int("CVICHE_LLM_MAX_ATTEMPTS", default=3)
 
 
 # Guards construction of the module-level clients below. call_llm runs on
@@ -463,9 +467,9 @@ def _validate_json_response(content, response_format):
     if not _wants_json(response_format):
         return True
     try:
-        json_module.loads(_strip_markdown_fences(content))
+        json.loads(_strip_markdown_fences(content))
         return True
-    except (json_module.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError):
         return False
 
 
@@ -738,7 +742,7 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
                     f"(stopReason={stop_reason!r}, tool_input="
                     f"{'present' if tool_input is not None else 'missing'})"
                 )
-            content = json_module.dumps(tool_input)
+            content = json.dumps(tool_input)
             finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
             result = _finalize_bedrock_result(
                 content, usage, cache_read_tokens, cache_write_tokens,
