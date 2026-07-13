@@ -1045,7 +1045,9 @@ def test_call_semaphore_released_on_success_and_failure(monkeypatch):
     sem = mod._llm_call_semaphore
     initial = sem._value  # available permits (CPython BoundedSemaphore)
 
-    assert mod._call_with_retry(lambda: "ok", retry_count=0) == "ok"
+    result, api_seconds = mod._call_with_retry(lambda: "ok", retry_count=0)
+    assert result == "ok"
+    assert api_seconds >= 0  # timed the call itself (#274)
     assert sem._value == initial  # released after success
 
     monkeypatch.setattr(mod.time, "sleep", lambda s: None)
@@ -1254,6 +1256,55 @@ def test_schema_tool_config_falls_back_for_non_object_schema():
     assert _schema_tool_config(None) is None
     ok = _schema_tool_config(_JSON_SCHEMA_RF)
     assert ok["toolChoice"] == {"tool": {"name": "grant_record"}}
+
+
+# ---------------------------------------------------------------------------
+# latency_ms excludes retry backoff (#274)
+# ---------------------------------------------------------------------------
+
+def test_call_with_retry_excludes_backoff_from_api_seconds(monkeypatch):
+    """api_seconds must time the API call, not the wait to get one through.
+
+    The bug (#274): start_time was captured before _call_with_retry, which
+    sleeps internally during backoff -- so a call that retried twice reported
+    ~35s latency even when every attempt took milliseconds. Moving start_time
+    to just before the dispatch (the fix as originally proposed) would NOT
+    have fixed this, since the sleeps happen inside the call being timed.
+    """
+    import unified_pipeline.llm_client as mod
+    from botocore.exceptions import ClientError
+
+    # The backoff must burn REAL time, or a wall-clock implementation would pass
+    # this test too. Stand in a short real sleep for the 1s/2s the code asks for
+    # (grab the true sleep first -- mod.time IS the time module, so patching it
+    # would otherwise make this recurse).
+    real_sleep = time.sleep
+    slept = []
+
+    def fake_sleep(seconds):
+        slept.append(seconds)
+        real_sleep(0.05)
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    throttle = ClientError({"Error": {"Code": "ThrottlingException"}}, "Converse")
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise throttle
+        return "ok"
+
+    result, api_seconds = mod._call_with_retry(flaky, retry_count=3)
+
+    assert result == "ok"
+    assert calls["n"] == 3        # two failures, then success
+    assert sum(slept) >= 1.0      # the code asked for real backoff (1s + 2s bases)
+    # Two backoffs actually burned ~0.10s of wall time. The successful call is a
+    # no-op lambda, so a correct api_seconds is ~0 -- well under the backoff.
+    # Timing the whole retry loop instead would report >= 0.10 here.
+    assert api_seconds < 0.05
 
 
 # ---------------------------------------------------------------------------

@@ -234,7 +234,16 @@ def _call_with_retry(call_fn, retry_count: int = 3):
         retry_count: Max number of retries (total attempts = retry_count + 1)
 
     Returns:
-        The return value of call_fn on success
+        (result, api_seconds) -- the return value of call_fn on success, and
+        the wall time of that one successful call_fn() invocation.
+
+        api_seconds deliberately EXCLUDES backoff sleeps, failed attempts, and
+        time spent blocked on _llm_call_semaphore. It is API response time, not
+        time-to-success: callers report it as latency_ms, and cost/perf
+        dashboards built on that field would otherwise read a 35s "latency" for
+        a call whose every attempt took 300ms (#274). The wait a caller
+        actually experienced is not currently reported anywhere; add a separate
+        field if something needs it, rather than folding it back into this one.
 
     Raises:
         ValueError: If retry_count is negative
@@ -254,7 +263,11 @@ def _call_with_retry(call_fn, retry_count: int = 3):
             # around the actual call and released before any backoff sleep below,
             # so a backing-off caller never holds a slot idle.
             with _llm_call_semaphore:
-                return call_fn()
+                # monotonic, not time(): a wall-clock step (NTP) mid-call must
+                # not be able to produce a negative or wildly wrong latency.
+                started = time.monotonic()
+                result = call_fn()
+                return result, time.monotonic() - started
         except RETRYABLE_ERRORS as e:
             # For botocore ClientError, only retry if the error code is retryable.
             # Non-retryable Bedrock errors (AccessDeniedException, ValidationException,
@@ -635,7 +648,11 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
         - model (str): Model used
         - provider (str): Provider used ("openai" or "bedrock")
         - finish_reason (str): Why generation stopped
-        - latency_ms (int): Wall-clock time in milliseconds
+        - latency_ms (int): API response time in milliseconds -- the time the
+          provider call itself took. Retry backoff sleeps, failed attempts and
+          time queued on the concurrency semaphore are excluded by design, so
+          this is safe to aggregate in cost/perf dashboards (#274). On the
+          Bedrock JSON-repair path it is the sum of both live calls.
 
     Raises:
         ValueError: If provider is not supported
@@ -656,8 +673,6 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
                     if k not in {"provider", "model", "temperature", "max_tokens",
                                  "retry_count", "stage", "enable_prompt_caching"}}
 
-    start_time = time.time()
-
     log_id = log_prompt_before_call(
         messages=messages,
         model=model,
@@ -671,13 +686,13 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
 
     # Dispatch to provider
     if provider == "openai":
-        response = _call_with_retry(
+        response, api_seconds = _call_with_retry(
             lambda: _call_openai(model, messages, temperature, response_format,
                                  max_tokens, **extra_kwargs),
             retry_count=retry_count,
         )
 
-        latency_ms = int((time.time() - start_time) * 1000)
+        latency_ms = int(api_seconds * 1000)
 
         # Extract response fields
         content = response.choices[0].message.content
@@ -714,15 +729,13 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
         return result
 
     elif provider == "bedrock":
-        response = _call_with_retry(
+        response, api_seconds = _call_with_retry(
             lambda: _call_bedrock(model, messages, temperature, response_format,
                                   max_tokens,
                                   enable_prompt_caching=enable_prompt_caching,
                                   **extra_kwargs),
             retry_count=retry_count,
         )
-
-        latency_ms = int((time.time() - start_time) * 1000)
 
         usage = response["usage"]
         cache_read_tokens, cache_write_tokens = _extract_cache_tokens(usage)
@@ -744,6 +757,9 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
                 )
             content = json.dumps(tool_input)
             finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
+            # This path returns before the JSON-repair branch, so there is only
+            # ever the one dispatch to account for.
+            latency_ms = int(api_seconds * 1000)
             result = _finalize_bedrock_result(
                 content, usage, cache_read_tokens, cache_write_tokens,
                 finish_reason, model, latency_ms,
@@ -775,13 +791,18 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
             # transient throttle on it should back off instead of raising.
             # _call_with_retry acquires _llm_call_semaphore itself, so this
             # call stays bounded without nesting the acquire.
-            retry_response = _call_with_retry(
+            retry_response, retry_api_seconds = _call_with_retry(
                 lambda: _call_bedrock(model, stronger_messages, temperature,
                                       response_format, max_tokens,
                                       enable_prompt_caching=enable_prompt_caching,
                                       **extra_kwargs),
                 retry_count=retry_count,
             )
+            # This repair call is a second live Bedrock request, so its API time
+            # belongs in latency_ms -- as its tokens already do just below.
+            # Previously latency_ms was frozen before this branch ran, so the
+            # repair call was billed but never timed.
+            api_seconds += retry_api_seconds
             content = retry_response["output"]["message"]["content"][0]["text"]
             retry_usage = retry_response["usage"]
             retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)
@@ -807,6 +828,10 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
         # no fence is present or no JSON was requested.
         if _wants_json(response_format):
             content = _strip_markdown_fences(content)
+
+        # After the JSON-repair branch above, so a repair call's API time is
+        # included rather than dropped.
+        latency_ms = int(api_seconds * 1000)
 
         result = _finalize_bedrock_result(
             content, usage, cache_read_tokens, cache_write_tokens,
