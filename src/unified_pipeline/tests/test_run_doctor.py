@@ -872,6 +872,27 @@ def test_run_doctor_reports_corrupt_artifact_as_error_not_missing(tmp_path):
         "a corrupt-but-present stage_4 must not be reported as missing"
 
 
+def test_run_doctor_broken_source_docx_errors_both_source_lints(tmp_path):
+    """A present-but-unparseable source docx must surface both source-fed lints
+    (segmentation, missed_headers) as ERROR, not the benign INFO "skipped:
+    missing". The two lints read the docx through independent loaders under
+    separate _note labels ("source" / "candidates"); each must map to its own
+    ready() kwarg so a broken file is never mislabelled absent."""
+    root = _build_clean_run(tmp_path)
+    source = root / "uploads" / f"{_UID}_cv.docx"
+    assert source.exists()
+    source.write_bytes(b"not a real docx, just bytes")  # present, unparseable
+
+    payload = run_doctor(root, _UID)
+    by_lint = {f["lint"]: f for f in payload["findings"]}
+    for lint in ("segmentation", "missed_headers"):
+        assert by_lint[lint]["severity"] == "ERROR", by_lint[lint]
+        assert "unreadable" in by_lint[lint]["message"]
+    assert not any(f["severity"] == "INFO" and "skipped: missing" in f["message"]
+                   and f["lint"] in ("segmentation", "missed_headers")
+                   for f in payload["findings"])
+
+
 def test_run_doctor_reemits_sidecar_findings_end_to_end(tmp_path):
     root = _build_clean_run(tmp_path)
     _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",
@@ -929,3 +950,30 @@ def test_main_exits_0_on_clean_run(tmp_path):
         main([str(root), _UID, "--out", str(out)])
     assert exc.value.code == 0
     assert json.loads(out.read_text())["worst_severity"] == "INFO"
+
+
+def test_main_truncates_oversized_report_and_flags_it(tmp_path, monkeypatch):
+    # Shrink the caps so a normal report trips them: the missing-artifacts run
+    # yields 13 INFO findings.
+    monkeypatch.setattr("unified_pipeline.run_doctor.MAX_REPORT_BYTES", 10)
+    monkeypatch.setattr("unified_pipeline.run_doctor.MAX_REPORT_FINDINGS", 5)
+    root = tmp_path / "empty"
+    root.mkdir()
+    out = tmp_path / "doctor.json"
+    with pytest.raises(SystemExit):
+        main([str(root), "NOPE", "--out", str(out)])
+    report = json.loads(out.read_text())
+    assert report["findings_truncated"] is True
+    assert len(report["findings"]) == 5
+
+
+def test_main_exits_2_when_report_write_fails(tmp_path):
+    # out_path is an existing directory: the advisory os.access check passes but
+    # write_text raises IsADirectoryError (an OSError), which must exit(2), not
+    # crash with a traceback.
+    root = _build_clean_run(tmp_path)
+    out = tmp_path / "a_directory"
+    out.mkdir()
+    with pytest.raises(SystemExit) as exc:
+        main([str(root), _UID, "--out", str(out)])
+    assert exc.value.code == 2
