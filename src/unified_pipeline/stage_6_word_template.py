@@ -49,13 +49,31 @@ from unified_pipeline.core.template_boilerplate import (
 
 
 def _clean_inline_tabs(text: str) -> str:
-    """Render tab-separated label/value content readably instead of emitting a
-    naked tab. A raw \\t in a bullet renders ragged against Word's default tab
-    stops; the source CV's WCM tables carry "Label\\tValue" pairs. The first tab
-    becomes ": " (label: value); any further tabs become " — ". Properly
-    structured content (mentee/board tables) is routed to real Word tables
-    upstream via classification; this is the fallback for residual tabbed text."""
-    if not text or "\t" not in text:
+    """Render the pipeline's internal cell separators readably.
+
+    Two separators are artifacts of how the readers flatten a source CV, and
+    neither belongs in a rendered Word document:
+
+    - " | " joins the cells of a table row (``docx_structure_extractor``). Those
+      cells are columns, not a label/value pair, so they rejoin with " — ".
+      A row whose cells are all empty is a blank template row carrying no
+      information; it collapses to "" so callers can drop it.
+    - "\\t" joins the "Label\\tValue" pairs of the WCM template's tables. A raw
+      tab renders ragged against Word's default tab stops, so the first becomes
+      ": " (label: value) and any further tabs become " — ".
+
+    Properly structured content (mentee/board tables) is routed to real Word
+    tables upstream via classification; this is the fallback for residual text.
+
+    ponytail: the name says "tabs" but it now handles both separators. Kept as-is
+    so this change does not collide with the three bullet call sites that #254
+    also edits; rename to _clean_cell_separators once that has landed.
+    """
+    if not text:
+        return text
+    if "|" in text:
+        text = " — ".join(c.strip() for c in text.split("|") if c.strip())
+    if "\t" not in text:
         return text
     parts = [p.strip() for p in text.split("\t") if p.strip()]
     if len(parts) <= 1:
@@ -8176,15 +8194,26 @@ Now analyze the text above:"""
             and not is_template_instruction(e.get("text", ""))
             and not is_source_boilerplate(e.get("text", ""))
         ]
-        _appendix_filtered = _pre_filter - len(unmapped_entries)
+
+        # Render each surviving entry once, collapsing the readers' internal cell
+        # separators. A table row whose cells are all empty (a blank WCM template
+        # row, e.g. "|  |  |") is non-empty as raw text but renders to "" — it
+        # carries no information, so it is dropped rather than shown as a bullet.
+        rendered_entries = [
+            (e, _clean_inline_tabs(e.get("text", "")))
+            for e in unmapped_entries
+        ]
+        rendered_entries = [(e, t) for e, t in rendered_entries if t.strip()]
+
+        _appendix_filtered = _pre_filter - len(rendered_entries)
         if _appendix_filtered:
             print(f"Filtered {_appendix_filtered} boilerplate/empty entries from Appendix")
 
-        if not unmapped_entries:
+        if not rendered_entries:
             return
 
         if self.verbose:
-            print(f"Adding Appendix ({len(unmapped_entries)} unmapped entries)...")
+            print(f"Adding Appendix ({len(rendered_entries)} unmapped entries)...")
 
         # Add blank paragraph before appendix header (matching BIBLIOGRAPHY style)
         self.doc.add_paragraph()
@@ -8217,12 +8246,12 @@ Now analyze the text above:"""
 
         # Group entries by their original CV section header
         entries_by_header = {}
-        for entry in unmapped_entries:
+        for entry, text in rendered_entries:
             hierarchy = entry.get('hierarchy', [])
             header = hierarchy[0] if hierarchy else 'Unknown Section'
             if header not in entries_by_header:
                 entries_by_header[header] = []
-            entries_by_header[header].append(entry)
+            entries_by_header[header].append((entry, text))
 
         # List entries grouped by original header
         is_first_section = True
@@ -8237,8 +8266,7 @@ Now analyze the text above:"""
             run = header_para.add_run(f"From \"{header}\":")
             self._set_font(run, bold=True)
 
-            for i, entry in enumerate(entries, start=1):
-                text = entry.get('text', '')
+            for i, (entry, text) in enumerate(entries, start=1):
                 element_idx = entry.get('element_idx_start', '')
 
                 # Truncate long entries
