@@ -63,9 +63,11 @@ import logging
 import os
 import re
 import sys
+from functools import partial
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
+from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
@@ -117,11 +119,14 @@ _RENDER_TOKEN_RE = re.compile(r"[a-z]{5,}")
 _LINE_SENTINEL = "\x00"
 
 
-def _tokens(text, pattern=_RENDER_TOKEN_RE) -> set:
-    """Distinctive-word token set for one string. The single shared primitive
-    behind the entry/record/dedup overlap checks (each still applies its own
-    threshold and comparison; only the tokenizing is common)."""
-    return set(pattern.findall(_norm(text)))
+def _long_word_tokens(text) -> set:
+    """5+-letter token set for one string (lints 5/8 render-overlap checks)."""
+    return set(_RENDER_TOKEN_RE.findall(_norm(text)))
+
+
+def _alphanumeric_tokens(text) -> set:
+    """a-z0-9 token set for one string (lint 11 dedup-containment coverage)."""
+    return set(_DEDUP_TOKEN_RE.findall(_norm(text)))
 
 
 # Lint 6: an appendix bigger than this means mapping failed at scale.
@@ -141,6 +146,13 @@ RECORD_DATE_LINE_MIN_CHARS = 20
 _RECORD_DATE_PREFIX_RE = re.compile(r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]")
 
 SEVERITY_ORDER = ("ERROR", "WARN", "INFO")  # most to least severe
+
+# A well-formed report is a few KB. A malformed artifact with huge text fields
+# could inflate the findings into a multi-MB file; cap it. Evidence strings are
+# already sliced at construction, so the only way to blow the cap is a very
+# large NUMBER of findings — truncating the list is the effective lever.
+MAX_REPORT_BYTES = 10 * 1024 * 1024
+MAX_REPORT_FINDINGS = 1000
 
 # '• [M2A] ...' style taxonomy-code leak (the pre-#214 appendix format).
 _BRACKET_CODE_RE = re.compile(r"\[[A-Z]\d?[A-Z]?\d?\]")
@@ -338,15 +350,16 @@ class Haystack(NamedTuple):
 
 
 def _haystacks(blocks: List[Tuple[str, str]]) -> Haystack:
-    """(containment haystack, distinctive-token set) for the output blocks.
-    Unpacks like the (text, tokens) tuple it replaces."""
+    """Containment haystack + distinctive-token set for the output blocks.
+    Read the result via its named fields (``h.text`` / ``h.tokens``), not
+    positional unpacking."""
     pieces: List[str] = []
     tokens: set = set()
     for _, text in blocks:
         for line in str(text).split("\n"):
             if line.strip():
                 pieces.append(_squash(line))
-                tokens.update(_tokens(line))
+                tokens.update(_long_word_tokens(line))
     return Haystack(_LINE_SENTINEL.join(pieces), tokens)
 
 
@@ -400,9 +413,9 @@ def _entry_status(entry: Dict) -> Optional[str]:
     return match.group(1).strip() if match else None
 
 
-def _funding_haystacks(blocks: List[Tuple[str, str]]) -> Dict[str, Tuple[str, set]]:
-    """Per-bucket (haystack, token set) of everything rendered under each of
-    stage 6's funding subsection headers."""
+def _funding_haystacks(blocks: List[Tuple[str, str]]) -> Dict[str, Haystack]:
+    """Per-bucket Haystack of everything rendered under each of stage 6's
+    funding subsection headers."""
     segments: Dict[str, List[Tuple[str, str]]] = {c: [] for c, _ in _FUNDING_SECTIONS}
     current = None
     for kind, text in blocks:
@@ -438,8 +451,8 @@ def lint_bucket_status(stage4: Dict, blocks: List[Tuple[str, str]]) -> List[Dict
         target, _note = grant_status_rebucket_target(status or "")
         if not target or target == code:
             continue
-        verdicts = {bucket: _entry_rendered(e.get("text"), haystack, tokens)
-                    for bucket, (haystack, tokens) in rendered.items()}
+        verdicts = {bucket: _entry_rendered(e.get("text"), h.text, h.tokens)
+                    for bucket, h in rendered.items()}
         if verdicts[target]:
             continue  # stage 6 rebucketed it correctly
         if all(v is None for v in verdicts.values()):
@@ -487,17 +500,11 @@ def lint_under_extraction(stage4: Dict) -> List[Dict]:
 
 # -------------------------------------------------------------------- lint 5
 
-def _entry_fragments(text) -> List[str]:
-    """An entry's fragments: per line, per '|' cell, and per tab cell."""
-    return [frag for line in str(text or "").split("\n")
-            for cell in line.split("|") for frag in cell.split("\t")]
-
-
 def _entry_pieces(text) -> List[str]:
     """Squashed fragments of an entry long enough to be looked up in the
     output haystack."""
     pieces = []
-    for frag in _entry_fragments(text):
+    for frag in entry_fragments(text):
         squashed = _squash(frag)
         if len(squashed) >= RENDER_PIECE_MIN_CHARS:
             pieces.append(squashed[:RENDER_PIECE_WINDOW])
@@ -515,8 +522,8 @@ def _entry_rendered(text, haystack: str, haystack_tokens: set) -> Optional[bool]
     if any(piece in haystack for piece in pieces):
         return True
     verifiable = bool(pieces)
-    for chunk in [str(text or "")] + _entry_fragments(text):
-        tokens = _tokens(chunk)
+    for chunk in [str(text or "")] + entry_fragments(text):
+        tokens = _long_word_tokens(chunk)
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue
         verifiable = True
@@ -530,7 +537,7 @@ def lint_classified_unrendered(stage3b: Dict,
     """Taxonomy codes classified at 3b none of whose entries appear anywhere
     in the stage-6 output (paragraphs or tables); 'T' is skipped (appendix
     catch-all)."""
-    haystack, haystack_tokens = _haystacks(blocks)
+    h = _haystacks(blocks)
     by_code: Dict[str, List[Dict]] = {}
     for e in stage3b.get("entries", []):
         if e.get("element_type") in ("header", "break"):
@@ -543,7 +550,7 @@ def lint_classified_unrendered(stage3b: Dict,
     findings = []
     for code in sorted(by_code):
         entries = by_code[code]
-        verdicts = [(_entry_rendered(e.get("text"), haystack, haystack_tokens), e)
+        verdicts = [(_entry_rendered(e.get("text"), h.text, h.tokens), e)
                     for e in entries]
         verifiable = [(v, e) for v, e in verdicts if v is not None]
         if not verifiable or any(v for v, _ in verifiable):
@@ -679,7 +686,7 @@ def _line_token_sets(blocks: List[Tuple[str, str]]) -> List[set]:
     common academic words scattered across unrelated sections vouch for a
     dropped record, while a 5c/5d-reformatted citation still matches here
     because its surname/title tokens stay together on one line."""
-    return [_tokens(line)
+    return [_long_word_tokens(line)
             for _, text in blocks for line in str(text).split("\n")
             if line.strip()]
 
@@ -693,8 +700,8 @@ def _record_rendered(line: str, haystack: str,
     if any(piece in haystack for piece in _entry_pieces(line)):
         return True
     rendered = None
-    for chunk in [line] + _entry_fragments(line):
-        tokens = _tokens(chunk)
+    for chunk in [line] + entry_fragments(line):
+        tokens = _long_word_tokens(chunk)
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue
         if any(len(tokens & line_tokens) / len(tokens) >= RENDER_TOKEN_OVERLAP
@@ -711,7 +718,11 @@ def lint_unrendered_records(stage4: Dict,
     the unextracted remainder lines with no bullet fallback (#221). No
     element_type filter — the KFGXBW loss was on a 'break' entry; 'T' is
     skipped (appendix catch-all)."""
-    haystack, _ = _haystacks(blocks)
+    # Only h.text (the verbatim-containment haystack) is used here; h.tokens
+    # (the pooled document token set) is deliberately not — this lint scores
+    # each record against per-OUTPUT-LINE token sets so common academic words
+    # scattered across unrelated sections can't vouch for a dropped record.
+    h = _haystacks(blocks)
     line_tokens = _line_token_sets(blocks)
     findings = []
     for e in stage4.get("entries", []):
@@ -722,7 +733,7 @@ def lint_unrendered_records(stage4: Dict,
         if len(records) < UNRENDERED_MIN_RECORD_LINES:
             continue
         absent = [r for r in records
-                  if _record_rendered(r, haystack, line_tokens) is False]
+                  if _record_rendered(r, h.text, line_tokens) is False]
         if not absent:
             continue
         findings.append(_finding(
@@ -787,8 +798,8 @@ def lint_dedup_drops(report: Dict) -> List[Dict]:
     records lost, not duplicates (#227)."""
     suspect = []
     for d in report.get("dedup_decisions", []):
-        dropped = _tokens(d.get("dropped_text", ""), _DEDUP_TOKEN_RE)
-        kept = _tokens(d.get("kept_text", ""), _DEDUP_TOKEN_RE)
+        dropped = _alphanumeric_tokens(d.get("dropped_text", ""))
+        kept = _alphanumeric_tokens(d.get("kept_text", ""))
         if not dropped:
             continue
         coverage = len(dropped & kept) / len(dropped)
@@ -1016,6 +1027,34 @@ def _try(fn, label: str = None, on_unreadable=None):
 
 # --------------------------------------------------------------------- doctor
 
+def _ready(lint_id: str, *, unreadable: Dict[str, str], findings: List[Dict],
+           **inputs) -> bool:
+    """True when every input for a lint is present; else record why it was
+    skipped and return False.
+
+    A None input is an ERROR when its file existed but would not parse, and the
+    benign INFO "skipped: missing" when it was genuinely absent. The two are
+    told apart by looking the input's NAME up in `unreadable`, so each keyword
+    name passed here MUST equal the label the matching loader gave `_note`
+    (e.g. missed_headers' `candidates` input is loaded with label
+    "candidates"). Break that alignment and a broken artifact silently degrades
+    to INFO. `unreadable`/`findings` are passed in explicitly rather than closed
+    over so that coupling is visible in the signature."""
+    missing = [name for name, value in inputs.items() if value is None]
+    if not missing:
+        return True
+    broken = [name for name in missing if name in unreadable]
+    absent = [name for name in missing if name not in unreadable]
+    if absent:
+        findings.append(_finding(
+            lint_id, "INFO", "skipped: missing " + ", ".join(absent)))
+    if broken:
+        findings.append(_finding(
+            lint_id, "ERROR", "skipped: unreadable " + ", ".join(
+                f"{name} ({unreadable[name]})" for name in broken)))
+    return False
+
+
 def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     """Run every lint whose artifacts exist under root for this document uid.
     Never raises on missing/unreadable artifacts and never calls sys.exit —
@@ -1024,9 +1063,11 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     paths = {key: _find_artifact(root, uid, key) for key in _ARTIFACTS}
     source_path = Path(source) if source else _find_source(root, uid)
 
-    # Artifacts that exist but failed to load, keyed by the same name ready()
-    # uses as its input kwarg (so a None input can be traced back to a broken
-    # file vs a genuinely absent one).
+    # Artifacts that exist but failed to load, keyed by the label their loader
+    # passed to _note -- which MUST match the input kwarg name _ready() checks
+    # (so a None input is traced back to a broken file vs a genuinely absent
+    # one). The source docx feeds two independent readers; they take separate
+    # labels so a reader that fails alone is attributed to the right lint.
     unreadable: Dict[str, str] = {}
     def _note(label, detail):
         unreadable[label] = detail
@@ -1038,33 +1079,16 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     stage_5e = _load_json(paths["stage_5_enrichment"], "stage_5_enrichment", _note)
     stage_6_report = _load_json(paths["stage_6_report"], "stage_6_report", _note)
     source_lines = _try(lambda: iter_source_lines(str(source_path)), "source", _note) if source_path else None
-    candidates = _try(lambda: iter_header_candidates(str(source_path)), "source", _note) if source_path else None
+    candidates = _try(lambda: iter_header_candidates(str(source_path)), "candidates", _note) if source_path else None
     blocks = _try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note) if paths["stage_6_docx"] else None
     table_rows = _try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note) if paths["stage_6_docx"] else None
 
     findings: List[Dict] = []
-
-    def ready(lint_id: str, **inputs) -> bool:
-        missing = [name for name, value in inputs.items() if value is None]
-        if not missing:
-            return True
-        # An input that is None because its file exists-but-won't-parse is an
-        # ERROR (the lint was silenced by a broken artifact, not an absent one);
-        # a genuinely absent input is the benign INFO "skipped: missing".
-        broken = [name for name in missing if name in unreadable]
-        absent = [name for name in missing if name not in unreadable]
-        if absent:
-            findings.append(_finding(
-                lint_id, "INFO", "skipped: missing " + ", ".join(absent)))
-        if broken:
-            findings.append(_finding(
-                lint_id, "ERROR", "skipped: unreadable " + ", ".join(
-                    f"{name} ({unreadable[name]})" for name in broken)))
-        return False
+    ready = partial(_ready, unreadable=unreadable, findings=findings)
 
     if ready("segmentation", source=source_lines, stage_1a=stage_1a, stage_2=stage_2):
         findings.extend(lint_segmentation(source_lines, stage_1a, stage_2))
-    if ready("missed_headers", source=candidates, stage_1a=stage_1a, stage_2=stage_2):
+    if ready("missed_headers", candidates=candidates, stage_1a=stage_1a, stage_2=stage_2):
         findings.extend(lint_missed_headers(candidates, stage_1a, stage_2))
     if ready("bucket_status", stage_4=stage_4, stage_6_docx=blocks):
         findings.extend(lint_bucket_status(stage_4, blocks))
@@ -1115,9 +1139,10 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--out", help="report file (default: <root>/<uid>_doctor.json)")
     args = parser.parse_args(argv)
 
-    # Validate the output location BEFORE running the lints -- otherwise an
-    # unwritable --out only fails after all the (slow) docx parsing, losing the
-    # whole report.
+    # Advisory pre-check only: fail fast with a clear message BEFORE the slow
+    # docx parsing if the target is already unwritable. It is NOT the
+    # correctness guarantee -- the file can still turn unwritable between here
+    # and the write (TOCTOU), so the write below is wrapped in its own guard.
     out_path = Path(args.out) if args.out else Path(args.root) / f"{args.uid}_doctor.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.exists() and not os.access(out_path, os.W_OK):
@@ -1126,7 +1151,19 @@ def main(argv: Optional[List[str]] = None):
     payload = run_doctor(Path(args.root), args.uid,
                          Path(args.source) if args.source else None)
 
-    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    report_json = json.dumps(payload, indent=2)
+    if len(report_json.encode("utf-8")) > MAX_REPORT_BYTES:
+        logger.warning("doctor report exceeds %d bytes; truncating to %d "
+                       "findings", MAX_REPORT_BYTES, MAX_REPORT_FINDINGS)
+        payload["findings"] = payload["findings"][:MAX_REPORT_FINDINGS]
+        payload["findings_truncated"] = True
+        report_json = json.dumps(payload, indent=2)
+    try:
+        out_path.write_text(report_json, encoding="utf-8")
+    except OSError as e:
+        print(f"error: could not write report to {out_path}: {e}",
+              file=sys.stderr)
+        sys.exit(2)
 
     print(f"run doctor: {args.uid}")
     for f in payload["findings"]:

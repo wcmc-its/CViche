@@ -42,6 +42,7 @@ except ImportError:
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
+from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
@@ -948,17 +949,11 @@ def _record_lines(text) -> List[str]:
                 and _RECORD_DATE_PREFIX_RE.match(line.strip()))]
 
 
-def _entry_fragments(text) -> List[str]:
-    """An entry's fragments: per line, per '|' cell, and per tab cell."""
-    return [frag for line in str(text or "").split("\n")
-            for cell in line.split("|") for frag in cell.split("\t")]
-
-
 def _entry_pieces(text) -> List[str]:
     """Squashed fragments of an entry long enough to be looked up verbatim in
     the rendered-output haystack."""
     pieces = []
-    for frag in _entry_fragments(text):
+    for frag in entry_fragments(text):
         squashed = _squash(frag)
         if len(squashed) >= RENDER_PIECE_MIN_CHARS:
             pieces.append(squashed[:RENDER_PIECE_WINDOW])
@@ -976,7 +971,7 @@ def _record_rendered(line: str, haystack: str,
     if any(piece in haystack for piece in _entry_pieces(line)):
         return True
     rendered = None
-    for chunk in [line] + _entry_fragments(line):
+    for chunk in [line] + entry_fragments(line):
         tokens = set(_RENDER_TOKEN_RE.findall(_norm(chunk)))
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue
