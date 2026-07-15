@@ -229,7 +229,7 @@ async def _stale_run_reaper_loop(interval_seconds: int):
 SECURE_AUTH_MODES = frozenset({"saml"})
 
 
-def _guard_deployed_auth_mode(auth_mode: str, storage_backend: str, allow_simple: bool) -> None:
+def _guard_deployed_auth_mode(auth_mode: str | None, storage_backend: str, allow_simple: bool) -> None:
     """Fail closed if a deployed instance's auth mode isn't a known-secure one.
 
     On a real deployment (S3 storage backend) auth_config.yaml is expected to
@@ -255,8 +255,10 @@ def _guard_deployed_auth_mode(auth_mode: str, storage_backend: str, allow_simple
     if auth_mode == "simple":
         detail = ("login is email-allowlist only with no credential")
     else:
-        detail = (f"'{auth_mode}' is not a recognized secure auth mode "
-                  f"(expected one of: {', '.join(sorted(SECURE_AUTH_MODES))})")
+        detail = (f"'{auth_mode}' is not in SECURE_AUTH_MODES "
+                  f"(allowed: {', '.join(sorted(SECURE_AUTH_MODES))}). "
+                  f"To add a new mode, update SECURE_AUTH_MODES in app/main.py "
+                  f"only after it is implemented and verified.")
     msg = (
         f"[SECURITY] auth_mode={auth_mode} on a deployed (S3 storage) instance: "
         f"{detail}. Expected auth.mode=saml from auth_config.yaml -- check that "
@@ -296,13 +298,17 @@ async def lifespan(app: FastAPI):
         # Fail closed: a deployed (S3) instance must not silently fall back to
         # password-less email-allowlist auth if auth_config.yaml didn't render
         # auth.mode=saml (issue #111). No-op in local dev (local storage).
-        auth_mode = get_config_value(db, "auth_mode") or "simple"
+        # Raw, deliberately un-defaulted: _guard_deployed_auth_mode owns the
+        # "missing/blank -> simple" normalization. Defaulting here too meant the
+        # rule lived in two places and could drift apart on a later refactor,
+        # with the caller's copy silently deciding what the guard sees (#277).
+        auth_mode = get_config_value(db, "auth_mode")
         storage_backend, _ = get_config("s3", "CVICHE_STORAGE_BACKEND", default="local")
         _guard_deployed_auth_mode(
             auth_mode, storage_backend,
             allow_simple=os.environ.get("CVICHE_ALLOW_SIMPLE_AUTH") == "1",
         )
-        logger.info("✅ Auth mode: %s", auth_mode)
+        logger.info("✅ Auth mode: %s", auth_mode or "simple (default)")
         load_consent_text()
         logger.info("✅ Consent text loaded")
         check_consent_integrity(db)

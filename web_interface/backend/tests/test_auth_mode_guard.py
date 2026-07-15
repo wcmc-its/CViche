@@ -45,11 +45,19 @@ def test_noncanonical_simple_still_guarded(auth_mode):
         _guard_deployed_auth_mode(auth_mode, "s3", allow_simple=False)
 
 
-def test_missing_auth_mode_defaults_to_simple_and_is_guarded():
-    # Caller passes "" (get_config_value(...) or "simple" upstream); an empty
-    # mode on a deployment normalizes to simple and is still caught.
+@pytest.mark.parametrize("auth_mode", ["", None, "   "])
+def test_missing_auth_mode_defaults_to_simple_and_is_guarded(auth_mode):
+    # The guard owns the missing -> "simple" default (#277): lifespan() now
+    # passes get_config_value(db, "auth_mode") RAW, so None reaches here when the
+    # key is unset. Empty, blank and None must all normalize to simple and still
+    # be caught on a deployment.
     with pytest.raises(RuntimeError):
-        _guard_deployed_auth_mode("", "s3", allow_simple=False)
+        _guard_deployed_auth_mode(auth_mode, "s3", allow_simple=False)
+
+
+def test_missing_auth_mode_on_local_dev_is_fine():
+    # Same raw-None input, but not a deployment -> must not raise.
+    _guard_deployed_auth_mode(None, "local", allow_simple=False)
 
 
 # The guard is an ALLOWLIST: any mode not in SECURE_AUTH_MODES fails closed on a
@@ -59,11 +67,23 @@ def test_missing_auth_mode_defaults_to_simple_and_is_guarded():
 def test_unknown_mode_on_deployed_s3_fails_closed(auth_mode):
     # "oidc" is intentionally included: it is NOT implemented, so it must fail
     # closed until it is added to SECURE_AUTH_MODES with a real credential path.
+    #
+    # This is the "unknown mode fails closed on S3" check from #277 -- it already
+    # covered that case, over five modes rather than one, so it is asserted here
+    # rather than duplicated into a second single-mode test.
     assert auth_mode not in SECURE_AUTH_MODES
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(RuntimeError, match="not in SECURE_AUTH_MODES") as exc:
         _guard_deployed_auth_mode(auth_mode, "s3", allow_simple=False)
     assert "[SECURITY]" in str(exc.value)
-    assert "not a recognized secure auth mode" in str(exc.value)
+
+
+def test_unknown_mode_error_names_the_remediation():
+    """The operator reading this at 2am must be told where to fix it (#277)."""
+    with pytest.raises(RuntimeError) as exc:
+        _guard_deployed_auth_mode("none", "s3", allow_simple=False)
+    msg = str(exc.value)
+    assert "update SECURE_AUTH_MODES in app/main.py" in msg
+    assert "only after it is implemented and verified" in msg
 
 
 @pytest.mark.parametrize("auth_mode", ["none", "dev", "oidc"])
