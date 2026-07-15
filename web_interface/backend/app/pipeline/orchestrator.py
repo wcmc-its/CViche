@@ -475,12 +475,9 @@ class PipelineOrchestrator:
             await event_emitter.emit_run_start(self.run_id)
             start_time = time.time()
 
-            # Notify Teams that a fresh run started processing (issue #154).
-            # Only on a true start, not a per-step retry/resume (which passes a
-            # start_step_number), so a re-run doesn't re-announce. Best-effort:
-            # _notify_started runs off the loop and swallows all failures.
-            if start_step_number is None:
-                await self._notify_started(run)
+            # Only the terminal card is sent to Teams (#154). The run-started
+            # card was dropped to halve the notification volume — the terminal
+            # card carries the outcome, which is what a watcher actually needs.
 
             # Copy file to pipeline input directory
             cv_path = self._copy_to_pipeline_input()
@@ -642,21 +639,6 @@ class PipelineOrchestrator:
             return user.display_name or user.email
         except Exception:  # pragma: no cover - defensive
             return None
-
-    async def _notify_started(self, run):
-        """Best-effort outbound notification that a run started processing.
-
-        Mirrors _notify_terminal: runs the blocking POST off the event loop and
-        swallows every failure so a webhook problem can never affect the run.
-        """
-        try:
-            from app.services.notifications import notify_run_started
-            submitter = self._submitter_label(run)
-            await asyncio.get_running_loop().run_in_executor(
-                None, notify_run_started, run, submitter
-            )
-        except Exception as e:  # pragma: no cover - defensive
-            logger.warning("Run start notification failed for run %s: %s", self.run_id, e)
 
     async def _notify_terminal(self, run, score, doctor=None):
         """Best-effort outbound notification for a terminal run.

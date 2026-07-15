@@ -79,7 +79,7 @@ def _orchestrator(monkeypatch, tmp_path, db, run_id):
 
 
 def _capture_posts(monkeypatch):
-    """Record every Teams webhook POST payload (started + terminal cards)."""
+    """Record every Teams webhook POST payload (one terminal card per run)."""
     posts = []
 
     def _ok_post(url, json=None, timeout=None):
@@ -149,8 +149,8 @@ def test_doctor_runs_by_default_and_publishes(monkeypatch, tmp_path, db):
     files = json.loads(step.output_files)
     assert files == ["/x/cv_wcm.docx", str(report)]
 
-    # Two cards posted (started + terminal); the terminal one has the line.
-    assert len(posts) == 2
+    # One terminal card posted; it carries the Doctor line.
+    assert len(posts) == 1
     assert _facts(posts[-1])["Doctor"] == "1 findings (top: segmentation)"
 
 
@@ -176,5 +176,5 @@ def test_doctor_crash_never_fails_run(monkeypatch, tmp_path, db, caplog):
     db.expire_all()
     assert db.query(Run).filter(Run.id == "DOC_BOOM").first().status == "complete"
     assert any("Run doctor failed" in r.message for r in caplog.records)
-    assert len(posts) == 2
+    assert len(posts) == 1
     assert "Doctor" not in _facts(posts[-1])

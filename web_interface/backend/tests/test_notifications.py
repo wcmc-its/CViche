@@ -1,10 +1,10 @@
 """Regression guards for the Teams run-notification service (issue #154).
 
 Covers:
-  - build_teams_payload / build_started_payload field mapping and title color,
-    plus run-link derivation from CVICHE_ALLOWED_ORIGINS.
-  - notify_run_* best-effort contract: no-op when unconfigured, and a POST
-    exception / non-2xx is swallowed (logged, never raised).
+  - build_teams_payload field mapping and title color, the fallbackText/summary
+    for non-card surfaces, plus run-link derivation from CVICHE_ALLOWED_ORIGINS.
+  - notify_run_terminal best-effort contract: no-op when unconfigured, and a
+    POST exception / non-2xx is swallowed (logged, never raised).
 
 Cards are Adaptive Cards in the Teams Workflows envelope:
   {"type": "message", "attachments": [{"content": <AdaptiveCard>}]}
@@ -112,49 +112,45 @@ def test_payload_omits_action_when_no_origin_configured(monkeypatch):
     assert "actions" not in _card(payload)
 
 
-# --- build_started_payload ------------------------------------------------
-
-def test_started_payload_has_no_score_or_cost(monkeypatch):
-    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-    run = _run(status="created")  # start fires before status flips in-memory
-
-    payload = notifications.build_started_payload(run)
-
-    facts = _facts(payload)
-    assert facts == {"Run ID": "A1B2C3", "File": "cv.docx", "Status": "started"}
-    # The lean start card omits the terminal-only fields entirely.
-    assert "Quality score" not in facts
-    assert "Total cost" not in facts
-    # started -> blue title
-    assert _title(payload)["color"] == "accent"
-
+# --- submitter fact ---------------------------------------------------------
 
 def test_payload_includes_submitter_when_given(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-
-    started = notifications.build_started_payload(_run(status="created"), submitter="Jane Doe")
-    terminal = notifications.build_teams_payload(_run(), {"totalScore": 9, "band": "GREEN"}, submitter="Jane Doe")
-
-    assert _facts(started)["Submitted by"] == "Jane Doe"
+    terminal = notifications.build_teams_payload(
+        _run(), {"totalScore": 9, "band": "GREEN"}, submitter="Jane Doe")
     assert _facts(terminal)["Submitted by"] == "Jane Doe"
 
 
 def test_payload_omits_submitter_when_none(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-
-    assert "Submitted by" not in _facts(notifications.build_started_payload(_run()))
     assert "Submitted by" not in _facts(notifications.build_teams_payload(_run(), None))
 
 
-def test_started_payload_action_uses_first_allowed_origin(monkeypatch):
-    monkeypatch.setenv("CVICHE_ALLOWED_ORIGINS", "https://cviche.weill.cornell.edu/")
-    run = _run()
+# --- fallbackText / summary for non-card surfaces ---------------------------
 
-    payload = notifications.build_started_payload(run)
+def test_payload_carries_fallback_and_summary(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    doctor = {"counts": {"ERROR": 0, "WARN": 5, "INFO": 1},
+              "findings": [{"lint": "missed_headers", "severity": "WARN"}]}
 
-    assert _card(payload)["actions"][0]["url"] == (
-        "https://cviche.weill.cornell.edu/run/A1B2C3"
-    )
+    payload = notifications.build_teams_payload(
+        _run(), {"totalScore": 82, "band": "YELLOW"}, doctor=doctor)
+
+    # The message summary (notification/preview text) is a useful one-liner, and
+    # the card's fallbackText (shown when a surface can't render the card) mirrors
+    # it -- so neither surface shows the "cards.unsupported" placeholder.
+    assert payload["summary"].startswith("CViche run A1B2C3 complete")
+    assert "score 82 (YELLOW)" in payload["summary"]
+    assert "missed_headers" in payload["summary"]
+    assert _card(payload)["fallbackText"] == payload["summary"]
+
+
+def test_summary_degrades_when_no_score_or_doctor(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    payload = notifications.build_teams_payload(_run(status="failed"), None)
+    # No score/doctor -> bare status line, still no placeholder.
+    assert payload["summary"] == "CViche run A1B2C3 failed"
+    assert _card(payload)["fallbackText"] == "CViche run A1B2C3 failed"
 
 
 # --- doctor line on the terminal card ---------------------------------------
@@ -255,33 +251,3 @@ def test_notify_logs_warning_on_non_2xx(monkeypatch, caplog):
 
     assert result is None
     assert any("returned HTTP 500" in r.message for r in caplog.records)
-
-
-# --- notify_run_started ---------------------------------------------------
-
-def test_notify_started_is_noop_when_unconfigured(monkeypatch):
-    monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
-
-    def _fail_post(*args, **kwargs):  # pragma: no cover - must not be reached
-        raise AssertionError("requests.post should not be called when unconfigured")
-
-    monkeypatch.setattr(notifications.requests, "post", _fail_post)
-
-    assert notifications.notify_run_started(_run()) is None
-
-
-def test_notify_started_posts_when_configured(monkeypatch):
-    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
-    captured = {}
-
-    def _ok_post(url, json=None, timeout=None):
-        captured["url"] = url
-        captured["json"] = json
-        return SimpleNamespace(status_code=200)
-
-    monkeypatch.setattr(notifications.requests, "post", _ok_post)
-
-    notifications.notify_run_started(_run())
-
-    assert captured["url"] == "https://webhook.example/teams"
-    assert _title(captured["json"])["text"].endswith("started")
