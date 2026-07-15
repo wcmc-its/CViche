@@ -93,6 +93,87 @@ The CViche pipeline saves intermediate JSON outputs at each stage. This means yo
 
 ---
 
+## Step 0: Run Doctor (automated first-pass diagnosis)
+
+Before hand-inspecting stages, read the doctor report. `run_doctor` applies
+cross-stage lints over a run's artifacts — pure local file reads, **no LLM, no
+network** — and ranks findings ERROR / WARN / INFO. Each lint encodes a real
+production failure class (grants fused into one entry, pipe-delimited source
+leaking to the output, honors-table rows mis-shaped, etc.).
+
+**The lint catalog is the module docstring — the single source of truth, kept in
+code so it can't drift:** `src/unified_pipeline/run_doctor.py` (13 lints, each
+named for the failure class it catches).
+
+### On the server (automatic)
+
+Every run auto-runs the doctor after the pipeline completes (gated by
+`CVICHE_RUN_DOCTOR`, unset/`1` = on, `0` = off). It runs *after* the run is
+already complete, so a doctor problem can never fail the run. The report is:
+
+- written to `stage_7_doctor/<uid>_doctor.json` (served by the admin stage-JSON
+  viewer, and mirrored to S3 for the durable fallback),
+- attached to the final step's output files, so the UI lists it,
+- summarized as a one-line **Teams card** "Doctor" fact (substantive finding
+  count + the most-severe lint; the full findings are in the JSON report).
+
+Uploads can land on one backend replica while the run executes on another, so
+the report lives on the executing pod. If you're probing pods directly, check
+all of them: `kubectl get pods -n cviche-dev -l app=cviche-backend -o name`.
+
+### Locally
+
+```bash
+# Writes <uid>_doctor.json into <root>, prints a summary, exits 1 on any WARN+
+PYTHONPATH=src python -m unified_pipeline.run_doctor <root> <uid> \
+    [--source cv.docx] [--out report.json]
+```
+
+`<root>` is the outputs dir holding `stage_*/<uid>_*.json`. For a server run,
+fetch the artifacts first (`scripts/fetch_run_artifacts.sh <uid>`), then point
+the doctor at them.
+
+### Reading findings
+
+- Findings reference entries by `element_idx_start` (may be a float like
+  `30.0`), **not** by stage-2 array index — match on that field.
+- Lints are **heuristics**. Verify each against the raw stage JSON and the
+  output docx before acting on it — stage 5c/5d reformat citations and teaching,
+  so naive source-vs-output text diffs produce many false positives.
+- A report missing an expected finding often just means the executing pod ran an
+  older image than the lint was added in (deploy drift), not that the run is
+  clean — re-run the doctor locally from fresh `origin/dev` to confirm.
+
+### Judging how widespread a problem is
+
+The run corpus is dominated by a few synthetic test CVs re-run many times
+(~92 runs ≈ 12–20 distinct CVs, one CV ~48% of runs), so **quote prevalence over
+distinct CVs, never runs**:
+
+```bash
+# Sync a fields.json corpus (dev bucket; prod bucket is empty)
+aws s3 sync s3://wcm-cviche-storage/cviche/runs/ <dir> \
+    --exclude '*' --include '*/outputs/*_fields.json'
+# Collapse runs -> distinct CVs; --hits are the runs where the bug appears
+python3 scripts/corpus_distinct_cvs.py <dir> --hits <run_id>,<run_id>
+```
+
+A rate on this synthetic corpus **bounds a bug class** — it does not estimate how
+often real users hit it.
+
+### From a finding to a fix
+
+1. Verify the finding against raw artifacts (above).
+2. Dedupe against open issues (`gh issue list`) — most findings are new examples
+   of an existing class (e.g. #208 layout-table fusion). Extend that issue; file
+   a new one only for a genuinely new class, one per class.
+3. Fix on a worktree off fresh `origin/dev`, one PR per concern, with captured
+   stage JSON turned into a **synthesized** regression fixture (no PII).
+4. Compound it: a genuinely new failure class becomes a new lint in
+   `run_doctor.py`, so the next run catches it automatically.
+
+---
+
 ## Step 1: Identify the Problem Stage
 
 When you see incorrect output, first determine WHERE the data went wrong.

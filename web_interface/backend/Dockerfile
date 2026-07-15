@@ -10,7 +10,7 @@
 #   docker compose build backend          # (compose sets the context)
 
 # ---- Stage 1: Dependencies ----
-FROM python:3.11-slim AS deps
+FROM python:3.14-slim AS deps
 
 WORKDIR /app
 
@@ -35,7 +35,7 @@ COPY requirements.txt /tmp/pipeline-requirements.txt
 RUN pip install --no-cache-dir --no-compile \
         -r /tmp/web-requirements.txt \
         -r /tmp/pipeline-requirements.txt \
-    && find /usr/local/lib/python3.11 -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true
+    && find /usr/local/lib/python3.14 -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true
 
 # ---- Stage 2: Application ----
 FROM deps AS app

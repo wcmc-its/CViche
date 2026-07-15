@@ -847,6 +847,31 @@ def test_run_doctor_clean_run_end_to_end(tmp_path):
     assert payload["worst_severity"] == "INFO"
 
 
+def test_run_doctor_reports_corrupt_artifact_as_error_not_missing(tmp_path):
+    """A present-but-unparseable stage_4 must surface as an ERROR, not the
+    benign INFO "skipped: missing stage_4" -- otherwise a corrupt artifact
+    silently disables its lints and skews the corpus-sweep denominators with
+    no signal at all."""
+    root = _build_clean_run(tmp_path)
+    stage4 = root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json"
+    assert stage4.exists()
+    stage4.write_text('{"entries": [ this is not valid json')  # file present, corrupt
+
+    payload = run_doctor(root, _UID)
+    messages = {(f["severity"], f["message"]) for f in payload["findings"]}
+
+    # The lints keyed on stage_4 report it unreadable, at ERROR severity...
+    unreadable = [f for f in payload["findings"]
+                  if f["severity"] == "ERROR" and "unreadable" in f["message"]
+                  and "stage_4" in f["message"]]
+    assert unreadable, f"expected an ERROR naming unreadable stage_4; got {messages}"
+    assert payload["counts"]["ERROR"] >= 1
+    # ...and never mislabel a file that exists as "missing".
+    assert not any(sev == "INFO" and "skipped: missing" in msg and "stage_4" in msg
+                   for sev, msg in messages), \
+        "a corrupt-but-present stage_4 must not be reported as missing"
+
+
 def test_run_doctor_reemits_sidecar_findings_end_to_end(tmp_path):
     root = _build_clean_run(tmp_path)
     _write_stage(root, "stage_6_wcm_documents", f"{_UID}_cv_render_warnings.json",

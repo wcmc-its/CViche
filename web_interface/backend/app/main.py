@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import traceback
+from urllib.parse import urlsplit
 
 
 from fastapi import FastAPI, Request, Depends, Response, status
@@ -52,6 +53,48 @@ def _resolve_allowed_origins() -> list[str]:
     
 
 _allowed_origins = _resolve_allowed_origins()
+
+
+def _origin_key(origin: str) -> tuple[str, str, int] | None:
+    """Parse an Origin value into a comparable (scheme, host, port) triple.
+
+    Default ports are normalized so "https://host" == "https://host:443".
+    Returns None when unparseable (no scheme/host, bad port), which callers
+    must treat as not-allowed.
+    """
+    try:
+        parts = urlsplit(origin.strip())
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return None
+    if not parts.scheme or not host:
+        return None
+    if port is None:
+        port = {"http": 80, "https": 443}.get(parts.scheme, 0)
+    # urlsplit/.hostname already lowercase these, but normalize explicitly so a
+    # non-normalized configured origin (e.g. "HTTPS://Host") still compares equal.
+    return (parts.scheme.lower(), host.lower(), port)
+
+
+_allowed_origin_keys = frozenset(
+    key for key in (_origin_key(o) for o in _allowed_origins) if key is not None
+)
+
+
+def _docs_enabled() -> bool:
+    """Serve /docs, /redoc and /openapi.json only when explicitly enabled.
+
+    Default off: the interactive docs enumerate every route and schema to
+    unauthenticated clients. Enable ONLY with CVICHE_ENABLE_DOCS=true (env var,
+    or auth_config.yaml under `auth` -- same wiring as CVICHE_ALLOWED_ORIGINS).
+    Deliberately NOT tied to CVICHE_DEBUG: an accidental CVICHE_DEBUG=true in
+    prod must not expose the API surface -- docs require their own explicit flag.
+    """
+    raw, _ = get_config("auth", "CVICHE_ENABLE_DOCS", default="")
+    return str(raw).strip().lower() in ("1", "true", "yes")
+
+
+_DOCS_ENABLED = _docs_enabled()
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +158,9 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             if request.url.path in CSRF_EXEMPT_PATHS:
                 return await call_next(request)
             origin = request.headers.get("origin") or ""
-            if origin and not any(origin.startswith(o) for o in _allowed_origins):
+            # Exact scheme+host+port comparison; a prefix match would accept
+            # lookalike domains (https://cviche.weill.cornell.edu.evil.com).
+            if origin and _origin_key(origin) not in _allowed_origin_keys:
                 return JSONResponse(
                     status_code=403,
                     content={"error": "forbidden", "message": "Cross-origin request rejected."},
@@ -173,6 +218,60 @@ async def _stale_run_reaper_loop(interval_seconds: int):
             )
 
 
+# Auth modes with a real credential check, allowed on a deployed (S3) instance.
+# Only "saml" is implemented today (see auth_routes.login / auth.py); "oidc" is
+# NOT here yet and is deliberately NOT listed -- allow it only once it exists and
+# is proven to authenticate, or a config typo'd to "oidc" would boot into a
+# locked-out (login 403s, SAML inactive) state. This is an ALLOWLIST on purpose:
+# any mode not in it -- "simple", "none", a future permissive mode, a typo --
+# fails closed on a deployment by default, so a new mode can't slip the guard
+# just because nobody remembered to blocklist it (mrj4001 review on #111).
+SECURE_AUTH_MODES = frozenset({"saml"})
+
+
+def _guard_deployed_auth_mode(auth_mode: str | None, storage_backend: str, allow_simple: bool) -> None:
+    """Fail closed if a deployed instance's auth mode isn't a known-secure one.
+
+    On a real deployment (S3 storage backend) auth_config.yaml is expected to
+    render a mode in SECURE_AUTH_MODES (auth.mode=saml). Anything else -- most
+    often "simple" (email-allowlist login with NO credential, see
+    auth_routes.login) from a broken or empty auth_config.yaml, but also any
+    unrecognized/future mode -- means the instance can't authenticate the way a
+    deployment must. Refuse to boot so the misconfiguration can't silently
+    expose or brick the instance (issue #111). An operator who genuinely wants
+    to override sets CVICHE_ALLOW_SIMPLE_AUTH=1. Local dev
+    (storage_backend="local") is never affected.
+    """
+    # Normalize before comparing: config values can arrive with stray case or
+    # whitespace ("S3", "s3 ", "Simple"). An exact-match compare would let those
+    # slip past the guard and boot a deployed non-secure instance (bypass).
+    # A missing/empty auth_mode resolves to "simple" here -- so a deployment
+    # with no rendered auth.mode fails closed regardless of the caller's own
+    # defaulting, while local dev (non-s3) stays unaffected.
+    auth_mode = (auth_mode or "").strip().lower() or "simple"
+    storage_backend = (storage_backend or "").strip().lower()
+    if storage_backend != "s3" or auth_mode in SECURE_AUTH_MODES:
+        return
+    if auth_mode == "simple":
+        detail = ("login is email-allowlist only with no credential")
+    else:
+        detail = (f"'{auth_mode}' is not in SECURE_AUTH_MODES "
+                  f"(allowed: {', '.join(sorted(SECURE_AUTH_MODES))}). "
+                  f"To add a new mode, update SECURE_AUTH_MODES in app/main.py "
+                  f"only after it is implemented and verified.")
+    msg = (
+        f"[SECURITY] auth_mode={auth_mode} on a deployed (S3 storage) instance: "
+        f"{detail}. Expected auth.mode=saml from auth_config.yaml -- check that "
+        "the overlay's auth_config.yaml rendered."
+    )
+    if allow_simple:
+        logger.warning("%s Proceeding anyway because CVICHE_ALLOW_SIMPLE_AUTH=1.", msg)
+    else:
+        raise RuntimeError(
+            f"{msg} Refusing to start; set CVICHE_ALLOW_SIMPLE_AUTH=1 to override."
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan events."""
@@ -188,7 +287,7 @@ async def lifespan(app: FastAPI):
         logger.info("✅ Database initialized")
     else:
         logger.info("⏭️  Skipping init_db() (CVICHE_INIT_DB=0); Alembic owns schema.")
-    from app.config_loader import seed_system_config
+    from app.config_loader import seed_system_config, get_config_value
     from app.consent import load_consent_text, check_consent_integrity
     from app.services.run_service import reconcile_stale_runs
     from app.database import SessionLocal
@@ -196,6 +295,20 @@ async def lifespan(app: FastAPI):
     try:
         seed_system_config(db)
         logger.info("✅ System config seeded")
+        # Fail closed: a deployed (S3) instance must not silently fall back to
+        # password-less email-allowlist auth if auth_config.yaml didn't render
+        # auth.mode=saml (issue #111). No-op in local dev (local storage).
+        # Raw, deliberately un-defaulted: _guard_deployed_auth_mode owns the
+        # "missing/blank -> simple" normalization. Defaulting here too meant the
+        # rule lived in two places and could drift apart on a later refactor,
+        # with the caller's copy silently deciding what the guard sees (#277).
+        auth_mode = get_config_value(db, "auth_mode")
+        storage_backend, _ = get_config("s3", "CVICHE_STORAGE_BACKEND", default="local")
+        _guard_deployed_auth_mode(
+            auth_mode, storage_backend,
+            allow_simple=os.environ.get("CVICHE_ALLOW_SIMPLE_AUTH") == "1",
+        )
+        logger.info("✅ Auth mode: %s", auth_mode or "simple (default)")
         load_consent_text()
         logger.info("✅ Consent text loaded")
         check_consent_integrity(db)
@@ -259,7 +372,12 @@ app = FastAPI(
     title="CViche Pipeline Viewer",
     description="Web interface for CViche with real-time progress tracking",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    # API docs are opt-in (see _docs_enabled); openapi_url=None also disables
+    # the schema endpoint the docs pages are rendered from.
+    docs_url="/docs" if _DOCS_ENABLED else None,
+    redoc_url="/redoc" if _DOCS_ENABLED else None,
+    openapi_url="/openapi.json" if _DOCS_ENABLED else None,
 )
 
 # CORS middleware (allow frontend to connect)
@@ -305,7 +423,7 @@ async def root():
     return {
         "message": "CViche Pipeline Viewer API",
         "version": "1.0.0",
-        "docs": "/docs",
+        "docs": "/docs" if _DOCS_ENABLED else None,
         "status": "running"
     }
 

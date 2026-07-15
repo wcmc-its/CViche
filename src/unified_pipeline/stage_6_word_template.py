@@ -49,13 +49,31 @@ from unified_pipeline.core.template_boilerplate import (
 
 
 def _clean_inline_tabs(text: str) -> str:
-    """Render tab-separated label/value content readably instead of emitting a
-    naked tab. A raw \\t in a bullet renders ragged against Word's default tab
-    stops; the source CV's WCM tables carry "Label\\tValue" pairs. The first tab
-    becomes ": " (label: value); any further tabs become " — ". Properly
-    structured content (mentee/board tables) is routed to real Word tables
-    upstream via classification; this is the fallback for residual tabbed text."""
-    if not text or "\t" not in text:
+    """Render the pipeline's internal cell separators readably.
+
+    Two separators are artifacts of how the readers flatten a source CV, and
+    neither belongs in a rendered Word document:
+
+    - " | " joins the cells of a table row (``docx_structure_extractor``). Those
+      cells are columns, not a label/value pair, so they rejoin with " — ".
+      A row whose cells are all empty is a blank template row carrying no
+      information; it collapses to "" so callers can drop it.
+    - "\\t" joins the "Label\\tValue" pairs of the WCM template's tables. A raw
+      tab renders ragged against Word's default tab stops, so the first becomes
+      ": " (label: value) and any further tabs become " — ".
+
+    Properly structured content (mentee/board tables) is routed to real Word
+    tables upstream via classification; this is the fallback for residual text.
+
+    ponytail: the name says "tabs" but it now handles both separators. Kept as-is
+    so this change does not collide with the three bullet call sites that #254
+    also edits; rename to _clean_cell_separators once that has landed.
+    """
+    if not text:
+        return text
+    if "|" in text:
+        text = " — ".join(c.strip() for c in text.split("|") if c.strip())
+    if "\t" not in text:
         return text
     parts = [p.strip() for p in text.split("\t") if p.strip()]
     if len(parts) <= 1:
@@ -82,6 +100,21 @@ def _committee_cell_text(value) -> str:
     if isinstance(value, list):
         return "; ".join(t for t in (_committee_cell_text(v) for v in value) if t)
     return str(value)
+
+
+# A leading 3b taxonomy code (M2B, D1, S6, N3A …) that leaked into a rendered
+# bullet — code letter + 1-2 digits + optional trailing letter, bracketed at the
+# very start and followed by whitespace. Seen verbatim in output on the WCM-
+# template CVs (issue #251): "• [M2B] Project title: …", "• [D1] Visiting Prof…".
+_TAXONOMY_CODE_PREFIX = re.compile(r"^\s*\[[A-Z]\d{1,2}[A-Z]?\]\s+")
+
+
+def _strip_taxonomy_code(text: str) -> str:
+    """Drop a leading bracketed taxonomy code from bullet text before render.
+    # ponytail: shape-match, not a code allowlist — could also strip a leading
+    # grant-mechanism token like "[R01] " (rare as a bullet's first token); switch
+    # to the TAXONOMY_TO_SECTION key set if that ever shows up in output."""
+    return _TAXONOMY_CODE_PREFIX.sub("", text) if text else text
 
 
 # XML namespaces for Word documents
@@ -141,6 +174,59 @@ DATE_FORMATS = {
 }
 
 
+# Month name -> month number, for the date parser below. Includes the common
+# 3-4 letter abbreviations CVs use ("Aug", "Sept"). Distinct from _MONTH_NAMES
+# further down, which is the reverse (number -> name) for range formatting.
+_MONTH_NAME_TO_NUM = {
+    'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+    'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11,
+    'december': 12,
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7, 'aug': 8,
+    'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+}
+
+
+def _parse_date_components(date_str: str):
+    """Parse a date string into (year, month, day) ints; any component absent
+    from the input is None. Returns (None, None, None) when nothing parses.
+
+    Single source of truth for date parsing, shared by format_date_for_section
+    (rendering) and extract_sort_date (reverse-chron sorting) so the two cannot
+    drift. They previously carried near-duplicate copies that HAD drifted: the
+    sort copy lacked the '\\.?' in the month-name pattern, so "Aug. 2021" /
+    "Sept. 2019" failed every branch and the entry sorted to the bottom of its
+    section while still rendering its date correctly (issue #266).
+    """
+    s = str(date_str or '').strip()
+    if not s:
+        return (None, None, None)
+    # YYYY-MM-DD / YYYY/MM/DD
+    m = re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    # MM/DD/YYYY / MM-DD-YYYY
+    m = re.match(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', s)
+    if m:
+        return (int(m.group(3)), int(m.group(1)), int(m.group(2)))
+    # YYYY-MM / YYYY/MM (disjoint from MM/YYYY below: 4-digit lead vs 4-digit tail)
+    m = re.match(r'(\d{4})[-/](\d{1,2})$', s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), None)
+    # MM/YYYY / MM-YYYY
+    m = re.match(r'(\d{1,2})[-/](\d{4})', s)
+    if m:
+        return (int(m.group(2)), int(m.group(1)), None)
+    # Just YYYY
+    m = re.match(r'^(\d{4})$', s)
+    if m:
+        return (int(m.group(1)), None, None)
+    # Month YYYY -- "August 2021", "Aug 2021", "Aug. 2021", "Sept. 2019"
+    m = re.match(r'([a-zA-Z]+)\.?\s*(\d{4})', s)
+    if m:
+        return (int(m.group(2)), _MONTH_NAME_TO_NUM.get(m.group(1).lower()), None)
+    return (None, None, None)
+
+
 def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool = False) -> str:
     """
     Format a date string according to the WCM template requirements for a section.
@@ -165,79 +251,30 @@ def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool
     # Get required format for this taxonomy code
     required_format = DATE_FORMATS.get(taxonomy_code, 'yyyy')
 
-    # Try to parse the date and reformat
-    # First, extract components from various input formats
-    year = None
-    month = None
-    day = None
-
-    # Pattern: YYYY-MM-DD or YYYY/MM/DD
-    match = re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', date_str)
-    if match:
-        year, month, day = match.groups()
-
-    # Pattern: MM/DD/YYYY or MM-DD-YYYY
-    if not year:
-        match = re.match(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', date_str)
-        if match:
-            month, day, year = match.groups()
-
-    # Pattern: MM/YYYY or MM-YYYY
-    if not year:
-        match = re.match(r'(\d{1,2})[-/](\d{4})', date_str)
-        if match:
-            month, year = match.groups()
-            day = None
-
-    # Pattern: YYYY-MM (ISO format)
-    if not year:
-        match = re.match(r'(\d{4})[-/](\d{1,2})$', date_str)
-        if match:
-            year, month = match.groups()
-            day = None
-
-    # Pattern: Just YYYY
-    if not year:
-        match = re.match(r'^(\d{4})$', date_str)
-        if match:
-            year = match.group(1)
-
-    # Pattern: Month YYYY (e.g., "August 2021")
-    if not year:
-        month_names = {
-            'january': '01', 'february': '02', 'march': '03', 'april': '04',
-            'may': '05', 'june': '06', 'july': '07', 'august': '08',
-            'september': '09', 'october': '10', 'november': '11', 'december': '12',
-            'jan': '01', 'feb': '02', 'mar': '03', 'apr': '04',
-            'jun': '06', 'jul': '07', 'aug': '08', 'sep': '09', 'sept': '09',
-            'oct': '10', 'nov': '11', 'dec': '12'
-        }
-        match = re.match(r'([a-zA-Z]+)\.?\s*(\d{4})', date_str)
-        if match:
-            month_name, year = match.groups()
-            month = month_names.get(month_name.lower())
+    year, month, day = _parse_date_components(date_str)
 
     # If we couldn't parse it, return as-is
     if not year:
         return date_str
+    year = str(year)
 
     # Format according to required format
     if required_format == 'yyyy':
         return year
     elif required_format == 'mm/yyyy':
         if month:
-            return f"{int(month):02d}/{year}"
+            return f"{month:02d}/{year}"
         return year  # Fall back to year only if no month
     elif required_format == 'mm/yy':
         if month:
-            return f"{int(month):02d}/{year[-2:]}"
+            return f"{month:02d}/{year[-2:]}"
         # If no month, use full 4-digit year (2-digit looks odd standalone)
         return year
     elif required_format == 'mm/dd/yyyy':
         if month and day:
-            return f"{int(month):02d}/{int(day):02d}/{year}"
+            return f"{month:02d}/{day:02d}/{year}"
         elif month:
-            return f"{int(month):02d}/01/{year}"  # Default to 1st of month
+            return f"{month:02d}/01/{year}"  # Default to 1st of month
         return year
 
     return date_str
@@ -602,57 +639,13 @@ def extract_sort_date(entry: Dict) -> tuple:
         if date_str in ('present', 'current', 'ongoing', 'now'):
             return (9999, 12, 31)
 
-        # Try to extract year, month, day
-        year, month, day = None, 1, 1
-
-        # Pattern: YYYY-MM-DD or YYYY/MM/DD
-        match = re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', date_str)
-        if match:
-            year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
-
-        # Pattern: MM/DD/YYYY or MM-DD-YYYY
-        if not year:
-            match = re.match(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', date_str)
-            if match:
-                month, day, year = int(match.group(1)), int(match.group(2)), int(match.group(3))
-
-        # Pattern: YYYY-MM (ISO format)
-        if not year:
-            match = re.match(r'(\d{4})[-/](\d{1,2})$', date_str)
-            if match:
-                year, month = int(match.group(1)), int(match.group(2))
-
-        # Pattern: MM/YYYY or MM-YYYY
-        if not year:
-            match = re.match(r'(\d{1,2})[-/](\d{4})', date_str)
-            if match:
-                month, year = int(match.group(1)), int(match.group(2))
-
-        # Pattern: Just YYYY
-        if not year:
-            match = re.match(r'^(\d{4})$', date_str)
-            if match:
-                year = int(match.group(1))
-
-        # Pattern: Month YYYY (e.g., "August 2021")
-        if not year:
-            month_names = {
-                'january': 1, 'february': 2, 'march': 3, 'april': 4,
-                'may': 5, 'june': 6, 'july': 7, 'august': 8,
-                'september': 9, 'october': 10, 'november': 11, 'december': 12,
-                'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4,
-                'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'sept': 9,
-                'oct': 10, 'nov': 11, 'dec': 12
-            }
-            match = re.match(r'([a-zA-Z]+)\s*(\d{4})', date_str)
-            if match:
-                month_name, year_str = match.groups()
-                year = int(year_str)
-                month = month_names.get(month_name.lower(), 1)
-
+        # Shared parser (see format_date_for_section). Month/day absent from the
+        # input default to 1 so partial dates ("2019", "Aug. 2021") still sort
+        # sensibly within their year.
+        year, month, day = _parse_date_components(date_str)
         if year:
-            # Defensive: ensure all values are integers for tuple comparison
-            return (int(year), int(month), int(day))
+            return (year, month if month is not None else 1,
+                    day if day is not None else 1)
 
     # No date found - sort last
     return (0, 0, 0)
@@ -674,9 +667,52 @@ def sort_entries_reverse_chronological(entries: List[Dict]) -> List[Dict]:
     return sorted(entries, key=extract_sort_date, reverse=True)
 
 
+def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
+    """Un-fuse publication entries whose stage-5d ``formatted_citation`` carries
+    multiple newline-separated citations.
+
+    The #208 fusion class reaches the bibliography too: when several source
+    citations collapse into one entry, stage 5d formats the whole block into a
+    single ``formatted_citation`` (newline-separated), and _fill_bibliography
+    then renders ONE numbered item followed by unnumbered ``<w:br/>``
+    continuation lines (the "no numbering on some pubs" symptom, HNFLBA S8).
+
+    Splitting each non-blank line into its own entry lets the caller number them
+    individually. A non-fused citation is a single line (verified: 100/101 of a
+    real CV's formatted_citations have zero internal newlines), so it passes
+    through untouched. Only stage-5d LLM citations with >=2 lines are split;
+    other bibliography shapes (parts-built citations) never carry newlines.
+    Continuation lines (i>0) are distinct records, so per-entry provenance that
+    belongs to the block as a whole (classification comment, enrichment
+    track-change, original text) is kept on the first line only, not replayed
+    on each.
+    """
+    out: List[Dict] = []
+    for pub in pubs:
+        fields = pub.get('extracted_fields') or {}
+        fc = fields.get('formatted_citation') or ''
+        lines = [ln.strip() for ln in fc.splitlines() if ln.strip()]
+        if fields.get('formatting_source') == 'stage_5d_llm' and len(lines) >= 2:
+            for i, line in enumerate(lines):
+                clone = dict(pub)
+                clone['extracted_fields'] = {**fields, 'formatted_citation': line}
+                if i > 0:
+                    clone['enrichment_status'] = ''
+                    clone['text'] = ''
+                    clone.pop('classification_reasoning', None)
+                out.append(clone)
+        else:
+            out.append(pub)
+    return out
+
+
 # Paths - Use the official WCM template
 TEMPLATE_PATH = Path(__file__).parent.parent.parent / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_6_wcm_documents"
+# Local-dev only: where sample source CVs live, for the generate() fallback that
+# locates an original docx when the caller didn't pass one. Absent in the
+# deployed image (the server always passes original_doc_path explicitly).
+SAMPLE_CV_DIR = Path(__file__).parent.parent.parent / "data" / "sample_cvs" / "word"
 
 # Fallback template paths
 FALLBACK_TEMPLATES = [
@@ -1025,6 +1061,10 @@ class WCMTemplateGenerator:
         # Appendix entries pending reconsideration
         self._appendix_pending = []  # List of (entry, coverage_pct) tuples
 
+        # Memoizes _classify_geographic_scope's LLM calls for the life of one
+        # render, keyed on (activity location, owner institutions).
+        self._geographic_scope_cache = {}
+
         # Statistics
         self.stats = {
             'sections_filled': 0,
@@ -1216,8 +1256,12 @@ class WCMTemplateGenerator:
                     cv_owner_location = stage4_data.get('cv_owner_location', {})
                     if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
                         print(f"Loaded cv_owner_location from Stage 4 output")
-                except Exception:
-                    pass
+                except Exception as e:
+                    # Non-fatal: geographic-scope classification just falls back
+                    # to its default. Still say so -- a permission error or a
+                    # truncated stage-4 JSON should not vanish without a trace.
+                    if self.verbose:
+                        print(f"  Warning: Could not load cv_owner_location from Stage 4: {e}")
 
         # Store location context for geographic scope classification
         self.cv_owner_location = cv_owner_location if cv_owner_location and cv_owner_location.get('inference_success') else None
@@ -1227,17 +1271,16 @@ class WCMTemplateGenerator:
             if primary:
                 print(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
-        # Try to find original document if not provided
+        # Try to find original document if not provided. Local-dev fallback
+        # only -- the server always passes original_doc_path, and SAMPLE_CV_DIR
+        # doesn't exist in the deployed image. Anchored on the module-relative
+        # SAMPLE_CV_DIR constant plus the process CWD, instead of a stack of
+        # brittle '..'/.parent chains that broke silently on any restructure.
         if not original_doc_path:
-            # Check common locations (relative to unified_pipeline/ and project root)
-            script_dir = Path(__file__).parent
-            project_root = script_dir.parent.parent  # CV parsing - AI project/
             possible_paths = [
-                Path('data/sample_cvs/word') / f"{document_uid}.docx",
-                Path('data/sample_cvs/word') / f"{document_uid}.doc",
-                script_dir / '..' / '..' / 'data' / 'sample_cvs' / 'word' / f"{document_uid}.docx",
-                project_root / 'data' / 'sample_cvs' / 'word' / f"{document_uid}.docx",
-                Path(input_path).parent.parent.parent.parent / 'data' / 'sample_cvs' / 'word' / f"{document_uid}.docx",
+                SAMPLE_CV_DIR / f"{document_uid}.docx",
+                SAMPLE_CV_DIR / f"{document_uid}.doc",
+                Path('data/sample_cvs/word') / f"{document_uid}.docx",  # relative to CWD
             ]
             for path in possible_paths:
                 if path.exists():
@@ -1245,6 +1288,10 @@ class WCMTemplateGenerator:
                     if self.verbose:
                         print(f"Found original document: {original_doc_path}")
                     break
+            else:
+                if self.verbose:
+                    print(f"No original document found for {document_uid} in "
+                          f"{SAMPLE_CV_DIR} or ./data/sample_cvs/word")
 
         # Load Stage 4.5 research summary if available
         research_summary_data = None
@@ -1546,7 +1593,14 @@ class WCMTemplateGenerator:
     def _set_table_border(self, table: Table, color: str = '808080', size: int = 4):
         """Set table borders to 1px (4 eighths of a point), 50% gray."""
         tbl = table._tbl
-        tblPr = tbl.tblPr if tbl.tblPr is not None else OxmlElement('w:tblPr')
+        # CT_Tbl.tblPr is a OneAndOnlyOne descriptor: it returns the element or
+        # raises InvalidXmlError -- it never returns None. (ECMA-376 makes
+        # w:tblPr required on w:tbl, so a valid document always has it.) The
+        # old `if tbl.tblPr is not None else OxmlElement(...)` ternary and its
+        # trailing `if tbl.tblPr is None: tbl.insert(0, tblPr)` were therefore
+        # both unreachable. Note there is no get_or_add_tblPr() to reach for --
+        # OneAndOnlyOne generates no such accessor.
+        tblPr = tbl.tblPr
 
         tblBorders = OxmlElement('w:tblBorders')
         for border_name in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
@@ -1561,9 +1615,6 @@ class WCMTemplateGenerator:
         if existing is not None:
             tblPr.remove(existing)
         tblPr.append(tblBorders)
-
-        if tbl.tblPr is None:
-            tbl.insert(0, tblPr)
 
     def _set_cell_vertical_alignment(self, cell, align='center'):
         """Set cell vertical alignment to center (middle)."""
@@ -1729,9 +1780,6 @@ class WCMTemplateGenerator:
 
         # Create cache key to avoid repeated LLM calls for same location
         cache_key = f"{activity_location[:100]}|{','.join(owner_institutions[:2])}"
-        if not hasattr(self, '_geographic_scope_cache'):
-            self._geographic_scope_cache = {}
-
         if cache_key in self._geographic_scope_cache:
             return self._geographic_scope_cache[cache_key]
 
@@ -1884,7 +1932,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Use a simple bullet character prefix for reliable rendering
         # This avoids Word numbering system issues across different templates
-        run = entry_para.add_run(f"• {_clean_inline_tabs(text)}")
+        run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
         self._set_font(run)
 
         if entry:
@@ -2264,7 +2312,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             # Look for comma before a city name
                             for state in us_states:
                                 # Pattern: "..., CityName, StateName"
-                                import re
                                 pattern = rf',\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?),\s*{re.escape(state)}$'
                                 match = re.search(pattern, part)
                                 if match:
@@ -2592,7 +2639,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             'MENTORING', 'INSTITUTIONAL LEADERSHIP', 'INSTITUTIONAL ADMINISTRATIVE',
             'EXTRAMURAL PROFESSIONAL', 'INVITATIONS TO SPEAK', 'BIBLIOGRAPHY',
         }
-        import re
         letter_pattern = re.compile(r'^[A-T]\.\s')
         paragraphs = self.doc.paragraphs
 
@@ -3290,7 +3336,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for entry in reversed(s0_entries):
             text = entry.get('text', '').strip()
             entry_para = self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
-            run = entry_para.add_run(f"• {_clean_inline_tabs(text)}")
+            run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
             self._set_font(run)
             self.stats['entries_inserted'] += 1
 
@@ -4661,14 +4707,80 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 if spacing_para is not None:
                     last_element = spacing_para
 
+    @staticmethod
+    def _is_orphan_fragment(fields: Dict, formatted_text: str, original_text: str) -> bool:
+        """True if a teaching entry is a stray sub-header rather than real content.
+
+        Such fragments carry no date, audience, location, formatted_text, or title.
+        Length alone is NOT sufficient: a short entry with an extracted title is a
+        real record (#262). "Biotia-HSS Next Generation Sequencing Orthopedic Assay"
+        (54 chars, titled) was being discarded, while its sibling table rows
+        Bactisure (180 chars) and Lamprene (120) rendered only by being longer.
+        """
+        has_date = bool(fields.get('date') or fields.get('start_date') or fields.get('end_date'))
+        has_audience = bool(fields.get('audience') or fields.get('level'))
+        has_location = bool(fields.get('location') or fields.get('institution'))
+        has_formatted = bool(formatted_text)
+        has_title = bool((fields.get('title') or '').strip())
+        return (not has_date and not has_audience and not has_location
+                and not has_formatted and not has_title and len(original_text) < 80)
+
+    @staticmethod
+    def _is_mentoring_outcome(entry: Dict) -> bool:
+        """True if the entry is N4 mentoring-outcome narrative.
+
+        _correct_mismatch_if_needed rewrites an unmapped N4 to N3A, stashing the
+        original under 'taxonomy_code_original' — so check both (#261).
+        """
+        return 'N4' in (entry.get('taxonomy_code'), entry.get('taxonomy_code_original'))
+
+    @staticmethod
+    def _is_mentee_record(entry: Dict) -> bool:
+        """True if the entry names a person, i.e. a per-mentee table can be built.
+
+        N3A/N3B also carry aggregate summaries ("Ph.D. Graduated: 38") that name no
+        one. Those are real content but cannot fill a per-mentee table (#261).
+        """
+        fields = entry.get('extracted_fields', {}) or {}
+        return bool((fields.get('name') or fields.get('mentee_name') or '').strip())
+
+    def _insert_mentoring_line(self, text: str, insert_after_idx: int, entry: Dict = None):
+        """Insert a plain mentoring paragraph directly after ``insert_after_idx``.
+
+        Used for content that belongs in MENTORING but has no per-mentee table to
+        live in: aggregate counts (N3A/N3B with no name) and outcome narrative (N4).
+        Positioned with the same body-splice the mentee tables use.
+        """
+        para = self.doc.add_paragraph()
+        run = para.add_run(text)
+        self._set_font(run)
+        if entry:
+            self._add_entry_comments(para, entry)
+
+        body = self.doc.element.body
+        try:
+            target = self.doc.paragraphs[insert_after_idx]._element
+            body.insert(list(body).index(target) + 1, para._element)
+        except (ValueError, IndexError):
+            pass
+        self.stats['entries_inserted'] += 1
+        return para
+
     def _fill_mentoring(self, entries_by_code: Dict[str, List[Dict]]):
         """Fill mentoring section with individual tables per mentee.
 
         Creates tables for N3A (current mentees) and N3B (past mentees).
         Overrides: If end_date contains 'present', mentee is treated as current.
+
+        N3A/N3B entries that name no mentee are aggregate summaries and render as
+        plain lines instead of tables; N4 (mentoring outcomes) has no table at all
+        and renders under the section header (#261). Without this, all three were
+        dropped silently: _create_mentee_table returns None with no name, and N4 has
+        no entry in TAXONOMY_TO_SECTION.
         """
         n3a_entries = list(entries_by_code.get('N3A', []))
         n3b_entries = list(entries_by_code.get('N3B', []))
+        n4_entries = list(entries_by_code.get('N4', []))
 
         # Override: Move N3B entries to current if the relationship appears ongoing
         # If end_date contains "present" OR (has start_date but no end_date), treat as current
@@ -4694,12 +4806,29 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             n3b_entries.remove(entry)
             n3a_entries.append(entry)
 
+        # Split off aggregate summaries (no mentee named) — they get a line, not a
+        # table. Done after the ongoing-reshuffle above, which keys off dates a
+        # summary never has, so the partition cannot change that outcome.
+        n3a_summaries = [e for e in n3a_entries if not self._is_mentee_record(e)]
+        n3b_summaries = [e for e in n3b_entries if not self._is_mentee_record(e)]
+        n3a_entries = [e for e in n3a_entries if self._is_mentee_record(e)]
+        n3b_entries = [e for e in n3b_entries if self._is_mentee_record(e)]
+
+        # Outcome narrative arrives disguised as a current mentee (see
+        # _is_mentoring_outcome). Reclaim it and render it under the section header
+        # rather than beneath "Current Mentees:", where it does not belong.
+        n4_entries += [e for e in n3a_summaries + n3b_summaries
+                       if self._is_mentoring_outcome(e)]
+        n3a_summaries = [e for e in n3a_summaries if not self._is_mentoring_outcome(e)]
+        n3b_summaries = [e for e in n3b_summaries if not self._is_mentoring_outcome(e)]
+
         total_mentees = len(n3a_entries) + len(n3b_entries)
-        if total_mentees == 0:
+        total_extra = len(n3a_summaries) + len(n3b_summaries) + len(n4_entries)
+        if total_mentees + total_extra == 0:
             return
 
         if self.verbose:
-            print(f"Filling Mentoring ({total_mentees} mentees)...")
+            print(f"Filling Mentoring ({total_mentees} mentees, {total_extra} summary/outcome lines)...")
             if entries_to_move:
                 print(f"  Moved {len(entries_to_move)} mentees from Past to Current (end_date=present)")
 
@@ -4720,7 +4849,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             past_mentees_idx = mentoring_idx
 
         # Fill Current Mentees (N3A)
-        if n3a_entries and current_mentees_idx is not None:
+        if (n3a_entries or n3a_summaries) and current_mentees_idx is not None:
             # Remove any existing template table after "Current Mentees:"
             existing_table = self._find_table_after_paragraph(current_mentees_idx)
             if existing_table:
@@ -4734,8 +4863,12 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 self.stats['tables_populated'] += 1
                 self.stats['entries_inserted'] += 1
 
+            # Summaries go in last so they land directly under the header, above the
+            # tables (each insert pushes the previous one down).
+            self._insert_mentoring_summaries(n3a_summaries, current_mentees_idx)
+
         # Fill Past Mentees (N3B)
-        if n3b_entries:
+        if n3b_entries or n3b_summaries:
             # Re-find Past Mentees index since it may have shifted after current mentee insertion
             past_mentees_idx = self._find_paragraph_exact("Past Mentees:")
             if past_mentees_idx is not None:
@@ -4750,6 +4883,26 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     self._create_mentee_table_with_spacing(fields, past_mentees_idx, entry)
                     self.stats['tables_populated'] += 1
                     self.stats['entries_inserted'] += 1
+
+                self._insert_mentoring_summaries(n3b_summaries, past_mentees_idx)
+
+        # Mentoring outcomes (N4) have no table in the WCM template. Render them
+        # under the section header, re-found because the inserts above shifted it.
+        if n4_entries:
+            mentoring_idx = self._find_paragraph_exact("MENTORING")
+            if mentoring_idx is not None:
+                self._insert_mentoring_summaries(n4_entries, mentoring_idx)
+
+    def _insert_mentoring_summaries(self, entries: List[Dict], insert_after_idx: int):
+        """Render summary/outcome entries as plain lines after ``insert_after_idx``.
+
+        Reversed so that, with each insert landing immediately after the header and
+        pushing the previous one down, the final document order matches ``entries``.
+        """
+        for entry in reversed(entries):
+            text = _clean_inline_tabs((entry.get('text') or '').strip())
+            if text:
+                self._insert_mentoring_line(text, insert_after_idx, entry)
 
     def _create_mentee_table(self, fields: Dict, insert_after_idx: int, entry: Dict = None) -> Optional[Table]:
         """Create an individual mentee table matching WCM template structure.
@@ -5003,7 +5156,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Separate award lines from year lines
             # Years are typically 4-digit numbers or ranges like "2017-2020"
-            import re
             year_pattern = re.compile(r'^(\d{4}(?:\s*-\s*\d{4})?|\d{4}(?:\s*-\s*present)?)$', re.IGNORECASE)
 
             # Header patterns to skip (tab-separated column headers from source CV tables)
@@ -5132,7 +5284,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         Returns the organization name, or empty string if none identified.
         """
-        import re
         if not text:
             return ''
 
@@ -5461,14 +5612,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         formatted_text = fields.get('formatted_text', '')
         original_text = entry.get('text', '')
 
-        # Skip orphan fragments: short entries with no date, audience, location, OR formatted_text
-        # (typically sub-headers that were misclassified as content entries)
-        # Don't skip if there's formatted_text - Stage 5c validated this as real content
-        has_date = bool(fields.get('date') or fields.get('start_date') or fields.get('end_date'))
-        has_audience = bool(fields.get('audience') or fields.get('level'))
-        has_location = bool(fields.get('location') or fields.get('institution'))
-        has_formatted = bool(formatted_text)
-        if not has_date and not has_audience and not has_location and not has_formatted and len(original_text) < 80:
+        if self._is_orphan_fragment(fields, formatted_text, original_text):
             return
 
         # Normalize any raw ISO dates the LLM left in formatted text
@@ -5827,7 +5971,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
-        import re
 
         for entry in entries:
             original_text = entry.get('text', '')
@@ -5864,7 +6007,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         - Date ranges at end of lines or in separate date block
         - Two-column table extractions where roles and dates are in separate columns
         """
-        import re
 
         # Patterns for date detection
         year_only_pattern = re.compile(r'^(\d{4})\s*$')
@@ -6213,7 +6355,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         WCM template has table with: State | Number | Date of issue | Date of last registration
         Also fills DEA and NPI numbers in a separate table (Table 9).
         """
-        import re
 
         if not entries:
             return
@@ -6437,7 +6578,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not text:
             return
 
-        import re
 
         # Handle pipe-separated format: "Specialty | CertNum | Year"
         # First, split on newlines and filter empty lines
@@ -6894,7 +7034,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         - "Committee Name    1999-2010" - trailing date
         - Lines followed by date-only lines (from table column extraction)
         """
-        import re
 
         # Date patterns
         year_pattern = re.compile(r'^(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)$', re.IGNORECASE)
@@ -7053,7 +7192,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # If dates not extracted, try to parse from parenthetical patterns in original text
             # Common patterns: "(Chair 2011-2013)", "(2010-present)", "(Member 1999-2012)"
             if not dates and original_text:
-                import re
                 # Pattern 1: (Role YYYY-YYYY) or (Role YYYY-present)
                 paren_match = re.search(r'\(([^)]*?)(\d{4})\s*[-–]\s*(\d{4}|present)\)', original_text, re.IGNORECASE)
                 if paren_match:
@@ -7120,7 +7258,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
     def _add_multiline_committee_rows(self, table, lines: List[str]):
         """Add multiple committee rows from multiline content, parsing dates from each line."""
-        import re
 
         # Pattern for bare date lines (orphaned from table extraction)
         bare_date_pattern = re.compile(r'^\s*\|?\s*\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?\s*$', re.IGNORECASE)
@@ -7919,7 +8056,7 @@ Now analyze the text above:"""
             insert_para = self.doc.paragraphs[insert_idx]
             new_para = insert_para.insert_paragraph_before()
 
-            run = new_para.add_run(f"• {_clean_inline_tabs(text)}")
+            run = new_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
             self._set_font(run)
 
             # Add explanatory comment
@@ -8203,15 +8340,26 @@ Now analyze the text above:"""
             and not is_template_instruction(e.get("text", ""))
             and not is_source_boilerplate(e.get("text", ""))
         ]
-        _appendix_filtered = _pre_filter - len(unmapped_entries)
+
+        # Render each surviving entry once, collapsing the readers' internal cell
+        # separators. A table row whose cells are all empty (a blank WCM template
+        # row, e.g. "|  |  |") is non-empty as raw text but renders to "" — it
+        # carries no information, so it is dropped rather than shown as a bullet.
+        rendered_entries = [
+            (e, _clean_inline_tabs(e.get("text", "")))
+            for e in unmapped_entries
+        ]
+        rendered_entries = [(e, t) for e, t in rendered_entries if t.strip()]
+
+        _appendix_filtered = _pre_filter - len(rendered_entries)
         if _appendix_filtered:
             print(f"Filtered {_appendix_filtered} boilerplate/empty entries from Appendix")
 
-        if not unmapped_entries:
+        if not rendered_entries:
             return
 
         if self.verbose:
-            print(f"Adding Appendix ({len(unmapped_entries)} unmapped entries)...")
+            print(f"Adding Appendix ({len(rendered_entries)} unmapped entries)...")
 
         # Add blank paragraph before appendix header (matching BIBLIOGRAPHY style)
         self.doc.add_paragraph()
@@ -8244,12 +8392,12 @@ Now analyze the text above:"""
 
         # Group entries by their original CV section header
         entries_by_header = {}
-        for entry in unmapped_entries:
+        for entry, text in rendered_entries:
             hierarchy = entry.get('hierarchy', [])
             header = hierarchy[0] if hierarchy else 'Unknown Section'
             if header not in entries_by_header:
                 entries_by_header[header] = []
-            entries_by_header[header].append(entry)
+            entries_by_header[header].append((entry, text))
 
         # List entries grouped by original header
         is_first_section = True
@@ -8264,8 +8412,7 @@ Now analyze the text above:"""
             run = header_para.add_run(f"From \"{header}\":")
             self._set_font(run, bold=True)
 
-            for i, entry in enumerate(entries, start=1):
-                text = entry.get('text', '')
+            for i, (entry, text) in enumerate(entries, start=1):
                 element_idx = entry.get('element_idx_start', '')
 
                 # Truncate long entries
@@ -8756,6 +8903,10 @@ Now analyze the text above:"""
 
             # Sort reverse chronologically (most recent first)
             pubs_sorted = sort_entries_reverse_chronological(pubs)
+            # Un-fuse any entry that collapsed several citations into one
+            # (#208), so each is numbered instead of rendering as unnumbered
+            # <w:br/> continuation lines under one number.
+            pubs_sorted = split_fused_citation_entries(pubs_sorted)
 
             # Insert after the section header - numbering restarts at 1 for each section
             insert_idx = section_idx + 1
@@ -9006,7 +9157,6 @@ Now analyze the text above:"""
             name_to_bold = target_name
         elif cv_owner_last_name:
             # Fallback: find cv_owner's name in the citation using regex
-            import re
             # Look for patterns like "Wende ME", "Wende, M", "Wende M.", etc.
             pattern = rf'\b{re.escape(cv_owner_last_name)}\s*[A-Z]{{0,3}}\.?\b'
             match = re.search(pattern, citation, re.IGNORECASE)
@@ -9067,7 +9217,6 @@ Now analyze the text above:"""
             if target_name and target_name in citation:
                 name_to_bold = target_name
             elif cv_owner_last_name:
-                import re
                 pattern = rf'\b{re.escape(cv_owner_last_name)}\s*[A-Z]{{0,3}}\.?\b'
                 match = re.search(pattern, citation, re.IGNORECASE)
                 if match:
@@ -9138,7 +9287,6 @@ Now analyze the text above:"""
         - P section tables: should not have bare dates in column A
         - Other structural issues
         """
-        import re
         issues = []
 
         # Check 1: Bulleted sections should have separate bullets, not semicolon-combined entries
