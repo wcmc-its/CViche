@@ -59,10 +59,12 @@ unreadable artifacts skip their lints with an INFO note instead of crashing.
 
 import argparse
 import json
+import logging
+import os
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
@@ -78,6 +80,8 @@ from unified_pipeline.segmentation_regression import (
     lint_metrics,
 )
 from unified_pipeline.stage_6_word_template import grant_status_rebucket_target
+
+logger = logging.getLogger(__name__)
 
 # Lint 4: an entry this big, with this many record-like lines, extracting
 # under this coverage is a mass-loss smell, not LLM wobble.
@@ -107,6 +111,19 @@ RENDER_TOKEN_MIN_COUNT = 3
 RENDER_TOKEN_OVERLAP = 0.7
 _RENDER_TOKEN_RE = re.compile(r"[a-z]{5,}")
 
+# Separator joined between output lines in the containment haystack so a
+# verbatim piece can't match across two unrelated lines (a control char that
+# never occurs in real CV text).
+_LINE_SENTINEL = "\x00"
+
+
+def _tokens(text, pattern=_RENDER_TOKEN_RE) -> set:
+    """Distinctive-word token set for one string. The single shared primitive
+    behind the entry/record/dedup overlap checks (each still applies its own
+    threshold and comparison; only the tokenizing is common)."""
+    return set(pattern.findall(_norm(text)))
+
+
 # Lint 6: an appendix bigger than this means mapping failed at scale.
 APPENDIX_WARN_ENTRIES = 15
 
@@ -123,7 +140,7 @@ UNRENDERED_MIN_RECORD_LINES = 2
 RECORD_DATE_LINE_MIN_CHARS = 20
 _RECORD_DATE_PREFIX_RE = re.compile(r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]")
 
-_SEVERITIES = ("ERROR", "WARN", "INFO")
+SEVERITY_ORDER = ("ERROR", "WARN", "INFO")  # most to least severe
 
 # '• [M2A] ...' style taxonomy-code leak (the pre-#214 appendix format).
 _BRACKET_CODE_RE = re.compile(r"\[[A-Z]\d?[A-Z]?\d?\]")
@@ -183,6 +200,19 @@ def _hierarchy_titles(stage1a: Dict) -> List[str]:
 
 # ----------------------------------------------------------------- docx views
 
+def _get_docx_document():
+    """Lazy python-docx import. The doctor is optional tooling and must import
+    cleanly where python-docx isn't installed (JSON-only lints still run), so
+    the import stays out of module scope -- but it's the SAME import in three
+    docx views, so centralize it here and give a clear message when missing."""
+    try:
+        from docx import Document
+    except ImportError as e:  # pragma: no cover - only when the extra is absent
+        raise ImportError("python-docx is required for the docx lints: "
+                          "pip install python-docx") from e
+    return Document
+
+
 def iter_header_candidates(docx_path: str) -> List[str]:
     """Header-looking source lines: short, letters-only, ALL-CAPS bold (or
     styled as a Heading), from top-level paragraphs and single-column table
@@ -190,7 +220,7 @@ def iter_header_candidates(docx_path: str) -> List[str]:
     tables are data tables — their bold cells are column headers — and
     document furniture ('CURRICULUM VITAE', revision stamps) is not a header
     either. These are what stage 1a should have promoted to hierarchy nodes."""
-    from docx import Document  # local import: doctor is optional tooling
+    Document = _get_docx_document()
 
     candidates: List[str] = []
 
@@ -230,6 +260,24 @@ def iter_header_candidates(docx_path: str) -> List[str]:
     return candidates
 
 
+def _docx_text(element) -> str:
+    """All ``w:t`` text under a docx element in document order. Unlike
+    python-docx's ``.text``, this INCLUDES text inside tracked-change ``<w:ins>``
+    runs and EXCLUDES ``<w:delText>`` — the accepted-changes view a reader sees.
+    Stage 6 inserts LLM-enriched content (research summaries, reformatted
+    citations) as tracked INSERTIONS, so a reader that ignores ``<w:ins>``
+    under-reports what actually rendered and false-flags content as 'unrendered'
+    (issue #249: M1 summaries and reformatted citations read as dropped)."""
+    from docx.oxml.ns import qn
+    return "".join(node.text or "" for node in element.iter(qn("w:t")))
+
+
+def _cell_text(cell) -> str:
+    """Track-change-aware equivalent of ``cell.text``: the cell's own paragraphs
+    (nested tables excluded, matching python-docx), including ``<w:ins>`` text."""
+    return "\n".join(_docx_text(p._p) for p in cell.paragraphs)
+
+
 def _table_lines(tbl) -> List[str]:
     """Text lines of one Word table: each non-empty cell, nested tables
     recursed into (cell.text never surfaces them), and every row with more
@@ -244,9 +292,10 @@ def _table_lines(tbl) -> List[str]:
     for row in tbl.rows:
         cell_texts = []
         for cell in row.cells:
-            if cell.text.strip():
-                cell_texts.append(cell.text)
-                lines.append(cell.text)
+            ctext = _cell_text(cell)
+            if ctext.strip():
+                cell_texts.append(ctext)
+                lines.append(ctext)
             for nested in cell.tables:
                 lines.extend(_table_lines(nested))
         if len(cell_texts) > 1:
@@ -258,16 +307,15 @@ def read_docx_blocks(docx_path: str) -> List[Tuple[str, str]]:
     """Body-order blocks of a docx: ("p", text) per paragraph, ("table",
     _table_lines joined by newlines) per table. Grants render as one Word
     table per grant, so any output check must read tables AND paragraphs."""
-    from docx import Document  # local import: doctor is optional tooling
+    Document = _get_docx_document()
     from docx.oxml.ns import qn
     from docx.table import Table
-    from docx.text.paragraph import Paragraph
 
     doc = Document(docx_path)
     blocks: List[Tuple[str, str]] = []
     for child in doc.element.body.iterchildren():
         if child.tag == qn("w:p"):
-            blocks.append(("p", Paragraph(child, doc).text))
+            blocks.append(("p", _docx_text(child)))
         elif child.tag == qn("w:tbl"):
             blocks.append(("table", "\n".join(_table_lines(Table(child, doc)))))
     return blocks
@@ -277,25 +325,29 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
     """Raw per-row cell texts of every top-level table, EMPTY CELLS INCLUDED
     — _table_lines drops empty cells, which hides an empty date column from
     the shape checks (lint 13)."""
-    from docx import Document  # local import: doctor is optional tooling
+    Document = _get_docx_document()
 
     doc = Document(docx_path)
-    return [[[cell.text.strip() for cell in row.cells] for row in tbl.rows]
+    return [[[_cell_text(cell).strip() for cell in row.cells] for row in tbl.rows]
             for tbl in doc.tables]
 
 
-def _haystacks(blocks: List[Tuple[str, str]]) -> Tuple[str, set]:
-    """(squashed containment haystack, distinctive-token set) for the output
-    blocks; the \\x00 sentinel keeps a piece from matching across two
-    unrelated lines."""
+class Haystack(NamedTuple):
+    text: str    # squashed containment haystack, _LINE_SENTINEL-joined
+    tokens: set  # distinctive long-word token set
+
+
+def _haystacks(blocks: List[Tuple[str, str]]) -> Haystack:
+    """(containment haystack, distinctive-token set) for the output blocks.
+    Unpacks like the (text, tokens) tuple it replaces."""
     pieces: List[str] = []
     tokens: set = set()
     for _, text in blocks:
         for line in str(text).split("\n"):
             if line.strip():
                 pieces.append(_squash(line))
-                tokens.update(_RENDER_TOKEN_RE.findall(_norm(line)))
-    return "\x00".join(pieces), tokens
+                tokens.update(_tokens(line))
+    return Haystack(_LINE_SENTINEL.join(pieces), tokens)
 
 
 # -------------------------------------------------------------------- lint 1
@@ -307,7 +359,7 @@ def lint_segmentation(source_lines: List[str], stage1a: Dict,
     metrics = compute_metrics(source_lines, stage1a, stage2)
     findings = []
     for flag in lint_metrics(metrics):
-        evidence = ([l[:100] for l in metrics["lost_lines"][:5]]
+        evidence = ([line[:100] for line in metrics["lost_lines"][:5]]
                     if flag.startswith("coverage") else [])
         findings.append(_finding("segmentation", "WARN", flag, evidence))
     return findings
@@ -464,7 +516,7 @@ def _entry_rendered(text, haystack: str, haystack_tokens: set) -> Optional[bool]
         return True
     verifiable = bool(pieces)
     for chunk in [str(text or "")] + _entry_fragments(text):
-        tokens = set(_RENDER_TOKEN_RE.findall(_norm(chunk)))
+        tokens = _tokens(chunk)
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue
         verifiable = True
@@ -528,7 +580,7 @@ def lint_output_hygiene(blocks: List[Tuple[str, str]]) -> List[Dict]:
         findings.append(_finding(
             "output_hygiene", "ERROR",
             f"{len(leaks)} bracketed taxonomy-code leak(s) in output text",
-            [l[:100] for l in leaks[:5]]))
+            [leak[:100] for leak in leaks[:5]]))
 
     paras = [text for kind, text in blocks if kind == "p"]
     appendix_at = next((i for i, t in enumerate(paras)
@@ -627,7 +679,7 @@ def _line_token_sets(blocks: List[Tuple[str, str]]) -> List[set]:
     common academic words scattered across unrelated sections vouch for a
     dropped record, while a 5c/5d-reformatted citation still matches here
     because its surname/title tokens stay together on one line."""
-    return [set(_RENDER_TOKEN_RE.findall(_norm(line)))
+    return [_tokens(line)
             for _, text in blocks for line in str(text).split("\n")
             if line.strip()]
 
@@ -642,7 +694,7 @@ def _record_rendered(line: str, haystack: str,
         return True
     rendered = None
     for chunk in [line] + _entry_fragments(line):
-        tokens = set(_RENDER_TOKEN_RE.findall(_norm(chunk)))
+        tokens = _tokens(chunk)
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue
         if any(len(tokens & line_tokens) / len(tokens) >= RENDER_TOKEN_OVERLAP
@@ -735,8 +787,8 @@ def lint_dedup_drops(report: Dict) -> List[Dict]:
     records lost, not duplicates (#227)."""
     suspect = []
     for d in report.get("dedup_decisions", []):
-        dropped = set(_DEDUP_TOKEN_RE.findall(_norm(d.get("dropped_text", ""))))
-        kept = set(_DEDUP_TOKEN_RE.findall(_norm(d.get("kept_text", ""))))
+        dropped = _tokens(d.get("dropped_text", ""), _DEDUP_TOKEN_RE)
+        kept = _tokens(d.get("kept_text", ""), _DEDUP_TOKEN_RE)
         if not dropped:
             continue
         coverage = len(dropped & kept) / len(dropped)
@@ -927,19 +979,38 @@ def _find_source(root: Path, uid: str) -> Optional[Path]:
     return None
 
 
-def _load_json(path: Optional[Path]) -> Optional[Dict]:
+def _load_json(path: Optional[Path], label: str = None,
+               on_unreadable=None) -> Optional[Dict]:
+    """Load an artifact JSON, or None if it is absent.
+
+    `path` comes from _find_artifact/_find_source, which glob -- so a non-None
+    path always names a file that EXISTS. A load failure on it therefore means
+    present-but-unreadable (corrupt JSON, permission error), which is NOT the
+    same as absent: report it via on_unreadable so a lint does not silently
+    degrade to "skipped: missing <stage>". Absent (path is None) stays quiet.
+    """
     if not path:
         return None
     try:
-        return json.loads(path.read_text())
-    except Exception:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        logger.warning("run_doctor could not read %s (%s): %s",
+                       label or path, type(e).__name__, e)
+        if on_unreadable is not None:
+            on_unreadable(label or str(path), f"{type(e).__name__}: {e}")
         return None
 
 
-def _try(fn):
+def _try(fn, label: str = None, on_unreadable=None):
+    """Run a docx-reading loader. Its callers guard on the path existing, so a
+    failure here is also present-but-unreadable, reported like _load_json."""
     try:
         return fn()
-    except Exception:
+    except Exception as e:
+        logger.warning("run_doctor could not read %s (%s): %s",
+                       label or "docx", type(e).__name__, e)
+        if on_unreadable is not None:
+            on_unreadable(label or "docx", f"{type(e).__name__}: {e}")
         return None
 
 
@@ -953,26 +1024,43 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     paths = {key: _find_artifact(root, uid, key) for key in _ARTIFACTS}
     source_path = Path(source) if source else _find_source(root, uid)
 
-    stage_1a = _load_json(paths["stage_1a"])
-    stage_2 = _load_json(paths["stage_2"])
-    stage_3b = _load_json(paths["stage_3b"])
-    stage_4 = _load_json(paths["stage_4"])
-    stage_5e = _load_json(paths["stage_5_enrichment"])
-    stage_6_report = _load_json(paths["stage_6_report"])
-    source_lines = _try(lambda: iter_source_lines(str(source_path))) if source_path else None
-    candidates = _try(lambda: iter_header_candidates(str(source_path))) if source_path else None
-    blocks = _try(lambda: read_docx_blocks(str(paths["stage_6_docx"]))) if paths["stage_6_docx"] else None
-    table_rows = _try(lambda: read_docx_table_rows(str(paths["stage_6_docx"]))) if paths["stage_6_docx"] else None
+    # Artifacts that exist but failed to load, keyed by the same name ready()
+    # uses as its input kwarg (so a None input can be traced back to a broken
+    # file vs a genuinely absent one).
+    unreadable: Dict[str, str] = {}
+    def _note(label, detail):
+        unreadable[label] = detail
+
+    stage_1a = _load_json(paths["stage_1a"], "stage_1a", _note)
+    stage_2 = _load_json(paths["stage_2"], "stage_2", _note)
+    stage_3b = _load_json(paths["stage_3b"], "stage_3b", _note)
+    stage_4 = _load_json(paths["stage_4"], "stage_4", _note)
+    stage_5e = _load_json(paths["stage_5_enrichment"], "stage_5_enrichment", _note)
+    stage_6_report = _load_json(paths["stage_6_report"], "stage_6_report", _note)
+    source_lines = _try(lambda: iter_source_lines(str(source_path)), "source", _note) if source_path else None
+    candidates = _try(lambda: iter_header_candidates(str(source_path)), "source", _note) if source_path else None
+    blocks = _try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note) if paths["stage_6_docx"] else None
+    table_rows = _try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note) if paths["stage_6_docx"] else None
 
     findings: List[Dict] = []
 
     def ready(lint_id: str, **inputs) -> bool:
         missing = [name for name, value in inputs.items() if value is None]
-        if missing:
+        if not missing:
+            return True
+        # An input that is None because its file exists-but-won't-parse is an
+        # ERROR (the lint was silenced by a broken artifact, not an absent one);
+        # a genuinely absent input is the benign INFO "skipped: missing".
+        broken = [name for name in missing if name in unreadable]
+        absent = [name for name in missing if name not in unreadable]
+        if absent:
             findings.append(_finding(
-                lint_id, "INFO", "skipped: missing " + ", ".join(missing)))
-            return False
-        return True
+                lint_id, "INFO", "skipped: missing " + ", ".join(absent)))
+        if broken:
+            findings.append(_finding(
+                lint_id, "ERROR", "skipped: unreadable " + ", ".join(
+                    f"{name} ({unreadable[name]})" for name in broken)))
+        return False
 
     if ready("segmentation", source=source_lines, stage_1a=stage_1a, stage_2=stage_2):
         findings.extend(lint_segmentation(source_lines, stage_1a, stage_2))
@@ -1001,10 +1089,10 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     if ready("table_shape", stage_6_docx=table_rows):
         findings.extend(lint_table_shape(table_rows))
 
-    counts = {severity: 0 for severity in _SEVERITIES}
+    counts = {severity: 0 for severity in SEVERITY_ORDER}
     for f in findings:
         counts[f["severity"]] += 1
-    worst = next((s for s in _SEVERITIES if counts[s]), None)
+    worst = next((s for s in SEVERITY_ORDER if counts[s]), None)
 
     return {
         "document_uid": uid,
@@ -1027,12 +1115,18 @@ def main(argv: Optional[List[str]] = None):
     parser.add_argument("--out", help="report file (default: <root>/<uid>_doctor.json)")
     args = parser.parse_args(argv)
 
+    # Validate the output location BEFORE running the lints -- otherwise an
+    # unwritable --out only fails after all the (slow) docx parsing, losing the
+    # whole report.
+    out_path = Path(args.out) if args.out else Path(args.root) / f"{args.uid}_doctor.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if out_path.exists() and not os.access(out_path, os.W_OK):
+        parser.error(f"output path not writable: {out_path}")
+
     payload = run_doctor(Path(args.root), args.uid,
                          Path(args.source) if args.source else None)
 
-    out_path = Path(args.out) if args.out else Path(args.root) / f"{args.uid}_doctor.json"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, indent=2))
+    out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     print(f"run doctor: {args.uid}")
     for f in payload["findings"]:
