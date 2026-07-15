@@ -4686,14 +4686,80 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 if spacing_para is not None:
                     last_element = spacing_para
 
+    @staticmethod
+    def _is_orphan_fragment(fields: Dict, formatted_text: str, original_text: str) -> bool:
+        """True if a teaching entry is a stray sub-header rather than real content.
+
+        Such fragments carry no date, audience, location, formatted_text, or title.
+        Length alone is NOT sufficient: a short entry with an extracted title is a
+        real record (#262). "Biotia-HSS Next Generation Sequencing Orthopedic Assay"
+        (54 chars, titled) was being discarded, while its sibling table rows
+        Bactisure (180 chars) and Lamprene (120) rendered only by being longer.
+        """
+        has_date = bool(fields.get('date') or fields.get('start_date') or fields.get('end_date'))
+        has_audience = bool(fields.get('audience') or fields.get('level'))
+        has_location = bool(fields.get('location') or fields.get('institution'))
+        has_formatted = bool(formatted_text)
+        has_title = bool((fields.get('title') or '').strip())
+        return (not has_date and not has_audience and not has_location
+                and not has_formatted and not has_title and len(original_text) < 80)
+
+    @staticmethod
+    def _is_mentoring_outcome(entry: Dict) -> bool:
+        """True if the entry is N4 mentoring-outcome narrative.
+
+        _correct_mismatch_if_needed rewrites an unmapped N4 to N3A, stashing the
+        original under 'taxonomy_code_original' — so check both (#261).
+        """
+        return 'N4' in (entry.get('taxonomy_code'), entry.get('taxonomy_code_original'))
+
+    @staticmethod
+    def _is_mentee_record(entry: Dict) -> bool:
+        """True if the entry names a person, i.e. a per-mentee table can be built.
+
+        N3A/N3B also carry aggregate summaries ("Ph.D. Graduated: 38") that name no
+        one. Those are real content but cannot fill a per-mentee table (#261).
+        """
+        fields = entry.get('extracted_fields', {}) or {}
+        return bool((fields.get('name') or fields.get('mentee_name') or '').strip())
+
+    def _insert_mentoring_line(self, text: str, insert_after_idx: int, entry: Dict = None):
+        """Insert a plain mentoring paragraph directly after ``insert_after_idx``.
+
+        Used for content that belongs in MENTORING but has no per-mentee table to
+        live in: aggregate counts (N3A/N3B with no name) and outcome narrative (N4).
+        Positioned with the same body-splice the mentee tables use.
+        """
+        para = self.doc.add_paragraph()
+        run = para.add_run(text)
+        self._set_font(run)
+        if entry:
+            self._add_entry_comments(para, entry)
+
+        body = self.doc.element.body
+        try:
+            target = self.doc.paragraphs[insert_after_idx]._element
+            body.insert(list(body).index(target) + 1, para._element)
+        except (ValueError, IndexError):
+            pass
+        self.stats['entries_inserted'] += 1
+        return para
+
     def _fill_mentoring(self, entries_by_code: Dict[str, List[Dict]]):
         """Fill mentoring section with individual tables per mentee.
 
         Creates tables for N3A (current mentees) and N3B (past mentees).
         Overrides: If end_date contains 'present', mentee is treated as current.
+
+        N3A/N3B entries that name no mentee are aggregate summaries and render as
+        plain lines instead of tables; N4 (mentoring outcomes) has no table at all
+        and renders under the section header (#261). Without this, all three were
+        dropped silently: _create_mentee_table returns None with no name, and N4 has
+        no entry in TAXONOMY_TO_SECTION.
         """
         n3a_entries = list(entries_by_code.get('N3A', []))
         n3b_entries = list(entries_by_code.get('N3B', []))
+        n4_entries = list(entries_by_code.get('N4', []))
 
         # Override: Move N3B entries to current if the relationship appears ongoing
         # If end_date contains "present" OR (has start_date but no end_date), treat as current
@@ -4719,12 +4785,29 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             n3b_entries.remove(entry)
             n3a_entries.append(entry)
 
+        # Split off aggregate summaries (no mentee named) — they get a line, not a
+        # table. Done after the ongoing-reshuffle above, which keys off dates a
+        # summary never has, so the partition cannot change that outcome.
+        n3a_summaries = [e for e in n3a_entries if not self._is_mentee_record(e)]
+        n3b_summaries = [e for e in n3b_entries if not self._is_mentee_record(e)]
+        n3a_entries = [e for e in n3a_entries if self._is_mentee_record(e)]
+        n3b_entries = [e for e in n3b_entries if self._is_mentee_record(e)]
+
+        # Outcome narrative arrives disguised as a current mentee (see
+        # _is_mentoring_outcome). Reclaim it and render it under the section header
+        # rather than beneath "Current Mentees:", where it does not belong.
+        n4_entries += [e for e in n3a_summaries + n3b_summaries
+                       if self._is_mentoring_outcome(e)]
+        n3a_summaries = [e for e in n3a_summaries if not self._is_mentoring_outcome(e)]
+        n3b_summaries = [e for e in n3b_summaries if not self._is_mentoring_outcome(e)]
+
         total_mentees = len(n3a_entries) + len(n3b_entries)
-        if total_mentees == 0:
+        total_extra = len(n3a_summaries) + len(n3b_summaries) + len(n4_entries)
+        if total_mentees + total_extra == 0:
             return
 
         if self.verbose:
-            print(f"Filling Mentoring ({total_mentees} mentees)...")
+            print(f"Filling Mentoring ({total_mentees} mentees, {total_extra} summary/outcome lines)...")
             if entries_to_move:
                 print(f"  Moved {len(entries_to_move)} mentees from Past to Current (end_date=present)")
 
@@ -4745,7 +4828,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             past_mentees_idx = mentoring_idx
 
         # Fill Current Mentees (N3A)
-        if n3a_entries and current_mentees_idx is not None:
+        if (n3a_entries or n3a_summaries) and current_mentees_idx is not None:
             # Remove any existing template table after "Current Mentees:"
             existing_table = self._find_table_after_paragraph(current_mentees_idx)
             if existing_table:
@@ -4759,8 +4842,12 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 self.stats['tables_populated'] += 1
                 self.stats['entries_inserted'] += 1
 
+            # Summaries go in last so they land directly under the header, above the
+            # tables (each insert pushes the previous one down).
+            self._insert_mentoring_summaries(n3a_summaries, current_mentees_idx)
+
         # Fill Past Mentees (N3B)
-        if n3b_entries:
+        if n3b_entries or n3b_summaries:
             # Re-find Past Mentees index since it may have shifted after current mentee insertion
             past_mentees_idx = self._find_paragraph_exact("Past Mentees:")
             if past_mentees_idx is not None:
@@ -4775,6 +4862,26 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     self._create_mentee_table_with_spacing(fields, past_mentees_idx, entry)
                     self.stats['tables_populated'] += 1
                     self.stats['entries_inserted'] += 1
+
+                self._insert_mentoring_summaries(n3b_summaries, past_mentees_idx)
+
+        # Mentoring outcomes (N4) have no table in the WCM template. Render them
+        # under the section header, re-found because the inserts above shifted it.
+        if n4_entries:
+            mentoring_idx = self._find_paragraph_exact("MENTORING")
+            if mentoring_idx is not None:
+                self._insert_mentoring_summaries(n4_entries, mentoring_idx)
+
+    def _insert_mentoring_summaries(self, entries: List[Dict], insert_after_idx: int):
+        """Render summary/outcome entries as plain lines after ``insert_after_idx``.
+
+        Reversed so that, with each insert landing immediately after the header and
+        pushing the previous one down, the final document order matches ``entries``.
+        """
+        for entry in reversed(entries):
+            text = _clean_inline_tabs((entry.get('text') or '').strip())
+            if text:
+                self._insert_mentoring_line(text, insert_after_idx, entry)
 
     def _create_mentee_table(self, fields: Dict, insert_after_idx: int, entry: Dict = None) -> Optional[Table]:
         """Create an individual mentee table matching WCM template structure.
@@ -5484,14 +5591,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         formatted_text = fields.get('formatted_text', '')
         original_text = entry.get('text', '')
 
-        # Skip orphan fragments: short entries with no date, audience, location, OR formatted_text
-        # (typically sub-headers that were misclassified as content entries)
-        # Don't skip if there's formatted_text - Stage 5c validated this as real content
-        has_date = bool(fields.get('date') or fields.get('start_date') or fields.get('end_date'))
-        has_audience = bool(fields.get('audience') or fields.get('level'))
-        has_location = bool(fields.get('location') or fields.get('institution'))
-        has_formatted = bool(formatted_text)
-        if not has_date and not has_audience and not has_location and not has_formatted and len(original_text) < 80:
+        if self._is_orphan_fragment(fields, formatted_text, original_text):
             return
 
         # Normalize any raw ISO dates the LLM left in formatted text
