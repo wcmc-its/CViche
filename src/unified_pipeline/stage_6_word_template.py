@@ -81,6 +81,27 @@ def _clean_inline_tabs(text: str) -> str:
     return parts[0] + ": " + " — ".join(parts[1:])
 
 
+def _committee_cell_text(value) -> str:
+    """Coerce a possibly-structured committee field to plain cell text.
+
+    Stage 4 can emit a committee field as a dict or a list of record dicts for a
+    multi-record entry (#208/#248 fusion), not just a string. Writing a non-str
+    into a Word cell (``cell.text = <dict>``) raises deep in python-docx and
+    aborts the whole document (#256). Never let that happen: pull the name-like
+    value from a dict, join a list, and stringify anything else."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return str(value.get("committee_name") or value.get("committee")
+                   or value.get("activity") or value.get("name")
+                   or value.get("title") or "")
+    if isinstance(value, list):
+        return "; ".join(t for t in (_committee_cell_text(v) for v in value) if t)
+    return str(value)
+
+
 # A leading 3b taxonomy code (M2B, D1, S6, N3A …) that leaked into a rendered
 # bullet — code letter + 1-2 digits + optional trailing letter, bracketed at the
 # very start and followed by whitespace. Seen verbatim in output on the WCM-
@@ -7142,6 +7163,26 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             taxonomy_code = entry.get('taxonomy_code', 'P')
             original_text = entry.get('text', '')
 
+            # Stage 4 packs a multi-committee entry as a LIST of record dicts under
+            # committee_name/committee/activity (#208/#248 fusion). Expand each into
+            # its own row rather than dumping a list into one cell (#256 crash).
+            record_list = next(
+                (v for v in (fields.get('committee_name'), fields.get('committee'),
+                             fields.get('activity')) if isinstance(v, list)), None)
+            if record_list:
+                for rec in record_list:
+                    if isinstance(rec, dict):
+                        a = _committee_cell_text(rec.get('committee_name') or rec.get('committee')
+                                                 or rec.get('activity') or rec.get('name'))
+                        r = _committee_cell_text(rec.get('role'))
+                        d = format_date_range(rec.get('start_date') or '',
+                                              rec.get('end_date') or '', taxonomy_code) or ''
+                    else:
+                        a, r, d = _committee_cell_text(rec), '', ''
+                    if a:
+                        self._add_committee_row(table, a, r, d)
+                continue
+
             activity = fields.get('activity') or fields.get('committee') or fields.get('committee_name') or ''
             role = fields.get('role') or ''
             start_date = fields.get('start_date') or ''
@@ -7191,6 +7232,11 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
     def _add_committee_row(self, table, activity: str, role: str, dates: str):
         """Add a single committee row with proper column handling."""
+        # Defensive: never write a non-str (dict/list) into a Word cell — it
+        # raises deep in python-docx and aborts the whole document (#256).
+        activity = _committee_cell_text(activity)
+        role = _committee_cell_text(role)
+        dates = _committee_cell_text(dates)
         row = table.add_row()
         num_cols = len(row.cells)
 
