@@ -1,5 +1,6 @@
-import { ArrowLeft, HelpCircle } from 'lucide-react'
+import { ArrowLeft, HelpCircle, Download } from 'lucide-react'
 import { Link } from 'react-router-dom'
+import { runRoutes } from '../api/routes'
 import { formatCost } from '../utils'
 import UserMenu from './UserMenu'
 
@@ -67,7 +68,15 @@ export default function PipelineHeader({
           </button>
           <div className="min-w-0">
             <h1 className="text-lg font-bold text-gray-900 truncate">Run #{runId}</h1>
-            <p className="text-sm text-gray-700 truncate">{filename}</p>
+            <a
+              href={runRoutes.inputFile(runId)}
+              download
+              title="Download the original uploaded CV"
+              className="group inline-flex items-center gap-1 max-w-full text-sm text-gray-700 hover:text-primary-600 hover:underline"
+            >
+              <span className="truncate">{filename}</span>
+              <Download className="h-3.5 w-3.5 shrink-0 opacity-60 group-hover:opacity-100" />
+            </a>
           </div>
         </div>
 

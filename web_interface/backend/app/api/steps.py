@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -197,6 +197,57 @@ async def get_data_file(
 
     # Default: download
     return FileResponse(str(file_path), filename=download_filename)
+
+
+@router.get("/run/{run_id}/input")
+async def download_input_file(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download the ORIGINAL uploaded CV, named as the user uploaded it.
+
+    The source is retained in durable storage at input/<run_id>.<ext> because
+    restart/retry re-materialize it (see runs._materialize_input_if_missing),
+    but it was only ever read internally — there was no way to get the original
+    file back out. Same owner-or-admin gate as the outputs download.
+    """
+    run = check_run_access(run_id, current_user, db)  # 404/403 as needed; returns the Run
+
+    file_type = (run.file_type or "").lower() or "docx"
+    key = f"input/{run_id}.{file_type}"
+    media_type = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if file_type == "docx" else "application/pdf"
+    )
+    # The download name is the user-supplied upload filename, so strip anything
+    # that could break out of the Content-Disposition header (CR/LF/quote).
+    original_name = (re.sub(r'[\r\n"]', "", run.filename or "").strip()
+                     or f"{run_id}.{file_type}")
+
+    storage = get_storage()
+    try:
+        if not storage.exists(run_id, key):
+            raise not_found("Original upload is not available for this run")
+        # S3 returns a presigned URL that renames the download; local storage
+        # returns None (no presigned URLs), so proxy the bytes ourselves.
+        url = storage.get_download_url(run_id, key, download_name=original_name)
+        if url:
+            return RedirectResponse(url, status_code=307)
+        data = storage.get_file(run_id, key)
+    except HTTPException:
+        raise
+    except FileNotFoundError:
+        raise not_found("Original upload is not available for this run")
+    except Exception as e:
+        logger.warning("Original-input download failed for run %s: %s", run_id, e)
+        raise internal_error("Could not retrieve the original upload")
+
+    return Response(
+        content=data,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{original_name}"'},
+    )
 
 
 async def _generate_preview_from_path(file_path: Path) -> OutputPreview | None:

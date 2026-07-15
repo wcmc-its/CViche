@@ -27,6 +27,8 @@ export const runRoutes = {
   /** GET/href /api/run/:id/data/:file  (raw data file download / open) */
   dataFile: (id: string, file: string) =>
     `/api/run/${id}/data/${file}` as const,
+  /** GET/href /api/run/:id/input  (original uploaded CV download) */
+  inputFile: (id: string) => `/api/run/${id}/input` as const,
   /** POST /api/run/:id/cancel */
   cancel: (id: string) => `/api/run/${id}/cancel` as const,
   /** POST /api/run/:id/restart */
