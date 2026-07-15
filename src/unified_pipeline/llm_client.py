@@ -29,7 +29,7 @@ import os
 from pathlib import Path
 import sys
 import time
-import json as json_module
+import json
 import logging
 import random
 import threading
@@ -117,14 +117,30 @@ RETRYABLE_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, Interna
 # are admission-capped, so in-flight calls are already few; this default is
 # generous headroom rather than a bottleneck. Read once at import (a
 # deploy-time knob), since BoundedSemaphore is sized at construction.
-def _get_max_concurrent_llm_calls() -> int:
+def _get_llm_config_int(key: str, default: int, min_value: int = 1) -> int:
+    """Read an int LLM knob, falling back to default if unset, unparseable,
+    or below min_value."""
     try:
-        #value = int(os.environ.get("CVICHE_MAX_CONCURRENT_LLM_CALLS", 8))
-        max_concurrent_llm_calls, _ = get_config("llm","CVICHE_MAX_CONCURRENT_LLM_CALLS",default=8)
-        value = int(max_concurrent_llm_calls)
+        value, _ = get_config("llm", key, default=default)
+        result = int(value)
     except (TypeError, ValueError):
-        return 8
-    return value if value > 0 else 8
+        return default
+    return result if result >= min_value else default
+
+
+def _get_llm_config_float(key: str, default: float, min_value: float = 0.0) -> float:
+    """Read a float LLM knob, falling back to default if unset, unparseable,
+    or at/below min_value."""
+    try:
+        value, _ = get_config("llm", key, default=default)
+        result = float(value)
+    except (TypeError, ValueError):
+        return default
+    return result if result > min_value else default
+
+
+def _get_max_concurrent_llm_calls() -> int:
+    return _get_llm_config_int("CVICHE_MAX_CONCURRENT_LLM_CALLS", default=8)
 
 
 _llm_call_semaphore = threading.BoundedSemaphore(_get_max_concurrent_llm_calls())
@@ -141,13 +157,7 @@ def _get_llm_timeout_seconds() -> float:
     surfaces to the user. Generous by default so legitimately slow calls
     are not clipped; tune via CVICHE_LLM_TIMEOUT_SECONDS.
     """
-    try:
-        #value = float(os.environ.get("CVICHE_LLM_TIMEOUT_SECONDS", 180))
-        timeout, _ = get_config("llm","CVICHE_LLM_TIMEOUT_SECONDS", default=180)
-        value = float(timeout)
-    except (TypeError, ValueError):
-        return 180.0
-    return value if value > 0 else 180.0
+    return _get_llm_config_float("CVICHE_LLM_TIMEOUT_SECONDS", default=180.0)
 
 
 def _get_llm_max_attempts() -> int:
@@ -158,13 +168,7 @@ def _get_llm_max_attempts() -> int:
     wedged Bedrock endpoint fails deterministically instead of hanging.
     Tune via CVICHE_LLM_MAX_ATTEMPTS.
     """
-    try:
-        #value = int(os.environ.get("CVICHE_LLM_MAX_ATTEMPTS", 3))
-        max_attempts,_ = get_config("llm","CVICHE_LLM_MAX_ATTEMPTS",3)
-        value = int(max_attempts)
-    except (TypeError, ValueError):
-        return 3
-    return value if value >= 1 else 3
+    return _get_llm_config_int("CVICHE_LLM_MAX_ATTEMPTS", default=3)
 
 
 # Guards construction of the module-level clients below. call_llm runs on
@@ -230,7 +234,16 @@ def _call_with_retry(call_fn, retry_count: int = 3):
         retry_count: Max number of retries (total attempts = retry_count + 1)
 
     Returns:
-        The return value of call_fn on success
+        (result, api_seconds) -- the return value of call_fn on success, and
+        the wall time of that one successful call_fn() invocation.
+
+        api_seconds deliberately EXCLUDES backoff sleeps, failed attempts, and
+        time spent blocked on _llm_call_semaphore. It is API response time, not
+        time-to-success: callers report it as latency_ms, and cost/perf
+        dashboards built on that field would otherwise read a 35s "latency" for
+        a call whose every attempt took 300ms (#274). The wait a caller
+        actually experienced is not currently reported anywhere; add a separate
+        field if something needs it, rather than folding it back into this one.
 
     Raises:
         ValueError: If retry_count is negative
@@ -250,7 +263,11 @@ def _call_with_retry(call_fn, retry_count: int = 3):
             # around the actual call and released before any backoff sleep below,
             # so a backing-off caller never holds a slot idle.
             with _llm_call_semaphore:
-                return call_fn()
+                # monotonic, not time(): a wall-clock step (NTP) mid-call must
+                # not be able to produce a negative or wildly wrong latency.
+                started = time.monotonic()
+                result = call_fn()
+                return result, time.monotonic() - started
         except RETRYABLE_ERRORS as e:
             # For botocore ClientError, only retry if the error code is retryable.
             # Non-retryable Bedrock errors (AccessDeniedException, ValidationException,
@@ -463,9 +480,9 @@ def _validate_json_response(content, response_format):
     if not _wants_json(response_format):
         return True
     try:
-        json_module.loads(_strip_markdown_fences(content))
+        json.loads(_strip_markdown_fences(content))
         return True
-    except (json_module.JSONDecodeError, TypeError):
+    except (json.JSONDecodeError, TypeError):
         return False
 
 
@@ -605,6 +622,173 @@ def _finalize_bedrock_result(content, usage, cache_read_tokens, cache_write_toke
     }
 
 
+# Keys call_llm consumes itself; everything else in **kwargs is forwarded to the
+# provider SDK untouched.
+_EXPLICIT_KWARGS = frozenset({
+    "provider", "model", "temperature", "max_tokens", "retry_count", "stage",
+    "enable_prompt_caching",
+})
+
+
+def _resolve_call_config(stage: str, kwargs: dict) -> dict:
+    """Merge the stage's YAML config with per-call kwarg overrides."""
+    config = get_stage_config(stage)
+    return {
+        "provider": kwargs.get("provider", config["provider"]),
+        "model": kwargs.get("model", config["model"]),
+        "temperature": kwargs.get("temperature", config["temperature"]),
+        "max_tokens": kwargs.get("max_tokens", config["max_tokens"]),
+        "retry_count": kwargs.get("retry_count", config["retry_count"]),
+        "enable_prompt_caching": kwargs.get(
+            "enable_prompt_caching", config.get("enable_prompt_caching", False)
+        ),
+        "extra_kwargs": {k: v for k, v in kwargs.items() if k not in _EXPLICIT_KWARGS},
+    }
+
+
+def _handle_openai(messages: list, response_format, cfg: dict) -> dict:
+    """Dispatch one OpenAI call and normalize the response."""
+    response, api_seconds = _call_with_retry(
+        lambda: _call_openai(cfg["model"], messages, cfg["temperature"],
+                             response_format, cfg["max_tokens"],
+                             **cfg["extra_kwargs"]),
+        retry_count=cfg["retry_count"],
+    )
+
+    usage = response.usage
+    return {
+        "content": response.choices[0].message.content,
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+        "cost": calculate_cost(
+            usage.prompt_tokens,
+            usage.completion_tokens,
+            model=cfg["model"],
+            provider="openai",
+        ),
+        "model": cfg["model"],
+        "provider": "openai",
+        "finish_reason": response.choices[0].finish_reason,
+        "latency_ms": int(api_seconds * 1000),
+    }
+
+
+def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
+    """Dispatch one Bedrock call and normalize the response.
+
+    Covers both output shapes: the #46 forced-tool json_schema path, and the
+    text/json_object path (with its one-shot JSON repair retry).
+    """
+    model = cfg["model"]
+    response, api_seconds = _call_with_retry(
+        lambda: _call_bedrock(model, messages, cfg["temperature"], response_format,
+                              cfg["max_tokens"],
+                              enable_prompt_caching=cfg["enable_prompt_caching"],
+                              **cfg["extra_kwargs"]),
+        retry_count=cfg["retry_count"],
+    )
+
+    usage = response["usage"]
+    cache_read_tokens, cache_write_tokens = _extract_cache_tokens(usage)
+
+    if _schema_tool_config(response_format) is not None:
+        # #46 json_schema path: the forced tool's structured `input` IS the
+        # answer. Re-serialize it so every caller's json.loads(content)
+        # keeps working, and skip the text-validation/fence-strip below
+        # (structured tool output is guaranteed valid JSON).
+        stop_reason = response.get("stopReason")
+        tool_input = _extract_tool_use_input(response)
+        if stop_reason != "tool_use" or tool_input is None:
+            # Forced tool call that didn't fire => schema not enforced.
+            # Fail loud rather than silently parsing free text.
+            raise RuntimeError(
+                f"Bedrock forced json_schema tool call did not fire "
+                f"(stopReason={stop_reason!r}, tool_input="
+                f"{'present' if tool_input is not None else 'missing'})"
+            )
+        # Returns before the JSON-repair branch, so there is only the one
+        # dispatch to account for.
+        return _finalize_bedrock_result(
+            json.dumps(tool_input), usage, cache_read_tokens, cache_write_tokens,
+            STOP_REASON_MAP.get(stop_reason, stop_reason), model,
+            int(api_seconds * 1000),
+        )
+
+    # Extract and normalize Bedrock response (text / json_object path)
+    content = response["output"]["message"]["content"][0]["text"]
+    stop_reason = response.get("stopReason", "end_turn")
+    finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
+
+    # D-05: Validate JSON when response_format was requested
+    if not _validate_json_response(content, response_format):
+        logger.warning("Bedrock response is not valid JSON. Retrying with stronger hint...")
+        # Retry once with stronger prompt hint
+        stronger_messages = list(messages)  # shallow copy
+        stronger_messages.append({
+            "role": "user",
+            "content": "Your previous response was not valid JSON. Please respond with ONLY valid JSON, no markdown fencing or explanation.",
+        })
+        # Go through _call_with_retry rather than calling _call_bedrock
+        # bare: this retry is a live Bedrock request like any other, and a
+        # transient throttle on it should back off instead of raising.
+        # _call_with_retry acquires _llm_call_semaphore itself, so this
+        # call stays bounded without nesting the acquire.
+        retry_response, retry_api_seconds = _call_with_retry(
+            lambda: _call_bedrock(model, stronger_messages, cfg["temperature"],
+                                  response_format, cfg["max_tokens"],
+                                  enable_prompt_caching=cfg["enable_prompt_caching"],
+                                  **cfg["extra_kwargs"]),
+            retry_count=cfg["retry_count"],
+        )
+        # This repair call is a second live Bedrock request, so its API time
+        # belongs in latency_ms -- as its tokens already do just below.
+        # Previously latency_ms was frozen before this branch ran, so the
+        # repair call was billed but never timed.
+        api_seconds += retry_api_seconds
+        content = retry_response["output"]["message"]["content"][0]["text"]
+        retry_usage = retry_response["usage"]
+        retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)
+        # Accumulate token usage from retry
+        usage = {
+            "inputTokens": usage["inputTokens"] + retry_usage["inputTokens"],
+            "outputTokens": usage["outputTokens"] + retry_usage["outputTokens"],
+            "totalTokens": usage["totalTokens"] + retry_usage["totalTokens"],
+        }
+        cache_read_tokens += retry_cache_read
+        cache_write_tokens += retry_cache_write
+        stop_reason = retry_response.get("stopReason", "end_turn")
+        finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
+        # If still invalid, return as-is (let downstream handle it per D-05)
+
+    # Strip a surrounding markdown fence (Claude wraps JSON in ```json…```
+    # even when told not to) so callers can json.loads() the content
+    # directly. This MUST stay at the handler body level, NOT inside the
+    # retry branch above: _validate_json_response strips fences before
+    # validating, so a fence-wrapped-but-valid response passes validation
+    # and never triggers a retry -- stripping here is the only thing that
+    # makes the returned content fence-free for the common case. No-op when
+    # no fence is present or no JSON was requested.
+    if _wants_json(response_format):
+        content = _strip_markdown_fences(content)
+
+    return _finalize_bedrock_result(
+        content, usage, cache_read_tokens, cache_write_tokens,
+        finish_reason, model,
+        # After the JSON-repair branch, so a repair call's API time is included
+        # rather than dropped.
+        int(api_seconds * 1000),
+    )
+
+
+_PROVIDER_HANDLERS = {
+    "openai": _handle_openai,
+    "bedrock": _handle_bedrock,
+}
+
+
 def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict:
     """Centralized LLM call with config resolution, retries, and cost tracking.
 
@@ -631,193 +815,49 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
         - model (str): Model used
         - provider (str): Provider used ("openai" or "bedrock")
         - finish_reason (str): Why generation stopped
-        - latency_ms (int): Wall-clock time in milliseconds
+        - latency_ms (int): API response time in milliseconds -- the time the
+          provider call itself took. Retry backoff sleeps, failed attempts and
+          time queued on the concurrency semaphore are excluded by design, so
+          this is safe to aggregate in cost/perf dashboards (#274). On the
+          Bedrock JSON-repair path it is the sum of both live calls.
 
     Raises:
         ValueError: If provider is not supported
         openai errors: On non-retryable OpenAI errors or exhausted retries
         botocore.exceptions.ClientError: On non-retryable Bedrock errors
     """
-    config = get_stage_config(stage)
-    provider = kwargs.get("provider", config["provider"])
-    model = kwargs.get("model", config["model"])
-    temperature = kwargs.get("temperature", config["temperature"])
-    max_tokens = kwargs.get("max_tokens", config["max_tokens"])
-    retry_count = kwargs.get("retry_count", config["retry_count"])
-    enable_prompt_caching = kwargs.get("enable_prompt_caching",
-                                       config.get("enable_prompt_caching", False))
+    cfg = _resolve_call_config(stage, kwargs)
 
-    # Filter out keys already extracted as explicit args
-    extra_kwargs = {k: v for k, v in kwargs.items()
-                    if k not in {"provider", "model", "temperature", "max_tokens",
-                                 "retry_count", "stage", "enable_prompt_caching"}}
-
-    start_time = time.time()
+    handler = _PROVIDER_HANDLERS.get(cfg["provider"])
+    if handler is None:
+        # Before log_prompt_before_call: a provider we can't dispatch to never
+        # reaches an API, so logging a prompt for it would leave an orphan entry
+        # that no response ever closes.
+        raise ValueError(
+            f"Unsupported provider: {cfg['provider']}. "
+            f"Supported providers: {', '.join(sorted(_PROVIDER_HANDLERS))}."
+        )
 
     log_id = log_prompt_before_call(
         messages=messages,
-        model=model,
+        model=cfg["model"],
         purpose=stage,
-        temperature=temperature,
+        temperature=cfg["temperature"],
         response_format=response_format,
-        max_tokens=max_tokens,
-        context={"provider": provider},
+        max_tokens=cfg["max_tokens"],
+        context={"provider": cfg["provider"]},
         caller_file="llm_client.py",
     )
 
-    # Dispatch to provider
-    if provider == "openai":
-        response = _call_with_retry(
-            lambda: _call_openai(model, messages, temperature, response_format,
-                                 max_tokens, **extra_kwargs),
-            retry_count=retry_count,
-        )
+    result = handler(messages, response_format, cfg)
 
-        latency_ms = int((time.time() - start_time) * 1000)
-
-        # Extract response fields
-        content = response.choices[0].message.content
-        usage = response.usage
-        finish_reason = response.choices[0].finish_reason
-
-        # Calculate cost
-        cost = calculate_cost(
-            usage.prompt_tokens,
-            usage.completion_tokens,
-            model=model,
-            provider=provider,
-        )
-
-        result = {
-            "content": content,
-            "prompt_tokens": usage.prompt_tokens,
-            "completion_tokens": usage.completion_tokens,
-            "total_tokens": usage.total_tokens,
-            "cache_read_tokens": 0,
-            "cache_write_tokens": 0,
-            "cost": cost,
-            "model": model,
-            "provider": provider,
-            "finish_reason": finish_reason,
-            "latency_ms": latency_ms,
-        }
-        log_prompt_response(
-            log_id=log_id,
-            response=result,
-            purpose=stage,
-            elapsed_time=latency_ms / 1000.0,
-        )
-        return result
-
-    elif provider == "bedrock":
-        response = _call_with_retry(
-            lambda: _call_bedrock(model, messages, temperature, response_format,
-                                  max_tokens,
-                                  enable_prompt_caching=enable_prompt_caching,
-                                  **extra_kwargs),
-            retry_count=retry_count,
-        )
-
-        latency_ms = int((time.time() - start_time) * 1000)
-
-        usage = response["usage"]
-        cache_read_tokens, cache_write_tokens = _extract_cache_tokens(usage)
-
-        if _schema_tool_config(response_format) is not None:
-            # #46 json_schema path: the forced tool's structured `input` IS the
-            # answer. Re-serialize it so every caller's json.loads(content)
-            # keeps working, and skip the text-validation/fence-strip below
-            # (structured tool output is guaranteed valid JSON).
-            stop_reason = response.get("stopReason")
-            tool_input = _extract_tool_use_input(response)
-            if stop_reason != "tool_use" or tool_input is None:
-                # Forced tool call that didn't fire => schema not enforced.
-                # Fail loud rather than silently parsing free text.
-                raise RuntimeError(
-                    f"Bedrock forced json_schema tool call did not fire "
-                    f"(stopReason={stop_reason!r}, tool_input="
-                    f"{'present' if tool_input is not None else 'missing'})"
-                )
-            content = json_module.dumps(tool_input)
-            finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
-            result = _finalize_bedrock_result(
-                content, usage, cache_read_tokens, cache_write_tokens,
-                finish_reason, model, latency_ms,
-            )
-            log_prompt_response(
-                log_id=log_id,
-                response=result,
-                purpose=stage,
-                elapsed_time=latency_ms / 1000.0,
-            )
-            return result
-
-        # Extract and normalize Bedrock response (text / json_object path)
-        content = response["output"]["message"]["content"][0]["text"]
-        stop_reason = response.get("stopReason", "end_turn")
-        finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
-
-        # D-05: Validate JSON when response_format was requested
-        if not _validate_json_response(content, response_format):
-            logger.warning("Bedrock response is not valid JSON. Retrying with stronger hint...")
-            # Retry once with stronger prompt hint
-            stronger_messages = list(messages)  # shallow copy
-            stronger_messages.append({
-                "role": "user",
-                "content": "Your previous response was not valid JSON. Please respond with ONLY valid JSON, no markdown fencing or explanation.",
-            })
-            # Go through _call_with_retry rather than calling _call_bedrock
-            # bare: this retry is a live Bedrock request like any other, and a
-            # transient throttle on it should back off instead of raising.
-            # _call_with_retry acquires _llm_call_semaphore itself, so this
-            # call stays bounded without nesting the acquire.
-            retry_response = _call_with_retry(
-                lambda: _call_bedrock(model, stronger_messages, temperature,
-                                      response_format, max_tokens,
-                                      enable_prompt_caching=enable_prompt_caching,
-                                      **extra_kwargs),
-                retry_count=retry_count,
-            )
-            content = retry_response["output"]["message"]["content"][0]["text"]
-            retry_usage = retry_response["usage"]
-            retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)
-            # Accumulate token usage from retry
-            usage = {
-                "inputTokens": usage["inputTokens"] + retry_usage["inputTokens"],
-                "outputTokens": usage["outputTokens"] + retry_usage["outputTokens"],
-                "totalTokens": usage["totalTokens"] + retry_usage["totalTokens"],
-            }
-            cache_read_tokens += retry_cache_read
-            cache_write_tokens += retry_cache_write
-            stop_reason = retry_response.get("stopReason", "end_turn")
-            finish_reason = STOP_REASON_MAP.get(stop_reason, stop_reason)
-            # If still invalid, return as-is (let downstream handle it per D-05)
-
-        # Strip a surrounding markdown fence (Claude wraps JSON in ```json…```
-        # even when told not to) so callers can json.loads() the content
-        # directly. This MUST stay at the call_llm body level, NOT inside the
-        # retry branch above: _validate_json_response strips fences before
-        # validating, so a fence-wrapped-but-valid response passes validation
-        # and never triggers a retry -- stripping here is the only thing that
-        # makes the returned content fence-free for the common case. No-op when
-        # no fence is present or no JSON was requested.
-        if _wants_json(response_format):
-            content = _strip_markdown_fences(content)
-
-        result = _finalize_bedrock_result(
-            content, usage, cache_read_tokens, cache_write_tokens,
-            finish_reason, model, latency_ms,
-        )
-        log_prompt_response(
-            log_id=log_id,
-            response=result,
-            purpose=stage,
-            elapsed_time=latency_ms / 1000.0,
-        )
-        return result
-
-    else:
-        raise ValueError(
-            f"Unsupported provider: {provider}. "
-            f"Supported providers: openai, bedrock."
-        )
+    # Single exit point. Previously this block was copy-pasted into all three
+    # return branches, so a change to the logging signature had to land in three
+    # places and missing one silently dropped the log (#273).
+    log_prompt_response(
+        log_id=log_id,
+        response=result,
+        purpose=stage,
+        elapsed_time=result["latency_ms"] / 1000.0,
+    )
+    return result

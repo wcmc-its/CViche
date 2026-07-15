@@ -1045,7 +1045,9 @@ def test_call_semaphore_released_on_success_and_failure(monkeypatch):
     sem = mod._llm_call_semaphore
     initial = sem._value  # available permits (CPython BoundedSemaphore)
 
-    assert mod._call_with_retry(lambda: "ok", retry_count=0) == "ok"
+    result, api_seconds = mod._call_with_retry(lambda: "ok", retry_count=0)
+    assert result == "ok"
+    assert api_seconds >= 0  # timed the call itself (#274)
     assert sem._value == initial  # released after success
 
     monkeypatch.setattr(mod.time, "sleep", lambda s: None)
@@ -1254,6 +1256,135 @@ def test_schema_tool_config_falls_back_for_non_object_schema():
     assert _schema_tool_config(None) is None
     ok = _schema_tool_config(_JSON_SCHEMA_RF)
     assert ok["toolChoice"] == {"tool": {"name": "grant_record"}}
+
+
+# ---------------------------------------------------------------------------
+# Single logging exit point (#273)
+# ---------------------------------------------------------------------------
+
+def test_call_llm_logs_response_exactly_once_per_provider_path():
+    """Every provider path logs the response exactly once.
+
+    log_prompt_response used to be copy-pasted into all three return branches
+    (OpenAI, Bedrock forced-tool, Bedrock text), so adding a fourth exit meant
+    remembering a fourth copy -- and forgetting silently dropped the log. There
+    is now one exit point; this pins it for all three paths.
+    """
+    from unified_pipeline.llm_client import call_llm
+
+    openai_cfg = {"provider": "openai", "model": "gpt-4o-mini", "temperature": 0,
+                  "max_tokens": None, "retry_count": 3}
+    schema_fmt = {
+        "type": "json_schema",
+        "json_schema": {"name": "grant_record",
+                        "schema": {"type": "object", "properties": {}}},
+    }
+
+    paths = []
+
+    # 1. OpenAI
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=openai_cfg), \
+         patch("unified_pipeline.llm_client._get_openai_client") as mock_openai, \
+         patch("unified_pipeline.llm_client.log_prompt_response") as logged:
+        mock_openai.return_value.chat.completions.create.return_value = _make_mock_response()
+        call_llm("stage_2", [{"role": "user", "content": "hi"}])
+        paths.append(("openai", logged.call_count))
+
+    # 2. Bedrock text/json_object path
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm_client.log_prompt_response") as logged:
+        mock_get_client.return_value.converse.return_value = _make_bedrock_response()
+        call_llm("stage_2", [{"role": "user", "content": "hi"}])
+        paths.append(("bedrock-text", logged.call_count))
+
+    # 3. Bedrock forced-tool json_schema path (#46)
+    tool_response = {
+        "output": {"message": {"content": [
+            {"toolUse": {"name": "grant_record", "input": {"title": "x"}}},
+        ]}},
+        "stopReason": "tool_use",
+        "usage": {"inputTokens": 100, "outputTokens": 50, "totalTokens": 150},
+    }
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=_bedrock_config()), \
+         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm_client.log_prompt_response") as logged:
+        mock_get_client.return_value.converse.return_value = tool_response
+        call_llm("stage_2", [{"role": "user", "content": "hi"}],
+                 response_format=schema_fmt)
+        paths.append(("bedrock-tool", logged.call_count))
+
+    assert paths == [("openai", 1), ("bedrock-text", 1), ("bedrock-tool", 1)]
+
+
+def test_call_llm_unsupported_provider_logs_no_orphan_prompt():
+    """An undispatchable provider must not leave a prompt log with no response.
+
+    The raise now happens before log_prompt_before_call, so there is no dangling
+    entry that nothing ever closes.
+    """
+    from unified_pipeline.llm_client import call_llm
+
+    bad_cfg = {"provider": "azure", "model": "gpt-4o-mini", "temperature": 0,
+               "max_tokens": None, "retry_count": 3}
+
+    with patch("unified_pipeline.llm_client.get_stage_config", return_value=bad_cfg), \
+         patch("unified_pipeline.llm_client.log_prompt_before_call") as before, \
+         patch("unified_pipeline.llm_client.log_prompt_response") as after:
+        with pytest.raises(ValueError, match="Unsupported provider"):
+            call_llm("stage_2", [{"role": "user", "content": "test"}])
+
+    assert before.call_count == 0
+    assert after.call_count == 0
+
+
+# ---------------------------------------------------------------------------
+# latency_ms excludes retry backoff (#274)
+# ---------------------------------------------------------------------------
+
+def test_call_with_retry_excludes_backoff_from_api_seconds(monkeypatch):
+    """api_seconds must time the API call, not the wait to get one through.
+
+    The bug (#274): start_time was captured before _call_with_retry, which
+    sleeps internally during backoff -- so a call that retried twice reported
+    ~35s latency even when every attempt took milliseconds. Moving start_time
+    to just before the dispatch (the fix as originally proposed) would NOT
+    have fixed this, since the sleeps happen inside the call being timed.
+    """
+    import unified_pipeline.llm_client as mod
+    from botocore.exceptions import ClientError
+
+    # The backoff must burn REAL time, or a wall-clock implementation would pass
+    # this test too. Stand in a short real sleep for the 1s/2s the code asks for
+    # (grab the true sleep first -- mod.time IS the time module, so patching it
+    # would otherwise make this recurse).
+    real_sleep = time.sleep
+    slept = []
+
+    def fake_sleep(seconds):
+        slept.append(seconds)
+        real_sleep(0.05)
+
+    monkeypatch.setattr(mod.time, "sleep", fake_sleep)
+
+    throttle = ClientError({"Error": {"Code": "ThrottlingException"}}, "Converse")
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise throttle
+        return "ok"
+
+    result, api_seconds = mod._call_with_retry(flaky, retry_count=3)
+
+    assert result == "ok"
+    assert calls["n"] == 3        # two failures, then success
+    assert sum(slept) >= 1.0      # the code asked for real backoff (1s + 2s bases)
+    # Two backoffs actually burned ~0.10s of wall time. The successful call is a
+    # no-op lambda, so a correct api_seconds is ~0 -- well under the backoff.
+    # Timing the whole retry loop instead would report >= 0.10 here.
+    assert api_seconds < 0.05
 
 
 # ---------------------------------------------------------------------------
