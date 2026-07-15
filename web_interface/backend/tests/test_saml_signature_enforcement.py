@@ -23,6 +23,7 @@ import os
 import shutil
 import subprocess
 import tempfile
+import warnings
 
 import pytest
 
@@ -111,7 +112,14 @@ def harness():
     idp = Server(config=Config().load(_idp_conf(tmp, idp_key, idp_crt, [sp_md])))
     atk = Server(config=Config().load(_idp_conf(tmp, atk_key, atk_crt, [sp_md])))
     strict_sp = Saml2Client(config=Config().load(_sp_conf(sp_key, sp_crt, [idp_md], want_signed=True)))
-    lax_sp = Saml2Client(config=Config().load(_sp_conf(sp_key, sp_crt, [idp_md], want_signed=False)))
+    # lax_sp is INTENTIONALLY insecure (want_assertions_signed=False) — it is the
+    # negative control test_flag_is_load_bearing needs to prove the prod flag
+    # (app/saml_client.py: want_assertions_signed=True, SEC-02) is what forces
+    # rejection. pysaml2 rightly UserWarns "accepts unsigned ..." on this config;
+    # it reflects only this deliberate fixture, not prod, so silence it here.
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="The SAML service provider accepts unsigned")
+        lax_sp = Saml2Client(config=Config().load(_sp_conf(sp_key, sp_crt, [idp_md], want_signed=False)))
 
     valid = _authn_response(idp, "victim")
     tampered = valid.replace("victim@test.local", "admin@test.local")

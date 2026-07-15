@@ -79,7 +79,7 @@ class RedisBroker:
         if not self.enabled:
             return
         try:
-            self._sync().setex(CANCEL_KEY.format(run_id=run_id), CANCEL_TTL_SECONDS, "1")
+            self._sync().set(CANCEL_KEY.format(run_id=run_id), "1", ex=CANCEL_TTL_SECONDS)
         except Exception:
             logger.warning("Redis cancel-set failed for run %s", run_id, exc_info=True)
 
