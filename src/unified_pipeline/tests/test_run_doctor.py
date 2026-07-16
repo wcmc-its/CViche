@@ -995,3 +995,32 @@ def test_missed_headers_ignores_trailing_colon():
     found = lint_missed_headers(["INTELLECTUAL PROPERTY:"], stage1a, stage2)
     assert len(found) == 1
     assert found[0]["lint"] == "missed_headers"
+
+
+def test_artifact_resolution_does_not_steal_a_longer_uids_files(tmp_path):
+    """uid 'web05' must not resolve to 'web050_entries.json'.
+
+    glob(f"{uid}*") is a prefix match and '0' sorts before '_', so the longer
+    uid won: the 2026-07-15 sweep doctored web04/web05/web06 against
+    web049/web050/web060.
+    """
+    from unified_pipeline.run_doctor import _find_artifact, _find_source
+
+    d = tmp_path / "stage_2_entry_extraction"
+    d.mkdir()
+    (d / "web050_entries.json").write_text("{}")   # decoy: longer uid, sorts first
+    (d / "web05_entries.json").write_text("{}")
+
+    found = _find_artifact(tmp_path, "web05", "stage_2")
+    assert found is not None and found.name == "web05_entries.json"
+
+    # the longer uid still resolves to its own file
+    found = _find_artifact(tmp_path, "web050", "stage_2")
+    assert found is not None and found.name == "web050_entries.json"
+
+    # and a uid with no artifact of its own gets nothing, not a neighbour's
+    assert _find_artifact(tmp_path, "web0", "stage_2") is None
+
+    (tmp_path / "web050.docx").write_text("x")
+    (tmp_path / "web05.docx").write_text("x")
+    assert _find_source(tmp_path, "web05").name == "web05.docx"

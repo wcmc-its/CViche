@@ -984,12 +984,30 @@ _ARTIFACTS = {
 }
 
 
+def _uid_owns(name: str, uid: str) -> bool:
+    """Does file ``name`` belong to ``uid`` -- and not to a longer uid that
+    merely starts with it?
+
+    ``glob(f"{uid}*")`` is a PREFIX match, so uid 'web05' also matches
+    'web050_entries.json'. Sorted, '0' (0x30) sorts before '_' (0x5F), so the
+    WRONG CV wins: the 2026-07-15 sweep doctored web04 against web049, web05
+    against web050 and web06 against web060 -- 3 of 25 CVs diagnosed entirely
+    against another CV's artifacts. Require the uid to end at a non-alphanumeric
+    boundary ('web05_entries.json' yes, 'web050_entries.json' no).
+    """
+    if not name.startswith(uid):
+        return False
+    rest = name[len(uid):]
+    return not rest[:1].isalnum()
+
+
 def _find_artifact(root: Path, uid: str, key: str) -> Optional[Path]:
     stage_dir, suffix = _ARTIFACTS[key]
     directory = root / stage_dir
     if not directory.is_dir():
         return None
-    matches = sorted(directory.glob(f"{uid}*{suffix}"))
+    matches = sorted(p for p in directory.glob(f"{uid}*{suffix}")
+                     if _uid_owns(p.name, uid))
     return matches[0] if matches else None
 
 
@@ -997,7 +1015,8 @@ def _find_source(root: Path, uid: str) -> Optional[Path]:
     for directory in (root, root / "uploads"):
         if directory.is_dir():
             matches = sorted(p for p in directory.glob(f"{uid}*.docx")
-                             if not p.name.endswith("_wcm.docx"))
+                             if not p.name.endswith("_wcm.docx")
+                             and _uid_owns(p.name, uid))
             if matches:
                 return matches[0]
     return None
