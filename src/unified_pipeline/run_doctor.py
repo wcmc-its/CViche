@@ -225,6 +225,16 @@ def _get_docx_document():
     return Document
 
 
+#: A credential in name-suffix position (', MD' / ', Ph.D.') -- the marker of a
+#: person line rather than a section header. Anchored on the comma so headers
+#: that merely contain commas are not swallowed.
+_NAME_CREDENTIAL_RE = re.compile(
+    r",\s*(?:M\.?D\.?|D\.?O\.?|Ph\.?\s?D\.?|M\.?B\.?B\.?S\.?|MBA|MPH|MSc?|"
+    r"FACEP|FAAEM|FACS|FACP|CPE|DDS|DMD|DVM|JD|RN|PA-C)\b",
+    re.IGNORECASE,
+)
+
+
 def iter_header_candidates(docx_path: str) -> List[str]:
     """Header-looking source lines: short, letters-only, ALL-CAPS bold (or
     styled as a Heading), from top-level paragraphs and single-column table
@@ -243,6 +253,19 @@ def iter_header_candidates(docx_path: str) -> List[str]:
         if not any(ch.isalpha() for ch in text) or any(ch.isdigit() for ch in text):
             return
         if is_source_boilerplate(text):
+            return
+        # A section header is a standalone label. A tab means 'label<TAB>value'
+        # -- a data row that happens to be styled like a heading, e.g. the
+        # licensure rows 'Active\t\t\tMaryland' / 'Certification:\t\t\tAmerican
+        # Board of Surgery'. Segmentation is right not to promote these.
+        if "\t" in text:
+            return
+        # The owner's name/credential line is document furniture, not a section:
+        # 'STANLEY J. SZEFLER, M.D.', 'LEE W. SHOCKLEY, MD, MBA, FACEP, FAAEM,
+        # CPE', 'CURRICULUM VITAE - JEFFREY R OLSEN, MD'. Anchored on the
+        # comma-suffix position so real headers that merely contain a comma
+        # ('ADMINISTRATIVE APPOINTMENTS, SCHOOL OF MEDICINE, CU:') survive.
+        if _NAME_CREDENTIAL_RE.search(text):
             return
         style = getattr(para.style, "name", "") or ""
         if style.startswith("Heading"):

@@ -1024,3 +1024,42 @@ def test_artifact_resolution_does_not_steal_a_longer_uids_files(tmp_path):
     (tmp_path / "web050.docx").write_text("x")
     (tmp_path / "web05.docx").write_text("x")
     assert _find_source(tmp_path, "web05").name == "web05.docx"
+
+
+def _para(text, style="Heading 1"):
+    """Minimal stand-in for the python-docx paragraph iter_header_candidates sees."""
+    class _S:  # noqa: D401
+        name = style
+    class _R:
+        def __init__(self, t): self.text, self.bold = t, True
+    class _P:
+        def __init__(self, t): self.text, self.style, self.runs = t, _S(), [_R(t)]
+    return _P(text)
+
+
+def test_candidate_filter_rejects_tab_data_rows_and_person_lines(monkeypatch):
+    """Header candidates must exclude data rows and the owner's name line.
+
+    2026-07-15 corpus: these were 7 of the 25 residual missed_headers findings.
+    """
+    import unified_pipeline.run_doctor as D
+
+    rejected = [
+        "Active\t\t\tMaryland",                          # licensure data row
+        "Certification:\t\t\tAmerican Board of Surgery",  # label<TAB>value
+        "STANLEY J. SZEFLER, M.D.",                       # owner name line
+        "LEE W. SHOCKLEY, MD, MBA, FACEP, FAAEM, CPE",
+        "AMY NICHOLE MERTENS, D.O.",
+        "CURRICULUM VITAE – JEFFREY R OLSEN, MD",         # CV title + name
+    ]
+    kept = [
+        "ADMINISTRATIVE APPOINTMENTS, SCHOOL OF MEDICINE, CU:",  # comma, real header
+        "PROFESSIONAL SOCIETIES:",
+        "TEACHING",
+    ]
+
+    for text in rejected:
+        assert D._NAME_CREDENTIAL_RE.search(text) or "\t" in text, text
+    for text in kept:
+        assert not D._NAME_CREDENTIAL_RE.search(text), text
+        assert "\t" not in text
