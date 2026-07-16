@@ -7437,55 +7437,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             self._set_font(run)
                 self.stats['entries_inserted'] += 1
 
-    def _fill_clinical_trials(self, entries_by_code: Dict[str, List[Dict]]):
-        """Fill M4A/M4B Clinical Trials sections.
-
-        These are research studies/clinical trials, not grants.
-        Uses bullet list format since template may not have specific tables.
-        """
-        m4a_entries = entries_by_code.get('M4A', [])
-        m4b_entries = entries_by_code.get('M4B', [])
-
-        all_entries = m4a_entries + m4b_entries
-        if not all_entries:
-            return
-
-        if self.verbose:
-            print(f"Filling Clinical Trials ({len(all_entries)} entries)...")
-
-        # Find Research section
-        section_idx = self._find_paragraph_with_text("RESEARCH")
-        if section_idx is None:
-            section_idx = self._find_paragraph_with_text("Clinical Trials")
-        if section_idx is None:
-            # Fall back - add after Research Support if it exists
-            section_idx = self._find_paragraph_with_text("Research Support")
-        if section_idx is None:
-            return
-
-        sorted_entries = sort_entries_reverse_chronological(all_entries)
-
-        # Insert in reverse order
-        reversed_entries = list(reversed(sorted_entries))
-        for i, entry in enumerate(reversed_entries):
-            fields = entry.get('extracted_fields', {}) or {}
-
-            title = fields.get('study_title') or fields.get('title') or ''
-            role = fields.get('role') or ''
-            status = 'Current' if entry.get('taxonomy_code') == 'M4A' else 'Completed'
-
-            if not title:
-                title = entry.get('text', '')[:150]
-
-            text = title
-            if role:
-                text += f" (Role: {role})"
-            text += f" [{status}]"
-
-            insert_idx = section_idx + 1
-            is_first = (i == len(reversed_entries) - 1)
-            self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first)
-
     def _fill_passthrough_sections(self, all_entries: List[Dict]):
         """Fill sections that can be copied directly from source CV when format matches.
 
