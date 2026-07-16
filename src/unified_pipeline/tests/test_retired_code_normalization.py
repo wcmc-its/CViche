@@ -32,6 +32,14 @@ def test_m3_normalizes_to_m2d_and_preserves_original():
     assert entry["taxonomy_code_original"] == "M3"
 
 
+def test_m4a_m4b_clinical_trials_normalize_to_grants():
+    for old, live in [("M4A", "M2A"), ("M4B", "M2B")]:
+        e = {"taxonomy_code": old, "text": "Phase I trial ..."}
+        assert normalize_retired_code(e) == live
+        assert e["taxonomy_code"] == live
+        assert e["taxonomy_code_original"] == old
+
+
 def test_live_code_is_untouched():
     entry = {"taxonomy_code": "H", "text": "Some honor"}
     assert normalize_retired_code(entry) == "H"

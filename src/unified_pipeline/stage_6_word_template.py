@@ -729,7 +729,9 @@ FALLBACK_TEMPLATES = [
 # ponytail: pure renames only. Codes with NO live equivalent (N4, M4C) need a
 # real render route instead — see #261; don't add them here.
 RETIRED_TAXONOMY_CODES = {
-    'M3': 'M2D',  # Patents & Innovations — former M3 renamed to M2D (taxonomy v7)
+    'M3': 'M2D',   # Patents & Innovations — former M3 renamed to M2D (taxonomy v7)
+    'M4A': 'M2A',  # Clinical trials (active) — M4 retired; trials are now grants-by-status
+    'M4B': 'M2B',  # Clinical trials (completed) — M4 retired; trials are now grants-by-status
 }
 
 
