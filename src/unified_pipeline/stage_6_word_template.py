@@ -722,6 +722,33 @@ FALLBACK_TEMPLATES = [
 ]
 
 
+# Retired taxonomy codes that were pure renames of a still-live code. Stage-3b
+# occasionally still emits the old code (e.g. patents tagged as the retired M3),
+# which has no render route and gets silently dropped. Normalize to the live code
+# at grouping time so the existing renderer picks them up.
+# ponytail: pure renames only. Codes with NO live equivalent (N4, M4C) need a
+# real render route instead — see #261; don't add them here.
+RETIRED_TAXONOMY_CODES = {
+    'M3': 'M2D',  # Patents & Innovations — former M3 renamed to M2D (taxonomy v7)
+}
+
+
+def normalize_retired_code(entry: Dict) -> str:
+    """Rewrite a retired taxonomy code on ``entry`` to its live equivalent.
+
+    Preserves the pre-normalization code under ``taxonomy_code_original`` (same
+    convention as the #261 mismatch path) and returns the effective code. A
+    non-retired code is returned unchanged and the entry is left untouched.
+    """
+    code = entry.get('taxonomy_code', 'T')
+    live = RETIRED_TAXONOMY_CODES.get(code)
+    if live:
+        entry['taxonomy_code_original'] = code
+        entry['taxonomy_code'] = live
+        return live
+    return code
+
+
 # Taxonomy code to WCM section mapping
 TAXONOMY_TO_SECTION = {
     # Personal Data
@@ -1315,7 +1342,7 @@ class WCMTemplateGenerator:
         entries_by_code = defaultdict(list)
         mismatch_corrections = 0
         for entry in entries:
-            code = entry.get('taxonomy_code', 'T')
+            code = normalize_retired_code(entry)
             code = self._correct_mismatch_if_needed(entry, code)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
