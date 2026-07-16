@@ -8,6 +8,10 @@
 # Idempotent: skips any CV whose WCM output already exists in the results dir, so you
 # can run in groups (25 now, 25 later) and re-invoke safely after an interruption.
 #
+# Provenance: every row is stamped with the pipeline git SHA, model, and UTC timestamp,
+# and each invocation appends a summary line to run_meta.jsonl. This is what lets you
+# tell which code version produced an output and re-run/compare later. Do not drop it.
+#
 # Usage:
 #   scripts/run_corpus_batch.sh <input_dir> [count] [results_dir] [model]
 #
@@ -17,6 +21,8 @@
 #   model        --model passed to run_full_pipeline.py   (default: pipeline default)
 #
 # MUST run on a checkout that has the latest merged pipeline (integration branch = dev).
+# For a long batch, launch detached so it survives turn-end reaping:
+#   nohup scripts/run_corpus_batch.sh <input_dir> 25 </dev/null >batch.log 2>&1 & disown
 # See docs/guides/running-cv-corpus-batches.md.
 set -u
 
@@ -28,10 +34,18 @@ COUNT="${2:-25}"
 RESULTS="${3:-$INPUT_DIR/_batch_runs}"
 MODEL="${4:-}"
 
-OUTDIR="$RESULTS/outputs"; LOGDIR="$RESULTS/logs"; SUMMARY="$RESULTS/summary.tsv"
+OUTDIR="$RESULTS/outputs"; LOGDIR="$RESULTS/logs"; SUMMARY="$RESULTS/summary.tsv"; META="$RESULTS/run_meta.jsonl"
 WCM_SRC="src/unified_pipeline/outputs/stage_6_wcm_documents"
 mkdir -p "$OUTDIR" "$LOGDIR"
-[ -f "$SUMMARY" ] || printf 'cv\texit\twcm_output\tkb\tsections\theaders\tentries\tclassified\n' > "$SUMMARY"
+
+# provenance for this invocation
+SHA="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+MODEL_LABEL="${MODEL:-default}"
+
+HEADER=$'date\tsha\tmodel\tcv\texit\twcm_output\tkb\tsections\theaders\tentries\tclassified'
+[ -f "$SUMMARY" ] || printf '%s\n' "$HEADER" > "$SUMMARY"
 
 ran=0; skipped=0; failed=0
 for f in "$INPUT_DIR"/*.docx; do
@@ -42,6 +56,7 @@ for f in "$INPUT_DIR"/*.docx; do
 
   ran=$((ran+1))
   log="$LOGDIR/${stem}.log"
+  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "[$(date '+%H:%M:%S')] ($ran/$COUNT) $stem ..."
   if [ -n "$MODEL" ]; then
     python3 run_full_pipeline.py "$f" --model "$MODEL" > "$log" 2>&1
@@ -60,10 +75,15 @@ for f in "$INPUT_DIR"/*.docx; do
   hdr=$(grep -oE 'Total headers: [0-9]+'      "$log" | grep -oE '[0-9]+' | tail -1)
   ent=$(grep -oE 'Entries extracted: [0-9]+'  "$log" | grep -oE '[0-9]+' | tail -1)
   cls=$(grep -oE 'Entries classified: [0-9]+' "$log" | grep -oE '[0-9]+' | tail -1)
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$stem" "$rc" "$out" "${kb:-}" "${sec:-}" "${hdr:-}" "${ent:-}" "${cls:-}" >> "$SUMMARY"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$ts" "$SHA" "$MODEL_LABEL" "$stem" "$rc" "$out" "${kb:-}" "${sec:-}" "${hdr:-}" "${ent:-}" "${cls:-}" >> "$SUMMARY"
 
   if [ "$rc" -ne 0 ] || [ "$out" = "—" ]; then failed=$((failed+1)); echo "   ! $stem rc=$rc output=$out (see $log)"; fi
   sleep 3
 done
 
-echo "DONE ran=$ran skipped=$skipped failed=$failed  (results in $RESULTS)"
+FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"started":"%s","finished":"%s","sha":"%s","branch":"%s","model":"%s","input_dir":"%s","count":%s,"ran":%s,"skipped":%s,"failed":%s}\n' \
+  "$STARTED" "$FINISHED" "$SHA" "$BRANCH" "$MODEL_LABEL" "$INPUT_DIR" "$COUNT" "$ran" "$skipped" "$failed" >> "$META"
+
+echo "DONE ran=$ran skipped=$skipped failed=$failed sha=$SHA  (results in $RESULTS)"
