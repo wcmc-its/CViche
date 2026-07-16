@@ -59,6 +59,14 @@ def _norm(text: str) -> str:
     return " ".join(str(text or "").split()).lower()
 
 
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _tokens(text: str) -> set:
+    """Word/number token set for the coverage check (see compute_metrics)."""
+    return set(_TOKEN_RE.findall(_norm(text)))
+
+
 def _squash(text: str) -> str:
     """Whitespace-FREE normalization for the coverage check: stage 2 joins
     text across in-paragraph line breaks with no whitespace at all
@@ -121,12 +129,31 @@ def compute_metrics(source_lines: List[str], stage1a: Dict, stage2: Dict) -> Dic
     content = [e for e in entries if e.get("element_type") not in ("header", "break")]
 
     # --- text coverage: does each substantive source line survive anywhere?
-    # Whitespace-free comparison (see _squash); the \x00 sentinel between
-    # entries survives squashing, so a line can never match by spanning two
-    # unrelated entries.
-    haystack = "\x00".join(_squash(e.get("text", "")) for e in entries)
+    # Whitespace-free comparison (see _squash). Checked PER ENTRY, so a line can
+    # never be called covered by unrelated content scattered across the document
+    # (what the old \x00-sentinel join enforced).
+    #
+    # Verbatim containment alone is too strict: stage 2 legitimately MERGES
+    # adjacent source content into one entry, inserting text mid-line --
+    #   source: '\t\t1984-1989\t\t\t\tB.S.\t (Biology)'
+    #   entry : '1984-1989    B.S. University of Utah (Biology)'
+    # Nothing is lost (the entry is a superset), but the source line is no longer
+    # a contiguous substring. That alone scored web053 96.0% and web057 67.5%.
+    # So a line also counts as covered when one entry holds ALL of its tokens.
+    # Both checks are kept: squash catches glued text with no token boundaries,
+    # tokens catch mid-line merges. A line is lost only if neither holds.
+    entry_squash = [_squash(e.get("text", "")) for e in entries]
+    entry_tokens = [_tokens(e.get("text", "")) for e in entries]
     substantive = [l for l in source_lines if len(_norm(l)) >= SUBSTANTIVE_LINE_CHARS]
-    lost = [l.strip() for l in substantive if _squash(l) not in haystack]
+
+    def _covered(line: str) -> bool:
+        squashed = _squash(line)
+        if squashed and any(squashed in es for es in entry_squash):
+            return True
+        line_tokens = _tokens(line)
+        return bool(line_tokens) and any(line_tokens <= et for et in entry_tokens)
+
+    lost = [l.strip() for l in substantive if not _covered(l)]
     coverage = 100.0 if not substantive else round(
         100.0 * (len(substantive) - len(lost)) / len(substantive), 1
     )
