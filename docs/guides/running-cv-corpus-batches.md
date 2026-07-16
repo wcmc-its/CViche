@@ -112,6 +112,24 @@ exist as faculty-database-hosted files. Two steps:
 Run the next group later with the same command — already-done CVs are skipped automatically.
 To run a specific model: pass it as the 4th arg (e.g. `gpt-5.1`, or a Bedrock model id).
 
+### Running the doctor alongside the batch
+
+Add `--doctor` to also run the deterministic `run_doctor` over each run's stage artifacts:
+
+```bash
+scripts/run_corpus_batch.sh --doctor data/sample_cvs/word/web_harvest 25
+```
+
+Per CV it writes a row to `_batch_runs/doctor.tsv` (`date sha cv worst ERROR WARN INFO top_lints`)
+and the full findings to `_batch_runs/doctor/<cv>.json`. No LLM cost — the doctor is deterministic
+lints over the stage_* artifacts. Findings are WARN/INFO detection lints (missed_headers,
+classified_unrendered, output_hygiene, dedup_drops, …); an ERROR means a crash- or critical-loss
+class worth stopping for. To doctor a run outside the batch loop:
+
+```bash
+PYTHONPATH=src python3 scripts/doctor_one.py src/unified_pipeline/outputs <cv> <source.docx>
+```
+
 ## Provenance & what gets tracked
 
 So an output can always be traced to the code and model that made it:
