@@ -729,10 +729,17 @@ FALLBACK_TEMPLATES = [
 # ponytail: pure renames only. Codes with NO live equivalent (N4, M4C) need a
 # real render route instead — see #261; don't add them here.
 RETIRED_TAXONOMY_CODES = {
-    'M3': 'M2D',   # Patents & Innovations — former M3 renamed to M2D (taxonomy v7)
-    'M4A': 'M2A',  # Clinical trials (active) — M4 retired; trials are now grants-by-status
-    'M4B': 'M2B',  # Clinical trials (completed) — M4 retired; trials are now grants-by-status
+    'M3': 'M2D',  # Patents & Innovations — former M3 renamed to M2D (taxonomy v7)
 }
+# ponytail: pure renames ONLY — old code and target must mean the same thing.
+# Deliberately NOT here:
+#   M4A/M4B/M4C (clinical trials). update_m4_to_m2.py suggests M4A->M2A/M4B->M2B,
+#   but that mapping is WRONG against the live taxonomy: M4A/M4B/M4C are trial
+#   TYPES (Interventional / Observational / Device), while M2A/M2B/M2C are funding
+#   STATUS (Current / Past / Pending). Renaming type->status files completed trials
+#   under "Current Research Funding" (verified on web059). Trials need status-aware
+#   routing, not a static map — see the clinical-trials issue.
+#   N4/M4C have no live equivalent and need real render routes — see #261.
 
 
 def normalize_retired_code(entry: Dict) -> str:

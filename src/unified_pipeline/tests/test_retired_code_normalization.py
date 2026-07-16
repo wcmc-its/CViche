@@ -32,12 +32,14 @@ def test_m3_normalizes_to_m2d_and_preserves_original():
     assert entry["taxonomy_code_original"] == "M3"
 
 
-def test_m4a_m4b_clinical_trials_normalize_to_grants():
-    for old, live in [("M4A", "M2A"), ("M4B", "M2B")]:
-        e = {"taxonomy_code": old, "text": "Phase I trial ..."}
-        assert normalize_retired_code(e) == live
-        assert e["taxonomy_code"] == live
-        assert e["taxonomy_code_original"] == old
+def test_clinical_trial_codes_are_not_remapped():
+    # M4A/M4B/M4C are trial TYPES; M2A/M2B/M2C are funding STATUS. Renaming
+    # type->status files completed trials under "Current Research Funding".
+    # They must stay out of the map until status-aware routing exists.
+    for code in ("M4A", "M4B", "M4C"):
+        e = {"taxonomy_code": code, "text": "Phase I trial ..."}
+        assert normalize_retired_code(e) == code
+        assert "taxonomy_code_original" not in e
 
 
 def test_live_code_is_untouched():
