@@ -380,17 +380,30 @@ def lint_segmentation(source_lines: List[str], stage1a: Dict,
 
 # -------------------------------------------------------------------- lint 2
 
+def _header_key(text: str) -> str:
+    """Comparison key for header matching: normalized, trailing ':' dropped.
+
+    Stage 1a promotes 'PROFESSIONAL SOCIETIES:' to the hierarchy node
+    'PROFESSIONAL SOCIETIES' -- the colon is source formatting, not part of the
+    header name. Comparing raw normalized forms reports a header that WAS
+    detected as missing: on the 2026-07-15 corpus (25 CVs) that was 36 of 61
+    findings (59%), including 22 of web061's 23.
+    """
+    return _norm(text).rstrip(":").strip()
+
+
 def lint_missed_headers(candidates: List[str], stage1a: Dict,
                         stage2: Dict) -> List[Dict]:
     """Header-looking source lines absent from the 1a hierarchy AND from
     every entry hierarchy path: a header demoted to content misroutes
     everything filed under it."""
-    known = set(_hierarchy_titles(stage1a))
-    paths = {_norm(h) for e in stage2.get("entries", [])
+    # _hierarchy_titles already returns _norm'ed titles; only the colon differs.
+    known = {t.rstrip(":").strip() for t in _hierarchy_titles(stage1a)}
+    paths = {_header_key(h) for e in stage2.get("entries", [])
              for h in (e.get("hierarchy") or [])}
     findings, seen = [], set()
     for cand in candidates:
-        normed = _norm(cand)
+        normed = _header_key(cand)
         if not normed or normed in seen:
             continue
         seen.add(normed)

@@ -977,3 +977,21 @@ def test_main_exits_2_when_report_write_fails(tmp_path):
     with pytest.raises(SystemExit) as exc:
         main([str(root), _UID, "--out", str(out)])
     assert exc.value.code == 2
+
+
+def test_missed_headers_ignores_trailing_colon():
+    """A header the segmenter promoted is not 'missed' just because the source
+    line ends in ':' (2026-07-15 corpus: 36 of 61 findings were this artifact)."""
+    from unified_pipeline.run_doctor import lint_missed_headers
+
+    stage1a = {"hierarchy": [{"text": "PROFESSIONAL SOCIETIES", "children": []}]}
+    stage2 = {"entries": [{"hierarchy": ["RESEARCH SUPPORT AND GRANTS"]}]}
+
+    # both are present in segmentation -- one via 1a, one via an entry path
+    assert lint_missed_headers(["PROFESSIONAL SOCIETIES:"], stage1a, stage2) == []
+    assert lint_missed_headers(["RESEARCH SUPPORT AND GRANTS:"], stage1a, stage2) == []
+
+    # a genuinely absent header is still reported
+    found = lint_missed_headers(["INTELLECTUAL PROPERTY:"], stage1a, stage2)
+    assert len(found) == 1
+    assert found[0]["lint"] == "missed_headers"
