@@ -53,12 +53,17 @@ def test_get_file_accessdenied_propagates():
         storage.get_file("run1", "input/cv.docx")
 
 
-def test_download_name_is_percent_encoded_not_raw():
+def test_download_name_is_percent_encoded_not_raw(monkeypatch):
     """S3 rejects a disposition it cannot encode as ISO-8859-1 ("InvalidArgument:
     Header value cannot be represented using ISO-8859-1"), so a CV named
     "Smith's CV.docx" (Word autocorrects the apostrophe to U+2019) 400s on
     download unless the name is percent-encoded. Verified against the real
     bucket: raw -> InvalidArgument, encoded -> 200."""
+    # Presigning signs the URL, so it needs credentials -- CI has none.
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+
     url = _storage().get_download_url("run1", "input/cv.docx",
                                       download_name="Dvořák’s CV – 2026.docx")
     # parse_qs undoes the URL-encoding boto3 applies; the RFC 5987 layer remains.
