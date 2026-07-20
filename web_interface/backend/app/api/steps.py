@@ -221,12 +221,9 @@ async def download_input_file(
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         if file_type == "docx" else "application/pdf"
     )
-    # The download name is the user-supplied upload filename, so strip anything
-    # that could break out of the Content-Disposition header (CR/LF/quote).
-    # Kept even though the header below percent-encodes: this same value is
-    # handed to storage as download_name for the S3 ResponseContentDisposition.
-    original_name = (re.sub(r'[\r\n"]', "", run.filename or "").strip()
-                     or f"{run_id}.{file_type}")
+    # Both consumers of this name percent-encode it into Content-Disposition
+    # (below, and S3's ResponseContentDisposition), so it needs no stripping.
+    original_name = (run.filename or "").strip() or f"{run_id}.{file_type}"
 
     storage = get_storage()
     try:
