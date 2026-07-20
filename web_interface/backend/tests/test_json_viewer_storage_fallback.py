@@ -112,3 +112,33 @@ def test_data_docx_still_allowed_for_owner(client, db, seed_simple_mode, monkeyp
     monkeypatch.setattr(steps_mod, "get_storage", lambda: _FakeStorage({}))
     resp = client.get(f"/api/run/{run.id}/data/cv.docx")
     assert resp.status_code != 403
+
+
+# --- review hardening: invariants pinned at the point of use (#287 review) ---
+
+
+def test_malformed_run_id_rejected(client, db, seed_simple_mode):
+    """The router already 404s a slash-bearing run_id before the handler, and
+    check_run_access requires an exact DB match. _validate_run_id pins that so a
+    later {run_id:path} cannot silently make traversal reachable."""
+    from fastapi import HTTPException
+
+    # Called directly, so the assertion cannot be satisfied by the router 404ing
+    # first -- that is exactly the ambiguity this guard is meant to remove.
+    for bad in ["../../etc", "a/b", "run\x00", "", "x" * 65]:
+        with pytest.raises(HTTPException) as exc:
+            steps_mod._validate_run_id(bad)
+        assert exc.value.status_code == 400, bad
+    for ok in ["A1B2C3", "run-fallback-1", "run_fallback_2"]:
+        steps_mod._validate_run_id(ok)  # must not raise
+
+
+def test_non_printable_filename_rejected(client, db, seed_simple_mode, monkeypatch):
+    """An encoded NUL used to reach pathlib and raise ValueError -> sanitized 500.
+    It should be a clean 400 instead."""
+    user, run = _user_and_run(db, role="admin", suffix="-np")
+    _auth(client, user)
+    monkeypatch.setattr(steps_mod, "get_storage", lambda: _FakeStorage({}))
+    resp = client.get(f"/api/run/{run.id}/data/stage1a%00.json")
+    assert resp.status_code == 400, resp.text
+    assert resp.status_code != 500

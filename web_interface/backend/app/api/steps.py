@@ -84,6 +84,23 @@ async def get_step_detail(
     )
 
 
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _validate_run_id(run_id: str) -> None:
+    """Reject a run_id that could act as anything but a single path segment.
+
+    Today the router already guarantees this -- `{run_id}` is a plain path param,
+    so Starlette compiles it to `[^/]+` and a slash-bearing value 404s before the
+    handler runs -- and check_run_access then requires an exact DB match. This
+    pins that invariant at the point of use so a later `{run_id:path}` (or a
+    lookup that stops being exact) cannot silently make traversal reachable.
+    """
+    if not _RUN_ID_RE.match(run_id):
+        logger.warning("[SECURITY] Blocked malformed run_id: %r", run_id)
+        raise HTTPException(status_code=400, detail="Invalid run ID")
+
+
 def _resolve_safe_path(filename: str, run_id: str) -> Path:
     """Resolve filename to a validated path within run output directories.
 
@@ -94,6 +111,16 @@ def _resolve_safe_path(filename: str, run_id: str) -> Path:
         HTTPException(400): Invalid or malicious filename
         HTTPException(404): File not found in any allowed directory
     """
+    _validate_run_id(run_id)
+
+    # Reject control characters (NUL, CR/LF and friends). Python raises ValueError
+    # on an embedded NUL rather than truncating at it the way C-backed runtimes do,
+    # so this is a clean 400 instead of a sanitized 500 -- and it keeps unprintable
+    # bytes out of the log lines below.
+    if not filename.isprintable():
+        logger.warning("[SECURITY] Blocked non-printable filename (run: %s)", run_id)
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
     # Reject absolute paths outright
     if filename.startswith('/'):
         logger.warning(
@@ -148,8 +175,10 @@ async def get_data_file(
 
     # Stage JSON files are internal pipeline artifacts -- restrict to admins.
     # The final .docx (and any other non-JSON output) stays available to the
-    # run owner. Gate before the storage short-circuit so the S3 redirect path
-    # is covered too.
+    # run owner. This single gate deliberately sits ABOVE every branch below --
+    # before the storage short-circuit AND before `preview` is ever read -- so it
+    # covers the S3 redirect, the download and the ?preview=true JSON viewer
+    # alike. Do not move it into a branch or duplicate it per-branch.
     if Path(filename).name.endswith(".json") and current_user.role != "admin":
         raise forbidden("Admin access required to access stage JSON.")
 
@@ -404,8 +433,13 @@ async def get_json_content(
     # Durable storage fallback (S3 in prod): the file may live in S3 but not on
     # this pod. Mirrors get_data_file (#38) so the viewer survives pod recycles /
     # multi-replica routing the same way the download button does.
+    # Re-run the guards here, not only on the local branch above: this path is
+    # reached when _resolve_safe_path raised 404, and a 404 means "no local file"
+    # -- it does not certify the name. Path().name cannot emit a separator, so the
+    # key stays inside this run's namespace, but validate rather than rely on it.
+    _validate_run_id(run_id)
     download_name = Path(filename).name
-    if not download_name.endswith(".json"):
+    if not download_name.isprintable() or not download_name.endswith(".json"):
         raise not_found("File not found")
     storage = get_storage()
     storage_key = f"outputs/{download_name}"
