@@ -2,6 +2,8 @@
 but was only ever read internally. GET /api/run/<id>/input hands it back to the
 run owner/admin, named as it was uploaded.
 """
+from urllib.parse import quote
+
 import app.api.steps as steps_mod
 from app.models import User, Run
 from app.auth import create_session_cookie, COOKIE_NAME
@@ -69,7 +71,8 @@ def test_owner_downloads_original_with_its_upload_name(client, db, seed_simple_m
     assert resp.status_code == 200, resp.text
     assert resp.content == b"PK\x03\x04 docx bytes"
     # Named as uploaded, not as the S3 uid, and the wordprocessing mime type.
-    assert _ORIGINAL in resp.headers["content-disposition"]
+    assert resp.headers["content-disposition"] == (
+        "attachment; filename*=utf-8''" + quote(_ORIGINAL, safe=""))
     assert "wordprocessingml" in resp.headers["content-type"]
 
 
@@ -105,6 +108,21 @@ def test_non_owner_forbidden(client, db, seed_simple_mode, monkeypatch):
 
     resp = client.get(f"/api/run/{run.id}/input")
     assert resp.status_code == 403
+
+
+def test_non_latin1_upload_name_downloads_instead_of_500(client, db, seed_simple_mode, monkeypatch):
+    # HTTP headers are latin-1. A smart quote (Word autocorrects apostrophes) or
+    # any non-Latin name used to raise UnicodeEncodeError building the response.
+    name = "Dvořák’s CV – 2026.docx"
+    user, run = _user_and_run(db, suffix="-utf8", filename=name)
+    _auth(client, user)
+    monkeypatch.setattr(steps_mod, "get_storage",
+                        lambda: _LocalStorage({f"input/{run.id}.docx": b"x"}))
+
+    resp = client.get(f"/api/run/{run.id}/input")
+    assert resp.status_code == 200, resp.text
+    assert resp.headers["content-disposition"] == (
+        "attachment; filename*=utf-8''" + quote(name, safe=""))
 
 
 def test_header_injection_stripped_from_upload_name(client, db, seed_simple_mode, monkeypatch):

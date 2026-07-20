@@ -5,6 +5,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
@@ -222,6 +223,8 @@ async def download_input_file(
     )
     # The download name is the user-supplied upload filename, so strip anything
     # that could break out of the Content-Disposition header (CR/LF/quote).
+    # Kept even though the header below percent-encodes: this same value is
+    # handed to storage as download_name for the S3 ResponseContentDisposition.
     original_name = (re.sub(r'[\r\n"]', "", run.filename or "").strip()
                      or f"{run_id}.{file_type}")
 
@@ -246,7 +249,12 @@ async def download_input_file(
     return Response(
         content=data,
         media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{original_name}"'},
+        # RFC 5987 encoding: headers are latin-1, and a CV named "Smith's CV.docx"
+        # (smart quote) or "Dvořák.docx" would otherwise raise on response build.
+        headers={
+            "Content-Disposition":
+                f"attachment; filename*=utf-8''{quote(original_name, safe='')}"
+        },
     )
 
 
