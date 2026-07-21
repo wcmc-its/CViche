@@ -417,7 +417,22 @@ def chunk_section(elements: List[Dict], start_idx: int, end_idx: int) -> List[Li
 
     Returns list of element chunks.
     """
-    section_elements = [e for e in elements if start_idx <= e['idx'] < end_idx]
+    # Paragraph/empty elements carry an int idx (para_idx); table elements carry
+    # a string idx ("table_N", on the body-element counter) that stage_2 needs and
+    # that cannot be range-compared. Elements are in document order, so attribute
+    # each non-int-idx element to the section of the most recent paragraph.
+    # ponytail: boundary fix, not source — stage_2 requires the "table_N" string idx
+    # (idx.startswith('table_'), sort keys). Proper fix is nested segmentation (#312 B2).
+    section_elements = []
+    last_para_idx = None
+    for e in elements:
+        idx = e.get('idx')
+        if isinstance(idx, int):
+            last_para_idx = idx
+            if start_idx <= idx < end_idx:
+                section_elements.append(e)
+        elif last_para_idx is not None and start_idx <= last_para_idx < end_idx:
+            section_elements.append(e)
 
     # Helper function to get element text length (handles tables)
     def get_elem_char_count(elem):
