@@ -1424,7 +1424,7 @@ class WCMTemplateGenerator:
         self._fill_honors(entries_by_code.get('H', []))  # H = Honors and Awards
         self._fill_memberships(entries_by_code.get('I', []))  # I = Professional Memberships
         self._fill_teaching(entries_by_code)  # K1-K5 = Teaching Activities
-        self._fill_research_summary(research_summary_data)  # Use standalone Stage 4.5 output
+        research_summary_rendered = self._fill_research_summary(research_summary_data)  # Stage 4.5 output
         self._fill_research_support(entries_by_code, cv_owner, document_uid)
         # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
         self._fill_patents(entries_by_code.get('M2D', []))
@@ -1465,6 +1465,15 @@ class WCMTemplateGenerator:
             'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9',  # Bibliography
             # NOTE: T is intentionally NOT here - T entries go to Appendix
         }
+
+        # M1 (Research Activities) entries are consumed by the Stage 4.5 research
+        # summary. When that summary did NOT render (no Stage 4.5 output, empty
+        # summary, or the template lacks a RESEARCH ACTIVITIES header), the M1
+        # entries would otherwise render nowhere AND be excluded from the appendix
+        # by being 'mapped' — a silent content loss (#317, C0ZGFW). Route them to
+        # the appendix safety net instead. No-op when the summary rendered.
+        if not research_summary_rendered:
+            mapped_codes.discard('M1')
 
         unmapped_entries = []
 
@@ -4183,11 +4192,16 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 - research_summary.text: The generated summary
                 - research_summary.generation_method: "llm_generated" or "existing_content"
                 - research_summary.word_count: Word count of summary
+
+        Returns:
+            True if a summary paragraph was rendered, False otherwise. Callers use
+            this to route M1 entries to the appendix when the summary is absent
+            (#317) instead of dropping them.
         """
         if not research_summary_data:
             if self.verbose:
                 print("Skipping Research Summary section (no Stage 4.5 output)")
-            return
+            return False
 
         # Extract summary from Stage 4.5 structure
         summary_info = research_summary_data.get('research_summary', {})
@@ -4196,7 +4210,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not summary_text or len(summary_text.strip()) < 50:
             if self.verbose:
                 print("Skipping Research Summary section (no substantive content)")
-            return
+            return False
 
         word_count = summary_info.get('word_count', len(summary_text.split()))
         generation_method = summary_info.get('generation_method', 'unknown')
@@ -4212,7 +4226,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if activities_idx is None:
             if self.verbose:
                 print("  Warning: Could not find 'RESEARCH ACTIVITIES' section")
-            return
+            return False
 
         # Get the paragraph element to insert after
         activities_para = self.doc.paragraphs[activities_idx]
@@ -4222,7 +4236,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         try:
             insert_idx = body_elements.index(activities_para._element) + 1  # Insert AFTER header
         except ValueError:
-            return
+            return False
 
         # Add blank line after RESEARCH ACTIVITIES header
         blank_para = self.doc.add_paragraph()
@@ -4240,6 +4254,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         body.insert(insert_idx, summary_para._element)
 
         self.stats['entries_inserted'] += 1
+        return True
 
     def _fill_research_support(self, entries_by_code: Dict[str, List[Dict]], cv_owner: Dict = None, document_uid: str = ''):
         """Fill research support section with individual tables per grant.
