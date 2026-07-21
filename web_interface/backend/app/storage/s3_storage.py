@@ -10,6 +10,8 @@ for local-only development.
 
 import os
 import logging
+from urllib.parse import quote
+
 import yaml
 
 from app.storage.base import RunStorage
@@ -156,8 +158,12 @@ class S3RunStorage(RunStorage):
         s3_key = self._s3_key(run_id, key)
         params = {"Bucket": self._bucket, "Key": s3_key}
         if download_name:
+            # RFC 5987. S3 rejects a disposition it cannot encode as ISO-8859-1
+            # ("InvalidArgument: Header value cannot be represented using
+            # ISO-8859-1"), so a CV named "Smith's CV.docx" -- Word autocorrects
+            # the apostrophe to U+2019 -- 400s on download unless percent-encoded.
             params["ResponseContentDisposition"] = (
-                f'attachment; filename="{download_name}"'
+                f"attachment; filename*=utf-8''{quote(download_name, safe='')}"
             )
         url = self._s3.generate_presigned_url(
             "get_object",

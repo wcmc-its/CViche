@@ -5,8 +5,9 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -83,6 +84,23 @@ async def get_step_detail(
     )
 
 
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _validate_run_id(run_id: str) -> None:
+    """Reject a run_id that could act as anything but a single path segment.
+
+    Today the router already guarantees this -- `{run_id}` is a plain path param,
+    so Starlette compiles it to `[^/]+` and a slash-bearing value 404s before the
+    handler runs -- and check_run_access then requires an exact DB match. This
+    pins that invariant at the point of use so a later `{run_id:path}` (or a
+    lookup that stops being exact) cannot silently make traversal reachable.
+    """
+    if not _RUN_ID_RE.match(run_id):
+        logger.warning("[SECURITY] Blocked malformed run_id: %r", run_id)
+        raise HTTPException(status_code=400, detail="Invalid run ID")
+
+
 def _resolve_safe_path(filename: str, run_id: str) -> Path:
     """Resolve filename to a validated path within run output directories.
 
@@ -93,6 +111,16 @@ def _resolve_safe_path(filename: str, run_id: str) -> Path:
         HTTPException(400): Invalid or malicious filename
         HTTPException(404): File not found in any allowed directory
     """
+    _validate_run_id(run_id)
+
+    # Reject control characters (NUL, CR/LF and friends). Python raises ValueError
+    # on an embedded NUL rather than truncating at it the way C-backed runtimes do,
+    # so this is a clean 400 instead of a sanitized 500 -- and it keeps unprintable
+    # bytes out of the log lines below.
+    if not filename.isprintable():
+        logger.warning("[SECURITY] Blocked non-printable filename (run: %s)", run_id)
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
     # Reject absolute paths outright
     if filename.startswith('/'):
         logger.warning(
@@ -147,8 +175,10 @@ async def get_data_file(
 
     # Stage JSON files are internal pipeline artifacts -- restrict to admins.
     # The final .docx (and any other non-JSON output) stays available to the
-    # run owner. Gate before the storage short-circuit so the S3 redirect path
-    # is covered too.
+    # run owner. This single gate deliberately sits ABOVE every branch below --
+    # before the storage short-circuit AND before `preview` is ever read -- so it
+    # covers the S3 redirect, the download and the ?preview=true JSON viewer
+    # alike. Do not move it into a branch or duplicate it per-branch.
     if Path(filename).name.endswith(".json") and current_user.role != "admin":
         raise forbidden("Admin access required to access stage JSON.")
 
@@ -197,6 +227,61 @@ async def get_data_file(
 
     # Default: download
     return FileResponse(str(file_path), filename=download_filename)
+
+
+@router.get("/run/{run_id}/input")
+async def download_input_file(
+    run_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Download the ORIGINAL uploaded CV, named as the user uploaded it.
+
+    The source is retained in durable storage at input/<run_id>.<ext> because
+    restart/retry re-materialize it (see runs._materialize_input_if_missing),
+    but it was only ever read internally — there was no way to get the original
+    file back out. Same owner-or-admin gate as the outputs download.
+    """
+    run = check_run_access(run_id, current_user, db)  # 404/403 as needed; returns the Run
+
+    file_type = (run.file_type or "").lower() or "docx"
+    key = f"input/{run_id}.{file_type}"
+    media_type = (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        if file_type == "docx" else "application/pdf"
+    )
+    # Both consumers of this name percent-encode it into Content-Disposition
+    # (below, and S3's ResponseContentDisposition), so it needs no stripping.
+    original_name = (run.filename or "").strip() or f"{run_id}.{file_type}"
+
+    storage = get_storage()
+    try:
+        if not storage.exists(run_id, key):
+            raise not_found("Original upload is not available for this run")
+        # S3 returns a presigned URL that renames the download; local storage
+        # returns None (no presigned URLs), so proxy the bytes ourselves.
+        url = storage.get_download_url(run_id, key, download_name=original_name)
+        if url:
+            return RedirectResponse(url, status_code=307)
+        data = storage.get_file(run_id, key)
+    except HTTPException:
+        raise
+    except FileNotFoundError:
+        raise not_found("Original upload is not available for this run")
+    except Exception as e:
+        logger.warning("Original-input download failed for run %s: %s", run_id, e)
+        raise internal_error("Could not retrieve the original upload")
+
+    return Response(
+        content=data,
+        media_type=media_type,
+        # RFC 5987 encoding: headers are latin-1, and a CV named "Smith's CV.docx"
+        # (smart quote) or "Dvořák.docx" would otherwise raise on response build.
+        headers={
+            "Content-Disposition":
+                f"attachment; filename*=utf-8''{quote(original_name, safe='')}"
+        },
+    )
 
 
 async def _generate_preview_from_path(file_path: Path) -> OutputPreview | None:
@@ -348,8 +433,13 @@ async def get_json_content(
     # Durable storage fallback (S3 in prod): the file may live in S3 but not on
     # this pod. Mirrors get_data_file (#38) so the viewer survives pod recycles /
     # multi-replica routing the same way the download button does.
+    # Re-run the guards here, not only on the local branch above: this path is
+    # reached when _resolve_safe_path raised 404, and a 404 means "no local file"
+    # -- it does not certify the name. Path().name cannot emit a separator, so the
+    # key stays inside this run's namespace, but validate rather than rely on it.
+    _validate_run_id(run_id)
     download_name = Path(filename).name
-    if not download_name.endswith(".json"):
+    if not download_name.isprintable() or not download_name.endswith(".json"):
         raise not_found("File not found")
     storage = get_storage()
     storage_key = f"outputs/{download_name}"
