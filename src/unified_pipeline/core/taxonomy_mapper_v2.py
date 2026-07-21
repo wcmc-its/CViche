@@ -1974,13 +1974,17 @@ def _normalize_header(text: str) -> str:
 
 
 def _canonical_header_map() -> Dict[str, tuple]:
+    # Source: PARENT_SECTIONS — the SAME parent list PASS-1 classifies into, so
+    # canonical<->code alignment matches what the classifier/renderer emit.
+    # (Do NOT use CV_SECTIONS: its canonical field swaps H/Honors vs I/Orgs
+    # relative to runtime codes, which would misroute those sections.)
     global _CANONICAL_HEADER_TO_PARENT
     if _CANONICAL_HEADER_TO_PARENT is None:
-        from ..cv_parser.cv_taxonomy_wcm import CV_SECTIONS
         m: Dict[str, tuple] = {}
-        for s in CV_SECTIONS:
-            if s.get('parent_section_code') is None and s.get('section_code') and s.get('canonical'):
-                m[_normalize_header(s['canonical'])] = (s['section_code'], s['canonical'])
+        for s in PARENT_SECTIONS:
+            code, canonical = s.get('code'), s.get('canonical')
+            if code and canonical:
+                m[_normalize_header(canonical)] = (code, canonical)
         _CANONICAL_HEADER_TO_PARENT = m
     return _CANONICAL_HEADER_TO_PARENT
 
@@ -2009,10 +2013,14 @@ def apply_canonical_header_pin(
         return pass1_result
     pinned_code, pinned_canonical = pinned
     current = pass1_result.get('parent_section_id')
-    # Rescue only a real A-T misclassification. Leave escape hatches
-    # (NOT_VALID_SECTION, MIXED_CONTENT, ...) alone — they all contain '_'; no
-    # parent code does. Don't touch a result that already matches the header.
-    if not current or '_' in current or current == pinned_code:
+    # Rescue only a real A-S misclassification:
+    #  - leave escape hatches (NOT_VALID_SECTION, MIXED_CONTENT, ...) alone —
+    #    they all contain '_'; no parent code does;
+    #  - leave 'T' (Appendix/Other) alone — a T group is boilerplate/unmapped
+    #    (WCM template instruction text), and forcing it into a real section
+    #    would surface that boilerplate as content;
+    #  - no-op when it already matches the header.
+    if not current or '_' in current or current == 'T' or current == pinned_code:
         return pass1_result
     original = f"{current} ({pass1_result.get('parent_canonical_name')})"
     pass1_result['parent_section_id'] = pinned_code

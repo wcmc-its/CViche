@@ -59,6 +59,21 @@ def test_invitations_canonical_pins_to_R():
     assert r["parent_section_id"] == "R"
 
 
+def test_honors_pins_to_H_not_I():
+    # Map-source guard: PARENT_SECTIONS has H=Honors, I=Organizations.
+    # CV_SECTIONS swaps them — building from it misrouted ~5 CVs (corpus-measured).
+    assert apply_canonical_header_pin(_result("K"), "Honors and Awards")["parent_section_id"] == "H"
+    assert apply_canonical_header_pin(_result("K"),
+        "Professional Organizations and Society Memberships")["parent_section_id"] == "I"
+
+
+def test_boilerplate_T_left_alone():
+    # A 'T' (Appendix/Other) group is WCM template boilerplate; don't force it
+    # into a real section (would surface instruction text as content).
+    r = apply_canonical_header_pin(_result("T"), "Bibliography")
+    assert r["parent_section_id"] == "T"
+
+
 def test_normalize_strips_code_prefix():
     assert _normalize_header("O. Institutional Leadership Activities") == \
         _normalize_header("institutional leadership activities")
