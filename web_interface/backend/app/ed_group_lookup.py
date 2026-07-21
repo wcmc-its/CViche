@@ -100,30 +100,59 @@ def _parse_memberurl(member_url: str) -> tuple[str, str, str] | None:
     return base_dn, scope, ldap_filter
 
 
+def _dn_in_scope(user_dn: str, base_dn: str, scope) -> bool:
+    """Whether user_dn falls under base_dn at the given LDAP URL scope.
+
+    BASE   (?base?) -- user_dn must equal base_dn.
+    LEVEL  (?one?)  -- user_dn must be a direct child of base_dn.
+    SUBTREE(?sub?)  -- user_dn must be base_dn or anywhere beneath it.
+
+    DN comparison is case-insensitive per the LDAP spec.
+    """
+    u = user_dn.strip().lower()
+    b = base_dn.strip().lower()
+    if scope == BASE:
+        return u == b
+    if scope == LEVEL:
+        # direct child: strip the user's leftmost RDN, the remainder must be base.
+        # ponytail: plain comma split -- WCM user RDNs (uid=cwid) carry no escaped
+        # commas; switch to ldap3.utils.dn.parse_dn only if a value ever needs it.
+        _, sep, rest = u.partition(",")
+        return bool(sep) and rest == b
+    # SUBTREE
+    return u == b or u.endswith("," + b)
+
+
 def _user_matches_memberurl(conn: Connection, member_url: str, user_dn: str) -> bool:
     """Return True if user_dn satisfies the membership rule encoded in member_url.
 
-    For ?base? scope (the WCM hybrid pattern), short-circuits the LDAP roundtrip
-    when the URL's base DN doesn't match user_dn at all -- no point evaluating
-    the filter against an entry we know isn't the user.
+    Evaluates the rule against the USER's own entry -- a single base-scoped read of
+    user_dn with the URL's filter -- rather than searching the URL's base/scope and
+    scanning the results for the user. The latter breaks on broad dynamic rules
+    (e.g. ?one? over ou=people matching ~10-15k people): WCM ED caps searches at
+    ~500 entries (sizeLimitExceeded), so anyone past the first page is a silent
+    false negative. Testing the user directly is O(1), size-limit-immune, and still
+    handles the WCM hybrid ?base?-per-user pattern (scope gate == the old
+    short-circuit, filter gate == the old stay-active check).
     """
     parsed = _parse_memberurl(member_url)
     if parsed is None:
         return False
     base_dn, scope, ldap_filter = parsed
-    if scope == BASE and base_dn.lower() != user_dn.lower():
+    # Scope gate: is user_dn within the URL's base at the URL's scope? Cheap, no I/O.
+    if not _dn_in_scope(user_dn, base_dn, scope):
         return False
+    # Filter gate: does the user's own entry satisfy the URL's stay-active filter?
     try:
         conn.search(
-            search_base=base_dn,
+            search_base=user_dn,
             search_filter=ldap_filter,
-            search_scope=scope,
+            search_scope=BASE,
             attributes=["dn"],
         )
     except LDAPException:
         return False
-    user_dn_lower = user_dn.lower()
-    return any(str(e.entry_dn).lower() == user_dn_lower for e in conn.entries)
+    return len(conn.entries) == 1
 
 def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
                             bind_dn: str, bind_password: str,
