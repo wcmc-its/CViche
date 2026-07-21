@@ -722,6 +722,42 @@ FALLBACK_TEMPLATES = [
 ]
 
 
+# Retired taxonomy codes that were pure renames of a still-live code. Stage-3b
+# occasionally still emits the old code (e.g. patents tagged as the retired M3),
+# which has no render route and gets silently dropped. Normalize to the live code
+# at grouping time so the existing renderer picks them up.
+# ponytail: pure renames only. Codes with NO live equivalent (N4, M4C) need a
+# real render route instead — see #261; don't add them here.
+RETIRED_TAXONOMY_CODES = {
+    'M3': 'M2D',  # Patents & Innovations — former M3 renamed to M2D (taxonomy v7)
+}
+# ponytail: pure renames ONLY — old code and target must mean the same thing.
+# Deliberately NOT here:
+#   M4A/M4B/M4C (clinical trials). update_m4_to_m2.py suggests M4A->M2A/M4B->M2B,
+#   but that mapping is WRONG against the live taxonomy: M4A/M4B/M4C are trial
+#   TYPES (Interventional / Observational / Device), while M2A/M2B/M2C are funding
+#   STATUS (Current / Past / Pending). Renaming type->status files completed trials
+#   under "Current Research Funding" (verified on web059). Trials need status-aware
+#   routing, not a static map — see the clinical-trials issue.
+#   N4/M4C have no live equivalent and need real render routes — see #261.
+
+
+def normalize_retired_code(entry: Dict) -> str:
+    """Rewrite a retired taxonomy code on ``entry`` to its live equivalent.
+
+    Preserves the pre-normalization code under ``taxonomy_code_original`` (same
+    convention as the #261 mismatch path) and returns the effective code. A
+    non-retired code is returned unchanged and the entry is left untouched.
+    """
+    code = entry.get('taxonomy_code', 'T')
+    live = RETIRED_TAXONOMY_CODES.get(code)
+    if live:
+        entry['taxonomy_code_original'] = code
+        entry['taxonomy_code'] = live
+        return live
+    return code
+
+
 # Taxonomy code to WCM section mapping
 TAXONOMY_TO_SECTION = {
     # Personal Data
@@ -1315,7 +1351,7 @@ class WCMTemplateGenerator:
         entries_by_code = defaultdict(list)
         mismatch_corrections = 0
         for entry in entries:
-            code = entry.get('taxonomy_code', 'T')
+            code = normalize_retired_code(entry)
             code = self._correct_mismatch_if_needed(entry, code)
             if code != entry.get('taxonomy_code', 'T'):
                 mismatch_corrections += 1
@@ -7407,55 +7443,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         for run in para.runs:
                             self._set_font(run)
                 self.stats['entries_inserted'] += 1
-
-    def _fill_clinical_trials(self, entries_by_code: Dict[str, List[Dict]]):
-        """Fill M4A/M4B Clinical Trials sections.
-
-        These are research studies/clinical trials, not grants.
-        Uses bullet list format since template may not have specific tables.
-        """
-        m4a_entries = entries_by_code.get('M4A', [])
-        m4b_entries = entries_by_code.get('M4B', [])
-
-        all_entries = m4a_entries + m4b_entries
-        if not all_entries:
-            return
-
-        if self.verbose:
-            print(f"Filling Clinical Trials ({len(all_entries)} entries)...")
-
-        # Find Research section
-        section_idx = self._find_paragraph_with_text("RESEARCH")
-        if section_idx is None:
-            section_idx = self._find_paragraph_with_text("Clinical Trials")
-        if section_idx is None:
-            # Fall back - add after Research Support if it exists
-            section_idx = self._find_paragraph_with_text("Research Support")
-        if section_idx is None:
-            return
-
-        sorted_entries = sort_entries_reverse_chronological(all_entries)
-
-        # Insert in reverse order
-        reversed_entries = list(reversed(sorted_entries))
-        for i, entry in enumerate(reversed_entries):
-            fields = entry.get('extracted_fields', {}) or {}
-
-            title = fields.get('study_title') or fields.get('title') or ''
-            role = fields.get('role') or ''
-            status = 'Current' if entry.get('taxonomy_code') == 'M4A' else 'Completed'
-
-            if not title:
-                title = entry.get('text', '')[:150]
-
-            text = title
-            if role:
-                text += f" (Role: {role})"
-            text += f" [{status}]"
-
-            insert_idx = section_idx + 1
-            is_first = (i == len(reversed_entries) - 1)
-            self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first)
 
     def _fill_passthrough_sections(self, all_entries: List[Dict]):
         """Fill sections that can be copied directly from source CV when format matches.
