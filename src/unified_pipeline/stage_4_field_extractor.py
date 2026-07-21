@@ -774,6 +774,12 @@ def needs_llm_recovery(entry: Dict[str, Any], min_original_chars: int = 200, max
     2. Extraction coverage is low (<30%)
     3. Entry has extractable patterns (dates, names, etc.)
 
+    Also triggers, regardless of length floor or date/structure markers, when
+    extraction produced nothing at all from substantive text (>=50 chars) --
+    total-extraction loss on short entries (board certifications, languages,
+    role lines) otherwise slips under the 200-char floor and vanishes from the
+    output silently (#322).
+
     Args:
         entry: Entry with extraction_coverage information
         min_original_chars: Minimum original text length to consider
@@ -787,6 +793,12 @@ def needs_llm_recovery(entry: Dict[str, Any], min_original_chars: int = 200, max
     original_text = entry.get("text", "")
     coverage_info = entry.get("extraction_coverage", {})
     coverage_pct = coverage_info.get("extraction_coverage_percent", 100.0)
+
+    # Total-extraction loss: no field got any value despite substantive text.
+    # Sufficient signal by itself -- skip the length/date/structure checks.
+    extracted_fields = entry.get("extracted_fields") or {}
+    if len(original_text.strip()) >= 50 and not any(extracted_fields.values()):
+        return True
 
     # Check basic conditions
     if len(original_text) < min_original_chars:
