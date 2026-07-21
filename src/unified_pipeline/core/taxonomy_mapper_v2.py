@@ -1959,6 +1959,72 @@ def apply_grant_keyword_fallback(
     return pass1_result
 
 
+# FIX #312 --------------------------------------------------------------------
+# Cached: normalized canonical WCM section title -> (parent_code, canonical).
+# Built once from the WCM taxonomy; top-level sections only.
+_CANONICAL_HEADER_TO_PARENT: Optional[Dict[str, tuple]] = None
+
+
+def _normalize_header(text: str) -> str:
+    """Lowercase, strip a leading code prefix ('O. '/'R) '), collapse separators."""
+    t = (text or '').strip().lower()
+    t = re.sub(r'^[a-z][0-9]?[.)]\s+', '', t)       # 'o. ' / 'r) ' style prefixes
+    t = re.sub(r'[\s/&,]+', ' ', t).strip()          # normalize spaces & separators
+    return t
+
+
+def _canonical_header_map() -> Dict[str, tuple]:
+    global _CANONICAL_HEADER_TO_PARENT
+    if _CANONICAL_HEADER_TO_PARENT is None:
+        from ..cv_parser.cv_taxonomy_wcm import CV_SECTIONS
+        m: Dict[str, tuple] = {}
+        for s in CV_SECTIONS:
+            if s.get('parent_section_code') is None and s.get('section_code') and s.get('canonical'):
+                m[_normalize_header(s['canonical'])] = (s['section_code'], s['canonical'])
+        _CANONICAL_HEADER_TO_PARENT = m
+    return _CANONICAL_HEADER_TO_PARENT
+
+
+def apply_canonical_header_pin(
+    pass1_result: Dict[str, Any],
+    section_label: str
+) -> Dict[str, Any]:
+    """
+    FIX #312: When the section header is the *verbatim* canonical WCM section
+    title, trust the header over content.
+
+    PASS-1 otherwise content-classifies topically homogeneous CVs into the
+    dominant-content parent. On C0ZGFW (an all-POCUS CV) it routed
+    "INSTITUTIONAL LEADERSHIP ACTIVITIES" -> K (Educational Contributions) and
+    emptied section O. The author's explicit, canonical section header is a
+    stronger signal than entry semantics.
+
+    ponytail: canonical-exact match only, NOT the alias list — aliases like
+    "seminars"/"talks"/"presentations" legitimately collide with teaching (K).
+    Orphaned sub-labels (Regional/National) need the hierarchy-nesting fix
+    (issue #312 Part B), not this pin.
+    """
+    pinned = _canonical_header_map().get(_normalize_header(section_label))
+    if not pinned:
+        return pass1_result
+    pinned_code, pinned_canonical = pinned
+    current = pass1_result.get('parent_section_id')
+    # Rescue only a real A-T misclassification. Leave escape hatches
+    # (NOT_VALID_SECTION, MIXED_CONTENT, ...) alone — they all contain '_'; no
+    # parent code does. Don't touch a result that already matches the header.
+    if not current or '_' in current or current == pinned_code:
+        return pass1_result
+    original = f"{current} ({pass1_result.get('parent_canonical_name')})"
+    pass1_result['parent_section_id'] = pinned_code
+    pass1_result['parent_canonical_name'] = pinned_canonical
+    pass1_result['confidence'] = max(pass1_result.get('confidence', 0.0) or 0.0, 0.90)
+    pass1_result['reasoning'] = (pass1_result.get('reasoning', '') +
+        f" [OVERRIDE #312: header is the canonical WCM title for {pinned_code}; "
+        f"header trumps content. Original: {original}]")
+    return pass1_result
+# END FIX #312 ----------------------------------------------------------------
+
+
 def apply_signal_overrides(
     pass1_result: Dict[str, Any],
     sample_entries: List[str]
@@ -3249,6 +3315,12 @@ def map_cv_sections_v2(segmented_cv_path: str, output_path: Optional[str] = None
                 pass1_result=pass1_result,
                 section_label=section_label,
                 sample_entries=sample_entries
+            )
+
+            # FIX #312: An explicit canonical WCM section header trumps content
+            pass1_result = apply_canonical_header_pin(
+                pass1_result=pass1_result,
+                section_label=section_label
             )
 
             parent_id = pass1_result['parent_section_id']
