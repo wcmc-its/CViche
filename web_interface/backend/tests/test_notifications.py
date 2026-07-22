@@ -112,6 +112,42 @@ def test_payload_omits_action_when_no_origin_configured(monkeypatch):
     assert "actions" not in _card(payload)
 
 
+# --- fallbackText / summary (no "cards.unsupported") ----------------------
+
+def test_terminal_payload_has_fallback_and_summary(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    doctor = {"counts": {"ERROR": 1, "WARN": 0}, "findings": [
+        {"severity": "ERROR", "lint": "grants_dropped"}]}
+
+    payload = notifications.build_teams_payload(
+        _run(), {"totalScore": 87, "band": "GREEN"}, doctor=doctor)
+
+    # message summary and card fallbackText both present, useful, and identical.
+    summary = payload["summary"]
+    assert _card(payload)["fallbackText"] == summary
+    assert summary.startswith("CViche run A1B2C3 complete")
+    assert "score 87 (GREEN)" in summary  # surfaces that skip the card still see it
+    assert "grants_dropped" in summary
+
+
+def test_terminal_summary_degrades_without_score_or_doctor(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+
+    payload = notifications.build_teams_payload(_run(status="failed"), None)
+
+    assert payload["summary"] == "CViche run A1B2C3 failed"  # bare status, no " — "
+    assert _card(payload)["fallbackText"] == payload["summary"]
+
+
+def test_started_payload_has_fallback_and_summary(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+
+    payload = notifications.build_started_payload(_run(status="created"))
+
+    assert payload["summary"] == "CViche run A1B2C3 started"
+    assert _card(payload)["fallbackText"] == payload["summary"]
+
+
 # --- build_started_payload ------------------------------------------------
 
 def test_started_payload_has_no_score_or_cost(monkeypatch):

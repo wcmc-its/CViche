@@ -6,6 +6,8 @@ AccessDenied must PROPAGATE -- it is a real IAM/KMS fault, not a missing file,
 and masking it as "missing" would hide an outage (and is also what a missing
 key looks like without s3:ListBucket -- that wants an IAM fix, not a code one).
 """
+from urllib.parse import parse_qs, urlparse
+
 import pytest
 
 boto3 = pytest.importorskip("boto3")
@@ -49,3 +51,24 @@ def test_get_file_accessdenied_propagates():
     stub.add_client_error("get_object", service_error_code="AccessDenied", http_status_code=403)
     with stub, pytest.raises(ClientError):
         storage.get_file("run1", "input/cv.docx")
+
+
+def test_download_name_is_percent_encoded_not_raw(monkeypatch):
+    """S3 rejects a disposition it cannot encode as ISO-8859-1 ("InvalidArgument:
+    Header value cannot be represented using ISO-8859-1"), so a CV named
+    "Smith's CV.docx" (Word autocorrects the apostrophe to U+2019) 400s on
+    download unless the name is percent-encoded. Verified against the real
+    bucket: raw -> InvalidArgument, encoded -> 200."""
+    # Presigning signs the URL, so it needs credentials -- CI has none.
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+
+    url = _storage().get_download_url("run1", "input/cv.docx",
+                                      download_name="Dvořák’s CV – 2026.docx")
+    # parse_qs undoes the URL-encoding boto3 applies; the RFC 5987 layer remains.
+    disposition = parse_qs(urlparse(url).query)["response-content-disposition"][0]
+    assert disposition == (
+        "attachment; filename*=utf-8''Dvo%C5%99%C3%A1k%E2%80%99s%20CV%20%E2%80%93%202026.docx")
+    # The signed URL must carry only latin-1-encodable bytes for S3 to accept it.
+    disposition.encode("latin-1")
