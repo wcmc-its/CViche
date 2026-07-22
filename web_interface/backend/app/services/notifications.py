@@ -8,7 +8,9 @@ logged and swallowed so it can never affect run status or surface to the user.
 Cards are Adaptive Cards wrapped in the {"type": "message", "attachments": [...]}
 envelope that the Teams *Workflows* incoming webhook expects. (The older Office
 365 connector took MessageCards but Microsoft retired it; Workflows is the
-supported replacement.)
+supported replacement.) Each card carries a plain-text ``fallbackText`` and the
+message a ``summary`` so Teams surfaces that don't render Adaptive Cards (mobile,
+activity feed, previews) show a useful line rather than "cards.unsupported".
 
 Config (read via app.config_loader.get_config, never hardcoded):
   - notifications.CVICHE_TEAMS_WEBHOOK_URL -- the Workflows webhook URL. If
@@ -78,19 +80,28 @@ def _action_buttons(run_id) -> list:
     ]
 
 
-def _adaptive_card(title, color, facts, run_id) -> dict:
+def _adaptive_card(title, color, facts, run_id, summary) -> dict:
     """Wrap a colored title + fact list in the Teams message/adaptive-card envelope.
+
+    ``summary`` is a plain-text one-liner used two ways for surfaces that do NOT
+    render Adaptive Cards (Teams mobile, the activity feed, channel-list
+    previews): the card's ``fallbackText`` (shown in place of the card) and the
+    message ``summary`` (the notification/toast text). Without it those surfaces
+    show Microsoft's "Card - access it on go.skype.com/cards.unsupported"
+    placeholder instead of anything useful.
 
     Args:
         title: the bold heading line.
         color: an Adaptive Card color enum ("good"/"attention"/"accent"/...).
         facts: list of {"name", "value"} dicts (rendered as an Adaptive FactSet).
         run_id: used to build the optional "Open run" button link.
+        summary: plain-text fallback/summary one-liner (see above).
     """
     card = {
         "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
         "type": "AdaptiveCard",
         "version": "1.5",
+        "fallbackText": summary,
         "body": [
             {
                 "type": "TextBlock",
@@ -115,6 +126,7 @@ def _adaptive_card(title, color, facts, run_id) -> dict:
 
     return {
         "type": "message",
+        "summary": summary,
         "attachments": [
             {
                 "contentType": "application/vnd.microsoft.card.adaptive",
@@ -144,7 +156,8 @@ def build_started_payload(run, submitter=None) -> dict:
     facts.append({"name": "Status", "value": "started"})
 
     return _adaptive_card(
-        f"CViche run {run_id} started", _STATUS_COLOR["started"], facts, run_id
+        f"CViche run {run_id} started", _STATUS_COLOR["started"], facts, run_id,
+        f"CViche run {run_id} started",
     )
 
 
@@ -221,7 +234,18 @@ def build_teams_payload(run, score=None, submitter=None, doctor=None) -> dict:
         facts.append({"name": "Doctor", "value": doctor_text})
 
     color = _STATUS_COLOR.get(status, _DEFAULT_COLOR)
-    return _adaptive_card(f"CViche run {run_id} {status}", color, facts, run_id)
+    # One-line summary for the non-card surfaces (mobile / activity feed /
+    # preview): mirror the useful facts a reader would otherwise have to open
+    # the card to see.
+    extras = []
+    if score:
+        extras.append(f"score {score_text}")
+    if doctor_text:
+        extras.append(doctor_text)
+    summary = f"CViche run {run_id} {status}"
+    if extras:
+        summary += " — " + ", ".join(extras)
+    return _adaptive_card(f"CViche run {run_id} {status}", color, facts, run_id, summary)
 
 
 def _post(payload, run_id) -> None:
