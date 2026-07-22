@@ -125,10 +125,10 @@ def _user_matches_memberurl(conn: Connection, member_url: str, user_dn: str) -> 
     user_dn_lower = user_dn.lower()
     return any(str(e.entry_dn).lower() == user_dn_lower for e in conn.entries)
 
-def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
+def _ldap_check_membership(cwid: str, group_dn: str, ldap_url: str,
                             bind_dn: str, bind_password: str,
                             search_base: str) -> bool:
-    """Check if a user (by email) is a member of the given LDAP group.
+    """Check if a user (by CWID) is a member of the given LDAP group.
     Handles both schemas WCM ED uses:
       groupOfNames  -- static `member` attribute on the group, listing user DNs
       groupOfURLs   -- dynamic `memberURL` attribute, each URL resolving (via
@@ -136,10 +136,13 @@ def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
                        a "hybrid" groupOfURLs with one memberURL per allowed user
                        and an attribute-based stay-active filter.
     Uses escape_filter_chars for injection protection.
-    
+
+    Resolves the user by `(uid=<cwid>)` -- every WCM identity has a uid, so
+    this works for affiliates with no `mail` attribute (unlike the old
+    mail-based lookup).
     """
-    safe_email = escape_filter_chars(email)
-    search_filter = f"(mail={safe_email})"
+    safe_cwid = escape_filter_chars(cwid)
+    search_filter = f"(uid={safe_cwid})"
 
     use_ssl = ldap_url.startswith("ldaps://") or ":636" in ldap_url
     conn = None
@@ -158,7 +161,7 @@ def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
         )
 
         if not conn.entries:
-            logger.debug("No LDAP entry found for email=%s", email)
+            logger.debug("No LDAP entry found for cwid=%s", cwid)
             return False
 
         user_entry = conn.entries[0]
@@ -171,7 +174,7 @@ def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
             if member_of_raw:
                 member_of_list = [str(dn).lower() for dn in member_of_raw]
                 if group_dn.lower() in member_of_list:
-                    logger.debug("memberOf hit for %s in %s", email, group_dn)
+                    logger.debug("memberOf hit for %s in %s", cwid, group_dn)
                     return True
                 # Fall through -- group could still be groupOfURLs even though
                 # memberOf is populated for other (groupOfNames) groups.
@@ -179,7 +182,7 @@ def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
             pass
 
          # Path 2: read the group entry, handle both schemas
-        logger.debug("Checking group entry directly for %s in %s", email, group_dn)
+        logger.debug("Checking group entry directly for %s in %s", cwid, group_dn)
         conn.search(
             search_base=group_dn,
             search_filter="(|(objectClass=groupOfNames)(objectClass=groupOfURLs))",
@@ -199,7 +202,7 @@ def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
             if members_raw:
                 members = [str(m).lower() for m in members_raw]
                 if user_dn.lower() in members:
-                    logger.debug("Group `member` hit for %s in %s", email, group_dn)
+                    logger.debug("Group `member` hit for %s in %s", cwid, group_dn)
                     return True
         except (KeyError, LDAPException):
             pass
@@ -211,12 +214,12 @@ def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
                 for url in member_urls_raw:
                     if _user_matches_memberurl(conn, str(url), user_dn):
                         logger.debug("memberURL hit for %s in %s via %s",
-                                     email, group_dn, url)
+                                     cwid, group_dn, url)
                         return True
         except (KeyError, LDAPException):
             pass
 
-        logger.debug("User %s not found in group %s via any method", email, group_dn)
+        logger.debug("User %s not found in group %s via any method", cwid, group_dn)
         return False
 
     except (LDAPException, OSError, ConnectionError) as exc:
@@ -233,10 +236,12 @@ def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
 # Public API
 # ---------------------------------------------------------------------------
 
-def check_ed_membership(email: str, access_group: str, admin_group: str,
+def check_ed_membership(cwid: str, access_group: str, admin_group: str,
                         ldap_url: str, bind_dn: str, bind_password: str,
                         search_base: str = "dc=weill,dc=cornell,dc=edu") -> dict:
     """Check user's membership in access and admin ED groups.
+
+    Keyed on CWID (resolved via `(uid=<cwid>)`), not email.
 
     Returns dict with keys:
         in_access_group: bool -- whether user is in the access group
@@ -250,7 +255,7 @@ def check_ed_membership(email: str, access_group: str, admin_group: str,
     """
     try:
         in_access = _ldap_check_membership(
-            email, access_group, ldap_url, bind_dn, bind_password, search_base
+            cwid, access_group, ldap_url, bind_dn, bind_password, search_base
         )
     except (LDAPException, OSError, ConnectionError) as exc:
         raise EdUnavailableError(str(exc)) from exc
@@ -259,7 +264,7 @@ def check_ed_membership(email: str, access_group: str, admin_group: str,
     if in_access and admin_group:
         try:
             in_admin = _ldap_check_membership(
-                email, admin_group, ldap_url, bind_dn, bind_password, search_base
+                cwid, admin_group, ldap_url, bind_dn, bind_password, search_base
             )
         except (LDAPException, OSError, ConnectionError) as exc:
             raise EdUnavailableError(str(exc)) from exc

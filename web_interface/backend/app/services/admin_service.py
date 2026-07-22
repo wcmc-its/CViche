@@ -61,6 +61,7 @@ def get_users_with_stats(db: Session) -> list[AdminUser]:
     return [
         AdminUser(
             id=user.id,
+            cwid=user.cwid,
             email=user.email,
             display_name=user.display_name,
             role=user.role,

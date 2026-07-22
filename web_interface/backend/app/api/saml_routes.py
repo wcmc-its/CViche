@@ -141,7 +141,7 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
 
         try:
             membership = check_ed_membership(
-                email=attrs["email"],
+                cwid=attrs["cwid"],
                 access_group=ed_access_group,
                 admin_group=ed_admin_group,
                 ldap_url=ldap_url,
@@ -149,12 +149,12 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
                 bind_password=bind_password,
             )
             if not membership["in_access_group"]:
-                logger.warning("SAML ACS: user %s not in ED access group", attrs["email"])
+                logger.warning("SAML ACS: user %s not in ED access group", attrs["cwid"])
                 return RedirectResponse("/login?error=not_authorized", status_code=302)
-            # Cache the result for per-request checks
-            set_cached_membership(attrs["email"], membership)
+            # Cache the result for per-request checks (keyed on cwid)
+            set_cached_membership(attrs["cwid"], membership)
         except EdUnavailableError:
-            logger.error("ED unavailable during SAML login for %s", attrs["email"], exc_info=True)
+            logger.error("ED unavailable during SAML login for %s", attrs["cwid"], exc_info=True)
             return RedirectResponse("/login?error=directory_unavailable", status_code=302)
 
     # Determine role based on ED groups (if enabled) or preserve existing
@@ -163,9 +163,10 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
     else:
         user_role = None  # Don't override existing role when ED not enabled
 
-    # JIT User Provisioning (upsert)
+    # JIT User Provisioning (upsert) -- anchored on cwid, email optional
     user = provision_user(
         db=db,
+        cwid=attrs["cwid"],
         email=attrs["email"],
         display_name=attrs["display_name"],
         auth_method="saml",

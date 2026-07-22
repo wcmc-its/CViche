@@ -105,7 +105,8 @@ class TestProvisionUser:
     """ARCH-03: provision_user handles both create and update."""
 
     def test_creates_new_user(self, db):
-        user = provision_user(db, "new@example.com", "New User", "simple", role="user")
+        user = provision_user(db, display_name="New User", auth_method="simple",
+                              email="new@example.com", role="user")
         assert user.email == "new@example.com"
         assert user.display_name == "New User"
         assert user.auth_method == "simple"
@@ -113,34 +114,70 @@ class TestProvisionUser:
         assert user.id is not None
 
     def test_updates_existing_user(self, db):
-        # Create initial user
-        provision_user(db, "existing@example.com", "Old Name", "simple", role="user")
-        # Update
-        user = provision_user(db, "existing@example.com", "New Name", "saml", role="admin")
+        # Create initial user (simple auth -- email anchor)
+        provision_user(db, display_name="Old Name", auth_method="simple",
+                       email="existing@example.com", role="user")
+        # Update by the same email
+        user = provision_user(db, display_name="New Name", auth_method="simple",
+                              email="existing@example.com", role="admin")
         assert user.display_name == "New Name"
-        assert user.auth_method == "saml"
         assert user.role == "admin"
 
     def test_preserves_role_when_none(self, db):
         """When role=None, existing user's role is preserved (SAML without ED)."""
-        provision_user(db, "keep@example.com", "Keep Role", "simple", role="admin")
-        user = provision_user(db, "keep@example.com", "Keep Role Updated", "saml", role=None)
+        provision_user(db, display_name="Keep Role", auth_method="saml",
+                       cwid="keep0001", role="admin")
+        user = provision_user(db, display_name="Keep Role Updated", auth_method="saml",
+                              cwid="keep0001", role=None)
         assert user.role == "admin"  # Preserved, not overwritten
 
     def test_new_user_defaults_to_user_role(self, db):
         """When role=None for a new user, defaults to 'user'."""
-        user = provision_user(db, "default@example.com", "Default Role", "saml", role=None)
+        user = provision_user(db, display_name="Default Role", auth_method="saml",
+                              cwid="dfl0001", role=None)
         assert user.role == "user"
 
     def test_simple_auth_with_admin_role(self, db):
-        user = provision_user(db, "admin@example.com", "Admin", "simple", role="admin")
+        user = provision_user(db, display_name="Admin", auth_method="simple",
+                              email="admin@example.com", role="admin")
         assert user.role == "admin"
         assert user.auth_method == "simple"
 
-    def test_saml_auth_with_ed_role(self, db):
-        user = provision_user(db, "saml@example.com", "SAML User", "saml", role="admin")
+    # --- CWID anchoring (#326) ---
+
+    def test_saml_user_anchored_on_cwid(self, db):
+        user = provision_user(db, display_name="SAML User", auth_method="saml",
+                              cwid="abc1234", email="abc1234@med.cornell.edu", role="admin")
+        assert user.cwid == "abc1234"
         assert user.role == "admin"
         assert user.auth_method == "saml"
+
+    def test_saml_user_without_email(self, db):
+        """Affiliate with no ED mail -- provisioned by cwid, email stays NULL."""
+        user = provision_user(db, display_name="No Mail", auth_method="saml",
+                              cwid="nom1001", email=None)
+        assert user.cwid == "nom1001"
+        assert user.email is None
+        assert user.id is not None
+
+    def test_saml_upsert_by_cwid_not_email(self, db):
+        """Second login with the same cwid updates the same row even if email changed."""
+        u1 = provision_user(db, display_name="V1", auth_method="saml",
+                            cwid="dup2002", email="old@example.com")
+        u2 = provision_user(db, display_name="V2", auth_method="saml",
+                            cwid="dup2002", email="new@example.com")
+        assert u1.id == u2.id
+        assert u2.email == "new@example.com"
+
+    def test_legacy_email_row_upgraded_in_place(self, db):
+        """A pre-CWID row (email only) is adopted and its cwid set -- no duplicate."""
+        legacy = provision_user(db, display_name="Legacy", auth_method="saml",
+                                email="legacy@med.cornell.edu")
+        assert legacy.cwid is None
+        upgraded = provision_user(db, display_name="Legacy", auth_method="saml",
+                                  cwid="legacy", email="legacy@med.cornell.edu")
+        assert upgraded.id == legacy.id
+        assert upgraded.cwid == "legacy"
 
 
 class TestConfigService:

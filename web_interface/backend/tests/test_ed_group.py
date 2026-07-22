@@ -188,7 +188,7 @@ class TestDnComparison:
 
         # First search (user lookup) returns the mock entry
         def search_side_effect(search_base, search_filter, search_scope, attributes):
-            if "mail=" in search_filter:
+            if "uid=" in search_filter:
                 mock_conn.entries = [mock_entry]
             else:
                 mock_conn.entries = []
@@ -197,7 +197,7 @@ class TestDnComparison:
         mock_conn.entries = [mock_entry]
 
         result = _ldap_check_membership(
-            email="testuser@med.cornell.edu",
+            cwid="testuser",
             group_dn="cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu",
             ldap_url="ldaps://ed.weill.cornell.edu:636",
             bind_dn="cn=svc,ou=SA,dc=weill,dc=cornell,dc=edu",
@@ -320,7 +320,7 @@ class TestGroupOfURLsMembership:
         #  2. group lookup -> group entry with memberURL list
         #  3. memberURL filter eval -> the user entry (passes filter)
         def search_side_effect(search_base, search_filter, search_scope, attributes):
-            if "(mail=" in search_filter:
+            if "(uid=" in search_filter:
                 # User lookup
                 mock_conn.entries = [_make_entry(_GOU_USER_DN)]
             elif "groupOfNames" in search_filter or "groupOfURLs" in search_filter:
@@ -338,7 +338,7 @@ class TestGroupOfURLsMembership:
         mock_conn.search.side_effect = search_side_effect
 
         result = _ldap_check_membership(
-            email="paa2013@med.cornell.edu",
+            cwid="paa2013",
             group_dn=_GOU_GROUP_DN,
             **LDAP_PARAMS,
         )
@@ -353,7 +353,7 @@ class TestGroupOfURLsMembership:
         mock_conn_cls.return_value = mock_conn
 
         def search_side_effect(search_base, search_filter, search_scope, attributes):
-            if "(mail=" in search_filter:
+            if "(uid=" in search_filter:
                 mock_conn.entries = [_make_entry(_GOU_USER_DN)]
             elif "groupOfNames" in search_filter or "groupOfURLs" in search_filter:
                 mock_conn.entries = [_make_entry(
@@ -368,7 +368,7 @@ class TestGroupOfURLsMembership:
         mock_conn.search.side_effect = search_side_effect
 
         result = _ldap_check_membership(
-            email="paa2013@med.cornell.edu",
+            cwid="paa2013",
             group_dn=_GOU_GROUP_DN,
             **LDAP_PARAMS,
         )
@@ -383,7 +383,7 @@ class TestGroupOfURLsMembership:
         other_user_dn = "uid=someoneelse,ou=People,dc=weill,dc=cornell,dc=edu"
 
         def search_side_effect(search_base, search_filter, search_scope, attributes):
-            if "(mail=" in search_filter:
+            if "(uid=" in search_filter:
                 mock_conn.entries = [_make_entry(other_user_dn)]
             elif "groupOfNames" in search_filter or "groupOfURLs" in search_filter:
                 mock_conn.entries = [_make_entry(
@@ -396,7 +396,7 @@ class TestGroupOfURLsMembership:
         mock_conn.search.side_effect = search_side_effect
 
         result = _ldap_check_membership(
-            email="outsider@med.cornell.edu",
+            cwid="outsider",
             group_dn=_GOU_GROUP_DN,
             **LDAP_PARAMS,
         )
@@ -411,7 +411,7 @@ class TestGroupOfURLsMembership:
         mock_conn_cls.return_value = mock_conn
 
         def search_side_effect(search_base, search_filter, search_scope, attributes):
-            if "(mail=" in search_filter:
+            if "(uid=" in search_filter:
                 mock_conn.entries = [_make_entry(_GOU_USER_DN)]
             elif "groupOfNames" in search_filter or "groupOfURLs" in search_filter:
                 mock_conn.entries = [_make_entry(
@@ -424,7 +424,7 @@ class TestGroupOfURLsMembership:
         mock_conn.search.side_effect = search_side_effect
 
         result = _ldap_check_membership(
-            email="paa2013@med.cornell.edu",
+            cwid="paa2013",
             group_dn=_GOU_GROUP_DN,
             **LDAP_PARAMS,
         )
@@ -473,7 +473,7 @@ class TestACSGroupCheck:
         """User not in ED access group gets redirected to /login?error=not_authorized."""
         clear_cache()
         mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
-        mock_extract.return_value = {"email": "test@med.cornell.edu", "display_name": "Test User"}
+        mock_extract.return_value = {"cwid": "test0001", "email": "test@med.cornell.edu", "display_name": "Test User"}
         mock_check_ed.return_value = {"in_access_group": False, "in_admin_group": False}
 
         response = client.post(
@@ -494,7 +494,7 @@ class TestACSGroupCheck:
         """User in ED access group proceeds normally -- 302 to / with session cookie."""
         clear_cache()
         mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
-        mock_extract.return_value = {"email": "test@med.cornell.edu", "display_name": "Test User"}
+        mock_extract.return_value = {"cwid": "test0001", "email": "test@med.cornell.edu", "display_name": "Test User"}
         mock_check_ed.return_value = {"in_access_group": True, "in_admin_group": False}
 
         response = client.post(
@@ -515,7 +515,7 @@ class TestACSGroupCheck:
         """When ed_enabled is false, ACS skips ED check and proceeds normally."""
         clear_cache()
         mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
-        mock_extract.return_value = {"email": "test@med.cornell.edu", "display_name": "Test User"}
+        mock_extract.return_value = {"cwid": "test0001", "email": "test@med.cornell.edu", "display_name": "Test User"}
 
         response = client.post(
             "/api/saml/acs",
@@ -535,7 +535,7 @@ class TestACSGroupCheck:
         """ED unavailable at login time redirects to /login?error=directory_unavailable."""
         clear_cache()
         mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
-        mock_extract.return_value = {"email": "test@med.cornell.edu", "display_name": "Test User"}
+        mock_extract.return_value = {"cwid": "test0001", "email": "test@med.cornell.edu", "display_name": "Test User"}
         mock_check_ed.side_effect = EdUnavailableError("Connection refused")
 
         response = client.post(
@@ -559,6 +559,7 @@ class TestPerRequestCheck:
         """SAML user with cached in_access_group=True gets 200 on /api/auth/me."""
         clear_cache()
         user = User(
+            cwid="test0001",
             email="test@med.cornell.edu",
             display_name="Test User",
             role="user",
@@ -568,7 +569,7 @@ class TestPerRequestCheck:
         db.commit()
         db.refresh(user)
 
-        set_cached_membership("test@med.cornell.edu", {"in_access_group": True, "in_admin_group": False})
+        set_cached_membership("test0001", {"in_access_group": True, "in_admin_group": False})
         token = create_session_cookie(user)
 
         response = client.get("/api/auth/me", cookies={COOKIE_NAME: token})
@@ -578,6 +579,7 @@ class TestPerRequestCheck:
         """SAML user with cached in_access_group=False gets 401 on /api/auth/me."""
         clear_cache()
         user = User(
+            cwid="test0001",
             email="test@med.cornell.edu",
             display_name="Test User",
             role="user",
@@ -587,7 +589,7 @@ class TestPerRequestCheck:
         db.commit()
         db.refresh(user)
 
-        set_cached_membership("test@med.cornell.edu", {"in_access_group": False, "in_admin_group": False})
+        set_cached_membership("test0001", {"in_access_group": False, "in_admin_group": False})
         token = create_session_cookie(user)
 
         response = client.get("/api/auth/me", cookies={COOKIE_NAME: token})

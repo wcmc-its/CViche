@@ -12,7 +12,12 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    email = Column(String(255), unique=True, nullable=False, index=True)
+    # cwid is the SSO identity anchor (unique, stable, present for every WCM
+    # identity). email is preferred-but-optional -- nothing in the app sends
+    # mail, so a user without an ED `mail` (e.g. external affiliates) still
+    # authenticates. nullable for simple-auth users, who have no CWID.
+    cwid = Column(String(20), unique=True, nullable=True, index=True)
+    email = Column(String(255), unique=True, nullable=True, index=True)
     display_name = Column(String(255), nullable=False)
     role = Column(String(20), nullable=False, default="user")  # "user" or "admin"
     status = Column(String(20), nullable=False, default="active")  # "active" or "disabled"

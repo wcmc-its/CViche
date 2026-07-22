@@ -188,7 +188,15 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     if user.auth_method == "saml":
         ed_enabled = get_config_value(db, "ed_enabled")
         if ed_enabled:
-            membership = get_cached_membership(user.email)
+            if not user.cwid:
+                # Legacy session provisioned before CWID anchoring -- force a
+                # clean re-login so the cwid gets set (see provision_user).
+                raise HTTPException(
+                    status_code=401,
+                    detail={"error": "session_invalid",
+                            "message": "Please log in again."}
+                )
+            membership = get_cached_membership(user.cwid)
             if membership is None:
                 # Cache miss -- query ED
                 from app.config_loader import get_config
@@ -200,18 +208,18 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                 bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
                 try:
                     membership = check_ed_membership(
-                        email=user.email,
+                        cwid=user.cwid,
                         access_group=ed_access_group,
                         admin_group=ed_admin_group,
                         ldap_url=ldap_url,
                         bind_dn=ldap_bind_dn,
                         bind_password=bind_password,
                     )
-                    set_cached_membership(user.email, membership)
+                    set_cached_membership(user.cwid, membership)
                 except EdUnavailableError:
                     # ED unreachable -- use stale cache
-                    logger.warning("ED unavailable during per-request check for %s", user.email)
-                    membership = get_stale_membership(user.email)
+                    logger.warning("ED unavailable during per-request check for %s", user.cwid)
+                    membership = get_stale_membership(user.cwid)
                     if membership is None:
                         # No stale data available -- cannot verify membership
                         raise HTTPException(
@@ -222,7 +230,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
             if not membership["in_access_group"]:
                 # User removed from access group -- deny
-                logger.warning("Per-request ED check: %s no longer in access group", user.email)
+                logger.warning("Per-request ED check: %s no longer in access group", user.cwid)
                 raise HTTPException(
                     status_code=401,
                     detail={"error": "not_authorized",

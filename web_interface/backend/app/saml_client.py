@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 ATTR_MAIL = "urn:oid:0.9.2342.19200300.100.1.3"
 ATTR_DISPLAY_NAME = "urn:oid:2.16.840.1.113730.3.1.241"
 ATTR_EPPN = "urn:oid:1.3.6.1.4.1.5923.1.1.1.6"
+ATTR_UID = "urn:oid:0.9.2342.19200300.100.1.1"
 
 
 def _find_xmlsec1() -> str:
@@ -162,17 +163,35 @@ _MAPPED_ATTR_KEYS = frozenset({
     ATTR_MAIL, "mail",
     ATTR_DISPLAY_NAME, "displayName",
     ATTR_EPPN, "eduPersonPrincipalName",
+    ATTR_UID, "uid",
 })
+
+
+def _cwid_from(uid: str | None, eppn: str | None) -> str | None:
+    """Derive the CWID identity anchor from released attributes.
+
+    Prefer an explicit `uid`; else the local-part of the ePPN
+    (<cwid>@med.cornell.edu). Returns None if neither is usable.
+    """
+    if uid:
+        return uid.strip().lower()
+    if eppn and "@" in eppn:
+        return eppn.split("@", 1)[0].strip().lower()
+    return None
 
 
 def extract_user_attrs(identity: dict) -> dict:
     """Extract user attributes from a SAML assertion identity dict.
 
     Handles both OID-keyed and friendly-name-keyed attributes.
-    Returns dict with keys: email, display_name, eppn.
-    Raises ValueError if required 'mail' attribute is missing.
+    Returns dict with keys: cwid, email, display_name, eppn.
 
-    Only mail/displayName/eppn are consumed; any other attribute the IdP
+    Identity is anchored on CWID (from uid or the ePPN local-part). Email is
+    preferred but optional -- nothing in the app sends mail, so a user with no
+    ED `mail` (e.g. external affiliates) still authenticates. Raises ValueError
+    only when no CWID is derivable.
+
+    Only uid/mail/displayName/eppn are consumed; any other attribute the IdP
     releases is not stored. Log the dropped attribute *names* (not values --
     they may be PII) so the loss is visible instead of silent.
     """
@@ -192,15 +211,20 @@ def extract_user_attrs(identity: dict) -> dict:
             len(unmapped), unmapped,
         )
 
-    mail = _get(ATTR_MAIL, "mail")
-    if mail is None:
-        raise ValueError("Required attribute 'mail' missing from SAML assertion")
-
-    display_name = _get(ATTR_DISPLAY_NAME, "displayName")
+    uid = _get(ATTR_UID, "uid")
     eppn = _get(ATTR_EPPN, "eduPersonPrincipalName")
+    mail = _get(ATTR_MAIL, "mail")
+    display_name = _get(ATTR_DISPLAY_NAME, "displayName")
+
+    cwid = _cwid_from(uid, eppn)
+    if cwid is None:
+        raise ValueError(
+            "No CWID derivable from SAML assertion (need uid or eduPersonPrincipalName)"
+        )
 
     return {
-        "email": mail.strip().lower(),
-        "display_name": (display_name or eppn or mail).strip(),
+        "cwid": cwid,
+        "email": mail.strip().lower() if mail else None,
+        "display_name": (display_name or eppn or mail or cwid).strip(),
         "eppn": eppn,
     }
