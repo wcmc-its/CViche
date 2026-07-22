@@ -1026,6 +1026,19 @@ def test_artifact_resolution_does_not_steal_a_longer_uids_files(tmp_path):
     assert _find_source(tmp_path, "web05").name == "web05.docx"
 
 
+def test_uid_owns_requires_a_real_boundary_suffix():
+    """The ownership guard must reject the degenerate cases as well as the
+    prefix collision: an empty uid owns nothing, and a name that IS the uid
+    (no separator at all) is not owned."""
+    from unified_pipeline.run_doctor import _uid_owns
+
+    assert _uid_owns("web05_entries.json", "web05") is True
+    assert _uid_owns("web05.docx", "web05") is True
+    assert _uid_owns("web050_entries.json", "web05") is False   # prefix collision
+    assert _uid_owns("web05", "web05") is False                 # no suffix boundary
+    assert _uid_owns("web05_entries.json", "") is False         # empty uid owns nothing
+
+
 def _para(text, style="Heading 1"):
     """Minimal stand-in for the python-docx paragraph iter_header_candidates sees."""
     class _S:  # noqa: D401

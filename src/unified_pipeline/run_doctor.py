@@ -420,8 +420,7 @@ def lint_missed_headers(candidates: List[str], stage1a: Dict,
     """Header-looking source lines absent from the 1a hierarchy AND from
     every entry hierarchy path: a header demoted to content misroutes
     everything filed under it."""
-    # _hierarchy_titles already returns _norm'ed titles; only the colon differs.
-    known = {t.rstrip(":").strip() for t in _hierarchy_titles(stage1a)}
+    known = {_header_key(t) for t in _hierarchy_titles(stage1a)}
     paths = {_header_key(h) for e in stage2.get("entries", [])
              for h in (e.get("hierarchy") or [])}
     findings, seen = [], set()
@@ -1018,10 +1017,10 @@ def _uid_owns(name: str, uid: str) -> bool:
     against another CV's artifacts. Require the uid to end at a non-alphanumeric
     boundary ('web05_entries.json' yes, 'web050_entries.json' no).
     """
-    if not name.startswith(uid):
+    if not uid or not name.startswith(uid):
         return False
     rest = name[len(uid):]
-    return not rest[:1].isalnum()
+    return bool(rest) and not rest[0].isalnum()
 
 
 def _find_artifact(root: Path, uid: str, key: str) -> Optional[Path]:
