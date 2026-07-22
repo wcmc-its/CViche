@@ -128,10 +128,9 @@ def _resolve_safe_path(filename: str, run_id: str) -> Path:
     # The pipeline names every artifact from document_uid, which for a web run IS
     # the run_id (orchestrator: Path(UPLOAD_DIR/"<run_id>.<ext>").stem), so the
     # basename carries its owner: "<run_id>_wcm.docx", "CV_<run_id>_<id>_<name>...".
-    if pipeline_dir.exists():
+    if pipeline_dir.is_dir():
         base_filename = Path(filename).name
-        if not (base_filename.startswith(run_id)
-                or base_filename.startswith(f"CV_{run_id}")):
+        if not base_filename.startswith((run_id, f"CV_{run_id}")):
             raise HTTPException(status_code=404, detail="File not found")
         for stage_dir in pipeline_dir.iterdir():
             if stage_dir.is_dir():
