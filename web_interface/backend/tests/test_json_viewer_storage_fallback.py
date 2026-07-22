@@ -114,6 +114,50 @@ def test_data_docx_still_allowed_for_owner(client, db, seed_simple_mode, monkeyp
     assert resp.status_code != 403
 
 
+# --- #296: the shared pipeline outputs dir must not leak across runs ---
+
+
+def _seed_shared_artifact(monkeypatch, tmp_path, basename):
+    """Put a file in the SHARED src/unified_pipeline/outputs tree (candidate 2),
+    which every run on the pod writes into, and point steps.py at it."""
+    stage_dir = tmp_path / "src" / "unified_pipeline" / "outputs" / "stage_4_wcm_templates"
+    stage_dir.mkdir(parents=True)
+    (stage_dir / basename).write_bytes(b"PK\x03\x04 another run's parsed CV")
+    # steps.py derives pipeline_dir from __file__; redirect it at the temp tree.
+    monkeypatch.setattr(steps_mod, "__file__",
+                        str(tmp_path / "web_interface" / "backend" / "app" / "api" / "steps.py"))
+
+
+def test_owner_cannot_read_another_runs_docx_from_shared_dir(
+    client, db, seed_simple_mode, monkeypatch, tmp_path
+):
+    """The exact #296 chain: a non-admin owning run A asks for a .docx that exists
+    only under run B. The .json admin gate does not cover .docx, and the shared
+    stage dir is not run-scoped, so this used to serve someone else's CV."""
+    user, run = _user_and_run(db, role="user", suffix="-x296")
+    _auth(client, user)
+    monkeypatch.setattr(steps_mod, "get_storage", lambda: _FakeStorage({}))
+    _seed_shared_artifact(monkeypatch, tmp_path, "victim-run-id_wcm.docx")
+
+    resp = client.get(f"/api/run/{run.id}/data/victim-run-id_wcm.docx")
+    assert resp.status_code == 404, (
+        f"cross-run read: got {resp.status_code}, {len(resp.content)} bytes")
+    assert b"parsed CV" not in resp.content
+
+
+def test_owner_can_still_read_its_own_docx_from_shared_dir(
+    client, db, seed_simple_mode, monkeypatch, tmp_path
+):
+    """The scoping must not break the legitimate case it guards -- the run's OWN
+    artifact still resolves out of the shared dir."""
+    user, run = _user_and_run(db, role="user", suffix="-o296")
+    _auth(client, user)
+    monkeypatch.setattr(steps_mod, "get_storage", lambda: _FakeStorage({}))
+    _seed_shared_artifact(monkeypatch, tmp_path, f"{run.id}_wcm.docx")
+
+    resp = client.get(f"/api/run/{run.id}/data/{run.id}_wcm.docx")
+    assert resp.status_code == 200, resp.text
+    assert b"parsed CV" in resp.content
 # --- review hardening: invariants pinned at the point of use (#287 review) ---
 
 

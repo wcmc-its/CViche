@@ -150,8 +150,16 @@ def _resolve_safe_path(filename: str, run_id: str) -> Path:
         / "src" / "unified_pipeline" / "outputs"
     ).resolve()
 
-    if pipeline_dir.exists():
+    # This directory is SHARED across every run the pod has processed, so
+    # is_relative_to(pipeline_dir) proves containment but NOT ownership -- without
+    # the name check below, a run's owner could read another run's parsed CV (#296).
+    # The pipeline names every artifact from document_uid, which for a web run IS
+    # the run_id (orchestrator: Path(UPLOAD_DIR/"<run_id>.<ext>").stem), so the
+    # basename carries its owner: "<run_id>_wcm.docx", "CV_<run_id>_<id>_<name>...".
+    if pipeline_dir.is_dir():
         base_filename = Path(filename).name
+        if not base_filename.startswith((run_id, f"CV_{run_id}")):
+            raise HTTPException(status_code=404, detail="File not found")
         for stage_dir in pipeline_dir.iterdir():
             if stage_dir.is_dir():
                 candidate = (stage_dir / base_filename).resolve()
