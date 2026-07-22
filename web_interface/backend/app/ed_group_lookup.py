@@ -3,16 +3,34 @@ import os
 import time
 import logging
 import threading
+from dataclasses import dataclass
 from urllib.parse import unquote
 from ldap3 import Server, Connection, BASE, LEVEL, SUBTREE
 from ldap3.utils.conv import escape_filter_chars
 from ldap3.core.exceptions import LDAPException
 from cachetools import TTLCache
+from pydantic import SecretStr
 
 
 class EdUnavailableError(Exception):
     """Raised when the Enterprise Directory is unreachable."""
     pass
+
+
+@dataclass(frozen=True)
+class LDAPConfig:
+    """Connection settings for an ED bind, passed as one object instead of
+    threading four positional args (incl. the credential) through every call.
+
+    ``bind_password`` is a ``SecretStr``, so the credential never lands in a log
+    line or traceback repr -- SecretStr renders as ``'**********'``, and this
+    object's dataclass repr shows that masked form. Unwrap with
+    ``.get_secret_value()`` only at the ldap3 boundary.
+    """
+    ldap_url: str
+    bind_dn: str
+    bind_password: SecretStr
+    search_base: str = "dc=weill,dc=cornell,dc=edu"
 
 
 logger = logging.getLogger(__name__)
@@ -154,9 +172,7 @@ def _user_matches_memberurl(conn: Connection, member_url: str, user_dn: str) -> 
         return False
     return len(conn.entries) == 1
 
-def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
-                            bind_dn: str, bind_password: str,
-                            search_base: str) -> bool:
+def _ldap_check_membership(email: str, group_dn: str, cfg: LDAPConfig) -> bool:
     """Check if a user (by email) is a member of the given LDAP group.
     Handles both schemas WCM ED uses:
       groupOfNames  -- static `member` attribute on the group, listing user DNs
@@ -170,17 +186,18 @@ def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
     safe_email = escape_filter_chars(email)
     search_filter = f"(mail={safe_email})"
 
-    use_ssl = ldap_url.startswith("ldaps://") or ":636" in ldap_url
+    use_ssl = cfg.ldap_url.startswith("ldaps://") or ":636" in cfg.ldap_url
     conn = None
     try:
-        server = Server(ldap_url, use_ssl=use_ssl, connect_timeout=5,
+        server = Server(cfg.ldap_url, use_ssl=use_ssl, connect_timeout=5,
                         get_info="NONE")
-        conn = Connection(server, user=bind_dn, password=bind_password,
+        conn = Connection(server, user=cfg.bind_dn,
+                          password=cfg.bind_password.get_secret_value(),
                           auto_bind=True, read_only=True, receive_timeout=5)
 
         # Find the user entry; collect user_dn and any memberOf attribute
         conn.search(
-            search_base=search_base,
+            search_base=cfg.search_base,
             search_filter=search_filter,
             search_scope=SUBTREE,
             attributes=["memberOf", "dn"],
@@ -263,8 +280,7 @@ def _ldap_check_membership(email: str, group_dn: str, ldap_url: str,
 # ---------------------------------------------------------------------------
 
 def check_ed_membership(email: str, access_group: str, admin_group: str,
-                        ldap_url: str, bind_dn: str, bind_password: str,
-                        search_base: str = "dc=weill,dc=cornell,dc=edu") -> dict:
+                        cfg: LDAPConfig) -> dict:
     """Check user's membership in access and admin ED groups.
 
     Returns dict with keys:
@@ -278,18 +294,14 @@ def check_ed_membership(email: str, access_group: str, admin_group: str,
     Raises EdUnavailableError if LDAP is unreachable.
     """
     try:
-        in_access = _ldap_check_membership(
-            email, access_group, ldap_url, bind_dn, bind_password, search_base
-        )
+        in_access = _ldap_check_membership(email, access_group, cfg)
     except (LDAPException, OSError, ConnectionError) as exc:
         raise EdUnavailableError(str(exc)) from exc
 
     in_admin = False
     if in_access and admin_group:
         try:
-            in_admin = _ldap_check_membership(
-                email, admin_group, ldap_url, bind_dn, bind_password, search_base
-            )
+            in_admin = _ldap_check_membership(email, admin_group, cfg)
         except (LDAPException, OSError, ConnectionError) as exc:
             raise EdUnavailableError(str(exc)) from exc
 

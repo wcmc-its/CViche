@@ -12,6 +12,7 @@ from app.ed_group_lookup import (
     get_stale_membership,
     clear_cache,
     EdUnavailableError,
+    LDAPConfig,
     _ldap_check_membership,
     _parse_memberurl,
     _user_matches_memberurl,
@@ -20,14 +21,18 @@ from app.ed_group_lookup import (
     _stale_cache,
 )
 from ldap3 import BASE, LEVEL, SUBTREE
+from pydantic import SecretStr
 
 
-# Common test parameters for LDAP calls
+# Common LDAP connection config for the membership calls. Spread as **LDAP_PARAMS
+# into the (email, ..., cfg) signature.
 LDAP_PARAMS = {
-    "ldap_url": "ldaps://ed.weill.cornell.edu:636",
-    "bind_dn": "cn=svc-cviche,ou=ServiceAccounts,dc=weill,dc=cornell,dc=edu",
-    "bind_password": "test-password",
-    "search_base": "dc=weill,dc=cornell,dc=edu",
+    "cfg": LDAPConfig(
+        ldap_url="ldaps://ed.weill.cornell.edu:636",
+        bind_dn="cn=svc-cviche,ou=ServiceAccounts,dc=weill,dc=cornell,dc=edu",
+        bind_password=SecretStr("test-password"),
+        search_base="dc=weill,dc=cornell,dc=edu",
+    )
 }
 ACCESS_GROUP = "cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
 ADMIN_GROUP = "cn=ITS:Library:CViche/admin-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
@@ -200,10 +205,7 @@ class TestDnComparison:
         result = _ldap_check_membership(
             email="testuser@med.cornell.edu",
             group_dn="cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu",
-            ldap_url="ldaps://ed.weill.cornell.edu:636",
-            bind_dn="cn=svc,ou=SA,dc=weill,dc=cornell,dc=edu",
-            bind_password="pass",
-            search_base="dc=weill,dc=cornell,dc=edu",
+            **LDAP_PARAMS,
         )
         assert result is True
 
