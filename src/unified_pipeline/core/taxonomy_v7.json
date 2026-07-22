@@ -10,7 +10,7 @@
       "F1", "F2",
       "K1", "K2", "K3", "K4", "K5",
       "L1", "L2", "L3",
-      "M1", "M2", "M3", "M4",
+      "M1", "M2", "M2D", "M4",
       "N1", "N2", "N3", "N4",
       "Q1", "Q2", "Q3", "Q4",
       "S0", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8", "S9"
@@ -29,7 +29,7 @@
       "Educational Contributions": ["K1", "K2", "K3", "K4", "K5"],
       "Clinical Activities": ["L1", "L2", "L3"],
       "Research & Scholarship": [
-        "M1", "M2", "M2A", "M2B", "M2C", "M3", "M4", "M4A", "M4B", "M4C",
+        "M1", "M2", "M2A", "M2B", "M2C", "M2D", "M4", "M4A", "M4B", "M4C",
         "N1", "N2", "N3", "N3A", "N3B", "N4",
         "O", "P",
         "Q1", "Q2", "Q3", "Q4", "Q4A", "Q4B", "Q4C", "Q4D",
@@ -51,7 +51,7 @@
       "grant_number": "M2/M2A/M2B/M2C",
       "nct_number": "M4/M4A/M4B/M4C",
       "isbn": "S3 (books) or S4 (chapters)",
-      "patent_number": "M3 (patents & inventions)"
+      "patent_number": "M2D (patents & inventions)"
     },
     "relationship_test": {
       "cv_owner_work": "Use the appropriate primary category (research, clinical, education, etc.)",
@@ -71,7 +71,7 @@
   },
   "legacy_mappings": {
     "T1_Community_Public_Engagement": ["T", "K5"],
-    "T2_Technology_Transfer": ["M3"],
+    "T2_Technology_Transfer": ["M2D"],
     "T3_Professional_Development": ["B2"],
     "T4_References": ["T"]
   },
@@ -1001,9 +1001,9 @@
       ]
     },
     {
-      "code": "M3",
+      "code": "M2D",
       "label": "Patents & Inventions",
-      "parent": "M",
+      "parent": "M2",
       "family": "M",
       "group": "Research & Scholarship",
       "purpose": "Capture intellectual property and technology transfer outputs.",
@@ -1014,12 +1014,12 @@
         "Licensed intellectual property generating royalties"
       ],
       "common_confusions": [
-        "Publications about devices or patents misclassified as M3 instead of S1–S5.",
-        "Legacy technology transfer entries (T2) not mapped to M3."
+        "Publications about devices or patents misclassified as M2D instead of S1–S5.",
+        "Legacy technology transfer entries (T2) not mapped to M2D."
       ],
       "key_rules": [
-        "Patents and formal inventions → M3.",
-        "Legacy Technology Transfer content (T2) routes to M3.",
+        "Patents and formal inventions → M2D.",
+        "Legacy Technology Transfer content (T2) routes to M2D.",
         "Publications describing the invention remain in S1–S5."
       ]
     },
@@ -1836,7 +1836,7 @@
         "Overuse of T instead of finding a more specific code.",
         "Professional titles (Professor, Chair, Director) misclassified as T instead of D1/O.",
         "Educational outreach misclassified as T instead of K5.",
-        "Technology transfer items left in T instead of being mapped to M3.",
+        "Technology transfer items left in T instead of being mapped to M2D.",
         "'Invited Participant' at scientific meetings misclassified as T instead of R.",
         "Committee membership misclassified as T instead of P or Q2.",
         "Fieldwork or excavations misclassified as T instead of M1.",
@@ -1850,7 +1850,7 @@
         "Professional titles and positions should NEVER go to T. Check D1, D2, D3, O first.",
         "Editorial roles (Editor, Associate Editor, Editorial Board) should NEVER go to T. Use Q4A/Q4B/Q4C.",
         "Grants and funding should NEVER go to T. Use M2A/M2B/M2C regardless of what section header they appear under.",
-        "Legacy mappings: T1 (community/public engagement) → T or K5; T2 (technology transfer) → M3; T3 (professional development) → B2; T4 (references) → T.",
+        "Legacy mappings: T1 (community/public engagement) → T or K5; T2 (technology transfer) → M2D; T3 (professional development) → B2; T4 (references) → T.",
         "Before using T, systematically check whether A–S codes could apply more specifically.",
         "If the entry says 'Invited' anything at a scientific venue → check R first.",
         "If the entry is committee/board service → check P, Q2, Q3 first.",
