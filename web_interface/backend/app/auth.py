@@ -19,7 +19,9 @@ from app.ed_group_lookup import (
     get_stale_membership,
     check_ed_membership,
     EdUnavailableError,
+    LDAPConfig,
 )
+from pydantic import SecretStr
 from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
 from app.session_idle import get_idle_store
 
@@ -206,14 +208,16 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                 ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
                 ldap_bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
                 bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
+                ldap_cfg = LDAPConfig(
+                    ldap_url=ldap_url, bind_dn=ldap_bind_dn,
+                    bind_password=SecretStr(bind_password),
+                )
                 try:
                     membership = check_ed_membership(
                         cwid=user.cwid,
                         access_group=ed_access_group,
                         admin_group=ed_admin_group,
-                        ldap_url=ldap_url,
-                        bind_dn=ldap_bind_dn,
-                        bind_password=bind_password,
+                        cfg=ldap_cfg,
                     )
                     set_cached_membership(user.cwid, membership)
                 except EdUnavailableError:

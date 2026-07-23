@@ -225,6 +225,16 @@ def _get_docx_document():
     return Document
 
 
+#: A credential in name-suffix position (', MD' / ', Ph.D.') -- the marker of a
+#: person line rather than a section header. Anchored on the comma so headers
+#: that merely contain commas are not swallowed.
+_NAME_CREDENTIAL_RE = re.compile(
+    r",\s*(?:M\.?D\.?|D\.?O\.?|Ph\.?\s?D\.?|M\.?B\.?B\.?S\.?|MBA|MPH|MSc?|"
+    r"FACEP|FAAEM|FACS|FACP|CPE|DDS|DMD|DVM|JD|RN|PA-C)\b",
+    re.IGNORECASE,
+)
+
+
 def iter_header_candidates(docx_path: str) -> List[str]:
     """Header-looking source lines: short, letters-only, ALL-CAPS bold (or
     styled as a Heading), from top-level paragraphs and single-column table
@@ -243,6 +253,19 @@ def iter_header_candidates(docx_path: str) -> List[str]:
         if not any(ch.isalpha() for ch in text) or any(ch.isdigit() for ch in text):
             return
         if is_source_boilerplate(text):
+            return
+        # A section header is a standalone label. A tab means 'label<TAB>value'
+        # -- a data row that happens to be styled like a heading, e.g. the
+        # licensure rows 'Active\t\t\tMaryland' / 'Certification:\t\t\tAmerican
+        # Board of Surgery'. Segmentation is right not to promote these.
+        if "\t" in text:
+            return
+        # The owner's name/credential line is document furniture, not a section:
+        # 'STANLEY J. SZEFLER, M.D.', 'LEE W. SHOCKLEY, MD, MBA, FACEP, FAAEM,
+        # CPE', 'CURRICULUM VITAE - JEFFREY R OLSEN, MD'. Anchored on the
+        # comma-suffix position so real headers that merely contain a comma
+        # ('ADMINISTRATIVE APPOINTMENTS, SCHOOL OF MEDICINE, CU:') survive.
+        if _NAME_CREDENTIAL_RE.search(text):
             return
         style = getattr(para.style, "name", "") or ""
         if style.startswith("Heading"):
@@ -380,17 +403,29 @@ def lint_segmentation(source_lines: List[str], stage1a: Dict,
 
 # -------------------------------------------------------------------- lint 2
 
+def _header_key(text: str) -> str:
+    """Comparison key for header matching: normalized, trailing ':' dropped.
+
+    Stage 1a promotes 'PROFESSIONAL SOCIETIES:' to the hierarchy node
+    'PROFESSIONAL SOCIETIES' -- the colon is source formatting, not part of the
+    header name. Comparing raw normalized forms reports a header that WAS
+    detected as missing: on the 2026-07-15 corpus (25 CVs) that was 36 of 61
+    findings (59%), including 22 of web061's 23.
+    """
+    return _norm(text).rstrip(":").strip()
+
+
 def lint_missed_headers(candidates: List[str], stage1a: Dict,
                         stage2: Dict) -> List[Dict]:
     """Header-looking source lines absent from the 1a hierarchy AND from
     every entry hierarchy path: a header demoted to content misroutes
     everything filed under it."""
-    known = set(_hierarchy_titles(stage1a))
-    paths = {_norm(h) for e in stage2.get("entries", [])
+    known = {_header_key(t) for t in _hierarchy_titles(stage1a)}
+    paths = {_header_key(h) for e in stage2.get("entries", [])
              for h in (e.get("hierarchy") or [])}
     findings, seen = [], set()
     for cand in candidates:
-        normed = _norm(cand)
+        normed = _header_key(cand)
         if not normed or normed in seen:
             continue
         seen.add(normed)
@@ -971,12 +1006,30 @@ _ARTIFACTS = {
 }
 
 
+def _uid_owns(name: str, uid: str) -> bool:
+    """Does file ``name`` belong to ``uid`` -- and not to a longer uid that
+    merely starts with it?
+
+    ``glob(f"{uid}*")`` is a PREFIX match, so uid 'web05' also matches
+    'web050_entries.json'. Sorted, '0' (0x30) sorts before '_' (0x5F), so the
+    WRONG CV wins: the 2026-07-15 sweep doctored web04 against web049, web05
+    against web050 and web06 against web060 -- 3 of 25 CVs diagnosed entirely
+    against another CV's artifacts. Require the uid to end at a non-alphanumeric
+    boundary ('web05_entries.json' yes, 'web050_entries.json' no).
+    """
+    if not uid or not name.startswith(uid):
+        return False
+    rest = name[len(uid):]
+    return bool(rest) and not rest[0].isalnum()
+
+
 def _find_artifact(root: Path, uid: str, key: str) -> Optional[Path]:
     stage_dir, suffix = _ARTIFACTS[key]
     directory = root / stage_dir
     if not directory.is_dir():
         return None
-    matches = sorted(directory.glob(f"{uid}*{suffix}"))
+    matches = sorted(p for p in directory.glob(f"{uid}*{suffix}")
+                     if _uid_owns(p.name, uid))
     return matches[0] if matches else None
 
 
@@ -984,7 +1037,8 @@ def _find_source(root: Path, uid: str) -> Optional[Path]:
     for directory in (root, root / "uploads"):
         if directory.is_dir():
             matches = sorted(p for p in directory.glob(f"{uid}*.docx")
-                             if not p.name.endswith("_wcm.docx"))
+                             if not p.name.endswith("_wcm.docx")
+                             and _uid_owns(p.name, uid))
             if matches:
                 return matches[0]
     return None

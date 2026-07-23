@@ -12,21 +12,27 @@ from app.ed_group_lookup import (
     get_stale_membership,
     clear_cache,
     EdUnavailableError,
+    LDAPConfig,
     _ldap_check_membership,
     _parse_memberurl,
     _user_matches_memberurl,
+    _dn_in_scope,
     _group_cache,
     _stale_cache,
 )
 from ldap3 import BASE, LEVEL, SUBTREE
+from pydantic import SecretStr
 
 
-# Common test parameters for LDAP calls
+# Common LDAP connection config for the membership calls. Spread as **LDAP_PARAMS
+# into the (email, ..., cfg) signature.
 LDAP_PARAMS = {
-    "ldap_url": "ldaps://ed.weill.cornell.edu:636",
-    "bind_dn": "cn=svc-cviche,ou=ServiceAccounts,dc=weill,dc=cornell,dc=edu",
-    "bind_password": "test-password",
-    "search_base": "dc=weill,dc=cornell,dc=edu",
+    "cfg": LDAPConfig(
+        ldap_url="ldaps://ed.weill.cornell.edu:636",
+        bind_dn="cn=svc-cviche,ou=ServiceAccounts,dc=weill,dc=cornell,dc=edu",
+        bind_password=SecretStr("test-password"),
+        search_base="dc=weill,dc=cornell,dc=edu",
+    )
 }
 ACCESS_GROUP = "cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
 ADMIN_GROUP = "cn=ITS:Library:CViche/admin-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu"
@@ -199,10 +205,7 @@ class TestDnComparison:
         result = _ldap_check_membership(
             cwid="testuser",
             group_dn="cn=ITS:Library:CViche/user-role,ou=application security,ou=groups,dc=weill,dc=cornell,dc=edu",
-            ldap_url="ldaps://ed.weill.cornell.edu:636",
-            bind_dn="cn=svc,ou=SA,dc=weill,dc=cornell,dc=edu",
-            bind_password="pass",
-            search_base="dc=weill,dc=cornell,dc=edu",
+            **LDAP_PARAMS,
         )
         assert result is True
 
@@ -297,6 +300,72 @@ class TestUserMatchesMemberURL:
         mock_conn = MagicMock()
         assert _user_matches_memberurl(mock_conn, "not-a-url", _GOU_USER_DN) is False
         mock_conn.search.assert_not_called()
+
+    # --- dynamic (attribute-rule) memberURLs: the ezproxy-style migration (#318) ---
+
+    _RULE_ONE = (
+        "ldap:///ou=people,dc=weill,dc=cornell,dc=edu??one?"
+        "(&(objectClass=eduPerson)(weillCornellEduPersonTypeCode=employee))"
+    )
+
+    def test_matches_dynamic_one_level_rule_via_user_read(self):
+        """A broad ?one? rule is evaluated by reading the USER's own entry with the
+        rule filter -- never a broad base/scope search (which ED caps at 500)."""
+        mock_conn = MagicMock()
+        mock_conn.entries = [_make_entry(_GOU_USER_DN)]  # user satisfies the filter
+        result = _user_matches_memberurl(mock_conn, self._RULE_ONE, _GOU_USER_DN)
+        assert result is True
+        # Search must target the user's own DN at BASE scope, not ou=people/?one?.
+        _, kwargs = mock_conn.search.call_args
+        assert kwargs["search_base"] == _GOU_USER_DN
+        assert kwargs["search_scope"] == BASE
+
+    def test_dynamic_rule_filter_excludes_user(self):
+        """User is under the rule's base but fails the filter -> False."""
+        mock_conn = MagicMock()
+        mock_conn.entries = []
+        assert _user_matches_memberurl(mock_conn, self._RULE_ONE, _GOU_USER_DN) is False
+        mock_conn.search.assert_called_once()
+
+    def test_dynamic_rule_rejects_user_outside_base(self):
+        """User not under the rule's base subtree -> scope gate fails, no LDAP call."""
+        mock_conn = MagicMock()
+        outsider = "uid=x,ou=people,dc=example,dc=org"
+        assert _user_matches_memberurl(mock_conn, self._RULE_ONE, outsider) is False
+        mock_conn.search.assert_not_called()
+
+    def test_one_level_rule_rejects_grandchild(self):
+        """?one? matches direct children only -- a grandchild DN is not a member."""
+        mock_conn = MagicMock()
+        grandchild = "uid=x,ou=sub,ou=people,dc=weill,dc=cornell,dc=edu"
+        assert _user_matches_memberurl(mock_conn, self._RULE_ONE, grandchild) is False
+        mock_conn.search.assert_not_called()
+
+
+class TestDnInScope:
+    """Scope gate: is a user DN within a memberURL's base at its scope? (#318)"""
+
+    BASE_DN = "ou=people,dc=weill,dc=cornell,dc=edu"
+    CHILD = "uid=paa2013,ou=people,dc=weill,dc=cornell,dc=edu"
+    GRANDCHILD = "uid=x,ou=sub,ou=people,dc=weill,dc=cornell,dc=edu"
+
+    def test_base_scope_requires_exact_match(self):
+        assert _dn_in_scope(self.CHILD, self.CHILD, BASE) is True
+        assert _dn_in_scope(self.CHILD, self.BASE_DN, BASE) is False
+
+    def test_level_scope_direct_child_only(self):
+        assert _dn_in_scope(self.CHILD, self.BASE_DN, LEVEL) is True
+        assert _dn_in_scope(self.GRANDCHILD, self.BASE_DN, LEVEL) is False
+        assert _dn_in_scope(self.BASE_DN, self.BASE_DN, LEVEL) is False
+
+    def test_subtree_scope_at_or_below(self):
+        assert _dn_in_scope(self.CHILD, self.BASE_DN, SUBTREE) is True
+        assert _dn_in_scope(self.GRANDCHILD, self.BASE_DN, SUBTREE) is True
+        assert _dn_in_scope(self.BASE_DN, self.BASE_DN, SUBTREE) is True
+        assert _dn_in_scope("uid=x,dc=other,dc=org", self.BASE_DN, SUBTREE) is False
+
+    def test_case_insensitive(self):
+        assert _dn_in_scope(self.CHILD.upper(), self.BASE_DN, LEVEL) is True
 
 
 class TestGroupOfURLsMembership:

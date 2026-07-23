@@ -977,3 +977,102 @@ def test_main_exits_2_when_report_write_fails(tmp_path):
     with pytest.raises(SystemExit) as exc:
         main([str(root), _UID, "--out", str(out)])
     assert exc.value.code == 2
+
+
+def test_missed_headers_ignores_trailing_colon():
+    """A header the segmenter promoted is not 'missed' just because the source
+    line ends in ':' (2026-07-15 corpus: 36 of 61 findings were this artifact)."""
+    from unified_pipeline.run_doctor import lint_missed_headers
+
+    stage1a = {"hierarchy": [{"text": "PROFESSIONAL SOCIETIES", "children": []}]}
+    stage2 = {"entries": [{"hierarchy": ["RESEARCH SUPPORT AND GRANTS"]}]}
+
+    # both are present in segmentation -- one via 1a, one via an entry path
+    assert lint_missed_headers(["PROFESSIONAL SOCIETIES:"], stage1a, stage2) == []
+    assert lint_missed_headers(["RESEARCH SUPPORT AND GRANTS:"], stage1a, stage2) == []
+
+    # a genuinely absent header is still reported
+    found = lint_missed_headers(["INTELLECTUAL PROPERTY:"], stage1a, stage2)
+    assert len(found) == 1
+    assert found[0]["lint"] == "missed_headers"
+
+
+def test_artifact_resolution_does_not_steal_a_longer_uids_files(tmp_path):
+    """uid 'web05' must not resolve to 'web050_entries.json'.
+
+    glob(f"{uid}*") is a prefix match and '0' sorts before '_', so the longer
+    uid won: the 2026-07-15 sweep doctored web04/web05/web06 against
+    web049/web050/web060.
+    """
+    from unified_pipeline.run_doctor import _find_artifact, _find_source
+
+    d = tmp_path / "stage_2_entry_extraction"
+    d.mkdir()
+    (d / "web050_entries.json").write_text("{}")   # decoy: longer uid, sorts first
+    (d / "web05_entries.json").write_text("{}")
+
+    found = _find_artifact(tmp_path, "web05", "stage_2")
+    assert found is not None and found.name == "web05_entries.json"
+
+    # the longer uid still resolves to its own file
+    found = _find_artifact(tmp_path, "web050", "stage_2")
+    assert found is not None and found.name == "web050_entries.json"
+
+    # and a uid with no artifact of its own gets nothing, not a neighbour's
+    assert _find_artifact(tmp_path, "web0", "stage_2") is None
+
+    (tmp_path / "web050.docx").write_text("x")
+    (tmp_path / "web05.docx").write_text("x")
+    assert _find_source(tmp_path, "web05").name == "web05.docx"
+
+
+def test_uid_owns_requires_a_real_boundary_suffix():
+    """The ownership guard must reject the degenerate cases as well as the
+    prefix collision: an empty uid owns nothing, and a name that IS the uid
+    (no separator at all) is not owned."""
+    from unified_pipeline.run_doctor import _uid_owns
+
+    assert _uid_owns("web05_entries.json", "web05") is True
+    assert _uid_owns("web05.docx", "web05") is True
+    assert _uid_owns("web050_entries.json", "web05") is False   # prefix collision
+    assert _uid_owns("web05", "web05") is False                 # no suffix boundary
+    assert _uid_owns("web05_entries.json", "") is False         # empty uid owns nothing
+
+
+def _para(text, style="Heading 1"):
+    """Minimal stand-in for the python-docx paragraph iter_header_candidates sees."""
+    class _S:  # noqa: D401
+        name = style
+    class _R:
+        def __init__(self, t): self.text, self.bold = t, True
+    class _P:
+        def __init__(self, t): self.text, self.style, self.runs = t, _S(), [_R(t)]
+    return _P(text)
+
+
+def test_candidate_filter_rejects_tab_data_rows_and_person_lines(monkeypatch):
+    """Header candidates must exclude data rows and the owner's name line.
+
+    2026-07-15 corpus: these were 7 of the 25 residual missed_headers findings.
+    """
+    import unified_pipeline.run_doctor as D
+
+    rejected = [
+        "Active\t\t\tMaryland",                          # licensure data row
+        "Certification:\t\t\tAmerican Board of Surgery",  # label<TAB>value
+        "STANLEY J. SZEFLER, M.D.",                       # owner name line
+        "LEE W. SHOCKLEY, MD, MBA, FACEP, FAAEM, CPE",
+        "AMY NICHOLE MERTENS, D.O.",
+        "CURRICULUM VITAE – JEFFREY R OLSEN, MD",         # CV title + name
+    ]
+    kept = [
+        "ADMINISTRATIVE APPOINTMENTS, SCHOOL OF MEDICINE, CU:",  # comma, real header
+        "PROFESSIONAL SOCIETIES:",
+        "TEACHING",
+    ]
+
+    for text in rejected:
+        assert D._NAME_CREDENTIAL_RE.search(text) or "\t" in text, text
+    for text in kept:
+        assert not D._NAME_CREDENTIAL_RE.search(text), text
+        assert "\t" not in text

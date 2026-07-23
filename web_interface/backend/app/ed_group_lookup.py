@@ -3,16 +3,34 @@ import os
 import time
 import logging
 import threading
+from dataclasses import dataclass
 from urllib.parse import unquote
 from ldap3 import Server, Connection, BASE, LEVEL, SUBTREE
 from ldap3.utils.conv import escape_filter_chars
 from ldap3.core.exceptions import LDAPException
 from cachetools import TTLCache
+from pydantic import SecretStr
 
 
 class EdUnavailableError(Exception):
     """Raised when the Enterprise Directory is unreachable."""
     pass
+
+
+@dataclass(frozen=True)
+class LDAPConfig:
+    """Connection settings for an ED bind, passed as one object instead of
+    threading four positional args (incl. the credential) through every call.
+
+    ``bind_password`` is a ``SecretStr``, so the credential never lands in a log
+    line or traceback repr -- SecretStr renders as ``'**********'``, and this
+    object's dataclass repr shows that masked form. Unwrap with
+    ``.get_secret_value()`` only at the ldap3 boundary.
+    """
+    ldap_url: str
+    bind_dn: str
+    bind_password: SecretStr
+    search_base: str = "dc=weill,dc=cornell,dc=edu"
 
 
 logger = logging.getLogger(__name__)
@@ -100,34 +118,61 @@ def _parse_memberurl(member_url: str) -> tuple[str, str, str] | None:
     return base_dn, scope, ldap_filter
 
 
+def _dn_in_scope(user_dn: str, base_dn: str, scope) -> bool:
+    """Whether user_dn falls under base_dn at the given LDAP URL scope.
+
+    BASE   (?base?) -- user_dn must equal base_dn.
+    LEVEL  (?one?)  -- user_dn must be a direct child of base_dn.
+    SUBTREE(?sub?)  -- user_dn must be base_dn or anywhere beneath it.
+
+    DN comparison is case-insensitive per the LDAP spec.
+    """
+    u = user_dn.strip().lower()
+    b = base_dn.strip().lower()
+    if scope == BASE:
+        return u == b
+    if scope == LEVEL:
+        # direct child: strip the user's leftmost RDN, the remainder must be base.
+        # ponytail: plain comma split -- WCM user RDNs (uid=cwid) carry no escaped
+        # commas; switch to ldap3.utils.dn.parse_dn only if a value ever needs it.
+        _, sep, rest = u.partition(",")
+        return bool(sep) and rest == b
+    # SUBTREE
+    return u == b or u.endswith("," + b)
+
+
 def _user_matches_memberurl(conn: Connection, member_url: str, user_dn: str) -> bool:
     """Return True if user_dn satisfies the membership rule encoded in member_url.
 
-    For ?base? scope (the WCM hybrid pattern), short-circuits the LDAP roundtrip
-    when the URL's base DN doesn't match user_dn at all -- no point evaluating
-    the filter against an entry we know isn't the user.
+    Evaluates the rule against the USER's own entry -- a single base-scoped read of
+    user_dn with the URL's filter -- rather than searching the URL's base/scope and
+    scanning the results for the user. The latter breaks on broad dynamic rules
+    (e.g. ?one? over ou=people matching ~10-15k people): WCM ED caps searches at
+    ~500 entries (sizeLimitExceeded), so anyone past the first page is a silent
+    false negative. Testing the user directly is O(1), size-limit-immune, and still
+    handles the WCM hybrid ?base?-per-user pattern (scope gate == the old
+    short-circuit, filter gate == the old stay-active check).
     """
     parsed = _parse_memberurl(member_url)
     if parsed is None:
         return False
     base_dn, scope, ldap_filter = parsed
-    if scope == BASE and base_dn.lower() != user_dn.lower():
+    # Scope gate: is user_dn within the URL's base at the URL's scope? Cheap, no I/O.
+    if not _dn_in_scope(user_dn, base_dn, scope):
         return False
+    # Filter gate: does the user's own entry satisfy the URL's stay-active filter?
     try:
         conn.search(
-            search_base=base_dn,
+            search_base=user_dn,
             search_filter=ldap_filter,
-            search_scope=scope,
+            search_scope=BASE,
             attributes=["dn"],
         )
     except LDAPException:
         return False
-    user_dn_lower = user_dn.lower()
-    return any(str(e.entry_dn).lower() == user_dn_lower for e in conn.entries)
+    return len(conn.entries) == 1
 
-def _ldap_check_membership(cwid: str, group_dn: str, ldap_url: str,
-                            bind_dn: str, bind_password: str,
-                            search_base: str) -> bool:
+def _ldap_check_membership(cwid: str, group_dn: str, cfg: LDAPConfig) -> bool:
     """Check if a user (by CWID) is a member of the given LDAP group.
     Handles both schemas WCM ED uses:
       groupOfNames  -- static `member` attribute on the group, listing user DNs
@@ -144,17 +189,18 @@ def _ldap_check_membership(cwid: str, group_dn: str, ldap_url: str,
     safe_cwid = escape_filter_chars(cwid)
     search_filter = f"(uid={safe_cwid})"
 
-    use_ssl = ldap_url.startswith("ldaps://") or ":636" in ldap_url
+    use_ssl = cfg.ldap_url.startswith("ldaps://") or ":636" in cfg.ldap_url
     conn = None
     try:
-        server = Server(ldap_url, use_ssl=use_ssl, connect_timeout=5,
+        server = Server(cfg.ldap_url, use_ssl=use_ssl, connect_timeout=5,
                         get_info="NONE")
-        conn = Connection(server, user=bind_dn, password=bind_password,
+        conn = Connection(server, user=cfg.bind_dn,
+                          password=cfg.bind_password.get_secret_value(),
                           auto_bind=True, read_only=True, receive_timeout=5)
 
         # Find the user entry; collect user_dn and any memberOf attribute
         conn.search(
-            search_base=search_base,
+            search_base=cfg.search_base,
             search_filter=search_filter,
             search_scope=SUBTREE,
             attributes=["memberOf", "dn"],
@@ -237,8 +283,7 @@ def _ldap_check_membership(cwid: str, group_dn: str, ldap_url: str,
 # ---------------------------------------------------------------------------
 
 def check_ed_membership(cwid: str, access_group: str, admin_group: str,
-                        ldap_url: str, bind_dn: str, bind_password: str,
-                        search_base: str = "dc=weill,dc=cornell,dc=edu") -> dict:
+                        cfg: LDAPConfig) -> dict:
     """Check user's membership in access and admin ED groups.
 
     Keyed on CWID (resolved via `(uid=<cwid>)`), not email.
@@ -254,18 +299,14 @@ def check_ed_membership(cwid: str, access_group: str, admin_group: str,
     Raises EdUnavailableError if LDAP is unreachable.
     """
     try:
-        in_access = _ldap_check_membership(
-            cwid, access_group, ldap_url, bind_dn, bind_password, search_base
-        )
+        in_access = _ldap_check_membership(cwid, access_group, cfg)
     except (LDAPException, OSError, ConnectionError) as exc:
         raise EdUnavailableError(str(exc)) from exc
 
     in_admin = False
     if in_access and admin_group:
         try:
-            in_admin = _ldap_check_membership(
-                cwid, admin_group, ldap_url, bind_dn, bind_password, search_base
-            )
+            in_admin = _ldap_check_membership(cwid, admin_group, cfg)
         except (LDAPException, OSError, ConnectionError) as exc:
             raise EdUnavailableError(str(exc)) from exc
 

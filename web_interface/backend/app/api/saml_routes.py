@@ -15,7 +15,8 @@ from app.session_idle import get_idle_store
 from app.config_loader import get_config_value
 from app.saml_client import get_saml_client, extract_user_attrs
 from app.saml_replay import get_replay_cache, assertion_ids, replay_ttl, replay_fail_closed
-from app.ed_group_lookup import check_ed_membership, set_cached_membership, EdUnavailableError
+from app.ed_group_lookup import check_ed_membership, set_cached_membership, EdUnavailableError, LDAPConfig
+from pydantic import SecretStr
 from app.services.user_service import provision_user
 from app.redirect_safety import safe_relative_path
 
@@ -139,14 +140,15 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
             logger.error("ED LDAP credentials not configured (ED_LDAP_URL, ED_LDAP_BIND_DN)")
             return RedirectResponse("/login?error=directory_unavailable", status_code=302)
 
+        ldap_cfg = LDAPConfig(
+            ldap_url=ldap_url, bind_dn=bind_dn, bind_password=SecretStr(bind_password)
+        )
         try:
             membership = check_ed_membership(
                 cwid=attrs["cwid"],
                 access_group=ed_access_group,
                 admin_group=ed_admin_group,
-                ldap_url=ldap_url,
-                bind_dn=bind_dn,
-                bind_password=bind_password,
+                cfg=ldap_cfg,
             )
             if not membership["in_access_group"]:
                 logger.warning("SAML ACS: user %s not in ED access group", attrs["cwid"])
