@@ -18,6 +18,7 @@ Usage:
 """
 
 import json
+import logging
 import os
 import re
 import sys
@@ -25,6 +26,8 @@ import time
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.config import calculate_cost as _centralized_calculate_cost
@@ -1222,7 +1225,14 @@ def validate_and_correct_taxonomy_code(
             return 'Q2', f"Corrected invalid {code} → Q2 (grant reviewing detected)"
         return 'Q3', f"Corrected invalid {code} → Q3 (editorial/reviewer activity detected)"
 
-    # Unknown invalid code - flag for review
+    # Unknown invalid code - flag for review. Log at ERROR so this is investigated:
+    # a hallucinated code, or a valid code missing from VALID_TAXONOMY_CODES (the sets
+    # have drifted -- see #383), silently sends real CV content to the Appendix (#384).
+    logger.error(
+        "Invalid taxonomy code %r (context=%s, label=%r) -- mapping to T (Appendix). "
+        "This indicates a model/prompt regression or a stale VALID_TAXONOMY_CODES.",
+        code, context or "n/a", group_data.get('label', ''),
+    )
     return 'T', f"INVALID CODE {code} - mapped to T (Other) for manual review"
 
 
