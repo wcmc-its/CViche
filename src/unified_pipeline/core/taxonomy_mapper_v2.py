@@ -18,6 +18,7 @@ Usage:
 """
 
 import json
+import logging
 import os
 import re
 import sys
@@ -25,6 +26,8 @@ import time
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.config import calculate_cost as _centralized_calculate_cost
@@ -1222,7 +1225,14 @@ def validate_and_correct_taxonomy_code(
             return 'Q2', f"Corrected invalid {code} → Q2 (grant reviewing detected)"
         return 'Q3', f"Corrected invalid {code} → Q3 (editorial/reviewer activity detected)"
 
-    # Unknown invalid code - flag for review
+    # Unknown invalid code - flag for review. Log at ERROR so this is investigated:
+    # a hallucinated code, or a valid code missing from VALID_TAXONOMY_CODES (the sets
+    # have drifted -- see #383), silently sends real CV content to the Appendix (#384).
+    logger.error(
+        "Invalid taxonomy code %r (context=%s, label=%r) -- mapping to T (Appendix). "
+        "This indicates a model/prompt regression or a stale VALID_TAXONOMY_CODES.",
+        code, context or "n/a", group_data.get('label', ''),
+    )
     return 'T', f"INVALID CODE {code} - mapped to T (Other) for manual review"
 
 
@@ -2976,6 +2986,10 @@ Your task: Classify each entry to the MOST SPECIFIC subsection, using hierarchic
         }
 
     except Exception as e:
+        # ponytail: broad catch is kept for now (returns a failure result the caller
+        # handles); Phase 2 of #396 narrows it so unexpected exceptions propagate,
+        # behind a corpus gate. Until then, at least make the swallow loud.
+        logger.exception("classify_pass2_batch failed -- returning failure result")
         return {
             'success': False,
             'classifications': [],
@@ -3189,7 +3203,7 @@ def map_cv_sections_v2(segmented_cv_path: str, output_path: Optional[str] = None
             # DEBUG: Verify sample_entries are all strings
             for idx, entry in enumerate(sample_entries):
                 if not isinstance(entry, str):
-                    print(f"{indent}    ⚠️  WARNING: sample_entries[{idx}] is {type(entry)}, not str: {entry}")
+                    logger.warning("sample_entries[%d] is %s, not str: %r", idx, type(entry), entry)
 
             pass1_result = classify_pass1_parent(
                 section_label=section_label,
@@ -3369,7 +3383,10 @@ def map_cv_sections_v2(segmented_cv_path: str, output_path: Optional[str] = None
                                 token_usage_by_model[model]['calls'] += 1
                             pass2_count += 1
                         else:
-                            print(f"{indent}    Pass 2 → Skipped: {batch_result.get('error', 'Unknown error')}")
+                            logger.warning(
+                                "Pass 2 disambiguation failed for group %r -- keeping coarse parent %s: %s",
+                                section_label, parent_id, batch_result.get('error', 'unknown error'),
+                            )
                             final_section_id = parent_id
                             final_canonical_name = pass1_result['parent_canonical_name']
                     else:
@@ -3415,14 +3432,15 @@ def map_cv_sections_v2(segmented_cv_path: str, output_path: Optional[str] = None
             mappings.append(mapping)
 
         except Exception as e:
-            import traceback
-            error_details = traceback.format_exc()
-            print(f"{indent}    ✗ Error: {e}")
-            # DEBUG: Print detailed traceback for dict errors
-            if "'dict' object has no attribute" in str(e):
-                print(f"{indent}    DEBUG: Dict error detected. Traceback:")
-                for line in error_details.split('\n')[:10]:  # First 10 lines
-                    print(f"{indent}      {line}")
+            # This broad catch has historically buried bugs (note the removed
+            # "'dict' object has no attribute" special-case) by turning a whole
+            # group into an UNMAPPED/ERROR entry. logger.exception captures the
+            # full traceback at ERROR so it is investigable. Phase 2 of #396
+            # narrows this to let genuine bugs propagate (corpus-gated).
+            logger.exception(
+                "Group classification failed for %r (group_id=%s) -- recording as UNMAPPED",
+                section_label, group_id,
+            )
             mappings.append({
                 'source_label': section_label,
                 'source_group_id': group_id,
@@ -3837,7 +3855,8 @@ IMPORTANT:
         }
 
     except Exception as e:
-        # Return error result
+        # Return error result (Phase 2 of #396 narrows this, corpus-gated).
+        logger.exception("classify_with_surfaced_candidates failed -- returning failure result")
         return {
             'success': False,
             'classifications': [],
@@ -3902,6 +3921,12 @@ def refine_parent_to_child(
                 'refinement_applied': False
             }
     except Exception as e:
+        # Degrades to the parent code -- make the swallowed error loud so it is
+        # not mistaken for a benign escape-hatch (Phase 2 of #396 narrows this).
+        logger.exception(
+            "refine_parent_to_child failed for parent %s -- falling back to parent @0.50",
+            parent_code,
+        )
         return {
             'taxonomy_code': parent_code,
             'taxonomy_label': parent_code,
