@@ -3,6 +3,16 @@ from sqlalchemy.orm import Session
 from app.models import User
 
 
+def normalize_email(email: str) -> str:
+    """Canonicalize an email for use as the user identity key.
+
+    email is the unique key on User, so every auth path must normalize the same
+    way or case/whitespace variants create distinct identities (#348). Simple
+    login already did this inline; the SAML path did not.
+    """
+    return email.strip().lower()
+
+
 def provision_user(
     db: Session,
     email: str,

@@ -17,7 +17,7 @@ from app.saml_client import get_saml_client, extract_user_attrs
 from app.saml_replay import get_replay_cache, assertion_ids, replay_ttl, replay_fail_closed
 from app.ed_group_lookup import check_ed_membership, set_cached_membership, EdUnavailableError, LDAPConfig
 from pydantic import SecretStr
-from app.services.user_service import provision_user
+from app.services.user_service import provision_user, normalize_email
 from app.redirect_safety import safe_relative_path
 
 logger = logging.getLogger(__name__)
@@ -109,6 +109,9 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
 
         identity = authn_response.get_identity()
         attrs = extract_user_attrs(identity)
+        # email is the unique identity key; normalize once so the ED membership
+        # check, its cache, and provisioning all agree on casing (#348).
+        attrs["email"] = normalize_email(attrs["email"])
 
     except ValueError as e:
         # Missing required attribute (e.g., mail)

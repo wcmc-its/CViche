@@ -1,7 +1,5 @@
 """Authentication API endpoints."""
-import time
 import logging
-from collections import defaultdict
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
@@ -12,32 +10,14 @@ from app.models import User
 from app.schemas import LoginRequest, LoginResponse, AuthConfigResponse, MeResponse, QuotaInfo
 from app.auth import create_session_cookie, decode_session_cookie, get_cookie_settings, get_cookie_delete_settings, get_current_user, get_session_epoch, COOKIE_NAME
 from app.session_idle import get_idle_store
+from app.login_throttle import get_login_throttle
 from app.config_loader import get_config_value
 from app.rate_limiter import get_quota
-from app.services.user_service import provision_user
-from app.services.config_service import LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW
+from app.services.user_service import provision_user, normalize_email
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-# ---------------------------------------------------------------------------
-# In-memory rate limiter: {ip: [timestamp, ...]}
-# ---------------------------------------------------------------------------
-_rate_limit_store: dict[str, list[float]] = defaultdict(list)
-
-
-def _check_rate_limit(ip: str) -> bool:
-    """Return True if the request is allowed, False if rate-limited."""
-    now = time.time()
-    # Prune entries older than the window
-    _rate_limit_store[ip] = [
-        ts for ts in _rate_limit_store[ip] if now - ts < LOGIN_RATE_LIMIT_WINDOW
-    ]
-    if len(_rate_limit_store[ip]) >= LOGIN_RATE_LIMIT_MAX:
-        return False
-    _rate_limit_store[ip].append(now)
-    return True
 
 
 # ---------------------------------------------------------------------------
@@ -74,14 +54,14 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
 
     client_ip = request.client.host if request.client else "unknown"
 
-    if not _check_rate_limit(client_ip):
+    if not get_login_throttle().allow(client_ip):
         return JSONResponse(
             status_code=429,
             content={"error": "rate_limited", "message": "Too many login attempts. Please try again later."},
         )
 
     # Normalise email for comparison
-    email_lower = body.email.strip().lower()
+    email_lower = normalize_email(body.email)
 
     # Check allowed_users from SystemConfig
     allowed_users = get_config_value(db, "allowed_users") or []
