@@ -142,6 +142,23 @@ class TestProvisionUser:
         assert user.role == "admin"
         assert user.auth_method == "saml"
 
+    def test_survives_concurrent_insert(self, db):
+        """#359: if a concurrent login inserts the row during our lookup->insert
+        window, the losing request returns the existing user instead of raising
+        IntegrityError."""
+        from unittest.mock import patch
+        from sqlalchemy.orm import Query
+
+        winner = provision_user(db, "race@example.com", "Winner", "saml", role="user")
+
+        # Force our pre-insert lookup to miss the freshly-committed row so the
+        # insert collides with unique(email) -- exactly the race in #359.
+        with patch.object(Query, "first", return_value=None):
+            loser = provision_user(db, "race@example.com", "Loser", "saml", role="user")
+
+        assert loser.id == winner.id
+        assert db.query(User).filter(User.email == "race@example.com").count() == 1
+
 
 class TestConfigService:
     """ARCH-04: Config values centralized with correct defaults."""
@@ -320,3 +337,20 @@ class TestAdminService:
         assert stats["completed_run_count"] == 1
         assert stats["feedback_count"] == 0
         assert stats["runs_today"] == 1
+
+
+class TestCsvInjectionGuard:
+    """#333: admin CSV exports must neutralize formula-injection triggers."""
+
+    def test_neutralizes_formula_triggers(self):
+        from app.api.admin_routes import _sanitize_csv_cell
+        for trigger in ("=", "+", "-", "@", "\t", "\r"):
+            assert _sanitize_csv_cell(f"{trigger}cmd()") == f"'{trigger}cmd()"
+
+    def test_leaves_safe_values_untouched(self):
+        from app.api.admin_routes import _sanitize_csv_cell
+        assert _sanitize_csv_cell("alice@example.com".lstrip("@")) == "alice@example.com".lstrip("@")
+        assert _sanitize_csv_cell("Jane Doe") == "Jane Doe"
+        assert _sanitize_csv_cell("cv.docx") == "cv.docx"
+        assert _sanitize_csv_cell(42) == 42  # non-strings pass through unchanged
+        assert _sanitize_csv_cell("") == ""
