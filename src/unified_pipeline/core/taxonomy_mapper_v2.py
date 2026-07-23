@@ -1959,6 +1959,174 @@ def apply_grant_keyword_fallback(
     return pass1_result
 
 
+# FIX #312 --------------------------------------------------------------------
+# Cached: normalized canonical WCM section title -> (parent_code, canonical).
+# Built once from the WCM taxonomy; top-level sections only.
+_CANONICAL_HEADER_TO_PARENT: Optional[Dict[str, tuple]] = None
+
+
+def _normalize_header(text: str) -> str:
+    """Lowercase, strip a leading code prefix ('O. '/'R) '), collapse separators."""
+    t = (text or '').strip().lower()
+    t = re.sub(r'^[a-z][0-9]?[.)]\s+', '', t)       # 'o. ' / 'r) ' style prefixes
+    t = re.sub(r'[\s/&,]+', ' ', t).strip()          # normalize spaces & separators
+    return t
+
+
+def _canonical_header_map() -> Dict[str, tuple]:
+    # Source: PARENT_SECTIONS — the SAME parent list PASS-1 classifies into, so
+    # canonical<->code alignment matches what the classifier/renderer emit.
+    # (Do NOT use CV_SECTIONS: its canonical field swaps H/Honors vs I/Orgs
+    # relative to runtime codes, which would misroute those sections.)
+    global _CANONICAL_HEADER_TO_PARENT
+    if _CANONICAL_HEADER_TO_PARENT is None:
+        m: Dict[str, tuple] = {}
+        for s in PARENT_SECTIONS:
+            code, canonical = s.get('code'), s.get('canonical')
+            if code and canonical:
+                m[_normalize_header(canonical)] = (code, canonical)
+        _CANONICAL_HEADER_TO_PARENT = m
+    return _CANONICAL_HEADER_TO_PARENT
+
+
+def apply_canonical_header_pin(
+    pass1_result: Dict[str, Any],
+    section_label: str
+) -> Dict[str, Any]:
+    """
+    FIX #312: When the section header is the *verbatim* canonical WCM section
+    title, trust the header over content.
+
+    PASS-1 otherwise content-classifies topically homogeneous CVs into the
+    dominant-content parent. On C0ZGFW (an all-POCUS CV) it routed
+    "INSTITUTIONAL LEADERSHIP ACTIVITIES" -> K (Educational Contributions) and
+    emptied section O. The author's explicit, canonical section header is a
+    stronger signal than entry semantics.
+
+    ponytail: canonical-exact match only, NOT the alias list — aliases like
+    "seminars"/"talks"/"presentations" legitimately collide with teaching (K).
+    Orphaned sub-labels (Regional/National) need the hierarchy-nesting fix
+    (issue #312 Part B), not this pin.
+    """
+    pinned = _canonical_header_map().get(_normalize_header(section_label))
+    if not pinned:
+        return pass1_result
+    pinned_code, pinned_canonical = pinned
+    current = pass1_result.get('parent_section_id')
+    # Rescue only a real A-S misclassification:
+    #  - leave escape hatches (NOT_VALID_SECTION, MIXED_CONTENT, ...) alone —
+    #    they all contain '_'; no parent code does;
+    #  - leave 'T' (Appendix/Other) alone — a T group is boilerplate/unmapped
+    #    (WCM template instruction text), and forcing it into a real section
+    #    would surface that boilerplate as content;
+    #  - no-op when it already matches the header.
+    if not current or '_' in current or current == 'T' or current == pinned_code:
+        return pass1_result
+    original = f"{current} ({pass1_result.get('parent_canonical_name')})"
+    pass1_result['parent_section_id'] = pinned_code
+    pass1_result['parent_canonical_name'] = pinned_canonical
+    pass1_result['confidence'] = max(pass1_result.get('confidence', 0.0) or 0.0, 0.90)
+    pass1_result['reasoning'] = (pass1_result.get('reasoning', '') +
+        f" [OVERRIDE #312: header is the canonical WCM title for {pinned_code}; "
+        f"header trumps content. Original: {original}]")
+    return pass1_result
+
+
+def _canonical_code_to_name() -> Dict[str, str]:
+    """parent code -> canonical name (for labelling overrides)."""
+    return {code: canon for (code, canon) in _canonical_header_map().values()}
+
+
+_PARENT_RECOGNITION_MAP: Optional[Dict[str, str]] = None
+
+
+def _parent_recognition_map() -> Dict[str, str]:
+    """
+    Normalized WCM top-level section header (canonical OR multi-word alias) ->
+    parent code. Used to identify the current parent while walking groups in
+    document order, so orphaned sub-labels can inherit it.
+
+    Broader than the canonical-only pin map because real CVs use alias forms
+    ("INVITED PRESENTATIONS" for R). Single-word aliases are dropped — they are
+    ambiguous ("presentations"/"talks"/"seminars" also read as teaching).
+    Aliases are mapped via canonical NAME to the authoritative PARENT_SECTIONS
+    code, so the CV_SECTIONS H(Honors)/I(Orgs) swap cannot leak in.
+    """
+    global _PARENT_RECOGNITION_MAP
+    if _PARENT_RECOGNITION_MAP is None:
+        canon = _canonical_header_map()                       # {norm: (code, canonical)}
+        m: Dict[str, str] = {k: v[0] for k, v in canon.items()}
+        name_to_code = {_normalize_header(v[1]): v[0] for v in canon.values()}
+        try:
+            from ..cv_parser.cv_taxonomy_wcm import CV_SECTIONS
+        except Exception:
+            CV_SECTIONS = []
+        ambiguous = set()
+        for s in CV_SECTIONS:
+            if s.get('parent_section_code'):                  # top-level sections only
+                continue
+            code = name_to_code.get(_normalize_header(s.get('canonical', '')))
+            if not code:
+                continue
+            for alias in s.get('aliases', []):
+                na = _normalize_header(alias)
+                if len(na.split()) < 2:                       # drop ambiguous single words
+                    continue
+                if na in m and m[na] != code:
+                    ambiguous.add(na)
+                else:
+                    m.setdefault(na, code)
+        for na in ambiguous:
+            m.pop(na, None)
+        _PARENT_RECOGNITION_MAP = m
+    return _PARENT_RECOGNITION_MAP
+
+
+# Parents that use bare geographic scope sub-labels (Regional/National/
+# International) as sub-sections. Both have geographic children; the bare label
+# is ambiguous between them, so the resolving signal is the *parent*.
+_GEO_SUBLABELS = {'regional', 'national', 'international'}
+_GEO_PARENTS = {'R', 'Q'}
+
+
+def apply_geographic_sublabel_pin(
+    pass1_result: Dict[str, Any],
+    section_label: str,
+    effective_parent: Optional[str]
+) -> Dict[str, Any]:
+    """
+    FIX #312 Part B: resolve a bare geographic sub-label (Regional / National /
+    International) to its document-order parent when that parent has geographic
+    children (R Invitations, Q Extramural committees).
+
+    The label alone is ambiguous — 'national' is a child of BOTH R (National
+    Invitations) and Q (National Boards/Committees). Segmentation flattens the
+    hierarchy, so PASS-1 sees the bare label + content and can misroute (on
+    C0ZGFW it sent the National invited-presentations table to K). The
+    disambiguator is the canonical parent section that precedes it in document
+    order (threaded in as effective_parent).
+
+    ponytail: geographic-labels-only, parent-constrained to R/Q; same guards as
+    the canonical pin (leave escape hatches and 'T' boilerplate alone).
+    """
+    if effective_parent not in _GEO_PARENTS:
+        return pass1_result
+    if _normalize_header(section_label) not in _GEO_SUBLABELS:
+        return pass1_result
+    current = pass1_result.get('parent_section_id')
+    if not current or '_' in current or current == 'T' or current == effective_parent:
+        return pass1_result
+    original = f"{current} ({pass1_result.get('parent_canonical_name')})"
+    pass1_result['parent_section_id'] = effective_parent
+    pass1_result['parent_canonical_name'] = _canonical_code_to_name().get(effective_parent, effective_parent)
+    pass1_result['confidence'] = max(pass1_result.get('confidence', 0.0) or 0.0, 0.90)
+    pass1_result['reasoning'] = (pass1_result.get('reasoning', '') +
+        f" [OVERRIDE #312B: geographic sub-label under document-order parent "
+        f"{effective_parent}; parent disambiguates. Original: {original}]")
+    return pass1_result
+# END FIX #312 ----------------------------------------------------------------
+
+
 def apply_signal_overrides(
     pass1_result: Dict[str, Any],
     sample_entries: List[str]
@@ -3027,7 +3195,7 @@ def map_cv_sections_v2(segmented_cv_path: str, output_path: Optional[str] = None
     print(f"Processing {len(groups)} top-level groups...")
     print()
 
-    def map_group_recursive(group, level=1, parent_path="", hierarchical_context=None):
+    def map_group_recursive(group, level=1, parent_path="", hierarchical_context=None, effective_parent=None):
         """
         Recursively map a group and all its subgroups.
 
@@ -3046,6 +3214,11 @@ def map_cv_sections_v2(segmented_cv_path: str, output_path: Optional[str] = None
         group_id = group.get('id', 'Unknown')
         entries = group.get('entries', [])
         subgroups = group.get('subgroups', [])
+
+        # FIX #312B: subgroups inherit this group's code if it is itself a
+        # recognized WCM section, otherwise the effective parent passed in.
+        _this_parent = _parent_recognition_map().get(_normalize_header(section_label))
+        child_effective_parent = _this_parent if _this_parent else effective_parent
 
         # Build hierarchical context for this group
         if hierarchical_context is None:
@@ -3084,7 +3257,7 @@ def map_cv_sections_v2(segmented_cv_path: str, output_path: Optional[str] = None
             print(f"{indent}[SKIP] {section_label} ({skip_reason} - {len(entries)} entries, {len(subgroups)} subgroups)")
             # Still process subgroups if any
             for subgroup in subgroups:
-                map_group_recursive(subgroup, level + 1, f"{parent_path}/{section_label}" if parent_path else section_label, hierarchical_context)
+                map_group_recursive(subgroup, level + 1, f"{parent_path}/{section_label}" if parent_path else section_label, hierarchical_context, effective_parent=child_effective_parent)
             return
 
         # Get sample entries - ensure all are strings, not dicts
@@ -3163,7 +3336,8 @@ def map_cv_sections_v2(segmented_cv_path: str, output_path: Optional[str] = None
                         group=subgroup,
                         level=level + 1,
                         parent_path=path,
-                        hierarchical_context=hierarchical_context.copy()
+                        hierarchical_context=hierarchical_context.copy(),
+                        effective_parent=child_effective_parent
                     )
             return
 
@@ -3191,10 +3365,13 @@ def map_cv_sections_v2(segmented_cv_path: str, output_path: Optional[str] = None
                 if not isinstance(entry, str):
                     print(f"{indent}    ⚠️  WARNING: sample_entries[{idx}] is {type(entry)}, not str: {entry}")
 
+            _hier_pos = {"level": level}
+            if effective_parent:  # FIX #312B: hand PASS-1 the document-order parent
+                _hier_pos["parent_classification"] = effective_parent
             pass1_result = classify_pass1_parent(
                 section_label=section_label,
                 sample_entries=sample_entries,
-                hierarchical_position={"level": level}
+                hierarchical_position=_hier_pos
             )
 
             # PHASE 2 FIX #18: Apply signal-based overrides if low confidence
@@ -3249,6 +3426,19 @@ def map_cv_sections_v2(segmented_cv_path: str, output_path: Optional[str] = None
                 pass1_result=pass1_result,
                 section_label=section_label,
                 sample_entries=sample_entries
+            )
+
+            # FIX #312: An explicit canonical WCM section header trumps content
+            pass1_result = apply_canonical_header_pin(
+                pass1_result=pass1_result,
+                section_label=section_label
+            )
+
+            # FIX #312B: geographic sub-label resolves to its document-order parent
+            pass1_result = apply_geographic_sublabel_pin(
+                pass1_result=pass1_result,
+                section_label=section_label,
+                effective_parent=effective_parent
             )
 
             parent_id = pass1_result['parent_section_id']
@@ -3438,11 +3628,22 @@ def map_cv_sections_v2(segmented_cv_path: str, output_path: Optional[str] = None
 
         # Recursively map subgroups
         for subgroup in subgroups:
-            map_group_recursive(subgroup, level + 1, path, hierarchical_context)
+            map_group_recursive(subgroup, level + 1, path, hierarchical_context, effective_parent=child_effective_parent)
 
-    # Map all top-level groups
+    # Map all top-level groups.
+    # FIX #312B: walk in document order, tracking the current canonical WCM
+    # parent so orphaned sub-labels (sub-headers the flat segmenter promoted to
+    # siblings) inherit it as classification context.
+    cur_canonical_parent = None
     for group in groups:
-        map_group_recursive(group, level=1)
+        _lbl = _normalize_header(group.get('label') or group.get('label_inferred', ''))
+        _code = _parent_recognition_map().get(_lbl)
+        if _code:
+            cur_canonical_parent = _code
+            eff = None  # this group IS a recognized section; nothing to inherit
+        else:
+            eff = cur_canonical_parent
+        map_group_recursive(group, level=1, effective_parent=eff)
 
     # Calculate stats
     total_sections = len(mappings)
