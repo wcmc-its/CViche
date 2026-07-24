@@ -19,6 +19,7 @@ from app.ed_group_lookup import (
     _dn_in_scope,
     _group_cache,
     _stale_cache,
+    _STALE_MAX_AGE,
 )
 from ldap3 import BASE, LEVEL, SUBTREE
 from pydantic import SecretStr
@@ -155,6 +156,20 @@ class TestCache:
         # Manually backdate the stale entry beyond the 1800s safety bound
         _stale_cache["a@b.com"]["timestamp"] = time.time() - 2000
         assert get_stale_membership("a@b.com") is None
+
+    def test_set_evicts_expired_stale_entries(self):
+        """A later set sweeps out stale entries past the safety bound.
+
+        get_stale_membership only filters expired entries on read, so without
+        the sweep the dict grows one entry per CWID for the life of the pod.
+        """
+        set_cached_membership("old0001", {"in_access_group": True, "in_admin_group": False})
+        _stale_cache["old0001"]["timestamp"] = time.time() - (_STALE_MAX_AGE + 1)
+
+        set_cached_membership("new0001", {"in_access_group": True, "in_admin_group": False})
+
+        assert "old0001" not in _stale_cache, "expired entry was not evicted"
+        assert "new0001" in _stale_cache, "fresh entry must survive the sweep"
 
     def test_clear_cache_empties_both(self):
         """clear_cache() empties both TTL and stale caches."""

@@ -1,6 +1,5 @@
 """pysaml2 SP client factory, certificate generation, and SAML attribute extraction."""
 import logging
-import platform
 import shutil
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -88,6 +87,7 @@ def _generate_self_signed_cert(cert_dir: Path) -> None:
             encryption_algorithm=serialization.NoEncryption(),
         )
     )
+    key_path.chmod(0o600)  # unencrypted SP private key -- owner-only
     cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
     logger.info("Generated self-signed SP certificate in %s", cert_dir)
@@ -123,9 +123,18 @@ def get_saml_client(db: Session) -> Saml2Client:
     else:
         cert_path = Path(cert_dir_str)
 
-    # Auto-generate self-signed cert on first use
-    if not (cert_path / "sp.crt").exists():
+    # Auto-generate a self-signed cert only when neither file exists. If exactly
+    # one is present, fail loudly -- sp.crt is the cert filed with the IdP, and
+    # silently regenerating it would break SSO instead of surfacing the problem.
+    crt, key = cert_path / "sp.crt", cert_path / "sp.key"
+    if not crt.exists() and not key.exists():
         _generate_self_signed_cert(cert_path)
+    elif not (crt.exists() and key.exists()):
+        missing = "sp.key" if crt.exists() else "sp.crt"
+        raise RuntimeError(
+            f"SP cert dir {cert_path} is half-populated: {missing} is missing. "
+            "Restore it, or delete both files to regenerate a self-signed pair."
+        )
 
     saml_config = {
         "entityid": entity_id,

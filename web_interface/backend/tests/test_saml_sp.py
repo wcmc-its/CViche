@@ -106,6 +106,13 @@ class TestCertGeneration:
         assert "BEGIN CERTIFICATE" in crt_content
         assert "BEGIN RSA PRIVATE KEY" in key_content
 
+    def test_generated_key_is_owner_only(self, tmp_path):
+        """The unencrypted SP private key is written 0600, not umask-default 0644."""
+        cert_dir = tmp_path / "certs"
+        _generate_self_signed_cert(cert_dir)
+        mode = (cert_dir / "sp.key").stat().st_mode & 0o777
+        assert mode & 0o077 == 0, f"sp.key is group/world-readable: {oct(mode)}"
+
 
 # --- Unit test: xmlsec1 detection ---
 
@@ -254,6 +261,27 @@ class TestGetSamlClient:
 
         with pytest.raises(RuntimeError, match="saml_sp_base_url"):
             get_saml_client(db)
+
+    def test_half_populated_cert_dir_raises(self, db, seed_saml_mode, tmp_path):
+        """sp.crt present but sp.key missing -> fail loud, don't hand pysaml2 a
+        key path that does not exist (the failure would surface later in xmlsec1).
+        """
+        from app.models import SystemConfig
+        import json as _json
+        cert_dir = tmp_path / "certs"
+        cert_dir.mkdir()
+        (cert_dir / "sp.crt").write_text("-----BEGIN CERTIFICATE-----\n")
+        row = db.query(SystemConfig).filter(SystemConfig.key == "saml_cert_dir").first()
+        row.value = _json.dumps(str(cert_dir))
+        db.commit()
+
+        with patch("app.saml_client.Saml2Config.load"), \
+             patch("app.saml_client.Saml2Client"):
+            with pytest.raises(RuntimeError, match="half-populated"):
+                get_saml_client(db)
+
+        # The existing cert is the one filed with the IdP -- never regenerated.
+        assert (cert_dir / "sp.crt").read_text() == "-----BEGIN CERTIFICATE-----\n"
 
 # --- SAML endpoint tests (Plan 02) ---
 

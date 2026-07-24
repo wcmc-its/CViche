@@ -39,7 +39,8 @@ logger = logging.getLogger(__name__)
 _group_cache = TTLCache(maxsize=1024, ttl=300)
 _cache_lock = threading.Lock()
 
-# Stale cache: fallback when ED is unavailable (keeps last-known good result)
+# Stale cache: fallback when ED is unavailable (keeps last-known good result).
+# Keyed by CWID, like the live cache above.
 _stale_cache: dict[str, dict] = {}
 _STALE_MAX_AGE = 1800  # 30 minutes safety bound for stale entries
 
@@ -48,25 +49,31 @@ _STALE_MAX_AGE = 1800  # 30 minutes safety bound for stale entries
 # Cache accessor functions
 # ---------------------------------------------------------------------------
 
-def get_cached_membership(email: str) -> dict | None:
-    """Return cached membership result for email, or None on cache miss."""
+def get_cached_membership(cwid: str) -> dict | None:
+    """Return cached membership result for cwid, or None on cache miss."""
     with _cache_lock:
-        return _group_cache.get(email)
+        return _group_cache.get(cwid)
 
 
-def set_cached_membership(email: str, membership: dict) -> None:
+def set_cached_membership(cwid: str, membership: dict) -> None:
     """Store membership result in both live TTL cache and stale fallback."""
+    now = time.time()
     with _cache_lock:
-        _group_cache[email] = membership
-    _stale_cache[email] = {**membership, "timestamp": time.time()}
+        _group_cache[cwid] = membership
+        _stale_cache[cwid] = {**membership, "timestamp": now}
+        # ponytail: full sweep per write, fine at one entry per CWID seen by a
+        # pod; if that ever gets large, swap _stale_cache for a bounded TTLCache.
+        for k in [k for k, v in _stale_cache.items()
+                  if now - v["timestamp"] > _STALE_MAX_AGE]:
+            del _stale_cache[k]
 
 
-def get_stale_membership(email: str) -> dict | None:
-    """Return last-known membership from stale cache if within safety bound.
+def get_stale_membership(cwid: str) -> dict | None:
+    """Return last-known membership for cwid from stale cache if within bound.
 
     Returns None if entry is older than _STALE_MAX_AGE seconds (30 min).
     """
-    entry = _stale_cache.get(email)
+    entry = _stale_cache.get(cwid)
     if entry is None:
         return None
     if time.time() - entry.get("timestamp", 0) > _STALE_MAX_AGE:
@@ -82,7 +89,7 @@ def clear_cache() -> None:
     """Clear both live and stale caches (primarily for testing)."""
     with _cache_lock:
         _group_cache.clear()
-    _stale_cache.clear()
+        _stale_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -298,16 +305,10 @@ def check_ed_membership(cwid: str, access_group: str, admin_group: str,
 
     Raises EdUnavailableError if LDAP is unreachable.
     """
-    try:
-        in_access = _ldap_check_membership(cwid, access_group, cfg)
-    except (LDAPException, OSError, ConnectionError) as exc:
-        raise EdUnavailableError(str(exc)) from exc
+    in_access = _ldap_check_membership(cwid, access_group, cfg)
 
     in_admin = False
     if in_access and admin_group:
-        try:
-            in_admin = _ldap_check_membership(cwid, admin_group, cfg)
-        except (LDAPException, OSError, ConnectionError) as exc:
-            raise EdUnavailableError(str(exc)) from exc
+        in_admin = _ldap_check_membership(cwid, admin_group, cfg)
 
     return {"in_access_group": in_access, "in_admin_group": in_admin}
