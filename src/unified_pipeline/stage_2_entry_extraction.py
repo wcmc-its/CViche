@@ -305,6 +305,63 @@ def remove_subset_delimiters(delimiters: list) -> list:
             return end[1] - start[1]
         return end[0] - start[0]
 
+    def is_bare(idx):
+        """True when idx carries no ".row" sub-index (i.e. a whole element)."""
+        return not (isinstance(idx, str) and "." in idx)
+
+    def content_lines(text):
+        """Non-trivial content lines of an entry.
+
+        Rows are newline-joined inside a whole-table blob but cells are joined
+        with ' | ' or a tab inside a single row, so both separators have to be
+        broken to compare a parent against its rows like with like. Lines under
+        12 chars are dropped as headers/dates/noise.
+        """
+        out = set()
+        for raw in str(text).replace("\t", "\n").split("\n"):
+            s = " ".join(raw.split())
+            if len(s) >= 12:
+                out.add(s.lower())
+        return out
+
+    # A table split into sub-rows ("109.4") can ALSO come back from the LLM as a
+    # bare whole-table span ("109..109"). normalize_idx maps that bare parent to
+    # the POINT (109, 0), so its own rows -- (109, 4) and up -- never test as
+    # contained below and BOTH survive: the table is emitted twice, and stage 6
+    # then renders it twice (#418).
+    #
+    # Dropping the parent outright is NOT safe: measured over the S3 corpus, 44 of
+    # 59 such parents carry at least one record that never became a sibling row,
+    # so an unconditional drop silently loses content (e.g. a $2.5M grant on
+    # MKEQKW, four records on C0ZGFW). Only drop a parent whose every content line
+    # is already present in its own surviving rows -- a provable duplicate. A
+    # parent with an uncovered remainder is left alone; it still double-renders,
+    # which is the splitter gap tracked separately, but no content is lost here.
+    #
+    # ponytail: strict all-or-nothing coverage. The finer fix is to subtract the
+    # covered rows and keep only the remainder, which needs text surgery on the
+    # parent -- do that only if double-rendering proves worse than the risk.
+    sub_row_parents = {}
+    for d in delimiters:
+        if not is_bare(d["element_idx_start"]):
+            key = normalize_idx(d["element_idx_start"])[0]
+            sub_row_parents.setdefault(key, []).append(d)
+
+    if sub_row_parents:
+        def is_redundant_table_parent(d):
+            start, end = d["element_idx_start"], d["element_idx_end"]
+            if not (is_bare(start) and is_bare(end)):
+                return False
+            main = normalize_idx(start)[0]
+            if main != normalize_idx(end)[0] or main not in sub_row_parents:
+                return False
+            rows = sub_row_parents[main]
+            haystack = " \n ".join(str(r.get("text", "")) for r in rows)
+            haystack = " ".join(haystack.replace("\t", " ").split()).lower()
+            return all(line in haystack for line in content_lines(d.get("text", "")))
+
+        delimiters = [d for d in delimiters if not is_redundant_table_parent(d)]
+
     # Sort by start index, then by span size (largest first)
     sorted_delims = sorted(
         delimiters,
