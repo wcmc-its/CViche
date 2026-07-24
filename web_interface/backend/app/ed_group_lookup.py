@@ -39,7 +39,8 @@ logger = logging.getLogger(__name__)
 _group_cache = TTLCache(maxsize=1024, ttl=300)
 _cache_lock = threading.Lock()
 
-# Stale cache: fallback when ED is unavailable (keeps last-known good result)
+# Stale cache: fallback when ED is unavailable (keeps last-known good result).
+# Keyed by CWID, like the live cache above.
 _stale_cache: dict[str, dict] = {}
 _STALE_MAX_AGE = 1800  # 30 minutes safety bound for stale entries
 
@@ -48,25 +49,31 @@ _STALE_MAX_AGE = 1800  # 30 minutes safety bound for stale entries
 # Cache accessor functions
 # ---------------------------------------------------------------------------
 
-def get_cached_membership(email: str) -> dict | None:
-    """Return cached membership result for email, or None on cache miss."""
+def get_cached_membership(cwid: str) -> dict | None:
+    """Return cached membership result for cwid, or None on cache miss."""
     with _cache_lock:
-        return _group_cache.get(email)
+        return _group_cache.get(cwid)
 
 
-def set_cached_membership(email: str, membership: dict) -> None:
+def set_cached_membership(cwid: str, membership: dict) -> None:
     """Store membership result in both live TTL cache and stale fallback."""
+    now = time.time()
     with _cache_lock:
-        _group_cache[email] = membership
-    _stale_cache[email] = {**membership, "timestamp": time.time()}
+        _group_cache[cwid] = membership
+        _stale_cache[cwid] = {**membership, "timestamp": now}
+        # ponytail: full sweep per write, fine at one entry per CWID seen by a
+        # pod; if that ever gets large, swap _stale_cache for a bounded TTLCache.
+        for k in [k for k, v in _stale_cache.items()
+                  if now - v["timestamp"] > _STALE_MAX_AGE]:
+            del _stale_cache[k]
 
 
-def get_stale_membership(email: str) -> dict | None:
-    """Return last-known membership from stale cache if within safety bound.
+def get_stale_membership(cwid: str) -> dict | None:
+    """Return last-known membership for cwid from stale cache if within bound.
 
     Returns None if entry is older than _STALE_MAX_AGE seconds (30 min).
     """
-    entry = _stale_cache.get(email)
+    entry = _stale_cache.get(cwid)
     if entry is None:
         return None
     if time.time() - entry.get("timestamp", 0) > _STALE_MAX_AGE:
@@ -82,7 +89,7 @@ def clear_cache() -> None:
     """Clear both live and stale caches (primarily for testing)."""
     with _cache_lock:
         _group_cache.clear()
-    _stale_cache.clear()
+        _stale_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -172,8 +179,8 @@ def _user_matches_memberurl(conn: Connection, member_url: str, user_dn: str) -> 
         return False
     return len(conn.entries) == 1
 
-def _ldap_check_membership(email: str, group_dn: str, cfg: LDAPConfig) -> bool:
-    """Check if a user (by email) is a member of the given LDAP group.
+def _ldap_check_membership(cwid: str, group_dn: str, cfg: LDAPConfig) -> bool:
+    """Check if a user (by CWID) is a member of the given LDAP group.
     Handles both schemas WCM ED uses:
       groupOfNames  -- static `member` attribute on the group, listing user DNs
       groupOfURLs   -- dynamic `memberURL` attribute, each URL resolving (via
@@ -181,10 +188,13 @@ def _ldap_check_membership(email: str, group_dn: str, cfg: LDAPConfig) -> bool:
                        a "hybrid" groupOfURLs with one memberURL per allowed user
                        and an attribute-based stay-active filter.
     Uses escape_filter_chars for injection protection.
-    
+
+    Resolves the user by `(uid=<cwid>)` -- every WCM identity has a uid, so
+    this works for affiliates with no `mail` attribute (unlike the old
+    mail-based lookup).
     """
-    safe_email = escape_filter_chars(email)
-    search_filter = f"(mail={safe_email})"
+    safe_cwid = escape_filter_chars(cwid)
+    search_filter = f"(uid={safe_cwid})"
 
     use_ssl = cfg.ldap_url.startswith("ldaps://") or ":636" in cfg.ldap_url
     conn = None
@@ -204,7 +214,7 @@ def _ldap_check_membership(email: str, group_dn: str, cfg: LDAPConfig) -> bool:
         )
 
         if not conn.entries:
-            logger.debug("No LDAP entry found for email=%s", email)
+            logger.debug("No LDAP entry found for cwid=%s", cwid)
             return False
 
         user_entry = conn.entries[0]
@@ -217,7 +227,7 @@ def _ldap_check_membership(email: str, group_dn: str, cfg: LDAPConfig) -> bool:
             if member_of_raw:
                 member_of_list = [str(dn).lower() for dn in member_of_raw]
                 if group_dn.lower() in member_of_list:
-                    logger.debug("memberOf hit for %s in %s", email, group_dn)
+                    logger.debug("memberOf hit for %s in %s", cwid, group_dn)
                     return True
                 # Fall through -- group could still be groupOfURLs even though
                 # memberOf is populated for other (groupOfNames) groups.
@@ -225,7 +235,7 @@ def _ldap_check_membership(email: str, group_dn: str, cfg: LDAPConfig) -> bool:
             pass
 
          # Path 2: read the group entry, handle both schemas
-        logger.debug("Checking group entry directly for %s in %s", email, group_dn)
+        logger.debug("Checking group entry directly for %s in %s", cwid, group_dn)
         conn.search(
             search_base=group_dn,
             search_filter="(|(objectClass=groupOfNames)(objectClass=groupOfURLs))",
@@ -245,7 +255,7 @@ def _ldap_check_membership(email: str, group_dn: str, cfg: LDAPConfig) -> bool:
             if members_raw:
                 members = [str(m).lower() for m in members_raw]
                 if user_dn.lower() in members:
-                    logger.debug("Group `member` hit for %s in %s", email, group_dn)
+                    logger.debug("Group `member` hit for %s in %s", cwid, group_dn)
                     return True
         except (KeyError, LDAPException):
             pass
@@ -257,12 +267,12 @@ def _ldap_check_membership(email: str, group_dn: str, cfg: LDAPConfig) -> bool:
                 for url in member_urls_raw:
                     if _user_matches_memberurl(conn, str(url), user_dn):
                         logger.debug("memberURL hit for %s in %s via %s",
-                                     email, group_dn, url)
+                                     cwid, group_dn, url)
                         return True
         except (KeyError, LDAPException):
             pass
 
-        logger.debug("User %s not found in group %s via any method", email, group_dn)
+        logger.debug("User %s not found in group %s via any method", cwid, group_dn)
         return False
 
     except (LDAPException, OSError, ConnectionError) as exc:
@@ -279,9 +289,11 @@ def _ldap_check_membership(email: str, group_dn: str, cfg: LDAPConfig) -> bool:
 # Public API
 # ---------------------------------------------------------------------------
 
-def check_ed_membership(email: str, access_group: str, admin_group: str,
+def check_ed_membership(cwid: str, access_group: str, admin_group: str,
                         cfg: LDAPConfig) -> dict:
     """Check user's membership in access and admin ED groups.
+
+    Keyed on CWID (resolved via `(uid=<cwid>)`), not email.
 
     Returns dict with keys:
         in_access_group: bool -- whether user is in the access group
@@ -293,16 +305,10 @@ def check_ed_membership(email: str, access_group: str, admin_group: str,
 
     Raises EdUnavailableError if LDAP is unreachable.
     """
-    try:
-        in_access = _ldap_check_membership(email, access_group, cfg)
-    except (LDAPException, OSError, ConnectionError) as exc:
-        raise EdUnavailableError(str(exc)) from exc
+    in_access = _ldap_check_membership(cwid, access_group, cfg)
 
     in_admin = False
     if in_access and admin_group:
-        try:
-            in_admin = _ldap_check_membership(email, admin_group, cfg)
-        except (LDAPException, OSError, ConnectionError) as exc:
-            raise EdUnavailableError(str(exc)) from exc
+        in_admin = _ldap_check_membership(cwid, admin_group, cfg)
 
     return {"in_access_group": in_access, "in_admin_group": in_admin}

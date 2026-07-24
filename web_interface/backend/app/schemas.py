@@ -236,7 +236,8 @@ class QuotaInfo(BaseModel):
 class MeResponse(BaseModel):
     """Current user info."""
     user_id: int
-    email: str
+    cwid: Optional[str] = None
+    email: Optional[str] = None
     display_name: str
     role: str
     consent_version: Optional[str] = None
@@ -350,7 +351,8 @@ class AdminStats(BaseModel):
 class AdminUser(BaseModel):
     """User record with per-user stats for admin view."""
     id: int
-    email: str
+    cwid: Optional[str] = None
+    email: Optional[str] = None
     display_name: str
     role: str
     status: str

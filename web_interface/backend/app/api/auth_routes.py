@@ -150,6 +150,7 @@ async def me(user: User = Depends(get_current_user), db: Session = Depends(get_d
     quota_data = get_quota(user, db)
     data = MeResponse(
         user_id=user.id,
+        cwid=user.cwid,
         email=user.email,
         display_name=user.display_name,
         role=user.role,

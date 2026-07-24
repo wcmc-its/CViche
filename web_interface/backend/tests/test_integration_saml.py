@@ -197,9 +197,26 @@ class TestSamlErrorPaths:
     """
 
     @patch("app.api.saml_routes.get_saml_client")
-    def test_acs_missing_mail_attribute(self, mock_get_client, client, seed_saml_mode):
-        """POST to ACS with identity missing mail -> redirect to /login?error=missing_attributes."""
+    def test_acs_missing_mail_uses_eppn(self, mock_get_client, client, db, seed_saml_mode):
+        """No mail is fine -- cwid comes from ePPN, user provisioned with email=None."""
         mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY_NO_MAIL)
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+        assert response.headers["location"] == "/"  # authenticated, not an error
+        user = db.query(User).filter(User.cwid == "test").first()
+        assert user is not None
+        assert user.email is None
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_no_identifier_redirects_error(self, mock_get_client, client, seed_saml_mode):
+        """Identity with no mail/ePPN/uid -> nothing to anchor on -> missing_attributes."""
+        mock_get_client.return_value = _mock_saml_client(
+            {"urn:oid:2.16.840.1.113730.3.1.241": ["Nameless"]}
+        )
         response = client.post(
             "/api/saml/acs",
             data={"SAMLResponse": "base64data"},
@@ -248,6 +265,7 @@ class TestSamlErrorPaths:
 
         # Create SAML user
         user = User(
+            cwid="test",
             email="test@med.cornell.edu",
             display_name="Test User",
             role="user",

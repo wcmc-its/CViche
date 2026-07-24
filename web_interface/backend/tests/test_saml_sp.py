@@ -20,8 +20,9 @@ class TestExtractUserAttrs:
     """Test SAML attribute extraction from identity dicts."""
 
     def test_extract_attrs_oid_keys(self, mock_saml_identity):
-        """OID-keyed identity returns correct email, display_name, eppn."""
+        """OID-keyed identity returns correct cwid, email, display_name, eppn."""
         result = extract_user_attrs(mock_saml_identity)
+        assert result["cwid"] == "testuser"  # from ePPN local-part
         assert result["email"] == "testuser@med.cornell.edu"
         assert result["display_name"] == "Test User"
         assert result["eppn"] == "testuser@cornell.edu"
@@ -29,14 +30,21 @@ class TestExtractUserAttrs:
     def test_extract_attrs_friendly_keys(self, mock_saml_identity_friendly):
         """Friendly-name-keyed identity returns correct values via fallback."""
         result = extract_user_attrs(mock_saml_identity_friendly)
+        assert result["cwid"] == "testuser"
         assert result["email"] == "testuser@med.cornell.edu"
         assert result["display_name"] == "Test User"
         assert result["eppn"] == "testuser@cornell.edu"
 
-    def test_extract_attrs_missing_mail_raises(self, mock_saml_identity_no_mail):
-        """Missing mail attribute raises ValueError."""
-        with pytest.raises(ValueError, match="mail"):
-            extract_user_attrs(mock_saml_identity_no_mail)
+    def test_extract_attrs_no_mail_uses_eppn_cwid(self, mock_saml_identity_no_mail):
+        """No mail is fine (nothing sends email): cwid comes from ePPN, email is None."""
+        result = extract_user_attrs(mock_saml_identity_no_mail)
+        assert result["cwid"] == "testuser"
+        assert result["email"] is None
+
+    def test_extract_attrs_no_identifier_raises(self):
+        """No mail, no ePPN, no uid -> nothing to anchor identity on -> ValueError."""
+        with pytest.raises(ValueError, match="CWID"):
+            extract_user_attrs({"displayName": ["Nameless"]})
 
     def test_extract_attrs_displayname_fallback_to_eppn(self):
         """When displayName is missing, display_name falls back to eppn."""
@@ -51,6 +59,7 @@ class TestExtractUserAttrs:
         """Email is lowercased and stripped of whitespace."""
         identity = {
             ATTR_MAIL: ["  TestUser@Med.Cornell.Edu  "],
+            ATTR_EPPN: ["testuser@cornell.edu"],  # provides the cwid anchor
         }
         result = extract_user_attrs(identity)
         assert result["email"] == "testuser@med.cornell.edu"
@@ -60,6 +69,7 @@ class TestExtractUserAttrs:
         name) so the drop is visible -- and their VALUES are never logged."""
         identity = {
             ATTR_MAIL: ["testuser@med.cornell.edu"],
+            ATTR_EPPN: ["testuser@cornell.edu"],  # cwid anchor -- a mapped attr
             "eduPersonAffiliation": ["staff"],
             "isMemberOf": ["cn=secret-group"],
         }
@@ -95,6 +105,13 @@ class TestCertGeneration:
         key_content = (cert_dir / "sp.key").read_text()
         assert "BEGIN CERTIFICATE" in crt_content
         assert "BEGIN RSA PRIVATE KEY" in key_content
+
+    def test_generated_key_is_owner_only(self, tmp_path):
+        """The unencrypted SP private key is written 0600, not umask-default 0644."""
+        cert_dir = tmp_path / "certs"
+        _generate_self_signed_cert(cert_dir)
+        mode = (cert_dir / "sp.key").stat().st_mode & 0o777
+        assert mode & 0o077 == 0, f"sp.key is group/world-readable: {oct(mode)}"
 
 
 # --- Unit test: xmlsec1 detection ---
@@ -245,6 +262,27 @@ class TestGetSamlClient:
         with pytest.raises(RuntimeError, match="saml_sp_base_url"):
             get_saml_client(db)
 
+    def test_half_populated_cert_dir_raises(self, db, seed_saml_mode, tmp_path):
+        """sp.crt present but sp.key missing -> fail loud, don't hand pysaml2 a
+        key path that does not exist (the failure would surface later in xmlsec1).
+        """
+        from app.models import SystemConfig
+        import json as _json
+        cert_dir = tmp_path / "certs"
+        cert_dir.mkdir()
+        (cert_dir / "sp.crt").write_text("-----BEGIN CERTIFICATE-----\n")
+        row = db.query(SystemConfig).filter(SystemConfig.key == "saml_cert_dir").first()
+        row.value = _json.dumps(str(cert_dir))
+        db.commit()
+
+        with patch("app.saml_client.Saml2Config.load"), \
+             patch("app.saml_client.Saml2Client"):
+            with pytest.raises(RuntimeError, match="half-populated"):
+                get_saml_client(db)
+
+        # The existing cert is the one filed with the IdP -- never regenerated.
+        assert (cert_dir / "sp.crt").read_text() == "-----BEGIN CERTIFICATE-----\n"
+
 # --- SAML endpoint tests (Plan 02) ---
 
 from app.models import User
@@ -346,9 +384,10 @@ class TestSamlACS:
         assert "error=auth_failed" in response.headers["location"]
 
     @patch("app.api.saml_routes.get_saml_client")
-    def test_acs_missing_attributes_redirects_error(self, mock_get_client, client, seed_saml_mode, mock_saml_identity_no_mail):
-        """POST /api/saml/acs with missing mail redirects to /login?error=missing_attributes."""
-        mock_get_client.return_value = _mock_saml_client(mock_saml_identity_no_mail)
+    def test_acs_missing_attributes_redirects_error(self, mock_get_client, client, seed_saml_mode):
+        """POST /api/saml/acs with no usable identifier (no mail/ePPN/uid) redirects
+        to /login?error=missing_attributes."""
+        mock_get_client.return_value = _mock_saml_client({"displayName": ["Nameless"]})
         response = client.post(
             "/api/saml/acs",
             data={"SAMLResponse": "base64data"},

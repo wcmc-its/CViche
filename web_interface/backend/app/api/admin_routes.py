@@ -193,6 +193,7 @@ async def update_user(
 
     return AdminUser(
         id=target.id,
+        cwid=target.cwid,
         email=target.email,
         display_name=target.display_name,
         role=target.role,
