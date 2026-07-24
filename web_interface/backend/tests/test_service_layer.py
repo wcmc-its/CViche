@@ -401,6 +401,18 @@ class TestAdminService:
         assert stats["runs_today"] == 1
 
 
+class TestNormalizeEmail:
+    """#348: shared email normalization keeps the identity key consistent."""
+
+    def test_lowercases_and_trims(self):
+        from app.services.user_service import normalize_email
+        assert normalize_email("  John.Doe@MED.Cornell.EDU ") == "john.doe@med.cornell.edu"
+
+    def test_idempotent(self):
+        from app.services.user_service import normalize_email
+        assert normalize_email("a@b.com") == "a@b.com"
+
+
 class TestCsvInjectionGuard:
     """#333: admin CSV exports must neutralize formula-injection triggers."""
 
