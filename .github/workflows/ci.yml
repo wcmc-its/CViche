@@ -42,6 +42,28 @@ jobs:
         working-directory: web_interface/backend
         run: python -m pytest -q -p no:cacheprovider
 
+  pipeline-tests:
+    # The unified_pipeline suite (src/unified_pipeline/tests) is NOT covered by
+    # backend-tests, which only runs web_interface/backend/tests. These are the
+    # accuracy-critical taxonomy / segmentation / stage-6 regression guards.
+    # They are hermetic -- no DB, no AWS, no network -- so they gate cheaply
+    # (~325 tests in a few seconds). Same Python/deps setup as backend-tests.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"  # match the build image (python:3.14-slim)
+          cache: pip
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends xmlsec1 poppler-utils
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r web_interface/backend/requirements-dev.txt -r requirements.txt
+      - name: Run pipeline tests
+        run: python -m pytest src/unified_pipeline/tests/ -q -p no:cacheprovider
+
   frontend-typecheck:
     runs-on: ubuntu-latest
     defaults:
