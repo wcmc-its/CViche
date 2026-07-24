@@ -391,6 +391,46 @@ def remove_subset_delimiters(delimiters: list) -> list:
     return kept
 
 
+def recover_unclaimed_table_rows(batch_elements: list, claimed_row_keys: set) -> list:
+    """Return entries for table rows no delimiter claimed (#420).
+
+    The model returns sub-row indices as JSON NUMBERS, so a row index with a
+    trailing zero collapses: "114.10" parses to the float 114.1, ``str()``
+    renders it back as "114.1", and the lookup lands on row 1 -- row 10 is
+    unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50 exactly this way.
+    Rows the model simply omitted disappear identically. Either way the content
+    survived only inside whatever whole-table entry the model happened to emit,
+    which is what made those blobs load-bearing.
+
+    Recovery is structural, so the entries are marked ``recovered_row`` and given
+    a lower confidence than model-attested ones.
+    """
+    recovered = []
+    for elem in batch_elements:
+        if elem.get("type") != "table_row":
+            continue
+        key = str(elem.get("idx"))
+        if key in claimed_row_keys:
+            continue
+        row_text = str(elem.get("full_text", elem.get("text", ""))).strip()
+        # A row of empty cells flattens to separators only ("|", "| |"): not empty
+        # by len(), but carrying nothing. Require at least one alphanumeric char.
+        if not any(ch.isalnum() for ch in row_text):
+            continue
+        recovered.append({
+            "element_idx_start": key,
+            "element_idx_end": key,
+            "element_type": "table_row",
+            "confidence": 0.5,  # not model-attested; recovered structurally
+            "text": row_text,
+            "table_index": elem.get("table_index"),
+            "row_index": elem.get("row_index"),
+            "parent_idx": elem.get("parent_idx"),
+            "recovered_row": True,
+        })
+    return recovered
+
+
 def _dedup_idx_key(idx):
     """Normalize an element index to a comparable (main, sub) tuple.
 
@@ -849,6 +889,7 @@ Respond **only** with a JSON array containing the identified entries. If no entr
 
             # Build a lookup for batch elements by index (use string keys for consistency)
             batch_elem_lookup = {str(elem['idx']): elem for elem in batch_elements}
+            claimed_row_keys = set()
 
             # Validate delimiters and extract full text
             for delim in delimiters:
@@ -892,6 +933,7 @@ Respond **only** with a JSON array containing the identified entries. If no entr
                                 "parent_idx": elem.get("parent_idx")
                             }
                             all_validated_entries.append(entry)
+                            claimed_row_keys.add(start_idx_str)
                         continue
 
                     # Handle paragraph indices (integers)
@@ -918,6 +960,33 @@ Respond **only** with a JSON array containing the identified entries. If no entr
                             "text": "\t".join(full_text_parts)  # Tab-separated for compact format
                         }
                         all_validated_entries.append(entry)
+
+            # Backstop: emit any table row this batch never claimed (#420).
+            #
+            # The model returns sub-row indices as JSON NUMBERS, so a row index
+            # with a trailing zero collapses: "114.10" parses to the float 114.1,
+            # str() renders it back as "114.1", and the lookup lands on row 1 --
+            # row 10 is unreachable. C0ZGFW element 114 lost rows 10/20/30/40/50
+            # exactly this way, and element 109 lost row 10. Rows the model simply
+            # omitted disappear identically. Either way the content survived only
+            # inside whatever whole-table entry the model happened to emit, which
+            # is what made those blobs load-bearing (and what made #227's dedup
+            # drop real content loss).
+            #
+            # Recovering the rows here is deterministic and costs no extra LLM
+            # call. It also runs BEFORE remove_subset_delimiters, so a whole-table
+            # blob whose rows are now all present becomes a provable duplicate and
+            # is collapsed by the #418 coverage check.
+            #
+            # ponytail: a backstop, not a cure. The real fix is to stop round
+            # tripping these indices through JSON numbers -- emit them as strings
+            # ("114.10") or renumber rows to unique ints. Do that and this loop
+            # only ever recovers rows the model genuinely skipped.
+            recovered = recover_unclaimed_table_rows(batch_elements, claimed_row_keys)
+            all_validated_entries.extend(recovered)
+            if recovered:
+                print(f"    Recovered {len(recovered)} unclaimed table row(s) "
+                      f"in batch {batch_idx + 1}")
 
         except Exception as e:
             print(f"    ⚠ Error in batch {batch_idx + 1}: {e}")
