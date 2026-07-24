@@ -40,6 +40,7 @@ class LoginThrottle:
         self._client = None
         self._lock = threading.Lock()
         self._local: dict[str, list[float]] = defaultdict(list)
+        self._last_sweep = 0.0
 
     @classmethod
     def from_env(cls) -> "LoginThrottle":
@@ -81,6 +82,17 @@ class LoginThrottle:
     def _allow_local(self, ip: str) -> bool:
         """Per-process sliding-window fallback (the original in-memory limiter)."""
         now = time.time()
+        # Bound the dict: an IP seen once is otherwise retained for the life of
+        # the process, and client_ip comes from a client-supplied XFF header.
+        # Sweep at most once per window so this stays O(n) per window, not per call.
+        # ponytail: growth within a single window is still unbounded; set
+        # CVICHE_REDIS_URL to get the TTL-backed path instead.
+        if now - self._last_sweep >= self.window:
+            self._last_sweep = now
+            self._local = defaultdict(
+                list,
+                {k: v for k, v in self._local.items() if v and now - v[-1] < self.window},
+            )
         self._local[ip] = [ts for ts in self._local[ip] if now - ts < self.window]
         if len(self._local[ip]) >= self.max_attempts:
             return False

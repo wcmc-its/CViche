@@ -1,5 +1,6 @@
 """#342: login throttle -- distributed across pods, degrades to in-memory."""
 import os
+import time
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 from app.login_throttle import LoginThrottle
@@ -58,3 +59,14 @@ def test_valkey_error_degrades_to_local_not_open():
     assert t.allow("x") is True
     assert t.allow("x") is True
     assert t.allow("x") is False  # still throttled via the in-memory fallback
+
+
+def test_in_memory_fallback_sweeps_lapsed_ips():
+    """The fallback dict must not grow once per distinct (client-supplied) IP."""
+    t = LoginThrottle(url=None, max_attempts=3, window_seconds=1)
+    for n in range(500):
+        t.allow(f"10.0.0.{n}")
+    assert len(t._local) == 500
+    time.sleep(1.1)  # every window above has now lapsed
+    t.allow("10.9.9.9")
+    assert len(t._local) == 1  # swept; only the live IP is retained
