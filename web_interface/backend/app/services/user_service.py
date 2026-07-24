@@ -4,14 +4,22 @@ from sqlalchemy.orm import Session
 from app.models import User
 
 
-def normalize_email(email: str) -> str:
-    """Canonicalize an email for use as the user identity key.
+def normalize_email(email: str | None) -> str | None:
+    """Canonicalize an email for use as a user identity key.
 
-    email is the unique key on User, so every auth path must normalize the same
-    way or case/whitespace variants create distinct identities (#348). Simple
-    login already did this inline; the SAML path did not.
+    email is unique on User, so every auth path must normalize the same way or
+    case/whitespace variants create distinct identities (#348). Simple login
+    already did this inline; the SAML path did not.
+
+    Since #326 email is also OPTIONAL -- a SAML user whose ED record has no
+    `mail` is provisioned on cwid alone -- so None must pass through instead of
+    raising. A blank or whitespace-only value collapses to None for the same
+    reason: "" is a real value under the unique index and two email-less users
+    would collide on it, whereas NULL does not (#413).
     """
-    return email.strip().lower()
+    if not email:
+        return None
+    return email.strip().lower() or None
 
 
 def provision_user(

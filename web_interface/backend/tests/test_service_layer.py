@@ -412,6 +412,20 @@ class TestNormalizeEmail:
         from app.services.user_service import normalize_email
         assert normalize_email("a@b.com") == "a@b.com"
 
+    def test_none_passes_through(self):
+        """#326 made email optional; a SAML user with no ED `mail` reaches this
+        with None and must not raise -- it did, and every such login 500'd into
+        /login?error=auth_failed."""
+        from app.services.user_service import normalize_email
+        assert normalize_email(None) is None
+
+    def test_blank_collapses_to_none(self):
+        """#413: "" is a real value under unique(email), so two email-less users
+        would collide on it. NULL does not collide."""
+        from app.services.user_service import normalize_email
+        assert normalize_email("") is None
+        assert normalize_email("   ") is None
+
 
 class TestCsvInjectionGuard:
     """#333: admin CSV exports must neutralize formula-injection triggers."""
