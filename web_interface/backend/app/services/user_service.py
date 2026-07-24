@@ -1,4 +1,5 @@
 """User-related service functions."""
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.models import User
 
@@ -49,15 +50,27 @@ def provision_user(
             user.email = email
         if role is not None:
             user.role = role
-    else:
-        user = User(
-            cwid=cwid,
-            email=email,
-            display_name=display_name,
-            role=role or "user",
-            auth_method=auth_method,
-        )
-        db.add(user)
-    db.commit()
+        db.commit()
+        db.refresh(user)
+        return user
+
+    user = User(
+        cwid=cwid,
+        email=email,
+        display_name=display_name,
+        role=role or "user",
+        auth_method=auth_method,
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        # A concurrent login committed this identity first. Drop our insert and
+        # return the winner's record, keyed on whichever unique column actually
+        # collided: cwid for SSO (email is nullable now, so it is not
+        # necessarily the constraint that fired), email for simple auth.
+        db.rollback()
+        q = db.query(User)
+        user = (q.filter(User.cwid == cwid) if cwid else q.filter(User.email == email)).one()
     db.refresh(user)
     return user

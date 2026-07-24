@@ -179,6 +179,48 @@ class TestProvisionUser:
         assert upgraded.id == legacy.id
         assert upgraded.cwid == "legacy"
 
+    def test_survives_concurrent_insert(self, db):
+        """#359: if a concurrent login inserts the row during our lookup->insert
+        window, the losing request returns the existing user instead of raising
+        IntegrityError. Rebased onto CWID anchoring: for SSO the constraint that
+        fires is unique(cwid), so the recovery lookup must key on cwid. Uses two
+        email-less affiliates -- which #326 now permits -- because that is the
+        case an email-keyed recovery gets wrong.
+        """
+        from unittest.mock import patch
+        from sqlalchemy.orm import Query
+
+        # A second email-less SSO user, so recovering by email would be ambiguous.
+        provision_user(db, display_name="Decoy", auth_method="saml",
+                       cwid="decoy9009", email=None, role="user")
+        winner = provision_user(db, display_name="Winner", auth_method="saml",
+                                cwid="race3003", email=None, role="user")
+
+        # Force our pre-insert lookup to miss the freshly-committed row so the
+        # insert collides -- exactly the race in #359.
+        with patch.object(Query, "first", return_value=None):
+            loser = provision_user(db, display_name="Loser", auth_method="saml",
+                                   cwid="race3003", email=None, role="user")
+
+        assert loser.id == winner.id
+        assert db.query(User).filter(User.cwid == "race3003").count() == 1
+
+    def test_survives_concurrent_insert_simple_auth(self, db):
+        """Same race on the simple-auth path, where there is no cwid and
+        unique(email) is the constraint that fires."""
+        from unittest.mock import patch
+        from sqlalchemy.orm import Query
+
+        winner = provision_user(db, display_name="Winner", auth_method="simple",
+                                email="simple-race@example.com", role="user")
+
+        with patch.object(Query, "first", return_value=None):
+            loser = provision_user(db, display_name="Loser", auth_method="simple",
+                                   email="simple-race@example.com", role="user")
+
+        assert loser.id == winner.id
+        assert db.query(User).filter(User.email == "simple-race@example.com").count() == 1
+
 
 class TestConfigService:
     """ARCH-04: Config values centralized with correct defaults."""
@@ -357,3 +399,20 @@ class TestAdminService:
         assert stats["completed_run_count"] == 1
         assert stats["feedback_count"] == 0
         assert stats["runs_today"] == 1
+
+
+class TestCsvInjectionGuard:
+    """#333: admin CSV exports must neutralize formula-injection triggers."""
+
+    def test_neutralizes_formula_triggers(self):
+        from app.api.admin_routes import _sanitize_csv_cell
+        for trigger in ("=", "+", "-", "@", "\t", "\r"):
+            assert _sanitize_csv_cell(f"{trigger}cmd()") == f"'{trigger}cmd()"
+
+    def test_leaves_safe_values_untouched(self):
+        from app.api.admin_routes import _sanitize_csv_cell
+        assert _sanitize_csv_cell("alice@example.com".lstrip("@")) == "alice@example.com".lstrip("@")
+        assert _sanitize_csv_cell("Jane Doe") == "Jane Doe"
+        assert _sanitize_csv_cell("cv.docx") == "cv.docx"
+        assert _sanitize_csv_cell(42) == 42  # non-strings pass through unchanged
+        assert _sanitize_csv_cell("") == ""

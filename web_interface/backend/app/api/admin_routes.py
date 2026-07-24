@@ -544,6 +544,30 @@ async def revoke_all_sessions(
 
 
 # ---------------------------------------------------------------------------
+# CSV formula-injection guard (OWASP): a cell whose text starts with a formula
+# trigger is interpreted as a formula by Excel/Sheets/LibreOffice. Prefix such
+# cells with a single quote so they render as literal text.
+# ---------------------------------------------------------------------------
+_CSV_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _sanitize_csv_cell(value):
+    if isinstance(value, str) and value and value[0] in _CSV_FORMULA_TRIGGERS:
+        return "'" + value
+    return value
+
+
+class _SafeCsvWriter:
+    """csv.writer wrapper that neutralizes formula injection in every cell."""
+
+    def __init__(self, f):
+        self._writer = csv.writer(f)
+
+    def writerow(self, row):
+        self._writer.writerow([_sanitize_csv_cell(c) for c in row])
+
+
+# ---------------------------------------------------------------------------
 # GET /api/admin/export/{export_type}
 # ---------------------------------------------------------------------------
 @router.get("/admin/export/{export_type}")
@@ -561,7 +585,7 @@ async def export_csv(
     )
 
     output = io.StringIO()
-    writer = csv.writer(output)
+    writer = _SafeCsvWriter(output)
 
     if export_type == "runs":
         writer.writerow([
