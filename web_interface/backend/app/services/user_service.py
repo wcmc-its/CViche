@@ -1,4 +1,5 @@
 """User-related service functions."""
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app.models import User
 
@@ -39,14 +40,23 @@ def provision_user(
         user.auth_method = auth_method
         if role is not None:
             user.role = role
-    else:
-        user = User(
-            email=email,
-            display_name=display_name,
-            role=role or "user",
-            auth_method=auth_method,
-        )
-        db.add(user)
-    db.commit()
+        db.commit()
+        db.refresh(user)
+        return user
+
+    user = User(
+        email=email,
+        display_name=display_name,
+        role=role or "user",
+        auth_method=auth_method,
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError:
+        # A concurrent login committed this email first (unique(email) already
+        # guards the row). Drop our insert and return the winner's record.
+        db.rollback()
+        user = db.query(User).filter(User.email == email).one()
     db.refresh(user)
     return user
