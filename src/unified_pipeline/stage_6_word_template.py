@@ -429,24 +429,37 @@ def _dates_overlap_or_match(entry_a: Dict, entry_b: Dict) -> bool:
 # only proves duplication when the dropped entry carries enough tokens.
 DEDUP_FULL_CONTAINMENT_MIN_TOKENS = 5
 
+# _drop_is_safe token-containment is a TRUE-DUPLICATE signal only when the kept
+# entry is itself a single record. When the kept entry is a FUSED multi-record
+# blob (a whole layout table captured atomically, #208), a distinct single
+# record is fully token-contained in it merely because the blob swallowed it —
+# dropping it is real content loss, not deduplication (C0ZGFW: 35 invited
+# presentations + 3 teaching records dropped into "Title/Institution/Dates"
+# table blobs of 52 and 13 record-lines). A blob this size is the fusion bug,
+# not a duplicate. ponytail: gate on record-line count; the source fix is
+# de-fusing the table in stage 2 (#208/#248).
+DEDUP_FUSED_BLOB_RECORD_LINES = 5
+
 
 def _drop_is_safe(dropped_entry: Dict, kept_entry: Dict) -> bool:
     """#227 guard: only drop an entry when the loss is provably recoverable.
 
     Safe when the dropped text is verbatim-contained in the kept entry, or
     every significant word of a token-rich dropped entry appears in the kept
-    entry (both are true-duplicate shapes), or the dropped entry is a fused
-    multi-record candidate — those the #221/#225 recovery pass re-verifies
-    line by line against the rendered document. A single-line entry that
-    merely SCORES similar is the #227 loss class: distinct records sharing
-    role/date/venue boilerplate (7 of 8 drops on 2Q1_ZQ were real content
-    loss, all single-line)."""
+    entry (both are true-duplicate shapes) AND the kept entry is not a fused
+    multi-record blob, or the dropped entry is a fused multi-record candidate —
+    those the #221/#225 recovery pass re-verifies line by line against the
+    rendered document. A single-line entry that merely SCORES similar is the
+    #227 loss class: distinct records sharing role/date/venue boilerplate (7 of
+    8 drops on 2Q1_ZQ were real content loss, all single-line); a distinct
+    record swallowed by a fused table blob is the same loss class (C0ZGFW)."""
     dropped_squashed = _squash(dropped_entry.get('text', ''))
     if dropped_squashed and dropped_squashed in _squash(kept_entry.get('text', '')):
         return True
     dropped_sig = _entry_signature_words(dropped_entry)
     if (len(dropped_sig) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS
-            and dropped_sig <= _entry_signature_words(kept_entry)):
+            and dropped_sig <= _entry_signature_words(kept_entry)
+            and len(_record_lines(kept_entry.get('text', ''))) < DEDUP_FUSED_BLOB_RECORD_LINES):
         return True
     return len(_record_lines(dropped_entry.get('text', ''))) >= UNRENDERED_MIN_RECORD_LINES
 
@@ -1411,7 +1424,7 @@ class WCMTemplateGenerator:
         self._fill_honors(entries_by_code.get('H', []))  # H = Honors and Awards
         self._fill_memberships(entries_by_code.get('I', []))  # I = Professional Memberships
         self._fill_teaching(entries_by_code)  # K1-K5 = Teaching Activities
-        self._fill_research_summary(research_summary_data)  # Use standalone Stage 4.5 output
+        research_summary_rendered = self._fill_research_summary(research_summary_data)  # Stage 4.5 output
         self._fill_research_support(entries_by_code, cv_owner, document_uid)
         # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
         self._fill_patents(entries_by_code.get('M2D', []))
@@ -1452,6 +1465,15 @@ class WCMTemplateGenerator:
             'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9',  # Bibliography
             # NOTE: T is intentionally NOT here - T entries go to Appendix
         }
+
+        # M1 (Research Activities) entries are consumed by the Stage 4.5 research
+        # summary. When that summary did NOT render (no Stage 4.5 output, empty
+        # summary, or the template lacks a RESEARCH ACTIVITIES header), the M1
+        # entries would otherwise render nowhere AND be excluded from the appendix
+        # by being 'mapped' — a silent content loss (#317, C0ZGFW). Route them to
+        # the appendix safety net instead. No-op when the summary rendered.
+        if not research_summary_rendered:
+            mapped_codes.discard('M1')
 
         unmapped_entries = []
 
@@ -4170,11 +4192,16 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 - research_summary.text: The generated summary
                 - research_summary.generation_method: "llm_generated" or "existing_content"
                 - research_summary.word_count: Word count of summary
+
+        Returns:
+            True if a summary paragraph was rendered, False otherwise. Callers use
+            this to route M1 entries to the appendix when the summary is absent
+            (#317) instead of dropping them.
         """
         if not research_summary_data:
             if self.verbose:
                 print("Skipping Research Summary section (no Stage 4.5 output)")
-            return
+            return False
 
         # Extract summary from Stage 4.5 structure
         summary_info = research_summary_data.get('research_summary', {})
@@ -4183,7 +4210,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not summary_text or len(summary_text.strip()) < 50:
             if self.verbose:
                 print("Skipping Research Summary section (no substantive content)")
-            return
+            return False
 
         word_count = summary_info.get('word_count', len(summary_text.split()))
         generation_method = summary_info.get('generation_method', 'unknown')
@@ -4199,7 +4226,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if activities_idx is None:
             if self.verbose:
                 print("  Warning: Could not find 'RESEARCH ACTIVITIES' section")
-            return
+            return False
 
         # Get the paragraph element to insert after
         activities_para = self.doc.paragraphs[activities_idx]
@@ -4209,7 +4236,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         try:
             insert_idx = body_elements.index(activities_para._element) + 1  # Insert AFTER header
         except ValueError:
-            return
+            return False
 
         # Add blank line after RESEARCH ACTIVITIES header
         blank_para = self.doc.add_paragraph()
@@ -4227,6 +4254,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         body.insert(insert_idx, summary_para._element)
 
         self.stats['entries_inserted'] += 1
+        return True
 
     def _fill_research_support(self, entries_by_code: Dict[str, List[Dict]], cv_owner: Dict = None, document_uid: str = ''):
         """Fill research support section with individual tables per grant.
