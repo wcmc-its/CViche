@@ -12,6 +12,7 @@ excluding deleted ``<w:delText>`` — i.e. the accepted-changes view a reader se
 Self-contained: no DB, no template. Requires only python-docx.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -19,10 +20,11 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from docx import Document
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls
 
-from unified_pipeline.run_doctor import _docx_text
+from unified_pipeline.run_doctor import _docx_text, read_docx_blocks, run_doctor
 
 
 def test_docx_text_includes_insertions_excludes_deletions():
@@ -40,6 +42,53 @@ def test_docx_text_includes_insertions_excludes_deletions():
 def test_docx_text_empty_paragraph():
     p = parse_xml(f'<w:p {nsdecls("w")}></w:p>')
     assert _docx_text(p) == ""
+
+
+def _tracked_changes_run(root, uid, cv_owner):
+    """Minimal run: a populated stage-4 artifact plus a stage-6 docx whose whole
+    body is a tracked INSERTION."""
+    stage4 = root / "stage_4_field_extraction"
+    stage4.mkdir(parents=True)
+    (stage4 / f"{uid}_fields.json").write_text(json.dumps(
+        {"document_uid": uid, "cv_owner": cv_owner, "entries": []}))
+
+    doc = Document()
+    doc.add_paragraph()._p.append(parse_xml(
+        f'<w:ins {nsdecls("w")} w:id="1" w:author="a" w:date="2026-07-25T00:00:00Z">'
+        '<w:r><w:t>Miriam Shapiro, M.D. — Curriculum Vitae</w:t></w:r></w:ins>'))
+    out = root / "stage_6_wcm_documents"
+    out.mkdir(parents=True)
+    doc.save(out / f"{uid}_wcm.docx")
+    return out / f"{uid}_wcm.docx"
+
+
+def test_hard_fail_gates_do_not_fire_on_tracked_changes(tmp_path):
+    """The #437 hard-fail lints decide from the stage-4 JSON, never from the
+    rendered docx, so a document delivered entirely as tracked insertions cannot
+    make them report an undeliverable run -- the false-positive shape this file
+    exists to pin."""
+    root = tmp_path / "outputs"
+    docx = _tracked_changes_run(root, "TRACKED", {
+        "first_name": "Miriam", "last_name": "Shapiro",
+        "full_name": "Miriam Shapiro"})
+    # not vacuous: the docx really does carry its text inside <w:ins>
+    assert any("Miriam Shapiro" in text for _, text in read_docx_blocks(str(docx)))
+
+    payload = run_doctor(root, "TRACKED")
+    gate_lints = ("owner_contact_missing", "pipeline_errors_present")
+    assert not [f for f in payload["findings"] if f["lint"] in gate_lints], \
+        "tracked changes must not manufacture a hard-fail finding"
+    assert payload["counts"]["ERROR"] == 0
+
+    # ...and the lint is not merely inert on this fixture: the same
+    # tracked-changes document with an emptied cv_owner still reports ERROR.
+    empty = tmp_path / "empty-owner"
+    _tracked_changes_run(empty, "TRACKED", {"first_name": "", "last_name": "",
+                                            "full_name": ""})
+    broken = run_doctor(empty, "TRACKED")
+    assert broken["worst_severity"] == "ERROR"
+    assert [f["lint"] for f in broken["findings"] if f["severity"] == "ERROR"] \
+        == ["owner_contact_missing"]
 
 
 if __name__ == "__main__":

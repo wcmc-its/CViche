@@ -46,6 +46,18 @@ Lints, ranked by the severity of the failure class they catch:
                           year in the name, state-abbrev organizations,
                           organization duplicated inside the name (#229)
 
+Lints 14-15 are the quality-score HARD-FAIL gates and sit outside that
+ranking: they are the only ERROR-by-construction lints, because each one on
+its own caps quality_score.py's final score into the RED do-not-deliver band.
+Without them an undeliverable run reported worst=WARN like every healthy one
+(#437). Both reuse the scorer's own predicates so the two instruments cannot
+drift apart:
+
+14. owner_contact_missing the stage-4 'cv_owner' block carries no usable name
+                          — the score is capped at 25
+15. pipeline_errors_present a fatal error (NameError, traceback) recorded in an
+                          'error' field of the run artifacts — capped at 40
+
 Usage:
 
     PYTHONPATH=src python -m unified_pipeline.run_doctor <root> <uid> \
@@ -71,6 +83,11 @@ from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
+)
+from unified_pipeline.quality_score import (
+    FATAL_ERROR_PATTERN,
+    cv_owner_name_missing,
+    iter_error_fields,
 )
 from unified_pipeline.segmentation_regression import (
     SUBSTANTIVE_LINE_CHARS,
@@ -993,6 +1010,54 @@ def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
     return findings
 
 
+# ------------------------------------------------------------------- lint 14
+
+def lint_owner_contact_missing(stage4: Dict) -> List[Dict]:
+    """The quality score's cap-25 hard-fail gate: the stage-4 ``cv_owner``
+    block carries no usable name, so the document cannot be delivered under
+    anyone's name. The predicate is the scorer's own
+    (quality_score.cv_owner_name_missing), applied to the stage-4 artifact the
+    doctor already loads — the same ``*_fields.json`` the scorer reads."""
+    if not cv_owner_name_missing(stage4):
+        return []
+    cv_owner = stage4.get("cv_owner", {}) or {}
+    return [_finding(
+        "owner_contact_missing", "ERROR",
+        "HARD-FAIL gate 'CV owner name / contact populated': the cv_owner "
+        "block has no usable name — the quality score is capped at 25 (RED, "
+        "do not deliver)",
+        [f"{field}={str(cv_owner.get(field) or '')!r}"
+         for field in ("full_name", "first_name", "last_name")])]
+
+
+# ------------------------------------------------------------------- lint 15
+
+def lint_pipeline_errors(artifacts: Dict[str, Dict]) -> List[Dict]:
+    """The quality score's cap-40 hard-fail gate: an ``error`` field somewhere
+    in the run's artifacts carries a fatal pattern (NameError, traceback), so a
+    stage died mid-run and whatever it owned is missing from the output. The
+    pattern and the walk are the scorer's own
+    (quality_score.FATAL_ERROR_PATTERN / iter_error_fields).
+
+    Scope is the JSON artifacts the doctor has already loaded, keyed by their
+    stage label — a superset of the ones the deployed scorer sees (it copies
+    only *_classified/_fields/_entries.json into the dir it scores), so this
+    cannot report clean on a run the score hard-fails."""
+    fatal: List[str] = []
+    for label in sorted(artifacts):
+        for path, value in iter_error_fields(artifacts[label], label):
+            if FATAL_ERROR_PATTERN.search(value):
+                fatal.append(f"{path}: {value[:120]}")
+    if not fatal:
+        return []
+    return [_finding(
+        "pipeline_errors_present", "ERROR",
+        f"HARD-FAIL gate 'Pipeline/API errors present': {len(fatal)} fatal "
+        f"error field(s) recorded in the run artifacts — the quality score is "
+        f"capped at 40 (RED, do not deliver)",
+        fatal[:5])]
+
+
 # --------------------------------------------------------- artifact resolution
 
 _ARTIFACTS = {
@@ -1166,6 +1231,20 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
         findings.extend(lint_pipe_leaks(blocks))
     if ready("table_shape", stage_6_docx=table_rows):
         findings.extend(lint_table_shape(table_rows))
+    if ready("owner_contact_missing", stage_4=stage_4):
+        findings.extend(lint_owner_contact_missing(stage_4))
+    # The error scan has no single required artifact -- it reads whichever JSON
+    # artifacts loaded. It skips only when NONE did, and that skip is reported
+    # under the collective name "artifacts" rather than a loader label: a run
+    # where every artifact is present-but-corrupt already gets an ERROR from
+    # every lint keyed on those labels, so nothing is lost by this one calling
+    # them missing.
+    json_artifacts = {label: data for label, data in (
+        ("stage_1a", stage_1a), ("stage_2", stage_2), ("stage_3b", stage_3b),
+        ("stage_4", stage_4), ("stage_5_enrichment", stage_5e),
+        ("stage_6_report", stage_6_report)) if data is not None}
+    if ready("pipeline_errors_present", artifacts=json_artifacts or None):
+        findings.extend(lint_pipeline_errors(json_artifacts))
 
     counts = {severity: 0 for severity in SEVERITY_ORDER}
     for f in findings:

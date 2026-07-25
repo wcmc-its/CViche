@@ -17,7 +17,8 @@
 #
 #   --doctor     also run the deterministic run_doctor over each run's stage artifacts,
 #                writing a row to <results_dir>/doctor.tsv and full findings to
-#                <results_dir>/doctor/<cv>.json (no LLM cost; findings are WARN/INFO lints)
+#                <results_dir>/doctor/<cv>.json (no LLM cost; an ERROR row means
+#                the run tripped a quality-score hard-fail gate -- do not deliver)
 #   input_dir    directory of .docx CVs to run          (required)
 #   count        number of NEW CVs to run this call      (default 25)
 #   results_dir  where outputs/logs/summary are written  (default <input_dir>/_batch_runs)
