@@ -27,15 +27,19 @@ def create_cviche_engine(db_host: str, db_port: str, db_name: str, db_user: str)
 
     DATABASE_URL = f"mysql+pymysql://{db_user}@{db_host}:{db_port}/{db_name}"
     aws_region = os.environ.get("AWS_REGION", "us-east-1")
-    
-    engine_kwargs = {
-        "pool_pre_ping": True,
-        # Recycle pooled connections after 1800s (30 min) so a connection is never
-        # reused after RDS wait_timeout or a load balancer has silently dropped it.
-        # Comfortably under RDS's default 8h wait_timeout; pool_pre_ping is the
-        # backstop for anything that dies sooner.
-        "pool_recycle": 1800,
-        "creator": lambda: pymysql.connect(
+
+    # Local dev (docker compose) runs MariaDB with password auth and no TLS, so
+    # the IAM-token path below cannot reach it. Setting DB_PASSWORD selects
+    # password auth; deployed environments leave it unset and are unaffected.
+    db_password = os.environ.get("DB_PASSWORD")
+
+    def _connect():
+        if db_password:
+            return pymysql.connect(
+                host=db_host, port=int(db_port), user=db_user,
+                password=db_password, database=db_name,
+            )
+        return pymysql.connect(
             host=db_host,
             port=int(db_port),
             user=db_user,
@@ -43,8 +47,17 @@ def create_cviche_engine(db_host: str, db_port: str, db_name: str, db_user: str)
                 DBHostname=db_host, Port=int(db_port), DBUsername=db_user, Region=aws_region
             ),
             database=db_name,
-            ssl={'ssl': True}
+            ssl={'ssl': True},
         )
+
+    engine_kwargs = {
+        "pool_pre_ping": True,
+        # Recycle pooled connections after 1800s (30 min) so a connection is never
+        # reused after RDS wait_timeout or a load balancer has silently dropped it.
+        # Comfortably under RDS's default 8h wait_timeout; pool_pre_ping is the
+        # backstop for anything that dies sooner.
+        "pool_recycle": 1800,
+        "creator": _connect,
     }
 
     return create_engine(DATABASE_URL, **engine_kwargs)
