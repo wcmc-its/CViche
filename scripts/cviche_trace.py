@@ -104,6 +104,11 @@ def docx_blocks(path):
 # "rendered under X" hits -- excluded deliberately.
 TITLE_FIELDS = ("title", "program_name", "activity_title", "event_name", "award_name")
 
+# A needle landing in this many DISTINCT sections is a common word, not an
+# identifier. Below it, multiple hits are still reported -- a record rendering
+# twice is a finding, not noise.
+AMBIGUOUS_SECTIONS = 3
+
 
 def _clean(s):
     """Lowercased, separator- and punctuation-stripped, whitespace-collapsed."""
@@ -161,8 +166,8 @@ def locate_render(blocks, entry_text, fields=None):
       'rendered'      -- a distinctive fragment was found (section, count set)
       'absent'        -- no fragment matched; a hint to VERIFY, not proof of a
                          drop, since 5c/5d reformatting can defeat matching
-      'indeterminate' -- header-shaped entry; matcher cannot separate a leak
-                         from template scaffolding (see is_header_shaped)
+      'indeterminate' -- header-shaped entry, or the only needle that matched is
+                         too generic to identify one record (see AMBIGUOUS_SECTIONS)
     """
     needles = render_needles(entry_text, fields)
     if not needles:
@@ -170,9 +175,25 @@ def locate_render(blocks, entry_text, fields=None):
     cleaned = [(sec, _clean(t)) for sec, t in blocks]
     for needle in needles:
         hits = [sec for sec, t in cleaned if needle in t]
-        if hits:
-            return "rendered", hits[0], len(hits)
-    return "absent", None, 0
+        if not hits:
+            continue
+        # A needle scattered across several unrelated sections is not identifying
+        # this record, it is a common word. Excluding role/teaching_role from
+        # TITLE_FIELDS was not enough: `title` itself holds bare descriptors
+        # ("Faculty", "Grand Rounds", "Expert Consultant"), and "faculty" matches
+        # the template's own "Faculty Curriculum Vitae Template" line plus every
+        # mention under POSITIONS, RESEARCH and MENTORING -- a confident, wrong
+        # section. Two sections stays reportable, because a record really showing
+        # up in two places is the duplication bug this tool exists to surface.
+        if len(set(hits)) >= AMBIGUOUS_SECTIONS:
+            continue
+        return "rendered", hits[0], len(hits)
+    return ("indeterminate" if _any_needle_hit(cleaned, needles) else "absent"), None, 0
+
+
+def _any_needle_hit(cleaned, needles):
+    """True when some needle matched but every match was too generic to trust."""
+    return any(needle in t for needle in needles for _, t in cleaned)
 
 
 def find_matches(stage2, selector):
@@ -235,8 +256,10 @@ def trace(outputs_root, uid, selector):
             if status == "rendered":
                 lines.append(f"  s6 render: {n}x under {sec!r}")
             elif status == "indeterminate":
-                lines.append("  s6 render: INDETERMINATE (header-shaped; matcher "
-                             "can't separate a leak from template scaffold)")
+                why = ("header-shaped; matcher can't separate a leak from template scaffold"
+                       if is_header_shaped(e.get("text", ""))
+                       else "only generic fragments matched; can't tell which line is this record")
+                lines.append(f"  s6 render: INDETERMINATE ({why})")
             else:
                 why = " (code T = drop)" if code == "T" else " (verify: matcher may miss reformatted text)"
                 lines.append(f"  s6 render: NOT FOUND{why}")
@@ -285,6 +308,21 @@ def _selftest():
         [("POSITIONS", "Director of Something"), ("POSITIONS", "Director of Another")],
         "Bugando POCUS Program\nrun the program", {"program_name": "Bugando POCUS Program", "role": "Director"})
     assert (status, n) == ("absent", 0), (status, sec, n)
+    # Same class via `title` rather than `role`: QJKSJQ 222 is a MENTORING record
+    # whose title field is the bare word "Faculty". Before the AMBIGUOUS_SECTIONS
+    # guard this reported a confident "8x under '(top)'" -- pointing at the
+    # template's own "Faculty Curriculum Vitae Template" line. Wrong section is
+    # worse than no answer, because the section is what an autopsy acts on.
+    generic = [("(top)", "Faculty Curriculum Vitae Template"),
+               ("PROFESSIONAL POSITIONS", "Faculty | China Medical University | 2019-Present"),
+               ("RESEARCH", "Award Source: | UC Faculty Research Grant"),
+               ("MENTORING", "Please list trainees and faculty you have supervised")]
+    status, sec, n = locate_render(generic, "Keke Liang, MD\t2019 - present", {"title": "Faculty"})
+    assert status == "indeterminate", (status, sec, n)
+    # ...but a record genuinely rendering twice in ONE section is still reported.
+    twice = [("MENTORING", "Keke Liang MD 2019"), ("MENTORING", "Keke Liang MD 2019 dup")]
+    status, sec, n = locate_render(twice, "Keke Liang, MD 2019", {"title": "Keke Liang"})
+    assert (status, sec, n) == ("rendered", "MENTORING", 2), (status, sec, n)
     print("selftest ok")
 
 
