@@ -1813,6 +1813,69 @@ If you cannot determine a field, return an empty string for it."""
     return result
 
 
+# Fields that name where the CV owner themselves works, studies or teaches.
+# Deliberately excludes 'venue' / 'publication_venue' and the 'location' field on
+# R / S8 / K5: those record where a talk was given or a paper appeared, and a
+# conference city is not the owner's location.
+_OWNER_AFFILIATION_FIELDS = ('employer', 'institution', 'organization', 'address')
+
+
+def _entry_end_year(fields: Dict[str, Any]) -> int:
+    """Sort key for recency: 'present' beats any year, an absent date sorts last."""
+    import re
+
+    raw = fields.get('end_date', '') or fields.get('dates_attended_end_date', '') or ''
+    text = str(raw).lower()
+    if 'present' in text or 'current' in text:
+        return 9999
+    match = re.search(r'(\d{4})', text)
+    return int(match.group(1)) if match else 0
+
+
+def _owner_affiliation_lines(
+    mapped_entries: List[Dict[str, Any]],
+    limit: int = 15,
+) -> List[str]:
+    """Recency-ranked affiliation lines drawn from *any* taxonomy code.
+
+    The primary pool in infer_cv_owner_location is gated on a fixed list of
+    section codes, which assumes the owner's location appears under Personal
+    Data / Education / Positions. Plenty of CVs state it only under Employment
+    Status (code E) or across a wall of teaching entries (K*), and those return
+    an empty pool. This builds a last-resort pool instead of growing the
+    allow-list, so it does not matter which section the CV happens to use.
+    """
+    counts: Dict[str, int] = {}
+    best_year: Dict[str, int] = {}
+
+    for entry in mapped_entries:
+        fields = entry.get('extracted_fields', {}) or {}
+        if not isinstance(fields, dict):
+            continue
+        # Code E is "Employment Status" -- current by definition, so it outranks
+        # everything else regardless of whether it carries a date.
+        year = 9999 if entry.get('taxonomy_code') == 'E' else _entry_end_year(fields)
+        for name in _OWNER_AFFILIATION_FIELDS:
+            value = str(fields.get(name) or '').strip()
+            if len(value) < 3:
+                continue
+            counts[value] = counts.get(value, 0) + 1
+            best_year[value] = max(best_year.get(value, 0), year)
+
+    if not counts:
+        return []
+
+    # Recency outranks frequency: a long-held past post must not beat a current
+    # one just by appearing more often. Frequency only breaks recency ties.
+    ranked = sorted(counts, key=lambda v: (best_year[v], counts[v]), reverse=True)[:limit]
+
+    lines = ["AFFILIATIONS STATED ACROSS THE CV (most recent first, with how often each appears):"]
+    for value in ranked:
+        marker = " [current]" if best_year[value] == 9999 else ""
+        lines.append(f"  - {value[:150]} (x{counts[value]}){marker}")
+    return lines
+
+
 def infer_cv_owner_location(
     mapped_entries: List[Dict[str, Any]],
     model: str = None
@@ -1875,9 +1938,8 @@ def infer_cv_owner_location(
                 'sort_year': sort_year
             })
 
-    if not location_entries:
-        return result
-
+    # An empty pool is not fatal any more -- it falls through to the
+    # affiliation-wide fallback below.
     # Sort by date descending (most recent first)
     location_entries.sort(key=lambda x: x['sort_year'], reverse=True)
 
@@ -1935,12 +1997,9 @@ def infer_cv_owner_location(
             formatted_lines.append(f"\nOFFICE/HOME ADDRESS:\n  {address[:200]}")
             break
 
-    if not formatted_lines:
-        return result
-
-    history_text = "\n".join(formatted_lines)
-
-    prompt = f"""Based on this CV owner's employment, education, and training history, determine their current primary location(s).
+    def _query(history_text: str) -> bool:
+        """Run the location prompt over one pool. True if it yielded a primary_location."""
+        prompt = f"""Based on this CV owner's employment, education, and training history, determine their current primary location(s).
 
 {history_text}
 
@@ -1957,38 +2016,59 @@ Return a JSON object with:
 Focus on positions with end_date="present" or most recent dates.
 Return ONLY valid JSON, no explanation."""
 
-    try:
-        llm_result = call_llm(
-            stage="stage_4",
-            messages=[
-                {"role": "system", "content": "You extract location information from CV data. Return only valid JSON."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.1,
-            max_tokens=500
-        )
+        try:
+            llm_result = call_llm(
+                stage="stage_4",
+                messages=[
+                    {"role": "system", "content": "You extract location information from CV data. Return only valid JSON."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=500
+            )
 
-        response_text = llm_result["content"].strip()
+            response_text = llm_result["content"].strip()
 
-        # Clean up response (remove markdown code blocks if present)
-        if response_text.startswith('```'):
-            response_text = re.sub(r'^```(?:json)?\s*', '', response_text)
-            response_text = re.sub(r'\s*```$', '', response_text)
+            # Clean up response (remove markdown code blocks if present)
+            if response_text.startswith('```'):
+                response_text = re.sub(r'^```(?:json)?\s*', '', response_text)
+                response_text = re.sub(r'\s*```$', '', response_text)
 
-        parsed = json.loads(response_text)
+            parsed = json.loads(response_text)
 
-        result['locations'] = parsed.get('locations', [])
-        result['metro_area'] = parsed.get('metro_area', '')
+        except json.JSONDecodeError as e:
+            print(f"  Warning: Could not parse location inference response: {e}")
+            return False
+        except Exception as e:
+            print(f"  Warning: Location inference failed: {e}")
+            return False
+
+        result['tokens'] = result.get('tokens', 0) + llm_result["total_tokens"]
+        result['cost'] = result.get('cost', 0.0) + llm_result["cost"]
+
+        result['locations'] = parsed.get('locations', []) or result['locations']
+        result['metro_area'] = parsed.get('metro_area', '') or result['metro_area']
+
+        # A response with no primary_location is not a success -- downstream
+        # scope classification reads exactly that key, and reporting success
+        # without it is what made this failure invisible.
+        if not parsed.get('primary_location'):
+            return False
+
         result['primary_location'] = parsed.get('primary_location')
         result['inference_success'] = True
+        return True
 
-        result['tokens'] = llm_result["total_tokens"]
-        result['cost'] = llm_result["cost"]
+    if formatted_lines and _query("\n".join(formatted_lines)):
+        return result
 
-    except json.JSONDecodeError as e:
-        print(f"  Warning: Could not parse location inference response: {e}")
-    except Exception as e:
-        print(f"  Warning: Location inference failed: {e}")
+    # The section-gated pool above found nothing usable. Before giving up, retry
+    # once against every affiliation stated anywhere in the CV, regardless of
+    # which section it sits under. This only runs when the CV would otherwise
+    # have returned no location at all, so it cannot change a working inference.
+    fallback_lines = _owner_affiliation_lines(mapped_entries)
+    if fallback_lines:
+        _query("\n".join(fallback_lines))
 
     return result
 
