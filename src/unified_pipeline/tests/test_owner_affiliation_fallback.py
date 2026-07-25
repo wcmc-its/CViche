@@ -82,6 +82,57 @@ def test_pool_is_capped():
     assert len(lines) == 16  # header + 15
 
 
+def test_location_inference_sees_extracted_fields():
+    """The call site must run after extraction, not before it.
+
+    Every check above hands _owner_affiliation_lines entries that already carry
+    extracted_fields. At runtime nothing upstream produces that key -- stage 3b
+    does not emit it and stage 4 is what fills it in -- so inferring before the
+    extraction loop fed this function bare entries and it returned an empty pool
+    on every real CV. The unit checks could not see that, because they supply
+    the fields themselves. This one asserts the ordering instead.
+    """
+    from unified_pipeline import stage_4_field_extractor as s4
+
+    mapped = [
+        {'taxonomy_code': 'D1', 'text': 'Professor of Surgery, Weill Cornell Medicine',
+         'element_idx_start': 0, 'element_idx_end': 0},
+        {'taxonomy_code': 'E', 'text': 'Employment Status: full time',
+         'element_idx_start': 1, 'element_idx_end': 1},
+    ]
+    seen = {}
+
+    def fake_batch(batch, batch_idx, num_batches, model=None, cv_owner_name=None):
+        out = []
+        for e in batch:
+            out.append({**e, 'extracted_fields': {
+                'institution': 'Weill Cornell Medicine, New York, NY',
+                'end_date': 'present',
+            }})
+        return {'success': True, 'entries': out, 'cost': 0.0, 'tokens': 0}
+
+    def fake_infer(entries, model=None):
+        seen['with_fields'] = sum(1 for e in entries if e.get('extracted_fields'))
+        seen['total'] = len(entries)
+        return {'inference_success': False}
+
+    orig = (s4.extract_fields_batch, s4.infer_cv_owner_location, s4.extract_cv_owner_name)
+    s4.extract_fields_batch = fake_batch
+    s4.infer_cv_owner_location = fake_infer
+    s4.extract_cv_owner_name = lambda uid, entries: {'last_name': ''}
+    try:
+        s4.extract_fields_from_mapped_entries(mapped, document_uid='TEST')
+    finally:
+        (s4.extract_fields_batch, s4.infer_cv_owner_location,
+         s4.extract_cv_owner_name) = orig
+
+    assert seen, 'infer_cv_owner_location was never called'
+    assert seen['with_fields'] == seen['total'] == 2, (
+        f"location inference saw {seen['with_fields']}/{seen['total']} entries carrying "
+        'extracted_fields -- it is running before extraction again'
+    )
+
+
 if __name__ == '__main__':
     for name, fn in sorted(globals().items()):
         if name.startswith('test_'):

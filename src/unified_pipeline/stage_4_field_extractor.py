@@ -2241,18 +2241,7 @@ def extract_fields_from_mapped_entries(
     if cv_owner_name.get('last_name'):
         print(f"CV Owner: {cv_owner_name.get('full_name', cv_owner_name['last_name'])} (last name: {cv_owner_name['last_name']})")
 
-    # Infer CV owner's current location(s) for geographic scope classification
-    cv_owner_location = infer_cv_owner_location(mapped_entries)
-    if cv_owner_location.get('inference_success'):
-        metro = cv_owner_location.get('metro_area', '')
-        primary = cv_owner_location.get('primary_location', {})
-        if primary:
-            loc_str = f"{primary.get('institution', '')} in {primary.get('city', '')}, {primary.get('state', '')}"
-            print(f"CV Location: {loc_str} (metro: {metro})")
-            if cv_owner_location.get('cost'):
-                print(f"  Location inference cost: ${cv_owner_location['cost']:.4f}")
-    else:
-        cv_owner_location = None  # Set to None if inference failed
+    # Location inference runs *after* extraction -- see the call site below.
 
     # Filter out entries with empty or minimal text
     valid_entries = []
@@ -2336,6 +2325,26 @@ def extract_fields_from_mapped_entries(
     reformatted_count = sum(1 for e in all_entries if e.get('reformatted_fields'))
     if reformatted_count > 0:
         print(f"✓ Applied reformatting to {reformatted_count} entries")
+
+    # Infer CV owner's current location(s) for geographic scope classification.
+    # This runs after extraction, not before it: the affiliation fallback reads
+    # named fields (employer/institution/organization/address), and stage 3b
+    # emits no extracted_fields at all -- every entry arrives here with the key
+    # absent. Inferring before extraction made that fallback dead code in every
+    # real run while still looking correct when replayed over a saved
+    # *_fields.json. Nothing in the extraction loop consumes the result; it is
+    # carried in the return value for downstream geographic-scope use.
+    cv_owner_location = infer_cv_owner_location(all_entries)
+    if cv_owner_location.get('inference_success'):
+        metro = cv_owner_location.get('metro_area', '')
+        primary = cv_owner_location.get('primary_location', {})
+        if primary:
+            loc_str = f"{primary.get('institution', '')} in {primary.get('city', '')}, {primary.get('state', '')}"
+            print(f"CV Location: {loc_str} (metro: {metro})")
+            if cv_owner_location.get('cost'):
+                print(f"  Location inference cost: ${cv_owner_location['cost']:.4f}")
+    else:
+        cv_owner_location = None  # Set to None if inference failed
 
     # Include location inference cost in total
     location_cost = cv_owner_location.get('cost', 0) if cv_owner_location else 0
