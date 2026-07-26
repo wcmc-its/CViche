@@ -1100,10 +1100,12 @@ _ARTIFACTS = {
     "stage_6_report": ("stage_6_wcm_documents", "_render_warnings.json"),
 }
 
-#: Artifacts the DEPLOYED scorer reads -- their suffixes are exactly
-#: quality_score_service._NEEDED_SUFFIXES. A run with none of these gets no
-#: score at all rather than a RED one, so it trips no hard-fail gate (#437).
-_SCORABLE = ("stage_2", "stage_3b", "stage_4", "stage_6_docx")
+#: The owner gate reports an ABSENT *_fields.json only for a run that got as
+#: far as rendering a deliverable, or whose stage-4 file exists but will not
+#: parse. An earlier artifact (stage_2/stage_3b) is not enough: a run doctored
+#: mid-pipeline, or one that crashed after stage 2, has no owner name YET --
+#: reporting "do not deliver" on it would be a false positive (#437).
+_DELIVERABLE = ("stage_4", "stage_6_docx")
 
 
 def _uid_owns(name: str, uid: str) -> bool:
@@ -1269,10 +1271,10 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     # score_cv_owner caps at 25 for an ABSENT *_fields.json as well as an empty
     # cv_owner name, so this lint breaks the house "missing artifact -> skip"
     # convention: skipping the absent case would report the more broken run
-    # more quietly (#437). It still skips when the run produced no scorable
-    # output at ALL, because quality_score_service returns no score rather than
-    # a RED one in that case -- there is no gate to report, only a wrong uid.
-    if stage_4 is not None or any(paths[k] for k in _SCORABLE):
+    # more quietly (#437). It still skips for a run that never reached stage 4
+    # -- an incomplete or wrong-uid run has no owner name yet, and the batch
+    # runner doctors CVs whose pipeline returned rc!=0.
+    if stage_4 is not None or any(paths[k] for k in _DELIVERABLE):
         findings.extend(lint_owner_contact_missing(
             stage_4, uid, unreadable.get("stage_4")))
     else:

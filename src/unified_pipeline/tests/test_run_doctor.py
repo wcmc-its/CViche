@@ -1057,6 +1057,22 @@ def test_run_doctor_owner_gate_errors_when_only_stage4_is_absent(tmp_path):
     assert payload["worst_severity"] == "ERROR"
 
 
+def test_run_doctor_owner_gate_skips_a_run_that_never_reached_stage_4(tmp_path):
+    """An incomplete run has no owner name YET, so "do not deliver" would be a
+    false positive. run_corpus_batch.sh doctors every CV including ones whose
+    pipeline returned rc!=0, so this is reachable in the batch tooling."""
+    root = _build_clean_run(tmp_path)
+    for stage in ("stage_4_field_extraction", "stage_6_wcm_documents"):
+        for leftover in (root / stage).glob(f"{_UID}*"):
+            leftover.unlink()
+    payload = run_doctor(root, _UID)
+    owner = next(f for f in payload["findings"]
+                 if f["lint"] == "owner_contact_missing")
+    assert owner["severity"] == "INFO"
+    assert owner["message"] == "skipped: missing stage_4"
+    assert payload["worst_severity"] != "ERROR"
+
+
 def test_run_doctor_owner_gate_skips_when_the_run_produced_nothing(tmp_path):
     """...but a uid with no scorable output at all is a wrong uid, not an
     undeliverable run: quality_score_service returns no score rather than a RED
