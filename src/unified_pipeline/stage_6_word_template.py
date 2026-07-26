@@ -1958,7 +1958,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         return len(lines)
 
     def _insert_bulleted_entry(self, insert_idx: int, text: str, entry: Dict = None,
-                                add_blank_before: bool = False) -> Optional[Paragraph]:
+                                add_blank_before: bool = False,
+                                list_level: int = None) -> Optional[Paragraph]:
         """Insert a SINGLE bulleted entry paragraph with a bullet character prefix.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
@@ -1968,6 +1969,10 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             text: The text content for the entry (should be single line)
             entry: Optional entry dict for adding comments
             add_blank_before: If True, add a blank line before this entry
+            list_level: When given, emit a real Word list paragraph at this
+                ilvl via _apply_list_bullet instead of prefixing a literal "• "
+                glyph (#474). Left at None by the three non-K call sites, whose
+                1,765 corpus-wide glyphs are #483.
 
         Returns:
             The created paragraph, or None if insertion failed
@@ -1983,10 +1988,15 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Insert blank before entry_para (which pushes entry down, so blank is above entry)
             entry_para.insert_paragraph_before("")
 
-        # Use a simple bullet character prefix for reliable rendering
-        # This avoids Word numbering system issues across different templates
-        run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
+        body = _clean_inline_tabs(_strip_taxonomy_code(text))
+        # Without list_level, a simple bullet character prefix: it avoids Word
+        # numbering system issues across different templates, at the cost of not
+        # being a list item to Word's outline, to accessibility tooling, or to
+        # anything re-parsing the output.
+        run = entry_para.add_run(body if list_level is not None else f"• {body}")
         self._set_font(run)
+        if list_level is not None:
+            self._apply_list_bullet(entry_para, level=list_level)
 
         if entry:
             self._add_entry_comments(entry_para, entry)
@@ -5691,14 +5701,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     add_blank = is_first_visible and (j == len(original_lines) - 1)
                     self._insert_bulleted_entry(
                         insert_idx, line_text, entry if j == 0 else None,
-                        add_blank_before=add_blank
+                        add_blank_before=add_blank, list_level=0
                     )
             else:
                 # Single item: use formatted_text
                 new_text = self._strip_markdown_for_word(formatted_text, preserve_newlines=True)
                 self._insert_bulleted_entry(
                     insert_idx, new_text, entry,
-                    add_blank_before=is_first_visible
+                    add_blank_before=is_first_visible, list_level=0
                 )
 
         elif formatted_text:
@@ -5707,7 +5717,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             combined_text = '. '.join(lines) if len(lines) > 1 else (lines[0] if lines else '')
             self._insert_bulleted_entry(
                 insert_idx, combined_text, entry,
-                add_blank_before=is_first_visible
+                add_blank_before=is_first_visible, list_level=0
             )
 
         else:
@@ -5728,14 +5738,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     text += f", {institution}"
                 if role and role not in text:
                     text += f" ({role})"
-                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible)
+                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible, list_level=0)
             elif course_title:
                 text = course_title
                 if institution and institution not in text:
                     text += f", {institution}"
                 if role and role not in text:
                     text += f" ({role})"
-                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible)
+                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible, list_level=0)
             else:
                 lines = []
                 for line in original_text.split('\n'):
@@ -5751,7 +5761,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     if not line_text:
                         continue
                     add_blank = is_first_visible and (j == len(lines) - 1)
-                    self._insert_bulleted_entry(insert_idx, line_text, entry if j == 0 else None, add_blank_before=add_blank)
+                    self._insert_bulleted_entry(insert_idx, line_text, entry if j == 0 else None, add_blank_before=add_blank, list_level=0)
 
     def _fill_service(self, entries_by_code: Dict[str, List[Dict]]):
         """Fill Q. EXTRAMURAL PROFESSIONAL RESPONSIBILITIES sections using tables.
