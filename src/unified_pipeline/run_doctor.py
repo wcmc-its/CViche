@@ -45,6 +45,10 @@ Lints, ranked by the severity of the failure class they catch:
                           blobs in the name cell, empty date column with a
                           year in the name, state-abbrev organizations,
                           organization duplicated inside the name (#229)
+14. duplicate_passages    stretches of 3+ CONSECUTIVE rendered blocks that
+                          appear twice in the output document — one record
+                          reaching the faculty-facing docx more than once
+                          (#439: C0ZGFW rendered whole teaching records twice)
 
 Lints 14-15 are the quality-score HARD-FAIL gates and sit outside that
 ranking: they are the only ERROR-by-construction lints, because each one on
@@ -1018,6 +1022,123 @@ def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
 
 # ------------------------------------------------------------------- lint 14
 
+# A duplicated RECORD repeats its whole neighbourhood; a legitimately repeated
+# FIELD does not. C0ZGFW renders each teaching record as several per-field
+# bullets, and its owner taught the same course at nine venues (#439).
+#
+# Requiring consecutive blocks is NOT what separates those two cases -- it was
+# measured and it does not: the nine venues themselves produce five repeated
+# runs of 3-4 consecutive blocks, and run length alone reports 21 passages on
+# C0ZGFW's original output, only 4 of which are real. The YEAR requirement in
+# lint_duplicate_passages is what does the discrimination (21 -> 4). Run length
+# supplies the second half: a repeated single field is not a record.
+#
+# Two blocks is the threshold because it is the smallest that costs nothing.
+# Measured over 123 rendered corpus outputs (four batch runs, 2026-07-25
+# 21:38 EDT) the longest YEAR-CARRYING repeated run is 2 blocks on exactly one
+# CV -- web119, where the same abstract is listed at two adjacent numbers and
+# again two later, read by hand and genuinely duplicated. 108 of the 123 have
+# no year-carrying repeated run at all and 14 top out at 1, so 2 fires on that
+# one true positive and nothing else; 3 would discard it for no measured gain.
+#
+# The count is absolute, not a ratio, so losing unrelated content cannot
+# improve it. The corpus cannot demonstrate that (its counts are already 0, so
+# deleting from it is 0 -> 0); C0ZGFW's original output can, and does: deleting
+# 20% of its blocks drawn from OUTSIDE the reported passages, 10 seeds, left
+# the count at exactly 4 every time.
+DUPLICATE_PASSAGE_MIN_BLOCKS = 2
+DUPLICATE_PASSAGE_WARN_COUNT = 1
+
+# Stage 5c/5d renumber lists between runs, so the enumerator cannot be part of
+# the comparison; everything but letters and digits is folded because stage 6
+# varies its own field separator ('acquisition — Morehead' vs 'acquisition:
+# Morehead' are the same record twice on C0ZGFW).
+_PASSAGE_ENUMERATOR_RE = re.compile(r"^\s*(?:\(?\d{1,3}[.)]|[•·▪◦*]|[-–—](?=\s))\s*")
+_PASSAGE_PUNCT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _passage_key(text) -> str:
+    """Comparison key for one block: leading enumerator dropped from every
+    line, punctuation folded, whitespace collapsed, casefolded. Empty for a
+    blank spacer paragraph, which is then dropped from the sequence entirely --
+    a spacer can neither match another spacer nor break a run."""
+    lines = [_PASSAGE_ENUMERATOR_RE.sub("", line)
+             for line in str(text or "").split("\n")]
+    return " ".join(_PASSAGE_PUNCT_RE.sub(" ", _norm("\n".join(lines))).split())
+
+
+def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
+    """Stretches of DUPLICATE_PASSAGE_MIN_BLOCKS+ consecutive rendered blocks
+    that appear twice in the output document — one source record reaching the
+    faculty-facing docx more than once (#439).
+
+    A counted passage must carry a year, and that requirement -- not the run
+    length -- is what makes this precise. A CV record is individuated by its
+    date, so a run repeated with the SAME date is the same record twice, while
+    the same activity described identically on different occasions differs in
+    exactly the date block. On C0ZGFW's original output the rule keeps 4
+    passages of 29 -- all four read by hand and genuinely duplicated records --
+    and on the post-#418/#420 rerun it keeps 0 of 16.
+
+    Known blind spots, measured over 125 rendered corpus outputs rather than
+    assumed: a record occupying ONE block cannot be seen (a duplicated citation
+    is the common shape -- 10 of those 125 carry one, which is why this lint
+    fires on 1 of them); a duplicated row inside a table is unreachable because
+    read_docx_blocks collapses a whole table into a single block; and a record
+    rendered once as a bullet and once as a table row shares no text to match.
+    """
+    keyed = [(i, _passage_key(text)) for i, (_kind, text) in enumerate(blocks)]
+    keyed = [(i, key) for i, key in keyed if key]
+    keys = [key for _i, key in keyed]
+    span = DUPLICATE_PASSAGE_MIN_BLOCKS
+    n = len(keys)
+    if n < 2 * span:
+        return []
+
+    # Only a distance at which some span-block window already repeats can carry
+    # a repeated passage. Taking CONSECUTIVE pairs of each window's positions
+    # keeps that set small even when one window repeats many times (measured
+    # max 17 distances over 123 documents; 121 of them have none at all).
+    windows: Dict[Tuple[str, ...], List[int]] = {}
+    for i in range(n - span + 1):
+        windows.setdefault(tuple(keys[i:i + span]), []).append(i)
+    distances = {b - a for positions in windows.values() if len(positions) > 1
+                 for a, b in zip(positions, positions[1:])}
+
+    passages: List[Tuple[int, int, int]] = []
+    for distance in sorted(distances):
+        i = 0
+        while i < n - distance:
+            if keys[i] != keys[i + distance]:
+                i += 1
+                continue
+            # Extend to the MAXIMAL matching stretch, so a 5-block duplicate is
+            # one finding and not the three overlapping 3-block windows in it.
+            j = i
+            while j + 1 < n - distance and keys[j + 1] == keys[j + 1 + distance]:
+                j += 1
+            if (j - i + 1 >= span
+                    and any(_YEAR_RE.search(keys[t]) for t in range(i, j + 1))):
+                passages.append((i, i + distance, j - i + 1))
+            i = j + 1
+    if len(passages) < DUPLICATE_PASSAGE_WARN_COUNT:
+        return []
+
+    evidence = []
+    # Document order, not scan-distance order: the block numbers in a report a
+    # human reads should ascend, and the [:5] cap should keep the first five.
+    for first, second, length in sorted(passages)[:5]:
+        evidence.append(
+            f"blocks {keyed[first][0]}-{keyed[first + length - 1][0]} repeat "
+            f"at {keyed[second][0]}-{keyed[second + length - 1][0]}: "
+            f"{str(blocks[keyed[first][0]][1])[:100]}")
+    return [_finding(
+        "duplicate_passages", "WARN",
+        f"{len(passages)} passage(s) of >={span} consecutive rendered blocks "
+        f"appear twice — one record reached the output document more than once",
+        evidence)]
+
+
 _OWNER_GATE = "HARD-FAIL gate 'CV owner name / contact populated'"
 _OWNER_CAP = "the quality score is capped at 25 (RED, do not deliver)"
 
@@ -1268,6 +1389,8 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
         findings.extend(lint_pipe_leaks(blocks))
     if ready("table_shape", stage_6_docx=table_rows):
         findings.extend(lint_table_shape(table_rows))
+    if ready("duplicate_passages", stage_6_docx=blocks):
+        findings.extend(lint_duplicate_passages(blocks))
     # score_cv_owner caps at 25 for an ABSENT *_fields.json as well as an empty
     # cv_owner name, so this lint breaks the house "missing artifact -> skip"
     # convention: skipping the absent case would report the more broken run
