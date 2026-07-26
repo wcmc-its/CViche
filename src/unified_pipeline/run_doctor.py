@@ -45,6 +45,10 @@ Lints, ranked by the severity of the failure class they catch:
                           blobs in the name cell, empty date column with a
                           year in the name, state-abbrev organizations,
                           organization duplicated inside the name (#229)
+14. duplicate_passages    stretches of 3+ CONSECUTIVE rendered blocks that
+                          appear twice in the output document — one record
+                          reaching the faculty-facing docx more than once
+                          (#439: C0ZGFW rendered whole teaching records twice)
 
 Usage:
 
@@ -993,6 +997,105 @@ def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
     return findings
 
 
+# ------------------------------------------------------------------- lint 14
+
+# A duplicated RECORD repeats its whole neighbourhood; a legitimately repeated
+# FIELD does not. C0ZGFW renders each teaching record as several per-field
+# bullets, and its owner taught the same course at nine venues -- so the course
+# title alone repeats 9 times faithfully, while a record the pipeline emitted
+# twice repeats several CONSECUTIVE blocks. Counting consecutive runs rather
+# than individual blocks is what separates the two (#439).
+#
+# Measured over 121 rendered corpus outputs (four batch runs, 2026-07-25
+# 21:23 EDT) the LONGEST repeated run of consecutive blocks is 2 blocks,
+# reached by 2 CVs; the other 119 top out at 1. Three is therefore one block
+# above the whole measured corpus, which fires on none of it, while C0ZGFW's
+# original output has 4 passages. The count is absolute, not a ratio, so
+# losing unrelated content cannot improve it: deleting 20% of the blocks of
+# each of those 121 outputs, 10 seeds each, moved no document's count at all.
+DUPLICATE_PASSAGE_MIN_BLOCKS = 3
+DUPLICATE_PASSAGE_WARN_COUNT = 1
+
+# Stage 5c/5d renumber lists between runs, so the enumerator cannot be part of
+# the comparison; everything but letters and digits is folded because stage 6
+# varies its own field separator ('acquisition — Morehead' vs 'acquisition:
+# Morehead' are the same record twice on C0ZGFW).
+_PASSAGE_ENUMERATOR_RE = re.compile(r"^\s*(?:\(?\d{1,3}[.)]|[•·▪◦*]|[-–—](?=\s))\s*")
+_PASSAGE_PUNCT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _passage_key(text) -> str:
+    """Comparison key for one block: leading enumerator dropped from every
+    line, punctuation folded, whitespace collapsed, casefolded. Empty when the
+    block carries no text (blank spacer paragraphs must not join two runs)."""
+    lines = [_PASSAGE_ENUMERATOR_RE.sub("", line)
+             for line in str(text or "").split("\n")]
+    return " ".join(_PASSAGE_PUNCT_RE.sub(" ", _norm("\n".join(lines))).split())
+
+
+def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
+    """Stretches of DUPLICATE_PASSAGE_MIN_BLOCKS+ consecutive rendered blocks
+    that appear twice in the output document — one source record reaching the
+    faculty-facing docx more than once (#439).
+
+    A counted passage must carry a year. A CV record is individuated by its
+    date, so a run repeated with the SAME date is the same record twice, while
+    the same activity described identically on different occasions differs in
+    exactly the date block. On C0ZGFW's original output that rule keeps 4
+    passages -- all four read by hand and genuinely duplicated records -- and
+    drops 17, every one of which was read by hand too and has a DIFFERENT date
+    in the first dated block after each copy.
+    """
+    keyed = [(i, _passage_key(text)) for i, (_kind, text) in enumerate(blocks)]
+    keyed = [(i, key) for i, key in keyed if key]
+    keys = [key for _i, key in keyed]
+    span = DUPLICATE_PASSAGE_MIN_BLOCKS
+    n = len(keys)
+    if n < 2 * span:
+        return []
+
+    # Only a distance at which some span-block window already repeats can carry
+    # a repeated passage. Taking CONSECUTIVE pairs of each window's positions
+    # keeps that set small even when one window repeats many times (measured
+    # max 17 distances over 123 documents; 121 of them have none at all).
+    windows: Dict[Tuple[str, ...], List[int]] = {}
+    for i in range(n - span + 1):
+        windows.setdefault(tuple(keys[i:i + span]), []).append(i)
+    distances = {b - a for positions in windows.values() if len(positions) > 1
+                 for a, b in zip(positions, positions[1:])}
+
+    passages: List[Tuple[int, int, int]] = []
+    for distance in sorted(distances):
+        i = 0
+        while i < n - distance:
+            if keys[i] != keys[i + distance]:
+                i += 1
+                continue
+            # Extend to the MAXIMAL matching stretch, so a 5-block duplicate is
+            # one finding and not the three overlapping 3-block windows in it.
+            j = i
+            while j + 1 < n - distance and keys[j + 1] == keys[j + 1 + distance]:
+                j += 1
+            if (j - i + 1 >= span
+                    and any(_YEAR_RE.search(keys[t]) for t in range(i, j + 1))):
+                passages.append((i, i + distance, j - i + 1))
+            i = j + 1
+    if len(passages) < DUPLICATE_PASSAGE_WARN_COUNT:
+        return []
+
+    evidence = []
+    for first, second, length in passages[:5]:
+        evidence.append(
+            f"blocks {keyed[first][0]}-{keyed[first + length - 1][0]} repeat "
+            f"at {keyed[second][0]}-{keyed[second + length - 1][0]}: "
+            f"{blocks[keyed[first][0]][1][:100]}")
+    return [_finding(
+        "duplicate_passages", "WARN",
+        f"{len(passages)} passage(s) of >={span} consecutive rendered blocks "
+        f"appear twice — one record reached the output document more than once",
+        evidence)]
+
+
 # --------------------------------------------------------- artifact resolution
 
 _ARTIFACTS = {
@@ -1166,6 +1269,8 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
         findings.extend(lint_pipe_leaks(blocks))
     if ready("table_shape", stage_6_docx=table_rows):
         findings.extend(lint_table_shape(table_rows))
+    if ready("duplicate_passages", stage_6_docx=blocks):
+        findings.extend(lint_duplicate_passages(blocks))
 
     counts = {severity: 0 for severity in SEVERITY_ORDER}
     for f in findings:

@@ -28,6 +28,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_classified_unrendered,
     lint_dead_sections,
     lint_dedup_drops,
+    lint_duplicate_passages,
     lint_enrichment_failures,
     lint_missed_headers,
     lint_output_hygiene,
@@ -727,6 +728,84 @@ def test_table_shape_ignores_non_honors_tables_and_clean_rows():
     assert lint_table_shape(tables) == []
 
 
+# ----------------------------------------------- lint 14: duplicate passages
+
+_NY_RECORD = [
+    ("p", "• New York Point-of-Care Ultrasound Course"),
+    ("p", "• 2 day introductory POCUS workshop"),
+    ("p", "• Lecture: Cardiac Image Review"),
+    ("p", "• POCUS for vascular access and lumbar puncture"),
+    ("p", "• Instructor: image acquisition: New York University — 10/23/2024"),
+]
+
+
+def test_duplicate_passages_flags_a_repeated_block_run():
+    """A record emitted twice repeats several CONSECUTIVE blocks (C0ZGFW
+    blocks 361-365 == 486-490). The 5-block duplicate counts ONCE, not once
+    per overlapping 3-block window inside it."""
+    blocks = ([("p", "K. EDUCATIONAL CONTRIBUTIONS")] + _NY_RECORD
+              + [("p", "• Grand Rounds, Weill Cornell Medicine — 3/4/2019")]
+              + _NY_RECORD)
+    findings = lint_duplicate_passages(blocks)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["lint"] == "duplicate_passages" and f["severity"] == "WARN"
+    assert "1 passage(s)" in f["message"]
+    assert f["evidence"][0].startswith("blocks 1-5 repeat at 7-11")
+
+    # three occurrences are two redundant copies, so the count is 2 -- nested
+    # and overlapping matches are never charged twice.
+    thrice = lint_duplicate_passages(
+        blocks + [("p", "• Journal Club, 2001")] + _NY_RECORD)
+    assert "2 passage(s)" in thrice[0]["message"]
+
+
+def test_duplicate_passages_quiet_when_only_the_adjacent_date_differs():
+    """The mode both earlier attempts fired on: one course taught at nine
+    venues renders nine records whose first three bullets are IDENTICAL and
+    whose distinguishing date sits in the ADJACENT block. Nine copies of a
+    three-block run, zero duplicated records."""
+    venues = [("Denver, Colorado", "6/14/2019"), ("Philadelphia, PA", "4/9/2019"),
+              ("Baltimore, MD", "3/23/2019"), ("New Orleans, LA", "4/19/2018"),
+              ("Orlando, FL", "4/5/2018"), ("Chicago, IL", "11/7/2019"),
+              ("San Diego, CA", "4/11/2017"), ("Austin, TX", "1/18/2016"),
+              ("Seattle, WA", "10/5/2015")]
+    blocks = [("p", "K. EDUCATIONAL CONTRIBUTIONS")]
+    for city, date in venues:
+        blocks += [("p", "• ACP National Annual Meeting"),
+                   ("p", "• Pre-Course on Point-of-Care Ultrasound"),
+                   ("p", "• 2-day CME POCUS workshop"),
+                   ("p", f"• Instructor – hands on teaching: {city} — {date}")]
+    assert lint_duplicate_passages(blocks) == []
+
+    # and round 1's mode: a single block repeated verbatim WITH its year, its
+    # neighbours different on both sides, is a repeated FIELD not a record.
+    blocks += [("p", "• Accredited by the ACCME, 2019"),
+               ("p", "• SHM National Annual Meeting"),
+               ("p", "• Accredited by the ACCME, 2019"),
+               ("p", "• Kidney Week")]
+    assert lint_duplicate_passages(blocks) == []
+
+
+def test_duplicate_passages_see_through_renumbering_and_separator_drift():
+    """5c/5d renumber lists and stage 6 varies its own field separator, so the
+    second copy of a duplicated record is rarely byte-identical — C0ZGFW
+    blocks 282-284 == 643-645 differ only in ' — ' vs ': '."""
+    record = ["Global Ultrasound Institute POCUS Workshop",
+              "2-day introductory POCUS course for Family Practice residents"]
+    blocks = ([("p", f"{n}. {line}") for n, line in enumerate(record, start=9)]
+              + [("p", "11. Instructor – image acquisition — Morehead, "
+                       "Kentucky — 12/7/2022")]
+              + [("p", "• Tutor Group, Weill Cornell Medicine, NY — 2018")]
+              + [("p", f"{n}. {line}") for n, line in enumerate(record, start=21)]
+              + [("p", "23. Instructor – image acquisition: Morehead, "
+                       "Kentucky — 12/7/2022")])
+    findings = lint_duplicate_passages(blocks)
+    assert len(findings) == 1
+    assert "1 passage(s)" in findings[0]["message"]
+    assert findings[0]["evidence"][0].startswith("blocks 0-2 repeat at 4-6")
+
+
 def test_read_docx_table_rows_keeps_empty_cells(tmp_path):
     doc = Document()
     table = doc.add_table(rows=2, cols=3)
@@ -827,7 +906,7 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    assert len(payload["findings"]) == 13
+    assert len(payload["findings"]) == 14
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
     assert payload["counts"]["ERROR"] == 0
