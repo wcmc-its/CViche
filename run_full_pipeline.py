@@ -93,6 +93,38 @@ def get_stage_order():
     return ['1a', '1b', '2', '3a', '3b', '3', '4', '4.5', '5', '5b', '5c', '5d', '6']
 
 
+def failed_stages(all_results):
+    """Return the names of stages that did not produce what they were asked to.
+
+    Every stage wrapper below records its exception as
+    ``all_results['stage_X'] = {'error': ...}`` and carries on. Nothing ever
+    read that key back: a stage-6 crash printed a warning, then printed
+    PIPELINE COMPLETE and exited 0 with no document on disk (#443). Batch
+    tooling that filters on the exit column -- which is what any reasonable
+    consumer does -- counted two zero-output runs of 96 as successes.
+
+    Counted as failed:
+
+    - a stage that stored an ``error``
+    - a stage that was reached but skipped for a missing prerequisite, which
+      only happens downstream of an earlier failure
+    - stage 6 with no ``output_file``, because stage 6 is the deliverable: if it
+      produced no document the run produced nothing, whatever else succeeded
+
+    A stage absent from ``all_results`` never ran (``--stage`` targeted a
+    different one) and is not a failure.
+    """
+    failed = []
+    for name, result in all_results.items():
+        if not isinstance(result, dict):
+            continue
+        if 'error' in result or 'skipped' in result:
+            failed.append(name)
+        elif name == 'stage_6' and not result.get('output_file'):
+            failed.append(name)
+    return failed
+
+
 def format_duration(seconds: float) -> str:
     """Format duration in seconds to human-readable string."""
     if seconds < 60:
@@ -981,12 +1013,22 @@ def main():
     # ========== SUMMARY ==========
     total_duration = time.time() - pipeline_start_time
 
+    failed = failed_stages(all_results)
+
     print("=" * 80)
-    print("PIPELINE COMPLETE")
+    print("PIPELINE COMPLETE WITH ERRORS" if failed else "PIPELINE COMPLETE")
     print("=" * 80)
     print(f"Document: {document_uid}")
     print(f"Model: {model}")
     print()
+    if failed:
+        print("Failed stages:")
+        for name in failed:
+            result = all_results.get(name) or {}
+            reason = (result.get('error') or result.get('skipped')
+                      or 'produced no output document')
+            print(f"  {name}: {reason}")
+        print()
     print("Outputs:")
     if stage1a_result:
         print(f"  Stage 1a: {stage1a_result['output_file']}")
@@ -1079,6 +1121,11 @@ def main():
                 print(f"  {code}: {count}")
     print()
 
+    # Continue-on-error is kept deliberately -- the partial stage artifacts are
+    # worth having for diagnosis. What changes is that the run stops claiming
+    # success it did not have.
+    return 1 if failed else 0
+
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main())
