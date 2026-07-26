@@ -770,23 +770,51 @@ _OWNER_EMPTY = {"first_name": "", "middle_name": "", "last_name": "web139",
 
 
 def test_owner_contact_missing_errors_and_names_the_gate():
-    findings = lint_owner_contact_missing({"cv_owner": _OWNER_EMPTY})
+    findings = lint_owner_contact_missing({"cv_owner": _OWNER_EMPTY}, "web139")
     assert len(findings) == 1
     finding = findings[0]
     assert finding["lint"] == "owner_contact_missing"
     assert finding["severity"] == "ERROR"
     assert "CV owner name / contact populated" in finding["message"]
     assert "25" in finding["message"]
-    assert any("full_name=''" in line for line in finding["evidence"])
+    assert finding["evidence"][0] == "cv_owner name fields populated: last_name"
+    assert "last_name is the document uid" in finding["evidence"][1]
+
+
+def test_owner_contact_missing_evidence_never_prints_a_name():
+    """A partly-extracted owner trips the gate (the LLM found a surname but no
+    given name and no full_name), and the report is mirrored to S3 and served
+    by the admin viewer — so the evidence names fields, never values."""
+    findings = lint_owner_contact_missing(
+        {"cv_owner": {"first_name": "", "last_name": "Shapiro",
+                      "full_name": ""}}, "89TEST")
+    assert len(findings) == 1
+    blob = " ".join([findings[0]["message"], *findings[0]["evidence"]])
+    assert "Shapiro" not in blob
+    assert "cv_owner name fields populated: last_name" in blob
+
+
+def test_owner_contact_missing_errors_when_the_artifact_is_absent_or_broken():
+    """score_cv_owner caps at 25 for an absent *_fields.json too, so the lint
+    must not go quiet there — a run with no stage-4 output is the most
+    undeliverable run there is (#437)."""
+    absent = lint_owner_contact_missing(None, "89TEST")
+    assert [f["severity"] for f in absent] == ["ERROR"]
+    assert "no stage-4 *_fields.json" in absent[0]["message"]
+    assert "25" in absent[0]["message"]
+
+    broken = lint_owner_contact_missing(None, "89TEST", "JSONDecodeError: x")
+    assert [f["severity"] for f in broken] == ["ERROR"]
+    assert "will not parse (JSONDecodeError: x)" in broken[0]["message"]
 
 
 def test_owner_contact_missing_quiet_on_a_populated_owner():
     # either a full_name, or first AND last, is enough
     assert lint_owner_contact_missing(
-        {"cv_owner": {"full_name": "Miriam Shapiro"}}) == []
+        {"cv_owner": {"full_name": "Miriam Shapiro"}}, "89TEST") == []
     assert lint_owner_contact_missing(
         {"cv_owner": {"first_name": "Miriam", "last_name": "Shapiro",
-                      "full_name": ""}}) == []
+                      "full_name": ""}}, "89TEST") == []
 
 
 @pytest.mark.parametrize("cv_owner", [
@@ -797,14 +825,20 @@ def test_owner_contact_missing_quiet_on_a_populated_owner():
     {"full_name": "Miriam Shapiro"},
     {"first_name": "Miriam", "last_name": "Shapiro"},
 ])
-def test_owner_lint_fires_exactly_when_the_scorer_caps_at_25(tmp_path, cv_owner):
-    """The lint and quality_score.score_cv_owner must agree run for run — that
-    is the whole point of sharing the predicate (#437). Scored through the
-    scorer's own flat-dir loader so a divergence in either loader shows up."""
+def test_owner_lint_and_scorer_read_the_same_stage4_artifact(tmp_path, cv_owner):
+    """LOADER drift guard, and nothing more. Both sides call the same predicate
+    (quality_score.cv_owner_name_missing), so this cannot tell you the predicate
+    is RIGHT — it stays green if the predicate is replaced with `lambda d: True`
+    or `lambda d: False`. What it does pin is that the doctor's stage-4 artifact
+    and the scorer's flat-dir `*_fields.json` resolve to the same document, so a
+    change to either loader shows up as a disagreement. The evidence that the
+    predicate is calibrated is in the issue: on the live corpus, exactly the CVs
+    it flags are the ones whose rendered deliverable carries the uid in the
+    owner-name field."""
     (tmp_path / "run_fields.json").write_text(
         json.dumps({"cv_owner": cv_owner, "entries": []}))
     _fraction, _detail, cap = score_cv_owner(tmp_path)
-    fired = bool(lint_owner_contact_missing({"cv_owner": cv_owner}))
+    fired = bool(lint_owner_contact_missing({"cv_owner": cv_owner}, "web139"))
     assert fired == (cap == 25), f"{cv_owner!r}: lint={fired} cap={cap}"
 
 
@@ -825,7 +859,7 @@ def test_pipeline_errors_errors_on_a_fatal_pattern():
 def test_pipeline_errors_quiet_on_benign_and_absent_error_fields():
     # A recorded-but-recoverable failure (a PubMed lookup that 429'd) is a
     # stage-5 WARN via enrichment_failures, not a do-not-deliver hard fail.
-    assert lint_pipeline_errors({"stage_5_enrichment": {"entries": [
+    assert lint_pipeline_errors({"stage_2": {"entries": [
         {"error": "HTTP 429 rate limited", "enrichment_status": "lookup_failed"}]}}) == []
     assert lint_pipeline_errors({"stage_4": {"entries": [{"error": None}]}}) == []
     assert lint_pipeline_errors({}) == []
@@ -1007,18 +1041,87 @@ def test_run_doctor_hard_fail_gate_makes_an_undeliverable_run_an_error(tmp_path)
     assert "cv_owner" in errors[0]["message"]
 
 
-def test_run_doctor_hard_fail_gates_skip_rather_than_fire_when_artifacts_absent(tmp_path):
-    """A run with no artifacts must not be called undeliverable: an absent
-    cv_owner block is not the same evidence as an empty one."""
+def test_run_doctor_owner_gate_errors_when_only_stage4_is_absent(tmp_path):
+    """The cap-25 gate has TWO trip conditions — an empty cv_owner name AND a
+    missing *_fields.json (quality_score.score_cv_owner: "no fields.json
+    found"). A run that rendered a document but lost its fields.json scores
+    25/RED, so the doctor must ERROR rather than take the quiet skip path."""
+    root = _build_clean_run(tmp_path)
+    (root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json").unlink()
+    payload = run_doctor(root, _UID)
+    owner = next(f for f in payload["findings"]
+                 if f["lint"] == "owner_contact_missing")
+    assert owner["severity"] == "ERROR"
+    assert "no stage-4 *_fields.json" in owner["message"]
+    assert "25" in owner["message"]
+    assert payload["worst_severity"] == "ERROR"
+
+
+def test_run_doctor_owner_gate_skips_when_the_run_produced_nothing(tmp_path):
+    """...but a uid with no scorable output at all is a wrong uid, not an
+    undeliverable run: quality_score_service returns no score rather than a RED
+    one when none of _NEEDED_SUFFIXES landed, so there is no gate to report."""
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
     gates = {f["lint"]: f for f in payload["findings"]
              if f["lint"] in ("owner_contact_missing", "pipeline_errors_present")}
     assert set(gates) == {"owner_contact_missing", "pipeline_errors_present"}
+    assert gates["owner_contact_missing"]["severity"] == "INFO"
     assert gates["owner_contact_missing"]["message"] == "skipped: missing stage_4"
-    assert gates["pipeline_errors_present"]["message"] == "skipped: missing artifacts"
-    assert all(f["severity"] == "INFO" for f in gates.values())
+    assert gates["pipeline_errors_present"]["severity"] == "INFO"
+    assert gates["pipeline_errors_present"]["message"] == \
+        "skipped: missing stage_2, stage_3b, stage_4"
+
+
+def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):
+    """_ready's contract: a None input is an ERROR "unreadable" when the file
+    existed but would not parse, never the benign "missing". The error scan
+    passes real loader labels so that distinction survives (#437)."""
+    root = tmp_path / "corrupt"
+    for stage_dir, name in (("stage_2_entry_extraction", "NOPE_entries.json"),
+                            ("stage_3b_classified_entries", "NOPE_classified.json"),
+                            ("stage_4_field_extraction", "NOPE_fields.json")):
+        (root / stage_dir).mkdir(parents=True)
+        (root / stage_dir / name).write_text("{not json")
+    payload = run_doctor(root, "NOPE")
+    gate = next(f for f in payload["findings"]
+                if f["lint"] == "pipeline_errors_present")
+    assert gate["severity"] == "ERROR"
+    assert gate["message"].startswith("skipped: unreadable ")
+    assert "missing" not in gate["message"]
+    for label in ("stage_2", "stage_3b", "stage_4"):
+        assert label in gate["message"]
+    owner = next(f for f in payload["findings"]
+                 if f["lint"] == "owner_contact_missing")
+    assert owner["severity"] == "ERROR"
+    assert "will not parse" in owner["message"]
+
+
+def test_run_doctor_error_scan_covers_only_what_the_deployed_scorer_reads(tmp_path):
+    """quality_score_service copies *_entries/_classified/_fields.json into the
+    dir it globs, so a fatal in stage_5 does NOT cap the deployed score — and
+    the lint says "capped at 40". Scan the scorer's set, keep the claim true."""
+    root = _build_clean_run(tmp_path)
+    fatal = "NameError: name 'response' is not defined"
+
+    enriched = root / "stage_5_enrichment" / f"{_UID}_cv_enriched.json"
+    data = json.loads(enriched.read_text())
+    data["error"] = fatal
+    enriched.write_text(json.dumps(data))
+    payload = run_doctor(root, _UID)
+    assert not [f for f in payload["findings"]
+                if f["lint"] == "pipeline_errors_present"]
+
+    classified = root / "stage_3b_classified_entries" / f"{_UID}_cv_classified.json"
+    data = json.loads(classified.read_text())
+    data["error"] = fatal
+    classified.write_text(json.dumps(data))
+    payload = run_doctor(root, _UID)
+    fired = [f for f in payload["findings"]
+             if f["lint"] == "pipeline_errors_present"]
+    assert [f["severity"] for f in fired] == ["ERROR"]
+    assert "40" in fired[0]["message"]
 
 
 def test_run_doctor_accepts_source_override(tmp_path):
@@ -1064,7 +1167,7 @@ def test_main_exits_0_on_clean_run(tmp_path):
 
 def test_main_truncates_oversized_report_and_flags_it(tmp_path, monkeypatch):
     # Shrink the caps so a normal report trips them: the missing-artifacts run
-    # yields 15 INFO findings.
+    # yields 15 findings (14 INFO skips + the owner gate's ERROR).
     monkeypatch.setattr("unified_pipeline.run_doctor.MAX_REPORT_BYTES", 10)
     monkeypatch.setattr("unified_pipeline.run_doctor.MAX_REPORT_FINDINGS", 5)
     root = tmp_path / "empty"
