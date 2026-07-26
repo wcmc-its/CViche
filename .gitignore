@@ -42,6 +42,12 @@ data/sample_cvs/*
 data/sample_cvs/word/*
 !data/sample_cvs/word/sample_vasquez_cv.docx
 web_interface/uploads/
+# Reproducing a run means dropping a real CV at the repo root, which none of the
+# path-scoped rules above cover. Root level only, so tracked docx elsewhere stay.
+/*.docx
+
+# Local compose override — interpolates host AWS creds, must never be committed.
+web_interface/docker-compose.override.yml
 
 # Templates
 key_files/
