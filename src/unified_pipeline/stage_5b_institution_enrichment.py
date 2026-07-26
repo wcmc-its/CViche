@@ -341,12 +341,15 @@ def lookup_institutions_llm(
         if verbose:
             print(f"    LLM resolved {len(results)} institutions (cost: ${cost:.4f})")
 
-        return results, cost
+        # Third element is what actually served the call: the `model` param
+        # is a default no orchestrator passes, so recording it stamped every
+        # artifact with a model the run never used (#459).
+        return results, cost, llm_result.get("model")
 
     except Exception as e:
         if verbose:
             print(f"    LLM institution lookup error: {e}")
-        return None, 0.0
+        return None, 0.0, None
 
 
 def enrich_entry_with_result(entry: Dict, result: Dict) -> Dict:
@@ -567,6 +570,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
 
     # Batch LLM lookups
     total_cost = 0.0
+    observed_model = None
     llm_calls = 0
 
     if uncached_count > 0:
@@ -588,13 +592,14 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
             # Prepare for LLM call
             llm_batch = [(inst_id, name, ctx) for inst_id, name, ctx, _, _ in batch]
 
-            results, cost = lookup_institutions_llm(
+            results, cost, call_model = lookup_institutions_llm(
                 llm_batch,
                 cv_owner_location,
                 model=model,
                 verbose=verbose
             )
             total_cost += cost
+            observed_model = call_model or observed_model
             llm_calls += 1
 
             # None means the LLM call itself failed — don't cache anything
@@ -657,7 +662,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         'llm_lookups': uncached_count,
         'llm_calls': llm_calls,
         'cost': total_cost,
-        'model': model,
+        'model': observed_model or model,
         'timestamp': datetime.now().isoformat()
     }
 
