@@ -42,7 +42,7 @@ except ImportError:
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
-from unified_pipeline.core.render_check import entry_fragments
+from unified_pipeline.core.render_check import entry_fragments, entry_lines
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
@@ -1942,7 +1942,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         Returns:
             Number of bullets inserted
         """
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        lines = entry_lines(text)
         if not lines:
             return 0
 
@@ -5211,7 +5211,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Check if this entry contains multiple awards (newline-separated)
             # This happens when multiple honors were merged during extraction
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            lines = entry_lines(original_text)
 
             # Separate award lines from year lines
             # Years are typically 4-digit numbers or ranges like "2017-2020"
@@ -5507,7 +5507,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Check if this entry contains multiple memberships (newline-separated)
             # Pattern: "Member\nElected Member | Org1\nOrg2 | date1\ndate2"
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            lines = entry_lines(original_text)
 
             # Detect multi-membership pattern: multiple organization names or membership types
             if len(lines) > 2:
@@ -5680,7 +5680,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         if formatted_text and original_text:
             # Check if original has multiple distinct items (newline-separated list)
-            original_lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            original_lines = entry_lines(original_text)
 
             if len(original_lines) > 1:
                 # Multi-item entry: use original lines (Stage 5c may have over-combined)
@@ -5703,7 +5703,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         elif formatted_text:
             new_text = self._strip_markdown_for_word(formatted_text, preserve_newlines=True)
-            lines = [l.strip() for l in new_text.split('\n') if l.strip()]
+            lines = entry_lines(new_text)
             combined_text = '. '.join(lines) if len(lines) > 1 else (lines[0] if lines else '')
             self._insert_bulleted_entry(
                 insert_idx, combined_text, entry,
@@ -5799,7 +5799,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             org = (fields.get('organization', '') or '').lower()
 
             # Check if this is a multi-line entry with mixed activities
-            lines = [l.strip() for l in text.split('\n') if l.strip()]
+            lines = entry_lines(text)
             if len(lines) > 1:
                 # Split into journal reviewing and board entries
                 journal_lines = []
@@ -6050,7 +6050,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 self._add_extramural_row(table, organization, role, dates)
             else:
                 # No useful extracted fields - try to parse from raw text
-                lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+                lines = entry_lines(original_text)
                 if len(lines) > 3:
                     # Multiple items merged - parse and split them
                     self._parse_extramural_leadership_lines(table, lines)
@@ -6640,7 +6640,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Handle pipe-separated format: "Specialty | CertNum | Year"
         # First, split on newlines and filter empty lines
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        lines = entry_lines(text)
 
         # Skip header lines
         header_keywords = ['name of specialty', 'board certificate', 'date of certification']
@@ -7049,7 +7049,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             dates = format_date_range(start_date, end_date, taxonomy_code) or ''
 
             # Check if this entry contains multiple items (newline-separated)
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            lines = entry_lines(original_text)
 
             # Use multi-line parsing when the text contains 3+ lines — this catches
             # mega-blocks where field extraction only captured one item from many.
@@ -7273,7 +7273,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             activity = re.sub(r'\s*\([^)]*\d{4}[^)]*\)', '', original_text).strip()
 
             # Check if this entry contains multiple items (newline-separated)
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            lines = entry_lines(original_text)
 
             # Use multi-line parsing when the text contains 3+ lines — this catches
             # mega-blocks where field extraction only captured one item from many.
