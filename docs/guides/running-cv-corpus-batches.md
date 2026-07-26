@@ -105,9 +105,27 @@ exist as faculty-database-hosted files. Two steps:
   can run in groups (25 now, 25 later) and safely re-invoke after an interruption.
 - Per CV it writes:
   - `_batch_runs/outputs/<cv>_wcm.docx` — the WCM output document
-  - `_batch_runs/outputs/<cv>_quality.json` — quality score (if the run emits one)
+  - `_batch_runs/outputs/<cv>_quality.json` — the full quality-score breakdown
   - `_batch_runs/logs/<cv>.log` — full stdout/stderr
   - one row in `_batch_runs/summary.tsv`
+  - one row in `_batch_runs/scores.tsv` — score, band, and the worst three penalties
+
+Scoring is deterministic and costs nothing (no LLM calls), so it runs for every CV
+rather than behind a flag. It reads the stage artifacts directly; the local CLI
+pipeline never writes a `quality_score.json` of its own, which is why earlier batches
+captured no scores at all (#435).
+
+Treat a row whose run produced no WCM docx as an **upper bound**: with no docx to
+inspect, both render dimensions award a flat half credit instead of penalising, so a
+run that rendered nothing can out-score one that rendered something genuinely sparse.
+
+To (re)score any local run whose stage artifacts are still on disk, without re-running
+the pipeline:
+
+```bash
+PYTHONPATH=src python3 scripts/score_one.py src/unified_pipeline/outputs <cv> \
+    _batch_runs/outputs/<cv>_wcm.docx
+```
 
 Run the next group later with the same command — already-done CVs are skipped automatically.
 To run a specific model: pass it as the 4th arg (e.g. `gpt-5.1`, or a Bedrock model id).

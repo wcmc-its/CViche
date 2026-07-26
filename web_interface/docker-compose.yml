@@ -12,7 +12,8 @@ services:
       MARIADB_CHARACTER_SET_SERVER: utf8mb4
       MARIADB_COLLATION_SERVER: utf8mb4_unicode_ci
     ports:
-      - "3306:3306"
+      # Host port is overridable: a dev box often already has something on 3306.
+      - "${CVICHE_DB_PORT:-3306}:3306"
     volumes:
       - mariadb_data:/var/lib/mysql
     healthcheck:
@@ -50,8 +51,17 @@ services:
     ports:
       - "8000:8000"
     environment:
-      # Database
-      CVICHE_DATABASE_URL: "mysql+pymysql://root:cviche_dev@db:3306/cviche"
+      # Database. app/database.py resolves these four keys individually via
+      # get_config("db", ...) -- there is no DATABASE_URL code path.
+      DB_HOST: "db"
+      DB_PORT: "3306"
+      DB_USER: "root"
+      # alembic/env.py resolves its own MIGRATE_USER, not DB_USER.
+      MIGRATE_USER: "root"
+      DB_NAME: "cviche"
+      # Presence of DB_PASSWORD selects password auth over RDS IAM auth. Local
+      # dev only: deployed environments leave it unset and keep IAM + TLS.
+      DB_PASSWORD: "cviche_dev"
       # Real-time broker: enables cross-worker events + cancellation. Remove to
       # exercise the in-process (single-worker) fallback path. LOCAL DEV ONLY:
       # unauthenticated plaintext to the compose-local redis. Production uses an
@@ -65,7 +75,7 @@ services:
       # Cookies: no TLS in local dev
       CVICHE_SECURE_COOKIES: "false"
       # CORS: allow frontend dev server and nginx
-      CVICHE_ALLOWED_ORIGINS: "http://localhost:3000,http://localhost:5173,http://localhost:80,http://localhost"
+      CVICHE_ALLOWED_ORIGINS: "http://localhost:3001,http://localhost:3000,http://localhost:5173,http://localhost:80,http://localhost"
       # Storage: local filesystem for dev
       CVICHE_STORAGE_BACKEND: "local"
       # OpenAI API key -- read from host environment
@@ -101,9 +111,12 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      # 3001 is CViche's assigned dev port and matches vite.config.ts.
+      - "${CVICHE_WEB_PORT:-3001}:3001"
     environment:
       NODE_ENV: development
+      # In-container the backend is reachable by service name, not localhost.
+      VITE_API_TARGET: "http://backend:8000"
     volumes:
       # Hot-reload: mount source code (exclude node_modules)
       - ./frontend/src:/app/src:ro
@@ -113,8 +126,8 @@ services:
       - ./frontend/tailwind.config.js:/app/tailwind.config.js:ro
       - ./frontend/postcss.config.js:/app/postcss.config.js:ro
       - ./frontend/tsconfig.json:/app/tsconfig.json:ro
-    # In dev mode, run Vite dev server instead of nginx
-    command: ["npx", "vite", "--host", "0.0.0.0", "--port", "3000"]
+    # In dev mode, run Vite dev server instead of nginx (port comes from vite.config.ts)
+    command: ["npx", "vite", "--host", "0.0.0.0"]
 
 volumes:
   mariadb_data:

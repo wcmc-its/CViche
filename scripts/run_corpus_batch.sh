@@ -12,12 +12,18 @@
 # and each invocation appends a summary line to run_meta.jsonl. This is what lets you
 # tell which code version produced an output and re-run/compare later. Do not drop it.
 #
+# Scoring: every CV is scored from its stage artifacts into <results_dir>/scores.tsv
+# and <results_dir>/outputs/<cv>_quality.json. Deterministic, no LLM cost. Rows whose
+# run produced no WCM docx are an upper bound, not a measurement -- the two render
+# dimensions award flat half credit when there is no docx to inspect (#435).
+#
 # Usage:
 #   scripts/run_corpus_batch.sh [--doctor] <input_dir> [count] [results_dir] [model]
 #
 #   --doctor     also run the deterministic run_doctor over each run's stage artifacts,
 #                writing a row to <results_dir>/doctor.tsv and full findings to
-#                <results_dir>/doctor/<cv>.json (no LLM cost; findings are WARN/INFO lints)
+#                <results_dir>/doctor/<cv>.json (no LLM cost; an ERROR row means
+#                the run tripped a quality-score hard-fail gate -- do not deliver)
 #   input_dir    directory of .docx CVs to run          (required)
 #   count        number of NEW CVs to run this call      (default 25)
 #   results_dir  where outputs/logs/summary are written  (default <input_dir>/_batch_runs)
@@ -51,7 +57,9 @@ OUTDIR="$RESULTS/outputs"; LOGDIR="$RESULTS/logs"; SUMMARY="$RESULTS/summary.tsv
 WCM_SRC="src/unified_pipeline/outputs/stage_6_wcm_documents"
 OUTPUTS_ROOT="src/unified_pipeline/outputs"
 DOCTOR_TSV="$RESULTS/doctor.tsv"; DOCTOR_DIR="$RESULTS/doctor"
+SCORES_TSV="$RESULTS/scores.tsv"
 mkdir -p "$OUTDIR" "$LOGDIR"
+[ -f "$SCORES_TSV" ] || printf 'date\tsha\tcv\tscore\tband\traw_before_caps\ttop_penalties\n' > "$SCORES_TSV"
 if [ "$DOCTOR" = "1" ]; then
   mkdir -p "$DOCTOR_DIR"
   [ -f "$DOCTOR_TSV" ] || printf 'date\tsha\tcv\tworst\tERROR\tWARN\tINFO\ttop_lints\n' > "$DOCTOR_TSV"
@@ -88,7 +96,15 @@ for f in "$INPUT_DIR"/*.docx; do
   [ -f "$wcm" ] || wcm="$(ls "$WCM_SRC"/*"${stem}"*[wW][cC][mM]*.docx 2>/dev/null | head -1)"
   out="—"; kb=""
   if [ -n "$wcm" ] && [ -f "$wcm" ]; then cp "$wcm" "$OUTDIR/${stem}_wcm.docx"; out="${stem}_wcm.docx"; kb=$(( $(wc -c < "$wcm") / 1024 )); fi
-  cp "src/unified_pipeline/outputs/quality_score.json" "$OUTDIR/${stem}_quality.json" 2>/dev/null
+  # Score from the stage artifacts. This used to `cp` a quality_score.json out of
+  # the outputs dir, but nothing in the local CLI pipeline writes that file --
+  # only the web backend does, into storage -- so with stderr suppressed it was a
+  # silent no-op and no batch ever captured a score (#435).
+  sline=$(PYTHONPATH=src python3 scripts/score_one.py "$OUTPUTS_ROOT" "$stem" \
+            "$OUTDIR/${stem}_wcm.docx" "$OUTDIR/${stem}_quality.json" 2>>"$log") \
+    || sline=$'error\t\t\t'
+  printf '%s\t%s\t%s\t%s\n' "$ts" "$SHA" "$stem" "$sline" >> "$SCORES_TSV"
+  echo "   score: $(printf '%s' "$sline" | cut -f1) $(printf '%s' "$sline" | cut -f2)"
 
   sec=$(grep -oE 'Top-level sections: [0-9]+' "$log" | grep -oE '[0-9]+' | tail -1)
   hdr=$(grep -oE 'Total headers: [0-9]+'      "$log" | grep -oE '[0-9]+' | tail -1)

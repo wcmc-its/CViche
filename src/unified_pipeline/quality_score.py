@@ -104,34 +104,56 @@ def _load_docx(outputs_dir: Path):
 
 
 # ---------------------------------------------------------------------------
+# Hard-fail predicates
+#
+# The two gates that cap the final score live here as standalone predicates so
+# run_doctor's owner_contact_missing / pipeline_errors_present lints report on
+# exactly the conditions the scorer caps for, instead of a second definition
+# that drifts (#437). The scorers below are their only other caller.
+# ---------------------------------------------------------------------------
+
+#: Error text that means a stage broke, not that one lookup came back empty.
+FATAL_ERROR_PATTERN = re.compile(
+    r"name '\w+' is not defined"
+    r"|Traceback \(most recent call last\)"
+    r"|NameError:|UnboundLocalError:|KeyError:",
+    re.IGNORECASE,
+)
+
+
+def iter_error_fields(obj, path=""):
+    """(dotted path, value) for every non-null ``error`` field anywhere in obj."""
+    results = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            cur = f"{path}.{k}"
+            if k == "error" and v:
+                results.append((cur, str(v)))
+            results.extend(iter_error_fields(v, cur))
+    elif isinstance(obj, list):
+        for i, item in enumerate(obj):
+            results.extend(iter_error_fields(item, f"{path}[{i}]"))
+    return results
+
+
+def cv_owner_name_missing(fields_data) -> bool:
+    """True when a fields.json ``cv_owner`` block carries no usable name --
+    the condition behind score_cv_owner's hard-fail cap of 25."""
+    cv_owner = (fields_data or {}).get("cv_owner", {}) or {}
+    full_name = (cv_owner.get("full_name") or "").strip()
+    first_name = (cv_owner.get("first_name") or "").strip()
+    last_name = (cv_owner.get("last_name") or "").strip()
+    return (not full_name) and (not first_name or not last_name)
+
+
+# ---------------------------------------------------------------------------
 # Dimension scorers  -- each returns (penalty_fraction, detail, hard_fail_cap)
 # ---------------------------------------------------------------------------
 
 def score_pipeline_errors(outputs_dir: Path):
     """Pipeline / API errors. Fatal patterns are a hard-fail (cap=40)."""
-    FATAL_PATTERN = re.compile(
-        r"name '\w+' is not defined"
-        r"|Traceback \(most recent call last\)"
-        r"|NameError:|UnboundLocalError:|KeyError:",
-        re.IGNORECASE,
-    )
-
     nonnull_errors = 0
-    fatal_hit = False
     fatal_locations = []
-
-    def find_errors(obj, path=""):
-        results = []
-        if isinstance(obj, dict):
-            for k, v in obj.items():
-                cur = f"{path}.{k}"
-                if k == "error" and v:
-                    results.append((cur, str(v)))
-                results.extend(find_errors(v, cur))
-        elif isinstance(obj, list):
-            for i, item in enumerate(obj):
-                results.extend(find_errors(item, f"{path}[{i}]"))
-        return results
 
     for json_file in sorted(outputs_dir.glob("*.json")):
         try:
@@ -139,12 +161,12 @@ def score_pipeline_errors(outputs_dir: Path):
                 data = json.load(f)
         except Exception:
             continue
-        for path, val in find_errors(data, json_file.name):
+        for path, val in iter_error_fields(data, json_file.name):
             nonnull_errors += 1
-            if FATAL_PATTERN.search(val):
-                fatal_hit = True
+            if FATAL_ERROR_PATTERN.search(val):
                 fatal_locations.append(f"{path}: {val!r}")
 
+    fatal_hit = bool(fatal_locations)
     hard_fail_cap = 40 if fatal_hit else None
     fraction = 1.0 if fatal_hit else clamp(nonnull_errors / 3.0)
     detail = (
@@ -160,15 +182,10 @@ def score_cv_owner(outputs_dir: Path):
     if data is None:
         return 1.0, "no fields.json found", 25
 
-    cv_owner = data.get("cv_owner", {}) or {}
-    full_name = (cv_owner.get("full_name") or "").strip()
-    first_name = (cv_owner.get("first_name") or "").strip()
-    last_name = (cv_owner.get("last_name") or "").strip()
-
-    name_missing = (not full_name) and (not first_name or not last_name)
-    if name_missing:
+    if cv_owner_name_missing(data):
         return 1.0, "cv_owner name empty; hard-fail cap=25", 25
 
+    full_name = ((data.get("cv_owner", {}) or {}).get("full_name") or "").strip()
     cv_loc = data.get("cv_owner_location", {}) or {}
     inference_success = cv_loc.get("inference_success", False)
     primary_location = cv_loc.get("primary_location")

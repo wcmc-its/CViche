@@ -119,7 +119,9 @@ alembic upgrade head
 uvicorn app.main:app --reload --port 8000
 ```
 
-The backend reads `CVICHE_DATABASE_URL` from the environment. If not set, it defaults to `mysql+pymysql://root@localhost:3306/cviche`.
+The backend resolves its connection from four separate settings -- `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` -- looked up by `get_config` (environment variable first, then the `db:` section of `auth_config.yaml`). There is no `DATABASE_URL` setting; all four are required and `create_cviche_engine` raises at boot if any is empty.
+
+By default the engine authenticates with an RDS IAM token over TLS. Setting `DB_PASSWORD` switches it to password auth without TLS, which is how the local compose stack reaches its MariaDB container.
 
 ### 3. Frontend Setup
 
@@ -149,7 +151,9 @@ The frontend runs on port 3000 by default and proxies `/api` and `/ws` requests 
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `CVICHE_DATABASE_URL` | Yes (prod) | `mysql+pymysql://root@localhost:3306/cviche` | MariaDB connection string. Used by SQLAlchemy and Alembic. |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` | Yes | none | MariaDB connection parameters. Resolved individually by `get_config` (env, then `auth_config.yaml`'s `db:` section) and passed to `create_cviche_engine`. Boot fails if any is empty. |
+| `MIGRATE_USER` | Yes | none | DB user Alembic connects as (`alembic/env.py`). Distinct from `DB_USER`; both must be set. |
+| `DB_PASSWORD` | No | unset | When set, password auth without TLS instead of RDS IAM tokens. Local dev only. |
 | `CVICHE_SESSION_SECRET` | Yes (prod) | Random (dev only) | Secret key for signing session cookies with `itsdangerous`. If not set, a random key is generated on startup and a warning is logged. Sessions will not survive server restarts in dev. |
 | `CVICHE_SECURE_COOKIES` | No | `true` | Set to `false` for HTTP-only deployments without TLS. When `true`, the browser requires HTTPS to set the session cookie. If the cookie silently fails to set and login does not work, this is the most likely cause. |
 | `CVICHE_ALLOWED_ORIGINS` | No | `http://localhost:3000,http://localhost:5173` | Comma-separated list of allowed CORS origins. Also used for Origin/Referer CSRF checking on state-changing requests. |
@@ -211,7 +215,7 @@ alembic revision --autogenerate -m "description of changes"
 
 In Docker, migrations run automatically on container startup via `docker-entrypoint.sh`.
 
-Alembic reads the database URL from the `CVICHE_DATABASE_URL` environment variable (configured in `alembic/env.py`). The fallback in `alembic.ini` is for local dev only.
+Alembic builds its engine in `alembic/env.py` from `DB_HOST`, `DB_PORT`, `DB_NAME` and `MIGRATE_USER` -- note the last one, which is a different key from the app's `DB_USER`.
 
 ### Database Tables
 
