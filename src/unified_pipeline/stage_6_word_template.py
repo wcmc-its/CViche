@@ -7456,6 +7456,16 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 if not title:
                     title = entry.get('text', '')[:150]
 
+                # The R block is Title | Institution/Location | Dates, so the
+                # meeting that hosted the talk has no column of its own and
+                # belongs with the venue: "ASMBS 2022 Presidential Grand Rounds,
+                # Dallas, TX". event_name was read nowhere in this file, so
+                # 2,194 of 2,956 extracted values across 79 CVs reached no part
+                # of the rendered document.
+                event_name = (fields.get('event_name') or '').strip()
+                if event_name and event_name.casefold() not in f"{institution} {title}".casefold():
+                    institution = f"{event_name}, {institution}" if institution else event_name
+
                 row = table.add_row()
                 num_cols = len(row.cells)
                 if num_cols >= 3:
