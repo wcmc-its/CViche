@@ -103,6 +103,76 @@ def _committee_cell_text(value) -> str:
     return str(value)
 
 
+# Keys observed in structured stage-4 `address` values on the 2026-07-25 corpus:
+# home_address, office_address, business_address. There is no convention — the
+# LLM picks one — so match on all of them.
+_HOME_ADDRESS_KEYS = ('home_address', 'home')
+_OFFICE_ADDRESS_KEYS = ('business_address', 'office_address', 'work_address',
+                        'business', 'office')
+
+
+def _labels_its_own_address_slots(value) -> bool:
+    """True when a dict address names its own home/office halves.
+
+    Distinguishes ``{"home_address": ..., "office_address": ...}``, which knows
+    which cell each half belongs in, from ``{"street": ..., "city": ...}``,
+    which is one address in parts and must be routed by the entry's own text."""
+    return isinstance(value, dict) and any(
+        k in value for k in _HOME_ADDRESS_KEYS + _OFFICE_ADDRESS_KEYS)
+
+
+def _address_cell_text(value, slot: str) -> str:
+    """Coerce a stage-4 ``address`` field to plain text for one slot.
+
+    ``slot`` is ``'home'`` or ``'office'``.
+
+    Stage 4 stores raw LLM JSON, and ``coerce_field_value_types`` deliberately
+    leaves dicts intact, so ``address`` reaches stage 6 as a dict on the CVs
+    whose contact block is a two-column Home/Office table. ``.replace()`` on
+    that dict raised AttributeError and aborted the entire document — two of 96
+    runs produced no deliverable at all (#442).
+
+    A string is returned untouched, so the CVs that never had this problem
+    render byte-identically.
+
+    Nothing is ever dropped for being an unfamiliar shape. The extraction call
+    runs with ``response_format={"type": "json_object"}`` and no schema, so the
+    key vocabulary is unbounded — the two corpus reproductions already disagreed
+    (``office_address`` vs ``business_address``). A dict that names no slot is
+    joined whole; a dict that names only one has its remaining keys joined into
+    the office cell; a value nested under a slot key is recursed into rather
+    than skipped. Silent loss is the failure mode this file keeps being bitten
+    by, so the fallbacks favour rendering something over rendering nothing."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "; ".join(t for t in (_address_cell_text(v, slot) for v in value) if t)
+    if not isinstance(value, dict):
+        return str(value)
+
+    def _join(items):
+        return "; ".join(t for t in (_address_cell_text(v, slot).strip()
+                                     for v in items) if t)
+
+    if not _labels_its_own_address_slots(value):
+        # One address split into parts. The caller routes it by entry text.
+        return _join(value.values())
+
+    own = _HOME_ADDRESS_KEYS if slot == 'home' else _OFFICE_ADDRESS_KEYS
+    other = _OFFICE_ADDRESS_KEYS if slot == 'home' else _HOME_ADDRESS_KEYS
+    for key in own:
+        text = _address_cell_text(value.get(key), slot).strip()
+        if text:
+            return text
+    if slot == 'home':
+        return ""
+    # Office is the catch-all: keys the home slot will never claim are joined
+    # here rather than silently dropped from a partly-labelled dict.
+    return _join(v for k, v in value.items() if k not in other)
+
+
 # A leading 3b taxonomy code (M2B, D1, S6, N3A …) that leaked into a rendered
 # bullet — code letter + 1-2 digits + optional trailing letter, bracketed at the
 # very start and followed by whitespace. Seen verbatim in output on the WCM-
@@ -3169,12 +3239,22 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Classify address by type
             if extracted_address:
-                if 'home' in text:
+                if _labels_its_own_address_slots(extracted_address):
+                    # The dict names its own halves, so fill both slots from it
+                    # instead of forcing the whole thing into whichever one the
+                    # raw text happened to label (#442). A dict that names no
+                    # slot is one address and falls through to the raw-text
+                    # routing below, same as a string.
                     if not home_address:
-                        home_address = extracted_address
+                        home_address = _address_cell_text(extracted_address, 'home')
+                    if not office_address:
+                        office_address = _address_cell_text(extracted_address, 'office')
+                elif 'home' in text:
+                    if not home_address:
+                        home_address = _address_cell_text(extracted_address, 'home')
                 elif 'office' in text or 'work' in text or 'business' in text or not office_address:
                     if not office_address:
-                        office_address = extracted_address
+                        office_address = _address_cell_text(extracted_address, 'office')
 
             # Classify email by type
             if extracted_email:
