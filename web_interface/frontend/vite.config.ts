@@ -6,12 +6,13 @@ export default defineConfig({
   server: {
     port: 3001,
     proxy: {
+      // In compose the backend is another container, so localhost is wrong.
       '/api': {
-        target: 'http://localhost:8000',
+        target: process.env.VITE_API_TARGET || 'http://localhost:8000',
         changeOrigin: true,
       },
       '/ws': {
-        target: 'ws://localhost:8000',
+        target: (process.env.VITE_API_TARGET || 'http://localhost:8000').replace(/^http/, 'ws'),
         ws: true,
       },
     },

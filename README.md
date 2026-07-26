@@ -302,7 +302,9 @@ The pipeline runs on Claude (Anthropic) models via Bedrock by default. To use Op
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `CVICHE_DATABASE_URL` | Database connection URL | SQLite (`sqlite:///./cviche_dev.db`) |
+| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` | Database connection parameters, resolved individually (env first, then `auth_config.yaml`'s `db:` section). There is no `DATABASE_URL` code path. | none — all four are required, the engine factory hard-raises without them |
+| `MIGRATE_USER` | DB user Alembic connects as. Separate from `DB_USER`. | none |
+| `DB_PASSWORD` | When set, the engine uses password auth instead of RDS IAM tokens and skips TLS. Local dev only; deployed environments leave it unset. | unset (IAM auth) |
 | `CVICHE_STORAGE_BACKEND` | Storage backend: `local` or `s3` | `local` |
 | `CVICHE_S3_BUCKET` | S3 bucket name (required when storage backend is `s3`) | -- |
 | `CVICHE_S3_PREFIX` | S3 key prefix | `cviche` |
