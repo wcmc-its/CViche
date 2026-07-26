@@ -1,0 +1,93 @@
+"""Regression guard for the contact half of issue #427: the scorer reported
+"no contact found" on CVs that plainly carry contact details.
+
+`score_cv_owner` tested exactly three literal field names -- "email", "phone",
+"address" -- but stage 4 stores raw LLM JSON with no schema, so it files contact
+under whatever key the model picked. Across the 100-CV corpus of the 2026-07-25
+batch it emitted institutional_email (18 entries), personal_email (9), fax (7),
+primary_email (4), home_address, office_address, work_phone, home_phone, cell,
+mobile_phone_primary and secondary_phone -- none of which the tuple matched.
+Two CVs (web136, web15) took the 0.3 `not any_contact` penalty with a perfectly
+good institutional email sitting in the fields JSON.
+
+    python3 -m pytest src/unified_pipeline/tests/test_quality_score_contact_keys.py -p no:cacheprovider
+
+Self-contained: no DB, no network, no PII.
+"""
+
+import json
+import sys
+from pathlib import Path
+
+_SRC = Path(__file__).resolve().parents[2]
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from unified_pipeline.quality_score import score_cv_owner  # noqa: E402
+
+
+def _fields(tmp_path, extracted_fields):
+    """Write a minimal stage-4 fields JSON with a valid owner name."""
+    payload = {
+        "document_uid": "TESTAA",
+        "cv_owner": {"first_name": "Jane", "last_name": "Public",
+                     "full_name": "Jane Q. Public"},
+        "cv_owner_location": {"inference_success": True,
+                              "primary_location": "New York, NY"},
+        "entries": [{"taxonomy_code": "A", "extracted_fields": extracted_fields}],
+    }
+    (tmp_path / "TESTAA_fields.json").write_text(json.dumps(payload))
+    return tmp_path
+
+
+def _any_contact(tmp_path, extracted_fields) -> bool:
+    _, detail, _ = score_cv_owner(_fields(tmp_path, extracted_fields))
+    assert "any_contact=" in detail
+    return "any_contact=True" in detail
+
+
+def test_plain_key_names_still_count(tmp_path):
+    """The three names the scorer always handled must keep working."""
+    for key in ("email", "phone", "address"):
+        assert _any_contact(tmp_path, {key: "something"}), key
+
+
+def test_the_key_names_stage_4_actually_emits_count(tmp_path):
+    """Every variant observed in the 100-CV corpus. This is the #427 bug."""
+    for key in ("institutional_email", "personal_email", "primary_email",
+                "work_email", "home_address", "office_address", "business_address",
+                "work_phone", "home_phone", "phone_office", "secondary_phone",
+                "mobile_phone_primary", "cell", "fax", "mobile", "telephone"):
+        assert _any_contact(tmp_path, {key: "something"}), \
+            f"{key} is contact information and was scored as absent"
+
+
+def test_a_blank_value_is_not_contact(tmp_path):
+    """None means the field was extracted and found empty."""
+    assert not _any_contact(tmp_path, {"institutional_email": None})
+    assert not _any_contact(tmp_path, {})
+
+
+def test_unrelated_fields_are_not_mistaken_for_contact(tmp_path):
+    """The match is on the key name, so it must not over-fire."""
+    for key in ("title", "institution", "degrees", "narrative", "year",
+                "department", "organization", "employer", "role", "journal"):
+        assert not _any_contact(tmp_path, {key: "something"}), \
+            f"{key} is not contact information"
+
+
+def test_no_contact_still_takes_the_penalty(tmp_path):
+    """The dimension must keep firing when the CV really has no contact."""
+    fraction, detail, cap = score_cv_owner(_fields(tmp_path, {"title": "Professor"}))
+    assert "any_contact=False" in detail
+    assert fraction >= 0.3, "the missing-contact penalty must survive this change"
+    assert cap is None, "this is not the hard-fail path"
+
+
+if __name__ == "__main__":
+    import tempfile
+    for _name, _fn in sorted(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            with tempfile.TemporaryDirectory() as d:
+                _fn(Path(d))
+    print("OK")
