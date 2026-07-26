@@ -118,7 +118,7 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
     return reports
 
 
-# The 13 lints run_doctor always considers (skipped ones emit a "skipped: missing"
+# The 15 lints run_doctor always considers (skipped ones emit a "skipped: missing"
 # INFO; a lint that runs clean emits nothing -- so ran = ALL - skipped, not the
 # set of lints that happened to fire).
 ALL_LINTS = [
@@ -126,6 +126,7 @@ ALL_LINTS = [
     "classified_unrendered", "output_hygiene", "dead_sections",
     "unrendered_records", "enrichment_failures", "stage6_render_warnings",
     "dedup_drops", "pipe_leaks", "table_shape",
+    "owner_contact_missing", "pipeline_errors_present",
 ]
 
 

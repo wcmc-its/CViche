@@ -46,6 +46,24 @@ Lints, ranked by the severity of the failure class they catch:
                           year in the name, state-abbrev organizations,
                           organization duplicated inside the name (#229)
 
+Lints 14-15 are the quality-score HARD-FAIL gates and sit outside that
+ranking: they are the only ERROR-by-construction lints, because each one on
+its own caps quality_score.py's final score into the RED do-not-deliver band.
+Without them an undeliverable run reported worst=WARN like every healthy one
+(#437). Each calls quality_score.py's own predicate over the same artifacts
+the scorer reads, so the doctor reports the gate rather than a second
+definition of it -- what that buys is that the two cannot drift apart, NOT
+independent confirmation that the gate itself is calibrated:
+
+14. owner_contact_missing the stage-4 'cv_owner' block carries no usable name,
+                          or a run that produced output has no stage-4
+                          artifact at all — either way the score is capped at
+                          25. The one lint that does not skip on a missing
+                          artifact, because the gate trips on that too.
+15. pipeline_errors_present a fatal error (NameError, traceback) recorded in an
+                          'error' field of stage_2/stage_3b/stage_4 — the JSON
+                          the deployed scorer globs — capped at 40
+
 Usage:
 
     PYTHONPATH=src python -m unified_pipeline.run_doctor <root> <uid> \
@@ -71,6 +89,11 @@ from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
+)
+from unified_pipeline.quality_score import (
+    FATAL_ERROR_PATTERN,
+    cv_owner_name_missing,
+    iter_error_fields,
 )
 from unified_pipeline.segmentation_regression import (
     SUBSTANTIVE_LINE_CHARS,
@@ -993,6 +1016,78 @@ def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
     return findings
 
 
+# ------------------------------------------------------------------- lint 14
+
+_OWNER_GATE = "HARD-FAIL gate 'CV owner name / contact populated'"
+_OWNER_CAP = "the quality score is capped at 25 (RED, do not deliver)"
+
+
+def lint_owner_contact_missing(stage4: Optional[Dict], uid: str,
+                               unreadable: Optional[str] = None) -> List[Dict]:
+    """The quality score's cap-25 hard-fail gate: the document cannot be
+    delivered under anyone's name. The predicate is the scorer's own
+    (quality_score.cv_owner_name_missing), applied to the stage-4 artifact the
+    doctor already loads — the same ``*_fields.json`` the scorer reads.
+
+    Accepts ``stage4=None`` rather than being skipped by ``_ready`` because
+    score_cv_owner caps at 25 for an ABSENT ``*_fields.json`` too ("no
+    fields.json found"); the call site decides when that case is a real run
+    rather than a wrong uid.
+
+    The evidence names which fields are populated but never their values: a
+    partly-extracted owner (LLM found a surname but no given name) fires this
+    gate, and the doctor report is mirrored to S3 and served by the admin
+    viewer."""
+    if stage4 is None:
+        cause = (f"the stage-4 *_fields.json will not parse ({unreadable})"
+                 if unreadable else
+                 "there is no stage-4 *_fields.json for this document")
+        return [_finding("owner_contact_missing", "ERROR",
+                         f"{_OWNER_GATE}: {cause} — {_OWNER_CAP}")]
+    if not cv_owner_name_missing(stage4):
+        return []
+    cv_owner = stage4.get("cv_owner", {}) or {}
+    fields = ("full_name", "first_name", "last_name")
+    populated = [f for f in fields if str(cv_owner.get(f) or "").strip()]
+    evidence = ["cv_owner name fields populated: " + (", ".join(populated)
+                                                      or "none")]
+    if str(cv_owner.get("last_name") or "").strip().lower() == uid.lower():
+        evidence.append(
+            "last_name is the document uid — stage 4 fell back to the file "
+            "stem, so the rendered document carries the uid as the owner name")
+    return [_finding(
+        "owner_contact_missing", "ERROR",
+        f"{_OWNER_GATE}: the cv_owner block has no usable name — {_OWNER_CAP}",
+        evidence)]
+
+
+# ------------------------------------------------------------------- lint 15
+
+def lint_pipeline_errors(artifacts: Dict[str, Dict]) -> List[Dict]:
+    """The quality score's cap-40 hard-fail gate: an ``error`` field somewhere
+    in the run's artifacts carries a fatal pattern (NameError, traceback), so a
+    stage died mid-run and whatever it owned is missing from the output. The
+    pattern and the walk are the scorer's own
+    (quality_score.FATAL_ERROR_PATTERN / iter_error_fields).
+
+    ``artifacts`` is keyed by stage label and the caller narrows it to exactly
+    the JSON the deployed scorer reads, so the cap this finding names is the
+    cap those artifacts actually produce."""
+    fatal: List[str] = []
+    for label in sorted(artifacts):
+        for path, value in iter_error_fields(artifacts[label], label):
+            if FATAL_ERROR_PATTERN.search(value):
+                fatal.append(f"{path}: {value[:120]}")
+    if not fatal:
+        return []
+    return [_finding(
+        "pipeline_errors_present", "ERROR",
+        f"HARD-FAIL gate 'Pipeline/API errors present': {len(fatal)} fatal "
+        f"error field(s) recorded in the run artifacts — the quality score is "
+        f"capped at 40 (RED, do not deliver)",
+        fatal[:5])]
+
+
 # --------------------------------------------------------- artifact resolution
 
 _ARTIFACTS = {
@@ -1004,6 +1099,13 @@ _ARTIFACTS = {
     "stage_6_docx": ("stage_6_wcm_documents", "_wcm.docx"),
     "stage_6_report": ("stage_6_wcm_documents", "_render_warnings.json"),
 }
+
+#: The owner gate reports an ABSENT *_fields.json only for a run that got as
+#: far as rendering a deliverable, or whose stage-4 file exists but will not
+#: parse. An earlier artifact (stage_2/stage_3b) is not enough: a run doctored
+#: mid-pipeline, or one that crashed after stage 2, has no owner name YET --
+#: reporting "do not deliver" on it would be a false positive (#437).
+_DELIVERABLE = ("stage_4", "stage_6_docx")
 
 
 def _uid_owns(name: str, uid: str) -> bool:
@@ -1166,6 +1268,32 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
         findings.extend(lint_pipe_leaks(blocks))
     if ready("table_shape", stage_6_docx=table_rows):
         findings.extend(lint_table_shape(table_rows))
+    # score_cv_owner caps at 25 for an ABSENT *_fields.json as well as an empty
+    # cv_owner name, so this lint breaks the house "missing artifact -> skip"
+    # convention: skipping the absent case would report the more broken run
+    # more quietly (#437). It still skips for a run that never reached stage 4
+    # -- an incomplete or wrong-uid run has no owner name yet, and the batch
+    # runner doctors CVs whose pipeline returned rc!=0.
+    if stage_4 is not None or any(paths[k] for k in _DELIVERABLE):
+        findings.extend(lint_owner_contact_missing(
+            stage_4, uid, unreadable.get("stage_4")))
+    else:
+        ready("owner_contact_missing", stage_4=stage_4)
+    # The error scan covers exactly the JSON the DEPLOYED scorer globs:
+    # quality_score_service copies *_entries/_classified/_fields.json into the
+    # dir it scores, which are stage_2/stage_3b/stage_4 here. It scans whatever
+    # subset of those loaded rather than requiring all three -- the scorer
+    # scans whatever landed too, so an absent artifact must not hide a fatal
+    # recorded in another. `ready` still reports the skip when none loaded, so
+    # absent stays INFO and unreadable stays ERROR under real loader labels.
+    scored_artifacts = {label: data for label, data in (
+        ("stage_2", stage_2), ("stage_3b", stage_3b), ("stage_4", stage_4))
+        if data is not None}
+    if scored_artifacts:
+        findings.extend(lint_pipeline_errors(scored_artifacts))
+    else:
+        ready("pipeline_errors_present", stage_2=stage_2, stage_3b=stage_3b,
+              stage_4=stage_4)
 
     counts = {severity: 0 for severity in SEVERITY_ORDER}
     for f in findings:

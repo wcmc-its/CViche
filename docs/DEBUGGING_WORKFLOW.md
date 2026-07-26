@@ -102,8 +102,10 @@ production failure class (grants fused into one entry, pipe-delimited source
 leaking to the output, honors-table rows mis-shaped, etc.).
 
 **The lint catalog is the module docstring — the single source of truth, kept in
-code so it can't drift:** `src/unified_pipeline/run_doctor.py` (13 lints, each
-named for the failure class it catches).
+code so it can't drift:** `src/unified_pipeline/run_doctor.py` (15 lints, each
+named for the failure class it catches). Lints 14-15 are the quality-score
+hard-fail gates: they report ERROR by construction, because each on its own
+caps the run's score into the RED do-not-deliver band.
 
 ### On the server (automatic)
 
