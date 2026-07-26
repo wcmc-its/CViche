@@ -28,6 +28,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_classified_unrendered,
     lint_dead_sections,
     lint_dedup_drops,
+    DUPLICATE_PASSAGE_MIN_BLOCKS,
     lint_duplicate_passages,
     lint_enrichment_failures,
     lint_missed_headers,
@@ -804,6 +805,21 @@ def test_duplicate_passages_see_through_renumbering_and_separator_drift():
     assert len(findings) == 1
     assert "1 passage(s)" in findings[0]["message"]
     assert findings[0]["evidence"][0].startswith("blocks 0-2 repeat at 4-6")
+
+
+def test_duplicate_passages_threshold_is_pinned_at_two_blocks():
+    """The corpus's only true positive is a 2-block duplicate (web119: the same
+    abstract at two adjacent numbers), so raising the threshold to 3 silently
+    discards it. Nothing else pinned the value -- every other test here passes
+    at both 2 and 3."""
+    assert DUPLICATE_PASSAGE_MIN_BLOCKS == 2
+    pair = [("p", "217. Rothwell GW. Anatomically preserved cycadeoid cones, 1993."),
+            ("p", "Botanical Gazette 154(3): 512-525.")]
+    other = [("p", "• Kidney Week, Chicago — 2016")]
+    assert "1 passage(s)" in lint_duplicate_passages(
+        pair + other + pair)[0]["message"]
+    # ...but one block alone is a repeated field, not a record, at any threshold
+    assert lint_duplicate_passages(pair[:1] + other + pair[:1]) == []
 
 
 def test_read_docx_table_rows_keeps_empty_cells(tmp_path):

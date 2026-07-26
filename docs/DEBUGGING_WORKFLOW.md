@@ -102,7 +102,7 @@ production failure class (grants fused into one entry, pipe-delimited source
 leaking to the output, honors-table rows mis-shaped, etc.).
 
 **The lint catalog is the module docstring — the single source of truth, kept in
-code so it can't drift:** `src/unified_pipeline/run_doctor.py` (13 lints, each
+code so it can't drift:** `src/unified_pipeline/run_doctor.py` (14 lints, each
 named for the failure class it catches).
 
 ### On the server (automatic)
