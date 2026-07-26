@@ -1752,16 +1752,28 @@ def extract_cv_owner_name(document_uid: str, mapped_entries: List[Dict[str, Any]
         if text and len(text) < 500:  # Skip very long entries
             first_entries.append(text)
 
-    # Helper to extract last name from document_uid as fallback
+    # Helper to extract last name from document_uid as fallback.
+    #
+    # This works for filename-style uids ('2097_Upton_Cv' -> 'Upton') and is
+    # worth keeping for them. It must NOT fire for an opaque uid: 'web151' was
+    # written in as the owner's surname on every CV whose name extraction
+    # returned nothing (#457). A manufactured surname is worse than an empty
+    # one -- it looks plausible, defeats emptiness checks in spirit, and feeds
+    # add_target_names and the bibliography author bolding a token that matches
+    # nothing. A missing name should look missing.
     def fallback_from_uid():
         import re
         if document_uid:
-            uid_clean = re.sub(r'_[Cc]v$', '', document_uid)
+            # Case-insensitive: '_CV' was not stripped, so '2026_OBrien_CV'
+            # yielded the literal 'CV' as the surname.
+            uid_clean = re.sub(r'_cv$', '', document_uid, flags=re.IGNORECASE)
             # Remove random prefix like "WSP0KQ_"
             uid_clean = re.sub(r'^[A-Z0-9]{6}_', '', uid_clean)
             parts = uid_clean.split('_')
             name_parts = [p for p in parts if not re.match(r'^\d{4}$', p) and len(p) > 1]
-            if name_parts:
+            # Only a purely alphabetic token can be a surname. 'web151' and
+            # 'I5NKUG' are identifiers, not names.
+            if name_parts and name_parts[-1].isalpha():
                 result['last_name'] = name_parts[-1]
 
     if not first_entries:
