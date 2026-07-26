@@ -18,12 +18,15 @@ Runs the complete CViche processing pipeline:
 - Stage 6: WCM Word Template Generation (creates formatted Word document)
 
 Usage:
-    python3 run_full_pipeline.py <cv_path> [--stage STAGE] [--model MODEL]
+    python3 run_full_pipeline.py <cv_path> [--stage STAGE]
 
 Arguments:
     cv_path       : Path to Word document or just the document UID
     --stage STAGE : Run ONLY this stage: '1a', '1b', '2', '3a', '3b', '3', '4', '4.5', '5', '5b', '5c', '5d', or '6'. Default: run all
-    --model MODEL : LLM model to use. Default: gpt-5.1
+
+The model is not a CLI argument. Each stage resolves its own from
+llm_config.yaml (stage_3b is deliberately on Haiku), so there is no single model
+to override; the summary reports which ones actually served the run.
 
 Example:
     # Run full pipeline
@@ -74,6 +77,7 @@ from datetime import timedelta
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
+from unified_pipeline.llm_client import format_models_used
 from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
 from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
 from unified_pipeline.stage_2_entry_extraction import run_stage_2
@@ -222,14 +226,13 @@ def resolve_cv_path(cv_path_or_uid: str) -> tuple:
 def main():
     # Parse arguments
     if len(sys.argv) < 2:
-        print("Usage: python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE] [--model MODEL]")
+        print("Usage: python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE]")
         print()
         print("Arguments:")
         print("  cv_path_or_uid : Path to Word document OR just the document UID")
         print("                   (if UID only, looks in data/sample_cvs/word/)")
         print("  --stage STAGE  : Run ONLY this stage: '1a', '1b', '2', '3a', '3b', '3', or '4'")
         print("                   (omit for full pipeline)")
-        print("  --model MODEL  : LLM model to use (default: gpt-5.1)")
         print()
         print("Examples:")
         print("  # Full pipeline")
@@ -255,17 +258,13 @@ def main():
     cv_path, document_uid = resolve_cv_path(sys.argv[1])
 
     # Parse optional flags
-    model = "gpt-5.1"  # Default model
     target_stage = None  # None = run all stages; otherwise run only that stage
     valid_stages = get_stage_order()
 
     i = 2  # Start after the cv_path_or_uid argument
     while i < len(sys.argv):
         arg = sys.argv[i]
-        if arg == "--model" and i + 1 < len(sys.argv):
-            model = sys.argv[i + 1]
-            i += 2
-        elif arg == "--stage" and i + 1 < len(sys.argv):
+        if arg == "--stage" and i + 1 < len(sys.argv):
             target_stage = sys.argv[i + 1]
             if target_stage not in valid_stages:
                 print(f"Error: Invalid stage '{target_stage}'. Use one of: {', '.join(valid_stages)}")
@@ -289,11 +288,10 @@ def main():
     if target_stage:
         print(f"CV PROCESSING PIPELINE - STAGE {target_stage.upper()} ONLY")
     else:
-        print(f"CV PROCESSING PIPELINE (V12)")
+        print(f"CV PROCESSING PIPELINE (V15)")
     print("=" * 80)
     print(f"Input: {cv_path}")
     print(f"Document UID: {document_uid}")
-    print(f"Model: {model}")
     print()
 
     # Track all results, costs, and timing
@@ -1019,7 +1017,7 @@ def main():
     print("PIPELINE COMPLETE WITH ERRORS" if failed else "PIPELINE COMPLETE")
     print("=" * 80)
     print(f"Document: {document_uid}")
-    print(f"Model: {model}")
+    print(f"Models: {format_models_used()}")
     print()
     if failed:
         print("Failed stages:")

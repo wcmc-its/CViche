@@ -33,6 +33,7 @@ import json
 import logging
 import random
 import threading
+from collections import Counter
 from openai import (
     OpenAI,
     RateLimitError,
@@ -789,6 +790,39 @@ _PROVIDER_HANDLERS = {
 }
 
 
+# Which models actually served this process's calls, counted at call_llm's
+# single exit point.
+#
+# run_full_pipeline stamped a hardcoded "Model: gpt-5.1" on every run while the
+# work ran on Bedrock Sonnet/Haiku (#444). The deeper problem is that there is
+# no single model to print: llm_config.yaml resolves per stage, and stage_3b is
+# deliberately on Haiku for accuracy and cost. Counting what was actually called
+# is a measurement rather than a second assertion that can drift from reality
+# the way the first one did -- it is also the only variant immune to a stale
+# deployment CVICHE_LLM_MODEL and to the model= kwarg in prompt_ab_tester.
+#
+# Process-local and never reset: a CLI run is one pipeline. The web backend
+# runs many pipelines per process, so it must not read this as per-run.
+_MODELS_USED = Counter()
+_MODELS_USED_LOCK = threading.Lock()
+
+
+def models_used() -> dict:
+    """Model id -> completed calls, for this process. Empty before any call."""
+    with _MODELS_USED_LOCK:
+        return dict(_MODELS_USED)
+
+
+def format_models_used() -> str:
+    """One-line provenance summary, busiest model first."""
+    counts = models_used()
+    if not counts:
+        return "none (no LLM calls recorded)"
+    return ", ".join(
+        f"{model} ({n} call{'' if n == 1 else 's'})"
+        for model, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])))
+
+
 def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict:
     """Centralized LLM call with config resolution, retries, and cost tracking.
 
@@ -860,4 +894,7 @@ def call_llm(stage: str, messages: list, response_format=None, **kwargs) -> dict
         purpose=stage,
         elapsed_time=result["latency_ms"] / 1000.0,
     )
+    # Record what actually served the call, not what was configured (#444).
+    with _MODELS_USED_LOCK:
+        _MODELS_USED[result.get("model") or cfg["model"]] += 1
     return result
