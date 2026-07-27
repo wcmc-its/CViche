@@ -952,7 +952,8 @@ def main():
             try:
                 stage6_output_path = run_stage6(
                     input_path=input_for_stage6,
-                    verbose=True
+                    verbose=True,
+                    source_docx=cv_path
                 )
 
                 stage_duration = time.time() - stage_start
