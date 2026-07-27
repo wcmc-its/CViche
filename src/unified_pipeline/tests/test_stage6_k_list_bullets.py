@@ -1,15 +1,14 @@
 """Section K entries must be Word list paragraphs, not a literal bullet character.
 
 Across the corpus, 2,570 K bullets were a literal glyph on a paragraph carrying
-no `w:numPr` at all. A literal glyph is
-part of the paragraph text, so Word's outline and navigation, accessibility
-tooling and anything re-parsing the output all see a bullet-shaped character
-rather than a list item -- and there is no level to set, which is why #423
-cannot be fixed at the render without this first.
+no `w:numPr` at all. A literal glyph is part of the paragraph text, so Word's
+outline and navigation, accessibility tooling and anything re-parsing the output
+all see a bullet-shaped character rather than a list item -- and there is no
+level to set, which is why #423 cannot be fixed at the render without this first.
 
 Scope is section K only, and deliberately: `_insert_bulleted_entry` is shared,
-and its other three call sites keep the glyph (#483 tracks the 1,765 non-K
-glyphs, which come from four separate emitters).
+and its other three call sites keep the glyph. The 241 remaining non-K glyphs
+come from four separate emitters and are #483.
 
 Level 0 for every K bullet, not a title/child split. Inferring hierarchy here
 would mean splitting `entry['text']` on newlines, and that approach was measured
