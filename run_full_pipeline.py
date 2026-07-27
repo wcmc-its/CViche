@@ -447,7 +447,7 @@ def main():
         except Exception as e:
             print(f"  Warning: Stage 1b failed: {e}")
             print("  Continuing with remaining stages...")
-            all_results['stage_1b'] = {'error': str(e)}
+            all_results['stage_1b'] = {'error': f"{type(e).__name__}: {e}"}
             print()
     else:
         # Load existing Stage 1b output path
@@ -497,7 +497,7 @@ def main():
             except Exception as e:
                 print(f"  Warning: Stage 2 failed: {e}")
                 print("  Continuing with remaining stages...")
-                all_results['stage_2'] = {'error': str(e)}
+                all_results['stage_2'] = {'error': f"{type(e).__name__}: {e}"}
                 print()
         else:
             print("  Skipped: Stage 1b output required")
@@ -549,7 +549,7 @@ def main():
             print()
         except Exception as e:
             print(f"  Warning: Stage 3a failed: {e}")
-            all_results['stage_3a'] = {'error': str(e)}
+            all_results['stage_3a'] = {'error': f"{type(e).__name__}: {e}"}
             print()
     else:
         # Load existing Stage 3a output path
@@ -600,7 +600,7 @@ def main():
                 print()
             except Exception as e:
                 print(f"  Warning: Stage 3b failed: {e}")
-                all_results['stage_3b'] = {'error': str(e)}
+                all_results['stage_3b'] = {'error': f"{type(e).__name__}: {e}"}
                 print()
         else:
             missing = []
@@ -661,7 +661,7 @@ def main():
                 print(f"  Warning: Stage 4 failed: {e}")
                 import traceback
                 traceback.print_exc()
-                all_results['stage_4'] = {'error': str(e)}
+                all_results['stage_4'] = {'error': f"{type(e).__name__}: {e}"}
                 print()
         else:
             print("  Skipped: Stage 3b output required")
@@ -720,7 +720,7 @@ def main():
                 print(f"  Warning: Stage 4.5 failed: {e}")
                 import traceback
                 traceback.print_exc()
-                all_results['stage_4.5'] = {'error': str(e)}
+                all_results['stage_4.5'] = {'error': f"{type(e).__name__}: {e}"}
                 print()
         else:
             print("  Skipped: Stage 4 output required")
@@ -770,7 +770,7 @@ def main():
                 print()
             except Exception as e:
                 print(f"  Warning: Stage 5 failed: {e}")
-                all_results['stage_5'] = {'error': str(e)}
+                all_results['stage_5'] = {'error': f"{type(e).__name__}: {e}"}
                 print()
         else:
             print("  Skipped: Stage 4 output required")
@@ -835,7 +835,7 @@ def main():
                 print()
             except Exception as e:
                 print(f"  Warning: Stage 5b failed: {e}")
-                all_results['stage_5b'] = {'error': str(e)}
+                all_results['stage_5b'] = {'error': f"{type(e).__name__}: {e}"}
                 print()
         else:
             print("  Skipped: Stage 4 or 5 output required")
@@ -889,7 +889,7 @@ def main():
                 print(f"  Warning: Stage 5c failed: {e}")
                 import traceback
                 traceback.print_exc()
-                all_results['stage_5c'] = {'error': str(e)}
+                all_results['stage_5c'] = {'error': f"{type(e).__name__}: {e}"}
                 print()
         else:
             print("  Skipped: Stage 4, 5, or 5b output required")
@@ -944,7 +944,7 @@ def main():
                 print(f"  Warning: Stage 5d failed: {e}")
                 import traceback
                 traceback.print_exc()
-                all_results['stage_5d'] = {'error': str(e)}
+                all_results['stage_5d'] = {'error': f"{type(e).__name__}: {e}"}
                 print()
         else:
             print("  Skipped: Earlier stage output required")
@@ -1003,7 +1003,7 @@ def main():
                 print(f"  Warning: Stage 6 failed: {e}")
                 import traceback
                 traceback.print_exc()
-                all_results['stage_6'] = {'error': str(e)}
+                all_results['stage_6'] = {'error': f"{type(e).__name__}: {e}"}
                 print()
         else:
             print("  Skipped: Stage 4, 5, or 5b output required")

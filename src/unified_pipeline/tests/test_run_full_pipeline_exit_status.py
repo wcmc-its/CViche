@@ -196,7 +196,7 @@ def test_stage_6_crash_exits_non_zero_and_says_so(tmp_path, monkeypatch, capsys)
     assert rc == 1, "a run that produced no document must not exit 0"
     assert "PIPELINE COMPLETE WITH ERRORS" in out
     assert "Failed stages:" in out
-    assert "stage_6: simulated 6 failure" in out
+    assert "stage_6: RuntimeError: simulated 6 failure" in out
 
 
 def test_a_mid_pipeline_crash_also_exits_non_zero(tmp_path, monkeypatch, capsys):
@@ -204,7 +204,20 @@ def test_a_mid_pipeline_crash_also_exits_non_zero(tmp_path, monkeypatch, capsys)
     rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'3b'})
     assert rc == 1
     assert "PIPELINE COMPLETE WITH ERRORS" in out
-    assert "stage_3b: simulated 3b failure" in out
+    assert "stage_3b: RuntimeError: simulated 3b failure" in out
+
+
+def test_the_failure_reason_names_the_exception_type(tmp_path, monkeypatch, capsys):
+    """`str(e)` alone drops the type, and the reason line is all the operator gets.
+
+    The real #443 crash recorded `'dict' object has no attribute 'replace'` --
+    a message that never names AttributeError. Every wrapper stores
+    `f"{type(e).__name__}: {e}"` so the summary says what went wrong, not just
+    where.
+    """
+    _, out = _run_main(tmp_path, monkeypatch, capsys, fail={'5c'})
+    reason = next(line for line in out.splitlines() if "stage_5c:" in line)
+    assert "RuntimeError" in reason, f"exception type missing from {reason!r}"
 
 
 def test_entrypoint_propagates_the_return_value_to_the_exit_status():
