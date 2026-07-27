@@ -6,9 +6,11 @@ outline and navigation, accessibility tooling and anything re-parsing the output
 all see a bullet-shaped character rather than a list item -- and there is no
 level to set, which is why #423 cannot be fixed at the render without this first.
 
-Scope is section K only, and deliberately: `_insert_bulleted_entry` is shared,
-and its other three call sites keep the glyph. The 241 remaining non-K glyphs
-come from four separate emitters and are #483.
+Originally section K only, since `_insert_bulleted_entry` is shared. #483 then
+extended it to that helper's three non-K call sites and to
+`_fill_researcher_profiles`. The two emitters in the appendix/recovery region
+still write a literal glyph -- their own tests assert it -- and converting them
+is the remaining half of #483.
 
 Level 0 for every K bullet, not a title/child split. Inferring hierarchy here
 would mean splitting `entry['text']` on newlines, and that approach was measured
@@ -38,8 +40,6 @@ _MODULE = Path(WCMTemplateGenerator.__module__.replace(".", "/"))
 _SOURCE = (_SRC / _MODULE).with_suffix(".py")
 
 K_CALLER = "_insert_teaching_entry"
-NON_K_CALLERS = ("_insert_multiline_as_bullets", "_fill_clinical_practice",
-                 "_fill_hospital_affiliation")
 
 
 def _generator():
@@ -117,11 +117,45 @@ def test_every_teaching_call_site_requests_a_list_level():
         assert "list_level" in kwargs, f"{K_CALLER} line {call.lineno} lost list_level"
 
 
-def test_non_k_call_sites_stay_on_the_literal_glyph():
-    # #483, not this issue. Passing list_level here would rewrite bullets in
-    # clinical practice and hospital affiliation with no gate covering them.
-    by_fn = _bullet_calls_by_function()
-    for name in NON_K_CALLERS:
-        for call in by_fn.get(name, []):
+def test_every_bulleted_entry_call_site_requests_a_list_level():
+    # #483 extended this to the three non-K sites, so the helper now has no
+    # caller left on the literal-glyph branch. The branch itself stays, because
+    # the two emitters in the appendix/recovery region still take it.
+    for name, calls in _bullet_calls_by_function().items():
+        for call in calls:
             kwargs = {kw.arg for kw in call.keywords}
-            assert "list_level" not in kwargs, f"{name} line {call.lineno} opted into #474"
+            assert "list_level" in kwargs, f"{name} line {call.lineno} lost list_level"
+
+
+def test_only_the_deferred_emitters_still_write_a_literal_glyph():
+    """Pins the residue. Any new glyph emitter fails here rather than in a render.
+
+    #474 handled the six K call sites, #483 the other three plus
+    `_fill_researcher_profiles`. What is left is the appendix/recovery pair,
+    whose own tests assert the glyph -- converting them means updating 16 of
+    those tests, which is the remaining half of #483.
+    """
+    tree = ast.parse(_SOURCE.read_text())
+    emitters = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef):
+            continue
+        for call in ast.walk(node):
+            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                    and call.func.attr == "add_run" and call.args):
+                continue
+            arg = call.args[0]
+            parts = arg.values if isinstance(arg, ast.JoinedStr) else [arg]
+            first = parts[0] if parts else None
+            if isinstance(first, ast.Constant) and str(first.value).startswith("•"):
+                emitters.add(node.name)
+    assert emitters == {"_insert_reconsidered_segment", "_add_remaining_to_appendix"}, \
+        f"unexpected literal-glyph emitters: {sorted(emitters)}"
+
+
+def test_the_dead_track_changes_bullet_writer_is_gone():
+    # A second bullet writer that looked like the one the teaching path would
+    # use when emit_track_changes is on (default True), with 0 call sites.
+    tree = ast.parse(_SOURCE.read_text())
+    names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    assert "_insert_bulleted_entry_with_track_changes" not in names

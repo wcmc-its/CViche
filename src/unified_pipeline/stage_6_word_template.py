@@ -1952,7 +1952,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             self._insert_bulleted_entry(
                 insert_idx, line_text,
                 entry if is_last else None,  # Attach entry/comments to first bullet
-                add_blank_before=add_blank_before and is_last
+                add_blank_before=add_blank_before and is_last, list_level=0
             )
 
         return len(lines)
@@ -1997,46 +1997,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         self._set_font(run)
         if list_level is not None:
             self._apply_list_bullet(entry_para, level=list_level)
-
-        if entry:
-            self._add_entry_comments(entry_para, entry)
-
-        self.stats['entries_inserted'] += 1
-        return entry_para
-
-    def _insert_bulleted_entry_with_track_changes(self, insert_idx: int, original_text: str,
-                                                   new_text: str, entry: Dict = None,
-                                                   add_blank_before: bool = False,
-                                                   author: str = "LLM Formatter") -> Optional[Paragraph]:
-        """Insert a bulleted entry showing original as deleted and new as inserted (track changes).
-
-        Args:
-            insert_idx: Index of paragraph to insert before
-            original_text: Original text to show as deleted
-            new_text: New formatted text to show as inserted
-            entry: Optional entry dict for adding comments
-            add_blank_before: If True, add a blank line before this entry
-            author: Author name for the track change attribution
-
-        Returns:
-            The created paragraph, or None if insertion failed
-        """
-        if insert_idx >= len(self.doc.paragraphs):
-            return None
-
-        # Create the bulleted entry paragraph first
-        entry_para = self.doc.paragraphs[insert_idx].insert_paragraph_before("")
-
-        # Add blank line before if requested
-        if add_blank_before:
-            entry_para.insert_paragraph_before("")
-
-        # Add bullet prefix, then track change pair
-        bullet_run = entry_para.add_run("• ")
-        self._set_font(bullet_run)
-
-        # Add track change pair: deletion (original) then insertion (new)
-        self._add_track_change_pair(entry_para, original_text, new_text, author=author)
 
         if entry:
             self._add_entry_comments(entry_para, entry)
@@ -3399,8 +3359,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for entry in reversed(s0_entries):
             text = entry.get('text', '').strip()
             entry_para = self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
-            run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
+            run = entry_para.add_run(_clean_inline_tabs(_strip_taxonomy_code(text)))
             self._set_font(run)
+            self._apply_list_bullet(entry_para, level=0)
             self.stats['entries_inserted'] += 1
 
         # Add a blank line before the S0 content
@@ -6920,7 +6881,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             continue
                         bullet_text = original_text.replace('\t', ' — ', 1).replace('\t', ' ') if '\t' in original_text else original_text
                         if bullet_text:
-                            self._insert_bulleted_entry(section_idx + 1 + bullet_count, bullet_text, entry, add_blank_before=(bullet_count == 0))
+                            self._insert_bulleted_entry(section_idx + 1 + bullet_count, bullet_text, entry, add_blank_before=(bullet_count == 0), list_level=0)
                             bullet_count += 1
 
         # L3: Clinical Leadership
@@ -7654,7 +7615,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     text = entry.get('text', '').strip()
                     if text:
                         insert_idx = section_idx + 1 + i
-                        self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=(i == 0))
+                        self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=(i == 0), list_level=0)
 
     def _route_overflow_entries(self):
         """Route content-overflow entries as tracked-change bullets in their WCM sections.
