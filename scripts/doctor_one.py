@@ -70,7 +70,8 @@ def main(argv=None):
     # fire most often AND say least, so most_common(4) spent half the line on
     # them and hid the rare ones that identify this run (#438). Same four slots,
     # same format -- the TSV contract is unchanged.
-    top = ",".join(f"{k}:{v}" for k, v in rank_lints(lints)[:4])
+    top_lints = rank_lints(lints)[:4]
+    top = ",".join(f"{k}:{v}" for k, v in top_lints)
 
     # stdout is the TSV contract (see the docstring): deliberately print(), not a
     # logger call -- run_corpus_batch.sh captures this line with $(...), so

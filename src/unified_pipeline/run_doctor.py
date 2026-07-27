@@ -254,7 +254,7 @@ def rank_lints(counts: Dict[str, int]) -> List[Tuple[str, int]]:
                   key=lambda kv: (-lint_surprise(kv[0]), -kv[1], kv[0]))
 
 
-def _magnitude_severity(observed, threshold) -> str:
+def _magnitude_severity(observed: float, threshold: float) -> str:
     """WARN when this run is in the corpus's worst quartile, else INFO.
 
     Severity that encodes presence cannot rank anything: `echo_paragraphs=20`
