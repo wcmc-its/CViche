@@ -118,6 +118,14 @@ def test_render_check_symbol_is_still_importable(name):
 #: failure forces a deliberate choice -- update the callers, or leave a thin
 #: delegating method behind -- instead of surfacing during PR rework, where it
 #: looks like a lost fix rather than a moved address.
+#:
+#: `_extract_year_from_text` was REMOVED from this tuple by the parsing split.
+#: The measurement that built the list counted `self._extract_year_from_text(...)`
+#: inside the generator itself, which is an internal call, not a test reaching
+#: through the class. Re-checked by name across dev and all nine open PR branches:
+#: the only reference outside stage_6_word_template.py was this list. Removing a
+#: name here is otherwise a breaking change -- the bar is proving no caller exists,
+#: not finding it inconvenient.
 STAGE6_CLASS_SURFACE = (
     "_add_remaining_to_appendix",
     "_add_track_change_insertion",
@@ -125,7 +133,6 @@ STAGE6_CLASS_SURFACE = (
     "_add_word_comment",
     "_degree_is_in_progress",
     "_extract_organization_from_award",
-    "_extract_year_from_text",
     "_fill_honors",
     "_fill_licensure",
     "_fill_positions",
@@ -162,7 +169,7 @@ def test_the_surface_list_is_not_silently_empty():
         "intentional, update the count and say why in the commit message"
     )
     assert len(RENDER_CHECK_IMPORT_SURFACE) == 1
-    assert len(STAGE6_CLASS_SURFACE) == 18
+    assert len(STAGE6_CLASS_SURFACE) == 17
 
 
 def test_private_names_are_a_deliberate_part_of_the_contract():

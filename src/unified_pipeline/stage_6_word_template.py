@@ -45,12 +45,27 @@ from unified_pipeline.llm_client import call_llm
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.stage6.formatting import (
     _clear_table_data,
+    _format_citation,
+    _format_currency,
+    _format_mentee_duration,
     _set_cell_background,
     _set_cell_borders,
+    _set_cell_text,
     _set_cell_vertical_alignment,
     _set_font,
     _set_paragraph_spacing,
     _set_table_border,
+)
+from unified_pipeline.stage6.parsing import (
+    _extract_last_name_from_uid,
+    _extract_name_from_uid,
+    _extract_year_from_text,
+    _is_mentee_record,
+    _is_mentoring_outcome,
+    _is_orphan_fragment,
+    _is_structural_label,
+    _is_table_header_entry,
+    _parse_multi_membership_entry,
 )
 from unified_pipeline.stage6.normalization import (
     _deduplicate_repeated_content,
@@ -1658,13 +1673,6 @@ class WCMTemplateGenerator:
 
 
 
-    def _set_cell_text(self, cell, text: str, bold: bool = False):
-        """Set cell text with proper Arial 11pt formatting."""
-        cell.text = ""  # Clear existing
-        if cell.paragraphs:
-            para = cell.paragraphs[0]
-            run = para.add_run(str(text) if text else "")
-            _set_font(run, bold=bold)
 
 
 
@@ -1712,40 +1720,6 @@ class WCMTemplateGenerator:
                     _set_cell_borders(cell, gray_color)
 
 
-    def _format_currency(self, value) -> str:
-        """Format a value as US currency ($).
-
-        Args:
-            value: Number, string with digits, or empty value
-
-        Returns:
-            Formatted currency string (e.g., "$14,876") or empty string
-        """
-        if not value:
-            return ''
-
-        # Convert to string and extract numeric portion
-        value_str = str(value).strip()
-
-        # If already formatted with $, just return it
-        if value_str.startswith('$'):
-            return value_str
-
-        # Remove any existing currency symbols, commas, and whitespace
-        cleaned = re.sub(r'[$,\s]', '', value_str)
-
-        # Try to extract a number
-        try:
-            # Handle cases like "14876" or "14876.00"
-            num = float(cleaned)
-            # Format with commas and $ symbol, no decimal places for whole numbers
-            if num == int(num):
-                return f"${int(num):,}"
-            else:
-                return f"${num:,.2f}"
-        except ValueError:
-            # If we can't parse it, return the original value
-            return value_str
 
     def _classify_geographic_scope(self, entry: Dict) -> str:
         """Classify an entry's geographic scope as Regional, National, or International.
@@ -2027,40 +2001,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         numPr.append(numId)
         pPr.append(numPr)
 
-    def _extract_year_from_text(self, text: str) -> Optional[str]:
-        """Extract year from raw text as fallback when not in extracted_fields.
-
-        Looks for patterns like:
-        - "August 2021"
-        - "December 2017"
-        - "May 2015"
-        - "(2021)"
-        - "2019-2021"
-        """
-        if not text:
-            return None
-
-        # Pattern 1: Month Year (e.g., "August 2021", "December 2017")
-        month_year = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})', text)
-        if month_year:
-            return month_year.group(2)
-
-        # Pattern 2: Year in parentheses at end (e.g., "(2021)")
-        paren_year = re.search(r'\((\d{4})\)\s*$', text)
-        if paren_year:
-            return paren_year.group(1)
-
-        # Pattern 3: Year range - take the end year (e.g., "2019-2021")
-        year_range = re.search(r'(\d{4})\s*[-–—]\s*(\d{4})', text)
-        if year_range:
-            return year_range.group(2)
-
-        # Pattern 4: Single year in text
-        single_year = re.search(r'\b(19\d{2}|20\d{2})\b', text)
-        if single_year:
-            return single_year.group(1)
-
-        return None
 
     # Phrases a CV uses to mark a degree that has not yet been conferred.
     _IN_PROGRESS_DEGREE_MARKERS = (
@@ -2095,87 +2035,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
 
 
-    def _is_table_header_entry(self, text: str, header_keywords: List[str], threshold: int = 2) -> bool:
-        """Detect if an entry is actually a table header that was mistakenly extracted as data.
 
-        Table headers are characterized by:
-        - Multiple header-like words (e.g., "Name of award", "Date", "Organization")
-        - Tab or pipe-separated columns
-        - No substantive content (just column labels)
-
-        Args:
-            text: The entry text to check
-            header_keywords: List of keywords that typically appear in headers for this section
-            threshold: Minimum number of header keywords required to classify as header
-
-        Returns:
-            True if this appears to be a table header, False otherwise
-        """
-        if not text:
-            return False
-
-        # Normalize text for checking
-        text_lower = text.lower().strip()
-
-        # If text is very short, it might be header-like
-        # But only if it matches header patterns
-        if len(text_lower) < 100:
-            # Count how many header keywords appear
-            keyword_count = sum(1 for kw in header_keywords if kw.lower() in text_lower)
-
-            # Check for common header patterns
-            header_patterns = [
-                r'\bname\s+of\s+',  # "Name of award", "Name of organization"
-                r'\bdate\s*(awarded|received|of|issued)?\b',  # "Date awarded", "Date of issue"
-                r'\b(organization|institution)\s*(name)?\b',  # "Organization", "Institution name"
-                r'\btitle\b.*\b(institution|organization|dates?)\b',  # "Title | Institution | Dates"
-                r'\bdates?\s*\(?[mdy/]+\)?',  # "Dates (mm/yy)"
-            ]
-
-            pattern_matches = sum(1 for p in header_patterns if re.search(p, text_lower))
-
-            # If multiple header keywords AND pattern matches, likely a header
-            if keyword_count >= threshold and pattern_matches >= 1:
-                return True
-
-            # Also check for tab/pipe-separated header-only content
-            if ('\t' in text or '|' in text):
-                parts = re.split(r'[\t|]', text_lower)
-                # If all parts are short and most match header keywords, it's a header
-                if all(len(p.strip()) < 30 for p in parts if p.strip()):
-                    parts_matching = sum(1 for p in parts if any(kw in p for kw in header_keywords))
-                    if parts_matching >= len(parts) * 0.5:
-                        return True
-
-        return False
-
-    def _is_structural_label(self, entry: Dict) -> bool:
-        """Check if an entry is a structural label from the source CV rather than actual content.
-
-        Source CVs contain section headers, sub-headers, and structural labels
-        (e.g., "CLINICAL PRACTICE ACTIVITIES", "Direct Teaching/Precepting/Supervision")
-        that sometimes get extracted as entries. These should not appear as content
-        in the WCM output — the WCM template provides its own structure.
-
-        Checks:
-        1. All-caps text longer than 3 characters (section headers)
-        2. Entry text that exactly matches one of its own hierarchy labels
-        """
-        text = (entry.get('text', '') or '').strip()
-        if not text:
-            return True
-
-        # All-caps text (section headers like "CLINICAL PRACTICE ACTIVITIES")
-        if text == text.upper() and len(text) > 3 and not any(c.isdigit() for c in text):
-            return True
-
-        # Text that exactly matches one of its hierarchy labels
-        hierarchy = entry.get('hierarchy', [])
-        for label in hierarchy:
-            if text.strip().lower() == label.strip().lower():
-                return True
-
-        return False
 
 
     def _get_institution_location(self, entry: Dict) -> Tuple[str, bool]:
@@ -2569,29 +2429,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 pass  # Already removed or not in body
 
 
-    def _style_table(self, table: Table):
-        """Apply standard WCM table styling with header background and borders.
-
-        Styling applied:
-        - Header row: Light gray background ("White, Background 1, Darker 25%" = D9D9D9)
-        - All cells: 1px light gray borders
-        """
-        if not table or not table.rows:
-            return
-
-        # Gray color for header background and borders (D9D9D9 = White, Background 1, Darker 25%)
-        gray_color = "D9D9D9"
-
-        # Style header row (first row) with background color
-        if table.rows:
-            header_row = table.rows[0]
-            for cell in header_row.cells:
-                _set_cell_background(cell, gray_color)
-
-        # Apply borders to all cells
-        for row in table.rows:
-            for cell in row.cells:
-                _set_cell_borders(cell, gray_color)
 
 
 
@@ -2721,16 +2558,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         self.stats['entries_inserted'] += 1
 
-    def _format_table_headers(self, table: Table):
-        """Make table header row bold and set proper formatting."""
-        if not table or not table.rows:
-            return
-        header_row = table.rows[0]
-        for cell in header_row.cells:
-            _set_cell_vertical_alignment(cell, 'center')
-            for para in cell.paragraphs:
-                for run in para.runs:
-                    _set_font(run, size=11, bold=True)
 
     def _add_spacing_paragraph(self, after_element=None):
         """Add a blank paragraph for spacing between elements.
@@ -2999,7 +2826,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Fallback to document_uid for name
         if not name:
-            name = self._extract_name_from_uid(document_uid)
+            name = _extract_name_from_uid(document_uid)
 
         # Find and fill Name field
         name_idx = self._find_paragraph_with_text("Name:")
@@ -3028,33 +2855,33 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 # Office address
                 if office_address and 'office address' in cell_text:
                     formatted_address = office_address.replace('\t', '\n').replace('; ', '\n').replace(';', '\n')
-                    self._set_cell_text(row.cells[1], formatted_address)
+                    _set_cell_text(row.cells[1], formatted_address)
                     self.stats['entries_inserted'] += 1
 
                 # Office telephone
                 if office_phone and 'office telephone' in cell_text:
-                    self._set_cell_text(row.cells[1], office_phone)
+                    _set_cell_text(row.cells[1], office_phone)
                     self.stats['entries_inserted'] += 1
 
                 # Work email
                 if work_email and 'work email' in cell_text:
-                    self._set_cell_text(row.cells[1], work_email)
+                    _set_cell_text(row.cells[1], work_email)
                     self.stats['entries_inserted'] += 1
 
                 # Home address
                 if home_address and 'home address' in cell_text:
                     formatted_address = home_address.replace('\t', '\n').replace('; ', '\n').replace(';', '\n')
-                    self._set_cell_text(row.cells[1], formatted_address)
+                    _set_cell_text(row.cells[1], formatted_address)
                     self.stats['entries_inserted'] += 1
 
                 # Cell phone
                 if cell_phone and 'cell phone' in cell_text:
-                    self._set_cell_text(row.cells[1], cell_phone)
+                    _set_cell_text(row.cells[1], cell_phone)
                     self.stats['entries_inserted'] += 1
 
                 # Personal email
                 if personal_email and 'personal email' in cell_text:
-                    self._set_cell_text(row.cells[1], personal_email)
+                    _set_cell_text(row.cells[1], personal_email)
                     self.stats['entries_inserted'] += 1
 
     def _fill_researcher_profiles(self, s0_entries: List[Dict]):
@@ -3092,43 +2919,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         # Add a blank line before the S0 content
         self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
 
-    def _extract_name_from_uid(self, uid: str) -> str:
-        """Extract formatted name from document UID."""
-        # Remove year prefix (e.g., "2015_Wende" -> "Wende")
-        parts = uid.replace('CV_', '').split('_')
 
-        # Filter out year
-        parts = [p for p in parts if not p.isdigit() and len(p) > 2]
-
-        if len(parts) >= 2:
-            # Assume "First_Last" or "Last_First"
-            return ' '.join(parts).title()
-        elif parts:
-            return parts[0].title()
-        return uid
-
-    def _extract_last_name_from_uid(self, uid: str) -> str:
-        """Extract last name from document UID for author matching."""
-        # Remove year prefix (e.g., "2015_Wende" -> "Wende")
-        parts = uid.replace('CV_', '').split('_')
-
-        # Filter out years and very short parts
-        parts = [p for p in parts if not p.isdigit() and len(p) > 2]
-
-        if parts:
-            # Last part is typically the last name
-            last_name = parts[-1]
-            # Handle cases like "Albrechtjs" -> "Albrecht" (initials appended)
-            if len(last_name) > 5:
-                # Check if last 2-3 chars look like initials
-                for suffix_len in [2, 3]:
-                    suffix = last_name[-suffix_len:]
-                    if suffix.islower() or suffix.isupper():
-                        base = last_name[:-suffix_len]
-                        if len(base) >= 3:
-                            return base.title()
-            return last_name.title()
-        return ''
 
     def _fill_education(self, entries: List[Dict]):
         """Fill education table with track changes for enriched content.
@@ -3205,7 +2996,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # If year_awarded is still empty, try to extract from raw text
             if not year_awarded and raw_text:
-                extracted_year = self._extract_year_from_text(raw_text)
+                extracted_year = _extract_year_from_text(raw_text)
                 if extracted_year:
                     year_awarded = extracted_year
                     year_is_enriched = True  # Mark as enriched since we extracted it
@@ -3340,7 +3131,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 dates = format_date_for_section(year, 'B2')
             else:
                 # Try to extract from raw text
-                extracted_year = self._extract_year_from_text(raw_text) if raw_text else ''
+                extracted_year = _extract_year_from_text(raw_text) if raw_text else ''
                 if extracted_year:
                     dates = format_date_for_section(extracted_year, 'B2')
                     year_is_enriched = True
@@ -3681,7 +3472,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Skip table header entries that were mistakenly extracted as data
         # BUT only if we don't have valid extracted fields to work with
-        if not has_valid_fields and self._is_table_header_entry(original_text, ['title', 'institution', 'organization', 'dates', 'city', 'state', 'position']):
+        if not has_valid_fields and _is_table_header_entry(original_text, ['title', 'institution', 'organization', 'dates', 'city', 'state', 'position']):
             if self.verbose:
                 print(f"  Skipping position header entry: '{original_text[:50]}...'")
             return
@@ -4244,7 +4035,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Format costs as currency
         costs = fields.get('annual_direct_costs') or fields.get('total_funding', '')
-        costs_formatted = self._format_currency(costs)
+        costs_formatted = _format_currency(costs)
 
         # Define the grant data model rows
         # Use the extracted title/agency variables (which check multiple field names) instead of just fields.get()
@@ -4462,42 +4253,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 if spacing_para is not None:
                     last_element = spacing_para
 
-    @staticmethod
-    def _is_orphan_fragment(fields: Dict, formatted_text: str, original_text: str) -> bool:
-        """True if a teaching entry is a stray sub-header rather than real content.
 
-        Such fragments carry no date, audience, location, formatted_text, or title.
-        Length alone is NOT sufficient: a short entry with an extracted title is a
-        real record (#262). "Biotia-HSS Next Generation Sequencing Orthopedic Assay"
-        (54 chars, titled) was being discarded, while its sibling table rows
-        Bactisure (180 chars) and Lamprene (120) rendered only by being longer.
-        """
-        has_date = bool(fields.get('date') or fields.get('start_date') or fields.get('end_date'))
-        has_audience = bool(fields.get('audience') or fields.get('level'))
-        has_location = bool(fields.get('location') or fields.get('institution'))
-        has_formatted = bool(formatted_text)
-        has_title = bool((fields.get('title') or '').strip())
-        return (not has_date and not has_audience and not has_location
-                and not has_formatted and not has_title and len(original_text) < 80)
 
-    @staticmethod
-    def _is_mentoring_outcome(entry: Dict) -> bool:
-        """True if the entry is N4 mentoring-outcome narrative.
-
-        _correct_mismatch_if_needed rewrites an unmapped N4 to N3A, stashing the
-        original under 'taxonomy_code_original' — so check both (#261).
-        """
-        return 'N4' in (entry.get('taxonomy_code'), entry.get('taxonomy_code_original'))
-
-    @staticmethod
-    def _is_mentee_record(entry: Dict) -> bool:
-        """True if the entry names a person, i.e. a per-mentee table can be built.
-
-        N3A/N3B also carry aggregate summaries ("Ph.D. Graduated: 38") that name no
-        one. Those are real content but cannot fill a per-mentee table (#261).
-        """
-        fields = entry.get('extracted_fields', {}) or {}
-        return bool((fields.get('name') or fields.get('mentee_name') or '').strip())
 
     def _insert_mentoring_line(self, text: str, insert_after_idx: int, entry: Dict = None):
         """Insert a plain mentoring paragraph directly after ``insert_after_idx``.
@@ -4564,18 +4321,18 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         # Split off aggregate summaries (no mentee named) — they get a line, not a
         # table. Done after the ongoing-reshuffle above, which keys off dates a
         # summary never has, so the partition cannot change that outcome.
-        n3a_summaries = [e for e in n3a_entries if not self._is_mentee_record(e)]
-        n3b_summaries = [e for e in n3b_entries if not self._is_mentee_record(e)]
-        n3a_entries = [e for e in n3a_entries if self._is_mentee_record(e)]
-        n3b_entries = [e for e in n3b_entries if self._is_mentee_record(e)]
+        n3a_summaries = [e for e in n3a_entries if not _is_mentee_record(e)]
+        n3b_summaries = [e for e in n3b_entries if not _is_mentee_record(e)]
+        n3a_entries = [e for e in n3a_entries if _is_mentee_record(e)]
+        n3b_entries = [e for e in n3b_entries if _is_mentee_record(e)]
 
         # Outcome narrative arrives disguised as a current mentee (see
         # _is_mentoring_outcome). Reclaim it and render it under the section header
         # rather than beneath "Current Mentees:", where it does not belong.
         n4_entries += [e for e in n3a_summaries + n3b_summaries
-                       if self._is_mentoring_outcome(e)]
-        n3a_summaries = [e for e in n3a_summaries if not self._is_mentoring_outcome(e)]
-        n3b_summaries = [e for e in n3b_summaries if not self._is_mentoring_outcome(e)]
+                       if _is_mentoring_outcome(e)]
+        n3a_summaries = [e for e in n3a_summaries if not _is_mentoring_outcome(e)]
+        n3b_summaries = [e for e in n3b_summaries if not _is_mentoring_outcome(e)]
 
         total_mentees = len(n3a_entries) + len(n3b_entries)
         total_extra = len(n3a_summaries) + len(n3b_summaries) + len(n4_entries)
@@ -4706,7 +4463,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         rows = [
             ('Name:', fields.get('name') or fields.get('mentee_name', '')),
             ('Site/Position:', site_position),
-            ('Mentoring Period:', self._format_mentee_duration(fields)),
+            ('Mentoring Period:', _format_mentee_duration(fields)),
             ('Project/Accomplishments:', project),
             ('Current Position:', fields.get('current_position', '')),
             ('Type of Supervision:', supervision_type),
@@ -4800,16 +4557,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         return table
 
-    def _format_mentee_duration(self, fields: Dict) -> str:
-        """Format mentee duration."""
-        start = fields.get('start_date', '')
-        end = fields.get('end_date', '')
-
-        if start and end:
-            return f"{start}-{end}"
-        elif start:
-            return f"{start}-present"
-        return ''
 
     # "MD" (from "Bethesda, MD") and "Bloomington" are comma segments the
     # short-proper-noun org fallback happily returns (#229) — never treat a
@@ -4881,7 +4628,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Skip table header entries that were mistakenly extracted as data
             # Common patterns: "Name of award\tOrganization\tDate awarded" or similar
-            if self._is_table_header_entry(original_text, ['award', 'honor', 'organization', 'date', 'year', 'granting']):
+            if _is_table_header_entry(original_text, ['award', 'honor', 'organization', 'date', 'year', 'granting']):
                 if self.verbose:
                     print(f"  Skipping header entry: '{original_text[:50]}...'")
                 continue
@@ -5182,7 +4929,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             original_text = entry.get('text', '')
 
             # Skip table header entries
-            if self._is_table_header_entry(original_text, ['organization', 'membership', 'society', 'date', 'member']):
+            if _is_table_header_entry(original_text, ['organization', 'membership', 'society', 'date', 'member']):
                 if self.verbose:
                     print(f"  Skipping header entry: '{original_text[:50]}...'")
                 continue
@@ -5194,7 +4941,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Detect multi-membership pattern: multiple organization names or membership types
             if len(lines) > 2:
                 # Try to parse multiple memberships
-                memberships = self._parse_multi_membership_entry(lines)
+                memberships = _parse_multi_membership_entry(lines)
                 if memberships:
                     for mem_type, org, dates in memberships:
                         org_text = f"{mem_type}, {org}" if mem_type and mem_type.lower() not in org.lower() else org
@@ -5224,59 +4971,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             self._add_table_row(table, [org_text, date_str], entry=entry)
             self.stats['entries_inserted'] += 1
 
-    def _parse_multi_membership_entry(self, lines: List[str]) -> List[Tuple[str, str, str]]:
-        """Parse multiple memberships from merged entry lines.
-
-        Handles patterns like:
-        - "Member | Org1 | date1" per line
-        - "Member\\nElected Member | Org1\\nOrg2 | date1\\ndate2"
-
-        Returns:
-            List of (membership_type, organization, dates) tuples
-        """
-        memberships = []
-        membership_types = []
-        organizations = []
-        dates = []
-
-        # Common membership type indicators
-        membership_keywords = ['member', 'fellow', 'diplomat', 'associate', 'elected', 'honorary']
-        date_pattern = re.compile(r'^(\d{1,2}/?\d{0,4}\s*-\s*(?:present|\d{1,2}/?\d{0,4}))$|^(\d{4}\s*-\s*(?:present|\d{4}))$', re.IGNORECASE)
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            # Check if line has pipe separators (structured format)
-            if '|' in line:
-                parts = [p.strip() for p in line.split('|')]
-                for part in parts:
-                    if not part:
-                        continue
-                    if any(kw in part.lower() for kw in membership_keywords) and len(part.split()) <= 3:
-                        membership_types.append(part)
-                    elif date_pattern.match(part) or re.match(r'^\d{1,2}/\d{4}', part):
-                        dates.append(part)
-                    else:
-                        organizations.append(part)
-            else:
-                # No pipe - classify by content
-                if any(kw in line.lower() for kw in membership_keywords) and len(line.split()) <= 3:
-                    membership_types.append(line)
-                elif date_pattern.match(line) or re.match(r'^\d{1,2}/\d{4}', line):
-                    dates.append(line)
-                elif len(line) > 5:  # Likely organization name
-                    organizations.append(line)
-
-        # Match up memberships - pair organizations with types and dates
-        if organizations:
-            for i, org in enumerate(organizations):
-                mem_type = membership_types[i] if i < len(membership_types) else ''
-                date = dates[i] if i < len(dates) else ''
-                memberships.append((mem_type, org, date))
-
-        return memberships
 
     def _fill_teaching(self, entries_by_code: Dict[str, List[Dict]]):
         """Fill K. TEACHING ACTIVITIES section.
@@ -5346,14 +5040,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         and raw text fallback.
         """
         # Skip structural labels from source CV
-        if self._is_structural_label(entry):
+        if _is_structural_label(entry):
             return
 
         fields = entry.get('extracted_fields', {}) or {}
         formatted_text = fields.get('formatted_text', '')
         original_text = entry.get('text', '')
 
-        if self._is_orphan_fragment(fields, formatted_text, original_text):
+        if _is_orphan_fragment(fields, formatted_text, original_text):
             return
 
         # Normalize any raw ISO dates the LLM left in formatted text
@@ -6512,7 +6206,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         original_text = entry.get('text', '').strip()
 
                         # Skip entries that are structural labels from the source CV
-                        if self._is_structural_label(entry):
+                        if _is_structural_label(entry):
                             continue
 
                         # L1 clinical practice entries are narrative summaries —
@@ -6588,7 +6282,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     bullet_count = 0
                     for entry in sorted_entries:
                         original_text = entry.get('text', '').strip()
-                        if self._is_structural_label(entry):
+                        if _is_structural_label(entry):
                             continue
                         bullet_text = original_text.replace('\t', ' — ', 1).replace('\t', ' ') if '\t' in original_text else original_text
                         if bullet_text:
@@ -6659,7 +6353,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         fields = entry.get('extracted_fields', {}) or {}
                         original_text = entry.get('text', '').strip()
 
-                        if self._is_structural_label(entry):
+                        if _is_structural_label(entry):
                             continue
 
                         role = fields.get('role') or fields.get('leadership_role') or fields.get('title') or ''
@@ -8564,7 +8258,7 @@ Now analyze the text above:"""
             cv_owner_last_name = cv_owner['last_name']
         elif document_uid:
             # Fallback: extract from document_uid (e.g., "2015_Wende" -> "Wende")
-            cv_owner_last_name = self._extract_last_name_from_uid(document_uid)
+            cv_owner_last_name = _extract_last_name_from_uid(document_uid)
 
         # Count total publications
         pub_codes = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']
@@ -8609,7 +8303,7 @@ Now analyze the text above:"""
                 insert_idx += 1
 
             for citation_num, pub in enumerate(pubs_sorted, start=1):
-                citation_text, target_name, enriched_fields = self._format_citation(pub, citation_num)
+                citation_text, target_name, enriched_fields = _format_citation(pub, citation_num)
                 original_text = pub.get('text', '')
                 enrichment_status = pub.get('enrichment_status', '')
 
@@ -8643,88 +8337,6 @@ Now analyze the text above:"""
                 insert_idx += 1
                 self.stats['entries_inserted'] += 1
 
-    def _format_citation(self, entry: Dict, num: int) -> Tuple[str, Optional[str], List[str]]:
-        """
-        Format a publication entry as Vancouver-style citation.
-
-        Returns:
-            (citation_text, target_name, enriched_fields) tuple
-        """
-        fields = entry.get('extracted_fields', {})
-        enrichment = entry.get('enrichment_data', {})
-        enriched_fields = entry.get('enriched_fields', [])  # Track which fields were enriched
-
-        # Check if Stage 5d provided a pre-formatted citation (for non-enriched entries)
-        formatted_citation = fields.get('formatted_citation', '')
-        if formatted_citation and fields.get('formatting_source') == 'stage_5d_llm':
-            # Use the LLM-formatted citation directly
-            citation = f"{num}. {formatted_citation}"
-            target_name = fields.get('target_name')
-            return citation, target_name, enriched_fields
-
-        parts = []
-
-        # Authors - prefer enriched PubMed authors, fall back to extracted
-        authors = enrichment.get('pubmed_authors') or fields.get('authors', '')
-        if authors:
-            # Clean and normalize author names
-            authors = _normalize_author_names(authors)
-            parts.append(authors + ".")
-
-        # Title - prefer enriched PubMed title, fall back to extracted
-        title = enrichment.get('pubmed_title') or fields.get('title', '')
-        if title:
-            title = title.rstrip('.')
-            parts.append(title + ".")
-
-        # Journal or Book title - prefer enriched
-        journal = enrichment.get('pubmed_journal') or fields.get('journal', '')
-        book_title = fields.get('book_title', '')
-        if journal:
-            parts.append(journal + ".")
-        elif book_title:
-            # For book chapters (S4), use "In: Book Title"
-            parts.append(f"In: {book_title}.")
-
-        # Year;Volume(Issue):Pages
-        year = str(fields.get('year', ''))
-        volume = enrichment.get('pubmed_volume') or fields.get('volume', '')
-        issue = enrichment.get('pubmed_issue') or fields.get('issue', '')
-        pages = enrichment.get('pubmed_pages') or fields.get('pages', '')
-
-        cit_parts = []
-        if year:
-            cit_parts.append(year)
-        if volume:
-            cit_parts.append(f";{volume}")
-        if issue:
-            cit_parts.append(f"({issue})")
-        if pages:
-            cit_parts.append(f":{pages}")
-
-        if cit_parts:
-            parts.append("".join(cit_parts) + ".")
-
-        # Identifiers - separated by periods
-        ids = []
-        doi = fields.get('doi', '')
-        pmid = fields.get('pmid', '')
-        pmcid = fields.get('pmcid', '')
-
-        if doi:
-            ids.append(f"doi:{doi}.")
-        if pmid:
-            ids.append(f"PMID:{pmid}.")
-        if pmcid:
-            ids.append(f"PMCID:{pmcid}.")
-
-        if ids:
-            parts.append(" ".join(ids).rstrip('.') + ".")  # Ensure single final period
-
-        citation = f"{num}. " + " ".join(parts)
-        target_name = fields.get('target_name')
-
-        return citation, target_name, enriched_fields
 
 
     def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: Optional[str], cv_owner_last_name: str = ''):

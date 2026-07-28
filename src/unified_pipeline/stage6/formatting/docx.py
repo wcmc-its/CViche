@@ -172,3 +172,12 @@ def _set_cell_borders(cell, color_hex: str, size: str = "4"):
         tcBorders.append(border)
 
     tcPr.append(tcBorders)
+
+
+def _set_cell_text(cell, text: str, bold: bool = False):
+    """Set cell text with proper Arial 11pt formatting."""
+    cell.text = ""  # Clear existing
+    if cell.paragraphs:
+        para = cell.paragraphs[0]
+        run = para.add_run(str(text) if text else "")
+        _set_font(run, bold=bold)
