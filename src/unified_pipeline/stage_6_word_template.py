@@ -43,6 +43,42 @@ except ImportError:
 
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.core.render_check import entry_fragments
+from unified_pipeline.stage6.formatting import (
+    _clear_table_data,
+    _format_citation,
+    _format_currency,
+    _format_mentee_duration,
+    _set_cell_background,
+    _set_cell_borders,
+    _set_cell_text,
+    _set_cell_vertical_alignment,
+    _set_font,
+    _set_paragraph_spacing,
+    _set_table_border,
+)
+from unified_pipeline.stage6.parsing import (
+    _extract_last_name_from_uid,
+    _extract_name_from_uid,
+    _extract_year_from_text,
+    _is_mentee_record,
+    _is_mentoring_outcome,
+    _is_orphan_fragment,
+    _is_structural_label,
+    _is_table_header_entry,
+    _parse_multi_membership_entry,
+)
+from unified_pipeline.stage6.resolution import (
+    _get_cv_owner_name,
+    _get_institution_location,
+    _recover_institution_from_nearby_entries,
+)
+from unified_pipeline.stage6.normalization import (
+    _deduplicate_repeated_content,
+    _get_cleaned_institution_name,
+    _normalize_author_names,
+    _strip_markdown_for_word,
+    _strip_org_tail,
+)
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
@@ -101,6 +137,76 @@ def _committee_cell_text(value) -> str:
     if isinstance(value, list):
         return "; ".join(t for t in (_committee_cell_text(v) for v in value) if t)
     return str(value)
+
+
+# Keys observed in structured stage-4 `address` values on the 2026-07-25 corpus:
+# home_address, office_address, business_address. There is no convention — the
+# LLM picks one — so match on all of them.
+_HOME_ADDRESS_KEYS = ('home_address', 'home')
+_OFFICE_ADDRESS_KEYS = ('business_address', 'office_address', 'work_address',
+                        'business', 'office')
+
+
+def _labels_its_own_address_slots(value) -> bool:
+    """True when a dict address names its own home/office halves.
+
+    Distinguishes ``{"home_address": ..., "office_address": ...}``, which knows
+    which cell each half belongs in, from ``{"street": ..., "city": ...}``,
+    which is one address in parts and must be routed by the entry's own text."""
+    return isinstance(value, dict) and any(
+        k in value for k in _HOME_ADDRESS_KEYS + _OFFICE_ADDRESS_KEYS)
+
+
+def _address_cell_text(value, slot: str) -> str:
+    """Coerce a stage-4 ``address`` field to plain text for one slot.
+
+    ``slot`` is ``'home'`` or ``'office'``.
+
+    Stage 4 stores raw LLM JSON, and ``coerce_field_value_types`` deliberately
+    leaves dicts intact, so ``address`` reaches stage 6 as a dict on the CVs
+    whose contact block is a two-column Home/Office table. ``.replace()`` on
+    that dict raised AttributeError and aborted the entire document — two of 96
+    runs produced no deliverable at all (#442).
+
+    A string is returned untouched, so the CVs that never had this problem
+    render byte-identically.
+
+    Nothing is ever dropped for being an unfamiliar shape. The extraction call
+    runs with ``response_format={"type": "json_object"}`` and no schema, so the
+    key vocabulary is unbounded — the two corpus reproductions already disagreed
+    (``office_address`` vs ``business_address``). A dict that names no slot is
+    joined whole; a dict that names only one has its remaining keys joined into
+    the office cell; a value nested under a slot key is recursed into rather
+    than skipped. Silent loss is the failure mode this file keeps being bitten
+    by, so the fallbacks favour rendering something over rendering nothing."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "; ".join(t for t in (_address_cell_text(v, slot) for v in value) if t)
+    if not isinstance(value, dict):
+        return str(value)
+
+    def _join(items):
+        return "; ".join(t for t in (_address_cell_text(v, slot).strip()
+                                     for v in items) if t)
+
+    if not _labels_its_own_address_slots(value):
+        # One address split into parts. The caller routes it by entry text.
+        return _join(value.values())
+
+    own = _HOME_ADDRESS_KEYS if slot == 'home' else _OFFICE_ADDRESS_KEYS
+    other = _OFFICE_ADDRESS_KEYS if slot == 'home' else _HOME_ADDRESS_KEYS
+    for key in own:
+        text = _address_cell_text(value.get(key), slot).strip()
+        if text:
+            return text
+    if slot == 'home':
+        return ""
+    # Office is the catch-all: keys the home slot will never claim are joined
+    # here rather than silently dropped from a partly-labelled dict.
+    return _join(v for k, v in value.items() if k not in other)
 
 
 # A leading 3b taxonomy code (M2B, D1, S6, N3A …) that leaked into a rendered
@@ -1570,116 +1676,10 @@ class WCMTemplateGenerator:
 
         return output_path
 
-    def _strip_markdown_for_word(self, text: str, preserve_newlines: bool = False) -> str:
-        """
-        Convert markdown-formatted text to plain text suitable for Word document.
 
-        Handles:
-        - Bold: **text** -> text
-        - Sub-bullets: - (item) -> (item)
-        - Headers: # Header -> Header
-        - Preserves quotes and other content
 
-        Args:
-            preserve_newlines: If True, join lines with newlines instead of
-                semicolons. Use for teaching entries where each line becomes
-                a separate bullet (main entry + notes).
-        """
-        if not text:
-            return ''
 
-        # Remove bold markers
-        text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
 
-        # Handle sub-bullets - strip the dash prefix
-        lines = text.split('\n')
-        result_parts = []
-        for line in lines:
-            line = line.strip()
-            if line.startswith('- '):
-                # Sub-bullet, strip the prefix and any "Notes: " structural marker from Stage 5c
-                line = line[2:].strip()
-                if line.startswith('Notes: '):
-                    line = line[7:]
-                elif line.startswith('Notes:'):
-                    line = line[6:].strip()
-                result_parts.append(line)
-            elif line:
-                result_parts.append(line)
-
-        # Join with appropriate separator
-        if preserve_newlines:
-            return '\n'.join(result_parts)
-        elif len(result_parts) > 1:
-            # Multiple lines - join with semicolon for compactness
-            result = '; '.join(result_parts)
-        else:
-            result = result_parts[0] if result_parts else ''
-
-        return result
-
-    def _set_font(self, run, name='Arial', size=11, bold=False, italic=False):
-        """Set font properties for a run - always 11pt Arial unless specified."""
-        run.font.name = name
-        run.font.size = Pt(size)
-        run.bold = bold
-        run.italic = italic
-        # Ensure font name applies to complex script and East Asian text as well
-        r = run._element
-        rPr = r.get_or_add_rPr()
-        rFonts = rPr.find(qn('w:rFonts'))
-        if rFonts is None:
-            rFonts = OxmlElement('w:rFonts')
-            rPr.insert(0, rFonts)
-        rFonts.set(qn('w:ascii'), name)
-        rFonts.set(qn('w:hAnsi'), name)
-        rFonts.set(qn('w:cs'), name)
-
-    def _set_cell_text(self, cell, text: str, bold: bool = False):
-        """Set cell text with proper Arial 11pt formatting."""
-        cell.text = ""  # Clear existing
-        if cell.paragraphs:
-            para = cell.paragraphs[0]
-            run = para.add_run(str(text) if text else "")
-            self._set_font(run, bold=bold)
-
-    def _set_table_border(self, table: Table, color: str = '808080', size: int = 4):
-        """Set table borders to 1px (4 eighths of a point), 50% gray."""
-        tbl = table._tbl
-        # CT_Tbl.tblPr is a OneAndOnlyOne descriptor: it returns the element or
-        # raises InvalidXmlError -- it never returns None. (ECMA-376 makes
-        # w:tblPr required on w:tbl, so a valid document always has it.) The
-        # old `if tbl.tblPr is not None else OxmlElement(...)` ternary and its
-        # trailing `if tbl.tblPr is None: tbl.insert(0, tblPr)` were therefore
-        # both unreachable. Note there is no get_or_add_tblPr() to reach for --
-        # OneAndOnlyOne generates no such accessor.
-        tblPr = tbl.tblPr
-
-        tblBorders = OxmlElement('w:tblBorders')
-        for border_name in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
-            border = OxmlElement(f'w:{border_name}')
-            border.set(qn('w:val'), 'single')
-            border.set(qn('w:sz'), str(size))  # 4 = 0.5pt, 8 = 1pt
-            border.set(qn('w:color'), color)
-            tblBorders.append(border)
-
-        # Remove existing borders and add new ones
-        existing = tblPr.find(qn('w:tblBorders'))
-        if existing is not None:
-            tblPr.remove(existing)
-        tblPr.append(tblBorders)
-
-    def _set_cell_vertical_alignment(self, cell, align='center'):
-        """Set cell vertical alignment to center (middle)."""
-        tc = cell._tc
-        tcPr = tc.get_or_add_tcPr()
-        vAlign = OxmlElement('w:vAlign')
-        vAlign.set(qn('w:val'), align)
-        # Remove existing vAlign
-        existing = tcPr.find(qn('w:vAlign'))
-        if existing is not None:
-            tcPr.remove(existing)
-        tcPr.append(vAlign)
 
     def _apply_vertical_alignment_to_all_tables(self):
         """Apply vertical middle alignment and paragraph spacing to ALL table cells.
@@ -1695,10 +1695,10 @@ class WCMTemplateGenerator:
         for table in self.doc.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    self._set_cell_vertical_alignment(cell, 'center')
+                    _set_cell_vertical_alignment(cell, 'center')
                     # Set paragraph spacing for all paragraphs in cell
                     for para in cell.paragraphs:
-                        self._set_paragraph_spacing(para, before_pt=4, after_pt=4)
+                        _set_paragraph_spacing(para, before_pt=4, after_pt=4)
 
     def _apply_table_styling_to_all_tables(self):
         """Apply standard WCM table styling to ALL tables.
@@ -1717,68 +1717,14 @@ class WCMTemplateGenerator:
             # Apply header row background color (first row)
             header_row = table.rows[0]
             for cell in header_row.cells:
-                self._set_cell_background(cell, gray_color)
+                _set_cell_background(cell, gray_color)
 
             # Apply borders to all cells
             for row in table.rows:
                 for cell in row.cells:
-                    self._set_cell_borders(cell, gray_color)
+                    _set_cell_borders(cell, gray_color)
 
-    def _set_paragraph_spacing(self, para, before_pt: int = 4, after_pt: int = 4):
-        """Set paragraph spacing before and after.
 
-        Args:
-            para: Paragraph to modify
-            before_pt: Space before in points
-            after_pt: Space after in points
-        """
-        pPr = para._p.get_or_add_pPr()
-
-        # Remove existing spacing element if present
-        existing = pPr.find(qn('w:spacing'))
-        if existing is not None:
-            pPr.remove(existing)
-
-        # Create new spacing element with before and after
-        spacing = OxmlElement('w:spacing')
-        spacing.set(qn('w:before'), str(before_pt * 20))  # Convert pt to twips (1pt = 20 twips)
-        spacing.set(qn('w:after'), str(after_pt * 20))
-        pPr.append(spacing)
-
-    def _format_currency(self, value) -> str:
-        """Format a value as US currency ($).
-
-        Args:
-            value: Number, string with digits, or empty value
-
-        Returns:
-            Formatted currency string (e.g., "$14,876") or empty string
-        """
-        if not value:
-            return ''
-
-        # Convert to string and extract numeric portion
-        value_str = str(value).strip()
-
-        # If already formatted with $, just return it
-        if value_str.startswith('$'):
-            return value_str
-
-        # Remove any existing currency symbols, commas, and whitespace
-        cleaned = re.sub(r'[$,\s]', '', value_str)
-
-        # Try to extract a number
-        try:
-            # Handle cases like "14876" or "14876.00"
-            num = float(cleaned)
-            # Format with commas and $ symbol, no decimal places for whole numbers
-            if num == int(num):
-                return f"${int(num):,}"
-            else:
-                return f"${num:,.2f}"
-        except ValueError:
-            # If we can't parse it, return the original value
-            return value_str
 
     def _classify_geographic_scope(self, entry: Dict) -> str:
         """Classify an entry's geographic scope as Regional, National, or International.
@@ -1883,47 +1829,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 print(f"    ⚠ Geographic classification error: {e}")
             return 'National'  # Default on error
 
-    def _get_cv_owner_name(self, cv_owner: Dict = None, document_uid: str = '') -> str:
-        """Extract the CV owner's full name for auto-filling PI fields.
 
-        Args:
-            cv_owner: Dict with keys like 'last_name', 'first_name', etc.
-            document_uid: Document UID like "2015_Wende" to extract name from
-
-        Returns:
-            Full name string (e.g., "Adam Wende") or last name if first not available
-        """
-        if cv_owner:
-            first = cv_owner.get('first_name', '')
-            last = cv_owner.get('last_name', '')
-            if first and last:
-                return f"{first} {last}"
-            elif last:
-                return last
-
-        # Fall back to extracting from document_uid
-        if document_uid:
-            # Handle patterns like "2015_Wende" or "2003_Albrechtjs_Cv"
-            parts = document_uid.split('_')
-            if len(parts) >= 2:
-                # Second part is usually the name
-                name_part = parts[1]
-                # Remove common suffixes
-                name_part = re.sub(r'(js|cv|CV|Cv)$', '', name_part, flags=re.IGNORECASE)
-                # Capitalize properly
-                return name_part.capitalize()
-
-        return ''
-
-    def _add_paragraph_spacing_before(self, para, space_pt: int = 10):
-        """Add spacing before a paragraph (for table margins)."""
-        pPr = para._p.get_or_add_pPr()
-        spacing = OxmlElement('w:spacing')
-        spacing.set(qn('w:before'), str(space_pt * 20))  # Convert pt to twips
-        existing = pPr.find(qn('w:spacing'))
-        if existing is not None:
-            pPr.remove(existing)
-        pPr.append(spacing)
 
     def _insert_multiline_as_bullets(self, insert_idx: int, text: str, entry: Dict = None,
                                        add_blank_before: bool = False) -> int:
@@ -1986,7 +1892,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         # Use a simple bullet character prefix for reliable rendering
         # This avoids Word numbering system issues across different templates
         run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
-        self._set_font(run)
+        _set_font(run)
 
         if entry:
             self._add_entry_comments(entry_para, entry)
@@ -2023,7 +1929,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Add bullet prefix, then track change pair
         bullet_run = entry_para.add_run("• ")
-        self._set_font(bullet_run)
+        _set_font(bullet_run)
 
         # Add track change pair: deletion (original) then insertion (new)
         self._add_track_change_pair(entry_para, original_text, new_text, author=author)
@@ -2034,40 +1940,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         self.stats['entries_inserted'] += 1
         return entry_para
 
-    def _apply_bullet_formatting(self, para: Paragraph) -> None:
-        """Apply bullet list formatting to a paragraph using XML.
-
-        This is used when the 'List Bullet' style is not available in the template.
-        Creates a proper Word bullet list with hanging indent.
-        """
-        # Get or create paragraph properties
-        pPr = para._p.get_or_add_pPr()
-
-        # Create numbering properties for bullet
-        numPr = OxmlElement('w:numPr')
-
-        # Use abstract numbering ID 0 (typically bullets in Word)
-        ilvl = OxmlElement('w:ilvl')
-        ilvl.set(qn('w:val'), '0')
-        numPr.append(ilvl)
-
-        numId = OxmlElement('w:numId')
-        numId.set(qn('w:val'), '1')  # numId 1 is typically bullet list
-        numPr.append(numId)
-
-        # Insert numbering properties at beginning of pPr
-        pPr.insert(0, numPr)
-
-        # Set hanging indent for proper bullet alignment (0.25" indent, 0.25" hanging)
-        ind = OxmlElement('w:ind')
-        ind.set(qn('w:left'), '720')      # 0.5 inch in twips (1440 twips = 1 inch)
-        ind.set(qn('w:hanging'), '360')   # 0.25 inch hanging indent
-
-        # Remove existing indentation if any
-        existing_ind = pPr.find(qn('w:ind'))
-        if existing_ind is not None:
-            pPr.remove(existing_ind)
-        pPr.append(ind)
 
     def _apply_list_bullet(self, para: Paragraph, level: int = 0) -> None:
         """Apply Word native list bullet formatting using the WCM template's numbering.
@@ -2103,40 +1975,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         numPr.append(numId)
         pPr.append(numPr)
 
-    def _extract_year_from_text(self, text: str) -> Optional[str]:
-        """Extract year from raw text as fallback when not in extracted_fields.
-
-        Looks for patterns like:
-        - "August 2021"
-        - "December 2017"
-        - "May 2015"
-        - "(2021)"
-        - "2019-2021"
-        """
-        if not text:
-            return None
-
-        # Pattern 1: Month Year (e.g., "August 2021", "December 2017")
-        month_year = re.search(r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})', text)
-        if month_year:
-            return month_year.group(2)
-
-        # Pattern 2: Year in parentheses at end (e.g., "(2021)")
-        paren_year = re.search(r'\((\d{4})\)\s*$', text)
-        if paren_year:
-            return paren_year.group(1)
-
-        # Pattern 3: Year range - take the end year (e.g., "2019-2021")
-        year_range = re.search(r'(\d{4})\s*[-–—]\s*(\d{4})', text)
-        if year_range:
-            return year_range.group(2)
-
-        # Pattern 4: Single year in text
-        single_year = re.search(r'\b(19\d{2}|20\d{2})\b', text)
-        if single_year:
-            return single_year.group(1)
-
-        return None
 
     # Phrases a CV uses to mark a degree that has not yet been conferred.
     _IN_PROGRESS_DEGREE_MARKERS = (
@@ -2169,412 +2007,13 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 pass
         return False
 
-    def _is_from_enrichment(self, entry: Dict, field: str) -> bool:
-        """Check if a field value came from enrichment rather than extraction."""
-        enriched_fields = entry.get('enriched_fields', [])
-        return field in enriched_fields
 
-    def _deduplicate_repeated_content(self, text: str, separator: str = '|') -> str:
-        """Remove repeated content from pipe-separated text.
 
-        Handles cases where table extraction causes the same content to repeat:
-        "Title .08FTE | Title .08FTE | Title .08FTE" -> "Title .08FTE"
 
-        Args:
-            text: Raw text that may contain repeated segments
-            separator: The separator between repeated segments (default: '|')
 
-        Returns:
-            Deduplicated text with only the first unique segment
-        """
-        if not text or separator not in text:
-            return text
 
-        parts = [p.strip() for p in text.split(separator) if p.strip()]
-        if len(parts) <= 1:
-            return text
 
-        # Check if all parts are similar (using first part as reference)
-        first_part = parts[0]
 
-        # Normalize for comparison (lowercase, remove extra whitespace)
-        def normalize(s):
-            return ' '.join(s.lower().split())
-
-        first_normalized = normalize(first_part)
-
-        # Count how many parts match the first
-        matching_count = sum(1 for p in parts if normalize(p) == first_normalized)
-
-        # If most parts are identical, return just the first one
-        if matching_count >= len(parts) * 0.5:
-            return first_part
-
-        # Otherwise return original (parts are meaningfully different)
-        return text
-
-    def _is_table_header_entry(self, text: str, header_keywords: List[str], threshold: int = 2) -> bool:
-        """Detect if an entry is actually a table header that was mistakenly extracted as data.
-
-        Table headers are characterized by:
-        - Multiple header-like words (e.g., "Name of award", "Date", "Organization")
-        - Tab or pipe-separated columns
-        - No substantive content (just column labels)
-
-        Args:
-            text: The entry text to check
-            header_keywords: List of keywords that typically appear in headers for this section
-            threshold: Minimum number of header keywords required to classify as header
-
-        Returns:
-            True if this appears to be a table header, False otherwise
-        """
-        if not text:
-            return False
-
-        # Normalize text for checking
-        text_lower = text.lower().strip()
-
-        # If text is very short, it might be header-like
-        # But only if it matches header patterns
-        if len(text_lower) < 100:
-            # Count how many header keywords appear
-            keyword_count = sum(1 for kw in header_keywords if kw.lower() in text_lower)
-
-            # Check for common header patterns
-            header_patterns = [
-                r'\bname\s+of\s+',  # "Name of award", "Name of organization"
-                r'\bdate\s*(awarded|received|of|issued)?\b',  # "Date awarded", "Date of issue"
-                r'\b(organization|institution)\s*(name)?\b',  # "Organization", "Institution name"
-                r'\btitle\b.*\b(institution|organization|dates?)\b',  # "Title | Institution | Dates"
-                r'\bdates?\s*\(?[mdy/]+\)?',  # "Dates (mm/yy)"
-            ]
-
-            pattern_matches = sum(1 for p in header_patterns if re.search(p, text_lower))
-
-            # If multiple header keywords AND pattern matches, likely a header
-            if keyword_count >= threshold and pattern_matches >= 1:
-                return True
-
-            # Also check for tab/pipe-separated header-only content
-            if ('\t' in text or '|' in text):
-                parts = re.split(r'[\t|]', text_lower)
-                # If all parts are short and most match header keywords, it's a header
-                if all(len(p.strip()) < 30 for p in parts if p.strip()):
-                    parts_matching = sum(1 for p in parts if any(kw in p for kw in header_keywords))
-                    if parts_matching >= len(parts) * 0.5:
-                        return True
-
-        return False
-
-    def _is_structural_label(self, entry: Dict) -> bool:
-        """Check if an entry is a structural label from the source CV rather than actual content.
-
-        Source CVs contain section headers, sub-headers, and structural labels
-        (e.g., "CLINICAL PRACTICE ACTIVITIES", "Direct Teaching/Precepting/Supervision")
-        that sometimes get extracted as entries. These should not appear as content
-        in the WCM output — the WCM template provides its own structure.
-
-        Checks:
-        1. All-caps text longer than 3 characters (section headers)
-        2. Entry text that exactly matches one of its own hierarchy labels
-        """
-        text = (entry.get('text', '') or '').strip()
-        if not text:
-            return True
-
-        # All-caps text (section headers like "CLINICAL PRACTICE ACTIVITIES")
-        if text == text.upper() and len(text) > 3 and not any(c.isdigit() for c in text):
-            return True
-
-        # Text that exactly matches one of its hierarchy labels
-        hierarchy = entry.get('hierarchy', [])
-        for label in hierarchy:
-            if text.strip().lower() == label.strip().lower():
-                return True
-
-        return False
-
-    def _clean_institution_field(self, institution: str) -> Tuple[str, str]:
-        """Clean up institution field that may contain tab-separated values or embedded locations.
-
-        Handles cases like:
-        - "Weill Cornell Medical College\\tNew York Presbyterian Hospital\\tNew York, New York"
-        - "Weill Cornell Medical College, New York, NY"
-
-        Args:
-            institution: Raw institution string from extraction
-
-        Returns:
-            Tuple of (cleaned_institution, extracted_location)
-            - cleaned_institution: Institution name(s) properly formatted
-            - extracted_location: City, State if found embedded in the string
-        """
-        if not institution:
-            return '', ''
-
-        # Common US state patterns (full names and abbreviations)
-        us_states = {
-            'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado',
-            'Connecticut', 'Delaware', 'Florida', 'Georgia', 'Hawaii', 'Idaho',
-            'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana',
-            'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota',
-            'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada',
-            'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina',
-            'North Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania',
-            'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas',
-            'Utah', 'Vermont', 'Virginia', 'Washington', 'West Virginia',
-            'Wisconsin', 'Wyoming', 'District of Columbia'
-        }
-        state_abbrevs = {
-            'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI', 'ID',
-            'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS',
-            'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK',
-            'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV',
-            'WI', 'WY', 'DC'
-        }
-        # Common international locations
-        international_locations = {
-            'Doha, Qatar', 'Qatar', 'London, UK', 'London, England', 'Toronto, Canada',
-            'Montreal, Canada', 'Paris, France', 'Berlin, Germany', 'Tokyo, Japan'
-        }
-
-        # Split on tabs first
-        parts = [p.strip() for p in institution.split('\t') if p.strip()]
-
-        institutions = []
-        location = ''
-
-        for part in parts:
-            # Check if this part looks like a location (City, State pattern)
-            is_location = False
-
-            # Check for "City, State" pattern where State is a US state
-            if ', ' in part:
-                potential_parts = part.rsplit(', ', 1)
-                if len(potential_parts) == 2:
-                    potential_state = potential_parts[1].strip()
-                    if potential_state in us_states or potential_state in state_abbrevs:
-                        # This is a City, State - check if it's ONLY location or institution + location
-                        potential_city = potential_parts[0].strip()
-                        # If the "city" part contains institution keywords, it's probably "Institution, City, State"
-                        inst_keywords = ['University', 'College', 'Hospital', 'Medical', 'Institute', 'Center', 'School']
-                        if any(kw in potential_city for kw in inst_keywords):
-                            # This is "Institution, City, State" - need to parse further
-                            # Try to find where institution ends and city begins
-                            # Look for comma before a city name
-                            for state in us_states:
-                                # Pattern: "..., CityName, StateName"
-                                pattern = rf',\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?),\s*{re.escape(state)}$'
-                                match = re.search(pattern, part)
-                                if match:
-                                    city = match.group(1)
-                                    location = f"{city}, {state}"
-                                    institutions.append(part[:match.start()].strip())
-                                    is_location = True
-                                    break
-                            if not is_location:
-                                # Couldn't parse, keep as institution
-                                institutions.append(part)
-                        else:
-                            # This is just "City, State"
-                            location = part
-                            is_location = True
-
-            # Check for international locations
-            if not is_location:
-                for intl_loc in international_locations:
-                    if part == intl_loc or part.endswith(f', {intl_loc}'):
-                        if part == intl_loc:
-                            location = part
-                            is_location = True
-                        else:
-                            # "Institution, Location"
-                            institutions.append(part.replace(f', {intl_loc}', '').strip())
-                            location = intl_loc
-                            is_location = True
-                        break
-
-            if not is_location:
-                institutions.append(part)
-
-        # Deduplicate institutions (preserving order) before joining
-        seen = set()
-        unique_institutions = []
-        for inst in institutions:
-            key = inst.lower().strip()
-            if key not in seen:
-                seen.add(key)
-                unique_institutions.append(inst)
-
-        # Join multiple institutions with " / " separator
-        cleaned_institution = ' / '.join(unique_institutions) if unique_institutions else ''
-
-        return cleaned_institution, location
-
-    def _get_institution_location(self, entry: Dict) -> Tuple[str, bool]:
-        """Get formatted location string from institution enrichment data.
-
-        Uses institution_enrichment from Stage 5b if available, otherwise falls back
-        to extracted_fields.location.
-
-        IMPORTANT: For known institutions (from config.yaml), we use the default location
-        instead of enrichment when:
-        1. The institution name contains a known institution (substring match)
-        2. The original text doesn't have an explicit location different from the default
-
-        This handles cases like "Weill Cornell Medical College, Doha, Qatar" where
-        enrichment returns "Doha, Qatar" but we want "New York, NY" for the main campus.
-
-        Args:
-            entry: Entry dict with potential institution_enrichment
-
-        Returns:
-            Tuple of (location_string, is_from_enrichment)
-            - location_string: Formatted location (e.g., "Columbus, OH") or empty string
-            - is_from_enrichment: True if location came from enrichment (needs track change)
-        """
-        # Known institutions with default locations (should match config.yaml)
-        known_institutions = {
-            'weill cornell': 'New York, NY',
-            'new york presbyterian': 'New York, NY',
-            'newyork-presbyterian': 'New York, NY',
-            'nyp': 'New York, NY',
-            'memorial sloan': 'New York, NY',
-            'hospital for special surgery': 'New York, NY',
-        }
-
-        # Check if this is a known institution that should use default location
-        fields = entry.get('extracted_fields', {})
-        institution_name = (fields.get('institution', '') or '').lower()
-        original_text = (entry.get('text', '') or '').lower()
-
-        # Check for known institution match (substring)
-        default_location = None
-        for known_inst, default_loc in known_institutions.items():
-            if known_inst in institution_name or known_inst in original_text:
-                default_location = default_loc
-                break
-
-        # If it's a known institution, check if original text has a different explicit location
-        # (like "Doha, Qatar" or "Valhalla, NY") - if so, we should NOT override
-        if default_location:
-            # Check if original text contains a non-default location
-            non_default_locations = ['doha', 'qatar', 'valhalla', 'ithaca', 'london', 'houston']
-            has_explicit_non_default = any(loc in original_text for loc in non_default_locations)
-
-            if not has_explicit_non_default:
-                # Use default location for known institution
-                return (default_location, False)  # False = not from enrichment (no track change needed)
-
-        # Check for institution enrichment data (from Stage 5b)
-        enrichment = entry.get('institution_enrichment', {})
-        if enrichment:
-            city = enrichment.get('city', '')
-            state = enrichment.get('state', '')
-            country_code = enrichment.get('country_code', '')
-
-            if city and state:
-                # For US, use state abbreviation
-                if country_code == 'US':
-                    state_abbrevs = {
-                        'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR',
-                        'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE',
-                        'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID',
-                        'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS',
-                        'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD',
-                        'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS',
-                        'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV',
-                        'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY',
-                        'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK',
-                        'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC',
-                        'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT',
-                        'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV',
-                        'Wisconsin': 'WI', 'Wyoming': 'WY', 'District of Columbia': 'DC'
-                    }
-                    state_abbrev = state_abbrevs.get(state, state)
-                    return (f"{city}, {state_abbrev}", True)  # True = from enrichment
-                else:
-                    # For non-US, include country
-                    country = enrichment.get('country', '')
-                    location = f"{city}, {country}" if country else f"{city}, {state}"
-                    return (location, True)  # True = from enrichment
-            elif city:
-                return (city, True)  # True = from enrichment
-
-        # Fall back to extracted_fields.location (not from enrichment)
-        fields = entry.get('extracted_fields', {})
-        return (fields.get('location', ''), False)  # False = not from enrichment
-
-    def _get_cleaned_institution_name(self, entry: Dict) -> Optional[str]:
-        """Get cleaned institution name from enrichment data if available.
-
-        When Stage 5b LLM enrichment provides a cleaned_name (institution name with
-        embedded location removed), use it instead of the raw institution field.
-        This prevents duplication like "Duke Medical Center, Durham, NC, Durham, NC".
-
-        Falls back to official_name when cleaned_name is empty — the LLM sometimes
-        returns empty cleaned_name even when official_name is correctly populated
-        (e.g., official_name="Duke Regional Hospital" with cleaned_name="").
-
-        Args:
-            entry: Entry dict with potential institution_enrichment
-
-        Returns:
-            Cleaned institution name, or None if not available (use original)
-        """
-        enrichment = entry.get('institution_enrichment', {})
-        cleaned = enrichment.get('cleaned_name', '')
-        if cleaned:
-            return cleaned
-        # Fall back to official_name — always the institution without embedded location
-        official = enrichment.get('official_name', '')
-        return official if official else None
-
-    def _recover_institution_from_nearby_entries(self, entry: Dict, all_entries: List[Dict]) -> str:
-        """Recover institution name from nearby entries in the original CV.
-
-        When a training entry (like Graduate Research Assistant) is missing institution,
-        look at subsequent entries by element_idx that might contain the institution name.
-        Common patterns: "University of X", "Department of X", institution names.
-        """
-        entry_end_idx = entry.get('element_idx_end', entry.get('element_idx_start', -1))
-        # Ensure entry_end_idx is an integer (may be string from JSON)
-        try:
-            entry_end_idx = int(entry_end_idx)
-        except (ValueError, TypeError):
-            entry_end_idx = -1
-        if entry_end_idx < 0:
-            return ''
-
-        # University/institution patterns
-        institution_patterns = [
-            'university of', 'college of', 'institute of', 'school of',
-            'department of', 'center for', 'laboratory', 'hospital',
-            ' – department', ' - department'
-        ]
-
-        # Look at entries within the next 5 element indices
-        for other_entry in all_entries:
-            other_start = other_entry.get('element_idx_start', -1)
-            # Ensure other_start is an integer (may be string from JSON)
-            try:
-                other_start = int(other_start)
-            except (ValueError, TypeError):
-                continue
-
-            # Check if this entry is immediately after our target (within 5 elements)
-            if other_start > entry_end_idx and other_start <= entry_end_idx + 5:
-                other_text = other_entry.get('text', '').strip()
-                other_text_lower = other_text.lower()
-
-                # Check if this looks like an institution
-                for pattern in institution_patterns:
-                    if pattern in other_text_lower:
-                        # Return the institution text (clean it up)
-                        return other_text
-
-        return ''
 
     def _get_wcm_section_header(self, taxonomy_code: str) -> str:
         """Map taxonomy code to WCM subsection header text for precise routing.
@@ -2826,88 +2265,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             except ValueError:
                 pass  # Already removed or not in body
 
-    def _clear_table_data(self, table: Table, keep_header: bool = True):
-        """Remove all data rows from table."""
-        if not table:
-            return
-        start_row = 1 if keep_header else 0
-        for i in range(len(table.rows) - 1, start_row - 1, -1):
-            table._element.remove(table.rows[i]._element)
 
-    def _style_table(self, table: Table):
-        """Apply standard WCM table styling with header background and borders.
 
-        Styling applied:
-        - Header row: Light gray background ("White, Background 1, Darker 25%" = D9D9D9)
-        - All cells: 1px light gray borders
-        """
-        if not table or not table.rows:
-            return
 
-        # Gray color for header background and borders (D9D9D9 = White, Background 1, Darker 25%)
-        gray_color = "D9D9D9"
-
-        # Style header row (first row) with background color
-        if table.rows:
-            header_row = table.rows[0]
-            for cell in header_row.cells:
-                self._set_cell_background(cell, gray_color)
-
-        # Apply borders to all cells
-        for row in table.rows:
-            for cell in row.cells:
-                self._set_cell_borders(cell, gray_color)
-
-    def _set_cell_background(self, cell, color_hex: str):
-        """Set cell background/shading color.
-
-        Args:
-            cell: The table cell
-            color_hex: Hex color string (without #), e.g., "D9D9D9"
-        """
-        tc = cell._tc
-        tcPr = tc.get_or_add_tcPr()
-
-        # Remove existing shading if any
-        existing_shd = tcPr.find(qn('w:shd'))
-        if existing_shd is not None:
-            tcPr.remove(existing_shd)
-
-        # Add new shading element
-        shd = OxmlElement('w:shd')
-        shd.set(qn('w:val'), 'clear')
-        shd.set(qn('w:color'), 'auto')
-        shd.set(qn('w:fill'), color_hex)
-        tcPr.append(shd)
-
-    def _set_cell_borders(self, cell, color_hex: str, size: str = "4"):
-        """Set cell borders.
-
-        Args:
-            cell: The table cell
-            color_hex: Hex color string for border color
-            size: Border size in eighths of a point (4 = 0.5pt, 8 = 1pt)
-        """
-        tc = cell._tc
-        tcPr = tc.get_or_add_tcPr()
-
-        # Remove existing borders if any
-        existing_borders = tcPr.find(qn('w:tcBorders'))
-        if existing_borders is not None:
-            tcPr.remove(existing_borders)
-
-        # Add new borders element
-        tcBorders = OxmlElement('w:tcBorders')
-
-        for border_name in ['top', 'left', 'bottom', 'right']:
-            border = OxmlElement(f'w:{border_name}')
-            border.set(qn('w:val'), 'single')
-            border.set(qn('w:sz'), size)
-            border.set(qn('w:space'), '0')
-            border.set(qn('w:color'), color_hex)
-            tcBorders.append(border)
-
-        tcPr.append(tcBorders)
 
     def _add_table_row(self, table: Table, data: List[str], is_header: bool = False, entry: Dict = None):
         """Add a row to a table with proper formatting.
@@ -2927,13 +2287,13 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 cell = row.cells[i]
                 cell.text = str(value) if value else ""
                 # Set vertical alignment to center (middle)
-                self._set_cell_vertical_alignment(cell, 'center')
+                _set_cell_vertical_alignment(cell, 'center')
                 for para in cell.paragraphs:
                     if i == 0 and first_cell_para is None:
                         first_cell_para = para
                     for run in para.runs:
                         # Always 11pt Arial, bold for headers
-                        self._set_font(run, size=11, bold=is_header)
+                        _set_font(run, size=11, bold=is_header)
 
         # Add comments to the first cell if entry provided
         if entry and first_cell_para:
@@ -2962,7 +2322,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             if i < len(row.cells):
                 cell = row.cells[i]
                 # Set vertical alignment to center (middle)
-                self._set_cell_vertical_alignment(cell, 'center')
+                _set_cell_vertical_alignment(cell, 'center')
 
                 # Clear default paragraph
                 if cell.paragraphs:
@@ -2978,7 +2338,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     else:
                         # Add as normal text
                         run = para.add_run(str(value) if value else "")
-                        self._set_font(run, size=11, bold=is_header)
+                        _set_font(run, size=11, bold=is_header)
 
         # Add comments to the first cell if entry provided
         if entry and first_cell_para:
@@ -3007,7 +2367,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             if i < len(row.cells):
                 cell = row.cells[i]
                 # Set vertical alignment to center (middle)
-                self._set_cell_vertical_alignment(cell, 'center')
+                _set_cell_vertical_alignment(cell, 'center')
 
                 # Clear default paragraph
                 if cell.paragraphs:
@@ -3027,7 +2387,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         else:
                             # Add as normal text
                             run = para.add_run(str(text))
-                            self._set_font(run, size=11, bold=is_header)
+                            _set_font(run, size=11, bold=is_header)
 
         # Add comments to the first cell if entry provided
         if entry and first_cell_para:
@@ -3035,16 +2395,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         self.stats['entries_inserted'] += 1
 
-    def _format_table_headers(self, table: Table):
-        """Make table header row bold and set proper formatting."""
-        if not table or not table.rows:
-            return
-        header_row = table.rows[0]
-        for cell in header_row.cells:
-            self._set_cell_vertical_alignment(cell, 'center')
-            for para in cell.paragraphs:
-                for run in para.runs:
-                    self._set_font(run, size=11, bold=True)
 
     def _add_spacing_paragraph(self, after_element=None):
         """Add a blank paragraph for spacing between elements.
@@ -3169,12 +2519,22 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Classify address by type
             if extracted_address:
-                if 'home' in text:
+                if _labels_its_own_address_slots(extracted_address):
+                    # The dict names its own halves, so fill both slots from it
+                    # instead of forcing the whole thing into whichever one the
+                    # raw text happened to label (#442). A dict that names no
+                    # slot is one address and falls through to the raw-text
+                    # routing below, same as a string.
                     if not home_address:
-                        home_address = extracted_address
+                        home_address = _address_cell_text(extracted_address, 'home')
+                    if not office_address:
+                        office_address = _address_cell_text(extracted_address, 'office')
+                elif 'home' in text:
+                    if not home_address:
+                        home_address = _address_cell_text(extracted_address, 'home')
                 elif 'office' in text or 'work' in text or 'business' in text or not office_address:
                     if not office_address:
-                        office_address = extracted_address
+                        office_address = _address_cell_text(extracted_address, 'office')
 
             # Classify email by type
             if extracted_email:
@@ -3303,7 +2663,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Fallback to document_uid for name
         if not name:
-            name = self._extract_name_from_uid(document_uid)
+            name = _extract_name_from_uid(document_uid)
 
         # Find and fill Name field
         name_idx = self._find_paragraph_with_text("Name:")
@@ -3311,7 +2671,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             para = self.doc.paragraphs[name_idx]
             para.clear()
             run = para.add_run(f"Name: {name}")
-            self._set_font(run, bold=True)
+            _set_font(run, bold=True)
 
         # Fill Date of preparation with today's date
         date_idx = self._find_paragraph_with_text("Date of preparation")
@@ -3320,7 +2680,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             para.clear()
             today = datetime.now().strftime("%B %-d, %Y")  # e.g., "February 1, 2026"
             run = para.add_run(f"Date of preparation: {today}")
-            self._set_font(run)
+            _set_font(run)
 
         # Fill email, phone, and address in the PERSONAL DATA table (Table 1)
         # Table 1 structure: Office address, Office telephone, Work email, Home address, Cell phone, Personal email
@@ -3332,33 +2692,33 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 # Office address
                 if office_address and 'office address' in cell_text:
                     formatted_address = office_address.replace('\t', '\n').replace('; ', '\n').replace(';', '\n')
-                    self._set_cell_text(row.cells[1], formatted_address)
+                    _set_cell_text(row.cells[1], formatted_address)
                     self.stats['entries_inserted'] += 1
 
                 # Office telephone
                 if office_phone and 'office telephone' in cell_text:
-                    self._set_cell_text(row.cells[1], office_phone)
+                    _set_cell_text(row.cells[1], office_phone)
                     self.stats['entries_inserted'] += 1
 
                 # Work email
                 if work_email and 'work email' in cell_text:
-                    self._set_cell_text(row.cells[1], work_email)
+                    _set_cell_text(row.cells[1], work_email)
                     self.stats['entries_inserted'] += 1
 
                 # Home address
                 if home_address and 'home address' in cell_text:
                     formatted_address = home_address.replace('\t', '\n').replace('; ', '\n').replace(';', '\n')
-                    self._set_cell_text(row.cells[1], formatted_address)
+                    _set_cell_text(row.cells[1], formatted_address)
                     self.stats['entries_inserted'] += 1
 
                 # Cell phone
                 if cell_phone and 'cell phone' in cell_text:
-                    self._set_cell_text(row.cells[1], cell_phone)
+                    _set_cell_text(row.cells[1], cell_phone)
                     self.stats['entries_inserted'] += 1
 
                 # Personal email
                 if personal_email and 'personal email' in cell_text:
-                    self._set_cell_text(row.cells[1], personal_email)
+                    _set_cell_text(row.cells[1], personal_email)
                     self.stats['entries_inserted'] += 1
 
     def _fill_researcher_profiles(self, s0_entries: List[Dict]):
@@ -3390,49 +2750,13 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             text = entry.get('text', '').strip()
             entry_para = self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
             run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
-            self._set_font(run)
+            _set_font(run)
             self.stats['entries_inserted'] += 1
 
         # Add a blank line before the S0 content
         self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
 
-    def _extract_name_from_uid(self, uid: str) -> str:
-        """Extract formatted name from document UID."""
-        # Remove year prefix (e.g., "2015_Wende" -> "Wende")
-        parts = uid.replace('CV_', '').split('_')
 
-        # Filter out year
-        parts = [p for p in parts if not p.isdigit() and len(p) > 2]
-
-        if len(parts) >= 2:
-            # Assume "First_Last" or "Last_First"
-            return ' '.join(parts).title()
-        elif parts:
-            return parts[0].title()
-        return uid
-
-    def _extract_last_name_from_uid(self, uid: str) -> str:
-        """Extract last name from document UID for author matching."""
-        # Remove year prefix (e.g., "2015_Wende" -> "Wende")
-        parts = uid.replace('CV_', '').split('_')
-
-        # Filter out years and very short parts
-        parts = [p for p in parts if not p.isdigit() and len(p) > 2]
-
-        if parts:
-            # Last part is typically the last name
-            last_name = parts[-1]
-            # Handle cases like "Albrechtjs" -> "Albrecht" (initials appended)
-            if len(last_name) > 5:
-                # Check if last 2-3 chars look like initials
-                for suffix_len in [2, 3]:
-                    suffix = last_name[-suffix_len:]
-                    if suffix.islower() or suffix.isupper():
-                        base = last_name[:-suffix_len]
-                        if len(base) >= 3:
-                            return base.title()
-            return last_name.title()
-        return ''
 
     def _fill_education(self, entries: List[Dict]):
         """Fill education table with track changes for enriched content.
@@ -3452,7 +2776,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort entries reverse chronologically (most recent first)
@@ -3472,7 +2796,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             institution = fields.get('institution', '')
             if institution and institution.lower() == 'none':
                 institution = ''
-            cleaned = self._get_cleaned_institution_name(entry)
+            cleaned = _get_cleaned_institution_name(entry)
             if cleaned:
                 institution = cleaned
 
@@ -3482,7 +2806,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 continue
 
             # Location from enrichment
-            location, location_is_enriched = self._get_institution_location(entry)
+            location, location_is_enriched = _get_institution_location(entry)
 
             # Dates - format according to B1 requirements (mm/yyyy-mm/yyyy)
             # Field extraction may use three different structures:
@@ -3509,7 +2833,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # If year_awarded is still empty, try to extract from raw text
             if not year_awarded and raw_text:
-                extracted_year = self._extract_year_from_text(raw_text)
+                extracted_year = _extract_year_from_text(raw_text)
                 if extracted_year:
                     year_awarded = extracted_year
                     year_is_enriched = True  # Mark as enriched since we extracted it
@@ -3601,7 +2925,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort entries reverse chronologically (most recent first)
@@ -3620,7 +2944,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             institution = fields.get('institution', '')
             if institution and institution.lower() == 'none':
                 institution = ''
-            cleaned = self._get_cleaned_institution_name(entry)
+            cleaned = _get_cleaned_institution_name(entry)
             if cleaned:
                 institution = cleaned
 
@@ -3629,7 +2953,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 continue
 
             # Location from enrichment
-            location, location_is_enriched = self._get_institution_location(entry)
+            location, location_is_enriched = _get_institution_location(entry)
 
             # Dates - format according to B2 requirements (mm/yy – mm/yy)
             start = fields.get('start_date', '')
@@ -3644,7 +2968,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 dates = format_date_for_section(year, 'B2')
             else:
                 # Try to extract from raw text
-                extracted_year = self._extract_year_from_text(raw_text) if raw_text else ''
+                extracted_year = _extract_year_from_text(raw_text) if raw_text else ''
                 if extracted_year:
                     dates = format_date_for_section(extracted_year, 'B2')
                     year_is_enriched = True
@@ -3923,7 +3247,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if acad_idx is not None and d1_entries:
             acad_table = self._find_table_after_paragraph(acad_idx)
             if acad_table:
-                self._clear_table_data(acad_table, keep_header=True)
+                _clear_table_data(acad_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 sorted_d1 = sort_entries_reverse_chronological(d1_entries)
                 for entry in sorted_d1:
@@ -3934,7 +3258,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if hosp_idx is not None and d2_entries:
             hosp_table = self._find_table_after_paragraph(hosp_idx)
             if hosp_table:
-                self._clear_table_data(hosp_table, keep_header=True)
+                _clear_table_data(hosp_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 sorted_d2 = sort_entries_reverse_chronological(d2_entries)
                 for entry in sorted_d2:
@@ -3945,7 +3269,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if other_idx is not None and d3_entries:
             other_table = self._find_table_after_paragraph(other_idx)
             if other_table:
-                self._clear_table_data(other_table, keep_header=True)
+                _clear_table_data(other_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 sorted_d3 = sort_entries_reverse_chronological(d3_entries)
                 for entry in sorted_d3:
@@ -3961,7 +3285,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             if not table:
                 return
 
-            self._clear_table_data(table, keep_header=True)
+            _clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
             # Combine all and sort
@@ -3985,7 +3309,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Skip table header entries that were mistakenly extracted as data
         # BUT only if we don't have valid extracted fields to work with
-        if not has_valid_fields and self._is_table_header_entry(original_text, ['title', 'institution', 'organization', 'dates', 'city', 'state', 'position']):
+        if not has_valid_fields and _is_table_header_entry(original_text, ['title', 'institution', 'organization', 'dates', 'city', 'state', 'position']):
             if self.verbose:
                 print(f"  Skipping position header entry: '{original_text[:50]}...'")
             return
@@ -4021,7 +3345,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         break
 
         # Use LLM-cleaned institution name (strips embedded location); fall back to raw field
-        institution = self._get_cleaned_institution_name(entry) or raw_institution
+        institution = _get_cleaned_institution_name(entry) or raw_institution
 
         # Build base institution string with department
         institution_base = institution
@@ -4029,7 +3353,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             institution_base = f"{institution}, {department}"
 
         # Location from Stage 5b enrichment
-        location, location_is_enriched = self._get_institution_location(entry)
+        location, location_is_enriched = _get_institution_location(entry)
 
         # Get taxonomy code for this entry (D1, D2, or D3)
         taxonomy_code = entry.get('taxonomy_code', 'D1')
@@ -4105,7 +3429,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort entries reverse chronologically (most recent first)
@@ -4127,14 +3451,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             raw_institution = fields.get('institution', '')
 
             # Use LLM-cleaned institution name (strips embedded location); fall back to raw field
-            institution = self._get_cleaned_institution_name(entry) or raw_institution
+            institution = _get_cleaned_institution_name(entry) or raw_institution
 
             # If institution is missing, try to recover from nearby entries in original CV
             if not institution and all_entries:
-                institution = self._recover_institution_from_nearby_entries(entry, all_entries)
+                institution = _recover_institution_from_nearby_entries(entry, all_entries)
 
             # Location from Stage 5b enrichment
-            location, location_is_enriched = self._get_institution_location(entry)
+            location, location_is_enriched = _get_institution_location(entry)
 
             # Get taxonomy code for this entry (C, C1, or C2)
             taxonomy_code = entry.get('taxonomy_code', 'C')
@@ -4279,7 +3603,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         before the current year are moved to M2B (completed) with a comment.
         """
         # Get CV owner name for auto-filling PI when role is Principal Investigator
-        owner_name = self._get_cv_owner_name(cv_owner, document_uid)
+        owner_name = _get_cv_owner_name(cv_owner, document_uid)
         current_year = datetime.now().year
 
         # Filter out role/effort header entries and extract percent effort metadata
@@ -4472,7 +3796,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Clean up title - remove repeated content from merged table cells
         # e.g., "Title .08FTE | Title .08FTE | Title .08FTE" -> "Title .08FTE"
-        title = self._deduplicate_repeated_content(title)
+        title = _deduplicate_repeated_content(title)
 
         agency = fields.get('agency') or fields.get('funding_source', '') or fields.get('sponsor', '')
         total_funding = fields.get('total_funding', '') or fields.get('annual_direct_costs', '')
@@ -4548,7 +3872,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Format costs as currency
         costs = fields.get('annual_direct_costs') or fields.get('total_funding', '')
-        costs_formatted = self._format_currency(costs)
+        costs_formatted = _format_currency(costs)
 
         # Define the grant data model rows
         # Use the extracted title/agency variables (which check multiple field names) instead of just fields.get()
@@ -4572,7 +3896,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         table = self.doc.add_table(rows=len(rows), cols=2)
 
         # Set table borders and formatting
-        self._set_table_border(table, color='808080', size=4)
+        _set_table_border(table, color='808080', size=4)
 
         # Fill in the table
         first_cell_para = None
@@ -4581,20 +3905,20 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Label cell (bold)
             label_cell = row.cells[0]
             label_cell.text = label
-            self._set_cell_vertical_alignment(label_cell, 'center')
+            _set_cell_vertical_alignment(label_cell, 'center')
             for para in label_cell.paragraphs:
                 if i == 0 and first_cell_para is None:
                     first_cell_para = para
                 for run in para.runs:
-                    self._set_font(run, bold=True)
+                    _set_font(run, bold=True)
 
             # Value cell
             value_cell = row.cells[1]
             value_cell.text = str(value) if value else ''
-            self._set_cell_vertical_alignment(value_cell, 'center')
+            _set_cell_vertical_alignment(value_cell, 'center')
             for para in value_cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
 
         # Add comments from entry
         if entry and first_cell_para:
@@ -4719,7 +4043,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Create a 2-column table
             table = self.doc.add_table(rows=len(rows), cols=2)
-            self._set_table_border(table, color='808080', size=4)
+            _set_table_border(table, color='808080', size=4)
 
             # Fill the table
             first_cell_para = None
@@ -4728,20 +4052,20 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 # Label cell (bold)
                 label_cell = row.cells[0]
                 label_cell.text = label
-                self._set_cell_vertical_alignment(label_cell, 'center')
+                _set_cell_vertical_alignment(label_cell, 'center')
                 for para in label_cell.paragraphs:
                     if ri == 0 and first_cell_para is None:
                         first_cell_para = para
                     for run in para.runs:
-                        self._set_font(run, bold=True)
+                        _set_font(run, bold=True)
 
                 # Value cell
                 value_cell = row.cells[1]
                 value_cell.text = str(value) if value else ''
-                self._set_cell_vertical_alignment(value_cell, 'center')
+                _set_cell_vertical_alignment(value_cell, 'center')
                 for para in value_cell.paragraphs:
                     for run in para.runs:
-                        self._set_font(run)
+                        _set_font(run)
 
             # Add comments from entry
             if first_cell_para:
@@ -4766,42 +4090,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 if spacing_para is not None:
                     last_element = spacing_para
 
-    @staticmethod
-    def _is_orphan_fragment(fields: Dict, formatted_text: str, original_text: str) -> bool:
-        """True if a teaching entry is a stray sub-header rather than real content.
 
-        Such fragments carry no date, audience, location, formatted_text, or title.
-        Length alone is NOT sufficient: a short entry with an extracted title is a
-        real record (#262). "Biotia-HSS Next Generation Sequencing Orthopedic Assay"
-        (54 chars, titled) was being discarded, while its sibling table rows
-        Bactisure (180 chars) and Lamprene (120) rendered only by being longer.
-        """
-        has_date = bool(fields.get('date') or fields.get('start_date') or fields.get('end_date'))
-        has_audience = bool(fields.get('audience') or fields.get('level'))
-        has_location = bool(fields.get('location') or fields.get('institution'))
-        has_formatted = bool(formatted_text)
-        has_title = bool((fields.get('title') or '').strip())
-        return (not has_date and not has_audience and not has_location
-                and not has_formatted and not has_title and len(original_text) < 80)
 
-    @staticmethod
-    def _is_mentoring_outcome(entry: Dict) -> bool:
-        """True if the entry is N4 mentoring-outcome narrative.
-
-        _correct_mismatch_if_needed rewrites an unmapped N4 to N3A, stashing the
-        original under 'taxonomy_code_original' — so check both (#261).
-        """
-        return 'N4' in (entry.get('taxonomy_code'), entry.get('taxonomy_code_original'))
-
-    @staticmethod
-    def _is_mentee_record(entry: Dict) -> bool:
-        """True if the entry names a person, i.e. a per-mentee table can be built.
-
-        N3A/N3B also carry aggregate summaries ("Ph.D. Graduated: 38") that name no
-        one. Those are real content but cannot fill a per-mentee table (#261).
-        """
-        fields = entry.get('extracted_fields', {}) or {}
-        return bool((fields.get('name') or fields.get('mentee_name') or '').strip())
 
     def _insert_mentoring_line(self, text: str, insert_after_idx: int, entry: Dict = None):
         """Insert a plain mentoring paragraph directly after ``insert_after_idx``.
@@ -4812,7 +4102,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         """
         para = self.doc.add_paragraph()
         run = para.add_run(text)
-        self._set_font(run)
+        _set_font(run)
         if entry:
             self._add_entry_comments(para, entry)
 
@@ -4868,18 +4158,18 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         # Split off aggregate summaries (no mentee named) — they get a line, not a
         # table. Done after the ongoing-reshuffle above, which keys off dates a
         # summary never has, so the partition cannot change that outcome.
-        n3a_summaries = [e for e in n3a_entries if not self._is_mentee_record(e)]
-        n3b_summaries = [e for e in n3b_entries if not self._is_mentee_record(e)]
-        n3a_entries = [e for e in n3a_entries if self._is_mentee_record(e)]
-        n3b_entries = [e for e in n3b_entries if self._is_mentee_record(e)]
+        n3a_summaries = [e for e in n3a_entries if not _is_mentee_record(e)]
+        n3b_summaries = [e for e in n3b_entries if not _is_mentee_record(e)]
+        n3a_entries = [e for e in n3a_entries if _is_mentee_record(e)]
+        n3b_entries = [e for e in n3b_entries if _is_mentee_record(e)]
 
         # Outcome narrative arrives disguised as a current mentee (see
         # _is_mentoring_outcome). Reclaim it and render it under the section header
         # rather than beneath "Current Mentees:", where it does not belong.
         n4_entries += [e for e in n3a_summaries + n3b_summaries
-                       if self._is_mentoring_outcome(e)]
-        n3a_summaries = [e for e in n3a_summaries if not self._is_mentoring_outcome(e)]
-        n3b_summaries = [e for e in n3b_summaries if not self._is_mentoring_outcome(e)]
+                       if _is_mentoring_outcome(e)]
+        n3a_summaries = [e for e in n3a_summaries if not _is_mentoring_outcome(e)]
+        n3b_summaries = [e for e in n3b_summaries if not _is_mentoring_outcome(e)]
 
         total_mentees = len(n3a_entries) + len(n3b_entries)
         total_extra = len(n3a_summaries) + len(n3b_summaries) + len(n4_entries)
@@ -5010,7 +4300,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         rows = [
             ('Name:', fields.get('name') or fields.get('mentee_name', '')),
             ('Site/Position:', site_position),
-            ('Mentoring Period:', self._format_mentee_duration(fields)),
+            ('Mentoring Period:', _format_mentee_duration(fields)),
             ('Project/Accomplishments:', project),
             ('Current Position:', fields.get('current_position', '')),
             ('Type of Supervision:', supervision_type),
@@ -5022,7 +4312,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Create table
         table = self.doc.add_table(rows=len(rows), cols=2)
-        self._set_table_border(table, color='808080', size=4)
+        _set_table_border(table, color='808080', size=4)
 
         first_cell_para = None
         for i, (label, value) in enumerate(rows):
@@ -5030,20 +4320,20 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Label cell (bold)
             label_cell = row.cells[0]
             label_cell.text = label
-            self._set_cell_vertical_alignment(label_cell, 'center')
+            _set_cell_vertical_alignment(label_cell, 'center')
             for para in label_cell.paragraphs:
                 if i == 0 and first_cell_para is None:
                     first_cell_para = para
                 for run in para.runs:
-                    self._set_font(run, bold=True)
+                    _set_font(run, bold=True)
 
             # Value cell
             value_cell = row.cells[1]
             value_cell.text = str(value) if value else ''
-            self._set_cell_vertical_alignment(value_cell, 'center')
+            _set_cell_vertical_alignment(value_cell, 'center')
             for para in value_cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
 
         # Add comments from entry
         if entry and first_cell_para:
@@ -5104,16 +4394,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         return table
 
-    def _format_mentee_duration(self, fields: Dict) -> str:
-        """Format mentee duration."""
-        start = fields.get('start_date', '')
-        end = fields.get('end_date', '')
-
-        if start and end:
-            return f"{start}-{end}"
-        elif start:
-            return f"{start}-present"
-        return ''
 
     # "MD" (from "Bethesda, MD") and "Bloomington" are comma segments the
     # short-proper-noun org fallback happily returns (#229) — never treat a
@@ -5150,20 +4430,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return cleaned, m.group(1)
         return text, ''
 
-    @staticmethod
-    def _strip_org_tail(name: str, org: str) -> str:
-        """Remove a trailing organization segment (plus one short comma-led
-        city tail, "..., Indiana University, Bloomington") from an award name
-        so the org isn't duplicated across the name and Organization cells
-        (#229). Conservative: only strips at end-of-string."""
-        if not org:
-            return name
-        stripped = re.sub(
-            r'[\s,]*' + re.escape(org) +
-            r'(?:,\s*[A-Z][\w.-]+(?:\s+[A-Z][\w.-]+)?)?[\s,.]*$',
-            '', name).strip()
-        return stripped or name
-
     def _fill_honors(self, entries: List[Dict]):
         """Fill H. HONORS, AWARDS section.
 
@@ -5187,7 +4453,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort by date (most recent first)
@@ -5199,7 +4465,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Skip table header entries that were mistakenly extracted as data
             # Common patterns: "Name of award\tOrganization\tDate awarded" or similar
-            if self._is_table_header_entry(original_text, ['award', 'honor', 'organization', 'date', 'year', 'granting']):
+            if _is_table_header_entry(original_text, ['award', 'honor', 'organization', 'date', 'year', 'granting']):
                 if self.verbose:
                     print(f"  Skipping header entry: '{original_text[:50]}...'")
                 continue
@@ -5302,7 +4568,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
                     # The org is usually a trailing segment of the raw line —
                     # keep it out of the name cell (#229)
-                    award_text = self._strip_org_tail(award_text, org)
+                    award_text = _strip_org_tail(award_text, org)
 
                     # Add row
                     self._add_honors_row(table, award_text, org, year_for_award)
@@ -5328,7 +4594,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     granting_body = self._extract_organization_from_award(award_name)
 
                 # Same duplication hazard as the multi-award path (#229)
-                award_name = self._strip_org_tail(award_name, granting_body)
+                award_name = _strip_org_tail(award_name, granting_body)
 
                 self._add_honors_row(table, award_name, granting_body, date)
 
@@ -5450,7 +4716,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for cell in row.cells:
             for para in cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
 
         self.stats['entries_inserted'] += 1
 
@@ -5489,7 +4755,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return
 
         # Clear existing data rows
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort by date (most recent first)
@@ -5500,7 +4766,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             original_text = entry.get('text', '')
 
             # Skip table header entries
-            if self._is_table_header_entry(original_text, ['organization', 'membership', 'society', 'date', 'member']):
+            if _is_table_header_entry(original_text, ['organization', 'membership', 'society', 'date', 'member']):
                 if self.verbose:
                     print(f"  Skipping header entry: '{original_text[:50]}...'")
                 continue
@@ -5512,7 +4778,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Detect multi-membership pattern: multiple organization names or membership types
             if len(lines) > 2:
                 # Try to parse multiple memberships
-                memberships = self._parse_multi_membership_entry(lines)
+                memberships = _parse_multi_membership_entry(lines)
                 if memberships:
                     for mem_type, org, dates in memberships:
                         org_text = f"{mem_type}, {org}" if mem_type and mem_type.lower() not in org.lower() else org
@@ -5542,59 +4808,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             self._add_table_row(table, [org_text, date_str], entry=entry)
             self.stats['entries_inserted'] += 1
 
-    def _parse_multi_membership_entry(self, lines: List[str]) -> List[Tuple[str, str, str]]:
-        """Parse multiple memberships from merged entry lines.
-
-        Handles patterns like:
-        - "Member | Org1 | date1" per line
-        - "Member\\nElected Member | Org1\\nOrg2 | date1\\ndate2"
-
-        Returns:
-            List of (membership_type, organization, dates) tuples
-        """
-        memberships = []
-        membership_types = []
-        organizations = []
-        dates = []
-
-        # Common membership type indicators
-        membership_keywords = ['member', 'fellow', 'diplomat', 'associate', 'elected', 'honorary']
-        date_pattern = re.compile(r'^(\d{1,2}/?\d{0,4}\s*-\s*(?:present|\d{1,2}/?\d{0,4}))$|^(\d{4}\s*-\s*(?:present|\d{4}))$', re.IGNORECASE)
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            # Check if line has pipe separators (structured format)
-            if '|' in line:
-                parts = [p.strip() for p in line.split('|')]
-                for part in parts:
-                    if not part:
-                        continue
-                    if any(kw in part.lower() for kw in membership_keywords) and len(part.split()) <= 3:
-                        membership_types.append(part)
-                    elif date_pattern.match(part) or re.match(r'^\d{1,2}/\d{4}', part):
-                        dates.append(part)
-                    else:
-                        organizations.append(part)
-            else:
-                # No pipe - classify by content
-                if any(kw in line.lower() for kw in membership_keywords) and len(line.split()) <= 3:
-                    membership_types.append(line)
-                elif date_pattern.match(line) or re.match(r'^\d{1,2}/\d{4}', line):
-                    dates.append(line)
-                elif len(line) > 5:  # Likely organization name
-                    organizations.append(line)
-
-        # Match up memberships - pair organizations with types and dates
-        if organizations:
-            for i, org in enumerate(organizations):
-                mem_type = membership_types[i] if i < len(membership_types) else ''
-                date = dates[i] if i < len(dates) else ''
-                memberships.append((mem_type, org, date))
-
-        return memberships
 
     def _fill_teaching(self, entries_by_code: Dict[str, List[Dict]]):
         """Fill K. TEACHING ACTIVITIES section.
@@ -5664,14 +4877,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         and raw text fallback.
         """
         # Skip structural labels from source CV
-        if self._is_structural_label(entry):
+        if _is_structural_label(entry):
             return
 
         fields = entry.get('extracted_fields', {}) or {}
         formatted_text = fields.get('formatted_text', '')
         original_text = entry.get('text', '')
 
-        if self._is_orphan_fragment(fields, formatted_text, original_text):
+        if _is_orphan_fragment(fields, formatted_text, original_text):
             return
 
         # Normalize any raw ISO dates the LLM left in formatted text
@@ -5695,14 +4908,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     )
             else:
                 # Single item: use formatted_text
-                new_text = self._strip_markdown_for_word(formatted_text, preserve_newlines=True)
+                new_text = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
                 self._insert_bulleted_entry(
                     insert_idx, new_text, entry,
                     add_blank_before=is_first_visible
                 )
 
         elif formatted_text:
-            new_text = self._strip_markdown_for_word(formatted_text, preserve_newlines=True)
+            new_text = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
             lines = [l.strip() for l in new_text.split('\n') if l.strip()]
             combined_text = '. '.join(lines) if len(lines) > 1 else (lines[0] if lines else '')
             self._insert_bulleted_entry(
@@ -5919,7 +5132,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Clear tables and mark as populated
         for scope, table in tables_by_scope.items():
-            self._clear_table_data(table, keep_header=True)
+            _clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
         # Classify and route entries by geographic scope
@@ -6004,7 +5217,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 for cell in row.cells:
                     for para in cell.paragraphs:
                         for run in para.runs:
-                            self._set_font(run)
+                            _set_font(run)
                 self.stats['entries_inserted'] += 1
 
     def _fill_extramural_leadership(self, entries: List[Dict]):
@@ -6027,7 +5240,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
 
@@ -6200,7 +5413,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for cell in row.cells:
             for para in cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
         self.stats['entries_inserted'] += 1
 
     def _fill_journal_reviewing(self, entries: List[Dict]):
@@ -6240,7 +5453,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 print(f"  Warning: Could not find Journal Reviewing table")
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(filtered_entries)
@@ -6273,7 +5486,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             for cell in row.cells:
                 for para in cell.paragraphs:
                     for run in para.runs:
-                        self._set_font(run)
+                        _set_font(run)
             self.stats['entries_inserted'] += 1
 
     def _fill_other_service(self, entries: List[Dict]):
@@ -6330,7 +5543,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Try to find and use a table first
             table = self._find_table_after_paragraph(section_idx)
             if table:
-                self._clear_table_data(table, keep_header=True)
+                _clear_table_data(table, keep_header=True)
                 self.stats['tables_populated'] += 1
 
                 sorted_entries = sort_entries_reverse_chronological(section_entries)
@@ -6429,7 +5642,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     for cell in row.cells:
                         for para in cell.paragraphs:
                             for run in para.runs:
-                                self._set_font(run)
+                                _set_font(run)
                     self.stats['entries_inserted'] += 1
 
     def _fill_licensure(self, entries: List[Dict]):
@@ -6456,7 +5669,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -6520,7 +5733,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             for cell in row.cells:
                 for para in cell.paragraphs:
                     for run in para.runs:
-                        self._set_font(run)
+                        _set_font(run)
             self.stats['entries_inserted'] += 1
 
         # Fill DEA/NPI table (Table 9 in template)
@@ -6560,12 +5773,12 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     row.cells[1].text = dea_number
                     for para in row.cells[1].paragraphs:
                         for run in para.runs:
-                            self._set_font(run)
+                            _set_font(run)
                 elif 'npi' in label and npi_number:
                     row.cells[1].text = npi_number
                     for para in row.cells[1].paragraphs:
                         for run in para.runs:
-                            self._set_font(run)
+                            _set_font(run)
 
     def _fill_board_certification(self, entries: List[Dict]):
         """Fill F2. BOARD CERTIFICATION section.
@@ -6596,7 +5809,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         for entry in entries:
@@ -6746,7 +5959,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for cell in row.cells:
             for para in cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
         self.stats['entries_inserted'] += 1
 
     def _fill_clinical_practice(self, entries_by_code: Dict[str, List[Dict]]):
@@ -6804,7 +6017,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 sorted_entries = sort_entries_reverse_chronological(l1_entries)
 
                 if table and table_is_valid:
-                    self._clear_table_data(table, keep_header=True)
+                    _clear_table_data(table, keep_header=True)
                     self.stats['tables_populated'] += 1
                     for entry in sorted_entries:
                         fields = entry.get('extracted_fields', {}) or {}
@@ -6843,7 +6056,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             for cell in row.cells:
                                 for para in cell.paragraphs:
                                     for run in para.runs:
-                                        self._set_font(run)
+                                        _set_font(run)
                             self.stats['entries_inserted'] += 1
                 else:
                     # No valid table found - insert as bullet points after section header
@@ -6854,7 +6067,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         original_text = entry.get('text', '').strip()
 
                         # Skip entries that are structural labels from the source CV
-                        if self._is_structural_label(entry):
+                        if _is_structural_label(entry):
                             continue
 
                         # L1 clinical practice entries are narrative summaries —
@@ -6889,7 +6102,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 sorted_entries = sort_entries_reverse_chronological(l2_entries)
 
                 if table and table_is_valid:
-                    self._clear_table_data(table, keep_header=True)
+                    _clear_table_data(table, keep_header=True)
                     self.stats['tables_populated'] += 1
 
                     for entry in sorted_entries:
@@ -6921,7 +6134,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             for cell in row.cells:
                                 for para in cell.paragraphs:
                                     for run in para.runs:
-                                        self._set_font(run)
+                                        _set_font(run)
                             self.stats['entries_inserted'] += 1
                 else:
                     # No valid table found — insert as bullet points
@@ -6930,7 +6143,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     bullet_count = 0
                     for entry in sorted_entries:
                         original_text = entry.get('text', '').strip()
-                        if self._is_structural_label(entry):
+                        if _is_structural_label(entry):
                             continue
                         bullet_text = original_text.replace('\t', ' — ', 1).replace('\t', ' ') if '\t' in original_text else original_text
                         if bullet_text:
@@ -6955,7 +6168,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 sorted_entries = sort_entries_reverse_chronological(l3_entries)
 
                 if table and table_is_valid:
-                    self._clear_table_data(table, keep_header=True)
+                    _clear_table_data(table, keep_header=True)
                     self.stats['tables_populated'] += 1
 
                     for entry in sorted_entries:
@@ -6990,7 +6203,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             for cell in row.cells:
                                 for para in cell.paragraphs:
                                     for run in para.runs:
-                                        self._set_font(run)
+                                        _set_font(run)
                             self.stats['entries_inserted'] += 1
                 else:
                     # No valid table found — insert as bullet points
@@ -7001,7 +6214,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         fields = entry.get('extracted_fields', {}) or {}
                         original_text = entry.get('text', '').strip()
 
-                        if self._is_structural_label(entry):
+                        if _is_structural_label(entry):
                             continue
 
                         role = fields.get('role') or fields.get('leadership_role') or fields.get('title') or ''
@@ -7052,7 +6265,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -7105,7 +6318,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for cell in row.cells:
             for para in cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
         self.stats['entries_inserted'] += 1
 
     def _add_multiline_leadership_rows(self, table, lines: List[str]):
@@ -7236,7 +6449,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -7336,7 +6549,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for cell in row.cells:
             for para in cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
         self.stats['entries_inserted'] += 1
 
     def _add_multiline_committee_rows(self, table, lines: List[str]):
@@ -7430,7 +6643,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Clear tables and mark as populated
         for scope, table in tables_by_scope.items():
-            self._clear_table_data(table, keep_header=True)
+            _clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
         # Classify and route entries by geographic scope
@@ -7493,7 +6706,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 for cell in row.cells:
                     for para in cell.paragraphs:
                         for run in para.runs:
-                            self._set_font(run)
+                            _set_font(run)
                 self.stats['entries_inserted'] += 1
 
     def _fill_passthrough_sections(self, all_entries: List[Dict]):
@@ -7582,7 +6795,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         # Clear and rewrite
                         para.clear()
                         run = para.add_run(f"{existing_label}\t{value}")
-                        self._set_font(run)
+                        _set_font(run)
                         self.stats['entries_inserted'] += 1
                         break
 
@@ -7631,7 +6844,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             if table:
                 # Clear existing table data and fill with matched entries
-                self._clear_table_data(table, keep_header=True)
+                _clear_table_data(table, keep_header=True)
                 self.stats['tables_populated'] += 1
 
                 for entry in matching_entries:
@@ -7659,7 +6872,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     for cell in row.cells:
                         for para in cell.paragraphs:
                             for run in para.runs:
-                                self._set_font(run)
+                                _set_font(run)
 
                     self.stats['entries_inserted'] += 1
             else:
@@ -7824,7 +7037,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 pPr.append(ind)
 
                 run = para.add_run(seg_text)
-                self._set_font(run)
+                _set_font(run)
 
                 # The last iteration in reversed order is forward_idx=0 (the title)
                 if idx == len(clean_segments) - 1:
@@ -8091,7 +7304,7 @@ Now analyze the text above:"""
             new_para = insert_para.insert_paragraph_before()
 
             run = new_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
-            self._set_font(run)
+            _set_font(run)
 
             # Add explanatory comment
             self._add_word_comment(
@@ -8204,14 +7417,14 @@ Now analyze the text above:"""
             self.doc.add_paragraph()
             appendix_para = self.doc.add_paragraph()
             run = appendix_para.add_run("T. APPENDIX")
-            self._set_font(run, bold=True)
+            _set_font(run, bold=True)
             run.underline = True
 
             intro_para = self.doc.add_paragraph()
             run = intro_para.add_run(
                 "The following content from the original CV was not successfully mapped to this CV format:"
             )
-            self._set_font(run)
+            _set_font(run)
             self.doc.add_paragraph()
 
         # Add each remaining segment. The taxonomy code is an internal
@@ -8220,7 +7433,7 @@ Now analyze the text above:"""
         for segment_text, original_code, coverage_pct in remaining:
             entry_para = self.doc.add_paragraph()
             run = entry_para.add_run(f"• {segment_text}")
-            self._set_font(run)
+            _set_font(run)
             self._add_word_comment(
                 entry_para,
                 f"Originally classified {original_code}; could not be mapped "
@@ -8401,7 +7614,7 @@ Now analyze the text above:"""
         # Add appendix header - matching BIBLIOGRAPHY style (bold + underline)
         appendix_para = self.doc.add_paragraph()
         run = appendix_para.add_run("T. APPENDIX")
-        self._set_font(run, bold=True)
+        _set_font(run, bold=True)
         run.underline = True
 
         # Add explanatory text
@@ -8409,7 +7622,7 @@ Now analyze the text above:"""
         run = intro_para.add_run(
             "The following content from the original CV was not successfully mapped to this CV format:"
         )
-        self._set_font(run)
+        _set_font(run)
 
         # Emit ONE summary doc comment for the boilerplate we removed (rather
         # than a per-entry comment for each dropped block).
@@ -8444,7 +7657,7 @@ Now analyze the text above:"""
             # Add subsection header showing original CV section
             header_para = self.doc.add_paragraph()
             run = header_para.add_run(f"From \"{header}\":")
-            self._set_font(run, bold=True)
+            _set_font(run, bold=True)
 
             for i, (entry, text) in enumerate(entries, start=1):
                 element_idx = entry.get('element_idx_start', '')
@@ -8456,7 +7669,7 @@ Now analyze the text above:"""
                 entry_para = self.doc.add_paragraph()
                 bullet_text = f"{i}. {text}"
                 run = entry_para.add_run(bullet_text)
-                self._set_font(run)
+                _set_font(run)
 
                 # Add comments from entry (e.g., why it was classified as T)
                 self._add_entry_comments(entry_para, entry)
@@ -8681,7 +7894,7 @@ Now analyze the text above:"""
         # the document reads as if the change were already accepted.
         if not self.emit_track_changes:
             run = para.add_run(text)
-            self._set_font(run)
+            _set_font(run)
             return run
         try:
             revision_id = str(self._revision_id)
@@ -8726,7 +7939,7 @@ Now analyze the text above:"""
                 print(f"  Warning: Could not add track change: {e}")
             # Fall back to normal text
             run = para.add_run(text)
-            self._set_font(run)
+            _set_font(run)
             return run
 
     def _add_track_change_deletion(self, para: Paragraph, text: str, author: str = "LLM Formatter"):
@@ -8906,7 +8119,7 @@ Now analyze the text above:"""
             cv_owner_last_name = cv_owner['last_name']
         elif document_uid:
             # Fallback: extract from document_uid (e.g., "2015_Wende" -> "Wende")
-            cv_owner_last_name = self._extract_last_name_from_uid(document_uid)
+            cv_owner_last_name = _extract_last_name_from_uid(document_uid)
 
         # Count total publications
         pub_codes = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']
@@ -8951,7 +8164,7 @@ Now analyze the text above:"""
                 insert_idx += 1
 
             for citation_num, pub in enumerate(pubs_sorted, start=1):
-                citation_text, target_name, enriched_fields = self._format_citation(pub, citation_num)
+                citation_text, target_name, enriched_fields = _format_citation(pub, citation_num)
                 original_text = pub.get('text', '')
                 enrichment_status = pub.get('enrichment_status', '')
 
@@ -8985,197 +8198,7 @@ Now analyze the text above:"""
                 insert_idx += 1
                 self.stats['entries_inserted'] += 1
 
-    def _format_citation(self, entry: Dict, num: int) -> Tuple[str, Optional[str], List[str]]:
-        """
-        Format a publication entry as Vancouver-style citation.
 
-        Returns:
-            (citation_text, target_name, enriched_fields) tuple
-        """
-        fields = entry.get('extracted_fields', {})
-        enrichment = entry.get('enrichment_data', {})
-        enriched_fields = entry.get('enriched_fields', [])  # Track which fields were enriched
-
-        # Check if Stage 5d provided a pre-formatted citation (for non-enriched entries)
-        formatted_citation = fields.get('formatted_citation', '')
-        if formatted_citation and fields.get('formatting_source') == 'stage_5d_llm':
-            # Use the LLM-formatted citation directly
-            citation = f"{num}. {formatted_citation}"
-            target_name = fields.get('target_name')
-            return citation, target_name, enriched_fields
-
-        parts = []
-
-        # Authors - prefer enriched PubMed authors, fall back to extracted
-        authors = enrichment.get('pubmed_authors') or fields.get('authors', '')
-        if authors:
-            # Clean and normalize author names
-            authors = self._normalize_author_names(authors)
-            parts.append(authors + ".")
-
-        # Title - prefer enriched PubMed title, fall back to extracted
-        title = enrichment.get('pubmed_title') or fields.get('title', '')
-        if title:
-            title = title.rstrip('.')
-            parts.append(title + ".")
-
-        # Journal or Book title - prefer enriched
-        journal = enrichment.get('pubmed_journal') or fields.get('journal', '')
-        book_title = fields.get('book_title', '')
-        if journal:
-            parts.append(journal + ".")
-        elif book_title:
-            # For book chapters (S4), use "In: Book Title"
-            parts.append(f"In: {book_title}.")
-
-        # Year;Volume(Issue):Pages
-        year = str(fields.get('year', ''))
-        volume = enrichment.get('pubmed_volume') or fields.get('volume', '')
-        issue = enrichment.get('pubmed_issue') or fields.get('issue', '')
-        pages = enrichment.get('pubmed_pages') or fields.get('pages', '')
-
-        cit_parts = []
-        if year:
-            cit_parts.append(year)
-        if volume:
-            cit_parts.append(f";{volume}")
-        if issue:
-            cit_parts.append(f"({issue})")
-        if pages:
-            cit_parts.append(f":{pages}")
-
-        if cit_parts:
-            parts.append("".join(cit_parts) + ".")
-
-        # Identifiers - separated by periods
-        ids = []
-        doi = fields.get('doi', '')
-        pmid = fields.get('pmid', '')
-        pmcid = fields.get('pmcid', '')
-
-        if doi:
-            ids.append(f"doi:{doi}.")
-        if pmid:
-            ids.append(f"PMID:{pmid}.")
-        if pmcid:
-            ids.append(f"PMCID:{pmcid}.")
-
-        if ids:
-            parts.append(" ".join(ids).rstrip('.') + ".")  # Ensure single final period
-
-        citation = f"{num}. " + " ".join(parts)
-        target_name = fields.get('target_name')
-
-        return citation, target_name, enriched_fields
-
-    def _normalize_author_names(self, authors: str) -> str:
-        """
-        Normalize author names to proper Vancouver format.
-
-        Handles formats like:
-        - "Kelly, R, Pirog, R" -> "Kelly R, Pirog R" (LastName, Initial pairs)
-        - "Smith JA, Jones MB" -> "Smith JA, Jones MB" (already Vancouver)
-        - "Smith, John A., Jones, Mary B." -> "Smith JA, Jones MB"
-
-        Fixes common issues:
-        - Double commas: "Watson, K.,," -> "Watson K"
-        - Trailing punctuation
-        """
-        if not authors:
-            return ''
-
-        # Clean up double/triple commas
-        authors = re.sub(r',{2,}', ',', authors)
-
-        # Remove trailing punctuation
-        authors = authors.rstrip('.,;')
-
-        # Replace " & " with ", "
-        authors = re.sub(r'\s*&\s*', ', ', authors)
-
-        # Handle the "LastName, Initial, LastName, Initial" format
-        # Pattern: word followed by comma and single letter(s)
-        # e.g., "Kelly, R, Pirog, R" -> list of ("Kelly", "R"), ("Pirog", "R")
-
-        # First, check if this looks like alternating "Name, Initial" pairs
-        parts = [p.strip() for p in authors.split(',') if p.strip()]
-
-        # Try to detect the pattern: alternating surnames and initials
-        # Initials are 1-4 uppercase letters (possibly space-separated like "P L" or hyphenated like "R-Y")
-        looks_like_pairs = True
-        if len(parts) >= 2:
-            for i in range(1, len(parts), 2):
-                # Every odd index should be initials (1-4 uppercase letters, possibly with spaces/hyphens)
-                part = parts[i].rstrip('.').replace(' ', '')
-                # Match: "AB", "ABC", "A-B", "R-Y", etc.
-                if not re.match(r'^[A-Z]{1,4}$', part) and not re.match(r'^[A-Z](-[A-Z])+$', part):
-                    looks_like_pairs = False
-                    break
-
-        if looks_like_pairs and len(parts) >= 2:
-            # Combine pairs: ["Kelly", "R", "Pirog", "R"] -> ["Kelly R", "Pirog R"]
-            cleaned_authors = []
-            i = 0
-            while i < len(parts) - 1:
-                surname = parts[i].strip().rstrip('.,')
-                initials = parts[i + 1].strip().rstrip('.,')
-                # Normalize spaced initials: "P L" -> "PL"
-                initials_normalized = initials.replace(' ', '')
-
-                # Skip if surname looks like just initials
-                if len(surname) <= 2 and surname.isupper():
-                    i += 1
-                    continue
-
-                # Handle multi-part surnames like "García Polanco"
-                # Check if next "initial" is actually part of surname
-                if i + 2 < len(parts):
-                    next_part = parts[i + 2].strip().rstrip('.,')
-                    if len(initials_normalized) > 4 or not initials_normalized.isupper():
-                        # This might be a multi-part name
-                        surname = f"{surname} {initials}"
-                        initials_normalized = next_part.replace(' ', '')
-                        i += 1
-
-                cleaned_authors.append(f"{surname} {initials_normalized}")
-                i += 2
-
-            return ', '.join(cleaned_authors)
-
-        # Fall back to simpler processing for other formats
-        cleaned_authors = []
-        has_et_al = False
-
-        for author in parts:
-            author_stripped = author.strip()
-
-            # Handle "et al" specially
-            if author_stripped.lower() in ('et al', 'et al.'):
-                has_et_al = True
-                continue
-
-            # Skip entries that are just initials (like "MR." or "UM.")
-            if re.match(r'^[A-Z]{1,3}\.?$', author_stripped):
-                continue
-
-            # Skip entries that look incomplete (just 1-2 chars)
-            if len(author_stripped) <= 2:
-                continue
-
-            # Clean up individual author formatting
-            author = author_stripped.rstrip('.,')
-
-            # Remove periods from initials: "J.A." -> "JA"
-            author = re.sub(r'([A-Z])\.([A-Z])', r'\1\2', author)
-            author = re.sub(r'([A-Z])\.$', r'\1', author)
-
-            if author:
-                cleaned_authors.append(author)
-
-        result = ', '.join(cleaned_authors)
-        if has_et_al:
-            result += ', et al.'
-        return result
 
     def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: Optional[str], cv_owner_last_name: str = ''):
         """
@@ -9206,21 +8229,21 @@ Now analyze the text above:"""
             # Add before (normal)
             if before:
                 run1 = para.add_run(before)
-                self._set_font(run1)
+                _set_font(run1)
 
             # Add target name (bold)
             run2 = para.add_run(name_to_bold)
-            self._set_font(run2, bold=True)
+            _set_font(run2, bold=True)
             self.stats['target_names_bolded'] += 1
 
             # Add after (normal)
             if after:
                 run3 = para.add_run(after)
-                self._set_font(run3)
+                _set_font(run3)
         else:
             # No target name to bold
             run = para.add_run(citation)
-            self._set_font(run)
+            _set_font(run)
 
     def _add_citation_with_bold_author_as_insertion(self, para: Paragraph, citation: str,
                                                      target_name: Optional[str], cv_owner_last_name: str = '',
