@@ -188,14 +188,19 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_table_shape,
     lint_unrendered_records,
 )
+from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
+    MISSED_HEADERS_WARN_COUNT,
+    _header_key,
+    _hierarchy_titles,
+    lint_missed_headers,
+    lint_segmentation,
+)
 
 
 logger = logging.getLogger(__name__)
 
 
 SEVERITY_ORDER = ("ERROR", "WARN", "INFO")  # most to least severe
-
-MISSED_HEADERS_WARN_COUNT = 6
 
 
 # How often each lint fires at all, over the same 73 scored runs. Used only to
@@ -293,20 +298,6 @@ def rank_lints(counts: Dict[str, int]) -> List[Tuple[str, int]]:
 # large NUMBER of findings — truncating the list is the effective lever.
 MAX_REPORT_BYTES = 10 * 1024 * 1024
 MAX_REPORT_FINDINGS = 1000
-
-
-def _hierarchy_titles(stage1a: Dict) -> List[str]:
-    titles: List[str] = []
-
-    def walk(nodes):
-        for node in nodes or []:
-            title = _norm(node.get("text", ""))
-            if title:
-                titles.append(title)
-            walk(node.get("children"))
-
-    walk(stage1a.get("hierarchy"))
-    return titles
 
 
 # ----------------------------------------------------------------- docx views
@@ -468,61 +459,8 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
 
 # -------------------------------------------------------------------- lint 1
 
-def lint_segmentation(source_lines: List[str], stage1a: Dict,
-                      stage2: Dict) -> List[Dict]:
-    """Coverage / lost lines / mega-entries / dups / empties, reusing the
-    segmentation_regression metrics (source docx + stage 1a + stage 2)."""
-    metrics = compute_metrics(source_lines, stage1a, stage2)
-    findings = []
-    for flag in lint_metrics(metrics):
-        evidence = ([line[:100] for line in metrics["lost_lines"][:5]]
-                    if flag.startswith("coverage") else [])
-        findings.append(_finding("segmentation", "WARN", flag, evidence))
-    return findings
-
 
 # -------------------------------------------------------------------- lint 2
-
-def _header_key(text: str) -> str:
-    """Comparison key for header matching: normalized, trailing ':' dropped.
-
-    Stage 1a promotes 'PROFESSIONAL SOCIETIES:' to the hierarchy node
-    'PROFESSIONAL SOCIETIES' -- the colon is source formatting, not part of the
-    header name. Comparing raw normalized forms reports a header that WAS
-    detected as missing: on the 2026-07-15 corpus (25 CVs) that was 36 of 61
-    findings (59%), including 22 of web061's 23.
-    """
-    return _norm(text).rstrip(":").strip()
-
-
-def lint_missed_headers(candidates: List[str], stage1a: Dict,
-                        stage2: Dict) -> List[Dict]:
-    """Header-looking source lines absent from the 1a hierarchy AND from
-    every entry hierarchy path: a header demoted to content misroutes
-    everything filed under it."""
-    known = {_header_key(t) for t in _hierarchy_titles(stage1a)}
-    paths = {_header_key(h) for e in stage2.get("entries", [])
-             for h in (e.get("hierarchy") or [])}
-    findings, seen = [], set()
-    for cand in candidates:
-        normed = _header_key(cand)
-        if not normed or normed in seen:
-            continue
-        seen.add(normed)
-        if normed in known or normed in paths:
-            continue
-        findings.append(_finding(
-            "missed_headers", "WARN",
-            f"header-like source line missing from segmentation: '{cand}'",
-            [cand]))
-    # Severity is a property of the RUN, not of each header: one stray
-    # header-like line is normal, a dozen means segmentation lost the document's
-    # shape. This lint emits one finding per header, so without this the finding
-    # count doubled as the severity and a long CV always looked worse (#438).
-    severity = _magnitude_severity(len(findings), MISSED_HEADERS_WARN_COUNT)
-    for f in findings:
-        f["severity"] = severity
-    return findings
 
 
 # -------------------------------------------------------------------- lint 3
