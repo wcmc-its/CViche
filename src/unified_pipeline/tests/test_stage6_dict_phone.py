@@ -139,6 +139,28 @@ def test_home_labelled_string_phone_is_unchanged(tmp_path):
         "the home number pre-empted the business number"
 
 
+def test_a_mixed_dict_routes_its_slots_and_drops_the_rest(tmp_path):
+    """Review question on #463: what happens to keys that name no slot.
+
+    The answer has to be "the slots still route correctly and the rest is
+    dropped", because the WCM template has exactly two phone rows. Requiring
+    every key to be recognized before taking the slot path would send this dict
+    down the join branch and concatenate the fax and the note into whichever
+    row asked first."""
+    contact = _render(tmp_path, [
+        {"text": "Contact", "taxonomy_code": "A", "element_idx_start": 0,
+         "extracted_fields": {
+             "name": "Jane Q. Public, MD",
+             "phone": {"cell": "(617) 555-0142", "note": "call after 5",
+                       "fax": "(617) 555-0199", "office": "(617) 555-0177"}}},
+    ])
+    assert contact.get("Cell phone:") == "(617) 555-0142"
+    assert contact.get("Office telephone:") == "(617) 555-0177"
+    for label, value in contact.items():
+        assert "555-0199" not in value, f"the fax reached {label}"
+        assert "call after 5" not in value, f"the note reached {label}"
+
+
 if __name__ == "__main__":
     import tempfile
     for _name, _fn in sorted(globals().items()):

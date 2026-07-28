@@ -94,7 +94,14 @@ _ALL_PHONE_SLOT_KEYS = _CELL_PHONE_KEYS + _OFFICE_PHONE_KEYS + _HOME_PHONE_KEYS
 
 
 def _labels_its_own_phone_slots(value) -> bool:
-    """True when a dict phone names its own cell/office/home halves."""
+    """True when a dict phone names its own cell/office/home halves.
+
+    Deliberately ANY key, not all: the real ``{"cell", "office", "fax"}`` from
+    web147 is a slot map carrying one key we have no slot for, and requiring
+    every key to be recognized would send it down the join path instead, which
+    concatenates the fax number into whichever row asked first. A dict that
+    names even one slot is routed by its own labels; keys outside
+    ``_ALL_PHONE_SLOT_KEYS`` are dropped -- see ``_phone_cell_text``."""
     return isinstance(value, dict) and any(
         k in value for k in _ALL_PHONE_SLOT_KEYS)
 
@@ -113,7 +120,16 @@ def _phone_cell_text(value, slot: str) -> str:
     said "Home" and the home slot has no template row (#450).
 
     Strings pass through untouched, so CVs that never had this render
-    identically. A dict that names no slot is joined rather than dropped."""
+    identically. A dict that names no slot is joined rather than dropped.
+
+    A slot-labelled dict drops any key outside ``_ALL_PHONE_SLOT_KEYS``, and
+    that is the intended render, not an oversight: the WCM template has exactly
+    two phone rows, Office telephone and Cell phone. ``fax`` -- the one non-slot
+    key observed in the corpus -- has nowhere to go, and joining it into the
+    office row would print a fax number as the office telephone. Anything new
+    stage 4 invents (``note``, ``pager``) is dropped the same way for the same
+    reason. Recovering one of them means adding a template row first; widening
+    the match here only moves the number into the wrong row."""
     if value is None:
         return ""
     if isinstance(value, str):
