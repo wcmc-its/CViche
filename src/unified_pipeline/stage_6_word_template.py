@@ -52,6 +52,13 @@ from unified_pipeline.stage6.formatting import (
     _set_paragraph_spacing,
     _set_table_border,
 )
+from unified_pipeline.stage6.normalization import (
+    _deduplicate_repeated_content,
+    _get_cleaned_institution_name,
+    _normalize_author_names,
+    _strip_markdown_for_word,
+    _strip_org_tail,
+)
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
@@ -1649,53 +1656,6 @@ class WCMTemplateGenerator:
 
         return output_path
 
-    def _strip_markdown_for_word(self, text: str, preserve_newlines: bool = False) -> str:
-        """
-        Convert markdown-formatted text to plain text suitable for Word document.
-
-        Handles:
-        - Bold: **text** -> text
-        - Sub-bullets: - (item) -> (item)
-        - Headers: # Header -> Header
-        - Preserves quotes and other content
-
-        Args:
-            preserve_newlines: If True, join lines with newlines instead of
-                semicolons. Use for teaching entries where each line becomes
-                a separate bullet (main entry + notes).
-        """
-        if not text:
-            return ''
-
-        # Remove bold markers
-        text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
-
-        # Handle sub-bullets - strip the dash prefix
-        lines = text.split('\n')
-        result_parts = []
-        for line in lines:
-            line = line.strip()
-            if line.startswith('- '):
-                # Sub-bullet, strip the prefix and any "Notes: " structural marker from Stage 5c
-                line = line[2:].strip()
-                if line.startswith('Notes: '):
-                    line = line[7:]
-                elif line.startswith('Notes:'):
-                    line = line[6:].strip()
-                result_parts.append(line)
-            elif line:
-                result_parts.append(line)
-
-        # Join with appropriate separator
-        if preserve_newlines:
-            return '\n'.join(result_parts)
-        elif len(result_parts) > 1:
-            # Multiple lines - join with semicolon for compactness
-            result = '; '.join(result_parts)
-        else:
-            result = result_parts[0] if result_parts else ''
-
-        return result
 
 
     def _set_cell_text(self, cell, text: str, bold: bool = False):
@@ -2133,49 +2093,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 pass
         return False
 
-    def _is_from_enrichment(self, entry: Dict, field: str) -> bool:
-        """Check if a field value came from enrichment rather than extraction."""
-        enriched_fields = entry.get('enriched_fields', [])
-        return field in enriched_fields
 
-    def _deduplicate_repeated_content(self, text: str, separator: str = '|') -> str:
-        """Remove repeated content from pipe-separated text.
-
-        Handles cases where table extraction causes the same content to repeat:
-        "Title .08FTE | Title .08FTE | Title .08FTE" -> "Title .08FTE"
-
-        Args:
-            text: Raw text that may contain repeated segments
-            separator: The separator between repeated segments (default: '|')
-
-        Returns:
-            Deduplicated text with only the first unique segment
-        """
-        if not text or separator not in text:
-            return text
-
-        parts = [p.strip() for p in text.split(separator) if p.strip()]
-        if len(parts) <= 1:
-            return text
-
-        # Check if all parts are similar (using first part as reference)
-        first_part = parts[0]
-
-        # Normalize for comparison (lowercase, remove extra whitespace)
-        def normalize(s):
-            return ' '.join(s.lower().split())
-
-        first_normalized = normalize(first_part)
-
-        # Count how many parts match the first
-        matching_count = sum(1 for p in parts if normalize(p) == first_normalized)
-
-        # If most parts are identical, return just the first one
-        if matching_count >= len(parts) * 0.5:
-            return first_part
-
-        # Otherwise return original (parts are meaningfully different)
-        return text
 
     def _is_table_header_entry(self, text: str, header_keywords: List[str], threshold: int = 2) -> bool:
         """Detect if an entry is actually a table header that was mistakenly extracted as data.
@@ -2259,122 +2177,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         return False
 
-    def _clean_institution_field(self, institution: str) -> Tuple[str, str]:
-        """Clean up institution field that may contain tab-separated values or embedded locations.
-
-        Handles cases like:
-        - "Weill Cornell Medical College\\tNew York Presbyterian Hospital\\tNew York, New York"
-        - "Weill Cornell Medical College, New York, NY"
-
-        Args:
-            institution: Raw institution string from extraction
-
-        Returns:
-            Tuple of (cleaned_institution, extracted_location)
-            - cleaned_institution: Institution name(s) properly formatted
-            - extracted_location: City, State if found embedded in the string
-        """
-        if not institution:
-            return '', ''
-
-        # Common US state patterns (full names and abbreviations)
-        us_states = {
-            'Alabama', 'Alaska', 'Arizona', 'Arkansas', 'California', 'Colorado',
-            'Connecticut', 'Delaware', 'Florida', 'Georgia', 'Hawaii', 'Idaho',
-            'Illinois', 'Indiana', 'Iowa', 'Kansas', 'Kentucky', 'Louisiana',
-            'Maine', 'Maryland', 'Massachusetts', 'Michigan', 'Minnesota',
-            'Mississippi', 'Missouri', 'Montana', 'Nebraska', 'Nevada',
-            'New Hampshire', 'New Jersey', 'New Mexico', 'New York', 'North Carolina',
-            'North Dakota', 'Ohio', 'Oklahoma', 'Oregon', 'Pennsylvania',
-            'Rhode Island', 'South Carolina', 'South Dakota', 'Tennessee', 'Texas',
-            'Utah', 'Vermont', 'Virginia', 'Washington', 'West Virginia',
-            'Wisconsin', 'Wyoming', 'District of Columbia'
-        }
-        state_abbrevs = {
-            'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI', 'ID',
-            'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI', 'MN', 'MS',
-            'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC', 'ND', 'OH', 'OK',
-            'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV',
-            'WI', 'WY', 'DC'
-        }
-        # Common international locations
-        international_locations = {
-            'Doha, Qatar', 'Qatar', 'London, UK', 'London, England', 'Toronto, Canada',
-            'Montreal, Canada', 'Paris, France', 'Berlin, Germany', 'Tokyo, Japan'
-        }
-
-        # Split on tabs first
-        parts = [p.strip() for p in institution.split('\t') if p.strip()]
-
-        institutions = []
-        location = ''
-
-        for part in parts:
-            # Check if this part looks like a location (City, State pattern)
-            is_location = False
-
-            # Check for "City, State" pattern where State is a US state
-            if ', ' in part:
-                potential_parts = part.rsplit(', ', 1)
-                if len(potential_parts) == 2:
-                    potential_state = potential_parts[1].strip()
-                    if potential_state in us_states or potential_state in state_abbrevs:
-                        # This is a City, State - check if it's ONLY location or institution + location
-                        potential_city = potential_parts[0].strip()
-                        # If the "city" part contains institution keywords, it's probably "Institution, City, State"
-                        inst_keywords = ['University', 'College', 'Hospital', 'Medical', 'Institute', 'Center', 'School']
-                        if any(kw in potential_city for kw in inst_keywords):
-                            # This is "Institution, City, State" - need to parse further
-                            # Try to find where institution ends and city begins
-                            # Look for comma before a city name
-                            for state in us_states:
-                                # Pattern: "..., CityName, StateName"
-                                pattern = rf',\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?),\s*{re.escape(state)}$'
-                                match = re.search(pattern, part)
-                                if match:
-                                    city = match.group(1)
-                                    location = f"{city}, {state}"
-                                    institutions.append(part[:match.start()].strip())
-                                    is_location = True
-                                    break
-                            if not is_location:
-                                # Couldn't parse, keep as institution
-                                institutions.append(part)
-                        else:
-                            # This is just "City, State"
-                            location = part
-                            is_location = True
-
-            # Check for international locations
-            if not is_location:
-                for intl_loc in international_locations:
-                    if part == intl_loc or part.endswith(f', {intl_loc}'):
-                        if part == intl_loc:
-                            location = part
-                            is_location = True
-                        else:
-                            # "Institution, Location"
-                            institutions.append(part.replace(f', {intl_loc}', '').strip())
-                            location = intl_loc
-                            is_location = True
-                        break
-
-            if not is_location:
-                institutions.append(part)
-
-        # Deduplicate institutions (preserving order) before joining
-        seen = set()
-        unique_institutions = []
-        for inst in institutions:
-            key = inst.lower().strip()
-            if key not in seen:
-                seen.add(key)
-                unique_institutions.append(inst)
-
-        # Join multiple institutions with " / " separator
-        cleaned_institution = ' / '.join(unique_institutions) if unique_institutions else ''
-
-        return cleaned_institution, location
 
     def _get_institution_location(self, entry: Dict) -> Tuple[str, bool]:
         """Get formatted location string from institution enrichment data.
@@ -2470,30 +2272,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         fields = entry.get('extracted_fields', {})
         return (fields.get('location', ''), False)  # False = not from enrichment
 
-    def _get_cleaned_institution_name(self, entry: Dict) -> Optional[str]:
-        """Get cleaned institution name from enrichment data if available.
-
-        When Stage 5b LLM enrichment provides a cleaned_name (institution name with
-        embedded location removed), use it instead of the raw institution field.
-        This prevents duplication like "Duke Medical Center, Durham, NC, Durham, NC".
-
-        Falls back to official_name when cleaned_name is empty — the LLM sometimes
-        returns empty cleaned_name even when official_name is correctly populated
-        (e.g., official_name="Duke Regional Hospital" with cleaned_name="").
-
-        Args:
-            entry: Entry dict with potential institution_enrichment
-
-        Returns:
-            Cleaned institution name, or None if not available (use original)
-        """
-        enrichment = entry.get('institution_enrichment', {})
-        cleaned = enrichment.get('cleaned_name', '')
-        if cleaned:
-            return cleaned
-        # Fall back to official_name — always the institution without embedded location
-        official = enrichment.get('official_name', '')
-        return official if official else None
 
     def _recover_institution_from_nearby_entries(self, entry: Dict, all_entries: List[Dict]) -> str:
         """Recover institution name from nearby entries in the original CV.
@@ -3390,7 +3168,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             institution = fields.get('institution', '')
             if institution and institution.lower() == 'none':
                 institution = ''
-            cleaned = self._get_cleaned_institution_name(entry)
+            cleaned = _get_cleaned_institution_name(entry)
             if cleaned:
                 institution = cleaned
 
@@ -3538,7 +3316,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             institution = fields.get('institution', '')
             if institution and institution.lower() == 'none':
                 institution = ''
-            cleaned = self._get_cleaned_institution_name(entry)
+            cleaned = _get_cleaned_institution_name(entry)
             if cleaned:
                 institution = cleaned
 
@@ -3939,7 +3717,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         break
 
         # Use LLM-cleaned institution name (strips embedded location); fall back to raw field
-        institution = self._get_cleaned_institution_name(entry) or raw_institution
+        institution = _get_cleaned_institution_name(entry) or raw_institution
 
         # Build base institution string with department
         institution_base = institution
@@ -4045,7 +3823,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             raw_institution = fields.get('institution', '')
 
             # Use LLM-cleaned institution name (strips embedded location); fall back to raw field
-            institution = self._get_cleaned_institution_name(entry) or raw_institution
+            institution = _get_cleaned_institution_name(entry) or raw_institution
 
             # If institution is missing, try to recover from nearby entries in original CV
             if not institution and all_entries:
@@ -4390,7 +4168,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Clean up title - remove repeated content from merged table cells
         # e.g., "Title .08FTE | Title .08FTE | Title .08FTE" -> "Title .08FTE"
-        title = self._deduplicate_repeated_content(title)
+        title = _deduplicate_repeated_content(title)
 
         agency = fields.get('agency') or fields.get('funding_source', '') or fields.get('sponsor', '')
         total_funding = fields.get('total_funding', '') or fields.get('annual_direct_costs', '')
@@ -5068,20 +4846,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return cleaned, m.group(1)
         return text, ''
 
-    @staticmethod
-    def _strip_org_tail(name: str, org: str) -> str:
-        """Remove a trailing organization segment (plus one short comma-led
-        city tail, "..., Indiana University, Bloomington") from an award name
-        so the org isn't duplicated across the name and Organization cells
-        (#229). Conservative: only strips at end-of-string."""
-        if not org:
-            return name
-        stripped = re.sub(
-            r'[\s,]*' + re.escape(org) +
-            r'(?:,\s*[A-Z][\w.-]+(?:\s+[A-Z][\w.-]+)?)?[\s,.]*$',
-            '', name).strip()
-        return stripped or name
-
     def _fill_honors(self, entries: List[Dict]):
         """Fill H. HONORS, AWARDS section.
 
@@ -5220,7 +4984,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
                     # The org is usually a trailing segment of the raw line —
                     # keep it out of the name cell (#229)
-                    award_text = self._strip_org_tail(award_text, org)
+                    award_text = _strip_org_tail(award_text, org)
 
                     # Add row
                     self._add_honors_row(table, award_text, org, year_for_award)
@@ -5246,7 +5010,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     granting_body = self._extract_organization_from_award(award_name)
 
                 # Same duplication hazard as the multi-award path (#229)
-                award_name = self._strip_org_tail(award_name, granting_body)
+                award_name = _strip_org_tail(award_name, granting_body)
 
                 self._add_honors_row(table, award_name, granting_body, date)
 
@@ -5613,14 +5377,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     )
             else:
                 # Single item: use formatted_text
-                new_text = self._strip_markdown_for_word(formatted_text, preserve_newlines=True)
+                new_text = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
                 self._insert_bulleted_entry(
                     insert_idx, new_text, entry,
                     add_blank_before=is_first_visible
                 )
 
         elif formatted_text:
-            new_text = self._strip_markdown_for_word(formatted_text, preserve_newlines=True)
+            new_text = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
             lines = [l.strip() for l in new_text.split('\n') if l.strip()]
             combined_text = '. '.join(lines) if len(lines) > 1 else (lines[0] if lines else '')
             self._insert_bulleted_entry(
@@ -8904,7 +8668,7 @@ Now analyze the text above:"""
         authors = enrichment.get('pubmed_authors') or fields.get('authors', '')
         if authors:
             # Clean and normalize author names
-            authors = self._normalize_author_names(authors)
+            authors = _normalize_author_names(authors)
             parts.append(authors + ".")
 
         # Title - prefer enriched PubMed title, fall back to extracted
@@ -8962,114 +8726,6 @@ Now analyze the text above:"""
 
         return citation, target_name, enriched_fields
 
-    def _normalize_author_names(self, authors: str) -> str:
-        """
-        Normalize author names to proper Vancouver format.
-
-        Handles formats like:
-        - "Kelly, R, Pirog, R" -> "Kelly R, Pirog R" (LastName, Initial pairs)
-        - "Smith JA, Jones MB" -> "Smith JA, Jones MB" (already Vancouver)
-        - "Smith, John A., Jones, Mary B." -> "Smith JA, Jones MB"
-
-        Fixes common issues:
-        - Double commas: "Watson, K.,," -> "Watson K"
-        - Trailing punctuation
-        """
-        if not authors:
-            return ''
-
-        # Clean up double/triple commas
-        authors = re.sub(r',{2,}', ',', authors)
-
-        # Remove trailing punctuation
-        authors = authors.rstrip('.,;')
-
-        # Replace " & " with ", "
-        authors = re.sub(r'\s*&\s*', ', ', authors)
-
-        # Handle the "LastName, Initial, LastName, Initial" format
-        # Pattern: word followed by comma and single letter(s)
-        # e.g., "Kelly, R, Pirog, R" -> list of ("Kelly", "R"), ("Pirog", "R")
-
-        # First, check if this looks like alternating "Name, Initial" pairs
-        parts = [p.strip() for p in authors.split(',') if p.strip()]
-
-        # Try to detect the pattern: alternating surnames and initials
-        # Initials are 1-4 uppercase letters (possibly space-separated like "P L" or hyphenated like "R-Y")
-        looks_like_pairs = True
-        if len(parts) >= 2:
-            for i in range(1, len(parts), 2):
-                # Every odd index should be initials (1-4 uppercase letters, possibly with spaces/hyphens)
-                part = parts[i].rstrip('.').replace(' ', '')
-                # Match: "AB", "ABC", "A-B", "R-Y", etc.
-                if not re.match(r'^[A-Z]{1,4}$', part) and not re.match(r'^[A-Z](-[A-Z])+$', part):
-                    looks_like_pairs = False
-                    break
-
-        if looks_like_pairs and len(parts) >= 2:
-            # Combine pairs: ["Kelly", "R", "Pirog", "R"] -> ["Kelly R", "Pirog R"]
-            cleaned_authors = []
-            i = 0
-            while i < len(parts) - 1:
-                surname = parts[i].strip().rstrip('.,')
-                initials = parts[i + 1].strip().rstrip('.,')
-                # Normalize spaced initials: "P L" -> "PL"
-                initials_normalized = initials.replace(' ', '')
-
-                # Skip if surname looks like just initials
-                if len(surname) <= 2 and surname.isupper():
-                    i += 1
-                    continue
-
-                # Handle multi-part surnames like "García Polanco"
-                # Check if next "initial" is actually part of surname
-                if i + 2 < len(parts):
-                    next_part = parts[i + 2].strip().rstrip('.,')
-                    if len(initials_normalized) > 4 or not initials_normalized.isupper():
-                        # This might be a multi-part name
-                        surname = f"{surname} {initials}"
-                        initials_normalized = next_part.replace(' ', '')
-                        i += 1
-
-                cleaned_authors.append(f"{surname} {initials_normalized}")
-                i += 2
-
-            return ', '.join(cleaned_authors)
-
-        # Fall back to simpler processing for other formats
-        cleaned_authors = []
-        has_et_al = False
-
-        for author in parts:
-            author_stripped = author.strip()
-
-            # Handle "et al" specially
-            if author_stripped.lower() in ('et al', 'et al.'):
-                has_et_al = True
-                continue
-
-            # Skip entries that are just initials (like "MR." or "UM.")
-            if re.match(r'^[A-Z]{1,3}\.?$', author_stripped):
-                continue
-
-            # Skip entries that look incomplete (just 1-2 chars)
-            if len(author_stripped) <= 2:
-                continue
-
-            # Clean up individual author formatting
-            author = author_stripped.rstrip('.,')
-
-            # Remove periods from initials: "J.A." -> "JA"
-            author = re.sub(r'([A-Z])\.([A-Z])', r'\1\2', author)
-            author = re.sub(r'([A-Z])\.$', r'\1', author)
-
-            if author:
-                cleaned_authors.append(author)
-
-        result = ', '.join(cleaned_authors)
-        if has_et_al:
-            result += ', et al.'
-        return result
 
     def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: Optional[str], cv_owner_last_name: str = ''):
         """
