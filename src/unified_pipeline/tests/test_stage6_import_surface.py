@@ -103,6 +103,54 @@ def test_render_check_symbol_is_still_importable(name):
     )
 
 
+#: Methods the test suite calls on a WCMTemplateGenerator INSTANCE, measured the
+#: same way. This is a second contract, distinct from the module surface above:
+#: those names are imported, these are reached for as class attributes, and the
+#: module-level pin does not cover them.
+#:
+#: Learned the hard way. The first split moved `_set_table_border` out of the
+#: class and `test_stage6_table_border.py` broke -- it was calling
+#: `WCMTemplateGenerator._set_table_border(None, table)`, passing None for self.
+#: Every module-surface test above still passed, because the symbol remained
+#: importable; only the class attribute had gone.
+#:
+#: A split that moves one of these SHOULD fail here. That is the point: the
+#: failure forces a deliberate choice -- update the callers, or leave a thin
+#: delegating method behind -- instead of surfacing during PR rework, where it
+#: looks like a lost fix rather than a moved address.
+STAGE6_CLASS_SURFACE = (
+    "_add_remaining_to_appendix",
+    "_add_track_change_insertion",
+    "_add_track_change_pair",
+    "_add_word_comment",
+    "_degree_is_in_progress",
+    "_extract_organization_from_award",
+    "_extract_year_from_text",
+    "_fill_honors",
+    "_fill_licensure",
+    "_fill_positions",
+    "_fill_research_summary",
+    "_finalize_comments",
+    "_merge_grouped_appointments",
+    "_reconsider_appendix_entries",
+    "_recover_unrendered_records",
+    "_remove_instruction_box",
+    "_split_award_year",
+    "generate",
+)
+
+
+@pytest.mark.parametrize("name", STAGE6_CLASS_SURFACE)
+def test_generator_method_is_still_on_the_class(name):
+    """Each method the tests call on an instance must remain a class attribute."""
+    mod = importlib.import_module("unified_pipeline.stage_6_word_template")
+    assert hasattr(mod.WCMTemplateGenerator, name), (
+        f"WCMTemplateGenerator.{name} is gone. If the split moved it out, either "
+        f"update the callers under src/unified_pipeline/tests/ or leave a thin "
+        f"delegating method -- {name} is called on an instance by the suite."
+    )
+
+
 def test_the_surface_list_is_not_silently_empty():
     """Guard the guard.
 
@@ -114,6 +162,7 @@ def test_the_surface_list_is_not_silently_empty():
         "intentional, update the count and say why in the commit message"
     )
     assert len(RENDER_CHECK_IMPORT_SURFACE) == 1
+    assert len(STAGE6_CLASS_SURFACE) == 18
 
 
 def test_private_names_are_a_deliberate_part_of_the_contract():
@@ -134,6 +183,8 @@ if __name__ == "__main__":
         test_stage6_symbol_is_still_importable(_n)
     for _n in RENDER_CHECK_IMPORT_SURFACE:
         test_render_check_symbol_is_still_importable(_n)
+    for _n in STAGE6_CLASS_SURFACE:
+        test_generator_method_is_still_on_the_class(_n)
     test_the_surface_list_is_not_silently_empty()
     test_private_names_are_a_deliberate_part_of_the_contract()
     print("OK")
