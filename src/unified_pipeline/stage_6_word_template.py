@@ -43,6 +43,15 @@ except ImportError:
 
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.core.render_check import entry_fragments
+from unified_pipeline.stage6.formatting import (
+    _clear_table_data,
+    _set_cell_background,
+    _set_cell_borders,
+    _set_cell_vertical_alignment,
+    _set_font,
+    _set_paragraph_spacing,
+    _set_table_border,
+)
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
@@ -1688,22 +1697,6 @@ class WCMTemplateGenerator:
 
         return result
 
-    def _set_font(self, run, name='Arial', size=11, bold=False, italic=False):
-        """Set font properties for a run - always 11pt Arial unless specified."""
-        run.font.name = name
-        run.font.size = Pt(size)
-        run.bold = bold
-        run.italic = italic
-        # Ensure font name applies to complex script and East Asian text as well
-        r = run._element
-        rPr = r.get_or_add_rPr()
-        rFonts = rPr.find(qn('w:rFonts'))
-        if rFonts is None:
-            rFonts = OxmlElement('w:rFonts')
-            rPr.insert(0, rFonts)
-        rFonts.set(qn('w:ascii'), name)
-        rFonts.set(qn('w:hAnsi'), name)
-        rFonts.set(qn('w:cs'), name)
 
     def _set_cell_text(self, cell, text: str, bold: bool = False):
         """Set cell text with proper Arial 11pt formatting."""
@@ -1711,45 +1704,9 @@ class WCMTemplateGenerator:
         if cell.paragraphs:
             para = cell.paragraphs[0]
             run = para.add_run(str(text) if text else "")
-            self._set_font(run, bold=bold)
+            _set_font(run, bold=bold)
 
-    def _set_table_border(self, table: Table, color: str = '808080', size: int = 4):
-        """Set table borders to 1px (4 eighths of a point), 50% gray."""
-        tbl = table._tbl
-        # CT_Tbl.tblPr is a OneAndOnlyOne descriptor: it returns the element or
-        # raises InvalidXmlError -- it never returns None. (ECMA-376 makes
-        # w:tblPr required on w:tbl, so a valid document always has it.) The
-        # old `if tbl.tblPr is not None else OxmlElement(...)` ternary and its
-        # trailing `if tbl.tblPr is None: tbl.insert(0, tblPr)` were therefore
-        # both unreachable. Note there is no get_or_add_tblPr() to reach for --
-        # OneAndOnlyOne generates no such accessor.
-        tblPr = tbl.tblPr
 
-        tblBorders = OxmlElement('w:tblBorders')
-        for border_name in ['top', 'left', 'bottom', 'right', 'insideH', 'insideV']:
-            border = OxmlElement(f'w:{border_name}')
-            border.set(qn('w:val'), 'single')
-            border.set(qn('w:sz'), str(size))  # 4 = 0.5pt, 8 = 1pt
-            border.set(qn('w:color'), color)
-            tblBorders.append(border)
-
-        # Remove existing borders and add new ones
-        existing = tblPr.find(qn('w:tblBorders'))
-        if existing is not None:
-            tblPr.remove(existing)
-        tblPr.append(tblBorders)
-
-    def _set_cell_vertical_alignment(self, cell, align='center'):
-        """Set cell vertical alignment to center (middle)."""
-        tc = cell._tc
-        tcPr = tc.get_or_add_tcPr()
-        vAlign = OxmlElement('w:vAlign')
-        vAlign.set(qn('w:val'), align)
-        # Remove existing vAlign
-        existing = tcPr.find(qn('w:vAlign'))
-        if existing is not None:
-            tcPr.remove(existing)
-        tcPr.append(vAlign)
 
     def _apply_vertical_alignment_to_all_tables(self):
         """Apply vertical middle alignment and paragraph spacing to ALL table cells.
@@ -1765,10 +1722,10 @@ class WCMTemplateGenerator:
         for table in self.doc.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    self._set_cell_vertical_alignment(cell, 'center')
+                    _set_cell_vertical_alignment(cell, 'center')
                     # Set paragraph spacing for all paragraphs in cell
                     for para in cell.paragraphs:
-                        self._set_paragraph_spacing(para, before_pt=4, after_pt=4)
+                        _set_paragraph_spacing(para, before_pt=4, after_pt=4)
 
     def _apply_table_styling_to_all_tables(self):
         """Apply standard WCM table styling to ALL tables.
@@ -1787,33 +1744,13 @@ class WCMTemplateGenerator:
             # Apply header row background color (first row)
             header_row = table.rows[0]
             for cell in header_row.cells:
-                self._set_cell_background(cell, gray_color)
+                _set_cell_background(cell, gray_color)
 
             # Apply borders to all cells
             for row in table.rows:
                 for cell in row.cells:
-                    self._set_cell_borders(cell, gray_color)
+                    _set_cell_borders(cell, gray_color)
 
-    def _set_paragraph_spacing(self, para, before_pt: int = 4, after_pt: int = 4):
-        """Set paragraph spacing before and after.
-
-        Args:
-            para: Paragraph to modify
-            before_pt: Space before in points
-            after_pt: Space after in points
-        """
-        pPr = para._p.get_or_add_pPr()
-
-        # Remove existing spacing element if present
-        existing = pPr.find(qn('w:spacing'))
-        if existing is not None:
-            pPr.remove(existing)
-
-        # Create new spacing element with before and after
-        spacing = OxmlElement('w:spacing')
-        spacing.set(qn('w:before'), str(before_pt * 20))  # Convert pt to twips (1pt = 20 twips)
-        spacing.set(qn('w:after'), str(after_pt * 20))
-        pPr.append(spacing)
 
     def _format_currency(self, value) -> str:
         """Format a value as US currency ($).
@@ -1985,15 +1922,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         return ''
 
-    def _add_paragraph_spacing_before(self, para, space_pt: int = 10):
-        """Add spacing before a paragraph (for table margins)."""
-        pPr = para._p.get_or_add_pPr()
-        spacing = OxmlElement('w:spacing')
-        spacing.set(qn('w:before'), str(space_pt * 20))  # Convert pt to twips
-        existing = pPr.find(qn('w:spacing'))
-        if existing is not None:
-            pPr.remove(existing)
-        pPr.append(spacing)
 
     def _insert_multiline_as_bullets(self, insert_idx: int, text: str, entry: Dict = None,
                                        add_blank_before: bool = False) -> int:
@@ -2056,7 +1984,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         # Use a simple bullet character prefix for reliable rendering
         # This avoids Word numbering system issues across different templates
         run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
-        self._set_font(run)
+        _set_font(run)
 
         if entry:
             self._add_entry_comments(entry_para, entry)
@@ -2093,7 +2021,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Add bullet prefix, then track change pair
         bullet_run = entry_para.add_run("• ")
-        self._set_font(bullet_run)
+        _set_font(bullet_run)
 
         # Add track change pair: deletion (original) then insertion (new)
         self._add_track_change_pair(entry_para, original_text, new_text, author=author)
@@ -2104,40 +2032,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         self.stats['entries_inserted'] += 1
         return entry_para
 
-    def _apply_bullet_formatting(self, para: Paragraph) -> None:
-        """Apply bullet list formatting to a paragraph using XML.
-
-        This is used when the 'List Bullet' style is not available in the template.
-        Creates a proper Word bullet list with hanging indent.
-        """
-        # Get or create paragraph properties
-        pPr = para._p.get_or_add_pPr()
-
-        # Create numbering properties for bullet
-        numPr = OxmlElement('w:numPr')
-
-        # Use abstract numbering ID 0 (typically bullets in Word)
-        ilvl = OxmlElement('w:ilvl')
-        ilvl.set(qn('w:val'), '0')
-        numPr.append(ilvl)
-
-        numId = OxmlElement('w:numId')
-        numId.set(qn('w:val'), '1')  # numId 1 is typically bullet list
-        numPr.append(numId)
-
-        # Insert numbering properties at beginning of pPr
-        pPr.insert(0, numPr)
-
-        # Set hanging indent for proper bullet alignment (0.25" indent, 0.25" hanging)
-        ind = OxmlElement('w:ind')
-        ind.set(qn('w:left'), '720')      # 0.5 inch in twips (1440 twips = 1 inch)
-        ind.set(qn('w:hanging'), '360')   # 0.25 inch hanging indent
-
-        # Remove existing indentation if any
-        existing_ind = pPr.find(qn('w:ind'))
-        if existing_ind is not None:
-            pPr.remove(existing_ind)
-        pPr.append(ind)
 
     def _apply_list_bullet(self, para: Paragraph, level: int = 0) -> None:
         """Apply Word native list bullet formatting using the WCM template's numbering.
@@ -2896,13 +2790,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             except ValueError:
                 pass  # Already removed or not in body
 
-    def _clear_table_data(self, table: Table, keep_header: bool = True):
-        """Remove all data rows from table."""
-        if not table:
-            return
-        start_row = 1 if keep_header else 0
-        for i in range(len(table.rows) - 1, start_row - 1, -1):
-            table._element.remove(table.rows[i]._element)
 
     def _style_table(self, table: Table):
         """Apply standard WCM table styling with header background and borders.
@@ -2921,63 +2808,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if table.rows:
             header_row = table.rows[0]
             for cell in header_row.cells:
-                self._set_cell_background(cell, gray_color)
+                _set_cell_background(cell, gray_color)
 
         # Apply borders to all cells
         for row in table.rows:
             for cell in row.cells:
-                self._set_cell_borders(cell, gray_color)
+                _set_cell_borders(cell, gray_color)
 
-    def _set_cell_background(self, cell, color_hex: str):
-        """Set cell background/shading color.
 
-        Args:
-            cell: The table cell
-            color_hex: Hex color string (without #), e.g., "D9D9D9"
-        """
-        tc = cell._tc
-        tcPr = tc.get_or_add_tcPr()
-
-        # Remove existing shading if any
-        existing_shd = tcPr.find(qn('w:shd'))
-        if existing_shd is not None:
-            tcPr.remove(existing_shd)
-
-        # Add new shading element
-        shd = OxmlElement('w:shd')
-        shd.set(qn('w:val'), 'clear')
-        shd.set(qn('w:color'), 'auto')
-        shd.set(qn('w:fill'), color_hex)
-        tcPr.append(shd)
-
-    def _set_cell_borders(self, cell, color_hex: str, size: str = "4"):
-        """Set cell borders.
-
-        Args:
-            cell: The table cell
-            color_hex: Hex color string for border color
-            size: Border size in eighths of a point (4 = 0.5pt, 8 = 1pt)
-        """
-        tc = cell._tc
-        tcPr = tc.get_or_add_tcPr()
-
-        # Remove existing borders if any
-        existing_borders = tcPr.find(qn('w:tcBorders'))
-        if existing_borders is not None:
-            tcPr.remove(existing_borders)
-
-        # Add new borders element
-        tcBorders = OxmlElement('w:tcBorders')
-
-        for border_name in ['top', 'left', 'bottom', 'right']:
-            border = OxmlElement(f'w:{border_name}')
-            border.set(qn('w:val'), 'single')
-            border.set(qn('w:sz'), size)
-            border.set(qn('w:space'), '0')
-            border.set(qn('w:color'), color_hex)
-            tcBorders.append(border)
-
-        tcPr.append(tcBorders)
 
     def _add_table_row(self, table: Table, data: List[str], is_header: bool = False, entry: Dict = None):
         """Add a row to a table with proper formatting.
@@ -2997,13 +2835,13 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 cell = row.cells[i]
                 cell.text = str(value) if value else ""
                 # Set vertical alignment to center (middle)
-                self._set_cell_vertical_alignment(cell, 'center')
+                _set_cell_vertical_alignment(cell, 'center')
                 for para in cell.paragraphs:
                     if i == 0 and first_cell_para is None:
                         first_cell_para = para
                     for run in para.runs:
                         # Always 11pt Arial, bold for headers
-                        self._set_font(run, size=11, bold=is_header)
+                        _set_font(run, size=11, bold=is_header)
 
         # Add comments to the first cell if entry provided
         if entry and first_cell_para:
@@ -3032,7 +2870,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             if i < len(row.cells):
                 cell = row.cells[i]
                 # Set vertical alignment to center (middle)
-                self._set_cell_vertical_alignment(cell, 'center')
+                _set_cell_vertical_alignment(cell, 'center')
 
                 # Clear default paragraph
                 if cell.paragraphs:
@@ -3048,7 +2886,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     else:
                         # Add as normal text
                         run = para.add_run(str(value) if value else "")
-                        self._set_font(run, size=11, bold=is_header)
+                        _set_font(run, size=11, bold=is_header)
 
         # Add comments to the first cell if entry provided
         if entry and first_cell_para:
@@ -3077,7 +2915,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             if i < len(row.cells):
                 cell = row.cells[i]
                 # Set vertical alignment to center (middle)
-                self._set_cell_vertical_alignment(cell, 'center')
+                _set_cell_vertical_alignment(cell, 'center')
 
                 # Clear default paragraph
                 if cell.paragraphs:
@@ -3097,7 +2935,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         else:
                             # Add as normal text
                             run = para.add_run(str(text))
-                            self._set_font(run, size=11, bold=is_header)
+                            _set_font(run, size=11, bold=is_header)
 
         # Add comments to the first cell if entry provided
         if entry and first_cell_para:
@@ -3111,10 +2949,10 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return
         header_row = table.rows[0]
         for cell in header_row.cells:
-            self._set_cell_vertical_alignment(cell, 'center')
+            _set_cell_vertical_alignment(cell, 'center')
             for para in cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run, size=11, bold=True)
+                    _set_font(run, size=11, bold=True)
 
     def _add_spacing_paragraph(self, after_element=None):
         """Add a blank paragraph for spacing between elements.
@@ -3391,7 +3229,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             para = self.doc.paragraphs[name_idx]
             para.clear()
             run = para.add_run(f"Name: {name}")
-            self._set_font(run, bold=True)
+            _set_font(run, bold=True)
 
         # Fill Date of preparation with today's date
         date_idx = self._find_paragraph_with_text("Date of preparation")
@@ -3400,7 +3238,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             para.clear()
             today = datetime.now().strftime("%B %-d, %Y")  # e.g., "February 1, 2026"
             run = para.add_run(f"Date of preparation: {today}")
-            self._set_font(run)
+            _set_font(run)
 
         # Fill email, phone, and address in the PERSONAL DATA table (Table 1)
         # Table 1 structure: Office address, Office telephone, Work email, Home address, Cell phone, Personal email
@@ -3470,7 +3308,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             text = entry.get('text', '').strip()
             entry_para = self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
             run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
-            self._set_font(run)
+            _set_font(run)
             self.stats['entries_inserted'] += 1
 
         # Add a blank line before the S0 content
@@ -3532,7 +3370,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort entries reverse chronologically (most recent first)
@@ -3681,7 +3519,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort entries reverse chronologically (most recent first)
@@ -4003,7 +3841,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if acad_idx is not None and d1_entries:
             acad_table = self._find_table_after_paragraph(acad_idx)
             if acad_table:
-                self._clear_table_data(acad_table, keep_header=True)
+                _clear_table_data(acad_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 sorted_d1 = sort_entries_reverse_chronological(d1_entries)
                 for entry in sorted_d1:
@@ -4014,7 +3852,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if hosp_idx is not None and d2_entries:
             hosp_table = self._find_table_after_paragraph(hosp_idx)
             if hosp_table:
-                self._clear_table_data(hosp_table, keep_header=True)
+                _clear_table_data(hosp_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 sorted_d2 = sort_entries_reverse_chronological(d2_entries)
                 for entry in sorted_d2:
@@ -4025,7 +3863,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if other_idx is not None and d3_entries:
             other_table = self._find_table_after_paragraph(other_idx)
             if other_table:
-                self._clear_table_data(other_table, keep_header=True)
+                _clear_table_data(other_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 sorted_d3 = sort_entries_reverse_chronological(d3_entries)
                 for entry in sorted_d3:
@@ -4041,7 +3879,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             if not table:
                 return
 
-            self._clear_table_data(table, keep_header=True)
+            _clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
             # Combine all and sort
@@ -4185,7 +4023,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort entries reverse chronologically (most recent first)
@@ -4652,7 +4490,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         table = self.doc.add_table(rows=len(rows), cols=2)
 
         # Set table borders and formatting
-        self._set_table_border(table, color='808080', size=4)
+        _set_table_border(table, color='808080', size=4)
 
         # Fill in the table
         first_cell_para = None
@@ -4661,20 +4499,20 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Label cell (bold)
             label_cell = row.cells[0]
             label_cell.text = label
-            self._set_cell_vertical_alignment(label_cell, 'center')
+            _set_cell_vertical_alignment(label_cell, 'center')
             for para in label_cell.paragraphs:
                 if i == 0 and first_cell_para is None:
                     first_cell_para = para
                 for run in para.runs:
-                    self._set_font(run, bold=True)
+                    _set_font(run, bold=True)
 
             # Value cell
             value_cell = row.cells[1]
             value_cell.text = str(value) if value else ''
-            self._set_cell_vertical_alignment(value_cell, 'center')
+            _set_cell_vertical_alignment(value_cell, 'center')
             for para in value_cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
 
         # Add comments from entry
         if entry and first_cell_para:
@@ -4799,7 +4637,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Create a 2-column table
             table = self.doc.add_table(rows=len(rows), cols=2)
-            self._set_table_border(table, color='808080', size=4)
+            _set_table_border(table, color='808080', size=4)
 
             # Fill the table
             first_cell_para = None
@@ -4808,20 +4646,20 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 # Label cell (bold)
                 label_cell = row.cells[0]
                 label_cell.text = label
-                self._set_cell_vertical_alignment(label_cell, 'center')
+                _set_cell_vertical_alignment(label_cell, 'center')
                 for para in label_cell.paragraphs:
                     if ri == 0 and first_cell_para is None:
                         first_cell_para = para
                     for run in para.runs:
-                        self._set_font(run, bold=True)
+                        _set_font(run, bold=True)
 
                 # Value cell
                 value_cell = row.cells[1]
                 value_cell.text = str(value) if value else ''
-                self._set_cell_vertical_alignment(value_cell, 'center')
+                _set_cell_vertical_alignment(value_cell, 'center')
                 for para in value_cell.paragraphs:
                     for run in para.runs:
-                        self._set_font(run)
+                        _set_font(run)
 
             # Add comments from entry
             if first_cell_para:
@@ -4892,7 +4730,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         """
         para = self.doc.add_paragraph()
         run = para.add_run(text)
-        self._set_font(run)
+        _set_font(run)
         if entry:
             self._add_entry_comments(para, entry)
 
@@ -5102,7 +4940,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Create table
         table = self.doc.add_table(rows=len(rows), cols=2)
-        self._set_table_border(table, color='808080', size=4)
+        _set_table_border(table, color='808080', size=4)
 
         first_cell_para = None
         for i, (label, value) in enumerate(rows):
@@ -5110,20 +4948,20 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Label cell (bold)
             label_cell = row.cells[0]
             label_cell.text = label
-            self._set_cell_vertical_alignment(label_cell, 'center')
+            _set_cell_vertical_alignment(label_cell, 'center')
             for para in label_cell.paragraphs:
                 if i == 0 and first_cell_para is None:
                     first_cell_para = para
                 for run in para.runs:
-                    self._set_font(run, bold=True)
+                    _set_font(run, bold=True)
 
             # Value cell
             value_cell = row.cells[1]
             value_cell.text = str(value) if value else ''
-            self._set_cell_vertical_alignment(value_cell, 'center')
+            _set_cell_vertical_alignment(value_cell, 'center')
             for para in value_cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
 
         # Add comments from entry
         if entry and first_cell_para:
@@ -5267,7 +5105,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort by date (most recent first)
@@ -5530,7 +5368,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for cell in row.cells:
             for para in cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
 
         self.stats['entries_inserted'] += 1
 
@@ -5569,7 +5407,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return
 
         # Clear existing data rows
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort by date (most recent first)
@@ -5999,7 +5837,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Clear tables and mark as populated
         for scope, table in tables_by_scope.items():
-            self._clear_table_data(table, keep_header=True)
+            _clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
         # Classify and route entries by geographic scope
@@ -6084,7 +5922,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 for cell in row.cells:
                     for para in cell.paragraphs:
                         for run in para.runs:
-                            self._set_font(run)
+                            _set_font(run)
                 self.stats['entries_inserted'] += 1
 
     def _fill_extramural_leadership(self, entries: List[Dict]):
@@ -6107,7 +5945,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
 
@@ -6280,7 +6118,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for cell in row.cells:
             for para in cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
         self.stats['entries_inserted'] += 1
 
     def _fill_journal_reviewing(self, entries: List[Dict]):
@@ -6320,7 +6158,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 print(f"  Warning: Could not find Journal Reviewing table")
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(filtered_entries)
@@ -6353,7 +6191,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             for cell in row.cells:
                 for para in cell.paragraphs:
                     for run in para.runs:
-                        self._set_font(run)
+                        _set_font(run)
             self.stats['entries_inserted'] += 1
 
     def _fill_other_service(self, entries: List[Dict]):
@@ -6410,7 +6248,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Try to find and use a table first
             table = self._find_table_after_paragraph(section_idx)
             if table:
-                self._clear_table_data(table, keep_header=True)
+                _clear_table_data(table, keep_header=True)
                 self.stats['tables_populated'] += 1
 
                 sorted_entries = sort_entries_reverse_chronological(section_entries)
@@ -6485,7 +6323,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     for cell in row.cells:
                         for para in cell.paragraphs:
                             for run in para.runs:
-                                self._set_font(run)
+                                _set_font(run)
                     self.stats['entries_inserted'] += 1
 
     def _fill_licensure(self, entries: List[Dict]):
@@ -6512,7 +6350,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -6576,7 +6414,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             for cell in row.cells:
                 for para in cell.paragraphs:
                     for run in para.runs:
-                        self._set_font(run)
+                        _set_font(run)
             self.stats['entries_inserted'] += 1
 
         # Fill DEA/NPI table (Table 9 in template)
@@ -6616,12 +6454,12 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     row.cells[1].text = dea_number
                     for para in row.cells[1].paragraphs:
                         for run in para.runs:
-                            self._set_font(run)
+                            _set_font(run)
                 elif 'npi' in label and npi_number:
                     row.cells[1].text = npi_number
                     for para in row.cells[1].paragraphs:
                         for run in para.runs:
-                            self._set_font(run)
+                            _set_font(run)
 
     def _fill_board_certification(self, entries: List[Dict]):
         """Fill F2. BOARD CERTIFICATION section.
@@ -6652,7 +6490,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         for entry in entries:
@@ -6802,7 +6640,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for cell in row.cells:
             for para in cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
         self.stats['entries_inserted'] += 1
 
     def _fill_clinical_practice(self, entries_by_code: Dict[str, List[Dict]]):
@@ -6860,7 +6698,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 sorted_entries = sort_entries_reverse_chronological(l1_entries)
 
                 if table and table_is_valid:
-                    self._clear_table_data(table, keep_header=True)
+                    _clear_table_data(table, keep_header=True)
                     self.stats['tables_populated'] += 1
                     for entry in sorted_entries:
                         fields = entry.get('extracted_fields', {}) or {}
@@ -6899,7 +6737,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             for cell in row.cells:
                                 for para in cell.paragraphs:
                                     for run in para.runs:
-                                        self._set_font(run)
+                                        _set_font(run)
                             self.stats['entries_inserted'] += 1
                 else:
                     # No valid table found - insert as bullet points after section header
@@ -6945,7 +6783,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 sorted_entries = sort_entries_reverse_chronological(l2_entries)
 
                 if table and table_is_valid:
-                    self._clear_table_data(table, keep_header=True)
+                    _clear_table_data(table, keep_header=True)
                     self.stats['tables_populated'] += 1
 
                     for entry in sorted_entries:
@@ -6977,7 +6815,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             for cell in row.cells:
                                 for para in cell.paragraphs:
                                     for run in para.runs:
-                                        self._set_font(run)
+                                        _set_font(run)
                             self.stats['entries_inserted'] += 1
                 else:
                     # No valid table found — insert as bullet points
@@ -7011,7 +6849,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 sorted_entries = sort_entries_reverse_chronological(l3_entries)
 
                 if table and table_is_valid:
-                    self._clear_table_data(table, keep_header=True)
+                    _clear_table_data(table, keep_header=True)
                     self.stats['tables_populated'] += 1
 
                     for entry in sorted_entries:
@@ -7046,7 +6884,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             for cell in row.cells:
                                 for para in cell.paragraphs:
                                     for run in para.runs:
-                                        self._set_font(run)
+                                        _set_font(run)
                             self.stats['entries_inserted'] += 1
                 else:
                     # No valid table found — insert as bullet points
@@ -7108,7 +6946,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -7161,7 +6999,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for cell in row.cells:
             for para in cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
         self.stats['entries_inserted'] += 1
 
     def _add_multiline_leadership_rows(self, table, lines: List[str]):
@@ -7292,7 +7130,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        self._clear_table_data(table, keep_header=True)
+        _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -7392,7 +7230,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for cell in row.cells:
             for para in cell.paragraphs:
                 for run in para.runs:
-                    self._set_font(run)
+                    _set_font(run)
         self.stats['entries_inserted'] += 1
 
     def _add_multiline_committee_rows(self, table, lines: List[str]):
@@ -7486,7 +7324,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Clear tables and mark as populated
         for scope, table in tables_by_scope.items():
-            self._clear_table_data(table, keep_header=True)
+            _clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
         # Classify and route entries by geographic scope
@@ -7549,7 +7387,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 for cell in row.cells:
                     for para in cell.paragraphs:
                         for run in para.runs:
-                            self._set_font(run)
+                            _set_font(run)
                 self.stats['entries_inserted'] += 1
 
     def _fill_passthrough_sections(self, all_entries: List[Dict]):
@@ -7638,7 +7476,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         # Clear and rewrite
                         para.clear()
                         run = para.add_run(f"{existing_label}\t{value}")
-                        self._set_font(run)
+                        _set_font(run)
                         self.stats['entries_inserted'] += 1
                         break
 
@@ -7687,7 +7525,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             if table:
                 # Clear existing table data and fill with matched entries
-                self._clear_table_data(table, keep_header=True)
+                _clear_table_data(table, keep_header=True)
                 self.stats['tables_populated'] += 1
 
                 for entry in matching_entries:
@@ -7715,7 +7553,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     for cell in row.cells:
                         for para in cell.paragraphs:
                             for run in para.runs:
-                                self._set_font(run)
+                                _set_font(run)
 
                     self.stats['entries_inserted'] += 1
             else:
@@ -7880,7 +7718,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 pPr.append(ind)
 
                 run = para.add_run(seg_text)
-                self._set_font(run)
+                _set_font(run)
 
                 # The last iteration in reversed order is forward_idx=0 (the title)
                 if idx == len(clean_segments) - 1:
@@ -8147,7 +7985,7 @@ Now analyze the text above:"""
             new_para = insert_para.insert_paragraph_before()
 
             run = new_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
-            self._set_font(run)
+            _set_font(run)
 
             # Add explanatory comment
             self._add_word_comment(
@@ -8260,14 +8098,14 @@ Now analyze the text above:"""
             self.doc.add_paragraph()
             appendix_para = self.doc.add_paragraph()
             run = appendix_para.add_run("T. APPENDIX")
-            self._set_font(run, bold=True)
+            _set_font(run, bold=True)
             run.underline = True
 
             intro_para = self.doc.add_paragraph()
             run = intro_para.add_run(
                 "The following content from the original CV was not successfully mapped to this CV format:"
             )
-            self._set_font(run)
+            _set_font(run)
             self.doc.add_paragraph()
 
         # Add each remaining segment. The taxonomy code is an internal
@@ -8276,7 +8114,7 @@ Now analyze the text above:"""
         for segment_text, original_code, coverage_pct in remaining:
             entry_para = self.doc.add_paragraph()
             run = entry_para.add_run(f"• {segment_text}")
-            self._set_font(run)
+            _set_font(run)
             self._add_word_comment(
                 entry_para,
                 f"Originally classified {original_code}; could not be mapped "
@@ -8457,7 +8295,7 @@ Now analyze the text above:"""
         # Add appendix header - matching BIBLIOGRAPHY style (bold + underline)
         appendix_para = self.doc.add_paragraph()
         run = appendix_para.add_run("T. APPENDIX")
-        self._set_font(run, bold=True)
+        _set_font(run, bold=True)
         run.underline = True
 
         # Add explanatory text
@@ -8465,7 +8303,7 @@ Now analyze the text above:"""
         run = intro_para.add_run(
             "The following content from the original CV was not successfully mapped to this CV format:"
         )
-        self._set_font(run)
+        _set_font(run)
 
         # Emit ONE summary doc comment for the boilerplate we removed (rather
         # than a per-entry comment for each dropped block).
@@ -8500,7 +8338,7 @@ Now analyze the text above:"""
             # Add subsection header showing original CV section
             header_para = self.doc.add_paragraph()
             run = header_para.add_run(f"From \"{header}\":")
-            self._set_font(run, bold=True)
+            _set_font(run, bold=True)
 
             for i, (entry, text) in enumerate(entries, start=1):
                 element_idx = entry.get('element_idx_start', '')
@@ -8512,7 +8350,7 @@ Now analyze the text above:"""
                 entry_para = self.doc.add_paragraph()
                 bullet_text = f"{i}. {text}"
                 run = entry_para.add_run(bullet_text)
-                self._set_font(run)
+                _set_font(run)
 
                 # Add comments from entry (e.g., why it was classified as T)
                 self._add_entry_comments(entry_para, entry)
@@ -8737,7 +8575,7 @@ Now analyze the text above:"""
         # the document reads as if the change were already accepted.
         if not self.emit_track_changes:
             run = para.add_run(text)
-            self._set_font(run)
+            _set_font(run)
             return run
         try:
             revision_id = str(self._revision_id)
@@ -8782,7 +8620,7 @@ Now analyze the text above:"""
                 print(f"  Warning: Could not add track change: {e}")
             # Fall back to normal text
             run = para.add_run(text)
-            self._set_font(run)
+            _set_font(run)
             return run
 
     def _add_track_change_deletion(self, para: Paragraph, text: str, author: str = "LLM Formatter"):
@@ -9262,21 +9100,21 @@ Now analyze the text above:"""
             # Add before (normal)
             if before:
                 run1 = para.add_run(before)
-                self._set_font(run1)
+                _set_font(run1)
 
             # Add target name (bold)
             run2 = para.add_run(name_to_bold)
-            self._set_font(run2, bold=True)
+            _set_font(run2, bold=True)
             self.stats['target_names_bolded'] += 1
 
             # Add after (normal)
             if after:
                 run3 = para.add_run(after)
-                self._set_font(run3)
+                _set_font(run3)
         else:
             # No target name to bold
             run = para.add_run(citation)
-            self._set_font(run)
+            _set_font(run)
 
     def _add_citation_with_bold_author_as_insertion(self, para: Paragraph, citation: str,
                                                      target_name: Optional[str], cv_owner_last_name: str = '',
