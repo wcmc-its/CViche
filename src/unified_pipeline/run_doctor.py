@@ -151,6 +151,12 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_dedup_drops,
     lint_under_extraction,
 )
+from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
+    _OWNER_CAP,
+    _OWNER_GATE,
+    lint_enrichment_failures,
+    lint_owner_contact_missing,
+)
 from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     APPENDIX_WARN_ENTRIES,
     DEAD_SECTION_MIN_LINES,
@@ -483,26 +489,6 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
 
 # -------------------------------------------------------------------- lint 9
 
-def lint_enrichment_failures(stage5e: Dict) -> List[Dict]:
-    """Publications whose stage-5 PubMed enrichment ended in a *_failed status
-    (lookup_failed, pmcid_conversion_failed, doi_found_but_fetch_failed):
-    their citations degrade to CV-extracted fields. Non-failure outcomes
-    (enriched, no_identifier, doi_not_in_pubmed) are expected vocabulary."""
-    failed = [e for e in stage5e.get("entries", [])
-              if str(e.get("enrichment_status") or "").endswith("_failed")]
-    if not failed:
-        return []
-    counts: Dict[str, int] = {}
-    for e in failed:
-        status = str(e.get("enrichment_status"))
-        counts[status] = counts.get(status, 0) + 1
-    breakdown = ", ".join(f"{s}: {n}" for s, n in sorted(counts.items()))
-    return [_finding(
-        "enrichment_failures", "WARN",
-        f"{len(failed)} publication(s) failed PubMed enrichment ({breakdown}) "
-        f"— citations degrade to CV-extracted fields (#222)",
-        [str(e.get("text", ""))[:100] for e in failed[:3]])]
-
 
 # ------------------------------------------------------------------- lint 10
 
@@ -517,49 +503,6 @@ def lint_enrichment_failures(stage5e: Dict) -> List[Dict]:
 
 
 # ------------------------------------------------------------------- lint 14
-
-
-_OWNER_GATE = "HARD-FAIL gate 'CV owner name / contact populated'"
-_OWNER_CAP = "the quality score is capped at 25 (RED, do not deliver)"
-
-
-def lint_owner_contact_missing(stage4: Optional[Dict], uid: str,
-                               unreadable: Optional[str] = None) -> List[Dict]:
-    """The quality score's cap-25 hard-fail gate: the document cannot be
-    delivered under anyone's name. The predicate is the scorer's own
-    (quality_score.cv_owner_name_missing), applied to the stage-4 artifact the
-    doctor already loads — the same ``*_fields.json`` the scorer reads.
-
-    Accepts ``stage4=None`` rather than being skipped by ``_ready`` because
-    score_cv_owner caps at 25 for an ABSENT ``*_fields.json`` too ("no
-    fields.json found"); the call site decides when that case is a real run
-    rather than a wrong uid.
-
-    The evidence names which fields are populated but never their values: a
-    partly-extracted owner (LLM found a surname but no given name) fires this
-    gate, and the doctor report is mirrored to S3 and served by the admin
-    viewer."""
-    if stage4 is None:
-        cause = (f"the stage-4 *_fields.json will not parse ({unreadable})"
-                 if unreadable else
-                 "there is no stage-4 *_fields.json for this document")
-        return [_finding("owner_contact_missing", "ERROR",
-                         f"{_OWNER_GATE}: {cause} — {_OWNER_CAP}")]
-    if not cv_owner_name_missing(stage4):
-        return []
-    cv_owner = stage4.get("cv_owner", {}) or {}
-    fields = ("full_name", "first_name", "last_name")
-    populated = [f for f in fields if str(cv_owner.get(f) or "").strip()]
-    evidence = ["cv_owner name fields populated: " + (", ".join(populated)
-                                                      or "none")]
-    if str(cv_owner.get("last_name") or "").strip().lower() == uid.lower():
-        evidence.append(
-            "last_name is the document uid — stage 4 fell back to the file "
-            "stem, so the rendered document carries the uid as the owner name")
-    return [_finding(
-        "owner_contact_missing", "ERROR",
-        f"{_OWNER_GATE}: the cv_owner block has no usable name — {_OWNER_CAP}",
-        evidence)]
 
 
 # ------------------------------------------------------------------- lint 15
