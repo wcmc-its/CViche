@@ -125,6 +125,15 @@ The system supports two execution modes: **CLI** for batch processing and **web*
 
 For pipeline internals, data schemas, and API details, see [Technical Documentation](docs/TECHNICAL_README.md).
 
+## Contributing
+
+`dev` is the integration branch — branch from `origin/dev`, PR into `dev`, and
+close the issue manually once it lands (a merge to `dev` does not auto-close,
+because GitHub only auto-closes from the default branch). See
+**[Dev workflow](docs/DEV_WORKFLOW.md)** for the full working agreement: branching,
+merging a batch of PRs safely, running corpus batches, PII rules, the measurement
+landmines, and how to brief a parallel working session.
+
 ## Web Interface
 
 ### Docker (Recommended)
