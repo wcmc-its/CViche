@@ -218,6 +218,49 @@ CLASSIFIED_UNRENDERED_WARN_ENTRIES = 2
 # Same staleness caveat as the thresholds above: #440 replaces this with a live
 # baseline. A lint absent from this table is treated as maximally surprising,
 # which is the safe direction -- a newly added lint surfaces rather than hides.
+#: Every lint key `run_doctor` can emit, in the order the lints run (#268).
+#:
+#: This is the canonical list. Consumers must import it rather than hardcoding
+#: their own copy -- `scripts/corpus_doctor_sweep.py` kept one and it drifted.
+#:
+#: It cannot be derived from the `lint_*` function names, and that is not a
+#: style preference. Two functions emit a key that is not their own name:
+#:
+#:     lint_stage6_warnings  -> "stage6_render_warnings"
+#:     lint_pipeline_errors  -> "pipeline_errors_present"
+#:
+#: A name-derived list would invent two keys no finding ever carries (so they
+#: report as "ran on 0 CVs") and drop the two that are real. A name-derived
+#: COUNT is wrong for a third reason: `lint_surprise` matches the `lint_`
+#: prefix but is a ranking helper, not a rule, and emits no findings at all.
+#:
+#: Order is load-bearing. The sweep breaks ranking ties on index, so reordering
+#: this changes its report even when every finding is identical. Keep it in
+#: dispatch order, matching `run_doctor()`.
+#:
+#: `test_run_doctor_contract.py` checks this against the keys the lint
+#: bodies actually pass to `_finding`/`_ready`, so adding a lint without
+#: registering it here fails in CI.
+KNOWN_LINTS = (
+    "segmentation",
+    "missed_headers",
+    "bucket_status",
+    "under_extraction",
+    "classified_unrendered",
+    "output_hygiene",
+    "dead_sections",
+    "unrendered_records",
+    "enrichment_failures",
+    "stage6_render_warnings",
+    "dedup_drops",
+    "pipe_leaks",
+    "table_shape",
+    "duplicate_passages",
+    "owner_contact_missing",
+    "pipeline_errors_present",
+)
+
+
 LINT_PREVALENCE = {
     "output_hygiene": 0.877,
     "table_shape": 0.562,
