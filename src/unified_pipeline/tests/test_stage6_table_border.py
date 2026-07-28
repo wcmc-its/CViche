@@ -23,7 +23,9 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
+# _set_table_border moved to its owning module in the #398 split. It never
+# touched self -- which this test already knew, since it passed None for it.
+from unified_pipeline.stage6.formatting import _set_table_border  # noqa: E402
 
 
 def _border_table():
@@ -33,7 +35,7 @@ def _border_table():
 
 def test_borders_land_on_the_attached_tblPr():
     doc, table = _border_table()
-    WCMTemplateGenerator._set_table_border(None, table, color="808080", size=4)
+    _set_table_border(table, color="808080", size=4)
 
     tbl = table._tbl
     tblPr = tbl.find(qn("w:tblPr"))
@@ -53,8 +55,8 @@ def test_borders_land_on_the_attached_tblPr():
 
 def test_reapplying_replaces_rather_than_duplicates_borders():
     doc, table = _border_table()
-    WCMTemplateGenerator._set_table_border(None, table)
-    WCMTemplateGenerator._set_table_border(None, table, color="FF0000", size=8)
+    _set_table_border(table)
+    _set_table_border(table, color="FF0000", size=8)
 
     tblPr = table._tbl.find(qn("w:tblPr"))
     all_borders = tblPr.findall(qn("w:tblBorders"))

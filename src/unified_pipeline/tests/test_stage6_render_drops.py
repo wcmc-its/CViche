@@ -8,7 +8,14 @@ ones from those artifacts.
 #262 - 9TUVGW: a short but titled clinical-trial row.
 """
 
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator as G
+# The three predicates below moved to stage6/parsing/records.py in the #398
+# split. They were @staticmethod on the generator, and this file already knew
+# it -- it reached them through the class, never an instance.
+from unified_pipeline.stage6.parsing import (
+    _is_mentee_record,
+    _is_mentoring_outcome,
+    _is_orphan_fragment,
+)
 
 
 # --- #262: the orphan-fragment guard must not discard titled entries -----------
@@ -18,26 +25,26 @@ def test_titled_short_entry_is_not_an_orphan_fragment():
     fields = {"title": "Biotia-HSS Next Generation Sequencing Orthopedic Assay"}
     text = "Biotia-HSS Next Generation Sequencing Orthopedic Assay"
     assert len(text) < 80
-    assert not G._is_orphan_fragment(fields, "", text)
+    assert not _is_orphan_fragment(fields, "", text)
 
 
 def test_untitled_short_bare_entry_is_still_an_orphan_fragment():
     # A stray sub-header: short, no title, no other signal. Still dropped.
-    assert G._is_orphan_fragment({}, "", "Clinical Innovations")
-    assert G._is_orphan_fragment({"title": "   "}, "", "Clinical Innovations")
+    assert _is_orphan_fragment({}, "", "Clinical Innovations")
+    assert _is_orphan_fragment({"title": "   "}, "", "Clinical Innovations")
 
 
 def test_long_or_dated_entries_survive_regardless_of_title():
-    assert not G._is_orphan_fragment({}, "", "x" * 80)
-    assert not G._is_orphan_fragment({"date": "2024"}, "", "short")
-    assert not G._is_orphan_fragment({}, "formatted by stage 5c", "short")
+    assert not _is_orphan_fragment({}, "", "x" * 80)
+    assert not _is_orphan_fragment({"date": "2024"}, "", "short")
+    assert not _is_orphan_fragment({}, "formatted by stage 5c", "short")
 
 
 # --- #261: mentee tables need a name; summaries and outcomes do not -----------
 
 def test_named_entry_is_a_mentee_record():
-    assert G._is_mentee_record({"extracted_fields": {"mentee_name": "Jane Doe"}})
-    assert G._is_mentee_record({"extracted_fields": {"name": "Jane Doe"}})
+    assert _is_mentee_record({"extracted_fields": {"mentee_name": "Jane Doe"}})
+    assert _is_mentee_record({"extracted_fields": {"name": "Jane Doe"}})
 
 
 def test_aggregate_counts_are_not_mentee_records():
@@ -48,21 +55,21 @@ def test_aggregate_counts_are_not_mentee_records():
                         ("Completed: 27", "Completed"),
                         ("Current: 8", None)]:
         entry = {"text": text, "extracted_fields": {"mentee_name": None, "mentee_level": level}}
-        assert not G._is_mentee_record(entry), text
+        assert not _is_mentee_record(entry), text
 
 
 def test_blank_name_is_not_a_mentee_record():
-    assert not G._is_mentee_record({"extracted_fields": {"mentee_name": "  "}})
-    assert not G._is_mentee_record({})
+    assert not _is_mentee_record({"extracted_fields": {"mentee_name": "  "}})
+    assert not _is_mentee_record({})
 
 
 def test_n4_outcome_detected_before_and_after_mismatch_rewrite():
     # _correct_mismatch_if_needed rewrites N4 -> N3A and stashes the original,
     # so an outcome must still be recognised once rerouted.
-    assert G._is_mentoring_outcome({"taxonomy_code": "N4"})
-    assert G._is_mentoring_outcome({"taxonomy_code": "N3A", "taxonomy_code_original": "N4"})
-    assert not G._is_mentoring_outcome({"taxonomy_code": "N3A"})
-    assert not G._is_mentoring_outcome({"taxonomy_code": "N3B", "taxonomy_code_original": "N3A"})
+    assert _is_mentoring_outcome({"taxonomy_code": "N4"})
+    assert _is_mentoring_outcome({"taxonomy_code": "N3A", "taxonomy_code_original": "N4"})
+    assert not _is_mentoring_outcome({"taxonomy_code": "N3A"})
+    assert not _is_mentoring_outcome({"taxonomy_code": "N3B", "taxonomy_code_original": "N3A"})
 
 
 if __name__ == "__main__":
