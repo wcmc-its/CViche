@@ -75,6 +75,14 @@ def _finding(lint: str, severity: str, message: str,
             "evidence": evidence or []}
 
 
+def _magnitude_severity(observed: float, threshold: float) -> str:
+    """WARN when this run is in the corpus's worst quartile, else INFO.
+
+    Severity that encodes presence cannot rank anything: `echo_paragraphs=20`
+    and `echo_paragraphs=1` are the same lint and used to be the same WARN."""
+    return "WARN" if observed >= threshold else "INFO"
+
+
 class Haystack(NamedTuple):
     text: str    # squashed containment haystack, _LINE_SENTINEL-joined
     tokens: set  # distinctive long-word token set
