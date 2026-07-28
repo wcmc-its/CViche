@@ -39,6 +39,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 _RUN_DOCTOR_PY = _SRC / "unified_pipeline" / "run_doctor.py"
+_LINTS_DIR = _SRC / "unified_pipeline" / "doctor" / "lints"
 
 
 def _module():
@@ -47,6 +48,18 @@ def _module():
 
 def _tree():
     return ast.parse(_RUN_DOCTOR_PY.read_text())
+
+
+def _lint_sources():
+    """Every file that may define a lint rule.
+
+    The #493 split moves rules out of `run_doctor.py` into `doctor/lints/`, one
+    module per domain, a PR at a time. Globbing means a new domain module is
+    picked up without editing this test -- but a lint that lands somewhere else
+    entirely still goes unseen, which is why the registry check below compares
+    both directions rather than only looking for unregistered keys.
+    """
+    return [_RUN_DOCTOR_PY, *sorted(_LINTS_DIR.glob("*.py"))]
 
 
 def _emitted_keys():
@@ -58,20 +71,21 @@ def _emitted_keys():
     stays out of the registry.
     """
     keys = {}
-    for node in _tree().body:
-        if not (isinstance(node, ast.FunctionDef) and node.name.startswith("lint_")):
-            continue
-        found = set()
-        for call in ast.walk(node):
-            if not isinstance(call, ast.Call):
+    for path in _lint_sources():
+        for node in ast.parse(path.read_text()).body:
+            if not (isinstance(node, ast.FunctionDef) and node.name.startswith("lint_")):
                 continue
-            fn = getattr(call.func, "id", None) or getattr(call.func, "attr", None)
-            if fn in ("_finding", "_ready") and call.args:
-                first = call.args[0]
-                if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                    found.add(first.value)
-        if found:
-            keys[node.name] = found
+            found = set()
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call):
+                    continue
+                fn = getattr(call.func, "id", None) or getattr(call.func, "attr", None)
+                if fn in ("_finding", "_ready") and call.args:
+                    first = call.args[0]
+                    if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                        found.add(first.value)
+            if found:
+                keys[node.name] = found
     return keys
 
 
