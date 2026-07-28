@@ -88,28 +88,10 @@ import re
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from unified_pipeline.core.render_check import entry_fragments
-from unified_pipeline.core.template_boilerplate import (
-    is_source_boilerplate,
-    is_template_instruction,
-)
-from unified_pipeline.quality_score import (
-    FATAL_ERROR_PATTERN,
-    cv_owner_name_missing,
-    iter_error_fields,
-)
-from unified_pipeline.segmentation_regression import (
-    SUBSTANTIVE_LINE_CHARS,
-    _looks_like_record,
-    _norm,
-    _squash,
-    compute_metrics,
-    iter_source_lines,
-    lint_metrics,
-)
-from unified_pipeline.stage_6_word_template import grant_status_rebucket_target
+from unified_pipeline.core.template_boilerplate import is_source_boilerplate
+from unified_pipeline.segmentation_regression import iter_source_lines
 
 # Lint rules and their primitives now live in the doctor/ package (#493).
 # Re-exported here rather than updating callers: five files import 33 names
@@ -464,51 +446,6 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
     doc = Document(docx_path)
     return [[[_cell_text(cell).strip() for cell in row.cells] for row in tbl.rows]
             for tbl in doc.tables]
-
-
-# -------------------------------------------------------------------- lint 1
-
-
-# -------------------------------------------------------------------- lint 2
-
-
-# -------------------------------------------------------------------- lint 3
-
-
-# -------------------------------------------------------------------- lint 4
-
-
-# -------------------------------------------------------------------- lint 5
-
-
-# -------------------------------------------------------------------- lint 6
-
-
-# -------------------------------------------------------------------- lint 7
-
-
-# -------------------------------------------------------------------- lint 8
-
-
-# -------------------------------------------------------------------- lint 9
-
-
-# ------------------------------------------------------------------- lint 10
-
-
-# ------------------------------------------------------------------- lint 11
-
-
-# ------------------------------------------------------------------- lint 12
-
-
-# ------------------------------------------------------------------- lint 13
-
-
-# ------------------------------------------------------------------- lint 14
-
-
-# ------------------------------------------------------------------- lint 15
 
 
 # --------------------------------------------------------- artifact resolution
