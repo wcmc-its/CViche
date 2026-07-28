@@ -201,6 +201,9 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     lint_missed_headers,
     lint_segmentation,
 )
+from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
+    lint_pipeline_errors,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -506,30 +509,6 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
 
 
 # ------------------------------------------------------------------- lint 15
-
-def lint_pipeline_errors(artifacts: Dict[str, Dict]) -> List[Dict]:
-    """The quality score's cap-40 hard-fail gate: an ``error`` field somewhere
-    in the run's artifacts carries a fatal pattern (NameError, traceback), so a
-    stage died mid-run and whatever it owned is missing from the output. The
-    pattern and the walk are the scorer's own
-    (quality_score.FATAL_ERROR_PATTERN / iter_error_fields).
-
-    ``artifacts`` is keyed by stage label and the caller narrows it to exactly
-    the JSON the deployed scorer reads, so the cap this finding names is the
-    cap those artifacts actually produce."""
-    fatal: List[str] = []
-    for label in sorted(artifacts):
-        for path, value in iter_error_fields(artifacts[label], label):
-            if FATAL_ERROR_PATTERN.search(value):
-                fatal.append(f"{path}: {value[:120]}")
-    if not fatal:
-        return []
-    return [_finding(
-        "pipeline_errors_present", "ERROR",
-        f"HARD-FAIL gate 'Pipeline/API errors present': {len(fatal)} fatal "
-        f"error field(s) recorded in the run artifacts — the quality score is "
-        f"capped at 40 (RED, do not deliver)",
-        fatal[:5])]
 
 
 # --------------------------------------------------------- artifact resolution
