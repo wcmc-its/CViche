@@ -21,7 +21,7 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from unified_pipeline.run_doctor import run_doctor
+from unified_pipeline.run_doctor import rank_lints, run_doctor
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +66,12 @@ def main(argv=None):
     findings = report.get("findings", [])
     sev = Counter(f["severity"] for f in findings)
     lints = Counter(f["lint"] for f in findings)
-    top = ",".join(f"{k}:{v}" for k, v in lints.most_common(4))
+    # Ranked by corpus-relative surprise, not raw count: the ubiquitous lints
+    # fire most often AND say least, so most_common(4) spent half the line on
+    # them and hid the rare ones that identify this run (#438). Same four slots,
+    # same format -- the TSV contract is unchanged.
+    top_lints = rank_lints(lints)[:4]
+    top = ",".join(f"{k}:{v}" for k, v in top_lints)
 
     # stdout is the TSV contract (see the docstring): deliberately print(), not a
     # logger call -- run_corpus_batch.sh captures this line with $(...), so
