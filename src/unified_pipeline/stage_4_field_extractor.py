@@ -1770,7 +1770,11 @@ def extract_cv_owner_name(document_uid: str, mapped_entries: List[Dict[str, Any]
             # Remove random prefix like "WSP0KQ_"
             uid_clean = re.sub(r'^[A-Z0-9]{6}_', '', uid_clean)
             parts = uid_clean.split('_')
-            name_parts = [p for p in parts if not re.match(r'^\d{4}$', p) and len(p) > 1]
+            # A year token, without the regex engine. Also strictly correct
+            # where the regex was not: Python's '$' matches before a trailing
+            # newline, so re.match(r'^\d{4}$', '2026\n') is a match.
+            name_parts = [p for p in parts
+                          if not (len(p) == 4 and p.isdigit()) and len(p) > 1]
             # Only a purely alphabetic token can be a surname. 'web151' and
             # 'I5NKUG' are identifiers, not names.
             if name_parts and name_parts[-1].isalpha():
