@@ -17,6 +17,7 @@ Author: Scholar Signals CV Pipeline
 Date: 2025-11-29
 """
 
+import logging
 import os
 import sys
 import json
@@ -83,6 +84,8 @@ from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _clean_inline_tabs(text: str) -> str:

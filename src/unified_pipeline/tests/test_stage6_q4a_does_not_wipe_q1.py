@@ -108,6 +108,19 @@ def test_clearing_is_recorded_so_a_second_filler_cannot_wipe_the_first():
         "clearing must be recorded, or the guard cannot fire"
 
 
+def test_the_backstop_can_actually_log_when_it_fires():
+    """The guard's own warning must not be the thing that crashes the run.
+
+    `logger.warning(...)` in `_fill_other_service` was the module's only use of
+    a name the module never defined, so firing the backstop raised NameError --
+    and stage 6 raising fails the whole run in the web orchestrator, which is
+    strictly worse than the wipe the backstop exists to prevent. No other test
+    catches it, because with Q4A rerouted the branch is designed never to run.
+    """
+    import unified_pipeline.stage_6_word_template as s6
+    s6.logger.warning("backstop smoke check, %r", "arg")
+
+
 if __name__ == "__main__":
     import tempfile
     for _name, _fn in sorted(globals().items()):
