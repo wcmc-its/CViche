@@ -24,6 +24,12 @@ from docx import Document  # noqa: E402
 from unified_pipeline.quality_score import score_cv_owner  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
     APPENDIX_WARN_ENTRIES,
+    CLASSIFIED_UNRENDERED_WARN_ENTRIES,
+    MISSED_HEADERS_WARN_COUNT,
+    TABLE_SHAPE_WARN_DEFECTS,
+    TABLE_SHAPE_WARN_ROW_RATIO,
+    lint_surprise,
+    rank_lints,
     iter_header_candidates,
     lint_bucket_status,
     lint_classified_unrendered,
@@ -153,8 +159,22 @@ def test_missed_headers_fires_on_demoted_header():
         ["PROFESSIONAL EXPERIENCE"], _STAGE1A,
         {"entries": [_entry(_GRANT_FSMB, hierarchy=["GRANTS"])]})
     assert len(findings) == 1
-    assert findings[0]["severity"] == "WARN"
     assert "PROFESSIONAL EXPERIENCE" in findings[0]["message"]
+    # Still reported in full; INFO rather than WARN because one demoted header
+    # is the corpus norm (p50=2 over 73 runs) and a flat WARN made 77% of runs
+    # share one meaningless verdict (#438). The finding, its message and its
+    # evidence are unchanged -- only whether it escalates the RUN's verdict.
+    assert findings[0]["severity"] == "INFO"
+
+
+def test_missed_headers_escalates_to_warn_at_corpus_scale():
+    """Many demoted headers means segmentation lost the document's shape."""
+    many = [f"SECTION {i}" for i in range(MISSED_HEADERS_WARN_COUNT)]
+    findings = lint_missed_headers(
+        many, _STAGE1A, {"entries": [_entry(_GRANT_FSMB, hierarchy=["GRANTS"])]})
+    assert len(findings) == MISSED_HEADERS_WARN_COUNT
+    assert {f["severity"] for f in findings} == {"WARN"}, \
+        "severity is a property of the run, so every finding carries it"
 
 
 def test_missed_headers_quiet_when_header_is_known():
@@ -1400,3 +1420,75 @@ def test_candidate_filter_rejects_tab_data_rows_and_person_lines(monkeypatch):
     for text in kept:
         assert not D._NAME_CREDENTIAL_RE.search(text), text
         assert "\t" not in text
+
+
+# ------------------------------------------------------------------ #438
+# Severity means "unusual", not "present"; display order means "informative",
+# not "numerous". The safety property under all of this: a finding is never
+# suppressed. Only whether it escalates the RUN's verdict changes.
+
+
+def test_classified_unrendered_severity_tracks_total_entries_lost():
+    """One lost entry is the corpus norm; several means content vanished."""
+    def blocks_missing_everything():
+        return [("p", "nothing here matches")]
+
+    def stage3b(n):
+        return {"entries": [
+            _entry(f"Distinctive unrendered entry number {i} about widgets",
+                   taxonomy_code="B1", start=i) for i in range(n)]}
+
+    few = lint_classified_unrendered(stage3b(1), blocks_missing_everything())
+    many = lint_classified_unrendered(
+        stage3b(CLASSIFIED_UNRENDERED_WARN_ENTRIES + 1),
+        blocks_missing_everything())
+    assert few and many, "the lint must still fire in both cases"
+    assert few[0]["severity"] == "INFO"
+    assert many[0]["severity"] == "WARN"
+
+
+def test_table_shape_severity_tracks_how_malformed_the_table_is():
+    """A couple of bad rows in a long table is normal; a bad short table is not."""
+    header = ["Name of Award", "Granting Organization", "Date Awarded"]
+
+    def tbl(bad, total):
+        rows = [header]
+        for i in range(bad):
+            rows.append([f"Prize {i} awarded in 2019. It was given for work.",
+                         "NY", ""])
+        for i in range(total - bad):
+            rows.append([f"Clean Award {i}", "Some University", "2020"])
+        return [rows]
+
+    long_mild = lint_table_shape(tbl(1, 40))
+    short_bad = lint_table_shape(tbl(3, 4))
+    assert long_mild and short_bad, "the lint must still fire in both cases"
+    assert long_mild[0]["severity"] == "INFO", "1/40 malformed rows is not a WARN"
+    assert short_bad[0]["severity"] == "WARN", "3/4 malformed rows is"
+
+
+def test_rare_lints_outrank_ubiquitous_ones_however_often_they_fire():
+    """The #438 core: most_common() let the 88% lints crowd out the 1% ones."""
+    counts = {"output_hygiene": 40, "table_shape": 12, "duplicate_passages": 1}
+    assert [k for k, _ in rank_lints(counts)] == [
+        "duplicate_passages", "table_shape", "output_hygiene"]
+    assert lint_surprise("duplicate_passages") > lint_surprise("output_hygiene")
+
+
+def test_an_unknown_lint_is_treated_as_maximally_surprising():
+    """A newly added lint must surface, not hide, before it is measured."""
+    assert lint_surprise("a_brand_new_lint") >= lint_surprise("duplicate_passages")
+    assert rank_lints({"a_brand_new_lint": 1, "output_hygiene": 99})[0][0] == \
+        "a_brand_new_lint"
+
+
+def test_magnitude_thresholds_never_suppress_a_finding():
+    """Severity may drop to INFO; the finding, message and evidence stay."""
+    header = ["Name of Award", "Granting Organization", "Date Awarded"]
+    rows = [header] + [["Prize awarded in 2019. Given for work.", "NY", ""]] \
+        + [[f"Clean {i}", "Some University", "2020"] for i in range(39)]
+    findings = lint_table_shape([rows])
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "INFO"
+    assert "malformed" in findings[0]["message"]
+    assert findings[0]["evidence"], "evidence must survive the downgrade"

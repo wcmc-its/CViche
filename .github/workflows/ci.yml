@@ -4,8 +4,12 @@ name: ci
 # scanning; this runs the backend test suite and a frontend typecheck/build so a
 # broken test or type error is caught before it reaches dev/main.
 on:
+  # Every base branch, not just the trunks: a PR stacked on another feature
+  # branch matched nothing here and so reported *no checks at all*, which reads
+  # as "not yet run" rather than as a failure (#467). push stays on the trunks
+  # so feature-branch pushes don't double-run.
   pull_request:
-    branches: [dev, main]
+    branches: ['**']
   push:
     branches: [dev, main]
   workflow_dispatch:

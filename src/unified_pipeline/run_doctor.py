@@ -82,6 +82,7 @@ unreadable artifacts skip their lints with an INFO note instead of crashing.
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import sys
@@ -173,6 +174,92 @@ RECORD_DATE_LINE_MIN_CHARS = 20
 _RECORD_DATE_PREFIX_RE = re.compile(r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]")
 
 SEVERITY_ORDER = ("ERROR", "WARN", "INFO")  # most to least severe
+
+# ---------------------------------------------------------------------------
+# Magnitude thresholds: WARN means "unusual", not "present" (#438).
+#
+# Three lints used to emit a flat WARN whenever they fired at all. Because they
+# also fire on most runs, 77% of the corpus landed on the identical WARN verdict
+# and the verdict carried no information -- an unchanged verdict was never
+# evidence of no regression, because it was never going to change.
+#
+# The rule is one sentence: a lint WARNs when this run sits in the corpus's
+# worst quartile for it, and is INFO when the run is typical. The numbers below
+# are the measured p75 of each magnitude over the 73 scored runs of the
+# 2026-07-25 batch (sha 9aec6a6), which moves the largest verdict bucket from
+# 77% to 58%:
+#
+#   magnitude                                   n    p50   p75   p90   max
+#   table_shape malformed-row ratio            41   0.18  0.27  0.40  0.60
+#   table_shape defects per table              41      2     4     7     10
+#   missed_headers per run                     21      2     6     9     13
+#   classified_unrendered entries lost/run     21      1     2     3      4
+#
+# Reproduce: join ~/worktrees/batch-slices/slice{2,3,4}/_batch_runs/scores.tsv
+# with run_doctor re-run over the batch worktree outputs.
+#
+# These are static constants measured once, so they go stale as the pipeline
+# improves -- #440 replaces them with a live corpus baseline. Until then, a
+# threshold that drifts is still strictly better than no threshold: today every
+# one of these fires WARN at magnitude 1.
+TABLE_SHAPE_WARN_ROW_RATIO = 0.27
+TABLE_SHAPE_WARN_DEFECTS = 4
+MISSED_HEADERS_WARN_COUNT = 6
+CLASSIFIED_UNRENDERED_WARN_ENTRIES = 2
+
+
+# How often each lint fires at all, over the same 73 scored runs. Used only to
+# ORDER what gets shown, never to decide severity. `top_lints` used to be
+# `most_common(4)`, which ranks by raw finding count -- so output_hygiene
+# (87.7% of runs) and table_shape (56.2%) consumed half the slots in every
+# report and pushed the 1-3% lints, the ones that actually distinguish this run
+# from every other run, out of view (#438).
+#
+# Same staleness caveat as the thresholds above: #440 replaces this with a live
+# baseline. A lint absent from this table is treated as maximally surprising,
+# which is the safe direction -- a newly added lint surfaces rather than hides.
+LINT_PREVALENCE = {
+    "output_hygiene": 0.877,
+    "table_shape": 0.562,
+    "missed_headers": 0.288,
+    "classified_unrendered": 0.288,
+    "stage6_render_warnings": 0.123,
+    "dedup_drops": 0.110,
+    "segmentation": 0.082,
+    "enrichment_failures": 0.082,
+    "owner_contact_missing": 0.068,
+    "pipe_leaks": 0.055,
+    "unrendered_records": 0.027,
+    "dead_sections": 0.027,
+    "duplicate_passages": 0.014,
+    "bucket_status": 0.014,
+    "under_extraction": 0.014,
+    "pipeline_errors_present": 0.001,
+}
+
+
+def lint_surprise(lint: str) -> float:
+    """How informative it is that THIS lint fired, in bits.
+
+    A lint that fires on 88% of runs says almost nothing about the run in front
+    of you; one that fires on 1.4% says a great deal. Ranking by raw count gets
+    this exactly backwards, because the ubiquitous lints are also the ones that
+    fire many times."""
+    return math.log2(1.0 / max(LINT_PREVALENCE.get(lint, 0.001), 0.001))
+
+
+def rank_lints(counts: Dict[str, int]) -> List[Tuple[str, int]]:
+    """Order lints for display: most surprising first, count as the tiebreak."""
+    return sorted(counts.items(),
+                  key=lambda kv: (-lint_surprise(kv[0]), -kv[1], kv[0]))
+
+
+def _magnitude_severity(observed: float, threshold: float) -> str:
+    """WARN when this run is in the corpus's worst quartile, else INFO.
+
+    Severity that encodes presence cannot rank anything: `echo_paragraphs=20`
+    and `echo_paragraphs=1` are the same lint and used to be the same WARN."""
+    return "WARN" if observed >= threshold else "INFO"
 
 # A well-formed report is a few KB. A malformed artifact with huge text fields
 # could inflate the findings into a multi-MB file; cap it. Evidence strings are
@@ -462,6 +549,13 @@ def lint_missed_headers(candidates: List[str], stage1a: Dict,
             "missed_headers", "WARN",
             f"header-like source line missing from segmentation: '{cand}'",
             [cand]))
+    # Severity is a property of the RUN, not of each header: one stray
+    # header-like line is normal, a dozen means segmentation lost the document's
+    # shape. This lint emits one finding per header, so without this the finding
+    # count doubled as the severity and a long CV always looked worse (#438).
+    severity = _magnitude_severity(len(findings), MISSED_HEADERS_WARN_COUNT)
+    for f in findings:
+        f["severity"] = severity
     return findings
 
 
@@ -610,6 +704,7 @@ def lint_classified_unrendered(stage3b: Dict,
         by_code.setdefault(code, []).append(e)
 
     findings = []
+    lost = 0
     for code in sorted(by_code):
         entries = by_code[code]
         verdicts = [(_entry_rendered(e.get("text"), h.text, h.tokens), e)
@@ -622,6 +717,12 @@ def lint_classified_unrendered(stage3b: Dict,
             f"taxonomy code {code}: none of its {len(entries)} classified "
             f"entries appear in the output document",
             [str(e.get("text", ""))[:80] for _, e in verifiable[:3]]))
+        lost += len(entries)
+    # As with missed_headers, the magnitude that matters is how much of the
+    # document went missing across all codes, not that one code did (#438).
+    severity = _magnitude_severity(lost, CLASSIFIED_UNRENDERED_WARN_ENTRIES)
+    for f in findings:
+        f["severity"] = severity
     return findings
 
 
@@ -1012,8 +1113,15 @@ def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
             elif org and len(org) > 8 and _norm(org) in _norm(name):
                 flag(rn, f"organization duplicated in name: {org[:60]}")
         if defects:
+            # A couple of mis-shaped rows in a long honors table is the corpus
+            # norm; half the table is not. Threshold on either the share of
+            # rows or the absolute defect count, so a short table with two bad
+            # rows out of three still warns (#438).
+            ratio = len(defective_rows) / len(rows) if rows else 0.0
             findings.append(_finding(
-                "table_shape", "WARN",
+                "table_shape",
+                "WARN" if (ratio >= TABLE_SHAPE_WARN_ROW_RATIO
+                           or len(defects) >= TABLE_SHAPE_WARN_DEFECTS) else "INFO",
                 f"honors table: {len(defective_rows)}/{len(rows)} row(s) "
                 f"malformed ({len(defects)} defect(s)) — #229",
                 defects[:6]))
