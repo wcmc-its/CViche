@@ -10,8 +10,16 @@ that decides *how a value should read* belongs in normalization.
 
     docx.py    a python-docx object in, its appearance mutated
     values.py  a value in, the string that appears on the page out
+    dates.py   a date in, the string the section's format calls for out
 """
 
+from .dates import (  # noqa: F401
+    DATE_FORMATS,
+    _MONTH_NAMES,
+    format_date_for_section,
+    format_date_range,
+    normalize_iso_dates_in_text,
+)
 from .docx import (  # noqa: F401
     _clear_table_data,
     _set_cell_background,

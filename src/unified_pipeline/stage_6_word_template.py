@@ -43,7 +43,16 @@ except ImportError:
 
 from unified_pipeline.llm_client import call_llm
 from unified_pipeline.core.render_check import entry_fragments
-from unified_pipeline.stage6.formatting import (
+# Every name below is re-exported from this module by being imported here: it is
+# the public import surface (tests/test_stage6_import_surface.py pins 21 of them).
+# run_full_pipeline.py and the backend orchestrator.py are parallel drivers over
+# the same stage_* modules and share no code, so a name that moves without a
+# re-export lands silently in whichever driver nobody ran. The blanket
+# `noqa: F401` is deliberate -- several of these have no caller left in this file
+# and exist purely to keep that surface intact.
+from unified_pipeline.stage6.formatting import (  # noqa: F401
+    DATE_FORMATS,
+    _MONTH_NAMES,
     _clear_table_data,
     _format_citation,
     _format_currency,
@@ -55,16 +64,23 @@ from unified_pipeline.stage6.formatting import (
     _set_font,
     _set_paragraph_spacing,
     _set_table_border,
+    format_date_for_section,
+    format_date_range,
+    normalize_iso_dates_in_text,
 )
-from unified_pipeline.stage6.parsing import (
+from unified_pipeline.stage6.parsing import (  # noqa: F401
+    _MONTH_NAME_TO_NUM,
+    _dates_overlap_or_match,
     _extract_last_name_from_uid,
     _extract_name_from_uid,
     _extract_year_from_text,
+    _get_entry_date_range,
     _is_mentee_record,
     _is_mentoring_outcome,
     _is_orphan_fragment,
     _is_structural_label,
     _is_table_header_entry,
+    _parse_date_components,
     _parse_multi_membership_entry,
 )
 from unified_pipeline.stage6.resolution import (
@@ -72,156 +88,32 @@ from unified_pipeline.stage6.resolution import (
     _get_institution_location,
     _recover_institution_from_nearby_entries,
 )
-from unified_pipeline.stage6.normalization import (
+from unified_pipeline.stage6.normalization import (  # noqa: F401
+    _HOME_ADDRESS_KEYS,
+    _OFFICE_ADDRESS_KEYS,
+    _TAXONOMY_CODE_PREFIX,
+    _address_cell_text,
+    _clean_inline_tabs,
+    _committee_cell_text,
     _deduplicate_repeated_content,
     _get_cleaned_institution_name,
+    _labels_its_own_address_slots,
     _normalize_author_names,
     _strip_markdown_for_word,
     _strip_org_tail,
+    _strip_taxonomy_code,
+    grant_status_rebucket_target,
+    split_fused_citation_entries,
+)
+from unified_pipeline.stage6.sorting import (  # noqa: F401
+    element_idx_sort_key,
+    extract_sort_date,
+    sort_entries_reverse_chronological,
 )
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
 )
-
-
-def _clean_inline_tabs(text: str) -> str:
-    """Render the pipeline's internal cell separators readably.
-
-    Two separators are artifacts of how the readers flatten a source CV, and
-    neither belongs in a rendered Word document:
-
-    - " | " joins the cells of a table row (``docx_structure_extractor``). Those
-      cells are columns, not a label/value pair, so they rejoin with " — ".
-      A row whose cells are all empty is a blank template row carrying no
-      information; it collapses to "" so callers can drop it.
-    - "\\t" joins the "Label\\tValue" pairs of the WCM template's tables. A raw
-      tab renders ragged against Word's default tab stops, so the first becomes
-      ": " (label: value) and any further tabs become " — ".
-
-    Properly structured content (mentee/board tables) is routed to real Word
-    tables upstream via classification; this is the fallback for residual text.
-
-    ponytail: the name says "tabs" but it now handles both separators. Kept as-is
-    so this change does not collide with the three bullet call sites that #254
-    also edits; rename to _clean_cell_separators once that has landed.
-    """
-    if not text:
-        return text
-    if "|" in text:
-        text = " — ".join(c.strip() for c in text.split("|") if c.strip())
-    if "\t" not in text:
-        return text
-    parts = [p.strip() for p in text.split("\t") if p.strip()]
-    if len(parts) <= 1:
-        return text.replace("\t", " ").strip()
-    return parts[0] + ": " + " — ".join(parts[1:])
-
-
-def _committee_cell_text(value) -> str:
-    """Coerce a possibly-structured committee field to plain cell text.
-
-    Stage 4 can emit a committee field as a dict or a list of record dicts for a
-    multi-record entry (#208/#248 fusion), not just a string. Writing a non-str
-    into a Word cell (``cell.text = <dict>``) raises deep in python-docx and
-    aborts the whole document (#256). Never let that happen: pull the name-like
-    value from a dict, join a list, and stringify anything else."""
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, dict):
-        return str(value.get("committee_name") or value.get("committee")
-                   or value.get("activity") or value.get("name")
-                   or value.get("title") or "")
-    if isinstance(value, list):
-        return "; ".join(t for t in (_committee_cell_text(v) for v in value) if t)
-    return str(value)
-
-
-# Keys observed in structured stage-4 `address` values on the 2026-07-25 corpus:
-# home_address, office_address, business_address. There is no convention — the
-# LLM picks one — so match on all of them.
-_HOME_ADDRESS_KEYS = ('home_address', 'home')
-_OFFICE_ADDRESS_KEYS = ('business_address', 'office_address', 'work_address',
-                        'business', 'office')
-
-
-def _labels_its_own_address_slots(value) -> bool:
-    """True when a dict address names its own home/office halves.
-
-    Distinguishes ``{"home_address": ..., "office_address": ...}``, which knows
-    which cell each half belongs in, from ``{"street": ..., "city": ...}``,
-    which is one address in parts and must be routed by the entry's own text."""
-    return isinstance(value, dict) and any(
-        k in value for k in _HOME_ADDRESS_KEYS + _OFFICE_ADDRESS_KEYS)
-
-
-def _address_cell_text(value, slot: str) -> str:
-    """Coerce a stage-4 ``address`` field to plain text for one slot.
-
-    ``slot`` is ``'home'`` or ``'office'``.
-
-    Stage 4 stores raw LLM JSON, and ``coerce_field_value_types`` deliberately
-    leaves dicts intact, so ``address`` reaches stage 6 as a dict on the CVs
-    whose contact block is a two-column Home/Office table. ``.replace()`` on
-    that dict raised AttributeError and aborted the entire document — two of 96
-    runs produced no deliverable at all (#442).
-
-    A string is returned untouched, so the CVs that never had this problem
-    render byte-identically.
-
-    Nothing is ever dropped for being an unfamiliar shape. The extraction call
-    runs with ``response_format={"type": "json_object"}`` and no schema, so the
-    key vocabulary is unbounded — the two corpus reproductions already disagreed
-    (``office_address`` vs ``business_address``). A dict that names no slot is
-    joined whole; a dict that names only one has its remaining keys joined into
-    the office cell; a value nested under a slot key is recursed into rather
-    than skipped. Silent loss is the failure mode this file keeps being bitten
-    by, so the fallbacks favour rendering something over rendering nothing."""
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, list):
-        return "; ".join(t for t in (_address_cell_text(v, slot) for v in value) if t)
-    if not isinstance(value, dict):
-        return str(value)
-
-    def _join(items):
-        return "; ".join(t for t in (_address_cell_text(v, slot).strip()
-                                     for v in items) if t)
-
-    if not _labels_its_own_address_slots(value):
-        # One address split into parts. The caller routes it by entry text.
-        return _join(value.values())
-
-    own = _HOME_ADDRESS_KEYS if slot == 'home' else _OFFICE_ADDRESS_KEYS
-    other = _OFFICE_ADDRESS_KEYS if slot == 'home' else _HOME_ADDRESS_KEYS
-    for key in own:
-        text = _address_cell_text(value.get(key), slot).strip()
-        if text:
-            return text
-    if slot == 'home':
-        return ""
-    # Office is the catch-all: keys the home slot will never claim are joined
-    # here rather than silently dropped from a partly-labelled dict.
-    return _join(v for k, v in value.items() if k not in other)
-
-
-# A leading 3b taxonomy code (M2B, D1, S6, N3A …) that leaked into a rendered
-# bullet — code letter + 1-2 digits + optional trailing letter, bracketed at the
-# very start and followed by whitespace. Seen verbatim in output on the WCM-
-# template CVs (issue #251): "• [M2B] Project title: …", "• [D1] Visiting Prof…".
-_TAXONOMY_CODE_PREFIX = re.compile(r"^\s*\[[A-Z]\d{1,2}[A-Z]?\]\s+")
-
-
-def _strip_taxonomy_code(text: str) -> str:
-    """Drop a leading bracketed taxonomy code from bullet text before render.
-    # ponytail: shape-match, not a code allowlist — could also strip a leading
-    # grant-mechanism token like "[R01] " (rare as a bullet's first token); switch
-    # to the TAXONOMY_TO_SECTION key set if that ever shows up in output."""
-    return _TAXONOMY_CODE_PREFIX.sub("", text) if text else text
 
 
 # XML namespaces for Word documents
@@ -231,225 +123,6 @@ NSMAP = {
     'w': WORD_NAMESPACE,
     'w14': W14_NAMESPACE,
 }
-
-
-# Date format specifications per WCM template section
-# Format codes: 'mm/yyyy', 'mm/yy', 'yyyy', 'mm/dd/yyyy'
-DATE_FORMATS = {
-    'B1': 'mm/yyyy',      # Education: Dates attended (mm/yyyy-mm/yyyy)
-    'B2': 'mm/yy',        # Other Education: Dates attended (mm/yy – mm/yy)
-    'C': 'mm/yy',         # Postdoc Training: Dates (mm/yy - mm/yy)
-    'C1': 'mm/yy',
-    'C2': 'mm/yy',
-    'D1': 'mm/yy',        # Academic Appointments: Dates (mm/yy - mm/yy)
-    'D2': 'mm/yy',        # Hospital Appointments
-    'D3': 'mm/yy',        # Other Positions
-    'F1': 'mm/dd/yyyy',   # Licensure: Date of issue (mm/dd/yyyy)
-    'F2': 'yyyy',         # Board Certification: Dates (yyyy–yyyy)
-    'H': 'yyyy',          # Honors: Date awarded (yyyy)
-    'I': 'yyyy',          # Memberships: Date (yyyy-yyyy)
-    'K1': 'yyyy',         # Teaching activities
-    'K2': 'yyyy',
-    'K3': 'yyyy',
-    'K4': 'yyyy',
-    'K5': 'yyyy',
-    'M2A': 'mm/yy',       # Grants: various date formats
-    'M2B': 'mm/yy',
-    'M2C': 'mm/yy',
-    'N3A': 'yyyy',        # Mentoring
-    'N3B': 'yyyy',
-    'O': 'yyyy',          # Leadership
-    'P': 'yyyy',          # Committees: Dates (yyyy-yyyy)
-    'Q1': 'yyyy',         # Service activities
-    'Q2': 'yyyy',
-    'Q3': 'yyyy',
-    'Q4': 'yyyy',
-    'Q4A': 'yyyy',
-    'Q4B': 'yyyy',
-    'Q4C': 'yyyy',
-    'Q4D': 'yyyy',
-    'R': 'yyyy',          # Invited Presentations: Dates (yyyy)
-    'S1': 'yyyy',         # Publications: year only
-    'S2': 'yyyy',
-    'S3': 'yyyy',
-    'S4': 'yyyy',
-    'S5': 'yyyy',
-    'S6': 'yyyy',
-    'S7': 'yyyy',
-    'S8': 'yyyy',
-    'S9': 'yyyy',
-}
-
-
-# Month name -> month number, for the date parser below. Includes the common
-# 3-4 letter abbreviations CVs use ("Aug", "Sept"). Distinct from _MONTH_NAMES
-# further down, which is the reverse (number -> name) for range formatting.
-_MONTH_NAME_TO_NUM = {
-    'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
-    'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11,
-    'december': 12,
-    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7, 'aug': 8,
-    'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12,
-}
-
-
-def _parse_date_components(date_str: str):
-    """Parse a date string into (year, month, day) ints; any component absent
-    from the input is None. Returns (None, None, None) when nothing parses.
-
-    Single source of truth for date parsing, shared by format_date_for_section
-    (rendering) and extract_sort_date (reverse-chron sorting) so the two cannot
-    drift. They previously carried near-duplicate copies that HAD drifted: the
-    sort copy lacked the '\\.?' in the month-name pattern, so "Aug. 2021" /
-    "Sept. 2019" failed every branch and the entry sorted to the bottom of its
-    section while still rendering its date correctly (issue #266).
-    """
-    s = str(date_str or '').strip()
-    if not s:
-        return (None, None, None)
-    # YYYY-MM-DD / YYYY/MM/DD
-    m = re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', s)
-    if m:
-        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
-    # MM/DD/YYYY / MM-DD-YYYY
-    m = re.match(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', s)
-    if m:
-        return (int(m.group(3)), int(m.group(1)), int(m.group(2)))
-    # YYYY-MM / YYYY/MM (disjoint from MM/YYYY below: 4-digit lead vs 4-digit tail)
-    m = re.match(r'(\d{4})[-/](\d{1,2})$', s)
-    if m:
-        return (int(m.group(1)), int(m.group(2)), None)
-    # MM/YYYY / MM-YYYY
-    m = re.match(r'(\d{1,2})[-/](\d{4})', s)
-    if m:
-        return (int(m.group(2)), int(m.group(1)), None)
-    # Just YYYY
-    m = re.match(r'^(\d{4})$', s)
-    if m:
-        return (int(m.group(1)), None, None)
-    # Month YYYY -- "August 2021", "Aug 2021", "Aug. 2021", "Sept. 2019"
-    m = re.match(r'([a-zA-Z]+)\.?\s*(\d{4})', s)
-    if m:
-        return (int(m.group(2)), _MONTH_NAME_TO_NUM.get(m.group(1).lower()), None)
-    return (None, None, None)
-
-
-def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool = False) -> str:
-    """
-    Format a date string according to the WCM template requirements for a section.
-
-    Args:
-        date_str: Input date string (various formats)
-        taxonomy_code: Taxonomy code to determine required format
-        is_end_date: True if this is an end date (affects 'present' handling)
-
-    Returns:
-        Formatted date string according to WCM requirements
-    """
-    if not date_str:
-        return ''
-
-    date_str = str(date_str).strip()
-
-    # Handle 'present', 'current', 'ongoing' - always return as 'Present'
-    if date_str.lower() in ('present', 'current', 'ongoing', 'now'):
-        return 'Present'
-
-    # Get required format for this taxonomy code
-    required_format = DATE_FORMATS.get(taxonomy_code, 'yyyy')
-
-    year, month, day = _parse_date_components(date_str)
-
-    # If we couldn't parse it, return as-is
-    if not year:
-        return date_str
-    year = str(year)
-
-    # Format according to required format
-    if required_format == 'yyyy':
-        return year
-    elif required_format == 'mm/yyyy':
-        if month:
-            return f"{month:02d}/{year}"
-        return year  # Fall back to year only if no month
-    elif required_format == 'mm/yy':
-        if month:
-            return f"{month:02d}/{year[-2:]}"
-        # If no month, use full 4-digit year (2-digit looks odd standalone)
-        return year
-    elif required_format == 'mm/dd/yyyy':
-        if month and day:
-            return f"{month:02d}/{day:02d}/{year}"
-        elif month:
-            return f"{month:02d}/01/{year}"  # Default to 1st of month
-        return year
-
-    return date_str
-
-
-def format_date_range(start_date: str, end_date: str, taxonomy_code: str) -> str:
-    """
-    Format a date range according to WCM template requirements.
-
-    Args:
-        start_date: Start date string
-        end_date: End date string (may be 'present', empty, or a date)
-        taxonomy_code: Taxonomy code to determine required format
-
-    Returns:
-        Formatted date range string (e.g., "08/17-07/21" or "2017-Present")
-    """
-    formatted_start = format_date_for_section(start_date, taxonomy_code)
-    formatted_end = format_date_for_section(end_date, taxonomy_code, is_end_date=True)
-
-    if formatted_start and formatted_end:
-        # Avoid redundant ranges like "2024-2024" when both resolve to the same string
-        if formatted_start == formatted_end:
-            return formatted_start
-        return f"{formatted_start}-{formatted_end}"
-    elif formatted_start:
-        # Avoid "Present-Present" when start is already 'Present'
-        if formatted_start == 'Present':
-            return 'Present'
-        return f"{formatted_start}-Present"
-    elif formatted_end:
-        return formatted_end
-    return ''
-
-
-_MONTH_NAMES = {
-    '01': 'January', '02': 'February', '03': 'March', '04': 'April',
-    '05': 'May', '06': 'June', '07': 'July', '08': 'August',
-    '09': 'September', '10': 'October', '11': 'November', '12': 'December',
-    '1': 'January', '2': 'February', '3': 'March', '4': 'April',
-    '5': 'May', '6': 'June', '7': 'July', '8': 'August',
-    '9': 'September',
-}
-
-def normalize_iso_dates_in_text(text: str) -> str:
-    """Replace ISO-format dates in free text with human-readable equivalents.
-
-    Handles patterns the Stage 5c LLM sometimes produces:
-      2021-03-01  -> March 2021
-      2019-08-01–2019-09-01  -> August 2019–September 2019
-      2018-08  -> August 2018
-      2012-06–2012-07  -> June 2012–July 2012
-    """
-    if not text:
-        return text
-
-    def _iso_to_readable(m):
-        year, month = m.group(1), m.group(2)
-        day = m.group(3) if m.lastindex >= 3 and m.group(3) else None
-        month_name = _MONTH_NAMES.get(month, month)
-        return f"{month_name} {year}"
-
-    # YYYY-MM-DD (drop the day)
-    text = re.sub(r'\b(\d{4})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])\b', _iso_to_readable, text)
-    # YYYY-MM (no day)
-    text = re.sub(r'\b(\d{4})[-/](0?[1-9]|1[0-2])\b', _iso_to_readable, text)
-
-    return text
 
 
 _STOP_WORDS = frozenset({
@@ -494,37 +167,6 @@ def _entry_title_words(entry: Dict) -> set:
             if not title:
                 title = text[:100]
     return _significant_words(title)
-
-
-def _get_entry_date_range(entry: Dict) -> tuple:
-    """Extract (start_date, end_date) strings from an entry for dedup comparison."""
-    fields = entry.get('extracted_fields', {}) or {}
-    return (fields.get('start_date', '') or '', fields.get('end_date', '') or '')
-
-
-def _dates_overlap_or_match(entry_a: Dict, entry_b: Dict) -> bool:
-    """Return True if two entries have the same or overlapping date ranges.
-
-    Used to distinguish true duplicates (same thing listed twice) from career
-    progressions (different roles at the same institution in different periods).
-    If either entry lacks dates, we conservatively return True (assume possible dup).
-    """
-    start_a, end_a = _get_entry_date_range(entry_a)
-    start_b, end_b = _get_entry_date_range(entry_b)
-    # If either lacks dates, can't prove they're different — allow dedup
-    if not start_a or not start_b:
-        return True
-    # Exact match (most common for true duplicates)
-    if start_a == start_b and end_a == end_b:
-        return True
-    # Check overlap: parse to comparable strings (YYYY-MM format sorts correctly)
-    # Normalize to just YYYY-MM for comparison
-    sa = start_a[:7]  # "2008-07" from "2008-07-01"
-    sb = start_b[:7]
-    ea = (end_a[:7] if end_a and end_a.lower() != 'present' else '9999-12')
-    eb = (end_b[:7] if end_b and end_b.lower() != 'present' else '9999-12')
-    # Overlap test: A.start <= B.end AND B.start <= A.end
-    return sa <= eb and sb <= ea
 
 
 # _drop_is_safe: a reworded true duplicate ("Associate Professor, HPE, USUHS"
@@ -689,141 +331,6 @@ def deduplicate_entries(entries: List[Dict], verbose: bool = False,
     if drop_indices:
         return [e for idx, e in enumerate(entries) if idx not in drop_indices]
     return entries
-
-
-def element_idx_sort_key(value) -> tuple:
-    """Document-order sort key tolerant of stage-2's mixed index types.
-
-    ``element_idx_start`` is not uniformly typed: stage 2 writes a plain int for
-    paragraph entries, a ``"table_N"`` string for table blocks, and a
-    ``"row.col"`` string such as ``"22.2"`` for table rows. Sorting these raw
-    raises ``TypeError: '<' not supported between instances of 'str' and 'int'``
-    whenever a section mixes them. Normalize every form to a ``(major, minor)``
-    float tuple so the comparison is total and preserves document order. Mirrors
-    ``normalize_idx`` in stage_2_entry_extraction.py.
-    """
-    if value is None:
-        return (float('inf'), 0.0)
-    if isinstance(value, str):
-        if '.' in value:
-            parts = value.split('.', 1)
-            try:
-                return (float(parts[0]), float(parts[1]))
-            except ValueError:
-                return (float('inf'), 0.0)
-        if value.startswith('table_'):
-            try:
-                return (1_000_000.0 + float(value.split('_')[1]), 0.0)
-            except (ValueError, IndexError):
-                return (float('inf'), 0.0)
-    try:
-        return (float(value), 0.0)
-    except (ValueError, TypeError):
-        return (float('inf'), 0.0)
-
-
-def extract_sort_date(entry: Dict) -> tuple:
-    """
-    Extract a sortable date tuple from an entry for reverse-chronological ordering.
-
-    Returns (year, month, day) tuple where:
-    - 'Present'/current entries get (9999, 12, 31) to sort first
-    - Entries with dates get their actual values
-    - Entries with no date get (0, 0, 0) to sort last
-
-    Args:
-        entry: Entry dictionary with extracted_fields
-
-    Returns:
-        Tuple (year, month, day) for sorting
-    """
-    fields = entry.get('extracted_fields', {})
-
-    # Try various date fields in order of preference
-    date_candidates = [
-        fields.get('end_date', ''),
-        fields.get('year', ''),
-        fields.get('year_awarded', ''),
-        fields.get('start_date', ''),
-        fields.get('date', ''),
-        fields.get('publication_date', ''),
-    ]
-
-    for date_str in date_candidates:
-        if not date_str:
-            continue
-
-        date_str = str(date_str).strip().lower()
-
-        # 'Present' or 'current' sorts first (most recent)
-        if date_str in ('present', 'current', 'ongoing', 'now'):
-            return (9999, 12, 31)
-
-        # Shared parser (see format_date_for_section). Month/day absent from the
-        # input default to 1 so partial dates ("2019", "Aug. 2021") still sort
-        # sensibly within their year.
-        year, month, day = _parse_date_components(date_str)
-        if year:
-            return (year, month if month is not None else 1,
-                    day if day is not None else 1)
-
-    # No date found - sort last
-    return (0, 0, 0)
-
-
-def sort_entries_reverse_chronological(entries: List[Dict]) -> List[Dict]:
-    """
-    Sort entries in reverse chronological order (most recent first).
-
-    Entries with 'Present' or current dates sort first.
-    Entries with no date sort last.
-
-    Args:
-        entries: List of entry dictionaries
-
-    Returns:
-        Sorted list of entries
-    """
-    return sorted(entries, key=extract_sort_date, reverse=True)
-
-
-def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
-    """Un-fuse publication entries whose stage-5d ``formatted_citation`` carries
-    multiple newline-separated citations.
-
-    The #208 fusion class reaches the bibliography too: when several source
-    citations collapse into one entry, stage 5d formats the whole block into a
-    single ``formatted_citation`` (newline-separated), and _fill_bibliography
-    then renders ONE numbered item followed by unnumbered ``<w:br/>``
-    continuation lines (the "no numbering on some pubs" symptom, HNFLBA S8).
-
-    Splitting each non-blank line into its own entry lets the caller number them
-    individually. A non-fused citation is a single line (verified: 100/101 of a
-    real CV's formatted_citations have zero internal newlines), so it passes
-    through untouched. Only stage-5d LLM citations with >=2 lines are split;
-    other bibliography shapes (parts-built citations) never carry newlines.
-    Continuation lines (i>0) are distinct records, so per-entry provenance that
-    belongs to the block as a whole (classification comment, enrichment
-    track-change, original text) is kept on the first line only, not replayed
-    on each.
-    """
-    out: List[Dict] = []
-    for pub in pubs:
-        fields = pub.get('extracted_fields') or {}
-        fc = fields.get('formatted_citation') or ''
-        lines = [ln.strip() for ln in fc.splitlines() if ln.strip()]
-        if fields.get('formatting_source') == 'stage_5d_llm' and len(lines) >= 2:
-            for i, line in enumerate(lines):
-                clone = dict(pub)
-                clone['extracted_fields'] = {**fields, 'formatted_citation': line}
-                if i > 0:
-                    clone['enrichment_status'] = ''
-                    clone['text'] = ''
-                    clone.pop('classification_reasoning', None)
-                out.append(clone)
-        else:
-            out.append(pub)
-    return out
 
 
 # Paths - Use the official WCM template
@@ -1135,31 +642,6 @@ def _record_rendered(line: str, haystack: str,
             return True
         rendered = False
     return rendered
-
-
-def grant_status_rebucket_target(status: str) -> Tuple[Optional[str], Optional[str]]:
-    """Map a grant's extracted status string to the funding bucket it belongs
-    in (#210). Returns (target_code, reclassification_note); (None, None)
-    when the status doesn't force a move.
-
-    An explicit status beats date inference: "Under review" / "Submitted" is
-    Pending (M2C) no matter what dates say; "Not funded" is kept under
-    Pending with a review comment rather than silently dropped.
-    """
-    status = (status or '').strip()
-    if not status:
-        return None, None
-    lowered = status.lower()
-    if re.search(r'not\s+funded|unfunded|declined|rejected', lowered):
-        return 'M2C', (
-            f"Status is '{status}' — kept under Pending Funding rather than "
-            "dropped; confirm whether to keep this entry on the CV"
-        )
-    if 'award' not in lowered and re.search(r'under\s+review|submitted|pending', lowered):
-        return 'M2C', f"Reclassified to Pending (M2C): status is '{status}'"
-    if re.search(r'\bcompleted?\b|\bclosed\b|\bexpired\b', lowered):
-        return 'M2B', f"Reclassified to Completed (M2B): status is '{status}'"
-    return None, None
 
 
 class WCMTemplateGenerator:
