@@ -5558,6 +5558,30 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                                     fields.get('committee_name', '') or
                                     fields.get('agency', '') or
                                     fields.get('journal_name', ''))
+
+                    # Q3 keeps the study-section name in 'panel_name', which no
+                    # code here ever read: every Grant Reviewing row rendered as
+                    # a bare agency ("Reviewer | NIH | 2018-2020") and the
+                    # identifier -- the entire content of the line -- was
+                    # dropped. 279 of the corpus's Q3 entries across 35 CVs
+                    # carry one, and 190 of those appear nowhere in the output
+                    # document (#466).
+                    #
+                    # Appended, deliberately, rather than promoted into the
+                    # chain above: agency and panel_name are BOTH populated on
+                    # 286 of 380 corpus Q3 entries, so preferring panel_name
+                    # would evict the agency on 269 of them and trade one
+                    # omission for another. Gated on Q3 because that is the only
+                    # code measured to carry the field -- panel_name is absent
+                    # from all 309 Q1, 24 Q4A, 105 Q4B and 157 Q4C entries, so
+                    # today the gate is a no-op that pins the intent.
+                    panel_name = fields.get('panel_name', '')
+                    if taxonomy_code == 'Q3' and panel_name:
+                        if not organization:
+                            organization = panel_name
+                        elif _squash(panel_name) not in _squash(organization):
+                            organization = f"{organization} - {panel_name}"
+
                     start_date = fields.get('start_date', '')
                     end_date = fields.get('end_date', '')
                     dates = format_date_range(start_date, end_date, taxonomy_code)
