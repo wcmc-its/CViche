@@ -6,6 +6,10 @@ section has its own rules -- its own template tables, its own taxonomy codes,
 its own rerouting quirks -- and almost nothing to say to its neighbours. That is
 the boundary the files follow.
 
+    clinical_practice.py  section L:  clinical practice, innovation, leadership
+    honors.py             section H:  honors and awards
+    mentoring.py          section N:  current / past mentees, outcomes
+    personal_data.py      section A:  name, addresses, phones, emails
     positions.py          section D:  academic / hospital / other appointments
     research_support.py   section M2: grants -- current, past, pending
     service.py            section Q:  extramural professional responsibilities
@@ -26,6 +30,10 @@ helper reached from two sections is not exclusive to either and stays on
 # than at render. Every name a section writer needs is importable from
 # `unified_pipeline.stage6.*` or from the standard library.
 
+from .clinical_practice import ClinicalPracticeSection  # noqa: F401
+from .honors import HonorsSection  # noqa: F401
+from .mentoring import MentoringSection  # noqa: F401
+from .personal_data import PersonalDataSection  # noqa: F401
 from .positions import PositionsSection  # noqa: F401
 from .research_support import ResearchSupportSection  # noqa: F401
 from .service import ServiceSection  # noqa: F401
