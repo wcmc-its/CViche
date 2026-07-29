@@ -3032,6 +3032,21 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
     """
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
+    Takes a PATH, not parsed data, and that is load-bearing for concurrency.
+    Stage 6 rewrites entries in place as it renders -- reassigning
+    ``entry['taxonomy_code']`` when it reroutes a code, writing back
+    ``entry['extracted_fields']``, annotating ``entry['reclassification_note']``
+    -- 17 sites in all. Because this function is handed a path and parses the
+    JSON itself, every render owns the dicts it mutates, and the web path runs
+    renders concurrently (``run_service.py`` starts each run in a thread and the
+    orchestrator hands each stage to ``asyncio.to_thread``).
+
+    Passing already-parsed stage 5 data in here to save a re-parse would be a
+    natural-looking optimisation and would silently break that: two concurrent
+    renders would then rewrite one another's entries mid-render. If the
+    in-memory interface is ever wanted, deep-copy at the boundary or make the
+    rewrites non-destructive first.
+
     Args:
         input_path: Path to enriched JSON file
         output_path: Optional output path
