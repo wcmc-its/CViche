@@ -1879,7 +1879,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
     def _insert_bulleted_entry(self, insert_idx: int, text: str, entry: Dict = None,
                                 add_blank_before: bool = False,
-                                list_level: int = None) -> Optional[Paragraph]:
+                                list_level: Optional[int] = None) -> Optional[Paragraph]:
         """Insert a SINGLE bulleted entry paragraph with a bullet character prefix.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
