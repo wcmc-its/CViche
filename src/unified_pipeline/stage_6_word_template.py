@@ -17,6 +17,7 @@ Author: Scholar Signals CV Pipeline
 Date: 2025-11-29
 """
 
+import logging
 import os
 import sys
 import json
@@ -83,6 +84,8 @@ from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _clean_inline_tabs(text: str) -> str:
@@ -1286,6 +1289,9 @@ class WCMTemplateGenerator:
         self._geographic_scope_cache = {}
 
         # Statistics
+        # Tables already cleared this render, by element id. Guards against one
+        # filler wiping another's rows when both resolve to the same table (#454).
+        self._cleared_tables = set()
         self.stats = {
             'sections_filled': 0,
             'entries_inserted': 0,
@@ -2335,6 +2341,26 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             except ValueError:
                 pass  # Already removed or not in body
 
+    def _clear_table_data(self, table: Table, keep_header: bool = True):
+        """Record, then clear all data rows from `table`.
+
+        The row removal itself is self-free and lives in
+        `stage6.formatting.docx._clear_table_data` after the #398 split. What
+        needs `self` is the bookkeeping: two fillers that resolve to the SAME
+        table make the second one silently destroy the first one's rows -- see
+        `_fill_other_service`, where a fuzzy anchor search sent Q4A onto the
+        table Q1 had just filled and wiped 39 entries across 6 corpus CVs
+        (#454). This wrapper is the thin delegating method
+        `test_stage6_import_surface.py` asks a split to leave behind; it changes
+        no rendering behaviour. The one caller that resolves its table by fuzzy
+        search consults `self._cleared_tables` before clearing.
+        """
+        if not table:
+            return
+        self._cleared_tables.add(id(table._element))
+        # Resolves to the module-level import at the top of this file: a class
+        # attribute of the same name does not shadow a global inside a method.
+        _clear_table_data(table, keep_header=keep_header)
 
 
 
@@ -2866,7 +2892,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort entries reverse chronologically (most recent first)
@@ -3015,7 +3041,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort entries reverse chronologically (most recent first)
@@ -3337,7 +3363,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if acad_idx is not None and d1_entries:
             acad_table = self._find_table_after_paragraph(acad_idx)
             if acad_table:
-                _clear_table_data(acad_table, keep_header=True)
+                self._clear_table_data(acad_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 sorted_d1 = sort_entries_reverse_chronological(d1_entries)
                 for entry in sorted_d1:
@@ -3348,7 +3374,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if hosp_idx is not None and d2_entries:
             hosp_table = self._find_table_after_paragraph(hosp_idx)
             if hosp_table:
-                _clear_table_data(hosp_table, keep_header=True)
+                self._clear_table_data(hosp_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 sorted_d2 = sort_entries_reverse_chronological(d2_entries)
                 for entry in sorted_d2:
@@ -3359,7 +3385,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if other_idx is not None and d3_entries:
             other_table = self._find_table_after_paragraph(other_idx)
             if other_table:
-                _clear_table_data(other_table, keep_header=True)
+                self._clear_table_data(other_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 sorted_d3 = sort_entries_reverse_chronological(d3_entries)
                 for entry in sorted_d3:
@@ -3375,7 +3401,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             if not table:
                 return
 
-            _clear_table_data(table, keep_header=True)
+            self._clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
             # Combine all and sort
@@ -3519,7 +3545,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort entries reverse chronologically (most recent first)
@@ -4543,7 +4569,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort by date (most recent first)
@@ -4845,7 +4871,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return
 
         # Clear existing data rows
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort by date (most recent first)
@@ -5222,7 +5248,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Clear tables and mark as populated
         for scope, table in tables_by_scope.items():
-            _clear_table_data(table, keep_header=True)
+            self._clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
         # Classify and route entries by geographic scope
@@ -5330,7 +5356,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
 
@@ -5543,7 +5569,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 print(f"  Warning: Could not find Journal Reviewing table")
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(filtered_entries)
@@ -5600,10 +5626,18 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         # Group by section
         # Q4B = Associate/Guest Editor roles, Q4C = Editorial Board Member
         # These should go to Editorial Activities section, not generic Professional Service
+        # Q4A is Editor-in-Chief / Senior Editor / Co-Editor (stage_3b:807), i.e.
+        # editorial -- not extramural leadership. It used to share Q1's anchor,
+        # and 'EXTRAMURAL PROFESSIONAL RESPONSIBILITIES' resolves to the
+        # top-level Q header whose first following table is the Leadership table
+        # Q1 had just filled. The clear below then wiped it: 0 of 76 Q1
+        # organizations reached their table on the 10 corpus CVs carrying both,
+        # and 39 entries on 6 CVs vanished from the document entirely (#454).
+        # 'Editor/Co-Editor' is Q4A's own template table and was previously dead.
         sections = {
             'Q3': ('Grant Reviewing', ['Grant Reviewing', 'Study Sections']),
             'Q4': ('Professional Service', ['EXTRAMURAL PROFESSIONAL RESPONSIBILITIES', 'Leadership in Extramural']),
-            'Q4A': ('Professional Service', ['EXTRAMURAL PROFESSIONAL RESPONSIBILITIES', 'Leadership in Extramural']),
+            'Q4A': ('Editor/Co-Editor', ['Editor/Co-Editor', 'Journals/Textbooks/Books']),
             'Q4B': ('Editorial Board', ['Editorial Board Membership', 'Editorial Activities']),
             'Q4C': ('Editorial Board', ['Editorial Board Membership', 'Editorial Activities']),
         }
@@ -5632,9 +5666,21 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Try to find and use a table first
             table = self._find_table_after_paragraph(section_idx)
-            if table:
-                _clear_table_data(table, keep_header=True)
+            if table and id(table._element) in self._cleared_tables:
+                # Another filler already owns this table. Appending is wrong but
+                # recoverable; clearing destroys content that has no appendix
+                # fallback, because these Q codes are all in mapped_codes. This
+                # is the backstop for #454 -- with Q4A routed correctly it should
+                # never fire, so say so loudly if it does.
+                logger.warning(
+                    "section %r resolved to a table already filled by another "
+                    "code; appending instead of clearing to avoid destroying it",
+                    section_name)
                 self.stats['tables_populated'] += 1
+            elif table:
+                self._clear_table_data(table, keep_header=True)
+                self.stats['tables_populated'] += 1
+            if table:
 
                 sorted_entries = sort_entries_reverse_chronological(section_entries)
                 for entry in sorted_entries:
@@ -5759,7 +5805,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -5899,7 +5945,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         for entry in entries:
@@ -6107,7 +6153,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 sorted_entries = sort_entries_reverse_chronological(l1_entries)
 
                 if table and table_is_valid:
-                    _clear_table_data(table, keep_header=True)
+                    self._clear_table_data(table, keep_header=True)
                     self.stats['tables_populated'] += 1
                     for entry in sorted_entries:
                         fields = entry.get('extracted_fields', {}) or {}
@@ -6192,7 +6238,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 sorted_entries = sort_entries_reverse_chronological(l2_entries)
 
                 if table and table_is_valid:
-                    _clear_table_data(table, keep_header=True)
+                    self._clear_table_data(table, keep_header=True)
                     self.stats['tables_populated'] += 1
 
                     for entry in sorted_entries:
@@ -6258,7 +6304,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 sorted_entries = sort_entries_reverse_chronological(l3_entries)
 
                 if table and table_is_valid:
-                    _clear_table_data(table, keep_header=True)
+                    self._clear_table_data(table, keep_header=True)
                     self.stats['tables_populated'] += 1
 
                     for entry in sorted_entries:
@@ -6355,7 +6401,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -6539,7 +6585,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -6733,7 +6779,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Clear tables and mark as populated
         for scope, table in tables_by_scope.items():
-            _clear_table_data(table, keep_header=True)
+            self._clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
         # Classify and route entries by geographic scope
@@ -6934,7 +6980,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             if table:
                 # Clear existing table data and fill with matched entries
-                _clear_table_data(table, keep_header=True)
+                self._clear_table_data(table, keep_header=True)
                 self.stats['tables_populated'] += 1
 
                 for entry in matching_entries:
