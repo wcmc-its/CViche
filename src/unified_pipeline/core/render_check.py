@@ -5,16 +5,19 @@ rendered output by breaking it into fragments; keeping that one splitter here
 stops the two copies drifting apart (they were verbatim-duplicated with no
 enforced sync)."""
 
-from typing import List
+def entry_fragments(text: str | None) -> list[str]:
+    """An entry's fragments: per line, per '|' cell, and per tab cell.
 
-
-def entry_fragments(text) -> List[str]:
-    """An entry's fragments: per line, per '|' cell, and per tab cell."""
+    `str(text or "")` rather than a bare split: entry['text'] is absent on some
+    stage-5 records and None on others, and every one of the ten call sites
+    this replaces coerced defensively. The annotation states the contract;
+    the coercion is what survives a record that breaks it.
+    """
     return [frag for line in str(text or "").split("\n")
             for cell in line.split("|") for frag in cell.split("\t")]
 
 
-def entry_lines(text) -> List[str]:
+def entry_lines(text: str | None) -> list[str]:
     """An entry's non-empty lines, stripped.
 
     Newline only -- deliberately NOT the same split as `entry_fragments`. This
