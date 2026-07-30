@@ -1101,10 +1101,13 @@ _PII_LABEL_RE = re.compile(r"""^\s*
 # Needed alongside the label pattern: stage 4 leaves extracted_fields empty for
 # most PII entries (caught by the label), but names some of them explicitly
 # (marital_status_spouse, birthplace) where the source label is unusual.
+# Every person stem takes the same optional suffix, so 'wife_name' is caught
+# wherever 'spouse_name' is; the anchoring, not the suffix, is what keeps
+# ordinary keys out.
 _PII_FIELD_KEY_RE = re.compile(r"""^(?:.*_)?(?:
       date_of_birth | birth_?date | birth_?place | place_of_birth | dob
-    | marital_status (?:_\w+)? | spouse (?:_\w+)? | wife | husband
-    | children | dependents?
+    | marital_status (?:_\w+)? | spouse (?:_\w+)? | wife (?:_\w+)? | husband (?:_\w+)?
+    | children (?:_\w+)? | dependents? (?:_\w+)?
     | ssn | social_security\w* )$""", re.X | re.I)
 
 _PII_FRAGMENT_SPLIT_RE = re.compile(r"[\n\t|]|\s{3,}")

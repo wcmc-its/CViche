@@ -41,6 +41,7 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     PII_REDACTED_NOTICE,
     WCMTemplateGenerator,
+    _PII_FIELD_KEY_RE,
     _pii_fragments,
 )
 
@@ -216,6 +217,18 @@ def test_deny_predicate_catches_the_real_labels():
         "D.O.B.: 1/1/1970",
     ]:
         assert _pii_fragments(pii), f"missed {pii!r}"
+
+
+def test_person_field_keys_accept_a_suffix():
+    """Stage 4 names these keys freely, so every person stem takes a suffix --
+    'wife_name' must be caught wherever 'spouse_name' is. Anchoring is what
+    keeps ordinary keys out, so the suffix costs no precision."""
+    for key in ["spouse_name", "wife_name", "husband_name", "children_names",
+                "dependents_names", "marital_status_children",
+                "personal_wife", "birthplace", "dob", "ssn"]:
+        assert _PII_FIELD_KEY_RE.match(key), f"missed {key!r}"
+    for keeper in ["institutional_email", "office_address", "housewife"]:
+        assert not _PII_FIELD_KEY_RE.match(keeper), f"false positive {keeper!r}"
 
 
 def test_research_vocabulary_is_not_denied():
