@@ -176,6 +176,20 @@ def test_pii_named_only_by_field_key_is_caught(tmp_path):
     assert PII_REDACTED_NOTICE in text
 
 
+def test_pii_in_a_tab_separated_cell_is_still_caught(tmp_path):
+    """The scan must read the RAW entry text. _clean_inline_tabs rewrites the
+    first '\\t' to ': ' and ' | ' to ' — ', destroying the fragment boundaries
+    the scan splits on -- scan the cleaned text instead and the PII cell merges
+    into its neighbour, no longer starts a fragment, and renders."""
+    text = _render(tmp_path, [
+        _a("Office: 1300 York Ave\tDate of Birth: 12/13/1947"),
+        _a("Home | Marital Status: Married"),
+    ])
+    assert "12/13/1947" not in text
+    assert "Married" not in text
+    assert PII_REDACTED_NOTICE in text
+
+
 # --------------------------------------------------------------------------
 # the deny predicate itself
 # --------------------------------------------------------------------------

@@ -7689,11 +7689,19 @@ Now analyze the text above:"""
         batch: List[Tuple[str, str, float]] = []
         redacted = 0
         for entry in getattr(self, '_unconsumed_personal_data', []):
-            text = _clean_inline_tabs(entry.get('text', '') or '').strip()
+            # The PII scan reads RAW text, the render reads cleaned text, and
+            # the order matters: _clean_inline_tabs rewrites '\t' to ': ' and
+            # ' | ' to ' — ', which are exactly the fragment boundaries
+            # _pii_fragments splits on. Scanning the cleaned text merges a PII
+            # cell into its neighbour and the label no longer starts a
+            # fragment, so the entry renders. Pinned by
+            # test_pii_in_a_tab_separated_cell_is_still_caught.
+            raw_text = entry.get('text', '') or ''
+            text = _clean_inline_tabs(raw_text).strip()
             if not text:
                 continue
             fields = entry.get('extracted_fields') or {}
-            if (_pii_fragments(entry.get('text', ''))
+            if (_pii_fragments(raw_text)
                     or any(_PII_FIELD_KEY_RE.match(k) for k in fields)):
                 redacted += 1
                 continue
