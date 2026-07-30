@@ -118,6 +118,76 @@ def _clean_inline_tabs(text: str) -> str:
     return parts[0] + ": " + " — ".join(parts[1:])
 
 
+# Keys observed in structured stage-4 `phone` values: cell, office, fax. Stage 4
+# extracts with no schema, so the vocabulary is unbounded -- match on the key
+# name, same as the address handling.
+_CELL_PHONE_KEYS = ('cell', 'mobile', 'cell_phone', 'mobile_phone',
+                    'mobile_phone_primary', 'personal_phone')
+_OFFICE_PHONE_KEYS = ('office', 'work', 'business', 'office_phone',
+                      'work_phone', 'phone_office', 'business_phone')
+_HOME_PHONE_KEYS = ('home', 'home_phone', 'residence')
+_ALL_PHONE_SLOT_KEYS = _CELL_PHONE_KEYS + _OFFICE_PHONE_KEYS + _HOME_PHONE_KEYS
+
+
+def _labels_its_own_phone_slots(value) -> bool:
+    """True when a dict phone names its own cell/office/home halves.
+
+    Deliberately ANY key, not all: the real ``{"cell", "office", "fax"}`` from
+    web147 is a slot map carrying one key we have no slot for, and requiring
+    every key to be recognized would send it down the join path instead, which
+    concatenates the fax number into whichever row asked first. A dict that
+    names even one slot is routed by its own labels; keys outside
+    ``_ALL_PHONE_SLOT_KEYS`` are dropped -- see ``_phone_cell_text``."""
+    return isinstance(value, dict) and any(
+        k in value for k in _ALL_PHONE_SLOT_KEYS)
+
+
+def _phone_cell_text(value, slot: str) -> str:
+    """Coerce a stage-4 ``phone`` field to plain text for one slot.
+
+    ``slot`` is ``'cell'``, ``'office'`` or ``'home'``.
+
+    Same defect family as the address field (#442): stage 4 stores raw LLM JSON
+    and ``coerce_field_value_types`` leaves dicts intact, so a two-column
+    contact block arrives here as ``{"cell": ..., "office": ..., "fax": ...}``.
+    Phone never crashed the way address did -- ``_set_cell_text`` stringifies --
+    so instead of losing the document it either rendered the dict's repr into a
+    Word cell or, on web147, dropped all three numbers because the entry text
+    said "Home" and the home slot has no template row (#450).
+
+    Strings pass through untouched, so CVs that never had this render
+    identically. A dict that names no slot is joined rather than dropped.
+
+    A slot-labelled dict drops any key outside ``_ALL_PHONE_SLOT_KEYS``, and
+    that is the intended render, not an oversight: the WCM template has exactly
+    two phone rows, Office telephone and Cell phone. ``fax`` -- the one non-slot
+    key observed in the corpus -- has nowhere to go, and joining it into the
+    office row would print a fax number as the office telephone. Anything new
+    stage 4 invents (``note``, ``pager``) is dropped the same way for the same
+    reason. Recovering one of them means adding a template row first; widening
+    the match here only moves the number into the wrong row."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "; ".join(t for t in (_phone_cell_text(v, slot) for v in value) if t)
+    if not isinstance(value, dict):
+        return str(value)
+    if not _labels_its_own_phone_slots(value):
+        # Recurse rather than str(): a nested value would otherwise render its
+        # Python repr into a Word cell.
+        return "; ".join(
+            t for t in (_phone_cell_text(v, slot).strip() for v in value.values()) if t)
+    keys = {'cell': _CELL_PHONE_KEYS, 'office': _OFFICE_PHONE_KEYS,
+            'home': _HOME_PHONE_KEYS}[slot]
+    for key in keys:
+        text = _phone_cell_text(value.get(key), slot).strip()
+        if text:
+            return text
+    return ""
+
+
 def _committee_cell_text(value) -> str:
     """Coerce a possibly-structured committee field to plain cell text.
 
@@ -2496,10 +2566,19 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 has_work = 'office' in text or 'work' in text
                 has_home = 'home' in text
 
-                if has_mobile and has_work and ';' in extracted_phone:
+                if _labels_its_own_phone_slots(extracted_phone):
+                    # A structured phone names its own halves, so trust those
+                    # rather than the entry's raw text label (#450). web147's
+                    # contact block is labelled "Home" but the dict carries
+                    # cell/office/fax; the raw-text routing sent all three to
+                    # home_phone, which the WCM template has no row for, so
+                    # every number was dropped.
+                    cell_phone = cell_phone or _phone_cell_text(extracted_phone, 'cell')
+                    office_phone = office_phone or _phone_cell_text(extracted_phone, 'office')
+                elif has_mobile and has_work and ';' in str(extracted_phone):
                     # Both types in same entry — try to split them
                     # Parse from original text to get correct assignment
-                    phones = [p.strip() for p in extracted_phone.split(';')]
+                    phones = [p.strip() for p in str(extracted_phone).split(';')]
                     # Find phone numbers in order they appear in text
                     mobile_match = re.search(r'(?:cell|mobile)[^(]*(\(\d{3}\)\s*\d{3}[-.\s]?\d{4})', text, re.IGNORECASE)
                     work_match = re.search(r'(?:work|office)[^(]*(\(\d{3}\)\s*\d{3}[-.\s]?\d{4})', text, re.IGNORECASE)
@@ -2509,13 +2588,24 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         office_phone = work_match.group(1)
                 elif has_mobile:
                     if not cell_phone:
-                        cell_phone = extracted_phone
+                        cell_phone = _phone_cell_text(extracted_phone, 'cell')
                 elif has_home:
+                    # The WCM template has exactly two phone rows, Office
+                    # telephone and Cell phone -- there is no home row, so
+                    # home_phone is written and never read, and a home-labelled
+                    # number is deliberately not rendered.
+                    #
+                    # Routing it to the office row instead was tried and is
+                    # WRONG: on web113 the HOME entry is processed before the
+                    # BUSINESS entry, so the office row took the home number and
+                    # the real business number was then skipped as already-set.
+                    # Recovering a home phone needs a template row to put it in,
+                    # not a slot to squat in.
                     if not home_phone:
-                        home_phone = extracted_phone
+                        home_phone = _phone_cell_text(extracted_phone, 'home')
                 elif has_work or not office_phone:
                     if not office_phone:
-                        office_phone = extracted_phone
+                        office_phone = _phone_cell_text(extracted_phone, 'office')
 
             # Classify address by type
             if extracted_address:
