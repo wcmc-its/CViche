@@ -293,6 +293,20 @@ _MONTH_NAME_TO_NUM = {
 }
 
 
+def _is_bullet_paragraph(para) -> bool:
+    """True for a bullet in either representation the renderer emits.
+
+    Section K moved to real Word list paragraphs in #474, so a validator that
+    tests for a literal "•" prefix stops seeing K at all -- and check 3
+    below then reports no_visible_teaching_content on every CV. The non-K
+    emitters still prefix the glyph (#483), so both forms have to count.
+    """
+    if para.text.strip().startswith('•'):
+        return True
+    pPr = para._p.pPr
+    return pPr is not None and pPr.find(qn('w:numPr')) is not None
+
+
 def _parse_date_components(date_str: str):
     """Parse a date string into (year, month, day) ints; any component absent
     from the input is None. Returns (None, None, None) when nothing parses.
@@ -1872,7 +1886,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
     def _insert_bulleted_entry(self, insert_idx: int, text: str, entry: Dict = None,
                                 add_blank_before: bool = False,
-                                list_level: int = None) -> Optional[Paragraph]:
+                                list_level: Optional[int] = None) -> Optional[Paragraph]:
         """Insert a SINGLE bulleted entry paragraph with a bullet character prefix.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
@@ -8407,11 +8421,12 @@ Now analyze the text above:"""
 
             # Look at the next few paragraphs after the section header
             for i in range(section_idx + 1, min(section_idx + 5, len(self.doc.paragraphs))):
-                para_text = self.doc.paragraphs[i].text.strip()
+                para = self.doc.paragraphs[i]
+                para_text = para.text.strip()
                 if not para_text:
                     continue
                 # Check if this looks like a combined entry (semicolon-separated list)
-                if para_text.startswith('•') and para_text.count(';') > 3:
+                if _is_bullet_paragraph(para) and para_text.count(';') > 3:
                     issues.append({
                         "check": "semicolon_fused_bullets",
                         "code": code,
@@ -8450,10 +8465,11 @@ Now analyze the text above:"""
         if teaching_idx is not None:
             has_visible_bullets = False
             for i in range(teaching_idx + 1, min(teaching_idx + 30, len(self.doc.paragraphs))):
-                para_text = self.doc.paragraphs[i].text.strip()
+                para = self.doc.paragraphs[i]
+                para_text = para.text.strip()
                 if 'CLINICAL PRACTICE' in para_text.upper():
                     break
-                if para_text.startswith('•') and len(para_text) > 5:
+                if _is_bullet_paragraph(para) and len(para_text) > 5:
                     has_visible_bullets = True
                     break
             if not has_visible_bullets:
