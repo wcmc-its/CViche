@@ -176,6 +176,22 @@ def score_pipeline_errors(outputs_dir: Path):
     return fraction, detail, hard_fail_cap
 
 
+# Stage 4 files contact under whatever key name the LLM picked -- the extraction
+# call runs with response_format=json_object and no schema. Across the 100-CV
+# corpus it emitted institutional_email (18), personal_email (9), fax (7),
+# primary_email (4), home_address, office_address, work_phone, home_phone, cell,
+# mobile_phone_primary, secondary_phone ... none of which the literal
+# ("email", "phone", "address") tuple matched. Two CVs were scored "no contact
+# found" while plainly carrying contact details (#427).
+#
+# Matching the key NAME rather than an allowlist of exact keys is deliberate:
+# the vocabulary is unbounded, so an allowlist goes stale on the next CV that
+# invents a variant. stage_6_word_template.py reads the same fields by hand and
+# has the same exposure.
+_CONTACT_KEY_RE = re.compile(
+    r"email|phone|address|\b(?:cell|fax|mobile|telephone)\b", re.IGNORECASE)
+
+
 def score_cv_owner(outputs_dir: Path):
     """CV owner name / contact. Missing name is a hard-fail (cap=25)."""
     data = _load_first(outputs_dir, "*_fields.json")
@@ -193,7 +209,7 @@ def score_cv_owner(outputs_dir: Path):
     any_contact = False
     for e in data.get("entries", []):
         ef = e.get("extracted_fields", {}) or {}
-        if any(ef.get(k) is not None for k in ("email", "phone", "address")):
+        if any(v is not None and _CONTACT_KEY_RE.search(k) for k, v in ef.items()):
             any_contact = True
             break
 
