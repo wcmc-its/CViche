@@ -125,3 +125,34 @@ def test_non_k_call_sites_stay_on_the_literal_glyph():
         for call in by_fn.get(name, []):
             kwargs = {kw.arg for kw in call.keywords}
             assert "list_level" not in kwargs, f"{name} line {call.lineno} opted into #474"
+
+
+# --- and the validator still recognises a bullet that has no glyph -----------
+
+def test_validator_sees_k_content_rendered_as_list_paragraphs():
+    # _validate_output detected K content by a literal "•" prefix. Dropping the
+    # glyph made that predicate blind, so check 3 fired on every CV with a fully
+    # populated section K. Observed on C0ZGFW before _is_bullet_paragraph.
+    gen = _generator()
+    gen._fill_teaching({"K1": [{
+        "taxonomy_code": "K1",
+        "text": "2018-2022 - PA Student Lectures, Lecturer",
+        "extracted_fields": {"formatted_text": "2018-2022 - PA Student Lectures, Lecturer"},
+    }]})
+    rendered = [p for p in gen.doc.paragraphs if "PA Student Lectures" in p.text]
+    assert "•" not in rendered[0].text, "precondition: the glyph is gone"
+
+    checks = {issue["check"] for issue in gen._validate_output()}
+    assert "no_visible_teaching_content" not in checks
+
+
+def test_validator_still_catches_semicolon_fused_list_paragraphs():
+    # The same blindness, quieter: check 1 would simply stop reporting fused
+    # K bullets rather than misreport, so nothing would have surfaced it.
+    gen = _generator()
+    idx = gen._find_paragraph_with_text("Didactic teaching")
+    gen._insert_bulleted_entry(idx + 1, "Lecture A; Lecture B; Lecture C; Lecture D; Lecture E",
+                               None, list_level=0)
+
+    fused = [i for i in gen._validate_output() if i["check"] == "semicolon_fused_bullets"]
+    assert [i["code"] for i in fused] == ["K1"]
