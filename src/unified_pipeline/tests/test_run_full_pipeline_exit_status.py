@@ -243,3 +243,53 @@ if __name__ == "__main__":
         if _name.startswith("test_") and callable(_fn) and not _fn.__code__.co_argcount:
             _fn()
     print("OK")
+
+
+# ------------------------------------------------------------------ #444
+# Model provenance. Every run used to be stamped "Model: gpt-5.1" -- a model it
+# never used -- while the work ran on Bedrock Sonnet/Haiku, and --model was
+# inert. The summary now reports what actually served the calls.
+
+
+def test_summary_reports_the_models_that_actually_ran(tmp_path, monkeypatch, capsys):
+    """Sentinel, not the shipped config: a test asserting the banner equals
+    whatever llm_config.yaml says would pass against a hardcoded string too."""
+    sentinel = "sentinel-model-4242"
+    monkeypatch.setattr(run_full_pipeline, "format_models_used",
+                        lambda: f"{sentinel} (7 calls)")
+    _, out = _run_main(tmp_path, monkeypatch, capsys)
+    assert f"Models: {sentinel} (7 calls)" in out
+
+
+def test_no_model_is_named_that_the_pipeline_did_not_call(tmp_path, monkeypatch, capsys):
+    """The specific #444 regression: a hardcoded OpenAI id on a Bedrock run."""
+    monkeypatch.setattr(run_full_pipeline, "format_models_used",
+                        lambda: "us.anthropic.claude-sonnet-4-6 (3 calls)")
+    _, out = _run_main(tmp_path, monkeypatch, capsys)
+    assert "gpt-" not in out, "a model the run never called is named in its own summary"
+
+
+def test_the_inert_model_flag_is_gone(tmp_path, monkeypatch, capsys):
+    """--model set a variable that reached no stage function. Removed rather
+    than wired: each stage resolves its own model from llm_config.yaml, and
+    stage_3b is deliberately on a different one."""
+    source = (_ROOT / "run_full_pipeline.py").read_text()
+    assert "--model" not in source, "the inert flag is back"
+
+
+def test_models_used_counts_real_calls_not_configuration():
+    """The accumulator records the model the response came back with."""
+    from unified_pipeline import llm_client
+    before = llm_client.models_used()
+    with llm_client._MODELS_USED_LOCK:
+        llm_client._MODELS_USED["test-model-x"] += 2
+    after = llm_client.models_used()
+    assert after.get("test-model-x", 0) - before.get("test-model-x", 0) == 2
+    assert "test-model-x (2 calls)" in llm_client.format_models_used()
+    with llm_client._MODELS_USED_LOCK:
+        del llm_client._MODELS_USED["test-model-x"]
+
+
+def test_format_models_used_is_honest_when_nothing_was_called():
+    from unified_pipeline import llm_client
+    assert llm_client.format_models_used(), "must never render as an empty string"

@@ -27,7 +27,12 @@
 #   input_dir    directory of .docx CVs to run          (required)
 #   count        number of NEW CVs to run this call      (default 25)
 #   results_dir  where outputs/logs/summary are written  (default <input_dir>/_batch_runs)
-#   model        --model passed to run_full_pipeline.py   (default: pipeline default)
+#   model        value for CVICHE_LLM_MODEL, overriding the default model block
+#                only -- explicit per-stage entries in llm_config.yaml still win
+#                (stage_3b stays on Haiku). Default: whatever the config resolves.
+#                The 'model' column is SCRAPED from each run's own output, so it
+#                reports what actually served the calls rather than what was asked
+#                for (#444).
 #
 # MUST run on a checkout that has the latest merged pipeline (integration branch = dev).
 # For a long batch, launch detached so it survives turn-end reaping:
@@ -86,7 +91,7 @@ for f in "$INPUT_DIR"/*.docx; do
   ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "[$(date '+%H:%M:%S')] ($ran/$COUNT) $stem ..."
   if [ -n "$MODEL" ]; then
-    python3 run_full_pipeline.py "$f" --model "$MODEL" > "$log" 2>&1
+    CVICHE_LLM_MODEL="$MODEL" python3 run_full_pipeline.py "$f" > "$log" 2>&1
   else
     python3 run_full_pipeline.py "$f" > "$log" 2>&1
   fi
@@ -110,8 +115,11 @@ for f in "$INPUT_DIR"/*.docx; do
   hdr=$(grep -oE 'Total headers: [0-9]+'      "$log" | grep -oE '[0-9]+' | tail -1)
   ent=$(grep -oE 'Entries extracted: [0-9]+'  "$log" | grep -oE '[0-9]+' | tail -1)
   cls=$(grep -oE 'Entries classified: [0-9]+' "$log" | grep -oE '[0-9]+' | tail -1)
+  # Scraped, not echoed: the old column repeated whatever was passed in, so it
+  # could not tell two model configurations apart and said 'default' either way.
+  mdl=$(grep -oE '^Models: .*' "$log" | tail -1 | sed 's/^Models: //' | tr '\t' ' ')
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$ts" "$SHA" "$MODEL_LABEL" "$stem" "$rc" "$out" "${kb:-}" "${sec:-}" "${hdr:-}" "${ent:-}" "${cls:-}" >> "$SUMMARY"
+    "$ts" "$SHA" "${mdl:-$MODEL_LABEL}" "$stem" "$rc" "$out" "${kb:-}" "${sec:-}" "${hdr:-}" "${ent:-}" "${cls:-}" >> "$SUMMARY"
 
   # optional: run the deterministic doctor over this run's stage artifacts and record findings
   if [ "$DOCTOR" = "1" ]; then
