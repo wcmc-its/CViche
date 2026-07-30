@@ -1196,6 +1196,7 @@ class WCMTemplateGenerator:
         # back to today's flat rendering when it is absent.
         self.source_docx = source_docx
         self._source_doc = None
+        self._source_cell_warned = False
 
         # When True, drop the WCM template's leading gray "instruction box"
         # (table[0]) from the generated document. That box is template
@@ -4920,10 +4921,26 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         try:
             if self._source_doc is None:
                 self._source_doc = Document(self.source_docx)
+            # cells[0] because a K row's content column is column 0; the reader
+            # records table_index/row_index against that same cell. A wrong cell
+            # cannot pass the two guards below, so this fails closed rather than
+            # applying another column's levels.
             cell = self._source_doc.tables[entry['table_index']].rows[entry['row_index']].cells[0]
+            # python-docx exposes no public accessor for a paragraph's numbering,
+            # so the w:t/w:pPr/w:numPr reads here and below go through ._p. Same
+            # access _apply_list_bullet already uses to write it.
             paras = [p for p in cell.paragraphs
                      if ''.join(n.text or '' for n in p._p.iter(qn('w:t'))).strip()]
-        except Exception:
+        except Exception as e:
+            # Warned once per run, not per entry: this is called for every
+            # teaching row, and a missing source or a stale table index would
+            # otherwise repeat for each one. Silence here would be worse --
+            # the feature would no-op for a whole run and read as "no
+            # hierarchy in this CV" rather than as a failure.
+            if not self._source_cell_warned:
+                self._source_cell_warned = True
+                print(f"  Warning: Could not read source cell levels, "
+                      f"section K stays flat: {e}")
             return None
 
         # Alignment guard: a row that does not line up 1:1 with the entry's
@@ -4935,6 +4952,15 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Same paragraph count, different content — measured on 6 real
             # entries, so the count guard alone is not enough to prove identity.
             return None
+        # Prefix rather than full equality because Stage 2 rewrites entry tails
+        # (dates normalised, roles appended), so the stored line and the source
+        # paragraph agree on the head and diverge later. 40 is long enough that
+        # a collision also needs an identical paragraph count and a
+        # title-then-bullets shape; the cost of a collision is one entry's
+        # sub-bullet levels, not lost content. Tightening it to a normalised
+        # full match is #423's follow-up and needs a corpus measurement first —
+        # a stricter test silently disables the feature wherever Stage 2 edited
+        # the tail, which is the majority case.
 
         flags = []
         for p in paras:

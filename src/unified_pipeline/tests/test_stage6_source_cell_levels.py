@@ -178,6 +178,44 @@ def test_a_missing_source_file_is_not_fatal(tmp_path):
     assert _levels(_render(str(tmp_path / "gone.docx"), lines), lines) == ["0", "0", "0"]
 
 
+def test_a_row_agreeing_only_on_the_first_40_characters_is_accepted(tmp_path):
+    """Characterisation, not endorsement: this is the prefix guard's blind spot.
+
+    Identity is `first[:40] == lines[0][:40]`, so two rows sharing a 40-character
+    head are indistinguishable to it and the source row's levels are applied to
+    the entry. The guard is a prefix on purpose -- Stage 2 rewrites entry tails,
+    and a full-equality test would reject the majority of real rows -- so the
+    trade is a known one. It is pinned here so that tightening or loosening the
+    bound is a deliberate change with a corpus measurement behind it, rather
+    than a silent one.
+    """
+    shared = "Weill Bugango Medical Center POCUS Progr"      # exactly 40 chars
+    assert len(shared) == 40
+    entry_title = shared + "am, medicine residents"
+    source_title = shared + "am, a different row entirely"
+    assert entry_title[:40] == source_title[:40]
+
+    lines = [entry_title] + CHILDREN
+    src = _source_docx(tmp_path, [source_title] + CHILDREN, [False, True, True])
+    assert _levels(_render(src, lines), lines) == ["0", "1", "1"]
+
+
+def test_an_unreadable_source_warns_once_per_run_not_once_per_entry(capsys):
+    # The lookup runs for every teaching row. A missing source or a stale table
+    # index is a whole-run condition, so printing per entry would bury it; not
+    # printing at all would make a feature that no-ops look like a CV with no
+    # hierarchy to restore.
+    gen = WCMTemplateGenerator(verbose=False, source_docx="/nonexistent/source.docx")
+    gen.doc = Document(gen.template_path)
+    gen._fill_teaching({"K3": [_entry([TITLE] + CHILDREN),
+                               _entry(["Another entry"] + CHILDREN),
+                               _entry(["A third entry"] + CHILDREN)]})
+
+    warnings = [ln for ln in capsys.readouterr().out.splitlines()
+                if "Could not read source cell levels" in ln]
+    assert len(warnings) == 1, f"expected exactly one warning, got {len(warnings)}"
+
+
 # --- the call site actually asks for a computed level ------------------------
 
 def test_branch_a_passes_a_computed_level_not_a_constant():
