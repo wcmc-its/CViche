@@ -68,6 +68,21 @@ jobs:
       - name: Run pipeline tests
         run: python -m pytest src/unified_pipeline/tests/ -q -p no:cacheprovider
 
+  function-size:
+    # Ratchet on oversized functions (CODING_STANDARDS.md 3.2a). Stdlib only --
+    # no pip install, so this is the cheapest job here. The baseline may fall
+    # but never rise; raising it is a deliberate, reviewed `--update`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Oversized-function ratchet
+        run: python3 scripts/check_function_size.py
+      - name: Ratchet self-test
+        run: python3 scripts/test_check_function_size.py
+
   frontend-typecheck:
     runs-on: ubuntu-latest
     defaults:
