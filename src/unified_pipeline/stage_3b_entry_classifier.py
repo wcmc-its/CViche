@@ -328,7 +328,8 @@ def classify_entries_batch(
     total_input_tokens = 0
     total_output_tokens = 0
     total_cost = 0.0
-    llm_batches = 0     # batches that attempted an LLM call
+    llm_batches = 0  # batches that attempted an LLM call
+    observed_model = None  # model id the API actually served (#459)
     failed_batches = 0  # batches whose LLM call raised (entries fell back)
 
     # Get ALL suggested codes from ALL hierarchy levels for taxonomy filtering
@@ -1189,6 +1190,7 @@ Return ONLY valid JSON with the classifications array."""
             total_input_tokens += llm_result["prompt_tokens"]
             total_output_tokens += llm_result["completion_tokens"]
             total_cost += llm_result["cost"]
+            observed_model = llm_result.get("model") or observed_model
 
         except Exception:
             # Every entry in this batch falls back to the default code below;
@@ -1251,6 +1253,11 @@ Return ONLY valid JSON with the classifications array."""
         "output_tokens": total_output_tokens,
         "total_tokens": total_input_tokens + total_output_tokens,
         "cost": total_cost,
+        # What actually served the calls. The `model` parameter is a default no
+        # orchestrator passes, so recording it stamped 100/100 corpus artifacts
+        # with a model the run never used -- and 3b is the one deliberately on
+        # Haiku, which is exactly the comparison the field exists for (#459).
+        "model": observed_model,
         "entries_classified": len(all_results),
         "llm_batches": llm_batches,
         "failed_batches": failed_batches,
@@ -1858,7 +1865,8 @@ def run_stage_3b(
         "failed_batches": 0,
         "llm_classified": 0,
         "fallback_entries": 0,
-        "empty_entries": 0
+        "empty_entries": 0,
+        "model": None
     }
 
     for group_idx, (hierarchy_key, group_entries) in enumerate(groups.items(), 1):
@@ -1900,6 +1908,7 @@ def run_stage_3b(
         total_stats["llm_classified"] += stats["llm_classified"]
         total_stats["fallback_entries"] += stats["fallback_entries"]
         total_stats["empty_entries"] += stats["empty_entries"]
+        total_stats["model"] = stats.get("model") or total_stats.get("model")
 
         print(f"    ✓ Classified {stats['entries_classified']} entries (${stats['cost']:.4f})")
 
@@ -2293,7 +2302,7 @@ def run_stage_3b(
         },
         "entries": all_classified,
         "meta": {
-            "model": model,
+            "model": total_stats.get("model") or model,
             "taxonomy_version": taxonomy["meta"]["version"],
             "total_entries": len(all_classified),
             "duplicate_entries": duplicate_count,

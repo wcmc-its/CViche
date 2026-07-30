@@ -287,6 +287,8 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
             'cache_read_tokens': llm_result.get("cache_read_tokens", 0),
             'cache_write_tokens': llm_result.get("cache_write_tokens", 0),
             'cost': llm_result.get("cost", 0.0),
+            # What actually served the call (#459).
+            'model': llm_result.get("model"),
         }
 
         return result_text, usage
@@ -397,7 +399,7 @@ def run_stage_5c(input_path: str, output_path: str = None, model: str = "gpt-4o-
         'input_file': input_path,
         'k_entries_processed': total_k_entries,
         'entries_formatted': entries_formatted_count,
-        'model': model if llm_output else None,
+        'model': (usage.get('model') if usage else None) or (model if llm_output else None),
         'timestamp': datetime.now().isoformat(),
         'total_cost': total_cost,
         'prompt_tokens': usage.get('prompt_tokens', 0) if usage else 0,

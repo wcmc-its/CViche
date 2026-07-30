@@ -227,6 +227,10 @@ def call_llm_formatter(raw_content: str, verbose: bool = True) -> tuple:
             'cache_read_tokens': llm_result.get("cache_read_tokens", 0),
             'cache_write_tokens': llm_result.get("cache_write_tokens", 0),
             'cost': llm_result.get("cost", 0.0),
+            # What actually served the call. The `model` parameter below is a
+            # default no orchestrator passes, so recording it stamped every
+            # artifact with a model the run never used (#459).
+            'model': llm_result.get("model"),
         }
 
         return result_text, usage
@@ -299,6 +303,7 @@ def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1
     total_cache_read_tokens = 0
     total_cache_write_tokens = 0
     total_cost = 0.0
+    observed_model = None
 
     for batch_start in range(0, len(non_enriched), batch_size):
         batch = non_enriched[batch_start:batch_start + batch_size]
@@ -324,6 +329,7 @@ def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1
             total_cache_read_tokens += usage.get('cache_read_tokens', 0)
             total_cache_write_tokens += usage.get('cache_write_tokens', 0)
             total_cost += usage.get('cost', 0.0)
+            observed_model = usage.get('model') or observed_model
 
         if llm_output:
             # Parse LLM output
@@ -360,7 +366,7 @@ def run_stage_5d(input_path: str, output_path: str = None, model: str = "gpt-5.1
         'input_file': input_path,
         'non_enriched_count': len(non_enriched),
         'formatted_count': formatted_count,
-        'model': model,
+        'model': observed_model or model,
         'timestamp': datetime.now().isoformat(),
         'total_cost': total_cost,
         'prompt_tokens': total_prompt_tokens,
