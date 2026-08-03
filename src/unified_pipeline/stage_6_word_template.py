@@ -1140,6 +1140,78 @@ def _squash(text) -> str:
     return re.sub(r"\s+", "", str(text or "")).lower()
 
 
+# Personal data that must not be carried onto a WCM CV. Source CVs routinely
+# carry date/place of birth, marital status and family members' names in their
+# contact block; a WCM CV must not.
+#
+# Matched as a LABEL PREFIX terminated by a colon, against fragments split out
+# of the entry text. The colon terminator is load-bearing and must not be
+# relaxed: allowing '-'/en-dash as a terminator, or slop before the colon,
+# produces false positives on real CV content elsewhere in the corpus
+# ("Children's Oncology Group - Emeritus", "Children and Fire: Research ...",
+# "Children's Hospital Colorado - Pillar Award").
+#
+# Deliberately EXCLUDES gender/sex/race/ethnicity/religion. Those are ordinary
+# research vocabulary -- a publication titled "Gender: A Review" would be one
+# colon away from deletion -- and none occurs as a personal-data label anywhere
+# in the corpus. Residual gap, accepted: a label written without a colon
+# ("Date of Birth<tab>12/13/1947") evades this. Colon-less labels do occur in
+# the corpus, just not yet on a PII label.
+_PII_LABEL_RE = re.compile(r"""^\s*
+    (?: date \s* of \s* birth
+      | birth \s*-? \s* date (?: \s+ and \s+ birth \s*-? \s* place )?
+      | birthdate (?: \s+ and \s+ birthplace )?
+      | born
+      | d\.?o\.?b\.?
+      | place \s* of \s* birth | birth \s*-? \s* place | birthplace
+      | marital \s* status
+      | spouse (?: [’']s )? (?: \s* name )? | wife | husband
+      | children (?: [’']s \s* names? )? | dependents?
+      | social \s* security (?: \s* (?: number | no\.? ) )? | ssn
+    ) \s* :""", re.X | re.I)
+
+# Anchored whole-key match, so 'institutional_email' and friends can never hit.
+# Needed alongside the label pattern: stage 4 leaves extracted_fields empty for
+# most PII entries (caught by the label), but names some of them explicitly
+# (marital_status_spouse, birthplace) where the source label is unusual.
+# Every person stem takes the same optional suffix, so 'wife_name' is caught
+# wherever 'spouse_name' is; the anchoring, not the suffix, is what keeps
+# ordinary keys out.
+_PII_FIELD_KEY_RE = re.compile(r"""^(?:.*_)?(?:
+      date_of_birth | birth_?date | birth_?place | place_of_birth | dob
+    | marital_status (?:_\w+)? | spouse (?:_\w+)? | wife (?:_\w+)? | husband (?:_\w+)?
+    | children (?:_\w+)? | dependents? (?:_\w+)?
+    | ssn | social_security\w* )$""", re.X | re.I)
+
+_PII_FRAGMENT_SPLIT_RE = re.compile(r"[\n\t|]|\s{3,}")
+
+PII_REDACTED_NOTICE = (
+    "[Personal data from the source CV was withheld here "
+    "(e.g. date or place of birth, marital status, family members' names). "
+    "Review the original CV if this content is needed.]"
+)
+
+
+def _pii_fragments(text) -> List[str]:
+    """The fragments of an entry that carry protected personal data."""
+    return [f for f in _PII_FRAGMENT_SPLIT_RE.split(str(text or ""))
+            if _PII_LABEL_RE.match(f)]
+
+
+def _from_pii_fragment(value, pii_fragments: List[str]) -> bool:
+    """Whether an extracted value's text was taken out of a PII fragment.
+
+    Deny by value PROVENANCE, not by entry. Dropping a whole entry that
+    contains a PII label is right in the appendix, where the entry renders
+    nothing so discarding it is free -- but it is wrong here, where the same
+    entry is actively supplying live contact data: on the corpus it drops real
+    office addresses, an office phone and a work email from three CVs whose
+    contact block happens to also carry a birth date.
+    """
+    squashed = _squash(value)
+    return bool(squashed) and any(squashed in _squash(f) for f in pii_fragments)
+
+
 def _looks_like_record(line: str) -> bool:
     line = line.strip()
     return len(line) > 60 and (" | " in line or "\t" in line)
@@ -1664,8 +1736,14 @@ class WCMTemplateGenerator:
             if code not in mapped_codes:
                 unmapped_entries.extend(entries)
 
-        # Note: A entries are all used in Personal Data section, no need to add extras to appendix
-        # The Personal Data section handles name, address, email, phone, etc.
+        # A stays in mapped_codes, but NOT because its entries are all consumed
+        # -- that was the old assumption here and the corpus refutes it (145 of
+        # 306 A entries reach no Personal Data slot, across 80 of 100 CVs).
+        # Routing them here is wrong regardless: at this point the document is
+        # only part-rendered, so "was this content already placed?" cannot be
+        # answered yet, and the CV owner's own name banner would be appended a
+        # second time. They are recovered after every section has rendered, by
+        # _unconsumed_personal_data_batch.
 
         if unmapped_entries:
             self._fill_appendix(unmapped_entries)
@@ -2571,9 +2649,25 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         office_address = None
         home_address = None
 
+        # A entries that reach none of the six slots below are consumed by
+        # nothing. 'A' is in mapped_codes, so they were then excluded from the
+        # appendix too, and vanished. Detected by ablation rather than by
+        # re-listing the fields this loop reads, so it cannot drift out of step
+        # when the loop learns to read a new one.
+        unconsumed = []
+
         for entry in entries:
             fields = entry.get('extracted_fields', {}) or {}
             text = entry.get('text', '').lower()
+            slots_before = (work_email, personal_email, office_phone,
+                            cell_phone, office_address, home_address)
+
+            # Values stage 4 lifted out of a protected-personal-data fragment
+            # are not contact details and must not reach the template. web07's
+            # Office address row renders "Cincinnati, Ohio" today, taken
+            # straight from "PLACE OF BIRTH: Cincinnati, Ohio" by the address
+            # catch-all below.
+            pii_fragments = _pii_fragments(entry.get('text', ''))
 
             # Determine type based on original text labels
             extracted_phone = fields.get('phone')
@@ -2583,6 +2677,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                               fields.get('institutional_email') or
                               fields.get('work_email') or
                               fields.get('personal_email'))
+
+            if pii_fragments:
+                if _from_pii_fragment(extracted_phone, pii_fragments):
+                    extracted_phone = None
+                if _from_pii_fragment(extracted_address, pii_fragments):
+                    extracted_address = None
+                if _from_pii_fragment(extracted_email, pii_fragments):
+                    extracted_email = None
 
             # Classify phone by type
             # Handle case where multiple phones are in one entry (e.g., "Mobile: X  Work: Y")
@@ -2663,8 +2765,22 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Also check entry text for email pattern (fallback)
             if not work_email and not personal_email:
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', entry.get('text', ''))
-                if email_match:
+                if email_match and not _from_pii_fragment(email_match.group(0),
+                                                          pii_fragments):
                     work_email = email_match.group(0)
+
+            # home_phone is deliberately absent from this tuple: it is written
+            # and never read (the template has no home-phone row), so an entry
+            # that sets only home_phone reaches the document nowhere and is
+            # genuinely unconsumed. Two corpus entries are in exactly that
+            # state.
+            if (work_email, personal_email, office_phone, cell_phone,
+                    office_address, home_address) == slots_before:
+                unconsumed.append(entry)
+
+        # Handed to the post-render recovery pass, which is the only point at
+        # which "did this content reach the document?" can actually be asked.
+        self._unconsumed_personal_data = unconsumed
 
         # Legacy variable names for compatibility with rest of function
         email = work_email
@@ -7724,12 +7840,70 @@ Now analyze the text above:"""
                     self.stats['unrendered_records_recovered'] += 1
                     n_recovered += 1
 
+        appendix_batch.extend(self._unconsumed_personal_data_batch(haystack))
+
         if appendix_batch:
             self._add_remaining_to_appendix(appendix_batch)
 
         if self.verbose and n_recovered:
             print(f"  Recovered {n_recovered} unrendered record line(s) "
                   f"({len(appendix_batch)} routed to appendix)")
+
+    def _unconsumed_personal_data_batch(self, haystack: str
+                                        ) -> List[Tuple[str, str, float]]:
+        """A-coded entries that reached no Personal Data slot and no page.
+
+        'A' is listed in `mapped_codes`, whose comment says "unused A entries
+        go to appendix" -- they did not. The exclusion covered the whole code,
+        on the stated assumption that "A entries are all used in Personal Data
+        section". The corpus refutes it: `_fill_personal_data` reads only
+        phone/address/email, so an entry carrying "Citizenship: US", "Fax: ..."
+        or "Foreign Languages: ..." is consumed by nothing and then excluded
+        from the appendix as well. 145 such orphans exist across 80 of the 100
+        corpus CVs.
+
+        Two filters, at deliberately different granularities:
+
+        - Already-rendered entries are skipped. Most orphans are the faculty
+          member's own name/title banner, which renders from `cv_owner` rather
+          than from the A entry -- 75 of 76 are already on the page, and
+          appending them would be pure duplication.
+        - PII entries are replaced by a single notice rather than dropped
+          silently. Here the whole entry is denied, unlike the consumption
+          path: this entry renders nothing, so discarding it costs nothing,
+          and fragment-level filtering would keep the birth date and drop only
+          its label.
+        """
+        batch: List[Tuple[str, str, float]] = []
+        redacted = 0
+        for entry in getattr(self, '_unconsumed_personal_data', []):
+            # The PII scan reads RAW text, the render reads cleaned text, and
+            # the order matters: _clean_inline_tabs rewrites '\t' to ': ' and
+            # ' | ' to ' — ', which are exactly the fragment boundaries
+            # _pii_fragments splits on. Scanning the cleaned text merges a PII
+            # cell into its neighbour and the label no longer starts a
+            # fragment, so the entry renders. Pinned by
+            # test_pii_in_a_tab_separated_cell_is_still_caught.
+            raw_text = entry.get('text', '') or ''
+            text = _clean_inline_tabs(raw_text).strip()
+            if not text:
+                continue
+            fields = entry.get('extracted_fields') or {}
+            if (_pii_fragments(raw_text)
+                    or any(_PII_FIELD_KEY_RE.match(k) for k in fields)):
+                redacted += 1
+                continue
+            if _squash(text) in haystack:
+                continue
+            batch.append((text, 'A', 0))
+
+        if redacted:
+            # One notice per document, not one per entry: the point is that the
+            # reader knows something was withheld, not how many times.
+            batch.append((PII_REDACTED_NOTICE, 'A', 0))
+        self.stats['personal_data_recovered'] = len(batch) - (1 if redacted else 0)
+        self.stats['personal_data_redacted'] = redacted
+        return batch
 
     def _fill_appendix(self, unmapped_entries: List[Dict]):
         """Add appendix section for unmapped content.
