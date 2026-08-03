@@ -1184,11 +1184,19 @@ class WCMTemplateGenerator:
     def __init__(self, template_path: str = None, verbose: bool = True,
                  emit_track_changes: bool = True, emit_comments: bool = False,
                  strip_template_instructions: bool = True,
-                 recover_unrendered_records: bool = True):
+                 recover_unrendered_records: bool = True,
+                 source_docx: str = None):
         # Find a valid template path
         self.template_path = self._find_template(template_path)
         self.verbose = verbose
         self.doc = None
+
+        # Original CV, needed only to recover sub-bullet levels the reader drops
+        # when it flattens a table cell (#423). Optional: every consumer falls
+        # back to today's flat rendering when it is absent.
+        self.source_docx = source_docx
+        self._source_doc = None
+        self._source_cell_warned = False
 
         # When True, drop the WCM template's leading gray "instruction box"
         # (table[0]) from the generated document. That box is template
@@ -4894,6 +4902,76 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 self._insert_teaching_entry(section_idx + 1, entry,
                                             is_first_visible=is_first_in_section)
 
+    def _source_cell_list_flags(self, entry: Dict, lines: List[str]) -> Optional[List[bool]]:
+        """Per-line "was a sub-bullet in the source cell" flags, or None (#423).
+
+        The reader flattens a table cell to newline-joined text
+        (docx_structure_extractor.py:340), destroying the per-paragraph
+        ``w:numPr`` that says which lines are children of the entry's title.
+        The cell itself still has it, and the entry still carries the
+        table/row coordinates to find it, so re-read it from the source.
+
+        Returns None whenever the answer cannot be trusted — no source docx,
+        not a table row, a lookup failure, a paragraph/line count mismatch, or
+        a row whose text does not match the entry. Callers then keep today's
+        flat rendering, so an unusable source is never worse than no source.
+        """
+        if not self.source_docx or entry.get('element_type') != 'table_row':
+            return None
+        try:
+            if self._source_doc is None:
+                self._source_doc = Document(self.source_docx)
+            # cells[0] because a K row's content column is column 0; the reader
+            # records table_index/row_index against that same cell. A wrong cell
+            # cannot pass the two guards below, so this fails closed rather than
+            # applying another column's levels.
+            cell = self._source_doc.tables[entry['table_index']].rows[entry['row_index']].cells[0]
+            # `p.text` deliberately, not a w:t sweep: the reader built the text
+            # this entry carries out of `cell.text`, which is exactly
+            # "\n".join(p.text ...). Reading it back any other way makes the two
+            # sides disagree over tabs, line breaks and hyperlinks, which is a
+            # difference in how the XML was read, not in what the row says.
+            paras = [p for p in cell.paragraphs if p.text.strip()]
+        except Exception as e:
+            # Warned once per run, not per entry: this is called for every
+            # teaching row, and a missing source or a stale table index would
+            # otherwise repeat for each one. Silence here would be worse --
+            # the feature would no-op for a whole run and read as "no
+            # hierarchy in this CV" rather than as a failure.
+            if not self._source_cell_warned:
+                self._source_cell_warned = True
+                print(f"  Warning: Could not read source cell levels, "
+                      f"section K stays flat: {e}")
+            return None
+
+        # Alignment guard: a row that does not line up 1:1 with the entry's
+        # lines is the wrong row, or one whose other columns contributed lines
+        # of their own. Both are unusable.
+        if len(paras) != len(lines):
+            return None
+        # Identity guard: every line must be its source paragraph verbatim, not
+        # just the first one and not just its head. The one licensed difference
+        # is on the last line: stage 2 joins a row's columns with " | ", so a
+        # multi-column row carries the other columns there and nowhere else.
+        source = [p.text.strip() for p in paras]
+        if source[:-1] != [ln.strip() for ln in lines[:-1]]:
+            return None
+        tail = lines[-1].strip()
+        if tail != source[-1] and not tail.startswith(source[-1] + " |"):
+            return None
+
+        flags = []
+        for p in paras:
+            # python-docx exposes no public accessor for a paragraph's
+            # numbering, so the w:pPr/w:numPr reads go through ._p. Same access
+            # _apply_list_bullet already uses to write it.
+            pPr = p._p.find(qn('w:pPr'))
+            flags.append(pPr is not None and pPr.find(qn('w:numPr')) is not None)
+        # Only a title-then-bullets cell carries hierarchy worth restoring.
+        if flags[0] or not any(flags[1:]):
+            return None
+        return flags
+
     def _insert_teaching_entry(self, insert_idx: int, entry: Dict, is_first_visible: bool = False):
         """Insert a single teaching entry as a bulleted item.
 
@@ -4922,13 +5000,20 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             if len(original_lines) > 1:
                 # Multi-item entry: use original lines (Stage 5c may have over-combined)
                 # Insert in reverse order since we're inserting before insert_idx
+                # Sub-bullets the reader flattened out of a table cell (#423);
+                # None means no trustworthy source, so every line stays level 0.
+                flags = self._source_cell_list_flags(entry, original_lines)
                 for j, line_text in enumerate(reversed(original_lines)):
                     if not line_text:
                         continue
                     add_blank = is_first_visible and (j == len(original_lines) - 1)
+                    # The loop is reversed, so line j is source paragraph
+                    # len-1-j. Indexing with j inverts the hierarchy.
+                    src_j = len(original_lines) - 1 - j
                     self._insert_bulleted_entry(
                         insert_idx, line_text, entry if j == 0 else None,
-                        add_blank_before=add_blank, list_level=0
+                        add_blank_before=add_blank,
+                        list_level=1 if flags and flags[src_j] else 0
                     )
             else:
                 # Single item: use formatted_text
@@ -8429,7 +8514,8 @@ Now analyze the text above:"""
 def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
                emit_track_changes: bool = True, emit_comments: bool = False,
                strip_template_instructions: bool = True,
-               recover_unrendered_records: bool = True) -> str:
+               recover_unrendered_records: bool = True,
+               source_docx: str = None) -> str:
     """
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -8443,6 +8529,8 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
         recover_unrendered_records: Re-emit record lines of fused multi-record
             entries that the structured render provably dropped (#221;
             default True).
+        source_docx: Original CV, used only to recover sub-bullet levels the
+            reader drops when flattening a table cell (#423). Optional.
 
     Returns:
         Path to generated document
@@ -8453,6 +8541,7 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
         emit_comments=emit_comments,
         strip_template_instructions=strip_template_instructions,
         recover_unrendered_records=recover_unrendered_records,
+        source_docx=source_docx,
     )
     return generator.generate(input_path, output_path)
 

@@ -1296,6 +1296,7 @@ class PipelineOrchestrator:
                     emit_track_changes=emit_track_changes,
                     emit_comments=emit_comments,
                     strip_template_instructions=strip_template_instructions,
+                    source_docx=cv_path,
                 )
 
                 self.stage_outputs['6'] = stage6_output_path
