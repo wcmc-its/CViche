@@ -4926,11 +4926,12 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # cannot pass the two guards below, so this fails closed rather than
             # applying another column's levels.
             cell = self._source_doc.tables[entry['table_index']].rows[entry['row_index']].cells[0]
-            # python-docx exposes no public accessor for a paragraph's numbering,
-            # so the w:t/w:pPr/w:numPr reads here and below go through ._p. Same
-            # access _apply_list_bullet already uses to write it.
-            paras = [p for p in cell.paragraphs
-                     if ''.join(n.text or '' for n in p._p.iter(qn('w:t'))).strip()]
+            # `p.text` deliberately, not a w:t sweep: the reader built the text
+            # this entry carries out of `cell.text`, which is exactly
+            # "\n".join(p.text ...). Reading it back any other way makes the two
+            # sides disagree over tabs, line breaks and hyperlinks, which is a
+            # difference in how the XML was read, not in what the row says.
+            paras = [p for p in cell.paragraphs if p.text.strip()]
         except Exception as e:
             # Warned once per run, not per entry: this is called for every
             # teaching row, and a missing source or a stale table index would
@@ -4944,26 +4945,26 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return None
 
         # Alignment guard: a row that does not line up 1:1 with the entry's
-        # lines is the wrong row, or one Stage 2 rewrote. Both are unusable.
+        # lines is the wrong row, or one whose other columns contributed lines
+        # of their own. Both are unusable.
         if len(paras) != len(lines):
             return None
-        first = ''.join(n.text or '' for n in paras[0]._p.iter(qn('w:t'))).strip()
-        if first[:40] != lines[0][:40]:
-            # Same paragraph count, different content — measured on 6 real
-            # entries, so the count guard alone is not enough to prove identity.
+        # Identity guard: every line must be its source paragraph verbatim, not
+        # just the first one and not just its head. The one licensed difference
+        # is on the last line: stage 2 joins a row's columns with " | ", so a
+        # multi-column row carries the other columns there and nowhere else.
+        source = [p.text.strip() for p in paras]
+        if source[:-1] != [ln.strip() for ln in lines[:-1]]:
             return None
-        # Prefix rather than full equality because Stage 2 rewrites entry tails
-        # (dates normalised, roles appended), so the stored line and the source
-        # paragraph agree on the head and diverge later. 40 is long enough that
-        # a collision also needs an identical paragraph count and a
-        # title-then-bullets shape; the cost of a collision is one entry's
-        # sub-bullet levels, not lost content. Tightening it to a normalised
-        # full match is #423's follow-up and needs a corpus measurement first —
-        # a stricter test silently disables the feature wherever Stage 2 edited
-        # the tail, which is the majority case.
+        tail = lines[-1].strip()
+        if tail != source[-1] and not tail.startswith(source[-1] + " |"):
+            return None
 
         flags = []
         for p in paras:
+            # python-docx exposes no public accessor for a paragraph's
+            # numbering, so the w:pPr/w:numPr reads go through ._p. Same access
+            # _apply_list_bullet already uses to write it.
             pPr = p._p.find(qn('w:pPr'))
             flags.append(pPr is not None and pPr.find(qn('w:numPr')) is not None)
         # Only a title-then-bullets cell carries hierarchy worth restoring.

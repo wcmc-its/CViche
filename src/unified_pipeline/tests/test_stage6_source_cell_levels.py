@@ -156,9 +156,10 @@ def test_a_cell_of_peer_bullets_stays_flat(tmp_path):
 
 
 def test_a_row_that_does_not_line_up_is_rejected(tmp_path):
-    # Stage 2 rewrites some rows, and a paragraph count that disagrees with the
-    # line count means the lookup found the wrong content. Guessing an alignment
-    # would weld one line's hierarchy onto another.
+    # A paragraph count that disagrees with the line count means the lookup
+    # found the wrong content, or a neighbouring column contributed lines of
+    # its own. Guessing an alignment would weld one line's hierarchy onto
+    # another.
     lines = [TITLE] + CHILDREN
     src = _source_docx(tmp_path, lines + ["A fourth source paragraph"],
                        [False, True, True, True])
@@ -178,16 +179,15 @@ def test_a_missing_source_file_is_not_fatal(tmp_path):
     assert _levels(_render(str(tmp_path / "gone.docx"), lines), lines) == ["0", "0", "0"]
 
 
-def test_a_row_agreeing_only_on_the_first_40_characters_is_accepted(tmp_path):
-    """Characterisation, not endorsement: this is the prefix guard's blind spot.
+def test_a_row_agreeing_only_on_its_first_40_characters_is_rejected(tmp_path):
+    """The blind spot the old prefix guard had: two rows sharing a long head.
 
-    Identity is `first[:40] == lines[0][:40]`, so two rows sharing a 40-character
-    head are indistinguishable to it and the source row's levels are applied to
-    the entry. The guard is a prefix on purpose -- Stage 2 rewrites entry tails,
-    and a full-equality test would reject the majority of real rows -- so the
-    trade is a known one. It is pinned here so that tightening or loosening the
-    bound is a deliberate change with a corpus measurement behind it, rather
-    than a silent one.
+    Identity used to be `first[:40] == lines[0][:40]`, so these two rows were
+    indistinguishable and the source row's levels were applied to the wrong
+    entry. Measured over 1,079 local CVs, requiring every line to match its
+    source paragraph verbatim costs nothing: of the 1,614 rows that clear the
+    count guard the prefix accepted 1,611 and verbatim accepts 1,614, and both
+    promote the same 442.
     """
     shared = "Weill Bugango Medical Center POCUS Progr"      # exactly 40 chars
     assert len(shared) == 40
@@ -197,7 +197,36 @@ def test_a_row_agreeing_only_on_the_first_40_characters_is_accepted(tmp_path):
 
     lines = [entry_title] + CHILDREN
     src = _source_docx(tmp_path, [source_title] + CHILDREN, [False, True, True])
-    assert _levels(_render(src, lines), lines) == ["0", "1", "1"]
+    assert _levels(_render(src, lines), lines) == ["0", "0", "0"]
+
+
+def test_a_line_diverging_only_at_its_tail_is_rejected(tmp_path):
+    # The head is identical well past 40 characters and only the tail differs,
+    # which is precisely the case the prefix could not see.
+    lines = [TITLE] + CHILDREN
+    source_lines = [TITLE, CHILDREN[0] + " in a different year", CHILDREN[1]]
+    src = _source_docx(tmp_path, source_lines, [False, True, True])
+    assert _levels(_render(src, lines), lines) == ["0", "0", "0"]
+
+
+def test_the_other_columns_stage_2_appends_do_not_break_identity(tmp_path):
+    """Why this is verbatim-per-line and not a flat `source == lines`.
+
+    Stage 2 stores a row as `" | ".join(cell texts)`, so a multi-column row's
+    last line carries the other columns and no other line does. A plain
+    equality test reads that as a mismatch and turns the feature off: over the
+    same 1,079 CVs it accepts 481 of the 1,614 rows the count guard clears,
+    against 1,614 for this one.
+    """
+    lines = [TITLE] + CHILDREN
+    src = _source_docx(tmp_path, lines, [False, True, True])
+    entry = _entry(lines)
+    entry["text"] = "\n".join(lines) + " | 2019 - 2024 | Course Director"
+
+    gen = WCMTemplateGenerator(verbose=False, source_docx=src)
+    gen.doc = Document(gen.template_path)
+    gen._fill_teaching({"K3": [entry]})
+    assert _levels(gen, [TITLE] + CHILDREN) == ["0", "1", "1"]
 
 
 def test_an_unreadable_source_warns_once_per_run_not_once_per_entry(capsys):
