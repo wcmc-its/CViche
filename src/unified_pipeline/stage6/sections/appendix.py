@@ -134,8 +134,6 @@ class AppendixSection:
             _set_font(run, bold=True)
 
             for i, (entry, text) in enumerate(entries, start=1):
-                element_idx = entry.get('element_idx_start', '')
-
                 # Truncate long entries
                 if len(text) > 200:
                     text = text[:200] + '...'
