@@ -142,15 +142,6 @@ from unified_pipeline.core.template_boilerplate import (
 )
 
 
-# XML namespaces for Word documents
-WORD_NAMESPACE = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-W14_NAMESPACE = 'http://schemas.microsoft.com/office/word/2010/wordml'
-NSMAP = {
-    'w': WORD_NAMESPACE,
-    'w14': W14_NAMESPACE,
-}
-
-
 _STOP_WORDS = frozenset({
     'a', 'an', 'and', 'as', 'at', 'be', 'by', 'for', 'from', 'i', 'in',
     'is', 'it', 'of', 'on', 'or', 'the', 'to', 'was', 'with',
@@ -368,10 +359,10 @@ OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_6_wcm_documents"
 SAMPLE_CV_DIR = Path(__file__).parent.parent.parent / "data" / "sample_cvs" / "word"
 
 # Fallback template paths
-FALLBACK_TEMPLATES = tuple([
+FALLBACK_TEMPLATES = (
     Path(__file__).parent / "cv_parser" / "cv_template_wcm.docx",
     Path(__file__).parent.parent.parent / "business" / "examples" / "template" / "wcm_cv_template_faculty_october_2022_final.docx",
-])
+)
 
 
 # Retired taxonomy codes that were pure renames of a still-live code. Stage-3b
