@@ -25,22 +25,25 @@ def write_fn(path, name, body_lines):
 
 
 def run(tree, *args):
+    # Run from elsewhere on purpose: the scan and the baseline are anchored to
+    # the script's own repo, so cwd must not be able to change what is measured.
     return subprocess.run(
-        [sys.executable, os.path.join(tree, "check.py"), "--root", tree, *args],
-        capture_output=True, text=True, cwd=tree,
+        [sys.executable, os.path.join(tree, "scripts", "check.py"), *args],
+        capture_output=True, text=True, cwd=os.path.dirname(tree),
     )
 
 
 def main():
     with tempfile.TemporaryDirectory() as tree:
-        with open(SCRIPT) as src, open(os.path.join(tree, "check.py"), "w") as dst:
+        os.mkdir(os.path.join(tree, "scripts"))
+        with open(SCRIPT) as src, open(os.path.join(tree, "scripts", "check.py"), "w") as dst:
             dst.write(src.read())
 
         # one 301-line function -> excess 101
         write_fn(os.path.join(tree, "a.py"), "big", 300)
         r = run(tree, "--update")
         assert r.returncode == 0, r.stderr
-        base = json.load(open(os.path.join(tree, "function-size-baseline.json")))
+        base = json.load(open(os.path.join(tree, "scripts", "function-size-baseline.json")))
         assert base["excess_lines"] == 101, base
         assert base["count"] == 1, base
         print(f"baseline           excess={base['excess_lines']:4}  ok")
@@ -86,7 +89,7 @@ def main():
         r = run(tree, "--update")
         assert r.returncode == 1, f"--update should refuse a regression: {r.stdout}"
         assert "only turns one way" in r.stderr, r.stderr
-        after = json.load(open(os.path.join(tree, "function-size-baseline.json")))
+        after = json.load(open(os.path.join(tree, "scripts", "function-size-baseline.json")))
         assert after["excess_lines"] == 101, "baseline must be untouched after a refused update"
         print("update refuses up  exit=1  baseline kept ok")
 

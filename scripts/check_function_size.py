@@ -26,11 +26,16 @@ import os
 import sys
 
 THRESHOLD = 200
-BASELINE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "function-size-baseline.json")
+# Scan and baseline are both anchored to this file, never to cwd: a run from
+# anywhere must measure the tree the baseline was taken from, or it silently
+# compares one repo's functions against another repo's number.
+SCRIPTS = os.path.dirname(os.path.abspath(__file__))
+ROOT = os.path.dirname(SCRIPTS)
+BASELINE = os.path.join(SCRIPTS, "function-size-baseline.json")
 SKIP_DIRS = {".git", "__pycache__", "node_modules", "outputs", "uploads", ".venv", "venv", "archive"}
 
 
-def scan(root="."):
+def scan(root=ROOT):
     """Every non-test function at or over THRESHOLD lines, longest first."""
     found = []
     for dirpath, dirnames, filenames in os.walk(root):
@@ -39,7 +44,7 @@ def scan(root="."):
             if not name.endswith(".py") or name.startswith("test_"):
                 continue
             path = os.path.relpath(os.path.join(dirpath, name), root)
-            if "/tests/" in path or path.startswith("tests/"):
+            if "tests" in path.split(os.sep):
                 continue
             try:
                 with open(os.path.join(root, path), encoding="utf-8", errors="replace") as fh:
@@ -66,12 +71,11 @@ def totals(found):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--root", default=".", help="repo root to scan (default: cwd)")
     ap.add_argument("--report", action="store_true", help="list the worst offenders and exit 0")
     ap.add_argument("--update", action="store_true", help="write a new baseline (refuses to regress)")
     args = ap.parse_args()
 
-    found = scan(args.root)
+    found = scan()
     now = totals(found)
 
     if args.report:
