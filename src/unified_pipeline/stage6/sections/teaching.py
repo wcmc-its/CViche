@@ -68,13 +68,13 @@ class TeachingSection:
         The WCM template provides the structure; Stage 5c handles per-entry formatting.
         Original CV hierarchy labels are not carried over.
         """
-        # Define K-code to section header mapping
+        # K-code to candidate header strings, tried in order (see module docstring)
         k_section_map = {
-            'K1': ('Didactic teaching', ['Didactic teaching', 'Didactic']),
-            'K2': ('Clinical teaching', ['Clinical teaching', 'bedside teaching']),
-            'K3': ('Administrative teaching', ['Administrative teaching', 'leadership role']),
-            'K4': ('Continuing education', ['Continuing education', 'professional education']),
-            'K5': ('Other education', ['outreach activities', 'Other education/outreach', 'community education or patient']),
+            'K1': ['Didactic teaching', 'Didactic'],
+            'K2': ['Clinical teaching', 'bedside teaching'],
+            'K3': ['Administrative teaching', 'leadership role'],
+            'K4': ['Continuing education', 'professional education'],
+            'K5': ['outreach activities', 'Other education/outreach', 'community education or patient'],
         }
 
         # Count total entries
@@ -86,7 +86,7 @@ class TeachingSection:
             print(f"Filling Teaching ({total_entries} entries)...")
 
         # Fill each K-code section separately
-        for code, (section_name, search_texts) in k_section_map.items():
+        for code, search_texts in k_section_map.items():
             entries = entries_by_code.get(code, [])
             if not entries:
                 continue

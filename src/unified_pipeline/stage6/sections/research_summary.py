@@ -39,7 +39,7 @@ except ImportError:  # pragma: no cover - mirrors stage_6_word_template
 class ResearchSummarySection:
     """Section M1 writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_research_summary(self, research_summary_data: Optional[Dict]):
+    def _fill_research_summary(self, research_summary_data: Optional[Dict]) -> bool:
         """Fill Research Summary section from Stage 4.5 output.
 
         Inserts a RESEARCH SUMMARY section before RESEARCH SUPPORT with
@@ -76,11 +76,9 @@ class ResearchSummarySection:
         if self.verbose:
             print(f"Filling Research Summary ({word_count} words, {generation_method})...")
 
-        # Find RESEARCH ACTIVITIES section (M1) to insert under
+        # Find RESEARCH ACTIVITIES section (M1) to insert under. The finder
+        # lowercases both sides, so casing of the needle carries no information.
         activities_idx = self._find_paragraph_with_text("RESEARCH ACTIVITIES")
-        if activities_idx is None:
-            # Fallback: try "Research Activities" (case variations)
-            activities_idx = self._find_paragraph_with_text("Research Activities")
         if activities_idx is None:
             if self.verbose:
                 print("  Warning: Could not find 'RESEARCH ACTIVITIES' section")
