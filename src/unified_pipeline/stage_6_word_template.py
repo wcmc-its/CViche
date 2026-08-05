@@ -23,7 +23,7 @@ import sys
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Literal, Optional, Tuple
 from datetime import datetime
 from collections import defaultdict
 
@@ -145,10 +145,8 @@ def _labels_its_own_phone_slots(value) -> bool:
         k in value for k in _ALL_PHONE_SLOT_KEYS)
 
 
-def _phone_cell_text(value, slot: str) -> str:
+def _phone_cell_text(value, slot: Literal['cell', 'office', 'home']) -> str:
     """Coerce a stage-4 ``phone`` field to plain text for one slot.
-
-    ``slot`` is ``'cell'``, ``'office'`` or ``'home'``.
 
     Same defect family as the address field (#442): stage 4 stores raw LLM JSON
     and ``coerce_field_value_types`` leaves dicts intact, so a two-column
@@ -366,7 +364,7 @@ _MONTH_NAME_TO_NUM = {
 }
 
 
-def _is_bullet_paragraph(para) -> bool:
+def _is_bullet_paragraph(para: Paragraph) -> bool:
     """True for a bullet in either representation the renderer emits.
 
     Section K moved to real Word list paragraphs in #474, so a validator that
