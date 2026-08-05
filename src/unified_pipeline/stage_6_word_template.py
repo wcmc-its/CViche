@@ -1204,7 +1204,7 @@ PII_REDACTED_NOTICE = (
 )
 
 
-def _pii_fragments(text) -> List[str]:
+def _pii_fragments(text: Optional[str]) -> List[str]:
     """The fragments of an entry that carry protected personal data."""
     return [f for f in _PII_FRAGMENT_SPLIT_RE.split(str(text or ""))
             if _PII_LABEL_RE.match(f)]
