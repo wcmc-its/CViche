@@ -1,13 +1,14 @@
-"""Value normalization lifted out of WCMTemplateGenerator (#398).
+"""Value normalization lifted out of stage_6_word_template (#398).
 
-Five methods that never touched `self`. Each takes a value and returns a
-canonicalised version: author names in a single citation spelling, an
-institution string with its trailing org suffix removed, markdown stripped for
-a Word run, a repeated phrase collapsed.
+Text in, cleaner text out. Author names in a single citation spelling, an
+institution string with its trailing org suffix removed, markdown stripped for a
+Word run, a repeated phrase collapsed, the reader's internal cell separators
+made readable, a leaked 3b taxonomy code stripped off the front of a bullet.
 
 They are kept together because they change for the same reason -- a new spelling
-variant observed in a CV -- and apart from `formatting`, which changes when the
-WCM template's appearance changes.
+variant, separator or leaked token observed in a CV -- and apart from
+`formatting`, which changes when the WCM template's appearance changes. The
+sibling `fields.py` handles the case where the input is not text yet.
 
 Names keep their leading underscore for now. Renaming and relocating in one
 change would make a failure impossible to attribute to either.
@@ -253,3 +254,51 @@ def _strip_markdown_for_word(text: str, preserve_newlines: bool = False) -> str:
         result = result_parts[0] if result_parts else ''
 
     return result
+
+
+def _clean_inline_tabs(text: str) -> str:
+    """Render the pipeline's internal cell separators readably.
+
+    Two separators are artifacts of how the readers flatten a source CV, and
+    neither belongs in a rendered Word document:
+
+    - " | " joins the cells of a table row (``docx_structure_extractor``). Those
+      cells are columns, not a label/value pair, so they rejoin with " — ".
+      A row whose cells are all empty is a blank template row carrying no
+      information; it collapses to "" so callers can drop it.
+    - "\\t" joins the "Label\\tValue" pairs of the WCM template's tables. A raw
+      tab renders ragged against Word's default tab stops, so the first becomes
+      ": " (label: value) and any further tabs become " — ".
+
+    Properly structured content (mentee/board tables) is routed to real Word
+    tables upstream via classification; this is the fallback for residual text.
+
+    ponytail: the name says "tabs" but it now handles both separators. Kept as-is
+    so this change does not collide with the three bullet call sites that #254
+    also edits; rename to _clean_cell_separators once that has landed.
+    """
+    if not text:
+        return text
+    if "|" in text:
+        text = " — ".join(c.strip() for c in text.split("|") if c.strip())
+    if "\t" not in text:
+        return text
+    parts = [p.strip() for p in text.split("\t") if p.strip()]
+    if len(parts) <= 1:
+        return text.replace("\t", " ").strip()
+    return parts[0] + ": " + " — ".join(parts[1:])
+
+
+# A leading 3b taxonomy code (M2B, D1, S6, N3A …) that leaked into a rendered
+# bullet — code letter + 1-2 digits + optional trailing letter, bracketed at the
+# very start and followed by whitespace. Seen verbatim in output on the WCM-
+# template CVs (issue #251): "• [M2B] Project title: …", "• [D1] Visiting Prof…".
+_TAXONOMY_CODE_PREFIX = re.compile(r"^\s*\[[A-Z]\d{1,2}[A-Z]?\]\s+")
+
+
+def _strip_taxonomy_code(text: str) -> str:
+    """Drop a leading bracketed taxonomy code from bullet text before render.
+    # ponytail: shape-match, not a code allowlist — could also strip a leading
+    # grant-mechanism token like "[R01] " (rare as a bullet's first token); switch
+    # to the TAXONOMY_TO_SECTION key set if that ever shows up in output."""
+    return _TAXONOMY_CODE_PREFIX.sub("", text) if text else text
