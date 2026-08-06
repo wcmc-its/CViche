@@ -88,28 +88,10 @@ import re
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from unified_pipeline.core.render_check import entry_fragments
-from unified_pipeline.core.template_boilerplate import (
-    is_source_boilerplate,
-    is_template_instruction,
-)
-from unified_pipeline.quality_score import (
-    FATAL_ERROR_PATTERN,
-    cv_owner_name_missing,
-    iter_error_fields,
-)
-from unified_pipeline.segmentation_regression import (
-    SUBSTANTIVE_LINE_CHARS,
-    _looks_like_record,
-    _norm,
-    _squash,
-    compute_metrics,
-    iter_source_lines,
-    lint_metrics,
-)
-from unified_pipeline.stage_6_word_template import grant_status_rebucket_target
+from unified_pipeline.core.template_boilerplate import is_source_boilerplate
+from unified_pipeline.segmentation_regression import iter_source_lines
 
 # Lint rules and their primitives now live in the doctor/ package (#493).
 # Re-exported here rather than updating callers: five files import 33 names
@@ -200,6 +182,9 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     _hierarchy_titles,
     lint_missed_headers,
     lint_segmentation,
+)
+from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
+    lint_pipeline_errors,
 )
 
 
@@ -461,75 +446,6 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
     doc = Document(docx_path)
     return [[[_cell_text(cell).strip() for cell in row.cells] for row in tbl.rows]
             for tbl in doc.tables]
-
-
-# -------------------------------------------------------------------- lint 1
-
-
-# -------------------------------------------------------------------- lint 2
-
-
-# -------------------------------------------------------------------- lint 3
-
-
-# -------------------------------------------------------------------- lint 4
-
-
-# -------------------------------------------------------------------- lint 5
-
-
-# -------------------------------------------------------------------- lint 6
-
-
-# -------------------------------------------------------------------- lint 7
-
-
-# -------------------------------------------------------------------- lint 8
-
-
-# -------------------------------------------------------------------- lint 9
-
-
-# ------------------------------------------------------------------- lint 10
-
-
-# ------------------------------------------------------------------- lint 11
-
-
-# ------------------------------------------------------------------- lint 12
-
-
-# ------------------------------------------------------------------- lint 13
-
-
-# ------------------------------------------------------------------- lint 14
-
-
-# ------------------------------------------------------------------- lint 15
-
-def lint_pipeline_errors(artifacts: Dict[str, Dict]) -> List[Dict]:
-    """The quality score's cap-40 hard-fail gate: an ``error`` field somewhere
-    in the run's artifacts carries a fatal pattern (NameError, traceback), so a
-    stage died mid-run and whatever it owned is missing from the output. The
-    pattern and the walk are the scorer's own
-    (quality_score.FATAL_ERROR_PATTERN / iter_error_fields).
-
-    ``artifacts`` is keyed by stage label and the caller narrows it to exactly
-    the JSON the deployed scorer reads, so the cap this finding names is the
-    cap those artifacts actually produce."""
-    fatal: List[str] = []
-    for label in sorted(artifacts):
-        for path, value in iter_error_fields(artifacts[label], label):
-            if FATAL_ERROR_PATTERN.search(value):
-                fatal.append(f"{path}: {value[:120]}")
-    if not fatal:
-        return []
-    return [_finding(
-        "pipeline_errors_present", "ERROR",
-        f"HARD-FAIL gate 'Pipeline/API errors present': {len(fatal)} fatal "
-        f"error field(s) recorded in the run artifacts — the quality score is "
-        f"capped at 40 (RED, do not deliver)",
-        fatal[:5])]
 
 
 # --------------------------------------------------------- artifact resolution
