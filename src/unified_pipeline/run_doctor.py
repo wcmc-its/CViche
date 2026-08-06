@@ -88,28 +88,10 @@ import re
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from unified_pipeline.core.render_check import entry_fragments
-from unified_pipeline.core.template_boilerplate import (
-    is_source_boilerplate,
-    is_template_instruction,
-)
-from unified_pipeline.quality_score import (
-    FATAL_ERROR_PATTERN,
-    cv_owner_name_missing,
-    iter_error_fields,
-)
-from unified_pipeline.segmentation_regression import (
-    SUBSTANTIVE_LINE_CHARS,
-    _looks_like_record,
-    _norm,
-    _squash,
-    compute_metrics,
-    iter_source_lines,
-    lint_metrics,
-)
-from unified_pipeline.stage_6_word_template import grant_status_rebucket_target
+from unified_pipeline.core.template_boilerplate import is_source_boilerplate
+from unified_pipeline.segmentation_regression import iter_source_lines
 
 # Lint rules and their primitives now live in the doctor/ package (#493).
 # Re-exported here rather than updating callers: five files import 33 names
@@ -129,7 +111,33 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
     _finding,
     _haystacks,
     _long_word_tokens,
+    _magnitude_severity,
     _output_section_header,
+)
+from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
+    CLASSIFIED_UNRENDERED_WARN_ENTRIES,
+    DEDUP_SAFE_CONTAINMENT,
+    UNDER_EXTRACTION_MAX_PCT,
+    UNDER_EXTRACTION_MIN_CHARS,
+    UNDER_EXTRACTION_MIN_RECORDS,
+    _DEDUP_TOKEN_RE,
+    _FUNDING_SECTIONS,
+    _STATUS_LABEL_RE,
+    _YEAR_EDGE_LINE_RE,
+    _alphanumeric_tokens,
+    _entry_rendered,
+    _entry_status,
+    _funding_haystacks,
+    lint_bucket_status,
+    lint_classified_unrendered,
+    lint_dedup_drops,
+    lint_under_extraction,
+)
+from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
+    _OWNER_CAP,
+    _OWNER_GATE,
+    lint_enrichment_failures,
+    lint_owner_contact_missing,
 )
 from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     APPENDIX_WARN_ENTRIES,
@@ -168,40 +176,22 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     lint_table_shape,
     lint_unrendered_records,
 )
+from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
+    MISSED_HEADERS_WARN_COUNT,
+    _header_key,
+    _hierarchy_titles,
+    lint_missed_headers,
+    lint_segmentation,
+)
+from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
+    lint_pipeline_errors,
+)
 
 
 logger = logging.getLogger(__name__)
 
-# Lint 4: an entry this big, with this many record-like lines, extracting
-# under this coverage is a mass-loss smell, not LLM wobble.
-UNDER_EXTRACTION_MAX_PCT = 40.0
-UNDER_EXTRACTION_MIN_CHARS = 800
-UNDER_EXTRACTION_MIN_RECORDS = 2
-# _looks_like_record only sees pipe/tab rows; fused award/honor lines are
-# plain newline lines carrying a leading or trailing year ("2020 AECT ...",
-# "... August 2025.") — the 2Q1_ZQ honors mega-entry (19% coverage) was
-# invisible without counting them (#229).
-_YEAR_EDGE_LINE_RE = re.compile(
-    r"^\s*(?:19|20)\d{2}\b|\b(?:19|20)\d{2}\s*[.)]?\s*$")
-
-
-
-
-
-
-
-def _alphanumeric_tokens(text) -> set:
-    """a-z0-9 token set for one string (lint 11 dedup-containment coverage)."""
-    return set(_DEDUP_TOKEN_RE.findall(_norm(text)))
-
-
-
-
 
 SEVERITY_ORDER = ("ERROR", "WARN", "INFO")  # most to least severe
-
-MISSED_HEADERS_WARN_COUNT = 6
-CLASSIFIED_UNRENDERED_WARN_ENTRIES = 2
 
 
 # How often each lint fires at all, over the same 73 scored runs. Used only to
@@ -293,51 +283,12 @@ def rank_lints(counts: Dict[str, int]) -> List[Tuple[str, int]]:
                   key=lambda kv: (-lint_surprise(kv[0]), -kv[1], kv[0]))
 
 
-def _magnitude_severity(observed: float, threshold: float) -> str:
-    """WARN when this run is in the corpus's worst quartile, else INFO.
-
-    Severity that encodes presence cannot rank anything: `echo_paragraphs=20`
-    and `echo_paragraphs=1` are the same lint and used to be the same WARN."""
-    return "WARN" if observed >= threshold else "INFO"
-
 # A well-formed report is a few KB. A malformed artifact with huge text fields
 # could inflate the findings into a multi-MB file; cap it. Evidence strings are
 # already sliced at construction, so the only way to blow the cap is a very
 # large NUMBER of findings — truncating the list is the effective lever.
 MAX_REPORT_BYTES = 10 * 1024 * 1024
 MAX_REPORT_FINDINGS = 1000
-
-
-
-
-
-
-# Stage 4 has no 'status' field in the M2* schemas; grant statuses live in
-# the raw entry text as a labelled fragment ("Status: Not funded").
-_STATUS_LABEL_RE = re.compile(r"status\s*[:\-]\s*([^|\n]+)", re.IGNORECASE)
-
-# The funding subsection headers stage 6 renders grant tables beneath.
-_FUNDING_SECTIONS = (
-    ("M2A", "current research funding"),
-    ("M2B", "past (completed) funding"),
-    ("M2C", "pending funding"),
-)
-
-
-
-
-def _hierarchy_titles(stage1a: Dict) -> List[str]:
-    titles: List[str] = []
-
-    def walk(nodes):
-        for node in nodes or []:
-            title = _norm(node.get("text", ""))
-            if title:
-                titles.append(title)
-            walk(node.get("children"))
-
-    walk(stage1a.get("hierarchy"))
-    return titles
 
 
 # ----------------------------------------------------------------- docx views
@@ -495,403 +446,6 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
     doc = Document(docx_path)
     return [[[_cell_text(cell).strip() for cell in row.cells] for row in tbl.rows]
             for tbl in doc.tables]
-
-
-
-
-
-
-# -------------------------------------------------------------------- lint 1
-
-def lint_segmentation(source_lines: List[str], stage1a: Dict,
-                      stage2: Dict) -> List[Dict]:
-    """Coverage / lost lines / mega-entries / dups / empties, reusing the
-    segmentation_regression metrics (source docx + stage 1a + stage 2)."""
-    metrics = compute_metrics(source_lines, stage1a, stage2)
-    findings = []
-    for flag in lint_metrics(metrics):
-        evidence = ([line[:100] for line in metrics["lost_lines"][:5]]
-                    if flag.startswith("coverage") else [])
-        findings.append(_finding("segmentation", "WARN", flag, evidence))
-    return findings
-
-
-# -------------------------------------------------------------------- lint 2
-
-def _header_key(text: str) -> str:
-    """Comparison key for header matching: normalized, trailing ':' dropped.
-
-    Stage 1a promotes 'PROFESSIONAL SOCIETIES:' to the hierarchy node
-    'PROFESSIONAL SOCIETIES' -- the colon is source formatting, not part of the
-    header name. Comparing raw normalized forms reports a header that WAS
-    detected as missing: on the 2026-07-15 corpus (25 CVs) that was 36 of 61
-    findings (59%), including 22 of web061's 23.
-    """
-    return _norm(text).rstrip(":").strip()
-
-
-def lint_missed_headers(candidates: List[str], stage1a: Dict,
-                        stage2: Dict) -> List[Dict]:
-    """Header-looking source lines absent from the 1a hierarchy AND from
-    every entry hierarchy path: a header demoted to content misroutes
-    everything filed under it."""
-    known = {_header_key(t) for t in _hierarchy_titles(stage1a)}
-    paths = {_header_key(h) for e in stage2.get("entries", [])
-             for h in (e.get("hierarchy") or [])}
-    findings, seen = [], set()
-    for cand in candidates:
-        normed = _header_key(cand)
-        if not normed or normed in seen:
-            continue
-        seen.add(normed)
-        if normed in known or normed in paths:
-            continue
-        findings.append(_finding(
-            "missed_headers", "WARN",
-            f"header-like source line missing from segmentation: '{cand}'",
-            [cand]))
-    # Severity is a property of the RUN, not of each header: one stray
-    # header-like line is normal, a dozen means segmentation lost the document's
-    # shape. This lint emits one finding per header, so without this the finding
-    # count doubled as the severity and a long CV always looked worse (#438).
-    severity = _magnitude_severity(len(findings), MISSED_HEADERS_WARN_COUNT)
-    for f in findings:
-        f["severity"] = severity
-    return findings
-
-
-# -------------------------------------------------------------------- lint 3
-
-def _entry_status(entry: Dict) -> Optional[str]:
-    status = (entry.get("extracted_fields") or {}).get("status")
-    if status:
-        return str(status)
-    match = _STATUS_LABEL_RE.search(str(entry.get("text", "")))
-    return match.group(1).strip() if match else None
-
-
-def _funding_haystacks(blocks: List[Tuple[str, str]]) -> Dict[str, Haystack]:
-    """Per-bucket Haystack of everything rendered under each of stage 6's
-    funding subsection headers."""
-    segments: Dict[str, List[Tuple[str, str]]] = {c: [] for c, _ in _FUNDING_SECTIONS}
-    current = None
-    for kind, text in blocks:
-        stripped = str(text).strip()
-        if kind == "p":
-            normed = _norm(stripped).rstrip(":")
-            code = next((c for c, title in _FUNDING_SECTIONS if normed == title), None)
-            if code:
-                current = code
-                continue
-            if _output_section_header(stripped):
-                current = None
-                continue
-        if current:
-            segments[current].append((kind, text))
-    return {code: _haystacks(seg) for code, seg in segments.items()}
-
-
-def lint_bucket_status(stage4: Dict, blocks: List[Tuple[str, str]]) -> List[Dict]:
-    """Grant status (extracted field, else the 'Status:' label in the raw
-    entry text) vs the funding subsection the grant actually rendered under.
-    Stage 6 rebuckets mis-bucketed grants at render time (#214), so the
-    stage-4 code alone proves nothing; a WARN here means the rendered
-    document files the grant under the wrong funding heading, or lost it."""
-    titles = dict(_FUNDING_SECTIONS)
-    rendered = _funding_haystacks(blocks)
-    findings = []
-    for e in stage4.get("entries", []):
-        code = e.get("taxonomy_code")
-        if code not in ("M2A", "M2B", "M2C"):
-            continue
-        status = _entry_status(e)
-        target, _note = grant_status_rebucket_target(status or "")
-        if not target or target == code:
-            continue
-        verdicts = {bucket: _entry_rendered(e.get("text"), h.text, h.tokens)
-                    for bucket, h in rendered.items()}
-        if verdicts[target]:
-            continue  # stage 6 rebucketed it correctly
-        if all(v is None for v in verdicts.values()):
-            continue  # too short to locate in the output either way
-        hits = [b for b, v in verdicts.items() if v]
-        where = (f"it rendered under {hits[0]} ('{titles[hits[0]]}')" if hits
-                 else "the entry is under no funding heading at all")
-        findings.append(_finding(
-            "bucket_status", "WARN",
-            f"entry {e.get('element_idx_start')}: status '{status}' implies "
-            f"{target} ('{titles[target]}') but {where}",
-            [str(e.get("text", ""))[:120]]))
-    return findings
-
-
-# -------------------------------------------------------------------- lint 4
-
-def lint_under_extraction(stage4: Dict) -> List[Dict]:
-    """Large multi-record entries whose stage-4 field extraction covered
-    almost none of the text: the rest of the records silently vanish."""
-    findings = []
-    for e in stage4.get("entries", []):
-        if e.get("element_type") in ("header", "break"):
-            continue
-        pct = (e.get("extraction_coverage") or {}).get("extraction_coverage_percent")
-        if pct is None or pct >= UNDER_EXTRACTION_MAX_PCT:
-            continue
-        text = str(e.get("text", ""))
-        if len(text) <= UNDER_EXTRACTION_MIN_CHARS:
-            continue
-        records = sum(
-            1 for line in text.split("\n")
-            if _looks_like_record(line)
-            or (len(line.strip()) >= SUBSTANTIVE_LINE_CHARS
-                and _YEAR_EDGE_LINE_RE.search(line)))
-        if records < UNDER_EXTRACTION_MIN_RECORDS:
-            continue
-        findings.append(_finding(
-            "under_extraction", "WARN",
-            f"entry {e.get('element_idx_start')}: extraction coverage {pct}% "
-            f"on a {len(text)}-char entry with {records} record-like lines",
-            [text[:120]]))
-    return findings
-
-
-# -------------------------------------------------------------------- lint 5
-
-
-
-def _entry_rendered(text, haystack: str, haystack_tokens: set) -> Optional[bool]:
-    """Whether an entry's text surfaces in the output: verbatim piece
-    containment first, then distinctive-token overlap over the whole text and
-    each fragment (stages 4-6 re-render entries from extracted fields, so no
-    verbatim piece survives the 5c/5d formatters, and stage 6 keeps the
-    title/institution fields while dropping long narratives). None = too
-    short to verify either way."""
-    pieces = _entry_pieces(text)
-    if any(piece in haystack for piece in pieces):
-        return True
-    verifiable = bool(pieces)
-    for chunk in [str(text or "")] + entry_fragments(text):
-        tokens = _long_word_tokens(chunk)
-        if len(tokens) < RENDER_TOKEN_MIN_COUNT:
-            continue
-        verifiable = True
-        if len(tokens & haystack_tokens) / len(tokens) >= RENDER_TOKEN_OVERLAP:
-            return True
-    return False if verifiable else None
-
-
-def lint_classified_unrendered(stage3b: Dict,
-                               blocks: List[Tuple[str, str]]) -> List[Dict]:
-    """Taxonomy codes classified at 3b none of whose entries appear anywhere
-    in the stage-6 output (paragraphs or tables); 'T' is skipped (appendix
-    catch-all)."""
-    h = _haystacks(blocks)
-    by_code: Dict[str, List[Dict]] = {}
-    for e in stage3b.get("entries", []):
-        if e.get("element_type") in ("header", "break"):
-            continue
-        code = e.get("taxonomy_code")
-        if not code or code == "T":
-            continue
-        by_code.setdefault(code, []).append(e)
-
-    findings = []
-    lost = 0
-    for code in sorted(by_code):
-        entries = by_code[code]
-        verdicts = [(_entry_rendered(e.get("text"), h.text, h.tokens), e)
-                    for e in entries]
-        verifiable = [(v, e) for v, e in verdicts if v is not None]
-        if not verifiable or any(v for v, _ in verifiable):
-            continue
-        findings.append(_finding(
-            "classified_unrendered", "WARN",
-            f"taxonomy code {code}: none of its {len(entries)} classified "
-            f"entries appear in the output document",
-            [str(e.get("text", ""))[:80] for _, e in verifiable[:3]]))
-        lost += len(entries)
-    # As with missed_headers, the magnitude that matters is how much of the
-    # document went missing across all codes, not that one code did (#438).
-    severity = _magnitude_severity(lost, CLASSIFIED_UNRENDERED_WARN_ENTRIES)
-    for f in findings:
-        f["severity"] = severity
-    return findings
-
-
-# -------------------------------------------------------------------- lint 6
-
-
-
-
-
-# -------------------------------------------------------------------- lint 7
-
-
-
-
-
-# -------------------------------------------------------------------- lint 8
-
-
-
-
-
-
-
-
-
-# -------------------------------------------------------------------- lint 9
-
-def lint_enrichment_failures(stage5e: Dict) -> List[Dict]:
-    """Publications whose stage-5 PubMed enrichment ended in a *_failed status
-    (lookup_failed, pmcid_conversion_failed, doi_found_but_fetch_failed):
-    their citations degrade to CV-extracted fields. Non-failure outcomes
-    (enriched, no_identifier, doi_not_in_pubmed) are expected vocabulary."""
-    failed = [e for e in stage5e.get("entries", [])
-              if str(e.get("enrichment_status") or "").endswith("_failed")]
-    if not failed:
-        return []
-    counts: Dict[str, int] = {}
-    for e in failed:
-        status = str(e.get("enrichment_status"))
-        counts[status] = counts.get(status, 0) + 1
-    breakdown = ", ".join(f"{s}: {n}" for s, n in sorted(counts.items()))
-    return [_finding(
-        "enrichment_failures", "WARN",
-        f"{len(failed)} publication(s) failed PubMed enrichment ({breakdown}) "
-        f"— citations degrade to CV-extracted fields (#222)",
-        [str(e.get("text", ""))[:100] for e in failed[:3]])]
-
-
-# ------------------------------------------------------------------- lint 10
-
-
-
-# ------------------------------------------------------------------- lint 11
-
-# A dropped entry this well contained (token-wise) in the kept entry is a
-# true duplicate; anything below carries content the kept entry lacks. On
-# 2Q1_ZQ the one true duplicate scored 1.00 and the seven real losses
-# 0.60-0.89 (#227).
-DEDUP_SAFE_CONTAINMENT = 0.9
-_DEDUP_TOKEN_RE = re.compile(r"[a-z0-9]+")
-
-
-def lint_dedup_drops(report: Dict) -> List[Dict]:
-    """Stage-6 dedup decisions whose dropped text is NOT near-fully contained
-    in the kept entry: at loose similarity thresholds these are distinct
-    records lost, not duplicates (#227)."""
-    suspect = []
-    for d in report.get("dedup_decisions", []):
-        dropped = _alphanumeric_tokens(d.get("dropped_text", ""))
-        kept = _alphanumeric_tokens(d.get("kept_text", ""))
-        if not dropped:
-            continue
-        coverage = len(dropped & kept) / len(dropped)
-        if coverage >= DEDUP_SAFE_CONTAINMENT:
-            continue
-        suspect.append(
-            f"{d.get('code', '?')} ({d.get('metric', '?')}, {coverage:.0%} "
-            f"covered by kept): dropped '{d.get('dropped_text', '')[:80]}' "
-            f"vs kept '{d.get('kept_text', '')[:80]}'")
-    if not suspect:
-        return []
-    return [_finding(
-        "dedup_drops", "WARN",
-        f"{len(suspect)} dedup drop(s) poorly covered by the kept entry — "
-        f"possible distinct records lost (#227)",
-        suspect[:6])]
-
-
-# ------------------------------------------------------------------- lint 12
-
-
-
-
-
-# ------------------------------------------------------------------- lint 13
-
-
-
-
-
-# ------------------------------------------------------------------- lint 14
-
-
-
-
-
-
-
-
-_OWNER_GATE = "HARD-FAIL gate 'CV owner name / contact populated'"
-_OWNER_CAP = "the quality score is capped at 25 (RED, do not deliver)"
-
-
-def lint_owner_contact_missing(stage4: Optional[Dict], uid: str,
-                               unreadable: Optional[str] = None) -> List[Dict]:
-    """The quality score's cap-25 hard-fail gate: the document cannot be
-    delivered under anyone's name. The predicate is the scorer's own
-    (quality_score.cv_owner_name_missing), applied to the stage-4 artifact the
-    doctor already loads — the same ``*_fields.json`` the scorer reads.
-
-    Accepts ``stage4=None`` rather than being skipped by ``_ready`` because
-    score_cv_owner caps at 25 for an ABSENT ``*_fields.json`` too ("no
-    fields.json found"); the call site decides when that case is a real run
-    rather than a wrong uid.
-
-    The evidence names which fields are populated but never their values: a
-    partly-extracted owner (LLM found a surname but no given name) fires this
-    gate, and the doctor report is mirrored to S3 and served by the admin
-    viewer."""
-    if stage4 is None:
-        cause = (f"the stage-4 *_fields.json will not parse ({unreadable})"
-                 if unreadable else
-                 "there is no stage-4 *_fields.json for this document")
-        return [_finding("owner_contact_missing", "ERROR",
-                         f"{_OWNER_GATE}: {cause} — {_OWNER_CAP}")]
-    if not cv_owner_name_missing(stage4):
-        return []
-    cv_owner = stage4.get("cv_owner", {}) or {}
-    fields = ("full_name", "first_name", "last_name")
-    populated = [f for f in fields if str(cv_owner.get(f) or "").strip()]
-    evidence = ["cv_owner name fields populated: " + (", ".join(populated)
-                                                      or "none")]
-    if str(cv_owner.get("last_name") or "").strip().lower() == uid.lower():
-        evidence.append(
-            "last_name is the document uid — stage 4 fell back to the file "
-            "stem, so the rendered document carries the uid as the owner name")
-    return [_finding(
-        "owner_contact_missing", "ERROR",
-        f"{_OWNER_GATE}: the cv_owner block has no usable name — {_OWNER_CAP}",
-        evidence)]
-
-
-# ------------------------------------------------------------------- lint 15
-
-def lint_pipeline_errors(artifacts: Dict[str, Dict]) -> List[Dict]:
-    """The quality score's cap-40 hard-fail gate: an ``error`` field somewhere
-    in the run's artifacts carries a fatal pattern (NameError, traceback), so a
-    stage died mid-run and whatever it owned is missing from the output. The
-    pattern and the walk are the scorer's own
-    (quality_score.FATAL_ERROR_PATTERN / iter_error_fields).
-
-    ``artifacts`` is keyed by stage label and the caller narrows it to exactly
-    the JSON the deployed scorer reads, so the cap this finding names is the
-    cap those artifacts actually produce."""
-    fatal: List[str] = []
-    for label in sorted(artifacts):
-        for path, value in iter_error_fields(artifacts[label], label):
-            if FATAL_ERROR_PATTERN.search(value):
-                fatal.append(f"{path}: {value[:120]}")
-    if not fatal:
-        return []
-    return [_finding(
-        "pipeline_errors_present", "ERROR",
-        f"HARD-FAIL gate 'Pipeline/API errors present': {len(fatal)} fatal "
-        f"error field(s) recorded in the run artifacts — the quality score is "
-        f"capped at 40 (RED, do not deliver)",
-        fatal[:5])]
 
 
 # --------------------------------------------------------- artifact resolution
