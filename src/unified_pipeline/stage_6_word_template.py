@@ -20,6 +20,7 @@ Date: 2025-11-29
 import os
 import sys
 import json
+from types import MappingProxyType
 import re
 from pathlib import Path
 from typing import Dict, List, Any, Optional, Tuple
@@ -139,15 +140,6 @@ from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
 )
-
-
-# XML namespaces for Word documents
-WORD_NAMESPACE = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
-W14_NAMESPACE = 'http://schemas.microsoft.com/office/word/2010/wordml'
-NSMAP = {
-    'w': WORD_NAMESPACE,
-    'w14': W14_NAMESPACE,
-}
 
 
 _STOP_WORDS = frozenset({
@@ -367,10 +359,10 @@ OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_6_wcm_documents"
 SAMPLE_CV_DIR = Path(__file__).parent.parent.parent / "data" / "sample_cvs" / "word"
 
 # Fallback template paths
-FALLBACK_TEMPLATES = [
+FALLBACK_TEMPLATES = (
     Path(__file__).parent / "cv_parser" / "cv_template_wcm.docx",
     Path(__file__).parent.parent.parent / "business" / "examples" / "template" / "wcm_cv_template_faculty_october_2022_final.docx",
-]
+)
 
 
 # Retired taxonomy codes that were pure renames of a still-live code. Stage-3b
@@ -379,9 +371,9 @@ FALLBACK_TEMPLATES = [
 # at grouping time so the existing renderer picks them up.
 # ponytail: pure renames only. Codes with NO live equivalent (N4, M4C) need a
 # real render route instead — see #261; don't add them here.
-RETIRED_TAXONOMY_CODES = {
+RETIRED_TAXONOMY_CODES = MappingProxyType({
     'M3': 'M2D',  # Patents & Innovations — former M3 renamed to M2D (taxonomy v7)
-}
+})
 # ponytail: pure renames ONLY — old code and target must mean the same thing.
 # Deliberately NOT here:
 #   M4A/M4B/M4C (clinical trials). update_m4_to_m2.py suggests M4A->M2A/M4B->M2B,
@@ -410,7 +402,7 @@ def normalize_retired_code(entry: Dict) -> str:
 
 
 # Taxonomy code to WCM section mapping
-TAXONOMY_TO_SECTION = {
+TAXONOMY_TO_SECTION = MappingProxyType({
     # Personal Data
     'A': 'personal_data',
 
@@ -478,7 +470,7 @@ TAXONOMY_TO_SECTION = {
 
     # Misc
     'T': 'miscellaneous',
-}
+})
 
 
 # Fields whose values identify a specific record (vs. generic values like a
@@ -3030,6 +3022,21 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
                recover_unrendered_records: bool = True) -> str:
     """
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
+
+    Takes a PATH, not parsed data, and that is load-bearing for concurrency.
+    Stage 6 rewrites entries in place as it renders -- reassigning
+    ``entry['taxonomy_code']`` when it reroutes a code, writing back
+    ``entry['extracted_fields']``, annotating ``entry['reclassification_note']``
+    -- 17 sites in all. Because this function is handed a path and parses the
+    JSON itself, every render owns the dicts it mutates, and the web path runs
+    renders concurrently (``run_service.py`` starts each run in a thread and the
+    orchestrator hands each stage to ``asyncio.to_thread``).
+
+    Passing already-parsed stage 5 data in here to save a re-parse would be a
+    natural-looking optimisation and would silently break that: two concurrent
+    renders would then rewrite one another's entries mid-render. If the
+    in-memory interface is ever wanted, deep-copy at the boundary or make the
+    rewrites non-destructive first.
 
     Args:
         input_path: Path to enriched JSON file
