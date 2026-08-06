@@ -17,12 +17,13 @@ Author: Scholar Signals CV Pipeline
 Date: 2025-11-29
 """
 
+import logging
 import os
 import sys
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Literal, Optional, Tuple
 from datetime import datetime
 from collections import defaultdict
 
@@ -42,7 +43,7 @@ except ImportError:
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
-from unified_pipeline.core.render_check import entry_fragments
+from unified_pipeline.core.render_check import entry_fragments, entry_lines
 from unified_pipeline.stage6.formatting import (
     _clear_table_data,
     _format_citation,
@@ -84,6 +85,8 @@ from unified_pipeline.core.template_boilerplate import (
     is_template_instruction,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def _clean_inline_tabs(text: str) -> str:
     """Render the pipeline's internal cell separators readably.
@@ -116,6 +119,74 @@ def _clean_inline_tabs(text: str) -> str:
     if len(parts) <= 1:
         return text.replace("\t", " ").strip()
     return parts[0] + ": " + " — ".join(parts[1:])
+
+
+# Keys observed in structured stage-4 `phone` values: cell, office, fax. Stage 4
+# extracts with no schema, so the vocabulary is unbounded -- match on the key
+# name, same as the address handling.
+_CELL_PHONE_KEYS = ('cell', 'mobile', 'cell_phone', 'mobile_phone',
+                    'mobile_phone_primary', 'personal_phone')
+_OFFICE_PHONE_KEYS = ('office', 'work', 'business', 'office_phone',
+                      'work_phone', 'phone_office', 'business_phone')
+_HOME_PHONE_KEYS = ('home', 'home_phone', 'residence')
+_ALL_PHONE_SLOT_KEYS = _CELL_PHONE_KEYS + _OFFICE_PHONE_KEYS + _HOME_PHONE_KEYS
+
+
+def _labels_its_own_phone_slots(value) -> bool:
+    """True when a dict phone names its own cell/office/home halves.
+
+    Deliberately ANY key, not all: the real ``{"cell", "office", "fax"}`` from
+    web147 is a slot map carrying one key we have no slot for, and requiring
+    every key to be recognized would send it down the join path instead, which
+    concatenates the fax number into whichever row asked first. A dict that
+    names even one slot is routed by its own labels; keys outside
+    ``_ALL_PHONE_SLOT_KEYS`` are dropped -- see ``_phone_cell_text``."""
+    return isinstance(value, dict) and any(
+        k in value for k in _ALL_PHONE_SLOT_KEYS)
+
+
+def _phone_cell_text(value, slot: Literal['cell', 'office', 'home']) -> str:
+    """Coerce a stage-4 ``phone`` field to plain text for one slot.
+
+    Same defect family as the address field (#442): stage 4 stores raw LLM JSON
+    and ``coerce_field_value_types`` leaves dicts intact, so a two-column
+    contact block arrives here as ``{"cell": ..., "office": ..., "fax": ...}``.
+    Phone never crashed the way address did -- ``_set_cell_text`` stringifies --
+    so instead of losing the document it either rendered the dict's repr into a
+    Word cell or, on web147, dropped all three numbers because the entry text
+    said "Home" and the home slot has no template row (#450).
+
+    Strings pass through untouched, so CVs that never had this render
+    identically. A dict that names no slot is joined rather than dropped.
+
+    A slot-labelled dict drops any key outside ``_ALL_PHONE_SLOT_KEYS``, and
+    that is the intended render, not an oversight: the WCM template has exactly
+    two phone rows, Office telephone and Cell phone. ``fax`` -- the one non-slot
+    key observed in the corpus -- has nowhere to go, and joining it into the
+    office row would print a fax number as the office telephone. Anything new
+    stage 4 invents (``note``, ``pager``) is dropped the same way for the same
+    reason. Recovering one of them means adding a template row first; widening
+    the match here only moves the number into the wrong row."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "; ".join(t for t in (_phone_cell_text(v, slot) for v in value) if t)
+    if not isinstance(value, dict):
+        return str(value)
+    if not _labels_its_own_phone_slots(value):
+        # Recurse rather than str(): a nested value would otherwise render its
+        # Python repr into a Word cell.
+        return "; ".join(
+            t for t in (_phone_cell_text(v, slot).strip() for v in value.values()) if t)
+    keys = {'cell': _CELL_PHONE_KEYS, 'office': _OFFICE_PHONE_KEYS,
+            'home': _HOME_PHONE_KEYS}[slot]
+    for key in keys:
+        text = _phone_cell_text(value.get(key), slot).strip()
+        if text:
+            return text
+    return ""
 
 
 def _committee_cell_text(value) -> str:
@@ -291,6 +362,20 @@ _MONTH_NAME_TO_NUM = {
     'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7, 'aug': 8,
     'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12,
 }
+
+
+def _is_bullet_paragraph(para: Paragraph) -> bool:
+    """True for a bullet in either representation the renderer emits.
+
+    Section K moved to real Word list paragraphs in #474, so a validator that
+    tests for a literal "•" prefix stops seeing K at all -- and check 3
+    below then reports no_visible_teaching_content on every CV. The non-K
+    emitters still prefix the glyph (#483), so both forms have to count.
+    """
+    if para.text.strip().startswith('•'):
+        return True
+    pPr = para._p.pPr
+    return pPr is not None and pPr.find(qn('w:numPr')) is not None
 
 
 def _parse_date_components(date_str: str):
@@ -1067,6 +1152,78 @@ def _squash(text) -> str:
     return re.sub(r"\s+", "", str(text or "")).lower()
 
 
+# Personal data that must not be carried onto a WCM CV. Source CVs routinely
+# carry date/place of birth, marital status and family members' names in their
+# contact block; a WCM CV must not.
+#
+# Matched as a LABEL PREFIX terminated by a colon, against fragments split out
+# of the entry text. The colon terminator is load-bearing and must not be
+# relaxed: allowing '-'/en-dash as a terminator, or slop before the colon,
+# produces false positives on real CV content elsewhere in the corpus
+# ("Children's Oncology Group - Emeritus", "Children and Fire: Research ...",
+# "Children's Hospital Colorado - Pillar Award").
+#
+# Deliberately EXCLUDES gender/sex/race/ethnicity/religion. Those are ordinary
+# research vocabulary -- a publication titled "Gender: A Review" would be one
+# colon away from deletion -- and none occurs as a personal-data label anywhere
+# in the corpus. Residual gap, accepted: a label written without a colon
+# ("Date of Birth<tab>12/13/1947") evades this. Colon-less labels do occur in
+# the corpus, just not yet on a PII label.
+_PII_LABEL_RE = re.compile(r"""^\s*
+    (?: date \s* of \s* birth
+      | birth \s*-? \s* date (?: \s+ and \s+ birth \s*-? \s* place )?
+      | birthdate (?: \s+ and \s+ birthplace )?
+      | born
+      | d\.?o\.?b\.?
+      | place \s* of \s* birth | birth \s*-? \s* place | birthplace
+      | marital \s* status
+      | spouse (?: [’']s )? (?: \s* name )? | wife | husband
+      | children (?: [’']s \s* names? )? | dependents?
+      | social \s* security (?: \s* (?: number | no\.? ) )? | ssn
+    ) \s* :""", re.X | re.I)
+
+# Anchored whole-key match, so 'institutional_email' and friends can never hit.
+# Needed alongside the label pattern: stage 4 leaves extracted_fields empty for
+# most PII entries (caught by the label), but names some of them explicitly
+# (marital_status_spouse, birthplace) where the source label is unusual.
+# Every person stem takes the same optional suffix, so 'wife_name' is caught
+# wherever 'spouse_name' is; the anchoring, not the suffix, is what keeps
+# ordinary keys out.
+_PII_FIELD_KEY_RE = re.compile(r"""^(?:.*_)?(?:
+      date_of_birth | birth_?date | birth_?place | place_of_birth | dob
+    | marital_status (?:_\w+)? | spouse (?:_\w+)? | wife (?:_\w+)? | husband (?:_\w+)?
+    | children (?:_\w+)? | dependents? (?:_\w+)?
+    | ssn | social_security\w* )$""", re.X | re.I)
+
+_PII_FRAGMENT_SPLIT_RE = re.compile(r"[\n\t|]|\s{3,}")
+
+PII_REDACTED_NOTICE = (
+    "[Personal data from the source CV was withheld here "
+    "(e.g. date or place of birth, marital status, family members' names). "
+    "Review the original CV if this content is needed.]"
+)
+
+
+def _pii_fragments(text: Optional[str]) -> List[str]:
+    """The fragments of an entry that carry protected personal data."""
+    return [f for f in _PII_FRAGMENT_SPLIT_RE.split(str(text or ""))
+            if _PII_LABEL_RE.match(f)]
+
+
+def _from_pii_fragment(value, pii_fragments: List[str]) -> bool:
+    """Whether an extracted value's text was taken out of a PII fragment.
+
+    Deny by value PROVENANCE, not by entry. Dropping a whole entry that
+    contains a PII label is right in the appendix, where the entry renders
+    nothing so discarding it is free -- but it is wrong here, where the same
+    entry is actively supplying live contact data: on the corpus it drops real
+    office addresses, an office phone and a work email from three CVs whose
+    contact block happens to also carry a birth date.
+    """
+    squashed = _squash(value)
+    return bool(squashed) and any(squashed in _squash(f) for f in pii_fragments)
+
+
 def _looks_like_record(line: str) -> bool:
     line = line.strip()
     return len(line) > 60 and (" | " in line or "\t" in line)
@@ -1216,6 +1373,9 @@ class WCMTemplateGenerator:
         self._geographic_scope_cache = {}
 
         # Statistics
+        # Tables already cleared this render, by element id. Guards against one
+        # filler wiping another's rows when both resolve to the same table (#454).
+        self._cleared_tables = set()
         self.stats = {
             'sections_filled': 0,
             'entries_inserted': 0,
@@ -1588,8 +1748,14 @@ class WCMTemplateGenerator:
             if code not in mapped_codes:
                 unmapped_entries.extend(entries)
 
-        # Note: A entries are all used in Personal Data section, no need to add extras to appendix
-        # The Personal Data section handles name, address, email, phone, etc.
+        # A stays in mapped_codes, but NOT because its entries are all consumed
+        # -- that was the old assumption here and the corpus refutes it (145 of
+        # 306 A entries reach no Personal Data slot, across 80 of 100 CVs).
+        # Routing them here is wrong regardless: at this point the document is
+        # only part-rendered, so "was this content already placed?" cannot be
+        # answered yet, and the CV owner's own name banner would be appended a
+        # second time. They are recovered after every section has rendered, by
+        # _unconsumed_personal_data_batch.
 
         if unmapped_entries:
             self._fill_appendix(unmapped_entries)
@@ -1848,7 +2014,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         Returns:
             Number of bullets inserted
         """
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        lines = entry_lines(text)
         if not lines:
             return 0
 
@@ -1858,13 +2024,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             self._insert_bulleted_entry(
                 insert_idx, line_text,
                 entry if is_last else None,  # Attach entry/comments to first bullet
-                add_blank_before=add_blank_before and is_last
+                add_blank_before=add_blank_before and is_last, list_level=0
             )
 
         return len(lines)
 
     def _insert_bulleted_entry(self, insert_idx: int, text: str, entry: Dict = None,
-                                add_blank_before: bool = False) -> Optional[Paragraph]:
+                                add_blank_before: bool = False,
+                                list_level: Optional[int] = None) -> Optional[Paragraph]:
         """Insert a SINGLE bulleted entry paragraph with a bullet character prefix.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
@@ -1874,6 +2041,10 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             text: The text content for the entry (should be single line)
             entry: Optional entry dict for adding comments
             add_blank_before: If True, add a blank line before this entry
+            list_level: When given, emit a real Word list paragraph at this
+                ilvl via _apply_list_bullet instead of prefixing a literal "• "
+                glyph (#474). Left at None by the three non-K call sites, whose
+                1,765 corpus-wide glyphs are #483.
 
         Returns:
             The created paragraph, or None if insertion failed
@@ -1889,50 +2060,15 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Insert blank before entry_para (which pushes entry down, so blank is above entry)
             entry_para.insert_paragraph_before("")
 
-        # Use a simple bullet character prefix for reliable rendering
-        # This avoids Word numbering system issues across different templates
-        run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
+        body = _clean_inline_tabs(_strip_taxonomy_code(text))
+        # Without list_level, a simple bullet character prefix: it avoids Word
+        # numbering system issues across different templates, at the cost of not
+        # being a list item to Word's outline, to accessibility tooling, or to
+        # anything re-parsing the output.
+        run = entry_para.add_run(body if list_level is not None else f"• {body}")
         _set_font(run)
-
-        if entry:
-            self._add_entry_comments(entry_para, entry)
-
-        self.stats['entries_inserted'] += 1
-        return entry_para
-
-    def _insert_bulleted_entry_with_track_changes(self, insert_idx: int, original_text: str,
-                                                   new_text: str, entry: Dict = None,
-                                                   add_blank_before: bool = False,
-                                                   author: str = "LLM Formatter") -> Optional[Paragraph]:
-        """Insert a bulleted entry showing original as deleted and new as inserted (track changes).
-
-        Args:
-            insert_idx: Index of paragraph to insert before
-            original_text: Original text to show as deleted
-            new_text: New formatted text to show as inserted
-            entry: Optional entry dict for adding comments
-            add_blank_before: If True, add a blank line before this entry
-            author: Author name for the track change attribution
-
-        Returns:
-            The created paragraph, or None if insertion failed
-        """
-        if insert_idx >= len(self.doc.paragraphs):
-            return None
-
-        # Create the bulleted entry paragraph first
-        entry_para = self.doc.paragraphs[insert_idx].insert_paragraph_before("")
-
-        # Add blank line before if requested
-        if add_blank_before:
-            entry_para.insert_paragraph_before("")
-
-        # Add bullet prefix, then track change pair
-        bullet_run = entry_para.add_run("• ")
-        _set_font(bullet_run)
-
-        # Add track change pair: deletion (original) then insertion (new)
-        self._add_track_change_pair(entry_para, original_text, new_text, author=author)
+        if list_level is not None:
+            self._apply_list_bullet(entry_para, level=list_level)
 
         if entry:
             self._add_entry_comments(entry_para, entry)
@@ -2265,6 +2401,26 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             except ValueError:
                 pass  # Already removed or not in body
 
+    def _clear_table_data(self, table: Table, keep_header: bool = True):
+        """Record, then clear all data rows from `table`.
+
+        The row removal itself is self-free and lives in
+        `stage6.formatting.docx._clear_table_data` after the #398 split. What
+        needs `self` is the bookkeeping: two fillers that resolve to the SAME
+        table make the second one silently destroy the first one's rows -- see
+        `_fill_other_service`, where a fuzzy anchor search sent Q4A onto the
+        table Q1 had just filled and wiped 39 entries across 6 corpus CVs
+        (#454). This wrapper is the thin delegating method
+        `test_stage6_import_surface.py` asks a split to leave behind; it changes
+        no rendering behaviour. The one caller that resolves its table by fuzzy
+        search consults `self._cleared_tables` before clearing.
+        """
+        if not table:
+            return
+        self._cleared_tables.add(id(table._element))
+        # Resolves to the module-level import at the top of this file: a class
+        # attribute of the same name does not shadow a global inside a method.
+        _clear_table_data(table, keep_header=keep_header)
 
 
 
@@ -2475,9 +2631,25 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         office_address = None
         home_address = None
 
+        # A entries that reach none of the six slots below are consumed by
+        # nothing. 'A' is in mapped_codes, so they were then excluded from the
+        # appendix too, and vanished. Detected by ablation rather than by
+        # re-listing the fields this loop reads, so it cannot drift out of step
+        # when the loop learns to read a new one.
+        unconsumed = []
+
         for entry in entries:
             fields = entry.get('extracted_fields', {}) or {}
             text = entry.get('text', '').lower()
+            slots_before = (work_email, personal_email, office_phone,
+                            cell_phone, office_address, home_address)
+
+            # Values stage 4 lifted out of a protected-personal-data fragment
+            # are not contact details and must not reach the template. web07's
+            # Office address row renders "Cincinnati, Ohio" today, taken
+            # straight from "PLACE OF BIRTH: Cincinnati, Ohio" by the address
+            # catch-all below.
+            pii_fragments = _pii_fragments(entry.get('text', ''))
 
             # Determine type based on original text labels
             extracted_phone = fields.get('phone')
@@ -2488,6 +2660,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                               fields.get('work_email') or
                               fields.get('personal_email'))
 
+            if pii_fragments:
+                if _from_pii_fragment(extracted_phone, pii_fragments):
+                    extracted_phone = None
+                if _from_pii_fragment(extracted_address, pii_fragments):
+                    extracted_address = None
+                if _from_pii_fragment(extracted_email, pii_fragments):
+                    extracted_email = None
+
             # Classify phone by type
             # Handle case where multiple phones are in one entry (e.g., "Mobile: X  Work: Y")
             if extracted_phone:
@@ -2496,10 +2676,19 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 has_work = 'office' in text or 'work' in text
                 has_home = 'home' in text
 
-                if has_mobile and has_work and ';' in extracted_phone:
+                if _labels_its_own_phone_slots(extracted_phone):
+                    # A structured phone names its own halves, so trust those
+                    # rather than the entry's raw text label (#450). web147's
+                    # contact block is labelled "Home" but the dict carries
+                    # cell/office/fax; the raw-text routing sent all three to
+                    # home_phone, which the WCM template has no row for, so
+                    # every number was dropped.
+                    cell_phone = cell_phone or _phone_cell_text(extracted_phone, 'cell')
+                    office_phone = office_phone or _phone_cell_text(extracted_phone, 'office')
+                elif has_mobile and has_work and ';' in str(extracted_phone):
                     # Both types in same entry — try to split them
                     # Parse from original text to get correct assignment
-                    phones = [p.strip() for p in extracted_phone.split(';')]
+                    phones = [p.strip() for p in str(extracted_phone).split(';')]
                     # Find phone numbers in order they appear in text
                     mobile_match = re.search(r'(?:cell|mobile)[^(]*(\(\d{3}\)\s*\d{3}[-.\s]?\d{4})', text, re.IGNORECASE)
                     work_match = re.search(r'(?:work|office)[^(]*(\(\d{3}\)\s*\d{3}[-.\s]?\d{4})', text, re.IGNORECASE)
@@ -2509,13 +2698,24 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                         office_phone = work_match.group(1)
                 elif has_mobile:
                     if not cell_phone:
-                        cell_phone = extracted_phone
+                        cell_phone = _phone_cell_text(extracted_phone, 'cell')
                 elif has_home:
+                    # The WCM template has exactly two phone rows, Office
+                    # telephone and Cell phone -- there is no home row, so
+                    # home_phone is written and never read, and a home-labelled
+                    # number is deliberately not rendered.
+                    #
+                    # Routing it to the office row instead was tried and is
+                    # WRONG: on web113 the HOME entry is processed before the
+                    # BUSINESS entry, so the office row took the home number and
+                    # the real business number was then skipped as already-set.
+                    # Recovering a home phone needs a template row to put it in,
+                    # not a slot to squat in.
                     if not home_phone:
-                        home_phone = extracted_phone
+                        home_phone = _phone_cell_text(extracted_phone, 'home')
                 elif has_work or not office_phone:
                     if not office_phone:
-                        office_phone = extracted_phone
+                        office_phone = _phone_cell_text(extracted_phone, 'office')
 
             # Classify address by type
             if extracted_address:
@@ -2547,8 +2747,22 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Also check entry text for email pattern (fallback)
             if not work_email and not personal_email:
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', entry.get('text', ''))
-                if email_match:
+                if email_match and not _from_pii_fragment(email_match.group(0),
+                                                          pii_fragments):
                     work_email = email_match.group(0)
+
+            # home_phone is deliberately absent from this tuple: it is written
+            # and never read (the template has no home-phone row), so an entry
+            # that sets only home_phone reaches the document nowhere and is
+            # genuinely unconsumed. Two corpus entries are in exactly that
+            # state.
+            if (work_email, personal_email, office_phone, cell_phone,
+                    office_address, home_address) == slots_before:
+                unconsumed.append(entry)
+
+        # Handed to the post-render recovery pass, which is the only point at
+        # which "did this content reach the document?" can actually be asked.
+        self._unconsumed_personal_data = unconsumed
 
         # Legacy variable names for compatibility with rest of function
         email = work_email
@@ -2749,8 +2963,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         for entry in reversed(s0_entries):
             text = entry.get('text', '').strip()
             entry_para = self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
-            run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
+            run = entry_para.add_run(_clean_inline_tabs(_strip_taxonomy_code(text)))
             _set_font(run)
+            self._apply_list_bullet(entry_para, level=0)
             self.stats['entries_inserted'] += 1
 
         # Add a blank line before the S0 content
@@ -2776,7 +2991,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort entries reverse chronologically (most recent first)
@@ -2925,7 +3140,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort entries reverse chronologically (most recent first)
@@ -3247,7 +3462,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if acad_idx is not None and d1_entries:
             acad_table = self._find_table_after_paragraph(acad_idx)
             if acad_table:
-                _clear_table_data(acad_table, keep_header=True)
+                self._clear_table_data(acad_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 sorted_d1 = sort_entries_reverse_chronological(d1_entries)
                 for entry in sorted_d1:
@@ -3258,7 +3473,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if hosp_idx is not None and d2_entries:
             hosp_table = self._find_table_after_paragraph(hosp_idx)
             if hosp_table:
-                _clear_table_data(hosp_table, keep_header=True)
+                self._clear_table_data(hosp_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 sorted_d2 = sort_entries_reverse_chronological(d2_entries)
                 for entry in sorted_d2:
@@ -3269,7 +3484,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if other_idx is not None and d3_entries:
             other_table = self._find_table_after_paragraph(other_idx)
             if other_table:
-                _clear_table_data(other_table, keep_header=True)
+                self._clear_table_data(other_table, keep_header=True)
                 self.stats['tables_populated'] += 1
                 sorted_d3 = sort_entries_reverse_chronological(d3_entries)
                 for entry in sorted_d3:
@@ -3285,7 +3500,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             if not table:
                 return
 
-            _clear_table_data(table, keep_header=True)
+            self._clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
             # Combine all and sort
@@ -3429,7 +3644,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort entries reverse chronologically (most recent first)
@@ -3874,6 +4089,15 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         costs = fields.get('annual_direct_costs') or fields.get('total_funding', '')
         costs_formatted = _format_currency(costs)
 
+        # Carry the grant/award identifier in Award Source. The WCM template has no
+        # grant-number row -- its block is exactly these 8 rows plus optional goals --
+        # but the Award Source label itself reads "(funding agency ...; type of grant)",
+        # so the identifier belongs there. Without this, stage 4 extracts grant_number
+        # and no renderer ever consumes it: 528 of 537 corpus values reached no render.
+        grant_number = (fields.get('grant_number') or '').strip()
+        if grant_number and grant_number.casefold() not in f"{agency} {title}".casefold():
+            agency = f"{agency} ({grant_number})" if agency else grant_number
+
         # Define the grant data model rows
         # Use the extracted title/agency variables (which check multiple field names) instead of just fields.get()
         rows = [
@@ -4282,6 +4506,15 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         # Build Project/Accomplishments from research_focus (dissertation title)
         project = fields.get('research_focus', '') or fields.get('dissertation_title', '')
 
+        # Awards and fellowships the mentee won belong in this row: the WCM template's
+        # footnote for Project/Accomplishments reads "Optional: List publications,
+        # awards, grants ... arising directly from the mentoring activity." Stage 4
+        # writes them to awards/funding_source, which nothing in this file read, so
+        # 133 corpus values were extracted and then dropped.
+        mentee_awards = (fields.get('awards') or fields.get('funding_source') or '').strip()
+        if mentee_awards and mentee_awards.casefold() not in project.casefold():
+            project = f"{project}\nAwards: {mentee_awards}" if project else f"Awards: {mentee_awards}"
+
         # Determine supervision type - default to "Research" for thesis/dissertation mentees
         supervision_type = fields.get('supervision_type', '')
         if not supervision_type:
@@ -4453,7 +4686,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort by date (most recent first)
@@ -4477,7 +4710,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Check if this entry contains multiple awards (newline-separated)
             # This happens when multiple honors were merged during extraction
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            lines = entry_lines(original_text)
 
             # Separate award lines from year lines
             # Years are typically 4-digit numbers or ranges like "2017-2020"
@@ -4755,7 +4988,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return
 
         # Clear existing data rows
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         # Sort by date (most recent first)
@@ -4773,7 +5006,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Check if this entry contains multiple memberships (newline-separated)
             # Pattern: "Member\nElected Member | Org1\nOrg2 | date1\ndate2"
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            lines = entry_lines(original_text)
 
             # Detect multi-membership pattern: multiple organization names or membership types
             if len(lines) > 2:
@@ -4893,7 +5126,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         if formatted_text and original_text:
             # Check if original has multiple distinct items (newline-separated list)
-            original_lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            original_lines = entry_lines(original_text)
 
             if len(original_lines) > 1:
                 # Multi-item entry: use original lines (Stage 5c may have over-combined)
@@ -4904,23 +5137,23 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     add_blank = is_first_visible and (j == len(original_lines) - 1)
                     self._insert_bulleted_entry(
                         insert_idx, line_text, entry if j == 0 else None,
-                        add_blank_before=add_blank
+                        add_blank_before=add_blank, list_level=0
                     )
             else:
                 # Single item: use formatted_text
                 new_text = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
                 self._insert_bulleted_entry(
                     insert_idx, new_text, entry,
-                    add_blank_before=is_first_visible
+                    add_blank_before=is_first_visible, list_level=0
                 )
 
         elif formatted_text:
             new_text = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
-            lines = [l.strip() for l in new_text.split('\n') if l.strip()]
+            lines = entry_lines(new_text)
             combined_text = '. '.join(lines) if len(lines) > 1 else (lines[0] if lines else '')
             self._insert_bulleted_entry(
                 insert_idx, combined_text, entry,
-                add_blank_before=is_first_visible
+                add_blank_before=is_first_visible, list_level=0
             )
 
         else:
@@ -4941,14 +5174,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     text += f", {institution}"
                 if role and role not in text:
                     text += f" ({role})"
-                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible)
+                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible, list_level=0)
             elif course_title:
                 text = course_title
                 if institution and institution not in text:
                     text += f", {institution}"
                 if role and role not in text:
                     text += f" ({role})"
-                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible)
+                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible, list_level=0)
             else:
                 lines = []
                 for line in original_text.split('\n'):
@@ -4964,7 +5197,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     if not line_text:
                         continue
                     add_blank = is_first_visible and (j == len(lines) - 1)
-                    self._insert_bulleted_entry(insert_idx, line_text, entry if j == 0 else None, add_blank_before=add_blank)
+                    self._insert_bulleted_entry(insert_idx, line_text, entry if j == 0 else None, add_blank_before=add_blank, list_level=0)
 
     def _fill_service(self, entries_by_code: Dict[str, List[Dict]]):
         """Fill Q. EXTRAMURAL PROFESSIONAL RESPONSIBILITIES sections using tables.
@@ -5012,7 +5245,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             org = (fields.get('organization', '') or '').lower()
 
             # Check if this is a multi-line entry with mixed activities
-            lines = [l.strip() for l in text.split('\n') if l.strip()]
+            lines = entry_lines(text)
             if len(lines) > 1:
                 # Split into journal reviewing and board entries
                 journal_lines = []
@@ -5132,7 +5365,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Clear tables and mark as populated
         for scope, table in tables_by_scope.items():
-            _clear_table_data(table, keep_header=True)
+            self._clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
         # Classify and route entries by geographic scope
@@ -5240,7 +5473,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
 
@@ -5263,7 +5496,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 self._add_extramural_row(table, organization, role, dates)
             else:
                 # No useful extracted fields - try to parse from raw text
-                lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+                lines = entry_lines(original_text)
                 if len(lines) > 3:
                     # Multiple items merged - parse and split them
                     self._parse_extramural_leadership_lines(table, lines)
@@ -5453,7 +5686,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 print(f"  Warning: Could not find Journal Reviewing table")
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(filtered_entries)
@@ -5510,10 +5743,18 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         # Group by section
         # Q4B = Associate/Guest Editor roles, Q4C = Editorial Board Member
         # These should go to Editorial Activities section, not generic Professional Service
+        # Q4A is Editor-in-Chief / Senior Editor / Co-Editor (stage_3b:807), i.e.
+        # editorial -- not extramural leadership. It used to share Q1's anchor,
+        # and 'EXTRAMURAL PROFESSIONAL RESPONSIBILITIES' resolves to the
+        # top-level Q header whose first following table is the Leadership table
+        # Q1 had just filled. The clear below then wiped it: 0 of 76 Q1
+        # organizations reached their table on the 10 corpus CVs carrying both,
+        # and 39 entries on 6 CVs vanished from the document entirely (#454).
+        # 'Editor/Co-Editor' is Q4A's own template table and was previously dead.
         sections = {
             'Q3': ('Grant Reviewing', ['Grant Reviewing', 'Study Sections']),
             'Q4': ('Professional Service', ['EXTRAMURAL PROFESSIONAL RESPONSIBILITIES', 'Leadership in Extramural']),
-            'Q4A': ('Professional Service', ['EXTRAMURAL PROFESSIONAL RESPONSIBILITIES', 'Leadership in Extramural']),
+            'Q4A': ('Editor/Co-Editor', ['Editor/Co-Editor', 'Journals/Textbooks/Books']),
             'Q4B': ('Editorial Board', ['Editorial Board Membership', 'Editorial Activities']),
             'Q4C': ('Editorial Board', ['Editorial Board Membership', 'Editorial Activities']),
         }
@@ -5542,9 +5783,21 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             # Try to find and use a table first
             table = self._find_table_after_paragraph(section_idx)
-            if table:
-                _clear_table_data(table, keep_header=True)
+            if table and id(table._element) in self._cleared_tables:
+                # Another filler already owns this table. Appending is wrong but
+                # recoverable; clearing destroys content that has no appendix
+                # fallback, because these Q codes are all in mapped_codes. This
+                # is the backstop for #454 -- with Q4A routed correctly it should
+                # never fire, so say so loudly if it does.
+                logger.warning(
+                    "section %r resolved to a table already filled by another "
+                    "code; appending instead of clearing to avoid destroying it",
+                    section_name)
                 self.stats['tables_populated'] += 1
+            elif table:
+                self._clear_table_data(table, keep_header=True)
+                self.stats['tables_populated'] += 1
+            if table:
 
                 sorted_entries = sort_entries_reverse_chronological(section_entries)
                 for entry in sorted_entries:
@@ -5558,6 +5811,30 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                                     fields.get('committee_name', '') or
                                     fields.get('agency', '') or
                                     fields.get('journal_name', ''))
+
+                    # Q3 keeps the study-section name in 'panel_name', which no
+                    # code here ever read: every Grant Reviewing row rendered as
+                    # a bare agency ("Reviewer | NIH | 2018-2020") and the
+                    # identifier -- the entire content of the line -- was
+                    # dropped. 279 of the corpus's Q3 entries across 35 CVs
+                    # carry one, and 190 of those appear nowhere in the output
+                    # document (#466).
+                    #
+                    # Appended, deliberately, rather than promoted into the
+                    # chain above: agency and panel_name are BOTH populated on
+                    # 286 of 380 corpus Q3 entries, so preferring panel_name
+                    # would evict the agency on 269 of them and trade one
+                    # omission for another. Gated on Q3 because that is the only
+                    # code measured to carry the field -- panel_name is absent
+                    # from all 309 Q1, 24 Q4A, 105 Q4B and 157 Q4C entries, so
+                    # today the gate is a no-op that pins the intent.
+                    panel_name = fields.get('panel_name', '')
+                    if taxonomy_code == 'Q3' and panel_name:
+                        if not organization:
+                            organization = panel_name
+                        elif _squash(panel_name) not in _squash(organization):
+                            organization = f"{organization} - {panel_name}"
+
                     start_date = fields.get('start_date', '')
                     end_date = fields.get('end_date', '')
                     dates = format_date_range(start_date, end_date, taxonomy_code)
@@ -5645,7 +5922,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -5785,7 +6062,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         for entry in entries:
@@ -5853,7 +6130,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Handle pipe-separated format: "Specialty | CertNum | Year"
         # First, split on newlines and filter empty lines
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        lines = entry_lines(text)
 
         # Skip header lines
         header_keywords = ['name of specialty', 'board certificate', 'date of certification']
@@ -5993,7 +6270,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 sorted_entries = sort_entries_reverse_chronological(l1_entries)
 
                 if table and table_is_valid:
-                    _clear_table_data(table, keep_header=True)
+                    self._clear_table_data(table, keep_header=True)
                     self.stats['tables_populated'] += 1
                     for entry in sorted_entries:
                         fields = entry.get('extracted_fields', {}) or {}
@@ -6078,7 +6355,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 sorted_entries = sort_entries_reverse_chronological(l2_entries)
 
                 if table and table_is_valid:
-                    _clear_table_data(table, keep_header=True)
+                    self._clear_table_data(table, keep_header=True)
                     self.stats['tables_populated'] += 1
 
                     for entry in sorted_entries:
@@ -6123,7 +6400,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             continue
                         bullet_text = original_text.replace('\t', ' — ', 1).replace('\t', ' ') if '\t' in original_text else original_text
                         if bullet_text:
-                            self._insert_bulleted_entry(section_idx + 1 + bullet_count, bullet_text, entry, add_blank_before=(bullet_count == 0))
+                            self._insert_bulleted_entry(section_idx + 1 + bullet_count, bullet_text, entry, add_blank_before=(bullet_count == 0), list_level=0)
                             bullet_count += 1
 
         # L3: Clinical Leadership
@@ -6144,7 +6421,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 sorted_entries = sort_entries_reverse_chronological(l3_entries)
 
                 if table and table_is_valid:
-                    _clear_table_data(table, keep_header=True)
+                    self._clear_table_data(table, keep_header=True)
                     self.stats['tables_populated'] += 1
 
                     for entry in sorted_entries:
@@ -6241,7 +6518,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -6262,7 +6539,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             dates = format_date_range(start_date, end_date, taxonomy_code) or ''
 
             # Check if this entry contains multiple items (newline-separated)
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            lines = entry_lines(original_text)
 
             # Use multi-line parsing when the text contains 3+ lines — this catches
             # mega-blocks where field extraction only captured one item from many.
@@ -6425,7 +6702,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         if not table:
             return
 
-        _clear_table_data(table, keep_header=True)
+        self._clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
         sorted_entries = sort_entries_reverse_chronological(entries)
@@ -6486,7 +6763,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                             activity = re.sub(r'\s*\([^)]*\d{4}[^)]*\)', '', original_text).strip()
 
             # Check if this entry contains multiple items (newline-separated)
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            lines = entry_lines(original_text)
 
             # Use multi-line parsing when the text contains 3+ lines — this catches
             # mega-blocks where field extraction only captured one item from many.
@@ -6619,7 +6896,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         # Clear tables and mark as populated
         for scope, table in tables_by_scope.items():
-            _clear_table_data(table, keep_header=True)
+            self._clear_table_data(table, keep_header=True)
             self.stats['tables_populated'] += 1
 
         # Classify and route entries by geographic scope
@@ -6830,7 +7107,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
             if table:
                 # Clear existing table data and fill with matched entries
-                _clear_table_data(table, keep_header=True)
+                self._clear_table_data(table, keep_header=True)
                 self.stats['tables_populated'] += 1
 
                 for entry in matching_entries:
@@ -6867,7 +7144,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     text = entry.get('text', '').strip()
                     if text:
                         insert_idx = section_idx + 1 + i
-                        self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=(i == 0))
+                        self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=(i == 0), list_level=0)
 
     def _route_overflow_entries(self):
         """Route content-overflow entries as tracked-change bullets in their WCM sections.
@@ -7546,12 +7823,70 @@ Now analyze the text above:"""
                     self.stats['unrendered_records_recovered'] += 1
                     n_recovered += 1
 
+        appendix_batch.extend(self._unconsumed_personal_data_batch(haystack))
+
         if appendix_batch:
             self._add_remaining_to_appendix(appendix_batch)
 
         if self.verbose and n_recovered:
             print(f"  Recovered {n_recovered} unrendered record line(s) "
                   f"({len(appendix_batch)} routed to appendix)")
+
+    def _unconsumed_personal_data_batch(self, haystack: str
+                                        ) -> List[Tuple[str, str, float]]:
+        """A-coded entries that reached no Personal Data slot and no page.
+
+        'A' is listed in `mapped_codes`, whose comment says "unused A entries
+        go to appendix" -- they did not. The exclusion covered the whole code,
+        on the stated assumption that "A entries are all used in Personal Data
+        section". The corpus refutes it: `_fill_personal_data` reads only
+        phone/address/email, so an entry carrying "Citizenship: US", "Fax: ..."
+        or "Foreign Languages: ..." is consumed by nothing and then excluded
+        from the appendix as well. 145 such orphans exist across 80 of the 100
+        corpus CVs.
+
+        Two filters, at deliberately different granularities:
+
+        - Already-rendered entries are skipped. Most orphans are the faculty
+          member's own name/title banner, which renders from `cv_owner` rather
+          than from the A entry -- 75 of 76 are already on the page, and
+          appending them would be pure duplication.
+        - PII entries are replaced by a single notice rather than dropped
+          silently. Here the whole entry is denied, unlike the consumption
+          path: this entry renders nothing, so discarding it costs nothing,
+          and fragment-level filtering would keep the birth date and drop only
+          its label.
+        """
+        batch: List[Tuple[str, str, float]] = []
+        redacted = 0
+        for entry in getattr(self, '_unconsumed_personal_data', []):
+            # The PII scan reads RAW text, the render reads cleaned text, and
+            # the order matters: _clean_inline_tabs rewrites '\t' to ': ' and
+            # ' | ' to ' — ', which are exactly the fragment boundaries
+            # _pii_fragments splits on. Scanning the cleaned text merges a PII
+            # cell into its neighbour and the label no longer starts a
+            # fragment, so the entry renders. Pinned by
+            # test_pii_in_a_tab_separated_cell_is_still_caught.
+            raw_text = entry.get('text', '') or ''
+            text = _clean_inline_tabs(raw_text).strip()
+            if not text:
+                continue
+            fields = entry.get('extracted_fields') or {}
+            if (_pii_fragments(raw_text)
+                    or any(_PII_FIELD_KEY_RE.match(k) for k in fields)):
+                redacted += 1
+                continue
+            if _squash(text) in haystack:
+                continue
+            batch.append((text, 'A', 0))
+
+        if redacted:
+            # One notice per document, not one per entry: the point is that the
+            # reader knows something was withheld, not how many times.
+            batch.append((PII_REDACTED_NOTICE, 'A', 0))
+        self.stats['personal_data_recovered'] = len(batch) - (1 if redacted else 0)
+        self.stats['personal_data_redacted'] = redacted
+        return batch
 
     def _fill_appendix(self, unmapped_entries: List[Dict]):
         """Add appendix section for unmapped content.
@@ -8349,11 +8684,12 @@ Now analyze the text above:"""
 
             # Look at the next few paragraphs after the section header
             for i in range(section_idx + 1, min(section_idx + 5, len(self.doc.paragraphs))):
-                para_text = self.doc.paragraphs[i].text.strip()
+                para = self.doc.paragraphs[i]
+                para_text = para.text.strip()
                 if not para_text:
                     continue
                 # Check if this looks like a combined entry (semicolon-separated list)
-                if para_text.startswith('•') and para_text.count(';') > 3:
+                if _is_bullet_paragraph(para) and para_text.count(';') > 3:
                     issues.append({
                         "check": "semicolon_fused_bullets",
                         "code": code,
@@ -8392,10 +8728,11 @@ Now analyze the text above:"""
         if teaching_idx is not None:
             has_visible_bullets = False
             for i in range(teaching_idx + 1, min(teaching_idx + 30, len(self.doc.paragraphs))):
-                para_text = self.doc.paragraphs[i].text.strip()
+                para = self.doc.paragraphs[i]
+                para_text = para.text.strip()
                 if 'CLINICAL PRACTICE' in para_text.upper():
                     break
-                if para_text.startswith('•') and len(para_text) > 5:
+                if _is_bullet_paragraph(para) and len(para_text) > 5:
                     has_visible_bullets = True
                     break
             if not has_visible_bullets:
