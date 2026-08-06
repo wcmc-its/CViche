@@ -16,12 +16,11 @@ predating the input-archiving feature).
 """
 import argparse
 import json
-import os
 import sys
 from collections import Counter
 from pathlib import Path
 
-from unified_pipeline.run_doctor import run_doctor
+from unified_pipeline.run_doctor import KNOWN_LINTS, run_doctor
 
 # S3-flat suffix -> the stage_* dir run_doctor._ARTIFACTS globs (kept in sync
 # with that map; a suffix run_doctor stops reading just goes unused here).
@@ -118,16 +117,17 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
     return reports
 
 
-# The 16 lints run_doctor always considers (skipped ones emit a "skipped: missing"
+# The lints run_doctor always considers (skipped ones emit a "skipped: missing"
 # INFO; a lint that runs clean emits nothing -- so ran = ALL - skipped, not the
 # set of lints that happened to fire).
-ALL_LINTS = [
-    "segmentation", "missed_headers", "bucket_status", "under_extraction",
-    "classified_unrendered", "output_hygiene", "dead_sections",
-    "unrendered_records", "enrichment_failures", "stage6_render_warnings",
-    "dedup_drops", "pipe_leaks", "table_shape", "duplicate_passages",
-    "owner_contact_missing", "pipeline_errors_present",
-]
+#
+# Imported, not hardcoded (#268). The local copy this replaces had drifted, and
+# the drift check that was supposed to catch it could not: it counted `lint_*`
+# names off the module, which over-counts by one because `lint_surprise` is a
+# ranking helper rather than a rule. That assert has been failing on dev ever
+# since lint_surprise landed, and nothing runs --selftest in CI, so nobody saw
+# it. Importing the canonical tuple removes both the copy and the heuristic.
+ALL_LINTS = list(KNOWN_LINTS)
 
 
 def aggregate(reports):
@@ -194,19 +194,12 @@ def _selftest():
         assert _resolve_run_dir(corpus, "flat") == corpus / "flat"
         assert _resolve_run_dir(corpus, "absent") == corpus / "absent"
 
-    # #4: ALL_LINTS is hand-kept in sync with run_doctor. The proper fix is
-    # exporting KNOWN_LINTS from run_doctor (#268) -- deriving by function name
-    # is wrong (lint_stage6_warnings emits key "stage6_render_warnings"). Until
-    # then, trip loudly the next time a lint is added/removed so the count can't
-    # silently drift.
-    import unified_pipeline.run_doctor as rd
-    n_lint_fns = sum(1 for name in dir(rd)
-                     if name.startswith("lint_") and callable(getattr(rd, name))
-                     # defined here, not an imported lint_* (e.g. lint_metrics)
-                     and getattr(getattr(rd, name), "__module__", None) == rd.__name__)
-    assert n_lint_fns == len(ALL_LINTS), (
-        f"lint drift: run_doctor has {n_lint_fns} lint_* functions but ALL_LINTS "
-        f"lists {len(ALL_LINTS)}; reconcile (see #268 for the KNOWN_LINTS export)")
+    # #4: ALL_LINTS is now imported from run_doctor rather than hand-kept, so
+    # it cannot drift. The name-prefix count that used to live here is gone --
+    # it over-counted lint_surprise (a ranking helper, not a rule) and had been
+    # failing on dev ever since. What the registry itself must match is checked
+    # by test_run_doctor_contract.py, which runs in CI; --selftest does not.
+    assert ALL_LINTS == list(KNOWN_LINTS), "ALL_LINTS diverged from KNOWN_LINTS"
     assert len(set(ALL_LINTS)) == len(ALL_LINTS), "ALL_LINTS has duplicates"
 
     print("selftest OK")
