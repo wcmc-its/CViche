@@ -88,28 +88,10 @@ import re
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
-from unified_pipeline.core.render_check import entry_fragments
-from unified_pipeline.core.template_boilerplate import (
-    is_source_boilerplate,
-    is_template_instruction,
-)
-from unified_pipeline.quality_score import (
-    FATAL_ERROR_PATTERN,
-    cv_owner_name_missing,
-    iter_error_fields,
-)
-from unified_pipeline.segmentation_regression import (
-    SUBSTANTIVE_LINE_CHARS,
-    _looks_like_record,
-    _norm,
-    _squash,
-    compute_metrics,
-    iter_source_lines,
-    lint_metrics,
-)
-from unified_pipeline.stage_6_word_template import grant_status_rebucket_target
+from unified_pipeline.core.template_boilerplate import is_source_boilerplate
+from unified_pipeline.segmentation_regression import iter_source_lines
 
 # Lint rules and their primitives now live in the doctor/ package (#493).
 # Re-exported here rather than updating callers: five files import 33 names
@@ -150,6 +132,12 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_classified_unrendered,
     lint_dedup_drops,
     lint_under_extraction,
+)
+from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
+    _OWNER_CAP,
+    _OWNER_GATE,
+    lint_enrichment_failures,
+    lint_owner_contact_missing,
 )
 from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     APPENDIX_WARN_ENTRIES,
@@ -194,6 +182,9 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     _hierarchy_titles,
     lint_missed_headers,
     lint_segmentation,
+)
+from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
+    lint_pipeline_errors,
 )
 
 
@@ -455,138 +446,6 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
     doc = Document(docx_path)
     return [[[_cell_text(cell).strip() for cell in row.cells] for row in tbl.rows]
             for tbl in doc.tables]
-
-
-# -------------------------------------------------------------------- lint 1
-
-
-# -------------------------------------------------------------------- lint 2
-
-
-# -------------------------------------------------------------------- lint 3
-
-
-# -------------------------------------------------------------------- lint 4
-
-
-# -------------------------------------------------------------------- lint 5
-
-
-# -------------------------------------------------------------------- lint 6
-
-
-# -------------------------------------------------------------------- lint 7
-
-
-# -------------------------------------------------------------------- lint 8
-
-
-# -------------------------------------------------------------------- lint 9
-
-def lint_enrichment_failures(stage5e: Dict) -> List[Dict]:
-    """Publications whose stage-5 PubMed enrichment ended in a *_failed status
-    (lookup_failed, pmcid_conversion_failed, doi_found_but_fetch_failed):
-    their citations degrade to CV-extracted fields. Non-failure outcomes
-    (enriched, no_identifier, doi_not_in_pubmed) are expected vocabulary."""
-    failed = [e for e in stage5e.get("entries", [])
-              if str(e.get("enrichment_status") or "").endswith("_failed")]
-    if not failed:
-        return []
-    counts: Dict[str, int] = {}
-    for e in failed:
-        status = str(e.get("enrichment_status"))
-        counts[status] = counts.get(status, 0) + 1
-    breakdown = ", ".join(f"{s}: {n}" for s, n in sorted(counts.items()))
-    return [_finding(
-        "enrichment_failures", "WARN",
-        f"{len(failed)} publication(s) failed PubMed enrichment ({breakdown}) "
-        f"— citations degrade to CV-extracted fields (#222)",
-        [str(e.get("text", ""))[:100] for e in failed[:3]])]
-
-
-# ------------------------------------------------------------------- lint 10
-
-
-# ------------------------------------------------------------------- lint 11
-
-
-# ------------------------------------------------------------------- lint 12
-
-
-# ------------------------------------------------------------------- lint 13
-
-
-# ------------------------------------------------------------------- lint 14
-
-
-_OWNER_GATE = "HARD-FAIL gate 'CV owner name / contact populated'"
-_OWNER_CAP = "the quality score is capped at 25 (RED, do not deliver)"
-
-
-def lint_owner_contact_missing(stage4: Optional[Dict], uid: str,
-                               unreadable: Optional[str] = None) -> List[Dict]:
-    """The quality score's cap-25 hard-fail gate: the document cannot be
-    delivered under anyone's name. The predicate is the scorer's own
-    (quality_score.cv_owner_name_missing), applied to the stage-4 artifact the
-    doctor already loads — the same ``*_fields.json`` the scorer reads.
-
-    Accepts ``stage4=None`` rather than being skipped by ``_ready`` because
-    score_cv_owner caps at 25 for an ABSENT ``*_fields.json`` too ("no
-    fields.json found"); the call site decides when that case is a real run
-    rather than a wrong uid.
-
-    The evidence names which fields are populated but never their values: a
-    partly-extracted owner (LLM found a surname but no given name) fires this
-    gate, and the doctor report is mirrored to S3 and served by the admin
-    viewer."""
-    if stage4 is None:
-        cause = (f"the stage-4 *_fields.json will not parse ({unreadable})"
-                 if unreadable else
-                 "there is no stage-4 *_fields.json for this document")
-        return [_finding("owner_contact_missing", "ERROR",
-                         f"{_OWNER_GATE}: {cause} — {_OWNER_CAP}")]
-    if not cv_owner_name_missing(stage4):
-        return []
-    cv_owner = stage4.get("cv_owner", {}) or {}
-    fields = ("full_name", "first_name", "last_name")
-    populated = [f for f in fields if str(cv_owner.get(f) or "").strip()]
-    evidence = ["cv_owner name fields populated: " + (", ".join(populated)
-                                                      or "none")]
-    if str(cv_owner.get("last_name") or "").strip().lower() == uid.lower():
-        evidence.append(
-            "last_name is the document uid — stage 4 fell back to the file "
-            "stem, so the rendered document carries the uid as the owner name")
-    return [_finding(
-        "owner_contact_missing", "ERROR",
-        f"{_OWNER_GATE}: the cv_owner block has no usable name — {_OWNER_CAP}",
-        evidence)]
-
-
-# ------------------------------------------------------------------- lint 15
-
-def lint_pipeline_errors(artifacts: Dict[str, Dict]) -> List[Dict]:
-    """The quality score's cap-40 hard-fail gate: an ``error`` field somewhere
-    in the run's artifacts carries a fatal pattern (NameError, traceback), so a
-    stage died mid-run and whatever it owned is missing from the output. The
-    pattern and the walk are the scorer's own
-    (quality_score.FATAL_ERROR_PATTERN / iter_error_fields).
-
-    ``artifacts`` is keyed by stage label and the caller narrows it to exactly
-    the JSON the deployed scorer reads, so the cap this finding names is the
-    cap those artifacts actually produce."""
-    fatal: List[str] = []
-    for label in sorted(artifacts):
-        for path, value in iter_error_fields(artifacts[label], label):
-            if FATAL_ERROR_PATTERN.search(value):
-                fatal.append(f"{path}: {value[:120]}")
-    if not fatal:
-        return []
-    return [_finding(
-        "pipeline_errors_present", "ERROR",
-        f"HARD-FAIL gate 'Pipeline/API errors present': {len(fatal)} fatal "
-        f"error field(s) recorded in the run artifacts — the quality score is "
-        f"capped at 40 (RED, do not deliver)",
-        fatal[:5])]
 
 
 # --------------------------------------------------------- artifact resolution
