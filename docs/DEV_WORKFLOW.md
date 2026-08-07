@@ -8,18 +8,19 @@ is the short version.
 
 ## The one-paragraph version
 
-`dev` is the integration branch. Branch off `origin/dev`, open a PR into `dev`,
-wait for CI, merge it, then close the issue **by hand**. `main` is the default
-branch but is not where day-to-day work lands. There is also a local-only branch
-literally named `integration`, which is a scratch tree for testing open PRs
-together — it is never pushed and never the base of a PR.
+`dev` is the integration branch and, since 2026-08-06, the GitHub default branch.
+Branch off `origin/dev`, open a PR into `dev`, wait for CI, merge it. `Closes #N`
+now closes the issue for you. `main` is a release pointer and is not where
+day-to-day work lands. There is also a local-only branch literally named
+`integration`, which is a scratch tree for testing open PRs together — it is
+never pushed and never the base of a PR.
 
 ## Branches
 
 | Branch | What it is |
 |---|---|
-| `dev` | Integration branch. All work targets this. |
-| `main` | GitHub default branch. Not the day-to-day target. |
+| `dev` | Integration branch **and the GitHub default branch** since 2026-08-06. All work targets this. |
+| `main` | Release pointer. Not the day-to-day target, and well behind `dev`. |
 | `integration` | **Local only.** `origin/dev` + every open PR, for testing combinations. Never pushed, never a PR base. |
 
 Always branch from **freshly fetched** `origin/dev`:
@@ -31,6 +32,80 @@ git worktree add -b fix/123-short-slug ~/worktrees/cviche-123 origin/dev
 
 Never branch off a local `dev`/`main` that may have drifted, and never off
 `integration` — that would smuggle unreviewed code from other PRs into yours.
+
+## Pull requests
+
+### Base every PR on `dev`. Do not stack.
+
+A PR whose base is another feature branch costs more than it saves:
+
+- Nothing in the chain can merge until the bottom one does, so one round of
+  comments blocks the whole stack. The `#398` chain ran four deep — #514 → #515
+  → #516 → #517 — and sat with all four `CHANGES_REQUESTED` at once, one of them
+  already `CONFLICTING`.
+- Every revision to the bottom PR rebases the three above it, and each rebase
+  re-opens their diffs for re-review.
+- None of them auto-close an issue. Of the eleven PRs merged 2026-08-05 → 08-07,
+  **seven merged into a feature branch rather than `dev`**.
+
+Land one, then rebase the next onto `dev`. Sequential is slower to start and much
+faster to finish.
+
+### Split by what has to land, not by what is convenient to write
+
+Comment volume tracks lines changed, not defect density: #518 drew 50 substantive
+comments over 16 files; #535 drew 8 over one 200-line script. A 3,000-line PR is
+not reviewed three times as fast as three 1,000-line ones.
+
+The one size complaint that recurs is about **file** size, not PR size, and it is
+explicit (PR #397, 2026-07-24):
+
+> "I'll review this file once it has been split into smaller, more manageable
+> files. At over 4,000 lines of code, it's difficult to review thoroughly and
+> maintain effectively in its current state."
+
+### Replying to review comments
+
+The standing verdict on most reviews is:
+
+> "Please address the code review comments if possible. They are improvement
+> suggestions, not bugs. If any of them cannot be addressed now, please leave a
+> comment explaining why. I will merge the PR as is."
+
+So a review is not a gate. The friction is in how we answer it. Two rules, both
+written from complaints we actually caused:
+
+1. **Never decline without a reason.** "Declined" with no explanation drew the
+   same objection seven times across #514 and #517 — *"Declined without any
+   explanation."* Say what you considered and why it does not apply here.
+2. **File the issue before you reply, and name the real number.** Replying "will
+   track this" and not filing is our most common failure: the #569 retrospective
+   found **34 of 45 tracking promises were never filed**. Pointing at an issue
+   that does not in fact cover the comment is the same failure with extra steps —
+   *"I don't see this issue included in #494"* (#503). Open the issue, then paste
+   its number.
+
+### What reviews here consistently ask for
+
+Across 152 substantive review comments on PRs #503, #509, #514–#518 and #535,
+six asks account for most of the volume. Meeting them in the first push is
+cheaper than answering them one comment at a time:
+
+| Ask | Comments | Standing issue |
+|---|---|---|
+| Split the function — one responsibility, one level of abstraction | 24 | #577 |
+| Builtin generics (`dict`, not `typing.Dict`) and full annotations | 23 | #533 |
+| A dataclass or `TypedDict` instead of a bare `dict` + `.get()` chain crossing a function boundary | 18 | #567, #494 |
+| No silently swallowed exception, no bare `except Exception` | 17 | — |
+| A named constant or `Enum` instead of an inline taxonomy code or format literal | 16 | — |
+| No `print()` in `src/` — and mind the two parsers that consume stage output | 8 | #563 |
+
+Those five standing issues absorb roughly 60% of everything written in review, so
+a comment that maps onto one of them belongs there rather than in a new issue.
+
+Nobody asks for tests in review. Testability appears only as an argument for
+splitting a function, never as a standalone request — which means test coverage
+is ours to decide, not something a reviewer will catch.
 
 ## Merging
 
@@ -70,23 +145,32 @@ Conflicts reported by that script are real and will hit you at merge time. Merge
 the independent PRs first, then merge `dev` into the conflicting branch, resolve,
 push, let CI re-run, and merge.
 
-### After merging: close the issue yourself
+### After merging: `Closes #N` now does the closing
 
-**A merge to `dev` never auto-closes anything.** GitHub only auto-closes issues
-from the default branch (`main`). `Closes #N` in a PR body targeting `dev` does
-nothing on merge.
+**Changed 2026-08-06.** `dev` became the GitHub default branch, so a PR merged
+into `dev` auto-closes the issues its body names. Verified end to end:
 
-This is the single biggest source of stale-open issues here, and stale-open
-issues cause duplicated work: someone picks up an issue that shipped weeks ago.
-
-```bash
-gh issue close 418 -c "Landed on dev in PR #419. Closing manually: a merge to dev
-does not auto-close, GitHub only auto-closes on the default branch (main)."
+```
+PR #508  merged into dev  2026-08-06T14:51:19Z   body: "Closes #268"
+issue #268  CLOSED 2026-08-06T14:51:20Z  reason=COMPLETED  closedBy=[508]
 ```
 
-Every issue number needs its own `Closes` keyword in the PR body, and its own
-manual close after. If a merge only partly satisfies an issue, do not leave the
-full original scope open — retitle it down to the precise remaining gap.
+Earlier notes in this file said the opposite, and were correct until that date.
+Anything merged before it never fired — #520 sat open for a day after #546
+shipped its fix for exactly this reason.
+
+Still true:
+
+- **One `Closes #N` per issue.** Two issues need two keywords; a comma list
+  closes only the first.
+- **It does not fire from a stacked PR.** Auto-close triggers only on a merge
+  into the default branch, so a PR based on another feature branch closes
+  nothing, ever. See "Pull requests" above.
+- **Check that it fired.** `gh issue view N --json state,closedByPullRequestsReferences`.
+  A stale-open issue causes duplicated work: someone picks up something that
+  shipped weeks ago.
+- **A partial fix does not stay open at full scope.** Retitle the issue down to
+  the precise remaining gap rather than leaving the original text standing.
 
 ## The `integration` branch
 
