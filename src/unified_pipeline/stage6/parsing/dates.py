@@ -14,19 +14,20 @@ it out. Deciding how a date should *look* on the page is `formatting/dates.py`;
 deciding what order records go in is `sorting/`. Both import from here, so
 nothing in this file may import from either.
 """
+from types import MappingProxyType
 import re
 from typing import Dict
 
 # Month name -> month number, for the date parser below. Includes the common
 # 3-4 letter abbreviations CVs use ("Aug", "Sept"). Distinct from _MONTH_NAMES
 # further down, which is the reverse (number -> name) for range formatting.
-_MONTH_NAME_TO_NUM = {
+_MONTH_NAME_TO_NUM = MappingProxyType({
     'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
     'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11,
     'december': 12,
     'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7, 'aug': 8,
     'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12,
-}
+})
 
 
 def _parse_date_components(date_str: str):
