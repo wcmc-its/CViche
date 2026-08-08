@@ -31,6 +31,7 @@ from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from ..normalization import _strip_org_tail
 from ..parsing import _is_table_header_entry
 from ..sorting import sort_entries_reverse_chronological
+from unified_pipeline.core.render_check import entry_lines
 
 
 class HonorsSection:

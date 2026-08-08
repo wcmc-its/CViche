@@ -49,6 +49,7 @@ from ..formatting import (
 )
 from ..parsing import _is_table_header_entry, _parse_multi_membership_entry
 from ..sorting import sort_entries_reverse_chronological
+from unified_pipeline.core.render_check import entry_lines
 
 
 class MembershipsSection:

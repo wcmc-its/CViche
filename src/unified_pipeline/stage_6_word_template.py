@@ -17,13 +17,14 @@ Author: Scholar Signals CV Pipeline
 Date: 2025-11-29
 """
 
+import logging
 import os
 import sys
 import json
 from types import MappingProxyType
 import re
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Literal, Optional, Tuple
 from datetime import datetime
 from collections import defaultdict
 
@@ -43,7 +44,7 @@ except ImportError:
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
-from unified_pipeline.core.render_check import entry_fragments
+from unified_pipeline.core.render_check import entry_fragments, entry_lines
 # Every name below is re-exported from this module by being imported here: it is
 # the public import surface (tests/test_stage6_import_surface.py pins 21 of them).
 # run_full_pipeline.py and the backend orchestrator.py are parallel drivers over
@@ -90,6 +91,18 @@ from unified_pipeline.stage6.resolution import (  # noqa: F401
     _recover_institution_from_nearby_entries,
 )
 from unified_pipeline.stage6.normalization import (  # noqa: F401
+    _CELL_PHONE_KEYS,
+    _OFFICE_PHONE_KEYS,
+    _HOME_PHONE_KEYS,
+    _ALL_PHONE_SLOT_KEYS,
+    _labels_its_own_phone_slots,
+    _phone_cell_text,
+    _PII_LABEL_RE,
+    _PII_FIELD_KEY_RE,
+    _PII_FRAGMENT_SPLIT_RE,
+    _squash,
+    _pii_fragments,
+    _from_pii_fragment,
     _HOME_ADDRESS_KEYS,
     _OFFICE_ADDRESS_KEYS,
     _TAXONOMY_CODE_PREFIX,
@@ -140,6 +153,398 @@ from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _clean_inline_tabs(text: str) -> str:
+    """Render the pipeline's internal cell separators readably.
+
+    Two separators are artifacts of how the readers flatten a source CV, and
+    neither belongs in a rendered Word document:
+
+    - " | " joins the cells of a table row (``docx_structure_extractor``). Those
+      cells are columns, not a label/value pair, so they rejoin with " — ".
+      A row whose cells are all empty is a blank template row carrying no
+      information; it collapses to "" so callers can drop it.
+    - "\\t" joins the "Label\\tValue" pairs of the WCM template's tables. A raw
+      tab renders ragged against Word's default tab stops, so the first becomes
+      ": " (label: value) and any further tabs become " — ".
+
+    Properly structured content (mentee/board tables) is routed to real Word
+    tables upstream via classification; this is the fallback for residual text.
+
+    ponytail: the name says "tabs" but it now handles both separators. Kept as-is
+    so this change does not collide with the three bullet call sites that #254
+    also edits; rename to _clean_cell_separators once that has landed.
+    """
+    if not text:
+        return text
+    if "|" in text:
+        text = " — ".join(c.strip() for c in text.split("|") if c.strip())
+    if "\t" not in text:
+        return text
+    parts = [p.strip() for p in text.split("\t") if p.strip()]
+    if len(parts) <= 1:
+        return text.replace("\t", " ").strip()
+    return parts[0] + ": " + " — ".join(parts[1:])
+
+
+# Keys observed in structured stage-4 `phone` values: cell, office, fax. Stage 4
+# extracts with no schema, so the vocabulary is unbounded -- match on the key
+# name, same as the address handling.
+
+
+
+
+
+
+def _committee_cell_text(value) -> str:
+    """Coerce a possibly-structured committee field to plain cell text.
+
+    Stage 4 can emit a committee field as a dict or a list of record dicts for a
+    multi-record entry (#208/#248 fusion), not just a string. Writing a non-str
+    into a Word cell (``cell.text = <dict>``) raises deep in python-docx and
+    aborts the whole document (#256). Never let that happen: pull the name-like
+    value from a dict, join a list, and stringify anything else."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return str(value.get("committee_name") or value.get("committee")
+                   or value.get("activity") or value.get("name")
+                   or value.get("title") or "")
+    if isinstance(value, list):
+        return "; ".join(t for t in (_committee_cell_text(v) for v in value) if t)
+    return str(value)
+
+
+# Keys observed in structured stage-4 `address` values on the 2026-07-25 corpus:
+# home_address, office_address, business_address. There is no convention — the
+# LLM picks one — so match on all of them.
+_HOME_ADDRESS_KEYS = ('home_address', 'home')
+_OFFICE_ADDRESS_KEYS = ('business_address', 'office_address', 'work_address',
+                        'business', 'office')
+
+
+def _labels_its_own_address_slots(value) -> bool:
+    """True when a dict address names its own home/office halves.
+
+    Distinguishes ``{"home_address": ..., "office_address": ...}``, which knows
+    which cell each half belongs in, from ``{"street": ..., "city": ...}``,
+    which is one address in parts and must be routed by the entry's own text."""
+    return isinstance(value, dict) and any(
+        k in value for k in _HOME_ADDRESS_KEYS + _OFFICE_ADDRESS_KEYS)
+
+
+def _address_cell_text(value, slot: str) -> str:
+    """Coerce a stage-4 ``address`` field to plain text for one slot.
+
+    ``slot`` is ``'home'`` or ``'office'``.
+
+    Stage 4 stores raw LLM JSON, and ``coerce_field_value_types`` deliberately
+    leaves dicts intact, so ``address`` reaches stage 6 as a dict on the CVs
+    whose contact block is a two-column Home/Office table. ``.replace()`` on
+    that dict raised AttributeError and aborted the entire document — two of 96
+    runs produced no deliverable at all (#442).
+
+    A string is returned untouched, so the CVs that never had this problem
+    render byte-identically.
+
+    Nothing is ever dropped for being an unfamiliar shape. The extraction call
+    runs with ``response_format={"type": "json_object"}`` and no schema, so the
+    key vocabulary is unbounded — the two corpus reproductions already disagreed
+    (``office_address`` vs ``business_address``). A dict that names no slot is
+    joined whole; a dict that names only one has its remaining keys joined into
+    the office cell; a value nested under a slot key is recursed into rather
+    than skipped. Silent loss is the failure mode this file keeps being bitten
+    by, so the fallbacks favour rendering something over rendering nothing."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "; ".join(t for t in (_address_cell_text(v, slot) for v in value) if t)
+    if not isinstance(value, dict):
+        return str(value)
+
+    def _join(items):
+        return "; ".join(t for t in (_address_cell_text(v, slot).strip()
+                                     for v in items) if t)
+
+    if not _labels_its_own_address_slots(value):
+        # One address split into parts. The caller routes it by entry text.
+        return _join(value.values())
+
+    own = _HOME_ADDRESS_KEYS if slot == 'home' else _OFFICE_ADDRESS_KEYS
+    other = _OFFICE_ADDRESS_KEYS if slot == 'home' else _HOME_ADDRESS_KEYS
+    for key in own:
+        text = _address_cell_text(value.get(key), slot).strip()
+        if text:
+            return text
+    if slot == 'home':
+        return ""
+    # Office is the catch-all: keys the home slot will never claim are joined
+    # here rather than silently dropped from a partly-labelled dict.
+    return _join(v for k, v in value.items() if k not in other)
+
+
+# A leading 3b taxonomy code (M2B, D1, S6, N3A …) that leaked into a rendered
+# bullet — code letter + 1-2 digits + optional trailing letter, bracketed at the
+# very start and followed by whitespace. Seen verbatim in output on the WCM-
+# template CVs (issue #251): "• [M2B] Project title: …", "• [D1] Visiting Prof…".
+_TAXONOMY_CODE_PREFIX = re.compile(r"^\s*\[[A-Z]\d{1,2}[A-Z]?\]\s+")
+
+
+def _strip_taxonomy_code(text: str) -> str:
+    """Drop a leading bracketed taxonomy code from bullet text before render.
+    # ponytail: shape-match, not a code allowlist — could also strip a leading
+    # grant-mechanism token like "[R01] " (rare as a bullet's first token); switch
+    # to the TAXONOMY_TO_SECTION key set if that ever shows up in output."""
+    return _TAXONOMY_CODE_PREFIX.sub("", text) if text else text
+
+
+# XML namespaces for Word documents
+WORD_NAMESPACE = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+W14_NAMESPACE = 'http://schemas.microsoft.com/office/word/2010/wordml'
+NSMAP = {
+    'w': WORD_NAMESPACE,
+    'w14': W14_NAMESPACE,
+}
+
+
+# Date format specifications per WCM template section
+# Format codes: 'mm/yyyy', 'mm/yy', 'yyyy', 'mm/dd/yyyy'
+DATE_FORMATS = {
+    'B1': 'mm/yyyy',      # Education: Dates attended (mm/yyyy-mm/yyyy)
+    'B2': 'mm/yy',        # Other Education: Dates attended (mm/yy – mm/yy)
+    'C': 'mm/yy',         # Postdoc Training: Dates (mm/yy - mm/yy)
+    'C1': 'mm/yy',
+    'C2': 'mm/yy',
+    'D1': 'mm/yy',        # Academic Appointments: Dates (mm/yy - mm/yy)
+    'D2': 'mm/yy',        # Hospital Appointments
+    'D3': 'mm/yy',        # Other Positions
+    'F1': 'mm/dd/yyyy',   # Licensure: Date of issue (mm/dd/yyyy)
+    'F2': 'yyyy',         # Board Certification: Dates (yyyy–yyyy)
+    'H': 'yyyy',          # Honors: Date awarded (yyyy)
+    'I': 'yyyy',          # Memberships: Date (yyyy-yyyy)
+    'K1': 'yyyy',         # Teaching activities
+    'K2': 'yyyy',
+    'K3': 'yyyy',
+    'K4': 'yyyy',
+    'K5': 'yyyy',
+    'M2A': 'mm/yy',       # Grants: various date formats
+    'M2B': 'mm/yy',
+    'M2C': 'mm/yy',
+    'N3A': 'yyyy',        # Mentoring
+    'N3B': 'yyyy',
+    'O': 'yyyy',          # Leadership
+    'P': 'yyyy',          # Committees: Dates (yyyy-yyyy)
+    'Q1': 'yyyy',         # Service activities
+    'Q2': 'yyyy',
+    'Q3': 'yyyy',
+    'Q4': 'yyyy',
+    'Q4A': 'yyyy',
+    'Q4B': 'yyyy',
+    'Q4C': 'yyyy',
+    'Q4D': 'yyyy',
+    'R': 'yyyy',          # Invited Presentations: Dates (yyyy)
+    'S1': 'yyyy',         # Publications: year only
+    'S2': 'yyyy',
+    'S3': 'yyyy',
+    'S4': 'yyyy',
+    'S5': 'yyyy',
+    'S6': 'yyyy',
+    'S7': 'yyyy',
+    'S8': 'yyyy',
+    'S9': 'yyyy',
+}
+
+
+# Month name -> month number, for the date parser below. Includes the common
+# 3-4 letter abbreviations CVs use ("Aug", "Sept"). Distinct from _MONTH_NAMES
+# further down, which is the reverse (number -> name) for range formatting.
+_MONTH_NAME_TO_NUM = {
+    'january': 1, 'february': 2, 'march': 3, 'april': 4, 'may': 5, 'june': 6,
+    'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11,
+    'december': 12,
+    'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7, 'aug': 8,
+    'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+}
+
+
+def _is_bullet_paragraph(para: Paragraph) -> bool:
+    """True for a bullet in either representation the renderer emits.
+
+    Section K moved to real Word list paragraphs in #474, so a validator that
+    tests for a literal "•" prefix stops seeing K at all -- and check 3
+    below then reports no_visible_teaching_content on every CV. The non-K
+    emitters still prefix the glyph (#483), so both forms have to count.
+    """
+    if para.text.strip().startswith('•'):
+        return True
+    pPr = para._p.pPr
+    return pPr is not None and pPr.find(qn('w:numPr')) is not None
+
+
+def _parse_date_components(date_str: str):
+    """Parse a date string into (year, month, day) ints; any component absent
+    from the input is None. Returns (None, None, None) when nothing parses.
+
+    Single source of truth for date parsing, shared by format_date_for_section
+    (rendering) and extract_sort_date (reverse-chron sorting) so the two cannot
+    drift. They previously carried near-duplicate copies that HAD drifted: the
+    sort copy lacked the '\\.?' in the month-name pattern, so "Aug. 2021" /
+    "Sept. 2019" failed every branch and the entry sorted to the bottom of its
+    section while still rendering its date correctly (issue #266).
+    """
+    s = str(date_str or '').strip()
+    if not s:
+        return (None, None, None)
+    # YYYY-MM-DD / YYYY/MM/DD
+    m = re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+    # MM/DD/YYYY / MM-DD-YYYY
+    m = re.match(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', s)
+    if m:
+        return (int(m.group(3)), int(m.group(1)), int(m.group(2)))
+    # YYYY-MM / YYYY/MM (disjoint from MM/YYYY below: 4-digit lead vs 4-digit tail)
+    m = re.match(r'(\d{4})[-/](\d{1,2})$', s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), None)
+    # MM/YYYY / MM-YYYY
+    m = re.match(r'(\d{1,2})[-/](\d{4})', s)
+    if m:
+        return (int(m.group(2)), int(m.group(1)), None)
+    # Just YYYY
+    m = re.match(r'^(\d{4})$', s)
+    if m:
+        return (int(m.group(1)), None, None)
+    # Month YYYY -- "August 2021", "Aug 2021", "Aug. 2021", "Sept. 2019"
+    m = re.match(r'([a-zA-Z]+)\.?\s*(\d{4})', s)
+    if m:
+        return (int(m.group(2)), _MONTH_NAME_TO_NUM.get(m.group(1).lower()), None)
+    return (None, None, None)
+
+
+def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool = False) -> str:
+    """
+    Format a date string according to the WCM template requirements for a section.
+
+    Args:
+        date_str: Input date string (various formats)
+        taxonomy_code: Taxonomy code to determine required format
+        is_end_date: True if this is an end date (affects 'present' handling)
+
+    Returns:
+        Formatted date string according to WCM requirements
+    """
+    if not date_str:
+        return ''
+
+    date_str = str(date_str).strip()
+
+    # Handle 'present', 'current', 'ongoing' - always return as 'Present'
+    if date_str.lower() in ('present', 'current', 'ongoing', 'now'):
+        return 'Present'
+
+    # Get required format for this taxonomy code
+    required_format = DATE_FORMATS.get(taxonomy_code, 'yyyy')
+
+    year, month, day = _parse_date_components(date_str)
+
+    # If we couldn't parse it, return as-is
+    if not year:
+        return date_str
+    year = str(year)
+
+    # Format according to required format
+    if required_format == 'yyyy':
+        return year
+    elif required_format == 'mm/yyyy':
+        if month:
+            return f"{month:02d}/{year}"
+        return year  # Fall back to year only if no month
+    elif required_format == 'mm/yy':
+        if month:
+            return f"{month:02d}/{year[-2:]}"
+        # If no month, use full 4-digit year (2-digit looks odd standalone)
+        return year
+    elif required_format == 'mm/dd/yyyy':
+        if month and day:
+            return f"{month:02d}/{day:02d}/{year}"
+        elif month:
+            return f"{month:02d}/01/{year}"  # Default to 1st of month
+        return year
+
+    return date_str
+
+
+def format_date_range(start_date: str, end_date: str, taxonomy_code: str) -> str:
+    """
+    Format a date range according to WCM template requirements.
+
+    Args:
+        start_date: Start date string
+        end_date: End date string (may be 'present', empty, or a date)
+        taxonomy_code: Taxonomy code to determine required format
+
+    Returns:
+        Formatted date range string (e.g., "08/17-07/21" or "2017-Present")
+    """
+    formatted_start = format_date_for_section(start_date, taxonomy_code)
+    formatted_end = format_date_for_section(end_date, taxonomy_code, is_end_date=True)
+
+    if formatted_start and formatted_end:
+        # Avoid redundant ranges like "2024-2024" when both resolve to the same string
+        if formatted_start == formatted_end:
+            return formatted_start
+        return f"{formatted_start}-{formatted_end}"
+    elif formatted_start:
+        # Avoid "Present-Present" when start is already 'Present'
+        if formatted_start == 'Present':
+            return 'Present'
+        return f"{formatted_start}-Present"
+    elif formatted_end:
+        return formatted_end
+    return ''
+
+
+_MONTH_NAMES = {
+    '01': 'January', '02': 'February', '03': 'March', '04': 'April',
+    '05': 'May', '06': 'June', '07': 'July', '08': 'August',
+    '09': 'September', '10': 'October', '11': 'November', '12': 'December',
+    '1': 'January', '2': 'February', '3': 'March', '4': 'April',
+    '5': 'May', '6': 'June', '7': 'July', '8': 'August',
+    '9': 'September',
+}
+
+def normalize_iso_dates_in_text(text: str) -> str:
+    """Replace ISO-format dates in free text with human-readable equivalents.
+
+    Handles patterns the Stage 5c LLM sometimes produces:
+      2021-03-01  -> March 2021
+      2019-08-01–2019-09-01  -> August 2019–September 2019
+      2018-08  -> August 2018
+      2012-06–2012-07  -> June 2012–July 2012
+    """
+    if not text:
+        return text
+
+    def _iso_to_readable(m):
+        year, month = m.group(1), m.group(2)
+        day = m.group(3) if m.lastindex >= 3 and m.group(3) else None
+        month_name = _MONTH_NAMES.get(month, month)
+        return f"{month_name} {year}"
+
+    # YYYY-MM-DD (drop the day)
+    text = re.sub(r'\b(\d{4})[-/](0?[1-9]|1[0-2])[-/](0?[1-9]|[12]\d|3[01])\b', _iso_to_readable, text)
+    # YYYY-MM (no day)
+    text = re.sub(r'\b(\d{4})[-/](0?[1-9]|1[0-2])\b', _iso_to_readable, text)
+
+    return text
 
 
 _STOP_WORDS = frozenset({
@@ -586,9 +991,44 @@ def _norm(text) -> str:
     return " ".join(str(text or "").split()).lower()
 
 
-def _squash(text) -> str:
-    """Whitespace-FREE normalization for verbatim containment checks."""
-    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+# Personal data that must not be carried onto a WCM CV. Source CVs routinely
+# carry date/place of birth, marital status and family members' names in their
+# contact block; a WCM CV must not.
+#
+# Matched as a LABEL PREFIX terminated by a colon, against fragments split out
+# of the entry text. The colon terminator is load-bearing and must not be
+# relaxed: allowing '-'/en-dash as a terminator, or slop before the colon,
+# produces false positives on real CV content elsewhere in the corpus
+# ("Children's Oncology Group - Emeritus", "Children and Fire: Research ...",
+# "Children's Hospital Colorado - Pillar Award").
+#
+# Deliberately EXCLUDES gender/sex/race/ethnicity/religion. Those are ordinary
+# research vocabulary -- a publication titled "Gender: A Review" would be one
+# colon away from deletion -- and none occurs as a personal-data label anywhere
+# in the corpus. Residual gap, accepted: a label written without a colon
+# ("Date of Birth<tab>12/13/1947") evades this. Colon-less labels do occur in
+# the corpus, just not yet on a PII label.
+
+# Anchored whole-key match, so 'institutional_email' and friends can never hit.
+# Needed alongside the label pattern: stage 4 leaves extracted_fields empty for
+# most PII entries (caught by the label), but names some of them explicitly
+# (marital_status_spouse, birthplace) where the source label is unusual.
+# Every person stem takes the same optional suffix, so 'wife_name' is caught
+# wherever 'spouse_name' is; the anchoring, not the suffix, is what keeps
+# ordinary keys out.
+
+
+PII_REDACTED_NOTICE = (
+    "[Personal data from the source CV was withheld here "
+    "(e.g. date or place of birth, marital status, family members' names). "
+    "Review the original CV if this content is needed.]"
+)
+
+
+
+
 
 
 def _looks_like_record(line: str) -> bool:
@@ -725,6 +1165,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._geographic_scope_cache = {}
 
         # Statistics
+        # Tables already cleared this render, by element id. Guards against one
+        # filler wiping another's rows when both resolve to the same table (#454).
+        self._cleared_tables = set()
         self.stats = {
             'sections_filled': 0,
             'entries_inserted': 0,
@@ -1097,8 +1540,14 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if code not in mapped_codes:
                 unmapped_entries.extend(entries)
 
-        # Note: A entries are all used in Personal Data section, no need to add extras to appendix
-        # The Personal Data section handles name, address, email, phone, etc.
+        # A stays in mapped_codes, but NOT because its entries are all consumed
+        # -- that was the old assumption here and the corpus refutes it (145 of
+        # 306 A entries reach no Personal Data slot, across 80 of 100 CVs).
+        # Routing them here is wrong regardless: at this point the document is
+        # only part-rendered, so "was this content already placed?" cannot be
+        # answered yet, and the CV owner's own name banner would be appended a
+        # second time. They are recovered after every section has rendered, by
+        # _unconsumed_personal_data_batch.
 
         if unmapped_entries:
             self._fill_appendix(unmapped_entries)
@@ -1338,8 +1787,12 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 print(f"    ⚠ Geographic classification error: {e}")
             return 'National'  # Default on error
 
+
+
+
     def _insert_bulleted_entry(self, insert_idx: int, text: str, entry: Dict = None,
-                                add_blank_before: bool = False) -> Optional[Paragraph]:
+                                add_blank_before: bool = False,
+                                list_level: Optional[int] = None) -> Optional[Paragraph]:
         """Insert a SINGLE bulleted entry paragraph with a bullet character prefix.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
@@ -1349,6 +1802,10 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             text: The text content for the entry (should be single line)
             entry: Optional entry dict for adding comments
             add_blank_before: If True, add a blank line before this entry
+            list_level: When given, emit a real Word list paragraph at this
+                ilvl via _apply_list_bullet instead of prefixing a literal "• "
+                glyph (#474). Left at None by the three non-K call sites, whose
+                1,765 corpus-wide glyphs are #483.
 
         Returns:
             The created paragraph, or None if insertion failed
@@ -1364,50 +1821,15 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Insert blank before entry_para (which pushes entry down, so blank is above entry)
             entry_para.insert_paragraph_before("")
 
-        # Use a simple bullet character prefix for reliable rendering
-        # This avoids Word numbering system issues across different templates
-        run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
+        body = _clean_inline_tabs(_strip_taxonomy_code(text))
+        # Without list_level, a simple bullet character prefix: it avoids Word
+        # numbering system issues across different templates, at the cost of not
+        # being a list item to Word's outline, to accessibility tooling, or to
+        # anything re-parsing the output.
+        run = entry_para.add_run(body if list_level is not None else f"• {body}")
         _set_font(run)
-
-        if entry:
-            self._add_entry_comments(entry_para, entry)
-
-        self.stats['entries_inserted'] += 1
-        return entry_para
-
-    def _insert_bulleted_entry_with_track_changes(self, insert_idx: int, original_text: str,
-                                                   new_text: str, entry: Dict = None,
-                                                   add_blank_before: bool = False,
-                                                   author: str = "LLM Formatter") -> Optional[Paragraph]:
-        """Insert a bulleted entry showing original as deleted and new as inserted (track changes).
-
-        Args:
-            insert_idx: Index of paragraph to insert before
-            original_text: Original text to show as deleted
-            new_text: New formatted text to show as inserted
-            entry: Optional entry dict for adding comments
-            add_blank_before: If True, add a blank line before this entry
-            author: Author name for the track change attribution
-
-        Returns:
-            The created paragraph, or None if insertion failed
-        """
-        if insert_idx >= len(self.doc.paragraphs):
-            return None
-
-        # Create the bulleted entry paragraph first
-        entry_para = self.doc.paragraphs[insert_idx].insert_paragraph_before("")
-
-        # Add blank line before if requested
-        if add_blank_before:
-            entry_para.insert_paragraph_before("")
-
-        # Add bullet prefix, then track change pair
-        bullet_run = entry_para.add_run("• ")
-        _set_font(bullet_run)
-
-        # Add track change pair: deletion (original) then insertion (new)
-        self._add_track_change_pair(entry_para, original_text, new_text, author=author)
+        if list_level is not None:
+            self._apply_list_bullet(entry_para, level=list_level)
 
         if entry:
             self._add_entry_comments(entry_para, entry)
@@ -1700,6 +2122,31 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             except ValueError:
                 pass  # Already removed or not in body
 
+    def _clear_table_data(self, table: Table, keep_header: bool = True):
+        """Record, then clear all data rows from `table`.
+
+        The row removal itself is self-free and lives in
+        `stage6.formatting.docx._clear_table_data` after the #398 split. What
+        needs `self` is the bookkeeping: two fillers that resolve to the SAME
+        table make the second one silently destroy the first one's rows -- see
+        `_fill_other_service`, where a fuzzy anchor search sent Q4A onto the
+        table Q1 had just filled and wiped 39 entries across 6 corpus CVs
+        (#454). This wrapper is the thin delegating method
+        `test_stage6_import_surface.py` asks a split to leave behind; it changes
+        no rendering behaviour. The one caller that resolves its table by fuzzy
+        search consults `self._cleared_tables` before clearing.
+        """
+        if not table:
+            return
+        self._cleared_tables.add(id(table._element))
+        # Resolves to the module-level import at the top of this file: a class
+        # attribute of the same name does not shadow a global inside a method.
+        _clear_table_data(table, keep_header=keep_header)
+
+
+
+
+
     def _add_table_row_with_track_changes(self, table: Table, data: List[Tuple[str, bool]],
                                            is_header: bool = False, entry: Dict = None,
                                            track_change_author: str = "Institution Enrichment"):
@@ -1822,6 +2269,84 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 pass
 
         return para._element
+
+
+
+
+
+
+
+
+    # Title strings that field extraction sometimes emits when the source CV had
+    # a column header instead of a real role (mirrors the filter in
+    # ``_add_position_row``). Treated as "no title" for grouping purposes.
+    _PLACEHOLDER_TITLES = frozenset({'title', 'position', 'role', 'name',
+                                     'description', 'activity'})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # "MD" (from "Bethesda, MD") and "Bloomington" are comma segments the
+    # short-proper-noun org fallback happily returns (#229) — never treat a
+    # bare state abbreviation as an organization.
+    _US_STATE_ABBREVS = frozenset({
+        'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI',
+        'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI',
+        'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC',
+        'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT',
+        'VT', 'VA', 'WA', 'WV', 'WI', 'WY', 'DC'})
+
+    _MONTH_TAIL_RE = re.compile(
+        r'[\s,]*(?:January|February|March|April|May|June|July|August|'
+        r'September|October|November|December)$', re.IGNORECASE)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     def _route_overflow_entries(self):
         """Route content-overflow entries as tracked-change bullets in their WCM sections.
@@ -2500,12 +3025,71 @@ Now analyze the text above:"""
                     self.stats['unrendered_records_recovered'] += 1
                     n_recovered += 1
 
+        appendix_batch.extend(self._unconsumed_personal_data_batch(haystack))
+
         if appendix_batch:
             self._add_remaining_to_appendix(appendix_batch)
 
         if self.verbose and n_recovered:
             print(f"  Recovered {n_recovered} unrendered record line(s) "
                   f"({len(appendix_batch)} routed to appendix)")
+
+    def _unconsumed_personal_data_batch(self, haystack: str
+                                        ) -> List[Tuple[str, str, float]]:
+        """A-coded entries that reached no Personal Data slot and no page.
+
+        'A' is listed in `mapped_codes`, whose comment says "unused A entries
+        go to appendix" -- they did not. The exclusion covered the whole code,
+        on the stated assumption that "A entries are all used in Personal Data
+        section". The corpus refutes it: `_fill_personal_data` reads only
+        phone/address/email, so an entry carrying "Citizenship: US", "Fax: ..."
+        or "Foreign Languages: ..." is consumed by nothing and then excluded
+        from the appendix as well. 145 such orphans exist across 80 of the 100
+        corpus CVs.
+
+        Two filters, at deliberately different granularities:
+
+        - Already-rendered entries are skipped. Most orphans are the faculty
+          member's own name/title banner, which renders from `cv_owner` rather
+          than from the A entry -- 75 of 76 are already on the page, and
+          appending them would be pure duplication.
+        - PII entries are replaced by a single notice rather than dropped
+          silently. Here the whole entry is denied, unlike the consumption
+          path: this entry renders nothing, so discarding it costs nothing,
+          and fragment-level filtering would keep the birth date and drop only
+          its label.
+        """
+        batch: List[Tuple[str, str, float]] = []
+        redacted = 0
+        for entry in getattr(self, '_unconsumed_personal_data', []):
+            # The PII scan reads RAW text, the render reads cleaned text, and
+            # the order matters: _clean_inline_tabs rewrites '\t' to ': ' and
+            # ' | ' to ' — ', which are exactly the fragment boundaries
+            # _pii_fragments splits on. Scanning the cleaned text merges a PII
+            # cell into its neighbour and the label no longer starts a
+            # fragment, so the entry renders. Pinned by
+            # test_pii_in_a_tab_separated_cell_is_still_caught.
+            raw_text = entry.get('text', '') or ''
+            text = _clean_inline_tabs(raw_text).strip()
+            if not text:
+                continue
+            fields = entry.get('extracted_fields') or {}
+            if (_pii_fragments(raw_text)
+                    or any(_PII_FIELD_KEY_RE.match(k) for k in fields)):
+                redacted += 1
+                continue
+            if _squash(text) in haystack:
+                continue
+            batch.append((text, 'A', 0))
+
+        if redacted:
+            # One notice per document, not one per entry: the point is that the
+            # reader knows something was withheld, not how many times.
+            batch.append((PII_REDACTED_NOTICE, 'A', 0))
+        self.stats['personal_data_recovered'] = len(batch) - (1 if redacted else 0)
+        self.stats['personal_data_redacted'] = redacted
+        return batch
+
 
     def _add_entry_comments(self, para: Paragraph, entry: Dict):
         """Add all relevant comments from an entry to the paragraph.
@@ -2955,11 +3539,12 @@ Now analyze the text above:"""
 
             # Look at the next few paragraphs after the section header
             for i in range(section_idx + 1, min(section_idx + 5, len(self.doc.paragraphs))):
-                para_text = self.doc.paragraphs[i].text.strip()
+                para = self.doc.paragraphs[i]
+                para_text = para.text.strip()
                 if not para_text:
                     continue
                 # Check if this looks like a combined entry (semicolon-separated list)
-                if para_text.startswith('•') and para_text.count(';') > 3:
+                if _is_bullet_paragraph(para) and para_text.count(';') > 3:
                     issues.append({
                         "check": "semicolon_fused_bullets",
                         "code": code,
@@ -2998,10 +3583,11 @@ Now analyze the text above:"""
         if teaching_idx is not None:
             has_visible_bullets = False
             for i in range(teaching_idx + 1, min(teaching_idx + 30, len(self.doc.paragraphs))):
-                para_text = self.doc.paragraphs[i].text.strip()
+                para = self.doc.paragraphs[i]
+                para_text = para.text.strip()
                 if 'CLINICAL PRACTICE' in para_text.upper():
                     break
-                if para_text.startswith('•') and len(para_text) > 5:
+                if _is_bullet_paragraph(para) and len(para_text) > 5:
                     has_visible_bullets = True
                     break
             if not has_visible_bullets:

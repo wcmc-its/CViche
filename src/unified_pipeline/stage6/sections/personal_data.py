@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - mirrors stage_6_word_template
     sys.exit(1)
 
 from ..formatting import _set_cell_text, _set_font
-from ..normalization import _address_cell_text, _labels_its_own_address_slots
+from ..normalization import _address_cell_text, _from_pii_fragment, _labels_its_own_address_slots, _labels_its_own_phone_slots, _phone_cell_text, _pii_fragments
 from ..parsing import _extract_name_from_uid
 
 

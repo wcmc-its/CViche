@@ -28,6 +28,7 @@ from ..formatting import (
 )
 from ..parsing import _is_structural_label
 from ..sorting import sort_entries_reverse_chronological
+from unified_pipeline.core.render_check import entry_lines
 
 
 class ClinicalPracticeSection:

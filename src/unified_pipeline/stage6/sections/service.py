@@ -23,11 +23,16 @@ that would have to be undone first to understand either.
 `_add_extramural_row` and `_parse_extramural_leadership_lines` are shared by two
 of the four writers and by nothing outside the section.
 """
+import logging
 import re
 from typing import Dict, List
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
 from ..sorting import sort_entries_reverse_chronological
+from ..normalization import _squash
+
+logger = logging.getLogger(__name__)
+from unified_pipeline.core.render_check import entry_lines
 
 
 class ServiceSection:

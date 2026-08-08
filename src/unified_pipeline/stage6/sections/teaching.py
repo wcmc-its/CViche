@@ -49,6 +49,7 @@ from ..formatting import normalize_iso_dates_in_text
 from ..normalization import _strip_markdown_for_word
 from ..parsing import _is_orphan_fragment, _is_structural_label
 from ..sorting import sort_entries_reverse_chronological
+from unified_pipeline.core.render_check import entry_lines
 
 
 class TeachingSection:

@@ -1205,8 +1205,30 @@ Return ONLY valid JSON with the classifications array."""
             )
             classifications = []
 
-        # Build index lookup for classifications
-        class_by_idx = {c["index"]: c for c in classifications}
+        # Build index lookup for classifications.
+        #
+        # This runs OUTSIDE the try/except above, so anything raised here
+        # escapes classify_entries_batch and run_stage_3b entirely: the
+        # orchestrator fails the whole web run, while the CLI prints
+        # "Warning: Stage N failed" and lets every later stage run on
+        # unclassified entries. The response is requested as a bare
+        # json_object with no schema, so an object without "index" (KeyError)
+        # or a non-dict element (TypeError) is a real possibility. Skip those
+        # loudly instead -- they fall back to the default code below, which is
+        # what a missing classification already does (#521).
+        class_by_idx = {}
+        malformed = 0
+        for c in classifications:
+            if isinstance(c, dict) and "index" in c:
+                class_by_idx[c["index"]] = c
+            else:
+                malformed += 1
+        if malformed:
+            logger.warning(
+                "Stage 3b: skipped %d malformed classification object(s) in the "
+                "batch at offset %d; those entries fall back to the default code",
+                malformed, batch_start
+            )
 
         # Map results back to entries
         for orig_idx, entry in enumerate(batch_entries):
@@ -1220,14 +1242,19 @@ Return ONLY valid JSON with the classifications array."""
                     "classification_source": "empty_entry"
                 })
             else:
-                # Find this entry's position in entries_with_text
-                text_idx = next(
-                    (i for i, (idx, e) in enumerate(entries_with_text) if idx == orig_idx),
-                    None
-                )
-
-                if text_idx is not None and text_idx in class_by_idx:
-                    c = class_by_idx[text_idx]
+                # class_by_idx is keyed by the ORIGINAL index within
+                # batch_entries: the prompt labels each entry "[{i}]" using the
+                # i carried in entries_with_text, which came from
+                # enumerate(batch_entries), and the model echoes those labels
+                # back as "index". Looking up a POSITION within entries_with_text
+                # instead only agrees when nothing was filtered out -- and stage 2
+                # emits empty "break" entries throughout the list on purpose
+                # (filter_extraction_noise keeps them; "breaks are legitimately
+                # empty"). One break in a batch shifted every later entry, so an
+                # entry was persisted with its neighbour's code and confidence,
+                # indistinguishable downstream from a correct classification (#520).
+                c = class_by_idx.get(orig_idx)
+                if c is not None:
                     all_results.append({
                         **entry,
                         # Coalesce an explicit-null/empty LLM code to the fallback,

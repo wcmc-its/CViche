@@ -32,6 +32,7 @@ from typing import Dict, List
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
 from ..sorting import sort_entries_reverse_chronological
+from unified_pipeline.core.render_check import entry_lines
 
 
 class LeadershipSection:

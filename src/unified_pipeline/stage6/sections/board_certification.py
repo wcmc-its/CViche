@@ -28,6 +28,7 @@ import re
 from typing import Dict, List
 
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
+from unified_pipeline.core.render_check import entry_lines
 
 
 class BoardCertificationSection:
