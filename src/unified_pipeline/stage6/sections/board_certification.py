@@ -130,7 +130,7 @@ class BoardCertificationSection:
 
         # Handle pipe-separated format: "Specialty | CertNum | Year"
         # First, split on newlines and filter empty lines
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        lines = entry_lines(text)
 
         # Skip header lines
         header_keywords = ['name of specialty', 'board certificate', 'date of certification']

@@ -107,7 +107,7 @@ class MembershipsSection:
 
             # Check if this entry contains multiple memberships (newline-separated)
             # Pattern: "Member\nElected Member | Org1\nOrg2 | date1\ndate2"
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            lines = entry_lines(original_text)
 
             # Detect multi-membership pattern: multiple organization names or membership types
             if len(lines) > 2:

@@ -59,8 +59,9 @@ class ResearcherProfilesSection:
         for entry in reversed(s0_entries):
             text = entry.get('text', '').strip()
             entry_para = self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
-            run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
+            run = entry_para.add_run(_clean_inline_tabs(_strip_taxonomy_code(text)))
             _set_font(run)
+            self._apply_list_bullet(entry_para, level=0)
             self.stats['entries_inserted'] += 1
 
         # Add a blank line before the S0 content

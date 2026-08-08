@@ -80,7 +80,7 @@ class LeadershipSection:
             dates = format_date_range(start_date, end_date, taxonomy_code) or ''
 
             # Check if this entry contains multiple items (newline-separated)
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            lines = entry_lines(original_text)
 
             # Use multi-line parsing when the text contains 3+ lines — this catches
             # mega-blocks where field extraction only captured one item from many.

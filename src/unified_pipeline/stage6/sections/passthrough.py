@@ -209,4 +209,4 @@ class PassthroughSection:
                     text = entry.get('text', '').strip()
                     if text:
                         insert_idx = section_idx + 1 + i
-                        self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=(i == 0))
+                        self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=(i == 0), list_level=0)

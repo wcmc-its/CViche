@@ -138,7 +138,7 @@ class TeachingSection:
 
         if formatted_text and original_text:
             # Check if original has multiple distinct items (newline-separated list)
-            original_lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            original_lines = entry_lines(original_text)
 
             if len(original_lines) > 1:
                 # Multi-item entry: use original lines (Stage 5c may have over-combined)
@@ -149,23 +149,23 @@ class TeachingSection:
                     add_blank = is_first_visible and (j == len(original_lines) - 1)
                     self._insert_bulleted_entry(
                         insert_idx, line_text, entry if j == 0 else None,
-                        add_blank_before=add_blank
+                        add_blank_before=add_blank, list_level=0
                     )
             else:
                 # Single item: use formatted_text
                 new_text = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
                 self._insert_bulleted_entry(
                     insert_idx, new_text, entry,
-                    add_blank_before=is_first_visible
+                    add_blank_before=is_first_visible, list_level=0
                 )
 
         elif formatted_text:
             new_text = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
-            lines = [l.strip() for l in new_text.split('\n') if l.strip()]
+            lines = entry_lines(new_text)
             combined_text = '. '.join(lines) if len(lines) > 1 else (lines[0] if lines else '')
             self._insert_bulleted_entry(
                 insert_idx, combined_text, entry,
-                add_blank_before=is_first_visible
+                add_blank_before=is_first_visible, list_level=0
             )
 
         else:
@@ -186,14 +186,14 @@ class TeachingSection:
                     text += f", {institution}"
                 if role and role not in text:
                     text += f" ({role})"
-                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible)
+                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible, list_level=0)
             elif course_title:
                 text = course_title
                 if institution and institution not in text:
                     text += f", {institution}"
                 if role and role not in text:
                     text += f" ({role})"
-                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible)
+                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible, list_level=0)
             else:
                 lines = []
                 for line in original_text.split('\n'):
@@ -209,4 +209,4 @@ class TeachingSection:
                     if not line_text:
                         continue
                     add_blank = is_first_visible and (j == len(lines) - 1)
-                    self._insert_bulleted_entry(insert_idx, line_text, entry if j == 0 else None, add_blank_before=add_blank)
+                    self._insert_bulleted_entry(insert_idx, line_text, entry if j == 0 else None, add_blank_before=add_blank, list_level=0)

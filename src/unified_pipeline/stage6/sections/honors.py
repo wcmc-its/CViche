@@ -118,7 +118,7 @@ class HonorsSection:
 
             # Check if this entry contains multiple awards (newline-separated)
             # This happens when multiple honors were merged during extraction
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            lines = entry_lines(original_text)
 
             # Separate award lines from year lines
             # Years are typically 4-digit numbers or ranges like "2017-2020"
