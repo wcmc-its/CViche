@@ -23,6 +23,12 @@ that absence is absorbed there and nowhere else.
 """
 
 from .fields import (  # noqa: F401
+    _CELL_PHONE_KEYS,
+    _OFFICE_PHONE_KEYS,
+    _HOME_PHONE_KEYS,
+    _ALL_PHONE_SLOT_KEYS,
+    _labels_its_own_phone_slots,
+    _phone_cell_text,
     _HOME_ADDRESS_KEYS,
     _OFFICE_ADDRESS_KEYS,
     _address_cell_text,
@@ -34,6 +40,12 @@ from .records import (  # noqa: F401
     split_fused_citation_entries,
 )
 from .text import (  # noqa: F401
+    _PII_LABEL_RE,
+    _PII_FIELD_KEY_RE,
+    _PII_FRAGMENT_SPLIT_RE,
+    _squash,
+    _pii_fragments,
+    _from_pii_fragment,
     _TAXONOMY_CODE_PREFIX,
     _clean_inline_tabs,
     _deduplicate_repeated_content,

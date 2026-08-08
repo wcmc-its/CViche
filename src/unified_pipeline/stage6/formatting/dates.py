@@ -16,13 +16,14 @@ only its presentation.
 Parsing the string into components is `parsing/dates.py`, imported below. That
 direction is one-way and must stay so.
 """
+from types import MappingProxyType
 import re
 
 from ..parsing.dates import _parse_date_components
 
 # Date format specifications per WCM template section
 # Format codes: 'mm/yyyy', 'mm/yy', 'yyyy', 'mm/dd/yyyy'
-DATE_FORMATS = {
+DATE_FORMATS = MappingProxyType({
     'B1': 'mm/yyyy',      # Education: Dates attended (mm/yyyy-mm/yyyy)
     'B2': 'mm/yy',        # Other Education: Dates attended (mm/yy – mm/yy)
     'C': 'mm/yy',         # Postdoc Training: Dates (mm/yy - mm/yy)
@@ -65,7 +66,7 @@ DATE_FORMATS = {
     'S7': 'yyyy',
     'S8': 'yyyy',
     'S9': 'yyyy',
-}
+})
 
 
 def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool = False) -> str:
@@ -151,14 +152,14 @@ def format_date_range(start_date: str, end_date: str, taxonomy_code: str) -> str
     return ''
 
 
-_MONTH_NAMES = {
+_MONTH_NAMES = MappingProxyType({
     '01': 'January', '02': 'February', '03': 'March', '04': 'April',
     '05': 'May', '06': 'June', '07': 'July', '08': 'August',
     '09': 'September', '10': 'October', '11': 'November', '12': 'December',
     '1': 'January', '2': 'February', '3': 'March', '4': 'April',
     '5': 'May', '6': 'June', '7': 'July', '8': 'August',
     '9': 'September',
-}
+})
 
 def normalize_iso_dates_in_text(text: str) -> str:
     """Replace ISO-format dates in free text with human-readable equivalents.

@@ -302,3 +302,56 @@ def _strip_taxonomy_code(text: str) -> str:
     # grant-mechanism token like "[R01] " (rare as a bullet's first token); switch
     # to the TAXONOMY_TO_SECTION key set if that ever shows up in output."""
     return _TAXONOMY_CODE_PREFIX.sub("", text) if text else text
+
+
+# Protected-personal-data detection. Deny by value provenance rather than
+# by entry, so a contact block that also carries a birth date keeps its
+# live office address, phone and work email (#472).
+
+_PII_LABEL_RE = re.compile(r"""^\s*
+    (?: date \s* of \s* birth
+      | birth \s*-? \s* date (?: \s+ and \s+ birth \s*-? \s* place )?
+      | birthdate (?: \s+ and \s+ birthplace )?
+      | born
+      | d\.?o\.?b\.?
+      | place \s* of \s* birth | birth \s*-? \s* place | birthplace
+      | marital \s* status
+      | spouse (?: [’']s )? (?: \s* name )? | wife | husband
+      | children (?: [’']s \s* names? )? | dependents?
+      | social \s* security (?: \s* (?: number | no\.? ) )? | ssn
+    ) \s* :""", re.X | re.I)
+
+
+_PII_FIELD_KEY_RE = re.compile(r"""^(?:.*_)?(?:
+      date_of_birth | birth_?date | birth_?place | place_of_birth | dob
+    | marital_status (?:_\w+)? | spouse (?:_\w+)? | wife (?:_\w+)? | husband (?:_\w+)?
+    | children (?:_\w+)? | dependents? (?:_\w+)?
+    | ssn | social_security\w* )$""", re.X | re.I)
+
+
+_PII_FRAGMENT_SPLIT_RE = re.compile(r"[\n\t|]|\s{3,}")
+
+
+def _squash(text) -> str:
+    """Whitespace-FREE normalization for verbatim containment checks."""
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def _pii_fragments(text: Optional[str]) -> List[str]:
+    """The fragments of an entry that carry protected personal data."""
+    return [f for f in _PII_FRAGMENT_SPLIT_RE.split(str(text or ""))
+            if _PII_LABEL_RE.match(f)]
+
+
+def _from_pii_fragment(value, pii_fragments: List[str]) -> bool:
+    """Whether an extracted value's text was taken out of a PII fragment.
+
+    Deny by value PROVENANCE, not by entry. Dropping a whole entry that
+    contains a PII label is right in the appendix, where the entry renders
+    nothing so discarding it is free -- but it is wrong here, where the same
+    entry is actively supplying live contact data: on the corpus it drops real
+    office addresses, an office phone and a work email from three CVs whose
+    contact block happens to also carry a birth date.
+    """
+    squashed = _squash(value)
+    return bool(squashed) and any(squashed in _squash(f) for f in pii_fragments)
