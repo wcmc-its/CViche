@@ -24,6 +24,7 @@ Run with:
 """
 
 import ast
+import inspect
 import sys
 from pathlib import Path
 
@@ -36,8 +37,25 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
-_MODULE = Path(WCMTemplateGenerator.__module__.replace(".", "/"))
-_SOURCE = (_SRC / _MODULE).with_suffix(".py")
+
+def _sources():
+    """Every module contributing methods to the generator.
+
+    The #398 split moved the section fillers out of stage_6_word_template.py and
+    onto mixins under stage6/sections/, so scanning the generator's own module
+    would silently find zero call sites and pass the wire tests vacuously. Walk
+    the MRO instead, so a call site is covered wherever it lives.
+    """
+    seen = {}
+    for klass in WCMTemplateGenerator.__mro__:
+        try:
+            path = inspect.getsourcefile(klass)
+        except TypeError:  # builtins such as object have no source
+            continue
+        if path and "unified_pipeline" in path:
+            seen[path] = Path(path)
+    return list(seen.values())
+
 
 K_CALLER = "_insert_teaching_entry"
 
@@ -59,16 +77,17 @@ def _num_level(para):
 
 def _bullet_calls_by_function():
     """Every _insert_bulleted_entry call site, grouped by enclosing function."""
-    tree = ast.parse(_SOURCE.read_text())
     found = {}
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        calls = [c for c in ast.walk(node)
-                 if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
-                 and c.func.attr == "_insert_bulleted_entry"]
-        if calls:
-            found[node.name] = calls
+    for source in _sources():
+        tree = ast.parse(source.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            calls = [c for c in ast.walk(node)
+                     if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+                     and c.func.attr == "_insert_bulleted_entry"]
+            if calls:
+                found.setdefault(node.name, []).extend(calls)
     return found
 
 
@@ -135,20 +154,21 @@ def test_only_the_deferred_emitters_still_write_a_literal_glyph():
     whose own tests assert the glyph -- converting them means updating 16 of
     those tests, which is the remaining half of #483.
     """
-    tree = ast.parse(_SOURCE.read_text())
     emitters = set()
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        for call in ast.walk(node):
-            if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
-                    and call.func.attr == "add_run" and call.args):
+    for source in _sources():
+        tree = ast.parse(source.read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.FunctionDef):
                 continue
-            arg = call.args[0]
-            parts = arg.values if isinstance(arg, ast.JoinedStr) else [arg]
-            first = parts[0] if parts else None
-            if isinstance(first, ast.Constant) and str(first.value).startswith("•"):
-                emitters.add(node.name)
+            for call in ast.walk(node):
+                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                        and call.func.attr == "add_run" and call.args):
+                    continue
+                arg = call.args[0]
+                parts = arg.values if isinstance(arg, ast.JoinedStr) else [arg]
+                first = parts[0] if parts else None
+                if isinstance(first, ast.Constant) and str(first.value).startswith("•"):
+                    emitters.add(node.name)
     assert emitters == {"_insert_reconsidered_segment", "_add_remaining_to_appendix"}, \
         f"unexpected literal-glyph emitters: {sorted(emitters)}"
 
@@ -156,8 +176,10 @@ def test_only_the_deferred_emitters_still_write_a_literal_glyph():
 def test_the_dead_track_changes_bullet_writer_is_gone():
     # A second bullet writer that looked like the one the teaching path would
     # use when emit_track_changes is on (default True), with 0 call sites.
-    tree = ast.parse(_SOURCE.read_text())
-    names = {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+    names = set()
+    for source in _sources():
+        tree = ast.parse(source.read_text())
+        names |= {n.name for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
     assert "_insert_bulleted_entry_with_track_changes" not in names
 
 
