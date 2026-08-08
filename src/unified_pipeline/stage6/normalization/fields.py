@@ -108,3 +108,77 @@ def _address_cell_text(value, slot: str) -> str:
     # Office is the catch-all: keys the home slot will never claim are joined
     # here rather than silently dropped from a partly-labelled dict.
     return _join(v for k, v in value.items() if k not in other)
+
+
+# Phone is the same shape as address above: stage 4 can store a dict of
+# slot -> number, and the renderer needs plain text for one slot (#450).
+
+_CELL_PHONE_KEYS = ('cell', 'mobile', 'cell_phone', 'mobile_phone',
+                    'mobile_phone_primary', 'personal_phone')
+
+
+_OFFICE_PHONE_KEYS = ('office', 'work', 'business', 'office_phone',
+                      'work_phone', 'phone_office', 'business_phone')
+
+
+_HOME_PHONE_KEYS = ('home', 'home_phone', 'residence')
+
+
+_ALL_PHONE_SLOT_KEYS = _CELL_PHONE_KEYS + _OFFICE_PHONE_KEYS + _HOME_PHONE_KEYS
+
+
+def _labels_its_own_phone_slots(value) -> bool:
+    """True when a dict phone names its own cell/office/home halves.
+
+    Deliberately ANY key, not all: the real ``{"cell", "office", "fax"}`` from
+    web147 is a slot map carrying one key we have no slot for, and requiring
+    every key to be recognized would send it down the join path instead, which
+    concatenates the fax number into whichever row asked first. A dict that
+    names even one slot is routed by its own labels; keys outside
+    ``_ALL_PHONE_SLOT_KEYS`` are dropped -- see ``_phone_cell_text``."""
+    return isinstance(value, dict) and any(
+        k in value for k in _ALL_PHONE_SLOT_KEYS)
+
+
+def _phone_cell_text(value, slot: Literal['cell', 'office', 'home']) -> str:
+    """Coerce a stage-4 ``phone`` field to plain text for one slot.
+
+    Same defect family as the address field (#442): stage 4 stores raw LLM JSON
+    and ``coerce_field_value_types`` leaves dicts intact, so a two-column
+    contact block arrives here as ``{"cell": ..., "office": ..., "fax": ...}``.
+    Phone never crashed the way address did -- ``_set_cell_text`` stringifies --
+    so instead of losing the document it either rendered the dict's repr into a
+    Word cell or, on web147, dropped all three numbers because the entry text
+    said "Home" and the home slot has no template row (#450).
+
+    Strings pass through untouched, so CVs that never had this render
+    identically. A dict that names no slot is joined rather than dropped.
+
+    A slot-labelled dict drops any key outside ``_ALL_PHONE_SLOT_KEYS``, and
+    that is the intended render, not an oversight: the WCM template has exactly
+    two phone rows, Office telephone and Cell phone. ``fax`` -- the one non-slot
+    key observed in the corpus -- has nowhere to go, and joining it into the
+    office row would print a fax number as the office telephone. Anything new
+    stage 4 invents (``note``, ``pager``) is dropped the same way for the same
+    reason. Recovering one of them means adding a template row first; widening
+    the match here only moves the number into the wrong row."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "; ".join(t for t in (_phone_cell_text(v, slot) for v in value) if t)
+    if not isinstance(value, dict):
+        return str(value)
+    if not _labels_its_own_phone_slots(value):
+        # Recurse rather than str(): a nested value would otherwise render its
+        # Python repr into a Word cell.
+        return "; ".join(
+            t for t in (_phone_cell_text(v, slot).strip() for v in value.values()) if t)
+    keys = {'cell': _CELL_PHONE_KEYS, 'office': _OFFICE_PHONE_KEYS,
+            'home': _HOME_PHONE_KEYS}[slot]
+    for key in keys:
+        text = _phone_cell_text(value.get(key), slot).strip()
+        if text:
+            return text
+    return ""

@@ -233,6 +233,15 @@ class MentoringSection:
         # Build Project/Accomplishments from research_focus (dissertation title)
         project = fields.get('research_focus', '') or fields.get('dissertation_title', '')
 
+        # Awards and fellowships the mentee won belong in this row: the WCM template's
+        # footnote for Project/Accomplishments reads "Optional: List publications,
+        # awards, grants ... arising directly from the mentoring activity." Stage 4
+        # writes them to awards/funding_source, which nothing in this file read, so
+        # 133 corpus values were extracted and then dropped.
+        mentee_awards = (fields.get('awards') or fields.get('funding_source') or '').strip()
+        if mentee_awards and mentee_awards.casefold() not in project.casefold():
+            project = f"{project}\nAwards: {mentee_awards}" if project else f"Awards: {mentee_awards}"
+
         # Determine supervision type - default to "Research" for thesis/dissertation mentees
         supervision_type = fields.get('supervision_type', '')
         if not supervision_type:

@@ -17,12 +17,14 @@ Author: Scholar Signals CV Pipeline
 Date: 2025-11-29
 """
 
+import logging
 import os
 import sys
 import json
+from types import MappingProxyType
 import re
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Literal, Optional, Tuple
 from datetime import datetime
 from collections import defaultdict
 
@@ -42,7 +44,7 @@ except ImportError:
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
-from unified_pipeline.core.render_check import entry_fragments
+from unified_pipeline.core.render_check import entry_fragments, entry_lines
 # Every name below is re-exported from this module by being imported here: it is
 # the public import surface (tests/test_stage6_import_surface.py pins 21 of them).
 # run_full_pipeline.py and the backend orchestrator.py are parallel drivers over
@@ -89,6 +91,18 @@ from unified_pipeline.stage6.resolution import (  # noqa: F401
     _recover_institution_from_nearby_entries,
 )
 from unified_pipeline.stage6.normalization import (  # noqa: F401
+    _CELL_PHONE_KEYS,
+    _OFFICE_PHONE_KEYS,
+    _HOME_PHONE_KEYS,
+    _ALL_PHONE_SLOT_KEYS,
+    _labels_its_own_phone_slots,
+    _phone_cell_text,
+    _PII_LABEL_RE,
+    _PII_FIELD_KEY_RE,
+    _PII_FRAGMENT_SPLIT_RE,
+    _squash,
+    _pii_fragments,
+    _from_pii_fragment,
     _HOME_ADDRESS_KEYS,
     _OFFICE_ADDRESS_KEYS,
     _TAXONOMY_CODE_PREFIX,
@@ -111,18 +125,67 @@ from unified_pipeline.stage6.sorting import (  # noqa: F401
     sort_entries_reverse_chronological,
 )
 from unified_pipeline.stage6.sections import (  # noqa: F401
+    AdministrativeActivitiesSection,
+    AppendixSection,
+    BibliographySection,
+    BoardCertificationSection,
     ClinicalPracticeSection,
+    EducationSection,
     HonorsSection,
+    LeadershipSection,
+    LicensureSection,
+    MembershipsSection,
     MentoringSection,
+    OtherEducationSection,
+    PassthroughSection,
+    PatentsSection,
     PersonalDataSection,
     PositionsSection,
+    PostdocTrainingSection,
+    PresentationsSection,
+    ResearchSummarySection,
     ResearchSupportSection,
+    ResearcherProfilesSection,
     ServiceSection,
+    TeachingSection,
 )
+
+logger = logging.getLogger(__name__)
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
 )
+
+
+
+
+
+# Keys observed in structured stage-4 `phone` values: cell, office, fax. Stage 4
+# extracts with no schema, so the vocabulary is unbounded -- match on the key
+# name, same as the address handling.
+
+
+
+
+
+
+
+
+# Keys observed in structured stage-4 `address` values on the 2026-07-25 corpus:
+# home_address, office_address, business_address. There is no convention — the
+# LLM picks one — so match on all of them.
+
+
+
+
+
+
+# A leading 3b taxonomy code (M2B, D1, S6, N3A …) that leaked into a rendered
+# bullet — code letter + 1-2 digits + optional trailing letter, bracketed at the
+# very start and followed by whitespace. Seen verbatim in output on the WCM-
+# template CVs (issue #251): "• [M2B] Project title: …", "• [D1] Visiting Prof…".
+
+
 
 
 # XML namespaces for Word documents
@@ -132,6 +195,38 @@ NSMAP = {
     'w': WORD_NAMESPACE,
     'w14': W14_NAMESPACE,
 }
+
+
+# Date format specifications per WCM template section
+# Format codes: 'mm/yyyy', 'mm/yy', 'yyyy', 'mm/dd/yyyy'
+
+
+# Month name -> month number, for the date parser below. Includes the common
+# 3-4 letter abbreviations CVs use ("Aug", "Sept"). Distinct from _MONTH_NAMES
+# further down, which is the reverse (number -> name) for range formatting.
+
+
+def _is_bullet_paragraph(para: Paragraph) -> bool:
+    """True for a bullet in either representation the renderer emits.
+
+    Section K moved to real Word list paragraphs in #474, so a validator that
+    tests for a literal "•" prefix stops seeing K at all -- and check 3
+    below then reports no_visible_teaching_content on every CV. The non-K
+    emitters still prefix the glyph (#483), so both forms have to count.
+    """
+    if para.text.strip().startswith('•'):
+        return True
+    pPr = para._p.pPr
+    return pPr is not None and pPr.find(qn('w:numPr')) is not None
+
+
+
+
+
+
+
+
+
 
 
 _STOP_WORDS = frozenset({
@@ -351,10 +446,10 @@ OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_6_wcm_documents"
 SAMPLE_CV_DIR = Path(__file__).parent.parent.parent / "data" / "sample_cvs" / "word"
 
 # Fallback template paths
-FALLBACK_TEMPLATES = [
+FALLBACK_TEMPLATES = (
     Path(__file__).parent / "cv_parser" / "cv_template_wcm.docx",
     Path(__file__).parent.parent.parent / "business" / "examples" / "template" / "wcm_cv_template_faculty_october_2022_final.docx",
-]
+)
 
 
 # Retired taxonomy codes that were pure renames of a still-live code. Stage-3b
@@ -363,9 +458,9 @@ FALLBACK_TEMPLATES = [
 # at grouping time so the existing renderer picks them up.
 # ponytail: pure renames only. Codes with NO live equivalent (N4, M4C) need a
 # real render route instead — see #261; don't add them here.
-RETIRED_TAXONOMY_CODES = {
+RETIRED_TAXONOMY_CODES = MappingProxyType({
     'M3': 'M2D',  # Patents & Innovations — former M3 renamed to M2D (taxonomy v7)
-}
+})
 # ponytail: pure renames ONLY — old code and target must mean the same thing.
 # Deliberately NOT here:
 #   M4A/M4B/M4C (clinical trials). update_m4_to_m2.py suggests M4A->M2A/M4B->M2B,
@@ -394,7 +489,7 @@ def normalize_retired_code(entry: Dict) -> str:
 
 
 # Taxonomy code to WCM section mapping
-TAXONOMY_TO_SECTION = {
+TAXONOMY_TO_SECTION = MappingProxyType({
     # Personal Data
     'A': 'personal_data',
 
@@ -462,7 +557,7 @@ TAXONOMY_TO_SECTION = {
 
     # Misc
     'T': 'miscellaneous',
-}
+})
 
 
 # Fields whose values identify a specific record (vs. generic values like a
@@ -578,9 +673,44 @@ def _norm(text) -> str:
     return " ".join(str(text or "").split()).lower()
 
 
-def _squash(text) -> str:
-    """Whitespace-FREE normalization for verbatim containment checks."""
-    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+# Personal data that must not be carried onto a WCM CV. Source CVs routinely
+# carry date/place of birth, marital status and family members' names in their
+# contact block; a WCM CV must not.
+#
+# Matched as a LABEL PREFIX terminated by a colon, against fragments split out
+# of the entry text. The colon terminator is load-bearing and must not be
+# relaxed: allowing '-'/en-dash as a terminator, or slop before the colon,
+# produces false positives on real CV content elsewhere in the corpus
+# ("Children's Oncology Group - Emeritus", "Children and Fire: Research ...",
+# "Children's Hospital Colorado - Pillar Award").
+#
+# Deliberately EXCLUDES gender/sex/race/ethnicity/religion. Those are ordinary
+# research vocabulary -- a publication titled "Gender: A Review" would be one
+# colon away from deletion -- and none occurs as a personal-data label anywhere
+# in the corpus. Residual gap, accepted: a label written without a colon
+# ("Date of Birth<tab>12/13/1947") evades this. Colon-less labels do occur in
+# the corpus, just not yet on a PII label.
+
+# Anchored whole-key match, so 'institutional_email' and friends can never hit.
+# Needed alongside the label pattern: stage 4 leaves extracted_fields empty for
+# most PII entries (caught by the label), but names some of them explicitly
+# (marital_status_spouse, birthplace) where the source label is unusual.
+# Every person stem takes the same optional suffix, so 'wife_name' is caught
+# wherever 'spouse_name' is; the anchoring, not the suffix, is what keeps
+# ordinary keys out.
+
+
+PII_REDACTED_NOTICE = (
+    "[Personal data from the source CV was withheld here "
+    "(e.g. date or place of birth, marital status, family members' names). "
+    "Review the original CV if this content is needed.]"
+)
+
+
+
+
 
 
 def _looks_like_record(line: str) -> bool:
@@ -653,10 +783,17 @@ def _record_rendered(line: str, haystack: str,
     return rendered
 
 
-class WCMTemplateGenerator(ClinicalPracticeSection, HonorsSection,
-                          MentoringSection, PersonalDataSection,
-                          PositionsSection, ResearchSupportSection,
-                          ServiceSection):
+class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
+                          BibliographySection, BoardCertificationSection,
+                          ClinicalPracticeSection, EducationSection,
+                          HonorsSection, LeadershipSection, LicensureSection,
+                          MembershipsSection, MentoringSection,
+                          OtherEducationSection, PassthroughSection,
+                          PatentsSection, PersonalDataSection,
+                          PositionsSection, PostdocTrainingSection,
+                          PresentationsSection, ResearchSummarySection,
+                          ResearchSupportSection, ResearcherProfilesSection,
+                          ServiceSection, TeachingSection):
     """
     Generates WCM Word documents from enriched CV data.
     """
@@ -710,6 +847,9 @@ class WCMTemplateGenerator(ClinicalPracticeSection, HonorsSection,
         self._geographic_scope_cache = {}
 
         # Statistics
+        # Tables already cleared this render, by element id. Guards against one
+        # filler wiping another's rows when both resolve to the same table (#454).
+        self._cleared_tables = set()
         self.stats = {
             'sections_filled': 0,
             'entries_inserted': 0,
@@ -1082,8 +1222,14 @@ class WCMTemplateGenerator(ClinicalPracticeSection, HonorsSection,
             if code not in mapped_codes:
                 unmapped_entries.extend(entries)
 
-        # Note: A entries are all used in Personal Data section, no need to add extras to appendix
-        # The Personal Data section handles name, address, email, phone, etc.
+        # A stays in mapped_codes, but NOT because its entries are all consumed
+        # -- that was the old assumption here and the corpus refutes it (145 of
+        # 306 A entries reach no Personal Data slot, across 80 of 100 CVs).
+        # Routing them here is wrong regardless: at this point the document is
+        # only part-rendered, so "was this content already placed?" cannot be
+        # answered yet, and the CV owner's own name banner would be appended a
+        # second time. They are recovered after every section has rendered, by
+        # _unconsumed_personal_data_batch.
 
         if unmapped_entries:
             self._fill_appendix(unmapped_entries)
@@ -1323,8 +1469,12 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 print(f"    ⚠ Geographic classification error: {e}")
             return 'National'  # Default on error
 
+
+
+
     def _insert_bulleted_entry(self, insert_idx: int, text: str, entry: Dict = None,
-                                add_blank_before: bool = False) -> Optional[Paragraph]:
+                                add_blank_before: bool = False,
+                                list_level: Optional[int] = None) -> Optional[Paragraph]:
         """Insert a SINGLE bulleted entry paragraph with a bullet character prefix.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
@@ -1334,6 +1484,10 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             text: The text content for the entry (should be single line)
             entry: Optional entry dict for adding comments
             add_blank_before: If True, add a blank line before this entry
+            list_level: When given, emit a real Word list paragraph at this
+                ilvl via _apply_list_bullet instead of prefixing a literal "• "
+                glyph (#474). Left at None by the three non-K call sites, whose
+                1,765 corpus-wide glyphs are #483.
 
         Returns:
             The created paragraph, or None if insertion failed
@@ -1349,50 +1503,15 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             # Insert blank before entry_para (which pushes entry down, so blank is above entry)
             entry_para.insert_paragraph_before("")
 
-        # Use a simple bullet character prefix for reliable rendering
-        # This avoids Word numbering system issues across different templates
-        run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
+        body = _clean_inline_tabs(_strip_taxonomy_code(text))
+        # Without list_level, a simple bullet character prefix: it avoids Word
+        # numbering system issues across different templates, at the cost of not
+        # being a list item to Word's outline, to accessibility tooling, or to
+        # anything re-parsing the output.
+        run = entry_para.add_run(body if list_level is not None else f"• {body}")
         _set_font(run)
-
-        if entry:
-            self._add_entry_comments(entry_para, entry)
-
-        self.stats['entries_inserted'] += 1
-        return entry_para
-
-    def _insert_bulleted_entry_with_track_changes(self, insert_idx: int, original_text: str,
-                                                   new_text: str, entry: Dict = None,
-                                                   add_blank_before: bool = False,
-                                                   author: str = "LLM Formatter") -> Optional[Paragraph]:
-        """Insert a bulleted entry showing original as deleted and new as inserted (track changes).
-
-        Args:
-            insert_idx: Index of paragraph to insert before
-            original_text: Original text to show as deleted
-            new_text: New formatted text to show as inserted
-            entry: Optional entry dict for adding comments
-            add_blank_before: If True, add a blank line before this entry
-            author: Author name for the track change attribution
-
-        Returns:
-            The created paragraph, or None if insertion failed
-        """
-        if insert_idx >= len(self.doc.paragraphs):
-            return None
-
-        # Create the bulleted entry paragraph first
-        entry_para = self.doc.paragraphs[insert_idx].insert_paragraph_before("")
-
-        # Add blank line before if requested
-        if add_blank_before:
-            entry_para.insert_paragraph_before("")
-
-        # Add bullet prefix, then track change pair
-        bullet_run = entry_para.add_run("• ")
-        _set_font(bullet_run)
-
-        # Add track change pair: deletion (original) then insertion (new)
-        self._add_track_change_pair(entry_para, original_text, new_text, author=author)
+        if list_level is not None:
+            self._apply_list_bullet(entry_para, level=list_level)
 
         if entry:
             self._add_entry_comments(entry_para, entry)
@@ -1434,46 +1553,6 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         numPr.append(ilvl)
         numPr.append(numId)
         pPr.append(numPr)
-
-
-    # Phrases a CV uses to mark a degree that has not yet been conferred.
-    _IN_PROGRESS_DEGREE_MARKERS = (
-        'expected', 'anticipated', 'in progress', 'in-progress', 'ongoing',
-        'to be conferred', 'to be awarded', 'candidate', 'pending', 'present',
-    )
-
-    def _degree_is_in_progress(self, raw_text: str, year_awarded: str) -> bool:
-        """Return True when a degree has not yet been conferred.
-
-        Two general signals, neither tied to any specific CV:
-        1. The source line carries an explicit "not yet awarded" marker
-           ("expected", "anticipated", "in progress", "candidate", ...).
-        2. The award year parses to a year later than the current (run) year, so
-           it cannot already have been conferred.
-        """
-        text = (raw_text or '').lower()
-        for marker in self._IN_PROGRESS_DEGREE_MARKERS:
-            if marker in text:
-                return True
-
-        # Future award year => not yet conferred. year_awarded is already
-        # normalized to a 4-digit year by format_date_for_section(..., 'H').
-        match = re.search(r'(19|20)\d{2}', str(year_awarded))
-        if match:
-            try:
-                if int(match.group(0)) > datetime.now().year:
-                    return True
-            except ValueError:
-                pass
-        return False
-
-
-
-
-
-
-
-
 
     def _get_wcm_section_header(self, taxonomy_code: str) -> str:
         """Map taxonomy code to WCM subsection header text for precise routing.
@@ -1725,41 +1804,30 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             except ValueError:
                 pass  # Already removed or not in body
 
+    def _clear_table_data(self, table: Table, keep_header: bool = True):
+        """Record, then clear all data rows from `table`.
 
-
-
-
-    def _add_table_row(self, table: Table, data: List[str], is_header: bool = False, entry: Dict = None):
-        """Add a row to a table with proper formatting.
-
-        Args:
-            table: The table to add to
-            data: List of cell values
-            is_header: Whether this is a header row
-            entry: Optional entry dict - if provided, adds comments from upstream pipeline
+        The row removal itself is self-free and lives in
+        `stage6.formatting.docx._clear_table_data` after the #398 split. What
+        needs `self` is the bookkeeping: two fillers that resolve to the SAME
+        table make the second one silently destroy the first one's rows -- see
+        `_fill_other_service`, where a fuzzy anchor search sent Q4A onto the
+        table Q1 had just filled and wiped 39 entries across 6 corpus CVs
+        (#454). This wrapper is the thin delegating method
+        `test_stage6_import_surface.py` asks a split to leave behind; it changes
+        no rendering behaviour. The one caller that resolves its table by fuzzy
+        search consults `self._cleared_tables` before clearing.
         """
         if not table:
             return
-        row = table.add_row()
-        first_cell_para = None
-        for i, value in enumerate(data):
-            if i < len(row.cells):
-                cell = row.cells[i]
-                cell.text = str(value) if value else ""
-                # Set vertical alignment to center (middle)
-                _set_cell_vertical_alignment(cell, 'center')
-                for para in cell.paragraphs:
-                    if i == 0 and first_cell_para is None:
-                        first_cell_para = para
-                    for run in para.runs:
-                        # Always 11pt Arial, bold for headers
-                        _set_font(run, size=11, bold=is_header)
+        self._cleared_tables.add(id(table._element))
+        # Resolves to the module-level import at the top of this file: a class
+        # attribute of the same name does not shadow a global inside a method.
+        _clear_table_data(table, keep_header=keep_header)
 
-        # Add comments to the first cell if entry provided
-        if entry and first_cell_para:
-            self._add_entry_comments(first_cell_para, entry)
 
-        self.stats['entries_inserted'] += 1
+
+
 
     def _add_table_row_with_track_changes(self, table: Table, data: List[Tuple[str, bool]],
                                            is_header: bool = False, entry: Dict = None,
@@ -1884,1808 +1952,83 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         return para._element
 
-    def _fill_researcher_profiles(self, s0_entries: List[Dict]):
-        """Fill S0 researcher profile info (ORCID, Google Scholar, etc).
-
-        Inserts right before "Peer-reviewed Research Articles" without a header.
-        Content is formatted as a bulleted list.
-        """
-        if not s0_entries:
-            return
-
-        if self.verbose:
-            print(f"Filling Researcher Profiles ({len(s0_entries)} entries)...")
-
-        # Find "Peer-reviewed Research Articles" to insert directly above it
-        peer_reviewed_idx = self._find_paragraph_with_text("Peer-reviewed Research Articles")
-        if peer_reviewed_idx is None:
-            # Fallback to BIBLIOGRAPHY
-            peer_reviewed_idx = self._find_paragraph_with_text("BIBLIOGRAPHY")
-        if peer_reviewed_idx is None:
-            return
-
-        # Insert a blank line before "Peer-reviewed" first
-        self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
-
-        # Insert entries in REVERSE order so they appear in correct order
-        # Format as bulleted list
-        for entry in reversed(s0_entries):
-            text = entry.get('text', '').strip()
-            entry_para = self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
-            run = entry_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
-            _set_font(run)
-            self.stats['entries_inserted'] += 1
-
-        # Add a blank line before the S0 content
-        self.doc.paragraphs[peer_reviewed_idx].insert_paragraph_before("")
-
-
-
-    def _fill_education(self, entries: List[Dict]):
-        """Fill education table with track changes for enriched content.
-
-        Track changes are used for:
-        - City/state from institution enrichment (only the location part, not institution name)
-        - Years extracted from raw text when not in extracted_fields
-        """
-        if self.verbose:
-            print(f"Filling Education ({len(entries)} entries)...")
-
-        edu_idx = self._find_paragraph_with_text("EDUCATION")
-        if edu_idx is None:
-            return
-
-        table = self._find_table_after_paragraph(edu_idx)
-        if not table:
-            return
-
-        _clear_table_data(table, keep_header=True)
-        self.stats['tables_populated'] += 1
-
-        # Sort entries reverse chronologically (most recent first)
-        sorted_entries = sort_entries_reverse_chronological(entries)
-
-        for entry in sorted_entries:
-            fields = entry.get('extracted_fields', {})
-            raw_text = entry.get('text', '')
-
-            # Degree column (not enriched)
-            degree = fields.get('degree', '')
-            major = fields.get('major') or fields.get('field_of_study', '')
-            if major and major not in degree:
-                degree = f"{degree}, {major}" if degree else major
-
-            # Institution - use cleaned_name from enrichment if available
-            institution = fields.get('institution', '')
-            if institution and institution.lower() == 'none':
-                institution = ''
-            cleaned = _get_cleaned_institution_name(entry)
-            if cleaned:
-                institution = cleaned
-
-            # Skip entries that have no degree AND no institution
-            # These are likely training items that don't fit the education table format
-            if not degree and not institution:
-                continue
-
-            # Location from enrichment
-            location, location_is_enriched = _get_institution_location(entry)
-
-            # Dates - format according to B1 requirements (mm/yyyy-mm/yyyy)
-            # Field extraction may use three different structures:
-            #   1. Flat: 'dates_attended_start_date' / 'dates_attended_end_date'
-            #   2. Nested dict: 'dates_attended': {'start_date': '...', 'end_date': '...'}
-            #   3. Generic: 'start_date' / 'end_date'
-            start = fields.get('dates_attended_start_date', '') or fields.get('start_date', '')
-            end = fields.get('dates_attended_end_date', '') or fields.get('end_date', '')
-
-            # Check for nested dict structure
-            if not start and not end:
-                dates_attended = fields.get('dates_attended', {})
-                if isinstance(dates_attended, dict):
-                    start = dates_attended.get('start_date', '') or ''
-                    end = dates_attended.get('end_date', '') or ''
-            if start or end:
-                dates = format_date_range(start, end, 'B1')
-            else:
-                dates = ''
-
-            # Year awarded - try to extract from raw text if missing
-            year_awarded = fields.get('year_awarded') or fields.get('year') or end or ''
-            year_is_enriched = False
-
-            # If year_awarded is still empty, try to extract from raw text
-            if not year_awarded and raw_text:
-                extracted_year = _extract_year_from_text(raw_text)
-                if extracted_year:
-                    year_awarded = extracted_year
-                    year_is_enriched = True  # Mark as enriched since we extracted it
-
-            # Format year_awarded - B1 uses mm/yyyy but year awarded column is just yyyy
-            if year_awarded:
-                year_awarded = format_date_for_section(year_awarded, 'H')  # H uses yyyy format
-
-            # A degree that is still in progress ("expected May 2026", a future
-            # award year, etc.) must NOT be presented as a conferred year. Mark it
-            # as anticipated so the reader can tell it has not been awarded yet.
-            if year_awarded and self._degree_is_in_progress(raw_text, year_awarded):
-                year_awarded = f"Expected {year_awarded}"
-
-            # Build cell contents with mixed normal/track-change content
-            # Cell 0: Degree (never enriched)
-            degree_content = [(degree, False, "")]
-
-            # Check if location is already present in institution to avoid duplication
-            # e.g., "University of Pittsburgh, Pittsburgh, PA" shouldn't get ", Pittsburgh, PA" appended again
-            location_already_present = False
-            if location and institution:
-                # Check if city is already in the institution string
-                location_parts = location.split(',')
-                if location_parts:
-                    city = location_parts[0].strip()
-                    # Check for city name in institution (case-insensitive)
-                    if city.lower() in institution.lower():
-                        location_already_present = True
-
-            # Cell 1: Institution + Location (location may be enriched)
-            if location and location_is_enriched and not location_already_present:
-                # Institution is normal text, ", City, State" is track change
-                if institution:
-                    institution_content = [
-                        (institution, False, ""),
-                        (f", {location}", True, "Institution Enrichment")
-                    ]
-                else:
-                    institution_content = [(location, True, "Institution Enrichment")]
-            elif location and not location_already_present:
-                # Location exists but not from enrichment - all normal text
-                institution_full = f"{institution}, {location}" if institution else location
-                institution_content = [(institution_full, False, "")]
-            else:
-                # No location or location already present
-                institution_content = [(institution, False, "")]
-
-            # Cell 2: Dates (never enriched for now)
-            dates_content = [(dates, False, "")]
-
-            # Cell 3: Year awarded (may be enriched if extracted from text)
-            year_content = [(year_awarded, year_is_enriched, "Text Extraction")]
-
-            # Add the row with mixed content
-            self._add_table_row_with_mixed_content(
-                table,
-                [degree_content, institution_content, dates_content, year_content],
-                entry=entry
-            )
-
-    def _fill_other_education(self, entries: List[Dict]):
-        """Fill Other Educational Experiences section (B2 entries).
-
-        B2 entries are training programs, certifications, workshops - not formal degrees.
-        These go in a separate section from the main Education table.
-        """
-        if not entries:
-            return
-
-        if self.verbose:
-            print(f"Filling Other Educational Experiences ({len(entries)} entries)...")
-
-        # Try to find the "OTHER EDUCATIONAL" or similar section
-        section_idx = self._find_paragraph_with_text("OTHER EDUCATIONAL")
-        if section_idx is None:
-            section_idx = self._find_paragraph_with_text("SPECIAL TRAINING")
-        if section_idx is None:
-            section_idx = self._find_paragraph_with_text("ADDITIONAL TRAINING")
-
-        if section_idx is None:
-            # No dedicated section found - these entries will need to go elsewhere
-            # For now, skip them (they could go in appendix or we could create a section)
-            if self.verbose:
-                print(f"  No 'Other Educational Experiences' section found in template")
-            return
-
-        table = self._find_table_after_paragraph(section_idx)
-        if not table:
-            return
-
-        _clear_table_data(table, keep_header=True)
-        self.stats['tables_populated'] += 1
-
-        # Sort entries reverse chronologically (most recent first)
-        sorted_entries = sort_entries_reverse_chronological(entries)
-
-        for entry in sorted_entries:
-            fields = entry.get('extracted_fields', {})
-            raw_text = entry.get('text', '')
-
-            # Program/Training name
-            program_name = (fields.get('program_name', '') or
-                          fields.get('program_type', '') or
-                          fields.get('title', ''))
-
-            # Institution - use cleaned_name from enrichment if available
-            institution = fields.get('institution', '')
-            if institution and institution.lower() == 'none':
-                institution = ''
-            cleaned = _get_cleaned_institution_name(entry)
-            if cleaned:
-                institution = cleaned
-
-            # Skip entries with no meaningful content
-            if not program_name and not institution:
-                continue
-
-            # Location from enrichment
-            location, location_is_enriched = _get_institution_location(entry)
-
-            # Dates - format according to B2 requirements (mm/yy – mm/yy)
-            start = fields.get('start_date', '')
-            end = fields.get('end_date', '')
-            year = fields.get('year', '') or fields.get('year_awarded', '')
-            year_is_enriched = False
-
-            # Try to build date range, or fall back to single year
-            if start or end:
-                dates = format_date_range(start, end, 'B2')
-            elif year:
-                dates = format_date_for_section(year, 'B2')
-            else:
-                # Try to extract from raw text
-                extracted_year = _extract_year_from_text(raw_text) if raw_text else ''
-                if extracted_year:
-                    dates = format_date_for_section(extracted_year, 'B2')
-                    year_is_enriched = True
-                else:
-                    dates = ''
-
-            # Build cell contents
-            program_content = [(program_name, False, "")]
-
-            if location and location_is_enriched:
-                if institution:
-                    institution_content = [
-                        (institution, False, ""),
-                        (f", {location}", True, "Institution Enrichment")
-                    ]
-                else:
-                    institution_content = [(location, True, "Institution Enrichment")]
-            elif location:
-                institution_full = f"{institution}, {location}" if institution else location
-                institution_content = [(institution_full, False, "")]
-            else:
-                institution_content = [(institution, False, "")]
-
-            dates_content = [(dates, year_is_enriched, "Text Extraction")]
-
-            self._add_table_row_with_mixed_content(
-                table,
-                [program_content, institution_content, dates_content],
-                entry=entry
-            )
-
-    def _fill_postdoc_training(self, entries_by_code: Dict[str, List[Dict]], all_entries: List[Dict] = None):
-        """Fill postdoctoral training table with track changes for enriched content.
-
-        Track changes are used for city/state from institution enrichment only.
-        """
-        training_entries = (
-            entries_by_code.get('C', []) +
-            entries_by_code.get('C1', []) +
-            entries_by_code.get('C2', [])
-        )
-
-        if not training_entries:
-            return
-
-        if self.verbose:
-            print(f"Filling Postdoctoral Training ({len(training_entries)} entries)...")
-
-        # Try to find the POSTDOCTORAL section
-        training_idx = self._find_paragraph_with_text("POSTDOCTORAL")
-        if training_idx is None:
-            training_idx = self._find_paragraph_with_text("TRAINING")
-        if training_idx is None:
-            return
-
-        table = self._find_table_after_paragraph(training_idx)
-        if not table:
-            return
-
-        _clear_table_data(table, keep_header=True)
-        self.stats['tables_populated'] += 1
-
-        # Sort entries reverse chronologically (most recent first)
-        sorted_entries = sort_entries_reverse_chronological(training_entries)
-
-        for entry in sorted_entries:
-            fields = entry.get('extracted_fields', {})
-
-            # Training type/title (clean up tabs that may have been extracted)
-            training_type = fields.get('training_type', '') or fields.get('title', 'Postdoctoral')
-            # Replace tabs with comma-space for cleaner display
-            if '\t' in training_type:
-                training_type = ', '.join(part.strip() for part in training_type.split('\t') if part.strip())
-            field_of_study = fields.get('field_of_study', '') or fields.get('specialty', '')
-            if field_of_study and field_of_study not in training_type:
-                training_type = f"{training_type}, {field_of_study}" if training_type else field_of_study
-
-            # Institution with location from enrichment
-            raw_institution = fields.get('institution', '')
-
-            # Use LLM-cleaned institution name (strips embedded location); fall back to raw field
-            institution = _get_cleaned_institution_name(entry) or raw_institution
-
-            # If institution is missing, try to recover from nearby entries in original CV
-            if not institution and all_entries:
-                institution = _recover_institution_from_nearby_entries(entry, all_entries)
-
-            # Location from Stage 5b enrichment
-            location, location_is_enriched = _get_institution_location(entry)
-
-            # Get taxonomy code for this entry (C, C1, or C2)
-            taxonomy_code = entry.get('taxonomy_code', 'C')
-
-            # Dates - format according to C/C1/C2 requirements (mm/yy - mm/yy)
-            start = fields.get('start_date', '')
-            end = fields.get('end_date', '')
-            dates = format_date_range(start, end, taxonomy_code)
-
-            # Build cell contents with mixed normal/track-change content
-            training_content = [(training_type, False, "")]
-
-            # Check if location is already present in institution to avoid duplication
-            location_already_present = False
-            if location and institution:
-                # Check if city is already in the institution string
-                location_parts = location.split(',')
-                if location_parts:
-                    city = location_parts[0].strip()
-                    # Check for city name in institution (case-insensitive)
-                    if city.lower() in institution.lower():
-                        location_already_present = True
-
-            if location and location_is_enriched and not location_already_present:
-                # Institution is normal text, ", City, State" is track change
-                if institution:
-                    institution_content = [
-                        (institution, False, ""),
-                        (f", {location}", True, "Institution Enrichment")
-                    ]
-                else:
-                    institution_content = [(location, True, "Institution Enrichment")]
-            elif location and not location_already_present:
-                institution_full = f"{institution}, {location}" if institution else location
-                institution_content = [(institution_full, False, "")]
-            else:
-                institution_content = [(institution, False, "")]
-
-            dates_content = [(dates, False, "")]
-
-            self._add_table_row_with_mixed_content(
-                table,
-                [training_content, institution_content, dates_content],
-                entry=entry
-            )
-
-    def _fill_research_summary(self, research_summary_data: Optional[Dict]):
-        """Fill Research Summary section from Stage 4.5 output.
-
-        Inserts a RESEARCH SUMMARY section before RESEARCH SUPPORT with
-        the biosketch-style research summary paragraph.
-
-        Args:
-            research_summary_data: Stage 4.5 standalone output containing:
-                - research_summary.text: The generated summary
-                - research_summary.generation_method: "llm_generated" or "existing_content"
-                - research_summary.word_count: Word count of summary
-
-        Returns:
-            True if a summary paragraph was rendered, False otherwise. Callers use
-            this to route M1 entries to the appendix when the summary is absent
-            (#317) instead of dropping them.
-        """
-        if not research_summary_data:
-            if self.verbose:
-                print("Skipping Research Summary section (no Stage 4.5 output)")
-            return False
-
-        # Extract summary from Stage 4.5 structure
-        summary_info = research_summary_data.get('research_summary', {})
-        summary_text = summary_info.get('text', '')
-
-        if not summary_text or len(summary_text.strip()) < 50:
-            if self.verbose:
-                print("Skipping Research Summary section (no substantive content)")
-            return False
-
-        word_count = summary_info.get('word_count', len(summary_text.split()))
-        generation_method = summary_info.get('generation_method', 'unknown')
-
-        if self.verbose:
-            print(f"Filling Research Summary ({word_count} words, {generation_method})...")
-
-        # Find RESEARCH ACTIVITIES section (M1) to insert under
-        activities_idx = self._find_paragraph_with_text("RESEARCH ACTIVITIES")
-        if activities_idx is None:
-            # Fallback: try "Research Activities" (case variations)
-            activities_idx = self._find_paragraph_with_text("Research Activities")
-        if activities_idx is None:
-            if self.verbose:
-                print("  Warning: Could not find 'RESEARCH ACTIVITIES' section")
-            return False
-
-        # Get the paragraph element to insert after
-        activities_para = self.doc.paragraphs[activities_idx]
-        body = self.doc.element.body
-        body_elements = list(body)
-
-        try:
-            insert_idx = body_elements.index(activities_para._element) + 1  # Insert AFTER header
-        except ValueError:
-            return False
-
-        # Add blank line after RESEARCH ACTIVITIES header
-        blank_para = self.doc.add_paragraph()
-        blank_para.paragraph_format.space_after = Pt(6)
-        body.insert(insert_idx, blank_para._element)
-        insert_idx += 1
-
-        # Create summary paragraph (no new header - goes under existing RESEARCH ACTIVITIES)
-        # Use track changes since this is LLM-generated content, not from the original CV
-        summary_para = self.doc.add_paragraph()
-        self._add_track_change_insertion(summary_para, summary_text.strip(), author="LLM Research Summary")
-        summary_para.paragraph_format.space_after = Pt(12)
-
-        # Move to correct position (after blank line)
-        body.insert(insert_idx, summary_para._element)
-
-        self.stats['entries_inserted'] += 1
-        return True
-
-    def _fill_patents(self, entries: List[Dict]):
-        """Fill Patents & Inventions section (M2D entries).
-
-        Creates an individual 2-column label/value table per patent, inserted
-        after the "Patents & Inventions" heading in the template.
-        WCM template instruction: "Please include inventors, title of invention
-        and patent number."
-
-        Fields from Stage 4: patent_number, title, inventors, filing_date,
-        issue_date, status, assignee, narrative.
-        """
-        if not entries:
-            return
-
-        # Find the section in the template
-        section_idx = self._find_paragraph_with_text("Patents & Inventions")
-        if section_idx is None:
-            section_idx = self._find_paragraph_with_text("Patents")
-        if section_idx is None:
-            if self.verbose:
-                print(f"  Warning: Could not find 'Patents & Inventions' section in template")
-            return
-
-        # Remove the instruction paragraph (the one after the header) if it starts with "Please include"
-        if section_idx + 1 < len(self.doc.paragraphs):
-            next_para = self.doc.paragraphs[section_idx + 1]
-            if next_para.text.strip().startswith("Please include"):
-                next_para.text = ""
-
-        if self.verbose:
-            print(f"Filling Patents & Inventions ({len(entries)} entries)...")
-
-        # Sort entries reverse chronologically
-        sorted_entries = sort_entries_reverse_chronological(entries)
-
-        # Insert tables after the section header
-        last_element = self.doc.paragraphs[section_idx]._element
-
-        for i, entry in enumerate(sorted_entries):
-            fields = entry.get('extracted_fields', {})
-
-            title = fields.get('title', '')
-            patent_number = fields.get('patent_number', '')
-            inventors = fields.get('inventors', '')
-            filing_date = fields.get('filing_date', '')
-            issue_date = fields.get('issue_date', '')
-            status = fields.get('status', '')
-            assignee = fields.get('assignee', '')
-            narrative = fields.get('narrative', '')
-
-            # Skip entries with no meaningful content
-            if not title and not patent_number:
-                if self.verbose:
-                    text = entry.get('text', '')[:50]
-                    print(f"  Skipping sparse patent entry: '{text}...'")
-                continue
-
-            # Format dates
-            formatted_filing = format_date_for_section(filing_date, 'M2D') if filing_date else ''
-            formatted_issue = format_date_for_section(issue_date, 'M2D') if issue_date else ''
-
-            # Build rows — only include rows that have data
-            rows = []
-            if title:
-                rows.append(('Title of invention:', title))
-            if patent_number:
-                rows.append(('Patent number:', patent_number))
-            if inventors:
-                rows.append(('Inventors:', inventors))
-            if status:
-                rows.append(('Status:', status))
-            if formatted_filing:
-                rows.append(('Filing date:', formatted_filing))
-            if formatted_issue:
-                rows.append(('Issue date:', formatted_issue))
-            if assignee:
-                rows.append(('Assignee:', assignee))
-            if narrative and len(narrative.strip()) > 10:
-                rows.append(('Description:', narrative))
-
-            if not rows:
-                continue
-
-            # Create a 2-column table
-            table = self.doc.add_table(rows=len(rows), cols=2)
-            _set_table_border(table, color='808080', size=4)
-
-            # Fill the table
-            first_cell_para = None
-            for ri, (label, value) in enumerate(rows):
-                row = table.rows[ri]
-                # Label cell (bold)
-                label_cell = row.cells[0]
-                label_cell.text = label
-                _set_cell_vertical_alignment(label_cell, 'center')
-                for para in label_cell.paragraphs:
-                    if ri == 0 and first_cell_para is None:
-                        first_cell_para = para
-                    for run in para.runs:
-                        _set_font(run, bold=True)
-
-                # Value cell
-                value_cell = row.cells[1]
-                value_cell.text = str(value) if value else ''
-                _set_cell_vertical_alignment(value_cell, 'center')
-                for para in value_cell.paragraphs:
-                    for run in para.runs:
-                        _set_font(run)
-
-            # Add comments from entry
-            if first_cell_para:
-                self._add_entry_comments(first_cell_para, entry)
-
-            # Move table to correct position (after the last inserted element)
-            body = self.doc.element.body
-            body_elements = list(body)
-            try:
-                elem_idx = body_elements.index(last_element)
-                body.insert(elem_idx + 1, table._tbl)
-            except (ValueError, IndexError):
-                pass
-
-            self.stats['tables_populated'] += 1
-            self.stats['entries_inserted'] += 1
-            last_element = table._tbl
-
-            # Add spacing between patent tables (except after the last one)
-            if i < len(sorted_entries) - 1:
-                spacing_para = self._add_spacing_paragraph(after_element=table._tbl)
-                if spacing_para is not None:
-                    last_element = spacing_para
-
-    def _fill_memberships(self, entries: List[Dict]):
-        """Fill I. PROFESSIONAL ORGANIZATIONS AND SOCIETY MEMBERSHIPS section.
-
-        Entries have fields: organization, membership_type, start_date, end_date
-        Uses table with columns: Organization, Date (yyyy-yyyy)
-        """
-        if not entries:
-            return
-
-        if self.verbose:
-            print(f"Filling Memberships ({len(entries)} entries)...")
-
-        # Find the MEMBERSHIPS section
-        memberships_idx = self._find_paragraph_with_text("PROFESSIONAL ORGANIZATIONS")
-        if memberships_idx is None:
-            memberships_idx = self._find_paragraph_with_text("SOCIETY MEMBERSHIPS")
-        if memberships_idx is None:
-            memberships_idx = self._find_paragraph_with_text("MEMBERSHIPS")
-        if memberships_idx is None:
-            return
-
-        # Find the table after the section header
-        table = self._find_table_after_paragraph(memberships_idx)
-        if not table:
-            # Fall back to finding table with "Organization" header
-            table = self._find_table_with_cell_text("Organization")
-            if table and "Date" not in table.rows[0].cells[1].text:
-                table = None  # Wrong table
-
-        if not table:
-            if self.verbose:
-                print("  Warning: Could not find memberships table")
-            return
-
-        # Clear existing data rows
-        _clear_table_data(table, keep_header=True)
-        self.stats['tables_populated'] += 1
-
-        # Sort by date (most recent first)
-        sorted_entries = sort_entries_reverse_chronological(entries)
-
-        for entry in sorted_entries:
-            fields = entry.get('extracted_fields', {}) or {}
-            original_text = entry.get('text', '')
-
-            # Skip table header entries
-            if _is_table_header_entry(original_text, ['organization', 'membership', 'society', 'date', 'member']):
-                if self.verbose:
-                    print(f"  Skipping header entry: '{original_text[:50]}...'")
-                continue
-
-            # Check if this entry contains multiple memberships (newline-separated)
-            # Pattern: "Member\nElected Member | Org1\nOrg2 | date1\ndate2"
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
-
-            # Detect multi-membership pattern: multiple organization names or membership types
-            if len(lines) > 2:
-                # Try to parse multiple memberships
-                memberships = _parse_multi_membership_entry(lines)
-                if memberships:
-                    for mem_type, org, dates in memberships:
-                        org_text = f"{mem_type}, {org}" if mem_type and mem_type.lower() not in org.lower() else org
-                        self._add_table_row(table, [org_text, dates], entry=entry)
-                        self.stats['entries_inserted'] += 1
-                    continue
-
-            # Single membership - use extracted fields
-            organization = fields.get('organization', '')
-            membership_type = fields.get('membership_type', '')
-            start_date = fields.get('start_date', '')
-            end_date = fields.get('end_date', '')
-
-            if not organization:
-                organization = original_text[:150]
-
-            # Format: Membership Type, Organization
-            if membership_type and membership_type.lower() not in organization.lower():
-                org_text = f"{membership_type}, {organization}"
-            else:
-                org_text = organization
-
-            # Format date range for table column
-            date_str = format_date_range(start_date, end_date, 'I') if (start_date or end_date) else ''
-
-            # Add row to table
-            self._add_table_row(table, [org_text, date_str], entry=entry)
-            self.stats['entries_inserted'] += 1
-
-
-    def _fill_teaching(self, entries_by_code: Dict[str, List[Dict]]):
-        """Fill K. TEACHING ACTIVITIES section.
-
-        Routes K-codes to their appropriate WCM subsections:
-        - K1 (didactic) -> "Didactic teaching"
-        - K2 (clinical) -> "Clinical teaching"
-        - K3 (administrative) -> "Administrative teaching"
-        - K4 (CME) -> "Continuing education and professional education"
-        - K5 (community) -> "Other education/outreach activities"
-
-        Entries are inserted as a flat chronological list under each K-code section.
-        The WCM template provides the structure; Stage 5c handles per-entry formatting.
-        Original CV hierarchy labels are not carried over.
-        """
-        # Define K-code to section header mapping
-        k_section_map = {
-            'K1': ('Didactic teaching', ['Didactic teaching', 'Didactic']),
-            'K2': ('Clinical teaching', ['Clinical teaching', 'bedside teaching']),
-            'K3': ('Administrative teaching', ['Administrative teaching', 'leadership role']),
-            'K4': ('Continuing education', ['Continuing education', 'professional education']),
-            'K5': ('Other education', ['outreach activities', 'Other education/outreach', 'community education or patient']),
-        }
-
-        # Count total entries
-        total_entries = sum(len(entries_by_code.get(code, [])) for code in k_section_map.keys())
-        if total_entries == 0:
-            return
-
-        if self.verbose:
-            print(f"Filling Teaching ({total_entries} entries)...")
-
-        # Fill each K-code section separately
-        for code, (section_name, search_texts) in k_section_map.items():
-            entries = entries_by_code.get(code, [])
-            if not entries:
-                continue
-
-            # Find the appropriate section header
-            section_idx = None
-            for search_text in search_texts:
-                section_idx = self._find_paragraph_with_text(search_text)
-                if section_idx is not None:
-                    break
-
-            if section_idx is None:
-                # Fall back to general teaching section
-                section_idx = self._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
-                if section_idx is None:
-                    continue
-
-            # Flat list: sort chronologically and insert without original CV sub-headers.
-            # The WCM template's own K-code sections (Didactic, Clinical, Administrative,
-            # CME, Community) provide the structure; Stage 5c handles per-entry formatting.
-            sorted_entries = sort_entries_reverse_chronological(entries)
-            reversed_entries = list(reversed(sorted_entries))
-
-            for i, entry in enumerate(reversed_entries):
-                is_first_in_section = (i == len(reversed_entries) - 1)
-                self._insert_teaching_entry(section_idx + 1, entry,
-                                            is_first_visible=is_first_in_section)
-
-    def _insert_teaching_entry(self, insert_idx: int, entry: Dict, is_first_visible: bool = False):
-        """Insert a single teaching entry as a bulleted item.
-
-        Handles Stage 5c formatted text (with track changes), structured fields,
-        and raw text fallback.
-        """
-        # Skip structural labels from source CV
-        if _is_structural_label(entry):
-            return
-
-        fields = entry.get('extracted_fields', {}) or {}
-        formatted_text = fields.get('formatted_text', '')
-        original_text = entry.get('text', '')
-
-        if _is_orphan_fragment(fields, formatted_text, original_text):
-            return
-
-        # Normalize any raw ISO dates the LLM left in formatted text
-        if formatted_text:
-            formatted_text = normalize_iso_dates_in_text(formatted_text)
-
-        if formatted_text and original_text:
-            # Check if original has multiple distinct items (newline-separated list)
-            original_lines = [l.strip() for l in original_text.split('\n') if l.strip()]
-
-            if len(original_lines) > 1:
-                # Multi-item entry: use original lines (Stage 5c may have over-combined)
-                # Insert in reverse order since we're inserting before insert_idx
-                for j, line_text in enumerate(reversed(original_lines)):
-                    if not line_text:
-                        continue
-                    add_blank = is_first_visible and (j == len(original_lines) - 1)
-                    self._insert_bulleted_entry(
-                        insert_idx, line_text, entry if j == 0 else None,
-                        add_blank_before=add_blank
-                    )
-            else:
-                # Single item: use formatted_text
-                new_text = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
-                self._insert_bulleted_entry(
-                    insert_idx, new_text, entry,
-                    add_blank_before=is_first_visible
-                )
-
-        elif formatted_text:
-            new_text = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
-            lines = [l.strip() for l in new_text.split('\n') if l.strip()]
-            combined_text = '. '.join(lines) if len(lines) > 1 else (lines[0] if lines else '')
-            self._insert_bulleted_entry(
-                insert_idx, combined_text, entry,
-                add_blank_before=is_first_visible
-            )
-
-        else:
-            # No Stage 5c formatting - fall back to building text from fields
-            course_code = fields.get('course_code', '')
-            course_title = fields.get('course_title', '')
-            institution = fields.get('institution', '')
-            role = fields.get('role', '')
-
-            if isinstance(course_title, list):
-                course_title = '; '.join(course_title)
-            if isinstance(course_code, list):
-                course_code = '; '.join(course_code)
-
-            if course_code and course_title:
-                text = f"{course_code}: {course_title}"
-                if institution and institution not in text:
-                    text += f", {institution}"
-                if role and role not in text:
-                    text += f" ({role})"
-                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible)
-            elif course_title:
-                text = course_title
-                if institution and institution not in text:
-                    text += f", {institution}"
-                if role and role not in text:
-                    text += f" ({role})"
-                self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=is_first_visible)
-            else:
-                lines = []
-                for line in original_text.split('\n'):
-                    line = line.strip()
-                    if not line or line.lower() in ['title', 'institution', 'dates', 'role']:
-                        continue
-                    if ';' in line and len(line) > 100:
-                        lines.extend([item.strip() for item in line.split(';') if item.strip()])
-                    else:
-                        lines.append(line)
-
-                for j, line_text in enumerate(reversed(lines)):
-                    if not line_text:
-                        continue
-                    add_blank = is_first_visible and (j == len(lines) - 1)
-                    self._insert_bulleted_entry(insert_idx, line_text, entry if j == 0 else None, add_blank_before=add_blank)
-
-    def _fill_licensure(self, entries: List[Dict]):
-        """Fill F1. LICENSURE section.
-
-        WCM template has table with: State | Number | Date of issue | Date of last registration
-        Also fills DEA and NPI numbers in a separate table (Table 9).
-        """
-
-        if not entries:
-            return
-
-        if self.verbose:
-            print(f"Filling Licensure ({len(entries)} entries)...")
-
-        # Find Licensure section
-        section_idx = self._find_paragraph_with_text("Licensure")
-        if section_idx is None:
-            section_idx = self._find_paragraph_with_text("LICENSURE")
-        if section_idx is None:
-            return
-
-        table = self._find_table_after_paragraph(section_idx)
-        if not table:
-            return
-
-        _clear_table_data(table, keep_header=True)
-        self.stats['tables_populated'] += 1
-
-        sorted_entries = sort_entries_reverse_chronological(entries)
-
-        # Track NPI and DEA numbers to fill separately
-        npi_number = None
-        dea_number = None
-        regular_licenses = []
-
-        for entry in sorted_entries:
-            fields = entry.get('extracted_fields', {}) or {}
-            original_text = entry.get('text', '')
-
-            state = fields.get('state_country') or fields.get('state') or fields.get('jurisdiction') or ''
-            license_number = fields.get('license_number') or fields.get('number') or ''
-            issue_date = fields.get('issue_date') or fields.get('date') or ''
-            expiration_date = fields.get('expiration_date') or ''
-
-            # Detect NPI number: 10 digits, or text mentions "NPI"
-            if license_number and (re.match(r'^\d{10,11}$', license_number) or
-                                   'NPI' in original_text.upper()):
-                npi_number = license_number
-                continue
-
-            # Detect DEA number: 2 letters + 7 alphanumeric, or text mentions "DEA"
-            if license_number and (re.match(r'^[A-Za-z]{2}[A-Za-z0-9]{7}$', license_number) or
-                                   'DEA' in original_text.upper()):
-                dea_number = license_number
-                continue
-
-            # Regular license entry - format dates as mm/dd/yyyy per WCM template
-            if state or license_number:
-                regular_licenses.append({
-                    'state': state,
-                    'license_number': license_number,
-                    'issue_date': format_date_for_section(issue_date, 'F1') if issue_date else '',
-                    'expiration_date': format_date_for_section(expiration_date, 'F1') if expiration_date else ''
-                })
-            elif original_text and not any(kw in original_text.upper() for kw in ['NPI', 'DEA']):
-                # Fallback to raw text for unstructured entries
-                regular_licenses.append({
-                    'state': original_text[:100],
-                    'license_number': '',
-                    'issue_date': '',
-                    'expiration_date': ''
-                })
-
-        # Fill regular licenses table
-        for lic in regular_licenses:
-            row = table.add_row()
-            num_cols = len(row.cells)
-            if num_cols >= 4:
-                row.cells[0].text = lic['state'] or ''
-                row.cells[1].text = lic['license_number'] or ''
-                row.cells[2].text = lic['issue_date'] or ''
-                row.cells[3].text = lic['expiration_date'] or ''
-            elif num_cols >= 2:
-                row.cells[0].text = lic['state'] or ''
-                row.cells[1].text = lic['license_number'] or ''
-
-            for cell in row.cells:
-                for para in cell.paragraphs:
-                    for run in para.runs:
-                        _set_font(run)
-            self.stats['entries_inserted'] += 1
-
-        # Fill DEA/NPI table (Table 9 in template)
-        self._fill_dea_npi(dea_number, npi_number)
-
-    def _fill_dea_npi(self, dea_number: str, npi_number: str):
-        """Fill DEA and NPI numbers in their dedicated table.
-
-        The WCM template has a 2-row table:
-        Row 0: DEA number: (optional) | [value]
-        Row 1: NPI number: (optional) | [value]
-        """
-        if not dea_number and not npi_number:
-            return
-
-        # Find the DEA/NPI table by looking for a table containing "DEA number"
-        dea_npi_table = None
-        for table in self.doc.tables:
-            for row in table.rows:
-                for cell in row.cells:
-                    if 'DEA number' in cell.text:
-                        dea_npi_table = table
-                        break
-                if dea_npi_table:
-                    break
-            if dea_npi_table:
-                break
-
-        if not dea_npi_table:
-            return
-
-        # Fill in the values
-        for row in dea_npi_table.rows:
-            if len(row.cells) >= 2:
-                label = row.cells[0].text.lower()
-                if 'dea' in label and dea_number:
-                    row.cells[1].text = dea_number
-                    for para in row.cells[1].paragraphs:
-                        for run in para.runs:
-                            _set_font(run)
-                elif 'npi' in label and npi_number:
-                    row.cells[1].text = npi_number
-                    for para in row.cells[1].paragraphs:
-                        for run in para.runs:
-                            _set_font(run)
-
-    def _fill_board_certification(self, entries: List[Dict]):
-        """Fill F2. BOARD CERTIFICATION section.
-
-        WCM template has table with: Name of specialty | Board Certificate # | Date of Certification
-
-        Handles cases where multiple certifications are merged into one entry.
-        """
-        if not entries:
-            return
-
-        if self.verbose:
-            print(f"Filling Board Certification ({len(entries)} entries)...")
-
-        # Find Board Certification section - need to find the subsection header,
-        # not the main "LICENSURE, BOARD CERTIFICATION" section header
-        section_idx = None
-        for i, para in enumerate(self.doc.paragraphs):
-            text = para.text.strip()
-            # Look for exact match or starts with "Board Certification"
-            if text == "Board Certification" or text.startswith("Board Certification:"):
-                section_idx = i
-                break
-        if section_idx is None:
-            return
-
-        table = self._find_table_after_paragraph(section_idx)
-        if not table:
-            return
-
-        _clear_table_data(table, keep_header=True)
-        self.stats['tables_populated'] += 1
-
-        for entry in entries:
-            fields = entry.get('extracted_fields', {}) or {}
-            original_text = entry.get('text', '')
-
-            certifying_board = fields.get('certifying_board', '')
-            certificate_number = fields.get('certificate_number', '')
-            year_certified = fields.get('year_certified', '')
-            recertification_date = fields.get('recertification_date', '')
-
-            # Handle certificate_number being a list (from LLM extraction) or string
-            if isinstance(certificate_number, list):
-                cert_numbers = [str(n).strip() for n in certificate_number if n]
-                certificate_number = ', '.join(cert_numbers)  # Also update for single cert case
-            else:
-                certificate_number = str(certificate_number) if certificate_number else ''
-
-            # Check if we have structured fields
-            if certifying_board or certificate_number:
-                # Check if multiple certifications were merged (multiple cert numbers)
-                cert_numbers = []
-                if certificate_number:
-                    # Split on semicolons or commas
-                    cert_numbers = [n.strip() for n in certificate_number.replace(';', ',').split(',') if n.strip()]
-
-                if len(cert_numbers) > 1:
-                    # Multiple certifications merged - try to parse from original text
-                    # Original text pattern: "Specialty1\n\nSpecialty2 | CertNum1\n\nCertNum2 | Year1\nYear2"
-                    self._parse_and_add_multiple_certifications(table, original_text, entry)
-                else:
-                    # Single certification - format dates as yyyy-yyyy per WCM template
-                    # Use start_date/end_date if available, fall back to year_certified/recertification_date
-                    start_date = fields.get('start_date') or year_certified
-                    end_date = fields.get('end_date') or recertification_date
-
-                    start_fmt = format_date_for_section(str(start_date), 'F2') if start_date else ''
-                    end_fmt = format_date_for_section(str(end_date), 'F2') if end_date else ''
-
-                    # Build date range string
-                    if start_fmt and end_fmt:
-                        if end_fmt.lower() == 'present':
-                            date_str = f"{start_fmt}-Present"
-                        elif end_fmt != start_fmt:
-                            date_str = f"{start_fmt}-{end_fmt}"
-                        else:
-                            date_str = start_fmt
-                    elif start_fmt:
-                        date_str = start_fmt
-                    elif end_fmt:
-                        date_str = end_fmt
-                    else:
-                        date_str = ''
-
-                    self._add_board_cert_row(table, certifying_board, certificate_number, date_str)
-            else:
-                # No structured fields - try to parse from text
-                self._parse_and_add_multiple_certifications(table, original_text, entry)
-
-    def _parse_and_add_multiple_certifications(self, table, text: str, entry: Dict):
-        """Parse multiple board certifications from raw text and add rows."""
-        if not text:
-            return
-
-
-        # Handle pipe-separated format: "Specialty | CertNum | Year"
-        # First, split on newlines and filter empty lines
-        lines = [line.strip() for line in text.split('\n') if line.strip()]
-
-        # Skip header lines
-        header_keywords = ['name of specialty', 'board certificate', 'date of certification']
-        lines = [l for l in lines if not any(kw in l.lower() for kw in header_keywords)]
-
-        if not lines:
-            return
-
-        # Try to parse pipe-separated rows first
-        # Format might be: "Specialty | CertNum | Year" on each line
-        # Or mixed format from extraction artifacts
-
-        specialties = []
-        cert_numbers = []
-        years = []
-
-        for line in lines:
-            # Check if line contains pipe separator
-            if '|' in line:
-                parts = [p.strip() for p in line.split('|')]
-                for part in parts:
-                    if not part:
-                        continue
-                    # Classify each part
-                    if re.match(r'^\d{4}$', part):
-                        years.append(part)
-                    elif re.match(r'^[\d\-]+$', part):
-                        cert_numbers.append(part)
-                    elif 'MOC' in part:
-                        years.append(part)
-                    elif not re.match(r'^\d', part):
-                        # Doesn't start with digit - likely specialty
-                        specialties.append(part)
-            else:
-                # No pipe - classify the whole line
-                line = line.strip()
-                if re.match(r'^\d{4}$', line):
-                    years.append(line)
-                elif re.match(r'^[\d\-]+$', line):
-                    cert_numbers.append(line)
-                elif 'MOC' in line:
-                    years.append(line)
-                elif not re.match(r'^\d', line) and line:
-                    specialties.append(line)
-
-        # Match specialties with cert numbers (assume same order)
-        num_certs = max(len(specialties), len(cert_numbers), 1)
-        for i in range(num_certs):
-            specialty = specialties[i] if i < len(specialties) else ''
-            cert_num = cert_numbers[i] if i < len(cert_numbers) else ''
-            # For years, try to match or use available
-            year = ''
-            if i < len(years):
-                year = years[i]
-            elif years:
-                # Use last year if we have fewer years than certs
-                year = years[-1] if i >= len(years) else years[i]
-
-            # Format year as yyyy per WCM template
-            if year:
-                year = format_date_for_section(year, 'F2')
-
-            if specialty or cert_num:
-                self._add_board_cert_row(table, specialty, cert_num, year)
-
-    def _add_board_cert_row(self, table, specialty: str, cert_number: str, dates: str):
-        """Add a single board certification row to the table."""
-        row = table.add_row()
-        num_cols = len(row.cells)
-
-        if num_cols >= 3:
-            row.cells[0].text = specialty or ''
-            row.cells[1].text = cert_number or ''
-            row.cells[2].text = dates or ''
-        elif num_cols >= 2:
-            row.cells[0].text = specialty or ''
-            row.cells[1].text = f"{cert_number} ({dates})" if dates else (cert_number or '')
-
-        for cell in row.cells:
-            for para in cell.paragraphs:
-                for run in para.runs:
-                    _set_font(run)
-        self.stats['entries_inserted'] += 1
-
-    def _fill_leadership(self, entries: List[Dict]):
-        """Fill O. INSTITUTIONAL LEADERSHIP ACTIVITIES section.
-
-        WCM template has table with: Role(s)/Position | Institution/Location | Dates
-        """
-        if not entries:
-            return
-
-        if self.verbose:
-            print(f"Filling Institutional Leadership ({len(entries)} entries)...")
-
-        # Find Leadership section
-        section_idx = self._find_paragraph_with_text("INSTITUTIONAL LEADERSHIP")
-        if section_idx is None:
-            section_idx = self._find_paragraph_with_text("Leadership")
-        if section_idx is None:
-            return
-
-        table = self._find_table_after_paragraph(section_idx)
-        if not table:
-            return
-
-        _clear_table_data(table, keep_header=True)
-        self.stats['tables_populated'] += 1
-
-        sorted_entries = sort_entries_reverse_chronological(entries)
-
-        for entry in sorted_entries:
-            fields = entry.get('extracted_fields', {}) or {}
-            taxonomy_code = entry.get('taxonomy_code', 'O')
-            original_text = entry.get('text', '')
-
-            # Check for leadership_role field (O code schema) as well as generic role/position
-            role = fields.get('leadership_role') or fields.get('role') or fields.get('position') or ''
-            institution = fields.get('institution') or fields.get('organization') or ''
-            # Also check division_department for O codes
-            if not institution:
-                institution = fields.get('division_department') or ''
-            start_date = fields.get('start_date') or ''
-            end_date = fields.get('end_date') or ''
-            dates = format_date_range(start_date, end_date, taxonomy_code) or ''
-
-            # Check if this entry contains multiple items (newline-separated)
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
-
-            # Use multi-line parsing when the text contains 3+ lines — this catches
-            # mega-blocks where field extraction only captured one item from many.
-            # For single/double-line entries, use extracted fields normally.
-            if len(lines) >= 3:
-                # Multiple items merged - split them into separate rows
-                self._add_multiline_leadership_rows(table, lines)
-            elif len(lines) > 1 and not role:
-                # Two lines, no extracted role - still try multi-line parsing
-                self._add_multiline_leadership_rows(table, lines)
-            else:
-                if not role and not institution:
-                    role = original_text[:100]
-
-                self._add_leadership_row(table, role, institution, dates)
-
-    def _add_leadership_row(self, table, role: str, institution: str, dates: str):
-        """Add a single row to leadership table."""
-        row = table.add_row()
-        num_cols = len(row.cells)
-        if num_cols >= 3:
-            row.cells[0].text = role or ''
-            row.cells[1].text = institution or ''
-            row.cells[2].text = dates or ''
-        elif num_cols >= 2:
-            row.cells[0].text = f"{role}, {institution}" if institution else (role or '')
-            row.cells[1].text = dates or ''
-
-        for cell in row.cells:
-            for para in cell.paragraphs:
-                for run in para.runs:
-                    _set_font(run)
-        self.stats['entries_inserted'] += 1
-
-    def _add_multiline_leadership_rows(self, table, lines: List[str]):
-        """Parse multiple leadership/committee lines and add separate rows.
-
-        Handles patterns like:
-        - "Committee Name (Chair 1999-2010)" - parenthetical role+date
-        - "Committee Name | 1999-2010" - pipe-separated date column
-        - "Committee Name    1999-2010" - trailing date
-        - Lines followed by date-only lines (from table column extraction)
-        """
-
-        # Date patterns
-        year_pattern = re.compile(r'^(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)$', re.IGNORECASE)
-        trailing_date = re.compile(r'(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)\s*$', re.IGNORECASE)
-        # Parenthetical with role+date: "(Chair 1999-2010)" or "(Vice Chair 2006-2008)"
-        paren_role_date = re.compile(r'\(([^)]*?)(\d{4})\s*[-–]\s*(\d{4}|present)\s*\)', re.IGNORECASE)
-
-        items = []  # (activity_text, institution, date)
-        dates_pool = []
-
-        for line in lines:
-            # Skip empty or header-like lines
-            if not line or line.lower() in ['dates', 'role', 'committee', 'institution']:
-                continue
-
-            # Handle pipe separator from table column extraction
-            # e.g., "Committee (Chair 2002-present) | 1996-Present"
-            if '|' in line:
-                parts = [p.strip() for p in line.split('|') if p.strip()]
-                if len(parts) >= 2 and trailing_date.match(parts[-1]):
-                    # Last part is a date, rest is the activity
-                    activity = ' | '.join(parts[:-1])
-                    pipe_date = parts[-1]
-                    # Also extract any parenthetical role+date from the activity
-                    paren_match = paren_role_date.search(activity)
-                    if paren_match:
-                        role_text = paren_match.group(1).strip().rstrip(',')
-                        clean_activity = paren_role_date.sub('', activity).strip()
-                        if role_text:
-                            clean_activity = f"{clean_activity} ({role_text})"
-                    else:
-                        clean_activity = activity
-                    items.append((clean_activity, '', pipe_date))
-                    continue
-                elif len(parts) == 1:
-                    line = parts[0]
-                # else fall through to normal processing
-
-            # Check if this is a date-only line
-            if year_pattern.match(line):
-                dates_pool.append(line)
-                continue
-
-            # Check for parenthetical role+date: "Committee (Chair 1999-2010)"
-            paren_match = paren_role_date.search(line)
-            if paren_match:
-                role_text = paren_match.group(1).strip().rstrip(',')
-                start_year = paren_match.group(2)
-                end_year = paren_match.group(3)
-                item_date = f"{start_year}-{end_year}"
-                # Clean the activity text: remove the parenthetical
-                clean_activity = paren_role_date.sub('', line).strip()
-                if role_text:
-                    clean_activity = f"{clean_activity} ({role_text})"
-                # Check for multiple parentheticals on same line
-                # e.g., "(Vice Chair 2006-2008) (Chair 2008-2010)"
-                all_parens = list(paren_role_date.finditer(line))
-                if len(all_parens) > 1:
-                    # Take the latest date range
-                    last = all_parens[-1]
-                    item_date = f"{last.group(2)}-{last.group(3)}"
-                    # Reconstruct clean activity with all roles
-                    clean_activity = paren_role_date.sub('', line).strip()
-                    roles = [m.group(1).strip().rstrip(',') for m in all_parens if m.group(1).strip()]
-                    if roles:
-                        clean_activity = f"{clean_activity} ({'; '.join(roles)})"
-                items.append((clean_activity, '', item_date))
-                continue
-
-            # Check if line has embedded date at the end (not in parentheses)
-            date_match = trailing_date.search(line)
-            if date_match:
-                item_text = line[:date_match.start()].strip()
-                item_date = date_match.group(1)
-                if item_text:
-                    items.append((item_text, '', item_date))
-                else:
-                    # Just a date with no text - add to pool
-                    dates_pool.append(item_date)
-                continue
-
-            # Plain text line - no date found
-            items.append((line, '', ''))
-
-        # Match dates_pool to items without dates using forward mapping.
-        # Both items and dates come from the same source table (column 1 → items,
-        # column 2 → dates), so they're always in the same order.
-        date_idx = 0
-        for i in range(len(items)):
-            if not items[i][2] and date_idx < len(dates_pool):
-                items[i] = (items[i][0], items[i][1], dates_pool[date_idx])
-                date_idx += 1
-
-        # Add rows for each item
-        for role, institution, item_date in items:
-            self._add_leadership_row(table, role, institution, item_date)
-
-    def _fill_administrative_activities(self, entries: List[Dict]):
-        """Fill P. INSTITUTIONAL ADMINISTRATIVE ACTIVITIES section.
-
-        WCM template has table with: Activity/Committee | Role | Dates
-        """
-        if not entries:
-            return
-
-        if self.verbose:
-            print(f"Filling Administrative Activities ({len(entries)} entries)...")
-
-        # Find Administrative section
-        section_idx = self._find_paragraph_with_text("INSTITUTIONAL ADMINISTRATIVE")
-        if section_idx is None:
-            section_idx = self._find_paragraph_with_text("ADMINISTRATIVE ACTIVITIES")
-        if section_idx is None:
-            return
-
-        table = self._find_table_after_paragraph(section_idx)
-        if not table:
-            return
-
-        _clear_table_data(table, keep_header=True)
-        self.stats['tables_populated'] += 1
-
-        sorted_entries = sort_entries_reverse_chronological(entries)
-
-        for entry in sorted_entries:
-            fields = entry.get('extracted_fields', {}) or {}
-            taxonomy_code = entry.get('taxonomy_code', 'P')
-            original_text = entry.get('text', '')
-
-            # Stage 4 packs a multi-committee entry as a LIST of record dicts under
-            # committee_name/committee/activity (#208/#248 fusion). Expand each into
-            # its own row rather than dumping a list into one cell (#256 crash).
-            record_list = next(
-                (v for v in (fields.get('committee_name'), fields.get('committee'),
-                             fields.get('activity')) if isinstance(v, list)), None)
-            if record_list:
-                for rec in record_list:
-                    if isinstance(rec, dict):
-                        a = _committee_cell_text(rec.get('committee_name') or rec.get('committee')
-                                                 or rec.get('activity') or rec.get('name'))
-                        r = _committee_cell_text(rec.get('role'))
-                        d = format_date_range(rec.get('start_date') or '',
-                                              rec.get('end_date') or '', taxonomy_code) or ''
-                    else:
-                        a, r, d = _committee_cell_text(rec), '', ''
-                    if a:
-                        self._add_committee_row(table, a, r, d)
-                continue
-
-            activity = fields.get('activity') or fields.get('committee') or fields.get('committee_name') or ''
-            role = fields.get('role') or ''
-            start_date = fields.get('start_date') or ''
-            end_date = fields.get('end_date') or ''
-            dates = format_date_range(start_date, end_date, taxonomy_code) or ''
-
-            # If dates not extracted, try to parse from parenthetical patterns in original text
-            # Common patterns: "(Chair 2011-2013)", "(2010-present)", "(Member 1999-2012)"
-            if not dates and original_text:
-                # Pattern 1: (Role YYYY-YYYY) or (Role YYYY-present)
-                paren_match = re.search(r'\(([^)]*?)(\d{4})\s*[-–]\s*(\d{4}|present)\)', original_text, re.IGNORECASE)
-                if paren_match:
-                    potential_role = paren_match.group(1).strip()
-                    start_year = paren_match.group(2)
-                    end_year = paren_match.group(3)
-                    dates = f"{start_year}-{end_year}"
-                    # Extract role if present (e.g., "Chair", "Member")
-                    if potential_role and not role:
-                        role = potential_role.rstrip(',').strip()
-                    # Clean activity by removing the parenthetical
-                    if not activity:
-                        activity = re.sub(r'\s*\([^)]*\d{4}[^)]*\)', '', original_text).strip()
-                else:
-                    # Pattern 2: Just (YYYY-YYYY) without role
-                    paren_match = re.search(r'\((\d{4})\s*[-–]\s*(\d{4}|present)\)', original_text, re.IGNORECASE)
-                    if paren_match:
-                        dates = f"{paren_match.group(1)}-{paren_match.group(2)}"
-                        if not activity:
-                            activity = re.sub(r'\s*\([^)]*\d{4}[^)]*\)', '', original_text).strip()
-
-            # Check if this entry contains multiple items (newline-separated)
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
-
-            # Use multi-line parsing when the text contains 3+ lines — this catches
-            # mega-blocks where field extraction only captured one item from many.
-            if len(lines) >= 3:
-                # Multiple items merged - split them into separate rows
-                self._add_multiline_committee_rows(table, lines)
-            elif len(lines) > 1 and not activity:
-                # Two lines, no extracted activity - still try multi-line parsing
-                self._add_multiline_committee_rows(table, lines)
-            else:
-                if not activity:
-                    activity = original_text[:150]
-
-                self._add_committee_row(table, activity, role, dates)
-
-    def _add_committee_row(self, table, activity: str, role: str, dates: str):
-        """Add a single committee row with proper column handling."""
-        # Defensive: never write a non-str (dict/list) into a Word cell — it
-        # raises deep in python-docx and aborts the whole document (#256).
-        activity = _committee_cell_text(activity)
-        role = _committee_cell_text(role)
-        dates = _committee_cell_text(dates)
-        row = table.add_row()
-        num_cols = len(row.cells)
-
-        if num_cols >= 3:
-            row.cells[0].text = activity or ''
-            row.cells[1].text = role or ''
-            row.cells[2].text = dates or ''
-        elif num_cols >= 2:
-            row.cells[0].text = f"{activity} ({role})" if role else activity
-            row.cells[1].text = dates or ''
-        else:
-            row.cells[0].text = f"{activity} - {dates}" if dates else activity
-
-        for cell in row.cells:
-            for para in cell.paragraphs:
-                for run in para.runs:
-                    _set_font(run)
-        self.stats['entries_inserted'] += 1
-
-    def _add_multiline_committee_rows(self, table, lines: List[str]):
-        """Add multiple committee rows from multiline content, parsing dates from each line."""
-
-        # Pattern for bare date lines (orphaned from table extraction)
-        bare_date_pattern = re.compile(r'^\s*\|?\s*\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?\s*$', re.IGNORECASE)
-
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-
-            # Skip bare date lines - they're orphaned from table extraction
-            # and we can't associate them with any committee
-            if bare_date_pattern.match(line):
-                continue
-
-            activity = line
-            role = ''
-            dates = ''
-
-            # Try to parse "(Role YYYY-YYYY)" or "(YYYY-YYYY)" pattern
-            paren_match = re.search(r'\(([^)]*?)(\d{4})\s*[-–]\s*(\d{4}|present)\)', line, re.IGNORECASE)
-            if paren_match:
-                potential_role = paren_match.group(1).strip()
-                start_year = paren_match.group(2)
-                end_year = paren_match.group(3)
-                dates = f"{start_year}-{end_year}"
-                if potential_role:
-                    role = potential_role.rstrip(',').strip()
-                activity = re.sub(r'\s*\([^)]*\d{4}[^)]*\)', '', line).strip()
-            else:
-                # Try simpler pattern: just (YYYY-YYYY)
-                paren_match = re.search(r'\((\d{4})\s*[-–]\s*(\d{4}|present)\)', line, re.IGNORECASE)
-                if paren_match:
-                    dates = f"{paren_match.group(1)}-{paren_match.group(2)}"
-                    activity = re.sub(r'\s*\([^)]*\d{4}[^)]*\)', '', line).strip()
-
-            # Skip if activity is empty after date extraction
-            if not activity:
-                continue
-
-            self._add_committee_row(table, activity, role, dates)
-
-    def _fill_presentations(self, entries: List[Dict]):
-        """Fill R. INVITATIONS TO SPEAK/PRESENT section.
-
-        WCM template has tables for Regional/National/International:
-        Table structure: Title | Institution/Location | Dates (yyyy)
-
-        Uses cv_owner_location to classify geographic scope of each entry.
-        """
-        if not entries:
-            return
-
-        if self.verbose:
-            print(f"Filling Invited Presentations ({len(entries)} entries)...")
-
-        # Find Presentations section
-        section_idx = self._find_paragraph_with_text("INVITATIONS TO SPEAK")
-        if section_idx is None:
-            section_idx = self._find_paragraph_with_text("Invited Presentations")
-        if section_idx is None:
-            return
-
-        # Find Regional, National, and International subsection tables
-        tables_by_scope = {}
-        for scope in ['Regional', 'National', 'International']:
-            # Look for scope header (may have * suffix like "National*")
-            scope_idx = None
-            for i in range(section_idx, min(section_idx + 25, len(self.doc.paragraphs))):
-                para_text = self.doc.paragraphs[i].text.strip()
-                if para_text == scope or para_text == f"{scope}*":
-                    scope_idx = i
-                    break
-
-            if scope_idx is not None:
-                table = self._find_table_after_paragraph(scope_idx)
-                if table:
-                    tables_by_scope[scope] = table
-
-        # Fall back to National if we couldn't find specific tables
-        if not tables_by_scope:
-            table = self._find_table_after_paragraph(section_idx)
-            if table:
-                tables_by_scope['National'] = table
-
-        if not tables_by_scope:
-            return
-
-        # Clear tables and mark as populated
-        for scope, table in tables_by_scope.items():
-            _clear_table_data(table, keep_header=True)
-            self.stats['tables_populated'] += 1
-
-        # Classify and route entries by geographic scope
-        entries_by_scope = {'Regional': [], 'National': [], 'International': []}
-        for entry in entries:
-            scope = self._classify_geographic_scope(entry)
-            entries_by_scope[scope].append(entry)
-
-        if self.verbose and self.cv_owner_location:
-            regional_count = len(entries_by_scope['Regional'])
-            national_count = len(entries_by_scope['National'])
-            intl_count = len(entries_by_scope['International'])
-            print(f"  Presentations: {regional_count} Regional, {national_count} National, {intl_count} International")
-
-        # Fill each table with its entries
-        for scope, scope_entries in entries_by_scope.items():
-            if not scope_entries:
-                continue
-
-            # Find the table for this scope (fall back to National)
-            table = tables_by_scope.get(scope) or tables_by_scope.get('National')
-            if not table:
-                continue
-
-            sorted_entries = sort_entries_reverse_chronological(scope_entries)
-
-            for entry in sorted_entries:
-                fields = entry.get('extracted_fields', {}) or {}
-                taxonomy_code = entry.get('taxonomy_code', 'R')
-
-                title = fields.get('title') or fields.get('presentation_title') or ''
-                institution = fields.get('institution') or fields.get('location') or fields.get('venue') or ''
-
-                # Get date, falling back to start_date/end_date for multi-date entries
-                raw_date = fields.get('year') or fields.get('date') or ''
-                # Handle the string "None" from field extraction
-                if str(raw_date).strip().lower() == 'none':
-                    raw_date = ''
-                if not raw_date:
-                    # Fall back to start_date for entries with date ranges
-                    raw_date = fields.get('start_date') or ''
-                    if str(raw_date).strip().lower() == 'none':
-                        raw_date = ''
-                # Format date as yyyy per WCM template requirements
-                formatted_date = format_date_for_section(raw_date, 'R') if raw_date else ''
-
-                if not title:
-                    title = entry.get('text', '')[:150]
-
-                # The R block is Title | Institution/Location | Dates, so the
-                # meeting that hosted the talk has no column of its own and
-                # belongs with the venue: "ASMBS 2022 Presidential Grand Rounds,
-                # Dallas, TX". event_name was read nowhere in this file, so
-                # 2,194 of 2,956 extracted values across 79 CVs reached no part
-                # of the rendered document.
-                event_name = (fields.get('event_name') or '').strip()
-                if event_name and event_name.casefold() not in f"{institution} {title}".casefold():
-                    institution = f"{event_name}, {institution}" if institution else event_name
-
-                row = table.add_row()
-                num_cols = len(row.cells)
-                if num_cols >= 3:
-                    row.cells[0].text = title or ''
-                    row.cells[1].text = institution or ''
-                    row.cells[2].text = formatted_date
-                elif num_cols >= 2:
-                    row.cells[0].text = title or ''
-                    row.cells[1].text = formatted_date
-
-                for cell in row.cells:
-                    for para in cell.paragraphs:
-                        for run in para.runs:
-                            _set_font(run)
-                self.stats['entries_inserted'] += 1
-
-    def _fill_passthrough_sections(self, all_entries: List[Dict]):
-        """Fill sections that can be copied directly from source CV when format matches.
-
-        These are short, structured sections in the WCM template that may already exist
-        in the source CV in the same format. If found, we copy them directly.
-
-        Sections handled:
-        - E. EMPLOYMENT STATUS
-        - G. INSTITUTIONAL/HOSPITAL AFFILIATION
-
-        Note: PERCENT EFFORT is complex and typically filled manually.
-
-        Args:
-            all_entries: All entries from the pipeline (to search by hierarchy)
-        """
-        self._fill_employment_status(all_entries)
-        self._fill_hospital_affiliation(all_entries)
-
-    def _fill_employment_status(self, all_entries: List[Dict]):
-        """Fill E. EMPLOYMENT STATUS section.
-
-        Looks for entries with hierarchy containing 'EMPLOYMENT STATUS' and
-        text in 'Label: Value' format (e.g., 'Name of Employer(s): Weill Cornell').
-        """
-        # Find entries from Employment Status section
-        matching_entries = []
-        for entry in all_entries:
-            hierarchy = entry.get('hierarchy', [])
-            hierarchy_str = ' '.join(hierarchy).upper()
-
-            # Match entries specifically from Employment Status section
-            if 'EMPLOYMENT STATUS' in hierarchy_str or (
-                'EMPLOYMENT' in hierarchy_str and 'H.' in hierarchy_str
-            ):
-                text = entry.get('text', '').strip()
-                # Accept "Label: Value" format entries
-                if text and ':' in text:
-                    parts = text.split(':', 1)
-                    value = parts[1].strip() if len(parts) > 1 else ''
-                    # Must have meaningful value after colon
-                    if len(value) > 2:
-                        matching_entries.append(entry)
-
-        if not matching_entries:
-            return
-
-        # Find "Name of Current Employer" paragraph in template (more specific than section header)
-        target_idx = None
-        for i, para in enumerate(self.doc.paragraphs):
-            text = para.text.lower()
-            if 'name of current employer' in text or 'name of employer' in text:
-                target_idx = i
-                break
-
-        if target_idx is None:
-            # Fall back to EMPLOYMENT STATUS section header
-            target_idx = self._find_paragraph_with_text('EMPLOYMENT STATUS')
-
-        if target_idx is None:
-            if self.verbose:
-                print("  Passthrough: Could not find Employment Status section")
-            return
-
-        if self.verbose:
-            print(f"  Passthrough: Filling Employment Status ({len(matching_entries)} entries)")
-
-        # Update the target paragraph with the employer info
-        for entry in matching_entries:
-            text = entry.get('text', '').strip()
-            if ':' in text:
-                # Parse "Label: Value" and update the corresponding template paragraph
-                parts = text.split(':', 1)
-                label = parts[0].strip()
-                value = parts[1].strip()
-
-                # Find and update the matching label in template
-                for i, para in enumerate(self.doc.paragraphs):
-                    para_text = para.text.strip()
-                    # Match paragraphs with similar labels (e.g., "Name of Current Employer(s):")
-                    if 'employer' in para_text.lower() and ':' in para_text:
-                        # Update the paragraph: keep the label, add the value
-                        label_end = para_text.find(':')
-                        existing_label = para_text[:label_end + 1]
-                        # Clear and rewrite
-                        para.clear()
-                        run = para.add_run(f"{existing_label}\t{value}")
-                        _set_font(run)
-                        self.stats['entries_inserted'] += 1
-                        break
-
-    def _fill_hospital_affiliation(self, all_entries: List[Dict]):
-        """Fill G. INSTITUTIONAL/HOSPITAL AFFILIATION section.
-
-        Looks for dedicated hospital affiliation entries or extracts from D2 positions.
-        """
-        # Find entries from Affiliation sections
-        matching_entries = []
-        for entry in all_entries:
-            hierarchy = entry.get('hierarchy', [])
-            hierarchy_str = ' '.join(hierarchy).upper()
-
-            if ('AFFILIATION' in hierarchy_str and 'HOSPITAL' in hierarchy_str) or \
-               ('INSTITUTIONAL' in hierarchy_str and 'AFFILIATION' in hierarchy_str):
-                text = entry.get('text', '').strip()
-                if text and len(text) > 5:
-                    matching_entries.append(entry)
-
-        if not matching_entries:
-            # No dedicated affiliation entries - skip (D2 positions are handled elsewhere)
-            return
-
-        # Find the affiliation table
-        section_idx = self._find_paragraph_with_text('INSTITUTIONAL/HOSPITAL AFFILIATION')
-        if section_idx is None:
-            section_idx = self._find_paragraph_with_text('HOSPITAL AFFILIATION')
-
-        if section_idx is None:
-            if self.verbose:
-                print("  Passthrough: Could not find Hospital Affiliation section")
-            return
-
-        # Find table after the section
-        table = self._find_table_after_paragraph(section_idx)
-
-        # Validate this is the affiliation table (should have "Primary Hospital" or similar)
-        if table and table.rows:
-            first_cell = table.rows[0].cells[0].text.lower() if table.rows[0].cells else ''
-            if 'hospital' not in first_cell and 'affiliation' not in first_cell and 'primary' not in first_cell:
-                # Wrong table - don't modify
-                if self.verbose:
-                    print(f"  Passthrough: Skipping non-affiliation table (first cell: '{first_cell[:30]}')")
-                table = None
-
-            if table:
-                # Clear existing table data and fill with matched entries
-                _clear_table_data(table, keep_header=True)
-                self.stats['tables_populated'] += 1
-
-                for entry in matching_entries:
-                    text = entry.get('text', '').strip()
-                    fields = entry.get('extracted_fields', {}) or {}
-
-                    # Try to extract structured content
-                    if ':' in text:
-                        # Parse "Label: Value" format
-                        parts = text.split(':', 1)
-                        label = parts[0].strip()
-                        value = parts[1].strip() if len(parts) > 1 else ''
-
-                        # Add as row: [Label, Value]
-                        row = table.add_row()
-                        row.cells[0].text = label
-                        if len(row.cells) > 1:
-                            row.cells[1].text = value
-                    else:
-                        # Add as single-cell row
-                        row = table.add_row()
-                        row.cells[0].text = text
-
-                    # Apply font formatting
-                    for cell in row.cells:
-                        for para in cell.paragraphs:
-                            for run in para.runs:
-                                _set_font(run)
-
-                    self.stats['entries_inserted'] += 1
-            else:
-                # No table - insert as bullet points after the section header
-                for i, entry in enumerate(matching_entries):
-                    text = entry.get('text', '').strip()
-                    if text:
-                        insert_idx = section_idx + 1 + i
-                        self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=(i == 0))
+
+
+
+
+
+
+
+    # Title strings that field extraction sometimes emits when the source CV had
+    # a column header instead of a real role (mirrors the filter in
+    # ``_add_position_row``). Treated as "no title" for grouping purposes.
+    _PLACEHOLDER_TITLES = frozenset({'title', 'position', 'role', 'name',
+                                     'description', 'activity'})
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # "MD" (from "Bethesda, MD") and "Bloomington" are comma segments the
+    # short-proper-noun org fallback happily returns (#229) — never treat a
+    # bare state abbreviation as an organization.
+    _US_STATE_ABBREVS = frozenset({
+        'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA', 'HI',
+        'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD', 'MA', 'MI',
+        'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ', 'NM', 'NY', 'NC',
+        'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT',
+        'VT', 'VA', 'WA', 'WV', 'WI', 'WY', 'DC'})
+
+    _MONTH_TAIL_RE = re.compile(
+        r'[\s,]*(?:January|February|March|April|May|June|July|August|'
+        r'September|October|November|December)$', re.IGNORECASE)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     def _route_overflow_entries(self):
         """Route content-overflow entries as tracked-change bullets in their WCM sections.
@@ -4364,6 +2707,8 @@ Now analyze the text above:"""
                     self.stats['unrendered_records_recovered'] += 1
                     n_recovered += 1
 
+        appendix_batch.extend(self._unconsumed_personal_data_batch(haystack))
+
         if appendix_batch:
             self._add_remaining_to_appendix(appendix_batch)
 
@@ -4371,114 +2716,62 @@ Now analyze the text above:"""
             print(f"  Recovered {n_recovered} unrendered record line(s) "
                   f"({len(appendix_batch)} routed to appendix)")
 
-    def _fill_appendix(self, unmapped_entries: List[Dict]):
-        """Add appendix section for unmapped content.
+    def _unconsumed_personal_data_batch(self, haystack: str
+                                        ) -> List[Tuple[str, str, float]]:
+        """A-coded entries that reached no Personal Data slot and no page.
 
-        Creates a T. Appendix section listing entries that couldn't be mapped
-        to the WCM template structure. Format matches S. BIBLIOGRAPHY style.
+        'A' is listed in `mapped_codes`, whose comment says "unused A entries
+        go to appendix" -- they did not. The exclusion covered the whole code,
+        on the stated assumption that "A entries are all used in Personal Data
+        section". The corpus refutes it: `_fill_personal_data` reads only
+        phone/address/email, so an entry carrying "Citizenship: US", "Fax: ..."
+        or "Foreign Languages: ..." is consumed by nothing and then excluded
+        from the appendix as well. 145 such orphans exist across 80 of the 100
+        corpus CVs.
+
+        Two filters, at deliberately different granularities:
+
+        - Already-rendered entries are skipped. Most orphans are the faculty
+          member's own name/title banner, which renders from `cv_owner` rather
+          than from the A entry -- 75 of 76 are already on the page, and
+          appending them would be pure duplication.
+        - PII entries are replaced by a single notice rather than dropped
+          silently. Here the whole entry is denied, unlike the consumption
+          path: this entry renders nothing, so discarding it costs nothing,
+          and fragment-level filtering would keep the birth date and drop only
+          its label.
         """
-        if not unmapped_entries:
-            return
+        batch: List[Tuple[str, str, float]] = []
+        redacted = 0
+        for entry in getattr(self, '_unconsumed_personal_data', []):
+            # The PII scan reads RAW text, the render reads cleaned text, and
+            # the order matters: _clean_inline_tabs rewrites '\t' to ': ' and
+            # ' | ' to ' — ', which are exactly the fragment boundaries
+            # _pii_fragments splits on. Scanning the cleaned text merges a PII
+            # cell into its neighbour and the label no longer starts a
+            # fragment, so the entry renders. Pinned by
+            # test_pii_in_a_tab_separated_cell_is_still_caught.
+            raw_text = entry.get('text', '') or ''
+            text = _clean_inline_tabs(raw_text).strip()
+            if not text:
+                continue
+            fields = entry.get('extracted_fields') or {}
+            if (_pii_fragments(raw_text)
+                    or any(_PII_FIELD_KEY_RE.match(k) for k in fields)):
+                redacted += 1
+                continue
+            if _squash(text) in haystack:
+                continue
+            batch.append((text, 'A', 0))
 
-        # Layer 3 backstop: drop WCM-template instruction boilerplate, source-CV
-        # furniture (title lines, date stamps — #213), and empty entries that
-        # slipped through to the unmapped pile so they do not pollute the
-        # Appendix. Precision-biased: real CV content is never dropped.
-        _pre_filter = len(unmapped_entries)
-        unmapped_entries = [
-            e for e in unmapped_entries
-            if e.get("text", "").strip()
-            and not is_template_instruction(e.get("text", ""))
-            and not is_source_boilerplate(e.get("text", ""))
-        ]
+        if redacted:
+            # One notice per document, not one per entry: the point is that the
+            # reader knows something was withheld, not how many times.
+            batch.append((PII_REDACTED_NOTICE, 'A', 0))
+        self.stats['personal_data_recovered'] = len(batch) - (1 if redacted else 0)
+        self.stats['personal_data_redacted'] = redacted
+        return batch
 
-        # Render each surviving entry once, collapsing the readers' internal cell
-        # separators. A table row whose cells are all empty (a blank WCM template
-        # row, e.g. "|  |  |") is non-empty as raw text but renders to "" — it
-        # carries no information, so it is dropped rather than shown as a bullet.
-        rendered_entries = [
-            (e, _clean_inline_tabs(e.get("text", "")))
-            for e in unmapped_entries
-        ]
-        rendered_entries = [(e, t) for e, t in rendered_entries if t.strip()]
-
-        _appendix_filtered = _pre_filter - len(rendered_entries)
-        if _appendix_filtered:
-            print(f"Filtered {_appendix_filtered} boilerplate/empty entries from Appendix")
-
-        if not rendered_entries:
-            return
-
-        if self.verbose:
-            print(f"Adding Appendix ({len(rendered_entries)} unmapped entries)...")
-
-        # Add blank paragraph before appendix header (matching BIBLIOGRAPHY style)
-        self.doc.add_paragraph()
-
-        # Add appendix header - matching BIBLIOGRAPHY style (bold + underline)
-        appendix_para = self.doc.add_paragraph()
-        run = appendix_para.add_run("T. APPENDIX")
-        _set_font(run, bold=True)
-        run.underline = True
-
-        # Add explanatory text
-        intro_para = self.doc.add_paragraph()
-        run = intro_para.add_run(
-            "The following content from the original CV was not successfully mapped to this CV format:"
-        )
-        _set_font(run)
-
-        # Emit ONE summary doc comment for the boilerplate we removed (rather
-        # than a per-entry comment for each dropped block).
-        if _appendix_filtered:
-            self._add_word_comment(
-                intro_para,
-                f"{_appendix_filtered} boilerplate/empty block"
-                f"{'s' if _appendix_filtered != 1 else ''} removed",
-                author="Template Filter",
-            )
-
-        # Add blank paragraph after intro text
-        self.doc.add_paragraph()
-
-        # Group entries by their original CV section header
-        entries_by_header = {}
-        for entry, text in rendered_entries:
-            hierarchy = entry.get('hierarchy', [])
-            header = hierarchy[0] if hierarchy else 'Unknown Section'
-            if header not in entries_by_header:
-                entries_by_header[header] = []
-            entries_by_header[header].append((entry, text))
-
-        # List entries grouped by original header
-        is_first_section = True
-        for header, entries in entries_by_header.items():
-            # Add blank paragraph before each section header (except the first one)
-            if not is_first_section:
-                self.doc.add_paragraph()
-            is_first_section = False
-
-            # Add subsection header showing original CV section
-            header_para = self.doc.add_paragraph()
-            run = header_para.add_run(f"From \"{header}\":")
-            _set_font(run, bold=True)
-
-            for i, (entry, text) in enumerate(entries, start=1):
-                element_idx = entry.get('element_idx_start', '')
-
-                # Truncate long entries
-                if len(text) > 200:
-                    text = text[:200] + '...'
-
-                entry_para = self.doc.add_paragraph()
-                bullet_text = f"{i}. {text}"
-                run = entry_para.add_run(bullet_text)
-                _set_font(run)
-
-                # Add comments from entry (e.g., why it was classified as T)
-                self._add_entry_comments(entry_para, entry)
-
-                self.stats['entries_inserted'] += 1
 
     def _add_entry_comments(self, para: Paragraph, entry: Dict):
         """Add all relevant comments from an entry to the paragraph.
@@ -4897,245 +3190,6 @@ Now analyze the text above:"""
         lines.append('</w:comments>')
         return '\n'.join(lines)
 
-    def _fill_bibliography(self, entries_by_code: Dict[str, List[Dict]], cv_owner: Dict, document_uid: str = ''):
-        """Fill bibliography section with formatted citations.
-
-        Uses the official WCM template section headers and restarts numbering
-        within each subsection.
-        """
-        # Map taxonomy codes to WCM template section header text
-        # These must match the exact text in the official WCM template
-        section_headers = {
-            'S1': 'Peer-reviewed Research Articles:',
-            'S2': 'Reviews and Editorials:',
-            'S3': 'Books:',
-            'S4': 'Chapters:',
-            'S5': 'Non-peer-reviewed Research Publications:',
-            'S6': 'Case Reports',
-            'S7': 'In review',
-            'S8': 'Abstracts',
-            'S9': 'Other (media, podcasts, etc.):',
-        }
-
-        # Get CV owner last name for fallback bolding
-        cv_owner_last_name = ''
-        if cv_owner and cv_owner.get('last_name'):
-            cv_owner_last_name = cv_owner['last_name']
-        elif document_uid:
-            # Fallback: extract from document_uid (e.g., "2015_Wende" -> "Wende")
-            cv_owner_last_name = _extract_last_name_from_uid(document_uid)
-
-        # Count total publications
-        pub_codes = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']
-        total_pubs = sum(len(entries_by_code.get(code, [])) for code in pub_codes)
-
-        if self.verbose:
-            print(f"Filling Bibliography ({total_pubs} publications)...")
-
-        # Process each publication type
-        for code in pub_codes:
-            pubs = entries_by_code.get(code, [])
-            if not pubs:
-                continue
-
-            header_text = section_headers.get(code, '')
-            if not header_text:
-                continue
-
-            # Find the section header in the template
-            section_idx = self._find_paragraph_with_text(header_text)
-            if section_idx is None:
-                if self.verbose:
-                    print(f"  Warning: Could not find section header '{header_text}'")
-                continue
-
-            if self.verbose:
-                print(f"  {code}: {len(pubs)} entries -> '{header_text[:30]}...'")
-
-            # Sort reverse chronologically (most recent first)
-            pubs_sorted = sort_entries_reverse_chronological(pubs)
-            # Un-fuse any entry that collapsed several citations into one
-            # (#208), so each is numbered instead of rendering as unnumbered
-            # <w:br/> continuation lines under one number.
-            pubs_sorted = split_fused_citation_entries(pubs_sorted)
-
-            # Insert after the section header - numbering restarts at 1 for each section
-            insert_idx = section_idx + 1
-
-            # Add blank line before first citation in each section
-            if pubs_sorted:
-                self.doc.paragraphs[insert_idx].insert_paragraph_before("")
-                insert_idx += 1
-
-            for citation_num, pub in enumerate(pubs_sorted, start=1):
-                citation_text, target_name, enriched_fields = _format_citation(pub, citation_num)
-                original_text = pub.get('text', '')
-                enrichment_status = pub.get('enrichment_status', '')
-
-                # Insert citation paragraph before the next element
-                para = self.doc.paragraphs[insert_idx].insert_paragraph_before("")
-
-                # Check if this entry was enriched - if so, use track changes
-                if enrichment_status == 'enriched' and original_text:
-                    # Show original as deleted, enriched citation as inserted
-                    # First add the deletion (original text)
-                    self._add_track_change_deletion(para, original_text, author="PubMed Enrichment")
-                    # Then add the insertion (enriched citation) with bold author
-                    self._add_citation_with_bold_author_as_insertion(
-                        para, citation_text, target_name, cv_owner_last_name,
-                        author="PubMed Enrichment"
-                    )
-                else:
-                    # No enrichment - add citation normally with target name bolded
-                    self._add_citation_with_bold_author(para, citation_text, target_name, cv_owner_last_name)
-
-                # Add comment explaining enrichment (no inline text)
-                if enriched_fields:
-                    enrichment_source = pub.get('enrichment_source', '')
-                    if enrichment_source:
-                        comment = f"Data enriched from {enrichment_source.upper()}. Fields updated: {', '.join(enriched_fields)}"
-                        self._add_word_comment(para, comment, author="PubMed Enrichment")
-
-                # Add comments from upstream pipeline processes
-                self._add_entry_comments(para, pub)
-
-                insert_idx += 1
-                self.stats['entries_inserted'] += 1
-
-
-
-    def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: Optional[str], cv_owner_last_name: str = ''):
-        """
-        Add citation text to paragraph, bolding the target author name.
-
-        If target_name is not found, falls back to searching for cv_owner_last_name.
-        """
-        para.clear()
-
-        # Determine what to bold
-        name_to_bold = None
-        if target_name and target_name in citation:
-            name_to_bold = target_name
-        elif cv_owner_last_name:
-            # Fallback: find cv_owner's name in the citation using regex
-            # Look for patterns like "Wende ME", "Wende, M", "Wende M.", etc.
-            pattern = rf'\b{re.escape(cv_owner_last_name)}\s*[A-Z]{{0,3}}\.?\b'
-            match = re.search(pattern, citation, re.IGNORECASE)
-            if match:
-                name_to_bold = match.group(0).rstrip('.,')
-
-        if name_to_bold and name_to_bold in citation:
-            # Split around target name
-            idx = citation.index(name_to_bold)
-            before = citation[:idx]
-            after = citation[idx + len(name_to_bold):]
-
-            # Add before (normal)
-            if before:
-                run1 = para.add_run(before)
-                _set_font(run1)
-
-            # Add target name (bold)
-            run2 = para.add_run(name_to_bold)
-            _set_font(run2, bold=True)
-            self.stats['target_names_bolded'] += 1
-
-            # Add after (normal)
-            if after:
-                run3 = para.add_run(after)
-                _set_font(run3)
-        else:
-            # No target name to bold
-            run = para.add_run(citation)
-            _set_font(run)
-
-    def _add_citation_with_bold_author_as_insertion(self, para: Paragraph, citation: str,
-                                                     target_name: Optional[str], cv_owner_last_name: str = '',
-                                                     author: str = "PubMed Enrichment"):
-        """
-        Add citation as a track change insertion, bolding the target author name.
-
-        This creates proper Word track change structure with w:ins element,
-        and includes bold formatting for the target author within the insertion.
-        """
-        # Issue #153: when track changes are disabled, render the citation as a
-        # plain (non-tracked) paragraph with the target author bolded.
-        if not self.emit_track_changes:
-            self._add_citation_with_bold_author(para, citation, target_name, cv_owner_last_name)
-            return
-        try:
-            revision_id = str(self._revision_id)
-            self._revision_id += 1
-
-            # Create the insertion element
-            ins = OxmlElement('w:ins')
-            ins.set(qn('w:id'), revision_id)
-            ins.set(qn('w:author'), author)
-            ins.set(qn('w:date'), datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
-
-            # Determine what to bold
-            name_to_bold = None
-            if target_name and target_name in citation:
-                name_to_bold = target_name
-            elif cv_owner_last_name:
-                pattern = rf'\b{re.escape(cv_owner_last_name)}\s*[A-Z]{{0,3}}\.?\b'
-                match = re.search(pattern, citation, re.IGNORECASE)
-                if match:
-                    name_to_bold = match.group(0).rstrip('.,')
-
-            def create_run_element(text: str, bold: bool = False) -> Any:
-                """Create a w:r element with text and optional bold."""
-                run_elem = OxmlElement('w:r')
-                rPr = OxmlElement('w:rPr')
-                rFonts = OxmlElement('w:rFonts')
-                rFonts.set(qn('w:ascii'), 'Arial')
-                rFonts.set(qn('w:hAnsi'), 'Arial')
-                rPr.append(rFonts)
-                sz = OxmlElement('w:sz')
-                sz.set(qn('w:val'), '22')  # 11pt
-                rPr.append(sz)
-                if bold:
-                    b = OxmlElement('w:b')
-                    rPr.append(b)
-                run_elem.append(rPr)
-                t = OxmlElement('w:t')
-                t.text = text
-                if text.startswith(' ') or text.endswith(' '):
-                    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-                run_elem.append(t)
-                return run_elem
-
-            if name_to_bold and name_to_bold in citation:
-                # Split around target name
-                idx = citation.index(name_to_bold)
-                before = citation[:idx]
-                after = citation[idx + len(name_to_bold):]
-
-                # Add before (normal)
-                if before:
-                    ins.append(create_run_element(before, bold=False))
-
-                # Add target name (bold)
-                ins.append(create_run_element(name_to_bold, bold=True))
-                self.stats['target_names_bolded'] += 1
-
-                # Add after (normal)
-                if after:
-                    ins.append(create_run_element(after, bold=False))
-            else:
-                # No target name to bold - single run
-                ins.append(create_run_element(citation, bold=False))
-
-            # Append insertion to paragraph
-            para._p.append(ins)
-            self.stats['track_changes_added'] += 1
-
-        except Exception as e:
-            if self.verbose:
-                print(f"  Warning: Could not add citation as insertion: {e}")
-            # Fall back to normal citation
-            self._add_citation_with_bold_author(para, citation, target_name, cv_owner_last_name)
-
     def _validate_output(self) -> List[Dict]:
         """Validate the generated document for common issues.
 
@@ -5167,11 +3221,12 @@ Now analyze the text above:"""
 
             # Look at the next few paragraphs after the section header
             for i in range(section_idx + 1, min(section_idx + 5, len(self.doc.paragraphs))):
-                para_text = self.doc.paragraphs[i].text.strip()
+                para = self.doc.paragraphs[i]
+                para_text = para.text.strip()
                 if not para_text:
                     continue
                 # Check if this looks like a combined entry (semicolon-separated list)
-                if para_text.startswith('•') and para_text.count(';') > 3:
+                if _is_bullet_paragraph(para) and para_text.count(';') > 3:
                     issues.append({
                         "check": "semicolon_fused_bullets",
                         "code": code,
@@ -5210,10 +3265,11 @@ Now analyze the text above:"""
         if teaching_idx is not None:
             has_visible_bullets = False
             for i in range(teaching_idx + 1, min(teaching_idx + 30, len(self.doc.paragraphs))):
-                para_text = self.doc.paragraphs[i].text.strip()
+                para = self.doc.paragraphs[i]
+                para_text = para.text.strip()
                 if 'CLINICAL PRACTICE' in para_text.upper():
                     break
-                if para_text.startswith('•') and len(para_text) > 5:
+                if _is_bullet_paragraph(para) and len(para_text) > 5:
                     has_visible_bullets = True
                     break
             if not has_visible_bullets:
@@ -5234,6 +3290,21 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
                recover_unrendered_records: bool = True) -> str:
     """
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
+
+    Takes a PATH, not parsed data, and that is load-bearing for concurrency.
+    Stage 6 rewrites entries in place as it renders -- reassigning
+    ``entry['taxonomy_code']`` when it reroutes a code, writing back
+    ``entry['extracted_fields']``, annotating ``entry['reclassification_note']``
+    -- 17 sites in all. Because this function is handed a path and parses the
+    JSON itself, every render owns the dicts it mutates, and the web path runs
+    renders concurrently (``run_service.py`` starts each run in a thread and the
+    orchestrator hands each stage to ``asyncio.to_thread``).
+
+    Passing already-parsed stage 5 data in here to save a re-parse would be a
+    natural-looking optimisation and would silently break that: two concurrent
+    renders would then rewrite one another's entries mid-render. If the
+    in-memory interface is ever wanted, deep-copy at the boundary or make the
+    rewrites non-destructive first.
 
     Args:
         input_path: Path to enriched JSON file

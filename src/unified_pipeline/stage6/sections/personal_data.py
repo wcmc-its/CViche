@@ -36,7 +36,7 @@ except ImportError:  # pragma: no cover - mirrors stage_6_word_template
     sys.exit(1)
 
 from ..formatting import _set_cell_text, _set_font
-from ..normalization import _address_cell_text, _labels_its_own_address_slots
+from ..normalization import _address_cell_text, _from_pii_fragment, _labels_its_own_address_slots, _labels_its_own_phone_slots, _phone_cell_text, _pii_fragments
 from ..parsing import _extract_name_from_uid
 
 
@@ -94,9 +94,25 @@ class PersonalDataSection:
         office_address = None
         home_address = None
 
+        # A entries that reach none of the six slots below are consumed by
+        # nothing. 'A' is in mapped_codes, so they were then excluded from the
+        # appendix too, and vanished. Detected by ablation rather than by
+        # re-listing the fields this loop reads, so it cannot drift out of step
+        # when the loop learns to read a new one.
+        unconsumed = []
+
         for entry in entries:
             fields = entry.get('extracted_fields', {}) or {}
             text = entry.get('text', '').lower()
+            slots_before = (work_email, personal_email, office_phone,
+                            cell_phone, office_address, home_address)
+
+            # Values stage 4 lifted out of a protected-personal-data fragment
+            # are not contact details and must not reach the template. web07's
+            # Office address row renders "Cincinnati, Ohio" today, taken
+            # straight from "PLACE OF BIRTH: Cincinnati, Ohio" by the address
+            # catch-all below.
+            pii_fragments = _pii_fragments(entry.get('text', ''))
 
             # Determine type based on original text labels
             extracted_phone = fields.get('phone')
@@ -107,6 +123,14 @@ class PersonalDataSection:
                               fields.get('work_email') or
                               fields.get('personal_email'))
 
+            if pii_fragments:
+                if _from_pii_fragment(extracted_phone, pii_fragments):
+                    extracted_phone = None
+                if _from_pii_fragment(extracted_address, pii_fragments):
+                    extracted_address = None
+                if _from_pii_fragment(extracted_email, pii_fragments):
+                    extracted_email = None
+
             # Classify phone by type
             # Handle case where multiple phones are in one entry (e.g., "Mobile: X  Work: Y")
             if extracted_phone:
@@ -115,10 +139,19 @@ class PersonalDataSection:
                 has_work = 'office' in text or 'work' in text
                 has_home = 'home' in text
 
-                if has_mobile and has_work and ';' in extracted_phone:
+                if _labels_its_own_phone_slots(extracted_phone):
+                    # A structured phone names its own halves, so trust those
+                    # rather than the entry's raw text label (#450). web147's
+                    # contact block is labelled "Home" but the dict carries
+                    # cell/office/fax; the raw-text routing sent all three to
+                    # home_phone, which the WCM template has no row for, so
+                    # every number was dropped.
+                    cell_phone = cell_phone or _phone_cell_text(extracted_phone, 'cell')
+                    office_phone = office_phone or _phone_cell_text(extracted_phone, 'office')
+                elif has_mobile and has_work and ';' in str(extracted_phone):
                     # Both types in same entry — try to split them
                     # Parse from original text to get correct assignment
-                    phones = [p.strip() for p in extracted_phone.split(';')]
+                    phones = [p.strip() for p in str(extracted_phone).split(';')]
                     # Find phone numbers in order they appear in text
                     mobile_match = re.search(r'(?:cell|mobile)[^(]*(\(\d{3}\)\s*\d{3}[-.\s]?\d{4})', text, re.IGNORECASE)
                     work_match = re.search(r'(?:work|office)[^(]*(\(\d{3}\)\s*\d{3}[-.\s]?\d{4})', text, re.IGNORECASE)
@@ -128,13 +161,24 @@ class PersonalDataSection:
                         office_phone = work_match.group(1)
                 elif has_mobile:
                     if not cell_phone:
-                        cell_phone = extracted_phone
+                        cell_phone = _phone_cell_text(extracted_phone, 'cell')
                 elif has_home:
+                    # The WCM template has exactly two phone rows, Office
+                    # telephone and Cell phone -- there is no home row, so
+                    # home_phone is written and never read, and a home-labelled
+                    # number is deliberately not rendered.
+                    #
+                    # Routing it to the office row instead was tried and is
+                    # WRONG: on web113 the HOME entry is processed before the
+                    # BUSINESS entry, so the office row took the home number and
+                    # the real business number was then skipped as already-set.
+                    # Recovering a home phone needs a template row to put it in,
+                    # not a slot to squat in.
                     if not home_phone:
-                        home_phone = extracted_phone
+                        home_phone = _phone_cell_text(extracted_phone, 'home')
                 elif has_work or not office_phone:
                     if not office_phone:
-                        office_phone = extracted_phone
+                        office_phone = _phone_cell_text(extracted_phone, 'office')
 
             # Classify address by type
             if extracted_address:
@@ -166,8 +210,22 @@ class PersonalDataSection:
             # Also check entry text for email pattern (fallback)
             if not work_email and not personal_email:
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', entry.get('text', ''))
-                if email_match:
+                if email_match and not _from_pii_fragment(email_match.group(0),
+                                                          pii_fragments):
                     work_email = email_match.group(0)
+
+            # home_phone is deliberately absent from this tuple: it is written
+            # and never read (the template has no home-phone row), so an entry
+            # that sets only home_phone reaches the document nowhere and is
+            # genuinely unconsumed. Two corpus entries are in exactly that
+            # state.
+            if (work_email, personal_email, office_phone, cell_phone,
+                    office_address, home_address) == slots_before:
+                unconsumed.append(entry)
+
+        # Handed to the post-render recovery pass, which is the only point at
+        # which "did this content reach the document?" can actually be asked.
+        self._unconsumed_personal_data = unconsumed
 
         # Legacy variable names for compatibility with rest of function
         email = work_email

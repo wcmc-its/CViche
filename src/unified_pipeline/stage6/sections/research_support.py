@@ -338,6 +338,15 @@ class ResearchSupportSection:
         costs = fields.get('annual_direct_costs') or fields.get('total_funding', '')
         costs_formatted = _format_currency(costs)
 
+        # Carry the grant/award identifier in Award Source. The WCM template has no
+        # grant-number row -- its block is exactly these 8 rows plus optional goals --
+        # but the Award Source label itself reads "(funding agency ...; type of grant)",
+        # so the identifier belongs there. Without this, stage 4 extracts grant_number
+        # and no renderer ever consumes it: 528 of 537 corpus values reached no render.
+        grant_number = (fields.get('grant_number') or '').strip()
+        if grant_number and grant_number.casefold() not in f"{agency} {title}".casefold():
+            agency = f"{agency} ({grant_number})" if agency else grant_number
+
         # Define the grant data model rows
         # Use the extracted title/agency variables (which check multiple field names) instead of just fields.get()
         rows = [

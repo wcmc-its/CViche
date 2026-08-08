@@ -31,6 +31,7 @@ from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from ..normalization import _strip_org_tail
 from ..parsing import _is_table_header_entry
 from ..sorting import sort_entries_reverse_chronological
+from unified_pipeline.core.render_check import entry_lines
 
 
 class HonorsSection:
@@ -118,7 +119,7 @@ class HonorsSection:
 
             # Check if this entry contains multiple awards (newline-separated)
             # This happens when multiple honors were merged during extraction
-            lines = [l.strip() for l in original_text.split('\n') if l.strip()]
+            lines = entry_lines(original_text)
 
             # Separate award lines from year lines
             # Years are typically 4-digit numbers or ranges like "2017-2020"

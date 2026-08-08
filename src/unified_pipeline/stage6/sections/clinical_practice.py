@@ -28,6 +28,7 @@ from ..formatting import (
 )
 from ..parsing import _is_structural_label
 from ..sorting import sort_entries_reverse_chronological
+from unified_pipeline.core.render_check import entry_lines
 
 
 class ClinicalPracticeSection:
@@ -218,7 +219,7 @@ class ClinicalPracticeSection:
                             continue
                         bullet_text = original_text.replace('\t', ' — ', 1).replace('\t', ' ') if '\t' in original_text else original_text
                         if bullet_text:
-                            self._insert_bulleted_entry(section_idx + 1 + bullet_count, bullet_text, entry, add_blank_before=(bullet_count == 0))
+                            self._insert_bulleted_entry(section_idx + 1 + bullet_count, bullet_text, entry, add_blank_before=(bullet_count == 0), list_level=0)
                             bullet_count += 1
 
         # L3: Clinical Leadership
@@ -331,7 +332,7 @@ class ClinicalPracticeSection:
         Returns:
             Number of bullets inserted
         """
-        lines = [l.strip() for l in text.split('\n') if l.strip()]
+        lines = entry_lines(text)
         if not lines:
             return 0
 
@@ -341,7 +342,7 @@ class ClinicalPracticeSection:
             self._insert_bulleted_entry(
                 insert_idx, line_text,
                 entry if is_last else None,  # Attach entry/comments to first bullet
-                add_blank_before=add_blank_before and is_last
+                add_blank_before=add_blank_before and is_last, list_level=0
             )
 
         return len(lines)
