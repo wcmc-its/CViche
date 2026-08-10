@@ -1,8 +1,10 @@
 """#342: login throttle -- distributed across pods, degrades to in-memory."""
+import inspect
 import os
 import time
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
+from app.api.auth_routes import login
 from app.login_throttle import LoginThrottle
 
 
@@ -59,6 +61,12 @@ def test_valkey_error_degrades_to_local_not_open():
     assert t.allow("x") is True
     assert t.allow("x") is True
     assert t.allow("x") is False  # still throttled via the in-memory fallback
+
+
+def test_login_route_stays_a_coroutine():
+    # If login stops being a coroutine function, FastAPI runs it in a real
+    # thread pool and _allow_local's shared dict needs a threading.Lock (#414).
+    assert inspect.iscoroutinefunction(login)
 
 
 def test_in_memory_fallback_sweeps_lapsed_ips():
