@@ -26,14 +26,14 @@ The floor is 50 characters rather than a word count because the failure it
 catches is a stub -- an empty string, a header echo, a refusal -- not a short
 but real summary.
 """
-import sys
 from typing import Dict, Optional
 
 try:
     from docx.shared import Pt
-except ImportError:  # pragma: no cover - mirrors stage_6_word_template
-    print("Error: python-docx not installed. Install with: pip install python-docx lxml")
-    sys.exit(1)
+except ImportError as exc:
+    raise ImportError(
+        "python-docx is required for stage 6. Install with: pip install python-docx lxml"
+    ) from exc
 
 
 class ResearchSummarySection:

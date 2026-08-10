@@ -16,15 +16,15 @@ with no warning (`grant_number` is the standing example). Adding a field means
 editing this file, not just stage 4.
 """
 import re
-import sys
 from datetime import datetime
 from typing import Dict, List, Optional
 
 try:
     from docx.table import Table
-except ImportError:  # pragma: no cover - mirrors stage_6_word_template
-    print("Error: python-docx not installed. Install with: pip install python-docx lxml")
-    sys.exit(1)
+except ImportError as exc:
+    raise ImportError(
+        "python-docx is required for stage 6. Install with: pip install python-docx lxml"
+    ) from exc
 
 from ..formatting import (
     _format_currency,

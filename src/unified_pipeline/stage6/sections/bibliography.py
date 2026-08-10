@@ -31,7 +31,6 @@ the CV owner's last name -- taken from `cv_owner`, or recovered from the
 document uid when the pipeline never resolved an owner.
 """
 import re
-import sys
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -39,9 +38,10 @@ try:
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
     from docx.text.paragraph import Paragraph
-except ImportError:  # pragma: no cover - mirrors stage_6_word_template
-    print("Error: python-docx not installed. Install with: pip install python-docx lxml")
-    sys.exit(1)
+except ImportError as exc:
+    raise ImportError(
+        "python-docx is required for stage 6. Install with: pip install python-docx lxml"
+    ) from exc
 
 from ..formatting import _format_citation, _set_font
 from ..normalization import split_fused_citation_entries

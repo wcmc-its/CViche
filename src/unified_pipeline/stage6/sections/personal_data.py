@@ -24,16 +24,16 @@ This is the only section writer that reads the source document directly, which
 is why `Document` and `Path` are imported here and nowhere else in this package.
 """
 import re
-import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List
 
 try:
     from docx import Document
-except ImportError:  # pragma: no cover - mirrors stage_6_word_template
-    print("Error: python-docx not installed. Install with: pip install python-docx lxml")
-    sys.exit(1)
+except ImportError as exc:
+    raise ImportError(
+        "python-docx is required for stage 6. Install with: pip install python-docx lxml"
+    ) from exc
 
 from ..formatting import _set_cell_text, _set_font
 from ..normalization import _address_cell_text, _from_pii_fragment, _labels_its_own_address_slots, _labels_its_own_phone_slots, _phone_cell_text, _pii_fragments
