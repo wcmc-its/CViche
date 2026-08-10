@@ -70,6 +70,7 @@ Outputs:
 
 import sys
 import json
+import logging
 import time
 from pathlib import Path
 from datetime import timedelta
@@ -90,6 +91,8 @@ from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
 from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
 from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
+
+logger = logging.getLogger(__name__)
 
 
 def get_stage_order():
@@ -807,14 +810,19 @@ def main():
 
                 # Read output to get enrichment stats and cost
                 stage5b_cost = 0.0
+                stage5b_cost_unknown = False
                 try:
                     with open(stage5b_output_path, 'r') as f:
                         stage5b_data = json.load(f)
                     stage5b_stats = stage5b_data.get('institution_enrichment_stats', {})
                     stage5b_cost = stage5b_stats.get('cost', 0.0)
                     total_cost += stage5b_cost
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(
+                        "Could not read stage 5b cost from %s: %s: %s",
+                        stage5b_output_path, type(e).__name__, e
+                    )
+                    stage5b_cost_unknown = True
 
                 stage_duration = time.time() - stage_start
                 stage_times['5b'] = stage_duration
@@ -822,12 +830,15 @@ def main():
                 all_results['stage_5b'] = {
                     'output_file': stage5b_output_path,
                     'cost': stage5b_cost,
+                    'cost_unknown': stage5b_cost_unknown,
                     'duration': stage_duration
                 }
                 print()
                 print("Stage 5b Complete")
                 print(f"  Output: {stage5b_output_path}")
-                if stage5b_cost > 0:
+                if stage5b_cost_unknown:
+                    print("  Cost: unknown (failed to read institution enrichment stats)")
+                elif stage5b_cost > 0:
                     print(f"  Cost: ${stage5b_cost:.4f}")
                 print(f"  Time: {format_duration(stage_duration)}")
                 print()
@@ -1091,7 +1102,9 @@ def main():
         print(f"  Stage 3b: ${all_results['stage_3b']['cost']:.4f}")
     if 'stage_4' in all_results and 'cost' in all_results['stage_4']:
         print(f"  Stage 4:  ${all_results['stage_4']['cost']:.4f}")
-    if 'stage_5b' in all_results and 'cost' in all_results['stage_5b'] and all_results['stage_5b']['cost'] > 0:
+    if 'stage_5b' in all_results and all_results['stage_5b'].get('cost_unknown'):
+        print("  Stage 5b: unknown (institution enrichment stats unreadable)")
+    elif 'stage_5b' in all_results and 'cost' in all_results['stage_5b'] and all_results['stage_5b']['cost'] > 0:
         print(f"  Stage 5b: ${all_results['stage_5b']['cost']:.4f}")
     print(f"  Total:    ${total_cost:.4f}")
     print()
