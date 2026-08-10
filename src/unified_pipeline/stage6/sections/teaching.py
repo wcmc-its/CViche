@@ -43,6 +43,7 @@ Structural labels and orphan fragments are dropped at the top -- a bare "Course
 Title" or a dangling continuation line is source-table furniture, not a
 teaching activity.
 """
+import logging
 from typing import Dict, List
 
 from ..formatting import normalize_iso_dates_in_text
@@ -50,6 +51,8 @@ from ..normalization import _strip_markdown_for_word
 from ..parsing import _is_orphan_fragment, _is_structural_label
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
+
+logger = logging.getLogger(__name__)
 
 
 class TeachingSection:
@@ -205,6 +208,21 @@ class TeachingSection:
                         lines.extend([item.strip() for item in line.split(';') if item.strip()])
                     else:
                         lines.append(line)
+
+                if not lines:
+                    # Every line was a bare column label ("Title"/"Institution"/etc.) --
+                    # the filter above left nothing to bullet. Institution and role are
+                    # right there in the extracted fields even though this branch only
+                    # exists because both formatted_text and course_title came back
+                    # empty, so fall back to those before giving up on the entry.
+                    text = ', '.join(part for part in (institution, role) if part)
+                    if text:
+                        self._insert_bulleted_entry(insert_idx, text, entry,
+                                                     add_blank_before=is_first_visible, list_level=0)
+                        return
+                    logger.warning("teaching entry produced no renderable line (%s): %r",
+                                    entry.get('taxonomy_code'), original_text[:80])
+                    return
 
                 for j, line_text in enumerate(reversed(lines)):
                     if not line_text:

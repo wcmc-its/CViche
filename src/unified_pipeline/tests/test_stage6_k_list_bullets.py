@@ -124,13 +124,13 @@ def test_teaching_entries_render_as_list_paragraphs_end_to_end():
     assert "•" not in rendered[0].text
 
 
-# --- and the six K call sites actually ask for it ----------------------------
+# --- and the seven K call sites actually ask for it --------------------------
 
 def test_every_teaching_call_site_requests_a_list_level():
     # Guards the wire, not the helper: deleting list_level from any one of the
-    # six call sites silently restores the glyph for part of section K.
+    # seven call sites silently restores the glyph for part of section K.
     calls = _bullet_calls_by_function()[K_CALLER]
-    assert len(calls) == 6, f"expected 6 K call sites, found {len(calls)}"
+    assert len(calls) == 7, f"expected 7 K call sites, found {len(calls)}"
     for call in calls:
         kwargs = {kw.arg for kw in call.keywords}
         assert "list_level" in kwargs, f"{K_CALLER} line {call.lineno} lost list_level"
