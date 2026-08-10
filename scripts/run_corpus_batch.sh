@@ -79,6 +79,34 @@ MODEL_LABEL="${MODEL:-default}"
 HEADER=$'date\tsha\tmodel\tcv\texit\twcm_output\tkb\tsections\theaders\tentries\tclassified'
 [ -f "$SUMMARY" ] || printf '%s\n' "$HEADER" > "$SUMMARY"
 
+# The loop below only ever sees *.docx -- the pipeline's readers don't handle
+# other formats yet (#524 is the separate initiative for that). A directory
+# of PDFs or anything else non-.docx would otherwise glob to zero iterations
+# and exit 0 with no rows, indistinguishable from a genuinely empty or
+# already-fully-run directory (#528). Count and name what got skipped here,
+# under its own counter -- distinct from the "already had output" $skipped
+# below -- so that silent zero-docx case is visible.
+NAMED_SKIP_LIMIT=5
+skipped_nondocx=0; nondocx_names=()
+for f in "$INPUT_DIR"/*; do
+  [ -e "$f" ] || continue
+  [ -d "$f" ] && continue
+  base="$(basename "$f")"
+  case "$base" in
+    .*|*.docx) continue ;;
+  esac
+  skipped_nondocx=$((skipped_nondocx+1))
+  nondocx_names+=("$base")
+done
+if [ "$skipped_nondocx" -gt 0 ]; then
+  if [ "$skipped_nondocx" -le "$NAMED_SKIP_LIMIT" ]; then
+    shown="$(IFS=,; echo "${nondocx_names[*]}")"
+  else
+    shown="$skipped_nondocx files"
+  fi
+  echo "Skipped $skipped_nondocx non-.docx file(s) in $INPUT_DIR: $shown"
+fi
+
 ran=0; skipped=0; failed=0
 for f in "$INPUT_DIR"/*.docx; do
   [ -e "$f" ] || continue
@@ -136,4 +164,7 @@ FINISHED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 printf '{"started":"%s","finished":"%s","sha":"%s","branch":"%s","model":"%s","input_dir":"%s","count":%s,"ran":%s,"skipped":%s,"failed":%s}\n' \
   "$STARTED" "$FINISHED" "$SHA" "$BRANCH" "$MODEL_LABEL" "$INPUT_DIR" "$COUNT" "$ran" "$skipped" "$failed" >> "$META"
 
-echo "DONE ran=$ran skipped=$skipped failed=$failed sha=$SHA doctor=$DOCTOR  (results in $RESULTS)"
+if [ "$ran" -eq 0 ] && [ "$skipped_nondocx" -gt 0 ]; then
+  echo "WARNING: ran=0 -- $skipped_nondocx non-.docx file(s) in $INPUT_DIR were skipped (see above); confirm $INPUT_DIR actually contains .docx CVs to run"
+fi
+echo "DONE ran=$ran skipped=$skipped skipped_nondocx=$skipped_nondocx failed=$failed sha=$SHA doctor=$DOCTOR  (results in $RESULTS)"
