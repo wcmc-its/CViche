@@ -84,6 +84,13 @@ def test_blank_lines_do_not_create_empty_entries():
     assert split_fused_citation_entries([fused]) == [fused]
 
 
+def test_non_str_formatted_citation_does_not_raise():
+    # Stage 4 stores raw LLM JSON and does not guarantee formatted_citation is
+    # a string; a dict/list/int must be treated as absent, not crash .splitlines().
+    non_str = _pub({"text": "Alpha B. First study."})
+    assert split_fused_citation_entries([non_str]) == [non_str]
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q", "-p", "no:cacheprovider"]))

@@ -44,7 +44,8 @@ def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
     out: List[Dict] = []
     for pub in pubs:
         fields = pub.get('extracted_fields') or {}
-        fc = fields.get('formatted_citation') or ''
+        fc = fields.get('formatted_citation')
+        fc = fc if isinstance(fc, str) else ''
         lines = [ln.strip() for ln in fc.splitlines() if ln.strip()]
         if fields.get('formatting_source') == 'stage_5d_llm' and len(lines) >= 2:
             for i, line in enumerate(lines):
