@@ -44,6 +44,7 @@ DATE_FORMATS = MappingProxyType({
     'M2A': 'mm/yy',       # Grants: various date formats
     'M2B': 'mm/yy',
     'M2C': 'mm/yy',
+    'M2D': 'mm/yyyy',     # Patents: filing/issue dates; template specifies no format
     'N3A': 'yyyy',        # Mentoring
     'N3B': 'yyyy',
     'O': 'yyyy',          # Leadership
