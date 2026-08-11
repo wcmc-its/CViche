@@ -88,7 +88,7 @@ import re
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
 from unified_pipeline.segmentation_regression import iter_source_lines
@@ -450,14 +450,18 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
 
 # --------------------------------------------------------- artifact resolution
 
+class ArtifactSpec(NamedTuple):
+    stage_dir: str
+    suffix: str
+
 _ARTIFACTS = {
-    "stage_1a": ("stage_1a_segmentation", "_segmented.json"),
-    "stage_2": ("stage_2_entry_extraction", "_entries.json"),
-    "stage_3b": ("stage_3b_classified_entries", "_classified.json"),
-    "stage_4": ("stage_4_field_extraction", "_fields.json"),
-    "stage_5_enrichment": ("stage_5_enrichment", "_enriched.json"),
-    "stage_6_docx": ("stage_6_wcm_documents", "_wcm.docx"),
-    "stage_6_report": ("stage_6_wcm_documents", "_render_warnings.json"),
+    "stage_1a": ArtifactSpec("stage_1a_segmentation", "_segmented.json"),
+    "stage_2": ArtifactSpec("stage_2_entry_extraction", "_entries.json"),
+    "stage_3b": ArtifactSpec("stage_3b_classified_entries", "_classified.json"),
+    "stage_4": ArtifactSpec("stage_4_field_extraction", "_fields.json"),
+    "stage_5_enrichment": ArtifactSpec("stage_5_enrichment", "_enriched.json"),
+    "stage_6_docx": ArtifactSpec("stage_6_wcm_documents", "_wcm.docx"),
+    "stage_6_report": ArtifactSpec("stage_6_wcm_documents", "_render_warnings.json"),
 }
 
 #: The owner gate reports an ABSENT *_fields.json only for a run that got as
@@ -486,11 +490,11 @@ def _uid_owns(name: str, uid: str) -> bool:
 
 
 def _find_artifact(root: Path, uid: str, key: str) -> Optional[Path]:
-    stage_dir, suffix = _ARTIFACTS[key]
-    directory = root / stage_dir
+    spec = _ARTIFACTS[key]
+    directory = root / spec.stage_dir
     if not directory.is_dir():
         return None
-    matches = sorted(p for p in directory.glob(f"{uid}*{suffix}")
+    matches = sorted(p for p in directory.glob(f"{uid}*{spec.suffix}")
                      if _uid_owns(p.name, uid))
     return matches[0] if matches else None
 

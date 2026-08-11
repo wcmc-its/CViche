@@ -70,7 +70,7 @@ def _get_institution_location(entry: Dict) -> Tuple[str, bool]:
             return (default_location, False)  # False = not from enrichment (no track change needed)
 
     # Check for institution enrichment data (from Stage 5b)
-    enrichment = entry.get('institution_enrichment', {})
+    enrichment = entry.get('institution_enrichment') or {}
     if enrichment:
         city = enrichment.get('city', '')
         state = enrichment.get('state', '')

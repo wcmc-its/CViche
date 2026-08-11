@@ -1370,6 +1370,17 @@ def test_artifact_resolution_does_not_steal_a_longer_uids_files(tmp_path):
     assert _find_source(tmp_path, "web05").name == "web05.docx"
 
 
+def test_artifacts_are_named_tuples_readable_by_attribute():
+    """_ARTIFACTS values are ArtifactSpec, not bare positional tuples -- so a
+    call site can read .stage_dir/.suffix by name instead of by position."""
+    from unified_pipeline.run_doctor import _ARTIFACTS, ArtifactSpec
+
+    for spec in _ARTIFACTS.values():
+        assert isinstance(spec, ArtifactSpec)
+        assert spec.stage_dir == spec[0]
+        assert spec.suffix == spec[1]
+
+
 def test_uid_owns_requires_a_real_boundary_suffix():
     """The ownership guard must reject the degenerate cases as well as the
     prefix collision: an empty uid owns nothing, and a name that IS the uid

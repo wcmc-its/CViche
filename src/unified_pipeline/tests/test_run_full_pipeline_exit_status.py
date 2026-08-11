@@ -20,6 +20,7 @@ Self-contained: no DB, no network, no LLM.
 
 import ast
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -119,8 +120,13 @@ def _write(path, payload=None):
     return str(path)
 
 
-def _run_main(tmp_path, monkeypatch, capsys, fail=()):
-    """Run main() end to end with every stage runner stubbed. Returns (rc, stdout)."""
+def _run_main(tmp_path, monkeypatch, capsys, fail=(), stage5b_writer=None):
+    """Run main() end to end with every stage runner stubbed. Returns (rc, stdout).
+
+    ``stage5b_writer``, if given, replaces the default stage 5b output (a valid
+    ``institution_enrichment_stats`` payload) so a test can point run_stage5b at
+    a missing or corrupt file without touching any other stage.
+    """
     monkeypatch.chdir(tmp_path)
     (tmp_path / 'data/sample_cvs/word').mkdir(parents=True)
     (tmp_path / f'data/sample_cvs/word/{UID}.docx').write_bytes(b'PK\x03\x04fake')
@@ -160,8 +166,8 @@ def _run_main(tmp_path, monkeypatch, capsys, fail=()):
     monkeypatch.setattr(run_full_pipeline, 'run_stage5', stub(
         '5', lambda: (_write(_FILES['5']), {'enriched': 10})[1]))
     monkeypatch.setattr(run_full_pipeline, 'run_stage5b', stub(
-        '5b', lambda: _write(_FILES['5b'],
-                             {'institution_enrichment_stats': {'cost': 0.0}})))
+        '5b', stage5b_writer or (lambda: _write(
+            _FILES['5b'], {'institution_enrichment_stats': {'cost': 0.0}}))))
     monkeypatch.setattr(run_full_pipeline, 'run_stage_5c', stub(
         '5c', lambda: _write(_FILES['5c'])))
     monkeypatch.setattr(run_full_pipeline, 'run_stage_5d', stub(
@@ -293,3 +299,49 @@ def test_models_used_counts_real_calls_not_configuration():
 def test_format_models_used_is_honest_when_nothing_was_called():
     from unified_pipeline import llm_client
     assert llm_client.format_models_used(), "must never render as an empty string"
+
+
+# ------------------------------------------------------------------ #489
+# Stage 5b cost bookkeeping. A missing or corrupt stage 5b output used to be
+# swallowed by a bare `except Exception: pass`, so the run reported cost 0.0 --
+# identical to a CV that genuinely had nothing left to enrich.
+
+def test_stage5b_genuine_zero_cost_is_not_flagged_unknown(tmp_path, monkeypatch, capsys):
+    """A CV with nothing left to enrich costs nothing; that must stay ordinary
+    success, not get swept into the same bucket as a read failure."""
+    rc, out = _run_main(tmp_path, monkeypatch, capsys)
+    assert rc == 0
+    assert "unknown" not in out.lower()
+
+
+def test_stage5b_corrupt_output_flags_cost_as_unknown(tmp_path, monkeypatch, capsys, caplog):
+    """The #489 case: malformed JSON from stage 5b must not silently read as
+    $0.00 -- it has to be visibly distinct from a genuine zero."""
+    def write_corrupt():
+        path = _FILES['5b']
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("{not valid json")
+        return str(path)
+
+    caplog.set_level(logging.WARNING)
+    rc, out = _run_main(tmp_path, monkeypatch, capsys, stage5b_writer=write_corrupt)
+    assert rc == 0, "institution enrichment itself succeeded; only the cost read failed"
+    assert "Cost: unknown (failed to read institution enrichment stats)" in out
+    assert "Stage 5b: unknown (institution enrichment stats unreadable)" in out
+    assert "Stage 5b: $0.0000" not in out
+    assert any("stage 5b cost" in record.message.lower() for record in caplog.records), (
+        "the read failure must be logged, naming the path and the exception")
+
+
+def test_stage5b_missing_output_file_flags_cost_as_unknown(tmp_path, monkeypatch, capsys, caplog):
+    """Same shape, the other failure mode named in #489: run_stage5b reports a
+    path but never writes it (crash, permissions, disk full)."""
+    def missing_file():
+        return str(_FILES['5b'])  # never created
+
+    caplog.set_level(logging.WARNING)
+    rc, out = _run_main(tmp_path, monkeypatch, capsys, stage5b_writer=missing_file)
+    assert rc == 0
+    assert "Cost: unknown (failed to read institution enrichment stats)" in out
+    assert "Stage 5b: unknown (institution enrichment stats unreadable)" in out
+    assert any("stage 5b cost" in record.message.lower() for record in caplog.records)

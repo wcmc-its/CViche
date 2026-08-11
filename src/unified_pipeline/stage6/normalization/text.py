@@ -144,7 +144,7 @@ def _get_cleaned_institution_name(entry: Dict) -> Optional[str]:
     Returns:
         Cleaned institution name, or None if not available (use original)
     """
-    enrichment = entry.get('institution_enrichment', {})
+    enrichment = entry.get('institution_enrichment') or {}
     cleaned = enrichment.get('cleaned_name', '')
     if cleaned:
         return cleaned

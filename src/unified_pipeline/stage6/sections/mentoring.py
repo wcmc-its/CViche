@@ -22,14 +22,14 @@ exists because rendering the stage-4 codes literally lost content (#261):
 `_create_mentee_table` is the table itself, kept separate because the spacing
 paragraph has to be inserted between the header and the table.
 """
-import sys
 from typing import Dict, List, Optional
 
 try:
     from docx.table import Table
-except ImportError:  # pragma: no cover - mirrors stage_6_word_template
-    print("Error: python-docx not installed. Install with: pip install python-docx lxml")
-    sys.exit(1)
+except ImportError as exc:
+    raise ImportError(
+        "python-docx is required for stage 6. Install with: pip install python-docx lxml"
+    ) from exc
 
 from ..formatting import (
     _format_mentee_duration,

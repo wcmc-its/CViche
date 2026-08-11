@@ -32,14 +32,14 @@ the only section that calls it. Everything else either writes cells directly or
 uses one of the shared `_add_table_row_with_*` variants, which stay on
 `WCMTemplateGenerator`.
 """
-import sys
 from typing import Dict, List
 
 try:
     from docx.table import Table
-except ImportError:  # pragma: no cover - mirrors stage_6_word_template
-    print("Error: python-docx not installed. Install with: pip install python-docx lxml")
-    sys.exit(1)
+except ImportError as exc:
+    raise ImportError(
+        "python-docx is required for stage 6. Install with: pip install python-docx lxml"
+    ) from exc
 
 from ..formatting import (
     _clear_table_data,
@@ -81,7 +81,11 @@ class MembershipsSection:
         if not table:
             # Fall back to finding table with "Organization" header
             table = self._find_table_with_cell_text("Organization")
-            if table and "Date" not in table.rows[0].cells[1].text:
+            if table and (
+                not table.rows
+                or len(table.rows[0].cells) < 2
+                or "Date" not in table.rows[0].cells[1].text
+            ):
                 table = None  # Wrong table
 
         if not table:

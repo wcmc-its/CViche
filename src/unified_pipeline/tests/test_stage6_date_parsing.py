@@ -90,6 +90,9 @@ def test_both_functions_use_the_shared_parser():
     ("2019-05-15", "M2A", "05/19"),
     ("present", "M2A", "Present"),
     ("", "M2A", ""),
+    ("2019-05-15", "M2D", "05/2019"),  # day-precision: day dropped, not fabricated
+    ("August 2021", "M2D", "08/2021"), # month-precision
+    ("2019", "M2D", "2019"),           # year-only: no month to fall back on
 ])
 def test_format_date_for_section_outputs(date_str, code, expected):
     assert format_date_for_section(date_str, code) == expected
