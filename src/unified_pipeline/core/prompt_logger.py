@@ -25,6 +25,7 @@ Usage:
 
 import json
 import os
+import contextvars
 from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
@@ -36,6 +37,35 @@ import hashlib
 _DEFAULT_PROMPT_LOG_DIR = Path(__file__).parent.parent / "prompt_logs"
 PROMPT_LOG_DIR = Path(os.getenv("PROMPT_LOG_DIR", str(_DEFAULT_PROMPT_LOG_DIR)))
 PROMPT_LOG_DIR.mkdir(exist_ok=True, parents=True)
+
+# Per-run subdirectory of PROMPT_LOG_DIR. With CVICHE_MAX_CONCURRENT_RUNS=3,
+# up to three runs share this interpreter and this directory; writing every
+# run's transcripts into the same flat directory let one run's file-by-mtime
+# upload pick up another run's verbatim CV text (#580). The web backend sets
+# this once per run via set_current_run_id(); unset (CLI / script usage)
+# keeps the original flat layout.
+_current_run_id: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+    "prompt_logger_current_run_id", default=None
+)
+
+
+def set_current_run_id(run_id: Optional[str]) -> None:
+    """Scope this task's prompt-log writes to PROMPT_LOG_DIR/<run_id>.
+
+    Must arrive as an argument, not a reach into the web backend's ``app.`` --
+    this module is in src/unified_pipeline/, which per CODING_STANDARDS §1.4
+    may not import it. Pass None to go back to the shared directory.
+    """
+    _current_run_id.set(run_id)
+
+
+def _log_dir() -> Path:
+    """Directory to write into: PROMPT_LOG_DIR, or PROMPT_LOG_DIR/<run_id>
+    if set_current_run_id() was called on this task."""
+    run_id = _current_run_id.get()
+    d = (PROMPT_LOG_DIR / run_id) if run_id else PROMPT_LOG_DIR
+    d.mkdir(exist_ok=True, parents=True)
+    return d
 
 
 def log_prompt_before_call(
@@ -111,7 +141,7 @@ def log_prompt_before_call(
     # Save to file
     # Format: YYYY-MM-DD_HH-MM-SS_{purpose}_{log_id}.json
     filename = f"{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}_{purpose}_{log_id}.json"
-    log_path = PROMPT_LOG_DIR / filename
+    log_path = _log_dir() / filename
 
     try:
         with open(log_path, 'w', encoding='utf-8') as f:
@@ -119,7 +149,7 @@ def log_prompt_before_call(
 
         # Also save a human-readable version
         readable_filename = f"{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}_{purpose}_{log_id}_READABLE.txt"
-        readable_path = PROMPT_LOG_DIR / readable_filename
+        readable_path = _log_dir() / readable_filename
 
         with open(readable_path, 'w', encoding='utf-8') as f:
             f.write("=" * 80 + "\n")
@@ -239,7 +269,7 @@ def log_prompt_response(
 
         # Save response
         filename = f"{timestamp.strftime('%Y-%m-%d_%H-%M-%S')}_{purpose}_{log_id}_RESPONSE.json"
-        log_path = PROMPT_LOG_DIR / filename
+        log_path = _log_dir() / filename
 
         with open(log_path, 'w', encoding='utf-8') as f:
             json.dump(response_record, f, indent=2, ensure_ascii=False)
