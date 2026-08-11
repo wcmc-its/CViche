@@ -131,6 +131,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_bucket_status,
     lint_classified_unrendered,
     lint_dedup_drops,
+    lint_taxonomy_code_coverage,
     lint_under_extraction,
 )
 from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
@@ -233,6 +234,7 @@ KNOWN_LINTS = (
     "bucket_status",
     "under_extraction",
     "classified_unrendered",
+    "taxonomy_code_coverage",
     "output_hygiene",
     "dead_sections",
     "unrendered_records",
@@ -616,6 +618,8 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
         findings.extend(lint_under_extraction(stage_4))
     if ready("classified_unrendered", stage_3b=stage_3b, stage_6_docx=blocks):
         findings.extend(lint_classified_unrendered(stage_3b, blocks))
+    if ready("taxonomy_code_coverage", stage_3b=stage_3b):
+        findings.extend(lint_taxonomy_code_coverage(stage_3b))
     if ready("output_hygiene", stage_6_docx=blocks):
         findings.extend(lint_output_hygiene(blocks))
     if ready("dead_sections", stage_2=stage_2, stage_6_docx=blocks):

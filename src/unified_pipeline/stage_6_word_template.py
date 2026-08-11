@@ -560,6 +560,41 @@ TAXONOMY_TO_SECTION = MappingProxyType({
 })
 
 
+# Taxonomy codes `generate()` treats as routed to a specific section, as
+# opposed to falling through to the T. Appendix catch-all. Distinct from
+# TAXONOMY_TO_SECTION above (which nominally covers 'T' too, for display/
+# lookup purposes elsewhere) -- this is specifically the dispatch decision
+# "did this code's entries already get placed by one of the _fill_* calls
+# above". Hoisted from a local inside generate() so run_doctor's coverage
+# lint (#529) can check real classification output against the exact same
+# set generate() uses, instead of hand-maintaining a second copy that WILL
+# drift from it.
+RENDER_ROUTED_CODES = frozenset({
+    'A',   # Personal Data (email, phone - but unused A entries go to appendix)
+    'S0',  # Researcher Profiles section
+    'B1',  # Education - Academic Degrees
+    'B2',  # Education - Other Educational Experiences
+    'C', 'C1', 'C2',  # Postdoctoral Training (C is generic, C1/C2 are sub-types)
+    'D1', 'D2', 'D3',  # Professional Positions
+    'F1', 'F2',  # Licensure and Board Certification
+    'H',   # Honors and Awards
+    'I',   # Professional Memberships
+    'K1', 'K2', 'K3', 'K4', 'K5',  # Teaching Activities
+    'L1', 'L2', 'L3',  # Clinical Practice, Innovation, Leadership
+    'M1',  # Research Summary (from Stage 4.5) -- see the conditional discard
+           # in generate(): only routed when the summary actually rendered.
+    'M2A', 'M2B', 'M2C',  # Research Support (grants and clinical trials)
+    'M2D',  # Patents & Innovations
+    'N3A', 'N3B',  # Mentoring (current/past mentees)
+    'O',   # Institutional Leadership
+    'P',   # Administrative Committees
+    'Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D',  # Service Activities
+    'R',   # Invited Presentations
+    'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9',  # Bibliography
+    # NOTE: T is intentionally NOT here - T entries go to Appendix
+})
+
+
 # Fields whose values identify a specific record (vs. generic values like a
 # status string shared by many records). Used by segment_already_rendered.
 _IDENTIFYING_FIELDS = (
@@ -1180,31 +1215,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # These are copied directly from source CV when the source format matches WCM
         self._fill_passthrough_sections(all_entries)
 
-        # Add appendix for ALL unmapped content
-        # Codes that are mapped to specific sections in the WCM template:
-        mapped_codes = {
-            'A',   # Personal Data (email, phone - but unused A entries go to appendix)
-            'S0',  # Researcher Profiles section
-            'B1',  # Education - Academic Degrees
-            'B2',  # Education - Other Educational Experiences
-            'C', 'C1', 'C2',  # Postdoctoral Training (C is generic, C1/C2 are sub-types)
-            'D1', 'D2', 'D3',  # Professional Positions
-            'F1', 'F2',  # Licensure and Board Certification
-            'H',   # Honors and Awards
-            'I',   # Professional Memberships
-            'K1', 'K2', 'K3', 'K4', 'K5',  # Teaching Activities
-            'L1', 'L2', 'L3',  # Clinical Practice, Innovation, Leadership
-            'M1',  # Research Summary (from Stage 4.5)
-            'M2A', 'M2B', 'M2C',  # Research Support (grants and clinical trials)
-            'M2D',  # Patents & Innovations
-            'N3A', 'N3B',  # Mentoring (current/past mentees)
-            'O',   # Institutional Leadership
-            'P',   # Administrative Committees
-            'Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D',  # Service Activities
-            'R',   # Invited Presentations
-            'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9',  # Bibliography
-            # NOTE: T is intentionally NOT here - T entries go to Appendix
-        }
+        # Add appendix for ALL unmapped content. Local mutable copy of the
+        # module-level RENDER_ROUTED_CODES: the M1 discard just below mutates
+        # it per-call, and a frozenset shared across calls/runs would make
+        # that mutation stick around for the next one (#580/#581's class of
+        # bug -- process-global state mutated per run).
+        mapped_codes = set(RENDER_ROUTED_CODES)
 
         # M1 (Research Activities) entries are consumed by the Stage 4.5 research
         # summary. When that summary did NOT render (no Stage 4.5 output, empty

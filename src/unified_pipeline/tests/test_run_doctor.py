@@ -43,6 +43,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_owner_contact_missing,
     lint_pipe_leaks,
     lint_pipeline_errors,
+    lint_taxonomy_code_coverage,
     lint_segmentation,
     lint_stage6_warnings,
     lint_table_shape,
@@ -349,6 +350,58 @@ def test_classified_unrendered_quiet_when_reformatted_downstream():
     stage3b = {"entries": [_entry(raw, taxonomy_code="S1", start=4)]}
     blocks = [("p", "BIBLIOGRAPHY"), ("p", rendered)]
     assert lint_classified_unrendered(stage3b, blocks) == []
+
+
+# --------------------------------------------------- lint: taxonomy code coverage
+
+def test_taxonomy_code_coverage_fires_for_a_code_with_no_render_route():
+    # N2 is exactly #529's example: a real, confidently-classified code stage
+    # 6 has never had a renderer for.
+    stage3b = {"entries": [
+        _entry("Postdoctoral Fellowship $26,000", taxonomy_code="N2", start=1),
+        _entry("Mentored Research Scholar Grant", taxonomy_code="N2", start=2),
+    ]}
+    findings = lint_taxonomy_code_coverage(stage3b)
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "WARN"
+    assert "N2" in findings[0]["message"]
+    assert "2 entries" in findings[0]["message"]
+
+
+def test_taxonomy_code_coverage_quiet_for_a_routed_code():
+    stage3b = {"entries": [_entry("A grant", taxonomy_code="M2A", start=1)]}
+    assert lint_taxonomy_code_coverage(stage3b) == []
+
+
+def test_taxonomy_code_coverage_does_not_flag_t_or_headers_or_breaks():
+    stage3b = {"entries": [
+        _entry("Leftover miscellaneous content", taxonomy_code="T", start=1),
+        _entry("A HEADER", taxonomy_code="N2", etype="header", start=2),
+        _entry("", taxonomy_code="N2", etype="break", start=3),
+    ]}
+    assert lint_taxonomy_code_coverage(stage3b) == []
+
+
+def test_taxonomy_code_coverage_does_not_flag_m1_the_common_routed_case():
+    # M1 is only unrouted when the Stage 4.5 summary itself didn't render
+    # (#317) -- a distinct, already-covered case. This lint must not
+    # false-positive the ordinary path where it did.
+    stage3b = {"entries": [_entry("Research summary text", taxonomy_code="M1", start=1)]}
+    assert lint_taxonomy_code_coverage(stage3b) == []
+
+
+def test_taxonomy_code_coverage_does_not_flag_codes_that_duplicate_instead():
+    # E, G and N4 all render via their own direct dispatch (not the
+    # RENDER_ROUTED_CODES lookup this lint checks) and then ALSO duplicate
+    # into the appendix -- a real defect, but a different one (#294 for G,
+    # #587 for N4) from "no render route at all", which is what this lint
+    # exists to catch. Flagging them here would conflate the two classes.
+    stage3b = {"entries": [
+        _entry("Weill Cornell Medicine", taxonomy_code="G", start=1),
+        _entry("Full-time", taxonomy_code="E", start=2),
+        _entry("Many trainees secured faculty positions", taxonomy_code="N4", start=3),
+    ]}
+    assert lint_taxonomy_code_coverage(stage3b) == []
 
 
 # --------------------------------------------------------- lint 6: output hygiene
@@ -1055,7 +1108,7 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    assert len(payload["findings"]) == 16
+    assert len(payload["findings"]) == 17  # one skip per lint in KNOWN_LINTS
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
     assert payload["counts"]["ERROR"] == 0
