@@ -67,6 +67,8 @@ jobs:
           pip install -r web_interface/backend/requirements-dev.txt -r requirements.txt
       - name: Run pipeline tests
         run: python -m pytest src/unified_pipeline/tests/ -q -p no:cacheprovider
+      - name: Render/doctor gate self-test
+        run: python3 scripts/test_render_doctor_gates.py
 
   function-size:
     # Ratchet on oversized functions (CODING_STANDARDS.md 3.2a). Stdlib only --
