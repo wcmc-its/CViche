@@ -1149,6 +1149,224 @@ Example:
 ]}}"""
 
 
+@dataclass
+class _BatchStats:
+    """One batch's contribution to classify_entries_batch's accumulators.
+
+    _classify_one_batch returns one of these instead of mutating outer
+    accumulator variables; classify_entries_batch sums them across batches.
+    Field names mirror the loop-local variables the inline code used to
+    increment (#604).
+    """
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost: float = 0.0
+    llm_batches: int = 0  # 1 if this batch attempted an LLM call, else 0
+    observed_model: Optional[str] = None  # model id the API actually served (#459)
+    failed_batches: int = 0  # 1 if this batch's LLM call raised, else 0
+
+
+def _build_taxonomy_ref_for_batch(
+    taxonomy_context: TaxonomyContext,
+    taxonomy: Dict,
+) -> Tuple[List[str], str]:
+    """Resolve the suggested codes and taxonomy reference text shared by every
+    batch in one classify_entries_batch call.
+
+    Returns:
+        Tuple of (all_suggested_codes, taxonomy_ref)
+    """
+    # Get ALL suggested codes from ALL hierarchy levels for taxonomy filtering
+    # This ensures we don't miss codes suggested at parent levels
+    all_suggested_codes = taxonomy_context.get_all_suggested_codes()
+    relevant_families = set(c[0] for c in all_suggested_codes) if all_suggested_codes else None
+
+    # Build taxonomy reference with disambiguation info for all suggested codes
+    if relevant_families and len(relevant_families) <= 5:
+        # Include suggested families plus a few common alternatives
+        relevant_families.update(['H', 'T'])  # Always include honors and other
+        # Pass ALL suggested codes so they get full disambiguation notes
+        taxonomy_ref = build_taxonomy_codes_for_prompt(
+            taxonomy,
+            relevant_families=list(relevant_families),
+            context_codes=all_suggested_codes
+        )
+    else:
+        # Full taxonomy, but still include disambiguation for suggested codes
+        taxonomy_ref = build_taxonomy_codes_for_prompt(
+            taxonomy,
+            context_codes=all_suggested_codes
+        )
+
+    return all_suggested_codes, taxonomy_ref
+
+
+def _classify_one_batch(
+    batch_entries: List[Dict],
+    batch_start: int,
+    taxonomy_context: TaxonomyContext,
+    all_suggested_codes: List[str],
+    taxonomy_ref: str,
+    model: str,
+) -> Tuple[List[Dict], _BatchStats]:
+    """Classify a single batch against a taxonomy_ref built once by the caller.
+
+    Returns this batch's own results list and its own stats contribution --
+    it never appends to a shared list or mutates an outer accumulator, so
+    classify_entries_batch can extend/sum the return values after the call.
+    """
+    stats = _BatchStats()
+
+    # Skip empty entries
+    entries_with_text = [(i, e) for i, e in enumerate(batch_entries) if e.get("text", "").strip()]
+
+    if not entries_with_text:
+        # All empty - assign parent code with low confidence
+        results = []
+        for entry in batch_entries:
+            primary = all_suggested_codes[0] if all_suggested_codes else "T"
+            results.append({
+                **entry,
+                "taxonomy_code": primary,
+                "taxonomy_confidence": 0.0,
+                "classification_source": "empty_entry"
+            })
+        return results, stats
+
+    # Build prompt
+    context_str = taxonomy_context.format_context_string()
+
+    system_prompt = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
+        context_str=context_str, taxonomy_ref=taxonomy_ref
+    )
+
+    # Build entries list for user message (include per-entry hierarchy)
+    entries_lines = []
+    for i, e in entries_with_text:
+        hierarchy_path = " > ".join(e.get("hierarchy", [])) or "unknown"
+        entries_lines.append(f"[{i}] (Section: {hierarchy_path}) {e['text'][:500]}")
+    entries_text = "\n".join(entries_lines)
+
+    user_message = f"""Classify these {len(entries_with_text)} entries:
+
+{entries_text}
+
+Return ONLY valid JSON with the classifications array."""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message}
+    ]
+
+    # Call LLM
+    stats.llm_batches = 1
+    try:
+        llm_result = call_llm(
+            stage="stage_3b",
+            messages=messages,
+            response_format={"type": "json_object"},
+            temperature=0.1,
+            max_tokens=2000
+        )
+
+        # Parse response
+        content = llm_result["content"]
+        result = json.loads(content)
+        classifications = result.get("classifications", [])
+
+        # Track tokens/cost
+        stats.input_tokens = llm_result["prompt_tokens"]
+        stats.output_tokens = llm_result["completion_tokens"]
+        stats.cost = llm_result["cost"]
+        stats.observed_model = llm_result.get("model")
+
+    except Exception:
+        # Every entry in this batch falls back to the default code below;
+        # the caller aggregates failed_batches and fails the run if NO
+        # batch ever produced a real classification (#61).
+        stats.failed_batches = 1
+        hierarchy_path = " > ".join(batch_entries[0].get("hierarchy", [])) or "(no hierarchy)"
+        logger.exception(
+            "Stage 3b batch classification failed; %d entries fall back to "
+            "default codes (batch at offset %d, hierarchy: %s)",
+            len(entries_with_text), batch_start, hierarchy_path
+        )
+        classifications = []
+
+    # Build index lookup for classifications.
+    #
+    # This runs OUTSIDE the try/except above, so anything raised here
+    # escapes classify_entries_batch and run_stage_3b entirely: the
+    # orchestrator fails the whole web run, while the CLI prints
+    # "Warning: Stage N failed" and lets every later stage run on
+    # unclassified entries. The response is requested as a bare
+    # json_object with no schema, so an object without "index" (KeyError)
+    # or a non-dict element (TypeError) is a real possibility. Skip those
+    # loudly instead -- they fall back to the default code below, which is
+    # what a missing classification already does (#521).
+    class_by_idx = {}
+    malformed = 0
+    for c in classifications:
+        if isinstance(c, dict) and "index" in c:
+            class_by_idx[c["index"]] = c
+        else:
+            malformed += 1
+    if malformed:
+        logger.warning(
+            "Stage 3b: skipped %d malformed classification object(s) in the "
+            "batch at offset %d; those entries fall back to the default code",
+            malformed, batch_start
+        )
+
+    # Map results back to entries
+    results = []
+    for orig_idx, entry in enumerate(batch_entries):
+        if not entry.get("text", "").strip():
+            # Empty entry
+            primary = all_suggested_codes[0] if all_suggested_codes else "T"
+            results.append({
+                **entry,
+                "taxonomy_code": primary,
+                "taxonomy_confidence": 0.0,
+                "classification_source": "empty_entry"
+            })
+        else:
+            # class_by_idx is keyed by the ORIGINAL index within
+            # batch_entries: the prompt labels each entry "[{i}]" using the
+            # i carried in entries_with_text, which came from
+            # enumerate(batch_entries), and the model echoes those labels
+            # back as "index". Looking up a POSITION within entries_with_text
+            # instead only agrees when nothing was filtered out -- and stage 2
+            # emits empty "break" entries throughout the list on purpose
+            # (filter_extraction_noise keeps them; "breaks are legitimately
+            # empty"). One break in a batch shifted every later entry, so an
+            # entry was persisted with its neighbour's code and confidence,
+            # indistinguishable downstream from a correct classification (#520).
+            c = class_by_idx.get(orig_idx)
+            if c is not None:
+                results.append({
+                    **entry,
+                    # Coalesce an explicit-null/empty LLM code to the fallback,
+                    # and coerce a stringified confidence to float, so the
+                    # persisted values never crash downstream .startswith / < 0.7.
+                    "taxonomy_code": c.get("code") or (all_suggested_codes[0] if all_suggested_codes else "T"),
+                    "taxonomy_confidence": _safe_float(c.get("confidence"), 0.5),
+                    "classification_reasoning": c.get("reasoning"),
+                    "classification_source": "llm"
+                })
+            else:
+                # Fallback to primary code
+                primary = all_suggested_codes[0] if all_suggested_codes else "T"
+                results.append({
+                    **entry,
+                    "taxonomy_code": primary,
+                    "taxonomy_confidence": 0.5,
+                    "classification_source": "fallback"
+                })
+
+    return results, stats
+
+
 def classify_entries_batch(
     entries: List[Dict],
     taxonomy_context: TaxonomyContext,
@@ -1177,176 +1395,22 @@ def classify_entries_batch(
     observed_model = None  # model id the API actually served (#459)
     failed_batches = 0  # batches whose LLM call raised (entries fell back)
 
-    # Get ALL suggested codes from ALL hierarchy levels for taxonomy filtering
-    # This ensures we don't miss codes suggested at parent levels
-    all_suggested_codes = taxonomy_context.get_all_suggested_codes()
-    relevant_families = set(c[0] for c in all_suggested_codes) if all_suggested_codes else None
-
-    # Build taxonomy reference with disambiguation info for all suggested codes
-    if relevant_families and len(relevant_families) <= 5:
-        # Include suggested families plus a few common alternatives
-        relevant_families.update(['H', 'T'])  # Always include honors and other
-        # Pass ALL suggested codes so they get full disambiguation notes
-        taxonomy_ref = build_taxonomy_codes_for_prompt(
-            taxonomy,
-            relevant_families=list(relevant_families),
-            context_codes=all_suggested_codes
-        )
-    else:
-        # Full taxonomy, but still include disambiguation for suggested codes
-        taxonomy_ref = build_taxonomy_codes_for_prompt(
-            taxonomy,
-            context_codes=all_suggested_codes
-        )
+    all_suggested_codes, taxonomy_ref = _build_taxonomy_ref_for_batch(taxonomy_context, taxonomy)
 
     # Process in batches
     for batch_start in range(0, len(entries), batch_size):
         batch_entries = entries[batch_start:batch_start + batch_size]
 
-        # Skip empty entries
-        entries_with_text = [(i, e) for i, e in enumerate(batch_entries) if e.get("text", "").strip()]
-
-        if not entries_with_text:
-            # All empty - assign parent code with low confidence
-            for entry in batch_entries:
-                primary = all_suggested_codes[0] if all_suggested_codes else "T"
-                all_results.append({
-                    **entry,
-                    "taxonomy_code": primary,
-                    "taxonomy_confidence": 0.0,
-                    "classification_source": "empty_entry"
-                })
-            continue
-
-        # Build prompt
-        context_str = taxonomy_context.format_context_string()
-
-        system_prompt = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
-            context_str=context_str, taxonomy_ref=taxonomy_ref
+        batch_results, batch_stats = _classify_one_batch(
+            batch_entries, batch_start, taxonomy_context, all_suggested_codes, taxonomy_ref, model
         )
-
-        # Build entries list for user message (include per-entry hierarchy)
-        entries_lines = []
-        for i, e in entries_with_text:
-            hierarchy_path = " > ".join(e.get("hierarchy", [])) or "unknown"
-            entries_lines.append(f"[{i}] (Section: {hierarchy_path}) {e['text'][:500]}")
-        entries_text = "\n".join(entries_lines)
-
-        user_message = f"""Classify these {len(entries_with_text)} entries:
-
-{entries_text}
-
-Return ONLY valid JSON with the classifications array."""
-
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message}
-        ]
-
-        # Call LLM
-        llm_batches += 1
-        try:
-            llm_result = call_llm(
-                stage="stage_3b",
-                messages=messages,
-                response_format={"type": "json_object"},
-                temperature=0.1,
-                max_tokens=2000
-            )
-
-            # Parse response
-            content = llm_result["content"]
-            result = json.loads(content)
-            classifications = result.get("classifications", [])
-
-            # Track tokens/cost
-            total_input_tokens += llm_result["prompt_tokens"]
-            total_output_tokens += llm_result["completion_tokens"]
-            total_cost += llm_result["cost"]
-            observed_model = llm_result.get("model") or observed_model
-
-        except Exception:
-            # Every entry in this batch falls back to the default code below;
-            # the caller aggregates failed_batches and fails the run if NO
-            # batch ever produced a real classification (#61).
-            failed_batches += 1
-            hierarchy_path = " > ".join(batch_entries[0].get("hierarchy", [])) or "(no hierarchy)"
-            logger.exception(
-                "Stage 3b batch classification failed; %d entries fall back to "
-                "default codes (batch at offset %d, hierarchy: %s)",
-                len(entries_with_text), batch_start, hierarchy_path
-            )
-            classifications = []
-
-        # Build index lookup for classifications.
-        #
-        # This runs OUTSIDE the try/except above, so anything raised here
-        # escapes classify_entries_batch and run_stage_3b entirely: the
-        # orchestrator fails the whole web run, while the CLI prints
-        # "Warning: Stage N failed" and lets every later stage run on
-        # unclassified entries. The response is requested as a bare
-        # json_object with no schema, so an object without "index" (KeyError)
-        # or a non-dict element (TypeError) is a real possibility. Skip those
-        # loudly instead -- they fall back to the default code below, which is
-        # what a missing classification already does (#521).
-        class_by_idx = {}
-        malformed = 0
-        for c in classifications:
-            if isinstance(c, dict) and "index" in c:
-                class_by_idx[c["index"]] = c
-            else:
-                malformed += 1
-        if malformed:
-            logger.warning(
-                "Stage 3b: skipped %d malformed classification object(s) in the "
-                "batch at offset %d; those entries fall back to the default code",
-                malformed, batch_start
-            )
-
-        # Map results back to entries
-        for orig_idx, entry in enumerate(batch_entries):
-            if not entry.get("text", "").strip():
-                # Empty entry
-                primary = all_suggested_codes[0] if all_suggested_codes else "T"
-                all_results.append({
-                    **entry,
-                    "taxonomy_code": primary,
-                    "taxonomy_confidence": 0.0,
-                    "classification_source": "empty_entry"
-                })
-            else:
-                # class_by_idx is keyed by the ORIGINAL index within
-                # batch_entries: the prompt labels each entry "[{i}]" using the
-                # i carried in entries_with_text, which came from
-                # enumerate(batch_entries), and the model echoes those labels
-                # back as "index". Looking up a POSITION within entries_with_text
-                # instead only agrees when nothing was filtered out -- and stage 2
-                # emits empty "break" entries throughout the list on purpose
-                # (filter_extraction_noise keeps them; "breaks are legitimately
-                # empty"). One break in a batch shifted every later entry, so an
-                # entry was persisted with its neighbour's code and confidence,
-                # indistinguishable downstream from a correct classification (#520).
-                c = class_by_idx.get(orig_idx)
-                if c is not None:
-                    all_results.append({
-                        **entry,
-                        # Coalesce an explicit-null/empty LLM code to the fallback,
-                        # and coerce a stringified confidence to float, so the
-                        # persisted values never crash downstream .startswith / < 0.7.
-                        "taxonomy_code": c.get("code") or (all_suggested_codes[0] if all_suggested_codes else "T"),
-                        "taxonomy_confidence": _safe_float(c.get("confidence"), 0.5),
-                        "classification_reasoning": c.get("reasoning"),
-                        "classification_source": "llm"
-                    })
-                else:
-                    # Fallback to primary code
-                    primary = all_suggested_codes[0] if all_suggested_codes else "T"
-                    all_results.append({
-                        **entry,
-                        "taxonomy_code": primary,
-                        "taxonomy_confidence": 0.5,
-                        "classification_source": "fallback"
-                    })
+        all_results.extend(batch_results)
+        total_input_tokens += batch_stats.input_tokens
+        total_output_tokens += batch_stats.output_tokens
+        total_cost += batch_stats.cost
+        llm_batches += batch_stats.llm_batches
+        failed_batches += batch_stats.failed_batches
+        observed_model = batch_stats.observed_model or observed_model
 
     stats = {
         "input_tokens": total_input_tokens,
