@@ -44,6 +44,34 @@ def test_iter_source_lines_sees_into_table_cells(tmp_path):
     assert any("FSMB" in l for l in lines)
 
 
+def test_iter_source_lines_reads_through_tracked_insertion_in_cell(tmp_path):
+    """#557: a run nested inside w:ins (tracked-change insertion) must not be
+    dropped mid-word. Reproduces "Down Syndrome" -> "Down yndrome": a table
+    cell paragraph built as 'Down ' + <w:ins>S</w:ins> + 'yndrome' must read
+    back whole, not with the tracked-change character silently skipped."""
+    from docx.oxml import parse_xml
+    from docx.oxml.ns import nsdecls
+
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.rows[0].cells[0]
+    para = cell.paragraphs[0]
+    para.add_run("Down ")
+    tail_run = para.add_run("yndrome")
+    ins = parse_xml(
+        f'<w:ins {nsdecls("w")} w:id="1" w:author="a" w:date="2026-01-01T00:00:00Z">'
+        '<w:r><w:t>S</w:t></w:r></w:ins>'
+    )
+    tail_run._r.addprevious(ins)
+
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    lines = iter_source_lines(str(path))
+    assert "Down Syndrome" in lines
+    assert "Down yndrome" not in lines
+
+
 # ------------------------------------------------------------------ metrics
 
 _GRANT_A = "FSMB Foundation Grant | Shapiro, M. (PI) | Improving Access to Healthcare | Role: Co-PI"

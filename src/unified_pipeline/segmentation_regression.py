@@ -153,13 +153,15 @@ def iter_source_lines(docx_path: str) -> list[str]:
     containers, and a coverage metric that can't see into cells would have
     missed the 89HQVQ grant loss entirely."""
     from docx import Document  # local import: harness is optional tooling
+    from unified_pipeline.core.docx_structure_extractor import get_paragraph_text
 
     lines: list[str] = []
 
     def walk_cell(cell):
         for para in cell.paragraphs:
-            if para.text.strip():
-                lines.append(para.text)
+            text = get_paragraph_text(para, tab_char='\t')
+            if text.strip():
+                lines.append(text)
         for tbl in cell.tables:
             for row in tbl.rows:
                 for c in row.cells:
@@ -167,8 +169,9 @@ def iter_source_lines(docx_path: str) -> list[str]:
 
     doc = Document(docx_path)
     for para in doc.paragraphs:
-        if para.text.strip():
-            lines.append(para.text)
+        text = get_paragraph_text(para, tab_char='\t')
+        if text.strip():
+            lines.append(text)
     for tbl in doc.tables:
         for row in tbl.rows:
             for cell in row.cells:

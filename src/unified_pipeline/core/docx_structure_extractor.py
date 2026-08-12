@@ -34,7 +34,7 @@ def pt_to_inches(pt: Optional[Pt]) -> float:
     return pt.inches if hasattr(pt, 'inches') else 0.0
 
 
-def get_paragraph_text(para: Paragraph) -> str:
+def get_paragraph_text(para: Paragraph, tab_char: str = ' ') -> str:
     """Extract all text from a paragraph, including nested structures.
 
     python-docx's Paragraph.text only concatenates text from direct w:r/w:t children.
@@ -42,6 +42,7 @@ def get_paragraph_text(para: Paragraph) -> str:
     - w:smartTag (legacy Word feature for auto-recognizing addresses, names, dates)
     - w:hyperlink
     - w:sdt (structured document tags / content controls)
+    - w:ins (tracked-change insertions) -- see #557
 
     Without this, paragraphs using smartTags appear empty even though they contain text.
     """
@@ -51,8 +52,9 @@ def get_paragraph_text(para: Paragraph) -> str:
     # returned text keeps the paragraph's internal line structure. Bare w:t iteration
     # mashed multi-line paragraphs into run-on text ("CURRICULUM VITAEZachary..."),
     # which hid sub-headers from the chunk LLM once stage 1a converged onto this reader.
-    # w:tab -> space (not "\t") on purpose: a literal tab would trip the mega-entry
-    # record heuristic downstream. iter() also descends into smartTag/hyperlink/sdt.
+    # w:tab -> tab_char (space by default) on purpose: a literal tab would trip the
+    # mega-entry record heuristic downstream. iter() also descends into
+    # smartTag/hyperlink/sdt/ins.
     WT, WBR, WCR, WTAB = qn('w:t'), qn('w:br'), qn('w:cr'), qn('w:tab')
     parts = []
     for node in para._p.iter(WT, WBR, WCR, WTAB):
@@ -60,10 +62,22 @@ def get_paragraph_text(para: Paragraph) -> str:
             if node.text:
                 parts.append(node.text)
         elif node.tag == WTAB:
-            parts.append(' ')
+            parts.append(tab_char)
         else:  # w:br / w:cr -> line break
             parts.append('\n')
     return ''.join(parts)
+
+
+def get_cell_text(cell, tab_char: str = ' ') -> str:
+    """Extract all text from a table cell, including nested structures (#557).
+
+    cell.text (python-docx) only concatenates w:r elements that are DIRECT
+    CHILDREN of w:p, silently dropping runs nested inside w:ins/w:smartTag/w:sdt --
+    a frequent mid-word loss when Word splits a tracked-change edit across runs
+    ("Down Syndrome" -> "Down yndrome"). Reuses get_paragraph_text's wrapper-descent
+    logic per paragraph rather than re-deriving it here.
+    """
+    return '\n'.join(get_paragraph_text(p, tab_char=tab_char) for p in cell.paragraphs)
 
 
 def extract_paragraph_metadata(para: Paragraph, idx: int) -> Dict[str, Any]:
@@ -337,7 +351,7 @@ def extract_table_metadata(table: Table, idx: int) -> Dict[str, Any]:
         for col_idx, cell in enumerate(row.cells):
             # FIX: cell.text sometimes returns empty string for cells with complex formatting
             # or malformed XML (e.g., <w:rPr> inside <w:t> instead of as sibling)
-            cell_text = cell.text.strip()
+            cell_text = get_cell_text(cell).strip()
 
             # Fallback: Extract text directly from XML using recursive text extraction
             if not cell_text and cell._element is not None:
@@ -505,7 +519,7 @@ def get_table_first_cell_text(table: Table) -> str:
         return ""
     first_cell = first_row.cells[0]
 
-    cell_text = first_cell.text.strip()
+    cell_text = get_cell_text(first_cell).strip()
 
     # Fallback extraction if needed
     if not cell_text and first_cell._element is not None:
