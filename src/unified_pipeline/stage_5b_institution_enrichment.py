@@ -25,6 +25,7 @@ import os
 import sys
 import json
 import re
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime
@@ -282,6 +283,38 @@ def _build_owner_context(cv_owner_location: Optional[Dict]) -> str:
     return ' | '.join(parts) if parts else "No location context available for CV owner."
 
 
+def _owner_context_hash(owner_context: str) -> str:
+    """Deterministic namespace id for an owner-disambiguation context string.
+
+    sha256[:16] (64 bits) rather than md5[:10] (40 bits) -- this is a cache
+    namespace separator, not a security boundary, but 40 bits is cheap to
+    collide by accident across a large CV corpus.
+    """
+    return hashlib.sha256(owner_context.encode('utf-8')).hexdigest()[:16]
+
+
+def _institution_cache_key(institution_name: str, owner_context: str) -> str:
+    """Cache key for an institution lookup, scoped to the CV owner's
+    disambiguation context.
+
+    INSTITUTION_CACHE used to be keyed on institution name alone, but the
+    value is produced by a prompt that is deliberately conditioned on whose
+    CV it is (INSTITUTION_SYSTEM_PROMPT rule 3, e.g. "OU College of Medicine"
+    resolving differently for an Oklahoma owner vs. an Ohio owner). A
+    name-only key let the first owner to resolve an ambiguous name decide it
+    for every owner afterwards, persisted to disk (#582). Folding a hash of
+    the owner context into the key means two owners with different contexts
+    simply never collide; two owners with the same (or no) context still
+    share the cache entry, so the common unambiguous case is unaffected.
+
+    Existing name-only keys in institution_cache.json stop matching under
+    this key shape, which is the intended migration: rather than a purge
+    script, each institution just gets one fresh, correctly-scoped LLM
+    lookup the next time its CV is processed.
+    """
+    return f"{institution_name.lower().strip()}|{_owner_context_hash(owner_context)}"
+
+
 def lookup_institutions_llm(
     batch: List[Tuple[str, str, str]],
     cv_owner_location: Optional[Dict],
@@ -476,6 +509,11 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         else:
             print("CV owner context: not available")
 
+    # Institutions are disambiguated using this owner context (see
+    # INSTITUTION_SYSTEM_PROMPT rule 3), so it has to be part of the cache
+    # key, not just part of the prompt -- see _institution_cache_key (#582).
+    owner_context = _build_owner_context(cv_owner_location)
+
     # Count entries by code
     code_counts = {}
     for entry in entries:
@@ -520,9 +558,15 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
 
         # Use normalized name as cache key for better deduplication
         # "Duke Univ. Medical Center" and "Duke University Medical Center" → same key
-        cache_key = normalize_institution_name(institution).lower().strip()
-        # Also check the raw key for backward compat with old ROR cache entries
-        raw_key = institution.lower().strip()
+        # Owner context is folded in so one CV owner's disambiguation can't
+        # be served to a different owner (#582).
+        cache_key = _institution_cache_key(normalize_institution_name(institution), owner_context)
+        # Also check the key built from the raw (non-normalized) name. Both
+        # already fold in owner_context via _institution_cache_key above, so
+        # this can't reintroduce #582's cross-owner leak -- it only guards
+        # against normalize_institution_name changing between when an entry
+        # was cached and when it's looked up again.
+        raw_key = _institution_cache_key(institution, owner_context)
         entry_to_cache_key[idx] = cache_key
 
         # Check cache (skip if refreshing)
