@@ -24,7 +24,10 @@ from unified_pipeline.segmentation_regression import (
     _looks_like_record,
     _norm,
 )
-from unified_pipeline.stage_6_word_template import grant_status_rebucket_target
+from unified_pipeline.stage_6_word_template import (
+    RENDER_ROUTED_CODES,
+    grant_status_rebucket_target,
+)
 
 from ..shared import (
     Haystack,
@@ -231,6 +234,71 @@ def lint_classified_unrendered(stage3b: Dict,
     for f in findings:
         f["severity"] = severity
     return findings
+
+
+# --------------------------------------------------------------------------
+# Taxonomy codes stage 3b can assign that stage 6 has no render route for.
+
+# Codes a `_fill_*` method reads and renders directly, but that were never
+# added to RENDER_ROUTED_CODES: E/G match on the source heading rather than
+# a taxonomy code (stage6/sections/passthrough.py), and N4 is pulled via
+# entries_by_code.get('N4', ...) in stage6/sections/mentoring.py (added by
+# #261's fix, which gave N4 a render path without also adding it here). All
+# three DO render -- and BECAUSE they're absent from RENDER_ROUTED_CODES,
+# their entries also fall through to the appendix a second time. That's a
+# real defect (duplicate content, tracked for G at #294 and for N4 at #587),
+# but it is a different defect from "no render route at all", which is what
+# this lint exists to catch -- flagging these here would conflate the two.
+#
+# This is itself a second, hand-maintained source of truth for stage-6
+# routing (review on #588) -- a code silently added here without a real
+# passthrough route would make this lint wrongly stay quiet about it.
+# test_taxonomy_code_render_coverage.py's
+# test_render_exceptions_still_wired_into_generate() is a cheap guard
+# against the two hooks these three codes depend on being removed without
+# updating this set; it can't prove a *new* addition is correct, only that
+# the existing ones haven't silently gone stale.
+_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES = frozenset({'E', 'G', 'N4'})
+
+
+def lint_taxonomy_code_coverage(stage3b: Dict) -> List[Dict]:
+    """Entries classified into a taxonomy code stage 6 has no render route
+    for at all -- they land in the Appendix by construction, regardless of
+    confidence or content (#529, e.g. N2 "Institutional Training Grants and
+    Mentored Trainee Grants").
+
+    Distinct from lint_classified_unrendered just above: that lint asks
+    whether an entry's text appears ANYWHERE in the rendered output, and
+    appendix content passes that check (the text is there, just in the
+    Appendix), so it cannot see this class -- #529's own investigation hit
+    exactly that blind spot. This lint instead asks a structural question
+    that needs no rendered document at all: does this code have a dispatch
+    path in generate()."""
+    by_code: Dict[str, int] = {}
+    for e in stage3b.get("entries", []):
+        if e.get("element_type") in ("header", "break"):
+            continue
+        code = e.get("taxonomy_code")
+        if not code or code == "T" or code == "M1":
+            # M1 is normally routed; it only falls through when the Stage
+            # 4.5 summary itself didn't render, a distinct, already-covered
+            # case (#317). Flagging it here would false-positive the common
+            # path.
+            continue
+        if code in RENDER_ROUTED_CODES or code in _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES:
+            continue
+        by_code[code] = by_code.get(code, 0) + 1
+
+    return [
+        _finding(
+            "taxonomy_code_coverage", "WARN",
+            f"taxonomy code {code}: {count} entries classified but stage 6 "
+            f"has no render route for this code -- routed to the Appendix "
+            f"by construction, not by content or confidence",
+            [code],
+        )
+        for code, count in sorted(by_code.items())
+    ]
 
 
 # --------------------------------------------------------------------------
