@@ -20,6 +20,11 @@ import zipfile
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# unified_pipeline is normally on the path via PYTHONPATH=<arm>/src (see
+# render_gate.py's own docstring) -- add it here too so this file's own
+# "runnable standalone" contract holds without the caller setting that up
+# just to run the (otherwise pipeline-independent) self-tests.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import doctor_gate_compare as dgc  # noqa: E402
 import render_gate_compare as rgc  # noqa: E402
@@ -101,7 +106,28 @@ def test_check_render_failures_clear_when_both_clean():
         b_dir.mkdir()
         (a_dir / "_render_index.json").write_text(json.dumps({"uid1": {"input": "x"}}))
         (b_dir / "_render_index.json").write_text(json.dumps({"uid1": {"input": "x"}}))
+        # "clean" now also means the index's success entry has a matching
+        # DOCX on disk (review on #589) -- an index that says success with
+        # no corresponding file must trip the guard, not read as clear.
+        (a_dir / "uid1_wcm.docx").touch()
+        (b_dir / "uid1_wcm.docx").touch()
         assert rgc._check_render_failures(a_dir, b_dir) == []
+
+
+def test_check_render_failures_trips_when_index_and_docx_disagree():
+    with tempfile.TemporaryDirectory() as tmp:
+        a_dir, b_dir = Path(tmp) / "a", Path(tmp) / "b"
+        a_dir.mkdir()
+        b_dir.mkdir()
+        # Index claims success for uid1, but no DOCX was actually written --
+        # the exact "0 == 0" gap the file-set comparison alone can't see
+        # (review on #589, point at render_gate_compare.py:69).
+        (a_dir / "_render_index.json").write_text(json.dumps({"uid1": {"input": "x"}}))
+        (b_dir / "_render_index.json").write_text(json.dumps({"uid1": {"input": "x"}}))
+        (b_dir / "uid1_wcm.docx").touch()
+        problems = rgc._check_render_failures(a_dir, b_dir)
+        assert problems, "index success with no DOCX on disk must trip the guard"
+        assert any("uid1" in p and "no DOCX on disk" in p for p in problems)
 
 
 def test_norm_matches_relative_and_absolute_work_dirs_identically():
@@ -140,11 +166,70 @@ def test_doctor_failure_guard_trips_on_either_arm():
     assert dgc._failure_guard_problems({}, {}) == []
 
 
+def test_doctor_failure_guard_trips_on_malformed_failed_value():
+    # "_failed" must be a dict -- a malformed doctor_gate.py output (review
+    # on #589) must be a loud gate failure, not a silent pass-through.
+    assert dgc._failure_guard_problems(["not", "a", "dict"], {})
+    assert dgc._failure_guard_problems({}, "also not a dict")
+
+
+def test_doctor_compare_identical_count_uses_uid_intersection():
+    # The exact bug from review on #589: len(a) - len(diff) overcounts
+    # "identical" when the UID sets differ. A=3 UIDs, B=2 UIDs, no common
+    # changes -- only 2 CVs were actually compared.
+    a = {"u1": {"findings": []}, "u2": {"findings": []}, "u3": {"findings": []}}
+    b = {"u1": {"findings": []}, "u2": {"findings": []}}
+    common = set(a) & set(b)
+    diff = [u for u in common if dgc.norm(a[u]) != dgc.norm(b[u])]
+    assert len(common) - len(diff) == 2, "only the 2 UIDs present in both arms were compared"
+
+
+def test_render_gate_llm_monkeypatch_still_intercepts_stage6():
+    """render_gate.py neutralizes LLM calls via `s6.call_llm = _no_llm` --
+    this only works because stage_6_word_template.py binds call_llm as a
+    module-level name via `from ... import call_llm`, which is what makes it
+    resolvable (and reassignable) as `s6.call_llm`. If a future refactor
+    switches to `import unified_pipeline.llm_client as llm_client` +
+    `llm_client.call_llm(...)`, this monkeypatch stops intercepting anything
+    with no error -- a "deterministic" gate run could silently make a real
+    LLM call (review on #589)."""
+    import inspect
+    import unified_pipeline.stage_6_word_template as s6
+
+    src = inspect.getsource(s6)
+    assert "from unified_pipeline.llm_client import call_llm" in src, (
+        "stage_6_word_template.py's call_llm import style changed -- "
+        "render_gate.py's LLM-disable monkeypatch needs updating to match"
+    )
+
+    original = s6.call_llm
+    calls = []
+
+    def _sentinel(*a, **kw):
+        calls.append(1)
+        raise RuntimeError("sentinel")
+
+    s6.call_llm = _sentinel
+    try:
+        try:
+            s6.call_llm()
+            raise AssertionError("expected RuntimeError from the sentinel")
+        except RuntimeError as e:
+            assert "sentinel" in str(e)
+        assert calls, "reassigning s6.call_llm did not intercept the call"
+    finally:
+        s6.call_llm = original
+
+
 if __name__ == "__main__":
     test_fingerprint_masks_render_timestamp_but_not_real_content()
     test_check_render_failures_trips_on_either_arm()
     test_check_render_failures_clear_when_both_clean()
+    test_check_render_failures_trips_when_index_and_docx_disagree()
     test_norm_matches_relative_and_absolute_work_dirs_identically()
     test_norm_still_distinguishes_real_content_differences()
     test_doctor_failure_guard_trips_on_either_arm()
+    test_doctor_failure_guard_trips_on_malformed_failed_value()
+    test_doctor_compare_identical_count_uses_uid_intersection()
+    test_render_gate_llm_monkeypatch_still_intercepts_stage6()
     print("ok")

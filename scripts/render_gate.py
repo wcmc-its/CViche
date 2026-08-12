@@ -37,29 +37,13 @@ Fixes two defects found in an earlier, uncommitted version of this script
    reference rather than trusting a stale one. render_gate_compare.py's
    fingerprint check masks date text for exactly this reason.
 """
+import argparse
 import json
 import shutil
 import sys
+import tempfile
 import traceback
 from pathlib import Path
-
-ARM_OUTPUTS = Path(sys.argv[1])
-OUT = Path(sys.argv[2])
-_rest = sys.argv[3:]
-if "--uids-file" in _rest:
-    _uids_file = Path(_rest[_rest.index("--uids-file") + 1])
-    ONLY = {line.strip() for line in _uids_file.read_text().splitlines() if line.strip()}
-else:
-    ONLY = set(_rest)
-
-if not (ARM_OUTPUTS / "stage_4_field_extraction").is_dir():
-    sys.exit(f"no stage_4_field_extraction under {ARM_OUTPUTS} -- point this at "
-              f"a stage-output tree, not a repo root")
-
-# Fresh directory every run -- see defect 1 above. shutil.rmtree on our own
-# output directory, never on anything the caller didn't name explicitly.
-shutil.rmtree(OUT, ignore_errors=True)
-OUT.mkdir(parents=True)
 
 PRECEDENCE = [
     ("stage_5d_citation_formatted", "{uid}_citation_formatted.json"),
@@ -69,46 +53,98 @@ PRECEDENCE = [
     ("stage_4_field_extraction", "{uid}_fields.json"),
 ]
 
-import unified_pipeline.stage_6_word_template as s6  # noqa: E402
+
+def _parse_args(argv):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("arm_outputs", type=Path, help="stage-output tree to render from")
+    parser.add_argument("out", type=Path, help="output directory (wiped and recreated)")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("uids", nargs="*", default=[], help="uids to render (default: all)")
+    group.add_argument("--uids-file", type=Path, default=None,
+                        help="file with one uid per line, instead of positional uids")
+    args = parser.parse_args(argv)
+    if not (args.arm_outputs / "stage_4_field_extraction").is_dir():
+        parser.error(f"no stage_4_field_extraction under {args.arm_outputs} -- point this at "
+                     f"a stage-output tree, not a repo root")
+    return args
 
 
-def _no_llm(*a, **kw):
-    raise RuntimeError("render_gate: LLM disabled for determinism")
-
-
-s6.call_llm = _no_llm
-
-uids = sorted({p.name.replace("_fields.json", "")
-               for p in (ARM_OUTPUTS / "stage_4_field_extraction").glob("*_fields.json")})
-if ONLY:
-    uids = [u for u in uids if u in ONLY]
-if not uids:
-    sys.exit("no uids to render -- empty arm, or --only matched nothing")
-
-results = {}
-for i, uid in enumerate(uids, 1):
-    src = None
-    for stage_dir, pat in PRECEDENCE:
-        cand = ARM_OUTPUTS / stage_dir / pat.format(uid=uid)
-        if cand.exists():
-            src = cand
-            break
-    if src is None:
-        results[uid] = {"error": "no input artifact"}
-        continue
+def _atomic_write_json(path: Path, obj) -> None:
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
-        s6.run_stage6(input_path=str(src), output_path=str(OUT / f"{uid}_wcm.docx"),
-                      verbose=False)
-        results[uid] = {"input": src.name}
-    except Exception as exc:
-        results[uid] = {"error": f"{type(exc).__name__}: {exc}",
-                        "tb": traceback.format_exc()[-800:]}
-    print(f"[{i}/{len(uids)}] {uid} "
-          f"{'OK' if 'error' not in results[uid] else results[uid]['error']}", flush=True)
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2)
+        Path(tmp_name).replace(path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
-(OUT / "_render_index.json").write_text(json.dumps(results, indent=2))
-bad = sorted(u for u, r in results.items() if "error" in r)
-print(f"\nrendered={len(results) - len(bad)} failed={len(bad)}")
-if bad:
-    print("failed uids:", " ".join(bad))
-    sys.exit(1)  # defect 1: a failed render must never look like a clean arm
+
+def main(argv=None):
+    args = _parse_args(argv)
+    arm_outputs, out = args.arm_outputs, args.out
+    only = ({line.strip() for line in args.uids_file.read_text(encoding="utf-8").splitlines() if line.strip()}
+            if args.uids_file else set(args.uids))
+
+    # Fresh directory every run -- see defect 1 above. shutil.rmtree on our own
+    # output directory, never on anything the caller didn't name explicitly.
+    shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True)
+
+    import unified_pipeline.stage_6_word_template as s6
+
+    def _no_llm(*a, **kw):
+        raise RuntimeError("render_gate: LLM disabled for determinism")
+
+    s6.call_llm = _no_llm
+
+    uids = sorted({p.name.replace("_fields.json", "")
+                   for p in (arm_outputs / "stage_4_field_extraction").glob("*_fields.json")})
+    if only:
+        uids = [u for u in uids if u in only]
+    if not uids:
+        print("no uids to render -- empty arm, or uid filter matched nothing", file=sys.stderr)
+        return 1
+
+    results = {}
+    for i, uid in enumerate(uids, 1):
+        src = None
+        for stage_dir, pat in PRECEDENCE:
+            cand = arm_outputs / stage_dir / pat.format(uid=uid)
+            # is_file(), not exists() -- run_stage6 expects a file; exists()
+            # would also accept a directory of the same name and hand it to
+            # the reader instead of falling through PRECEDENCE (review on #589).
+            if cand.is_file():
+                src = cand
+                break
+        if src is None:
+            results[uid] = {"error": "no input artifact"}
+            continue
+        dest = out / f"{uid}_wcm.docx"
+        try:
+            s6.run_stage6(input_path=str(src), output_path=str(dest), verbose=False)
+            # A renderer that returns without raising and without writing the
+            # output file is not a successful render -- "no exception" is not
+            # "rendered" (review on #589, same fail-closed guarantee this
+            # module's docstring claims for defect 1).
+            if not dest.is_file():
+                results[uid] = {"error": "run_stage6 returned without writing an output file"}
+            else:
+                results[uid] = {"input": src.name}
+        except Exception as exc:
+            results[uid] = {"error": f"{type(exc).__name__}: {exc}",
+                            "tb": traceback.format_exc()[-800:]}
+        print(f"[{i}/{len(uids)}] {uid} "
+              f"{'OK' if 'error' not in results[uid] else results[uid]['error']}", flush=True)
+
+    _atomic_write_json(out / "_render_index.json", results)
+    bad = sorted(u for u, r in results.items() if "error" in r)
+    print(f"\nrendered={len(results) - len(bad)} failed={len(bad)}")
+    if bad:
+        print("failed uids:", " ".join(bad))
+        return 1  # defect 1: a failed render must never look like a clean arm
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

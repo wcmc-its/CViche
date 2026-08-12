@@ -22,56 +22,107 @@ fires on this farm because none of its CVs represent a failed run -- it needs
 a synthetic failed-run fixture, which belongs in run_doctor's own test suite
 (src/unified_pipeline/tests/test_run_doctor.py), not in a corpus gate.
 """
+import argparse
 import json
+import shutil
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
-FARM = Path(sys.argv[1])
-OUT = Path(sys.argv[2])
-SOURCE_DIR = None
-if "--source-dir" in sys.argv:
-    SOURCE_DIR = Path(sys.argv[sys.argv.index("--source-dir") + 1])
-WORK = OUT.parent / (OUT.stem + "_work")
 
-from unified_pipeline.run_doctor import run_doctor  # noqa: E402
+def _parse_args(argv):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("farm", type=Path, help="flat stage_* tree to doctor")
+    parser.add_argument("out", type=Path, help="findings JSON to write")
+    parser.add_argument("--source-dir", type=Path, default=None,
+                         help="directory holding <uid>*.docx (see docstring)")
+    args = parser.parse_args(argv)
+    if not args.farm.is_dir():
+        parser.error(f"farm is not a directory: {args.farm}")
+    if args.source_dir is not None and not args.source_dir.is_dir():
+        # Fail closed (CODING_STANDARDS 5.5): a bad --source-dir must not
+        # silently disable every segmentation lint the way a missing one
+        # does when the flag is simply omitted -- omitting the flag is a
+        # documented, intentional mode; a typo'd path is not.
+        parser.error(f"--source-dir is not a directory: {args.source_dir}")
+    return args
 
-uids = sorted(p.name.replace("_fields.json", "")
-              for p in (FARM / "stage_4_field_extraction").glob("*_fields.json"))
 
-reports, failed = {}, {}
-for i, uid in enumerate(uids, 1):
-    root = WORK / uid
-    for stage in sorted(d for d in FARM.iterdir() if d.is_dir()):
-        hits = sorted(stage.glob(f"{uid}*"))
-        if not hits:
-            continue
-        (root / stage.name).mkdir(parents=True, exist_ok=True)
-        for src in hits:
-            link = root / stage.name / src.name
-            link.unlink(missing_ok=True)
-            link.symlink_to(src.resolve())
-    source_path = None
-    if SOURCE_DIR:
-        docx_hits = sorted(SOURCE_DIR.glob(f"{uid}*.docx"))
-        if docx_hits:
-            source_path = docx_hits[0]
+def _atomic_write_json(path: Path, obj) -> None:
+    """Write JSON via a temp sibling + rename so a crash mid-write can never
+    leave downstream tooling reading a truncated report (review on #589)."""
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
     try:
-        reports[uid] = run_doctor(root, uid, source=source_path)
-    except Exception as e:
-        failed[uid] = f"{type(e).__name__}: {e}"
-        traceback.print_exc()
-    if i % 25 == 0:
-        print(f"  [{i}/{len(uids)}]", flush=True)
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=1, sort_keys=True)
+        Path(tmp_name).replace(path)
+    except BaseException:
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
 
-# Failures ride along in the output (top-level "_failed" key) rather than
-# only being printed, so doctor_gate_compare.py can fail closed on them the
-# same way render_gate_compare.py does on render_gate.py's failures --
-# "nothing to compare for this uid" must never look like CHANGED 0.
-OUT.write_text(json.dumps({**reports, "_failed": failed}, indent=1, sort_keys=True))
-n_find = sum(len(r.get("findings", [])) for r in reports.values())
-source_note = f", source-linked={sum(1 for u in uids if SOURCE_DIR and list(SOURCE_DIR.glob(f'{u}*.docx')))}" if SOURCE_DIR else " (no --source-dir: segmentation lints are blind on every uid)"
-print(f"doctored={len(reports)} failed={len(failed)} findings={n_find}{source_note}")
-if failed:
-    print("FAILURES:", json.dumps(failed, indent=1))
-    sys.exit(1)
+
+def main(argv=None):
+    args = _parse_args(argv)
+    farm, out, source_dir = args.farm, args.out, args.source_dir
+    work = out.parent / (out.stem + "_work")
+
+    from unified_pipeline.run_doctor import run_doctor, _uid_owns  # noqa: E402
+
+    # Fresh WORK every run -- an earlier invocation's symlink views must not
+    # leak into this one. A uid dropped from the current farm (or renamed)
+    # would otherwise leave a stale symlink tree that run_doctor happily
+    # reads, making the gate's result depend on what a PREVIOUS run built,
+    # not just the farm passed on this invocation (review on #589).
+    shutil.rmtree(work, ignore_errors=True)
+
+    uids = sorted(p.name.replace("_fields.json", "")
+                  for p in (farm / "stage_4_field_extraction").glob("*_fields.json"))
+
+    reports, failed = {}, {}
+    for i, uid in enumerate(uids, 1):
+        root = work / uid
+        for stage in sorted(d for d in farm.iterdir() if d.is_dir()):
+            # _uid_owns, not a bare prefix match -- glob(f"{uid}*") matches a
+            # LONGER uid that starts with this one (web05 also matches
+            # web050_entries.json); run_doctor's own docstring on this
+            # helper cites the 2026-07-15 sweep this exact bug caused (3 of
+            # 25 CVs doctored against the wrong artifacts).
+            hits = sorted(p for p in stage.glob(f"{uid}*") if _uid_owns(p.name, uid))
+            if not hits:
+                continue
+            (root / stage.name).mkdir(parents=True, exist_ok=True)
+            for src in hits:
+                link = root / stage.name / src.name
+                link.unlink(missing_ok=True)
+                link.symlink_to(src.resolve())
+        source_path = None
+        if source_dir:
+            docx_hits = sorted(p for p in source_dir.glob(f"{uid}*.docx") if _uid_owns(p.name, uid))
+            if docx_hits:
+                source_path = docx_hits[0]
+        try:
+            reports[uid] = run_doctor(root, uid, source=source_path)
+        except Exception as e:
+            failed[uid] = f"{type(e).__name__}: {e}"
+            traceback.print_exc()
+        if i % 25 == 0:
+            print(f"  [{i}/{len(uids)}]", flush=True)
+
+    # Failures ride along in the output (top-level "_failed" key) rather than
+    # only being printed, so doctor_gate_compare.py can fail closed on them the
+    # same way render_gate_compare.py does on render_gate.py's failures --
+    # "nothing to compare for this uid" must never look like CHANGED 0.
+    _atomic_write_json(out, {**reports, "_failed": failed})
+    n_find = sum(len(r.get("findings", [])) for r in reports.values())
+    source_note = (f", source-linked={sum(1 for u in uids if source_dir and list(source_dir.glob(f'{u}*.docx')))}"
+                   if source_dir else " (no --source-dir: segmentation lints are blind on every uid)")
+    print(f"doctored={len(reports)} failed={len(failed)} findings={n_find}{source_note}")
+    if failed:
+        print("FAILURES:", json.dumps(failed, indent=1))
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -13,6 +13,13 @@ other than "doctor-<name>.json" must still normalise cleanly, or a clean run
 reads as 100% changed with nothing to distinguish it from a real regression
 (issue #584).
 
+The path scrub only touches the two fields run_doctor's report actually uses
+for filesystem paths -- `root` and `artifacts` (see run_doctor()'s return
+shape) -- not the whole serialized report. A finding's `message` or
+`evidence` text is comparison-relevant CONTENT: scrubbing a work-dir-shaped
+substring out of it, rather than out of an actual path field, could rewrite
+a real regression into looking identical (review on #589).
+
 The regex ALSO has to work when doctor_gate.py was invoked with a relative
 path (e.g. "scratch/doctor_a_work/...", no leading "/"), not just an
 absolute one -- an earlier version of this normaliser required a leading "/"
@@ -31,38 +38,71 @@ doctor_gate.py failures (the "_failed" key doctor_gate.py writes alongside
 its per-uid reports) -- a uid run_doctor() itself crashed on must never be
 silently excluded from the comparison as if it had no findings to compare.
 """
+import argparse
 import json
 import re
 import sys
 
 FAILED_KEY = "_failed"
 
+# Matches zero or more leading path segments, then a final segment ending in
+# "_work", then the trailing slash -- works whether the whole thing starts
+# with "/" (absolute) or not (relative). See module docstring for why the
+# leading "/" cannot be required. Applied to a raw path string (not a JSON-
+# encoded one), so no need to exclude '"'.
+_WORK_RE = re.compile(r'/?(?:[^/]+/)*[^/]+_work/')
+
+
+def _scrub_work_dir(value):
+    if not isinstance(value, str):
+        return value
+    return _WORK_RE.sub('<WORK>/', value)
+
 
 def norm(rep):
-    # Matches zero or more leading path segments, then a final segment
-    # ending in "_work", then the trailing slash -- works whether the whole
-    # thing starts with "/" (absolute) or not (relative). See module
-    # docstring for why the leading "/" cannot be required.
-    return re.sub(r'/?(?:[^"/]+/)*[^"/]+_work/', '<WORK>/', json.dumps(rep, sort_keys=True))
+    """Canonical JSON for rep with the harness's own work-dir path scrubbed
+    out of `root` and `artifacts` -- the only two fields run_doctor's report
+    uses for filesystem paths. See module docstring."""
+    scrubbed = dict(rep) if isinstance(rep, dict) else rep
+    if isinstance(scrubbed, dict):
+        if "root" in scrubbed:
+            scrubbed["root"] = _scrub_work_dir(scrubbed["root"])
+        if isinstance(scrubbed.get("artifacts"), dict):
+            scrubbed["artifacts"] = {k: _scrub_work_dir(v) for k, v in scrubbed["artifacts"].items()}
+    return json.dumps(scrubbed, sort_keys=True)
 
 
-def _failure_guard_problems(failed_a: dict, failed_b: dict) -> list:
+def _failure_guard_problems(failed_a, failed_b) -> list:
     """Fail-closed guard (issue #584): a uid run_doctor() crashed on must
     never be silently excluded from the comparison as if it had no findings.
-    Returns problem strings; empty means clear to compare."""
+    Returns problem strings; empty means clear to compare.
+
+    Validates the shape too (review on #589): a malformed "_failed" value
+    (not a dict) must be a loud gate failure, not a TypeError/AttributeError
+    from len()/sorted() below or a comparison that quietly treats it as
+    empty."""
     problems = []
-    if failed_a:
-        problems.append(f"arm A: {len(failed_a)} uid(s) run_doctor() crashed on: "
-                        f"{' '.join(sorted(failed_a)[:10])}")
-    if failed_b:
-        problems.append(f"arm B: {len(failed_b)} uid(s) run_doctor() crashed on: "
-                        f"{' '.join(sorted(failed_b)[:10])}")
+    for label, failed in (("A", failed_a), ("B", failed_b)):
+        if not isinstance(failed, dict):
+            problems.append(f"arm {label}: \"_failed\" is not an object "
+                            f"(got {type(failed).__name__}) -- malformed doctor_gate.py output")
+            continue
+        if failed:
+            problems.append(f"arm {label}: {len(failed)} uid(s) run_doctor() crashed on: "
+                            f"{' '.join(sorted(failed)[:10])}")
     return problems
 
 
-def main():
-    a = json.load(open(sys.argv[1]))
-    b = json.load(open(sys.argv[2]))
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("a", help="first doctor_gate.py output JSON")
+    parser.add_argument("b", help="second doctor_gate.py output JSON")
+    args = parser.parse_args(argv)
+
+    with open(args.a, encoding="utf-8") as f:
+        a = json.load(f)
+    with open(args.b, encoding="utf-8") as f:
+        b = json.load(f)
 
     failed_a, failed_b = a.pop(FAILED_KEY, {}), b.pop(FAILED_KEY, {})
     problems = _failure_guard_problems(failed_a, failed_b)
@@ -74,12 +114,16 @@ def main():
         return 1
 
     missing = set(a) ^ set(b)
-    diff = [u for u in a if u in b and norm(a[u]) != norm(b[u])]
-    print(f"compared {len(a)} CVs; identical {len(a) - len(diff)}; CHANGED {len(diff)}")
+    common = set(a) & set(b)
+    diff = [u for u in common if norm(a[u]) != norm(b[u])]
+    print(f"compared {len(common)} CVs; identical {len(common) - len(diff)}; CHANGED {len(diff)}")
     if missing:
         print(f"UID SET DIFFERS: {sorted(missing)[:10]}")
-    ok = not diff and not missing
-    print("PASS - no doctor finding changed" if ok else f"FAIL {diff[:8]}")
+    ok = not diff and not missing and bool(common)
+    if not common:
+        print("FAIL - no comparable CVs (empty UID intersection)")
+    else:
+        print("PASS - no doctor finding changed" if ok else f"FAIL {diff[:8]}")
     return 0 if ok else 1
 
 
