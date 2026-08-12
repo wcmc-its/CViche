@@ -249,6 +249,15 @@ def lint_classified_unrendered(stage3b: Dict,
 # real defect (duplicate content, tracked for G at #294 and for N4 at #587),
 # but it is a different defect from "no render route at all", which is what
 # this lint exists to catch -- flagging these here would conflate the two.
+#
+# This is itself a second, hand-maintained source of truth for stage-6
+# routing (review on #588) -- a code silently added here without a real
+# passthrough route would make this lint wrongly stay quiet about it.
+# test_taxonomy_code_render_coverage.py's
+# test_render_exceptions_still_wired_into_generate() is a cheap guard
+# against the two hooks these three codes depend on being removed without
+# updating this set; it can't prove a *new* addition is correct, only that
+# the existing ones haven't silently gone stale.
 _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES = frozenset({'E', 'G', 'N4'})
 
 

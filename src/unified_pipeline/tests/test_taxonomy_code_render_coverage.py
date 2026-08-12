@@ -59,6 +59,32 @@ def test_taxonomy_catalog_matches_known_gaps_exactly():
     assert actual_gaps == _KNOWN_GAPS
 
 
+def test_render_exceptions_still_wired_into_generate():
+    """_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES exempts E, G, N4 from the
+    coverage lint because a passthrough/mentoring writer renders them outside
+    the RENDER_ROUTED_CODES dispatch table (see extraction.py's comment on
+    this set). If that writer's hook is ever removed from generate() -- e.g.
+    during a stage-6 decomposition -- the exemption goes stale and this lint
+    silently stops catching what would then be a real gap (review on #588).
+
+    This doesn't prove the codes still render (that needs a real CV, which
+    is what the corpus doctor sweep is for) -- only that the two call sites
+    the exemption depends on still exist.
+    """
+    src = (_SRC / "unified_pipeline" / "stage_6_word_template.py").read_text()
+    assert "self._fill_passthrough_sections(" in src, (
+        "E/G's passthrough hook is gone from generate() -- if they no longer "
+        "render, remove them from _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES "
+        "so the coverage lint catches the gap"
+    )
+    assert "self._fill_mentoring(" in src, (
+        "N4's mentoring hook is gone from generate() -- if it no longer "
+        "renders, remove it from _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES "
+        "so the coverage lint catches the gap"
+    )
+
+
 if __name__ == "__main__":
     test_taxonomy_catalog_matches_known_gaps_exactly()
+    test_render_exceptions_still_wired_into_generate()
     print("ok")
