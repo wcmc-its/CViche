@@ -49,6 +49,14 @@ web_interface/uploads/
 # Local compose override — interpolates host AWS creds, must never be committed.
 web_interface/docker-compose.override.yml
 
+# Scratch working dirs for gate/corpus runs (scripts/render_gate.py etc.) --
+# these routinely hold real harvested CVs and their PII-bearing pipeline
+# outputs, copied in locally from web_interface/uploads/ or src/unified_
+# pipeline/outputs/. Neither of the docx/outputs rules above catches a
+# nested scratch/ dir, so this is its own rule, not defense in depth.
+/scratch/
+**/scratch/
+
 # Templates
 key_files/
 !key_files/wcm_cv_template_faculty_october_2022_final.docx
