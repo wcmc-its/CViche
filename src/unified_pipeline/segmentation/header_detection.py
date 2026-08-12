@@ -216,13 +216,26 @@ def _enforce_hierarchy_consistency(headers: List[Dict]) -> List[Dict]:
 
         # Check if this is a known subsection term that shouldn't be H1
         if text_lower in KNOWN_SUBSECTION_TERMS and header['level'] == 1:
-            # Look backward for the most recent non-subsection header to find parent
+            # Look backward for the most recent non-subsection header that is a
+            # genuine ancestor -- i.e. strictly shallower than this header's
+            # current level -- rather than just the first non-subsection header,
+            # which could be a sibling or cousin at the same or deeper level.
             parent_level = None
             for j in range(i - 1, -1, -1):
                 prev_text = headers[j]['text'].lower().rstrip(':').strip()
-                if prev_text not in KNOWN_SUBSECTION_TERMS:
+                if prev_text not in KNOWN_SUBSECTION_TERMS and headers[j]['level'] < header['level']:
                     parent_level = headers[j]['level']
                     break
+
+            # Fallback: since this branch only runs for level-1 headers, no
+            # preceding header can be strictly shallower, so the scan above
+            # always exhausts. Fall back to the nearest preceding L1 header --
+            # the new header becomes its sibling subsection.
+            if parent_level is None:
+                for j in range(i - 1, -1, -1):
+                    if headers[j]['level'] == 1:
+                        parent_level = headers[j]['level']
+                        break
 
             # Demote to one level below parent (or L2 if no parent found)
             if parent_level is not None:
