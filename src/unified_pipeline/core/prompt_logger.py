@@ -25,6 +25,7 @@ Usage:
 
 import json
 import os
+import re
 import contextvars
 from pathlib import Path
 from datetime import datetime
@@ -48,15 +49,32 @@ _current_run_id: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVa
     "prompt_logger_current_run_id", default=None
 )
 
+# generate_run_id()'s charset (web_interface/backend/app/api/upload.py --
+# secrets.token_urlsafe(4)[:6].upper()) and the runs.id column (String(10)).
+# Enforced here because run_id can arrive from a request path, and
+# PROMPT_LOG_DIR / run_id below would otherwise accept a path-traversal
+# payload like "../../etc" (review on #586).
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,10}$")
 
-def set_current_run_id(run_id: Optional[str]) -> None:
+
+def set_current_run_id(run_id: Optional[str]) -> "contextvars.Token":
     """Scope this task's prompt-log writes to PROMPT_LOG_DIR/<run_id>.
 
     Must arrive as an argument, not a reach into the web backend's ``app.`` --
     this module is in src/unified_pipeline/, which per CODING_STANDARDS §1.4
     may not import it. Pass None to go back to the shared directory.
+
+    Returns the ContextVar token; pass it to reset_current_run_id() when the
+    scope ends so a reused worker thread/task can't inherit this run's id.
     """
-    _current_run_id.set(run_id)
+    if run_id is not None and not _RUN_ID_RE.match(run_id):
+        raise ValueError(f"invalid run_id for prompt log scoping: {run_id!r}")
+    return _current_run_id.set(run_id)
+
+
+def reset_current_run_id(token: "contextvars.Token") -> None:
+    """Undo a set_current_run_id() call, restoring whatever was active before it."""
+    _current_run_id.reset(token)
 
 
 def _log_dir() -> Path:

@@ -54,7 +54,7 @@ from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
 from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
 from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
-from unified_pipeline.core.prompt_logger import set_current_run_id
+from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
 
 
 # Cancellation tracking. The in-process set covers same-worker cancels (and is
@@ -299,7 +299,15 @@ class PipelineOrchestrator:
         self.web_output_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
         self.web_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Document UID extracted from filename
+        # Document UID extracted from filename. == run_id at every current
+        # call site: upload.py names the stored file f"{run_id}.{ext}", and
+        # restart_run() does the same with the *new* run's id (never the
+        # original's) -- see _copy_to_pipeline_input and _get_output_paths
+        # below, which key input/artifact paths off this. Review on #586
+        # raised input/artifact collision across concurrent runs sharing a
+        # document_uid; verified against every PipelineOrchestrator(...)
+        # call site that this can't currently happen. A future caller that
+        # reuses one file_path across multiple runs would reopen it.
         self.document_uid = Path(file_path).stem
 
         # Track outputs between stages
@@ -520,6 +528,7 @@ class PipelineOrchestrator:
         # Initialised before the try so the failure handler can always record a
         # duration even if something throws before the pipeline proper starts.
         start_time = None
+        run_id_token = None
 
         try:
             # Scope this run's prompt-log writes to PROMPT_LOGS_DIR/<run_id>
@@ -527,8 +536,10 @@ class PipelineOrchestrator:
             # not in __init__: __init__ runs on the request thread, while
             # execute() runs inside run_in_threadpool's own thread with its
             # own contextvars.Context -- the same one asyncio.to_thread
-            # copies into every stage call made below.
-            set_current_run_id(self.run_id)
+            # copies into every stage call made below. Token is reset in the
+            # finally block below so a reused worker thread/task can't
+            # inherit this run's id (review on #586).
+            run_id_token = set_current_run_id(self.run_id)
 
             await event_emitter.emit_run_start(self.run_id)
             start_time = time.time()
@@ -667,6 +678,8 @@ class PipelineOrchestrator:
             raise
 
         finally:
+            if run_id_token is not None:
+                reset_current_run_id(run_id_token)
             # Clean up cancellation flag
             clear_cancelled(self.run_id)
 
