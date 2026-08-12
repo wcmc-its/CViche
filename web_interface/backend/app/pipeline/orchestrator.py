@@ -15,7 +15,6 @@ import shutil
 import traceback
 import threading
 import io
-from contextlib import redirect_stdout, redirect_stderr
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional
@@ -55,6 +54,7 @@ from unified_pipeline.stage_5b_institution_enrichment import run_stage5b
 from unified_pipeline.stage_5c_teaching_formatter import run_stage_5c
 from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
+from unified_pipeline.core.prompt_logger import set_current_run_id, reset_current_run_id
 
 
 # Cancellation tracking. The in-process set covers same-worker cancels (and is
@@ -136,6 +136,56 @@ PROGRESS_PATTERNS = [
     # "5 of 10 sections" or "5 of 10 entries"
     re.compile(r'(\d+)\s+of\s+(\d+)\s+(?:sections?|entries?|items?|chunks?|nodes?|headers?|publications?|grants?|positions?)', re.IGNORECASE),
 ]
+
+
+class _RoutedStdout:
+    """Process-wide sys.stdout replacement that dispatches per calling thread.
+
+    Installed once, permanently, at import. sys.stdout is a single binding
+    shared by every thread in the interpreter -- with up to
+    CVICHE_MAX_CONCURRENT_RUNS=3 runs each directly reassigning it per stage
+    call from its own thread-pool worker thread, the last assignment won:
+    run A's stage output streamed into run B's viewer and run B's own output
+    was silently dropped (#581). This object is never reassigned; instead
+    each stage call registers/unregisters *itself* under its own thread id
+    (see PipelineOrchestrator._run_with_stdout_capture_sync), so a write is
+    routed to whichever run's thread produced it. Not
+    contextlib.redirect_stdout -- that rebinds the same global and would
+    carry the identical race.
+    """
+
+    def __init__(self, real_stdout):
+        self._real = real_stdout
+        self._captures: Dict[int, "StreamingStdoutCapture"] = {}
+
+    def register(self, capture: "StreamingStdoutCapture") -> None:
+        self._captures[threading.get_ident()] = capture
+
+    def unregister(self) -> None:
+        self._captures.pop(threading.get_ident(), None)
+
+    def _target(self):
+        return self._captures.get(threading.get_ident(), self._real)
+
+    def write(self, text: str) -> int:
+        return self._target().write(text)
+
+    def flush(self) -> None:
+        self._target().flush()
+
+    def __getattr__(self, name):
+        # isatty(), encoding, etc. -- anything we don't model ourselves goes
+        # to the real stdout, not whichever run happens to be registered.
+        return getattr(self._real, name)
+
+
+# Installed once at import time, replacing the old per-call sys.stdout
+# reassignment. See _RoutedStdout's docstring. The assignment (not just the
+# construction) has to happen here: building the router without installing
+# it leaves sys.stdout pointing at the original stream until the first
+# stage call, which is exactly the ambiguity this class exists to remove.
+_STDOUT_ROUTER = _RoutedStdout(sys.stdout)
+sys.stdout = _STDOUT_ROUTER
 
 
 class StreamingStdoutCapture:
@@ -249,7 +299,15 @@ class PipelineOrchestrator:
         self.web_output_dir = Path(__file__).parent.parent.parent.parent / "outputs" / run_id
         self.web_output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Document UID extracted from filename
+        # Document UID extracted from filename. == run_id at every current
+        # call site: upload.py names the stored file f"{run_id}.{ext}", and
+        # restart_run() does the same with the *new* run's id (never the
+        # original's) -- see _copy_to_pipeline_input and _get_output_paths
+        # below, which key input/artifact paths off this. Review on #586
+        # raised input/artifact collision across concurrent runs sharing a
+        # document_uid; verified against every PipelineOrchestrator(...)
+        # call site that this can't currently happen. A future caller that
+        # reuses one file_path across multiple runs would reopen it.
         self.document_uid = Path(file_path).stem
 
         # Track outputs between stages
@@ -470,8 +528,19 @@ class PipelineOrchestrator:
         # Initialised before the try so the failure handler can always record a
         # duration even if something throws before the pipeline proper starts.
         start_time = None
+        run_id_token = None
 
         try:
+            # Scope this run's prompt-log writes to PROMPT_LOGS_DIR/<run_id>
+            # instead of the shared flat directory (#580). Must happen here,
+            # not in __init__: __init__ runs on the request thread, while
+            # execute() runs inside run_in_threadpool's own thread with its
+            # own contextvars.Context -- the same one asyncio.to_thread
+            # copies into every stage call made below. Token is reset in the
+            # finally block below so a reused worker thread/task can't
+            # inherit this run's id (review on #586).
+            run_id_token = set_current_run_id(self.run_id)
+
             await event_emitter.emit_run_start(self.run_id)
             start_time = time.time()
 
@@ -609,6 +678,8 @@ class PipelineOrchestrator:
             raise
 
         finally:
+            if run_id_token is not None:
+                reset_current_run_id(run_id_token)
             # Clean up cancellation flag
             clear_cancelled(self.run_id)
 
@@ -833,20 +904,22 @@ class PipelineOrchestrator:
     def _sync_prompt_logs_to_storage(
         self, since: Optional[datetime], step_number: int
     ) -> None:
-        """Copy prompt log files written since ``since`` into per-run storage.
+        """Copy this run's prompt log files written since ``since`` into per-run storage.
 
-        The pipeline's prompt_logger.py writes files to a single shared
-        directory (`src/unified_pipeline/prompt_logs/`). In prod the
-        container's writable layer is wiped on every restart, so these
-        files must be replicated to durable storage to be readable later
-        from the API.
+        prompt_logger.py writes each run's transcripts under
+        ``PROMPT_LOGS_DIR/<run_id>`` (set_current_run_id() is called once at
+        the top of execute()) rather than the old shared flat directory, so
+        this can never pick up a concurrent run's files (#580). In prod the
+        container's writable layer is wiped on every restart, so these files
+        must be replicated to durable storage to be readable later from the
+        API.
 
-        Files are filtered by mtime > ``since`` so each step uploads only
-        what it wrote. Failures are logged and swallowed -- the step has
-        already succeeded by the time this runs, and a missed prompt-log
-        upload should not flip its status.
+        Files are filtered by mtime > ``since`` purely to avoid re-uploading
+        earlier steps' files on every step -- the per-run directory, not the
+        mtime filter, is what keeps runs apart now.
         """
-        if not PROMPT_LOGS_DIR.exists():
+        run_log_dir = PROMPT_LOGS_DIR / self.run_id
+        if not run_log_dir.exists():
             return
 
         since_ts = since.timestamp() if since else 0
@@ -854,7 +927,7 @@ class PipelineOrchestrator:
         uploaded = 0
 
         try:
-            entries = list(PROMPT_LOGS_DIR.iterdir())
+            entries = list(run_log_dir.iterdir())
         except OSError as exc:
             logger.warning("Could not list prompt logs dir: %s", exc)
             return
@@ -893,18 +966,22 @@ class PipelineOrchestrator:
         This runs in a thread pool, so the event loop remains free to process log emissions.
         The event_loop parameter is required to schedule async log operations
         from the synchronous context where stage functions run.
+
+        Registers with the process-wide _STDOUT_ROUTER under this thread's id
+        rather than reassigning sys.stdout directly -- sys.stdout is one
+        binding shared by every concurrent run's thread, so reassigning it
+        here would race the same way the code this replaced did (#581).
         """
         capture = StreamingStdoutCapture(self, step_number, event_loop)
-
-        original_stdout = sys.stdout
-        sys.stdout = capture
+        sys.stdout = _STDOUT_ROUTER  # idempotent; defends against anything else having swapped it
+        _STDOUT_ROUTER.register(capture)
         try:
             result = func(*args, **kwargs)
             # Flush any remaining buffer
             capture.flush()
             return result
         finally:
-            sys.stdout = original_stdout
+            _STDOUT_ROUTER.unregister()
 
     async def _run_with_stdout_capture(self, func, step_number: int, *args, **kwargs):
         """Run a function in a thread pool while capturing stdout and streaming logs in real-time.

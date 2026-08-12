@@ -35,10 +35,16 @@ def storage(tmp_path, monkeypatch):
 
 @pytest.fixture
 def prompt_logs_dir(tmp_path, monkeypatch):
-    """A tmp prompt_logs dir wired into the orchestrator module."""
-    d = tmp_path / "prompt_logs"
-    d.mkdir()
-    monkeypatch.setattr(orch_mod, "PROMPT_LOGS_DIR", d)
+    """A tmp prompt_logs dir wired into the orchestrator module.
+
+    _sync_prompt_logs_to_storage reads from PROMPT_LOGS_DIR/<run_id> (#580),
+    so this returns that per-run subdirectory directly -- existing tests that
+    write into the returned path are unaffected.
+    """
+    root = tmp_path / "prompt_logs"
+    d = root / "RUN001"
+    d.mkdir(parents=True)
+    monkeypatch.setattr(orch_mod, "PROMPT_LOGS_DIR", root)
     return d
 
 
@@ -98,6 +104,27 @@ class TestSyncPromptLogsToStorage:
         keys = storage.list_files("RUN001", prefix="prompt_logs/")
         # Only "new.txt" should land in storage.
         assert keys == ["prompt_logs/new.txt"]
+
+    def test_ignores_files_in_a_different_runs_subdirectory(
+        self, fake_orchestrator, storage, prompt_logs_dir
+    ):
+        """#580: prompt_logger scopes writes to PROMPT_LOGS_DIR/<run_id>. A
+        file sitting in a sibling run's subdirectory, even one newer than
+        `since`, must never be picked up by this run's sync -- the old flat
+        directory + mtime-only filter could not tell the two apart, which is
+        exactly how one run's verbatim CV text got uploaded under another
+        run's id."""
+        other_run_dir = prompt_logs_dir.parent / "RUN002"
+        other_run_dir.mkdir()
+        step_start = datetime.now()
+        time.sleep(0.05)
+        _write_log(other_run_dir, "other_run_secret.txt", "belongs to RUN002")
+        _write_log(prompt_logs_dir, "own.txt", "belongs to RUN001")
+
+        fake_orchestrator._sync_prompt_logs_to_storage(step_start, step_number=1)
+
+        keys = storage.list_files("RUN001", prefix="prompt_logs/")
+        assert keys == ["prompt_logs/own.txt"]
 
     def test_missing_prompt_logs_dir_is_noop(
         self, fake_orchestrator, storage, tmp_path, monkeypatch
