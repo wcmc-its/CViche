@@ -181,9 +181,56 @@ def load_stage_2_entries(path: Path) -> Tuple[List[Dict], List[Dict]]:
 
 
 def load_stage_3a_mappings(path: Path) -> Dict:
-    """Load Stage 3a header taxonomy mappings."""
+    """Load Stage 3a header taxonomy mappings.
+
+    ``mappings`` is unvalidated LLM output -- stage 3a parses it with
+    ``json.loads()`` from a ``json_object``-mode call with no schema (#558).
+    Nine call sites downstream subscript ``o["code"]``/``o["confidence"]``
+    with no guard; a malformed option previously raised uncaught (KeyError
+    on a missing "code", ValueError on a stringified confidence, TypeError
+    on a bare-string option) and lost the entire run. Normalise once, here,
+    before any of those sites ever see it.
+    """
     with open(path, 'r') as f:
-        return json.load(f)
+        data = json.load(f)
+    _normalize_taxonomy_mappings(data.get("mappings", []))
+    return data
+
+
+def _normalize_taxonomy_mappings(nodes: List[Dict]) -> None:
+    """Recursively drop malformed taxonomy_options entries and coerce
+    confidence to float, in place. See load_stage_3a_mappings (#558)."""
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        title = node.get("title", "?")
+
+        options = node.get("taxonomy_options")
+        if isinstance(options, list):
+            kept = []
+            for o in options:
+                if not isinstance(o, dict) or "code" not in o:
+                    logger.warning(
+                        "stage 3a mapping %r: dropping malformed taxonomy_options "
+                        "entry (%r) -- not an object or missing 'code'", title, o)
+                    continue
+                o["code"] = str(o["code"])
+                o["confidence"] = _safe_float(o.get("confidence"), 0.5)
+                kept.append(o)
+            if len(kept) != len(options):
+                logger.warning(
+                    "stage 3a mapping %r: taxonomy_options dropped from %d to %d "
+                    "entries after normalisation", title, len(options), len(kept))
+            node["taxonomy_options"] = kept
+
+        children = node.get("children")
+        if isinstance(children, list):
+            _normalize_taxonomy_mappings(children)
+        elif children is not None:
+            logger.warning(
+                "stage 3a mapping %r: 'children' is not a list (%s) -- treating "
+                "as empty", title, type(children).__name__)
+            node["children"] = []
 
 
 def build_mapping_index(mappings: List[Dict], index: Dict = None, path: List[str] = None) -> Dict:
