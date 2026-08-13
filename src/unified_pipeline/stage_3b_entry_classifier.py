@@ -372,79 +372,7 @@ def build_taxonomy_codes_for_prompt(
     return "\n".join(lines)
 
 
-def classify_entries_batch(
-    entries: List[Dict],
-    taxonomy_context: TaxonomyContext,
-    taxonomy: Dict,
-    model: str = "gpt-5.1",
-    batch_size: int = 15
-) -> Tuple[List[Dict], Dict]:
-    """
-    Classify a batch of entries with the same taxonomy context.
-
-    Args:
-        entries: List of entry dicts with 'text' field
-        taxonomy_context: Shared taxonomy context for these entries
-        taxonomy: Full taxonomy reference
-        model: OpenAI model to use
-        batch_size: Max entries per LLM call
-
-    Returns:
-        Tuple of (classified_entries, stats)
-    """
-    all_results = []
-    total_input_tokens = 0
-    total_output_tokens = 0
-    total_cost = 0.0
-    llm_batches = 0  # batches that attempted an LLM call
-    observed_model = None  # model id the API actually served (#459)
-    failed_batches = 0  # batches whose LLM call raised (entries fell back)
-
-    # Get ALL suggested codes from ALL hierarchy levels for taxonomy filtering
-    # This ensures we don't miss codes suggested at parent levels
-    all_suggested_codes = taxonomy_context.get_all_suggested_codes()
-    relevant_families = set(c[0] for c in all_suggested_codes) if all_suggested_codes else None
-
-    # Build taxonomy reference with disambiguation info for all suggested codes
-    if relevant_families and len(relevant_families) <= 5:
-        # Include suggested families plus a few common alternatives
-        relevant_families.update(['H', 'T'])  # Always include honors and other
-        # Pass ALL suggested codes so they get full disambiguation notes
-        taxonomy_ref = build_taxonomy_codes_for_prompt(
-            taxonomy,
-            relevant_families=list(relevant_families),
-            context_codes=all_suggested_codes
-        )
-    else:
-        # Full taxonomy, but still include disambiguation for suggested codes
-        taxonomy_ref = build_taxonomy_codes_for_prompt(
-            taxonomy,
-            context_codes=all_suggested_codes
-        )
-
-    # Process in batches
-    for batch_start in range(0, len(entries), batch_size):
-        batch_entries = entries[batch_start:batch_start + batch_size]
-
-        # Skip empty entries
-        entries_with_text = [(i, e) for i, e in enumerate(batch_entries) if e.get("text", "").strip()]
-
-        if not entries_with_text:
-            # All empty - assign parent code with low confidence
-            for entry in batch_entries:
-                primary = all_suggested_codes[0] if all_suggested_codes else "T"
-                all_results.append({
-                    **entry,
-                    "taxonomy_code": primary,
-                    "taxonomy_confidence": 0.0,
-                    "classification_source": "empty_entry"
-                })
-            continue
-
-        # Build prompt
-        context_str = taxonomy_context.format_context_string()
-
-        system_prompt = f"""You are an expert at classifying academic CV entries into a standardized taxonomy.
+_CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE = """You are an expert at classifying academic CV entries into a standardized taxonomy.
 
 HIERARCHY CONTEXT:
   The following labels (Top-level, Section, Subsection) come directly from the original CV's
@@ -1219,6 +1147,83 @@ Example:
   {{"index": 0, "code": "S1", "confidence": 0.95}},
   {{"index": 1, "code": "H", "confidence": 0.85, "reasoning": "Content is clearly an award (H), despite Teaching section placement"}}
 ]}}"""
+
+
+def classify_entries_batch(
+    entries: List[Dict],
+    taxonomy_context: TaxonomyContext,
+    taxonomy: Dict,
+    model: str = "gpt-5.1",
+    batch_size: int = 15
+) -> Tuple[List[Dict], Dict]:
+    """
+    Classify a batch of entries with the same taxonomy context.
+
+    Args:
+        entries: List of entry dicts with 'text' field
+        taxonomy_context: Shared taxonomy context for these entries
+        taxonomy: Full taxonomy reference
+        model: OpenAI model to use
+        batch_size: Max entries per LLM call
+
+    Returns:
+        Tuple of (classified_entries, stats)
+    """
+    all_results = []
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cost = 0.0
+    llm_batches = 0  # batches that attempted an LLM call
+    observed_model = None  # model id the API actually served (#459)
+    failed_batches = 0  # batches whose LLM call raised (entries fell back)
+
+    # Get ALL suggested codes from ALL hierarchy levels for taxonomy filtering
+    # This ensures we don't miss codes suggested at parent levels
+    all_suggested_codes = taxonomy_context.get_all_suggested_codes()
+    relevant_families = set(c[0] for c in all_suggested_codes) if all_suggested_codes else None
+
+    # Build taxonomy reference with disambiguation info for all suggested codes
+    if relevant_families and len(relevant_families) <= 5:
+        # Include suggested families plus a few common alternatives
+        relevant_families.update(['H', 'T'])  # Always include honors and other
+        # Pass ALL suggested codes so they get full disambiguation notes
+        taxonomy_ref = build_taxonomy_codes_for_prompt(
+            taxonomy,
+            relevant_families=list(relevant_families),
+            context_codes=all_suggested_codes
+        )
+    else:
+        # Full taxonomy, but still include disambiguation for suggested codes
+        taxonomy_ref = build_taxonomy_codes_for_prompt(
+            taxonomy,
+            context_codes=all_suggested_codes
+        )
+
+    # Process in batches
+    for batch_start in range(0, len(entries), batch_size):
+        batch_entries = entries[batch_start:batch_start + batch_size]
+
+        # Skip empty entries
+        entries_with_text = [(i, e) for i, e in enumerate(batch_entries) if e.get("text", "").strip()]
+
+        if not entries_with_text:
+            # All empty - assign parent code with low confidence
+            for entry in batch_entries:
+                primary = all_suggested_codes[0] if all_suggested_codes else "T"
+                all_results.append({
+                    **entry,
+                    "taxonomy_code": primary,
+                    "taxonomy_confidence": 0.0,
+                    "classification_source": "empty_entry"
+                })
+            continue
+
+        # Build prompt
+        context_str = taxonomy_context.format_context_string()
+
+        system_prompt = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
+            context_str=context_str, taxonomy_ref=taxonomy_ref
+        )
 
         # Build entries list for user message (include per-entry hierarchy)
         entries_lines = []
