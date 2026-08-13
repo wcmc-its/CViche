@@ -216,26 +216,20 @@ def _enforce_hierarchy_consistency(headers: List[Dict]) -> List[Dict]:
 
         # Check if this is a known subsection term that shouldn't be H1
         if text_lower in KNOWN_SUBSECTION_TERMS and header['level'] == 1:
-            # Look backward for the most recent non-subsection header that is a
-            # genuine ancestor -- i.e. strictly shallower than this header's
-            # current level -- rather than just the first non-subsection header,
-            # which could be a sibling or cousin at the same or deeper level.
+            # This branch only runs when header['level'] == 1, so a scan for
+            # "the nearest preceding header strictly shallower than this
+            # header's own level" can never succeed (no header level is < 1)
+            # -- that comparison is a contradiction, not just an edge case,
+            # since the level we'd compare against is the very thing this
+            # block is about to overwrite. #400's own fix sketch names the
+            # alternative directly: fall back to the most recent preceding
+            # L1 header, and treat the new header as that section's sibling
+            # subsection (one level below it).
             parent_level = None
             for j in range(i - 1, -1, -1):
-                prev_text = headers[j]['text'].lower().rstrip(':').strip()
-                if prev_text not in KNOWN_SUBSECTION_TERMS and headers[j]['level'] < header['level']:
+                if headers[j]['level'] == 1:
                     parent_level = headers[j]['level']
                     break
-
-            # Fallback: since this branch only runs for level-1 headers, no
-            # preceding header can be strictly shallower, so the scan above
-            # always exhausts. Fall back to the nearest preceding L1 header --
-            # the new header becomes its sibling subsection.
-            if parent_level is None:
-                for j in range(i - 1, -1, -1):
-                    if headers[j]['level'] == 1:
-                        parent_level = headers[j]['level']
-                        break
 
             # Demote to one level below parent (or L2 if no parent found)
             if parent_level is not None:
