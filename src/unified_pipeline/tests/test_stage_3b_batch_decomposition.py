@@ -29,6 +29,7 @@ stage_3b test but fails this one.
 import ast
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -197,6 +198,195 @@ def test_classify_entries_batch_is_under_the_ratchet_threshold():
     assert span < _RATCHET_THRESHOLD, (
         f"classify_entries_batch is {span} lines, expected under {_RATCHET_THRESHOLD}"
     )
+
+
+def test_classify_entries_batch_empty_input(monkeypatch):
+    """entries=[] is a common boundary case for batch-processing code -- must
+    not invoke call_llm at all and must return zeroed stats without raising."""
+    def _boom(**kwargs):
+        raise AssertionError("call_llm must not be invoked for an empty entries list")
+
+    monkeypatch.setattr(stage_3b, "call_llm", _boom)
+
+    results, stats = classify_entries_batch([], _context(), TAXONOMY, batch_size=BATCH_SIZE)
+
+    assert results == []
+    assert stats == {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cost": 0.0,
+        "model": None,
+        "entries_classified": 0,
+        "llm_batches": 0,
+        "failed_batches": 0,
+        "llm_classified": 0,
+        "fallback_entries": 0,
+        "empty_entries": 0,
+    }
+
+
+def _echo_call_llm(monkeypatch):
+    """Classifies every entry index found in the prompt as ("H", 0.9) -- a
+    generic well-formed stub for tests that only care about batching shape,
+    not response content. Reads indices back out of the "[N] (Section: ...)"
+    lines _classify_one_batch builds into the user message."""
+    def call(**kwargs):
+        user_msg = kwargs["messages"][1]["content"]
+        indices = [int(m) for m in re.findall(r"^\[(\d+)\]", user_msg, flags=re.MULTILINE)]
+        return {
+            "content": json.dumps({"classifications": [
+                {"index": i, "code": "H", "confidence": 0.9} for i in indices
+            ]}),
+            "prompt_tokens": 10, "completion_tokens": 5, "cost": 0.001,
+            "model": "gpt-5.1-mini-echo",
+        }
+
+    monkeypatch.setattr(stage_3b, "call_llm", call)
+
+
+@pytest.mark.parametrize("num_entries,batch_size,expected_llm_batches", [
+    (2, 2, 1),  # exactly one full batch
+    (3, 2, 2),  # one full batch + a single-entry batch
+    (5, 2, 3),  # 2 + 2 + 1: partial final batch, the classic off-by-one
+])
+def test_classify_entries_batch_boundary_and_partial_final_batch(
+    monkeypatch, num_entries, batch_size, expected_llm_batches
+):
+    """Every pre-existing test uses an entry count that's an exact multiple
+    of batch_size (8 / 2); the shorter-final-slice path was never exercised.
+    Also pins that results stay in original input order across batches."""
+    _echo_call_llm(monkeypatch)
+    entries = [_entry(f"Award {i}") for i in range(num_entries)]
+
+    results, stats = classify_entries_batch(entries, _context(), TAXONOMY, batch_size=batch_size)
+
+    assert len(results) == num_entries
+    assert stats["llm_batches"] == expected_llm_batches
+    assert stats["llm_classified"] == num_entries
+    for i, r in enumerate(results):
+        assert r["classification_source"] == "llm"
+        assert r["text"] == f"Award {i}"
+
+
+def test_classify_entries_batch_handles_unparseable_llm_json(monkeypatch, caplog):
+    """Every existing 'failure' test raises directly from call_llm. Nothing
+    exercises json.loads(content) itself raising on genuinely invalid JSON --
+    it's wrapped by the same try/except, so it should behave identically to
+    a raised exception: batch counted failed, both entries fall back."""
+    def call(**kwargs):
+        return {
+            "content": "not valid json {{{",
+            "prompt_tokens": 50, "completion_tokens": 10, "cost": 0.001,
+            "model": "gpt-5.1-mini-bad-json",
+        }
+
+    monkeypatch.setattr(stage_3b, "call_llm", call)
+
+    with caplog.at_level(logging.ERROR, logger=stage_3b.logger.name):
+        results, stats = classify_entries_batch(
+            [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2
+        )
+
+    assert len(results) == 2
+    assert all(r["classification_source"] == "fallback" for r in results)
+    assert all(r["taxonomy_code"] == "H" for r in results)
+    assert stats["failed_batches"] == 1
+    assert stats["llm_batches"] == 1
+    # Stats are never assigned on this path -- json.loads raised before the
+    # llm_result fields were read -- so they stay at _BatchStats' defaults,
+    # same as a raised call_llm exception.
+    assert stats["input_tokens"] == 0
+    assert stats["model"] is None
+
+
+@pytest.mark.parametrize("response_json", [
+    {"foo": "bar"},           # no "classifications" key at all
+    {"classifications": []},  # key present but empty
+], ids=["missing-key", "empty-list"])
+def test_classify_entries_batch_handles_missing_or_empty_classifications(monkeypatch, response_json):
+    """Distinct from the malformed-individual-object case: here the JSON
+    parses fine and the top-level shape is fine, there's just nothing to map
+    back to entries. Both should behave as a clean fallback, not a failure --
+    the response was successfully parsed, so tokens/cost/model ARE recorded."""
+    def call(**kwargs):
+        return {
+            "content": json.dumps(response_json),
+            "prompt_tokens": 40, "completion_tokens": 8, "cost": 0.0008,
+            "model": "gpt-5.1-mini-noclass",
+        }
+
+    monkeypatch.setattr(stage_3b, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2
+    )
+
+    assert len(results) == 2
+    assert all(r["classification_source"] == "fallback" for r in results)
+    assert stats["failed_batches"] == 0
+    assert stats["llm_batches"] == 1
+    assert stats["fallback_entries"] == 2
+    assert stats["model"] == "gpt-5.1-mini-noclass"
+
+
+def test_classify_entries_batch_malformed_indices_do_not_cross_contaminate(monkeypatch):
+    """Duplicate/out-of-range/negative/non-integer indices must never let one
+    entry receive another entry's classification data (#520/#521's silent-
+    failure class), even though none of them raise."""
+    def call(**kwargs):
+        return {
+            "content": json.dumps({"classifications": [
+                {"index": 0, "code": "H", "confidence": 0.9},
+                {"index": 0, "code": "T", "confidence": 0.99},  # duplicate index
+                {"index": 99, "code": "X", "confidence": 0.9},  # out of range
+                {"index": -1, "code": "Y", "confidence": 0.9},  # negative
+                {"index": "1", "code": "Z", "confidence": 0.9},  # string, not int
+            ]}),
+            "prompt_tokens": 30, "completion_tokens": 10, "cost": 0.001,
+            "model": "gpt-5.1-mini-idx",
+        }
+
+    monkeypatch.setattr(stage_3b, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2
+    )
+
+    assert len(results) == 2
+    # Entry 0: only ever sees index=0 objects (last one wins) -- never the
+    # out-of-range/negative/string-indexed data.
+    assert results[0]["classification_source"] == "llm"
+    assert results[0]["taxonomy_code"] == "T"
+    assert results[0]["taxonomy_confidence"] == 0.99
+    # Entry 1: the string index "1" does not match int orig_idx=1, so it
+    # falls back rather than being corrupted by a wrong entry's object.
+    assert results[1]["classification_source"] == "fallback"
+
+
+def test_classify_entries_batch_uses_index_not_position(monkeypatch):
+    """Every existing mock returns classifications in the same order as the
+    input entries, so a naive positional zip(entries, classifications) --
+    ignoring "index" entirely -- would pass unnoticed. Return them reversed
+    to prove index-based lookup is actually happening."""
+    def call(**kwargs):
+        return {
+            "content": json.dumps({"classifications": [
+                {"index": 1, "code": "T", "confidence": 0.8},
+                {"index": 0, "code": "H", "confidence": 0.9},
+            ]}),
+            "prompt_tokens": 30, "completion_tokens": 10, "cost": 0.001,
+            "model": "gpt-5.1-mini-rev",
+        }
+
+    monkeypatch.setattr(stage_3b, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2
+    )
+
+    assert results[0]["taxonomy_code"] == "H"
+    assert results[1]["taxonomy_code"] == "T"
 
 
 if __name__ == "__main__":
