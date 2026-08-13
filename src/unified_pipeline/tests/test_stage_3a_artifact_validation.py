@@ -32,7 +32,13 @@ from unified_pipeline.stage_3b_entry_classifier import (  # noqa: E402
 
 def _write(tmp_path, mappings):
     path = tmp_path / "stage_3a.json"
-    path.write_text(json.dumps({"mappings": mappings}))
+    path.write_text(json.dumps({"mappings": mappings}), encoding="utf-8")
+    return path
+
+
+def _write_raw(tmp_path, obj):
+    path = tmp_path / "stage_3a.json"
+    path.write_text(json.dumps(obj), encoding="utf-8")
     return path
 
 
@@ -86,6 +92,66 @@ def test_malformed_children_treated_as_empty_not_recursed_into(tmp_path):
     assert data["mappings"][0]["children"] == []
     # build_mapping_index's own "if children:" + recursive call must not choke on it either.
     build_mapping_index(data["mappings"])
+
+
+def test_non_object_root_raises_clear_error_not_attributeerror(tmp_path):
+    # json.load() accepts any JSON value; a bare array at the root has no
+    # .get() to call "mappings" on.
+    path = _write_raw(tmp_path, ["not", "an", "object"])
+    with pytest.raises(ValueError, match="not a JSON object"):
+        load_stage_3a_mappings(path)
+
+
+def test_non_list_mappings_value_treated_as_empty(tmp_path, caplog):
+    path = _write_raw(tmp_path, {"mappings": "not-a-list"})
+    with caplog.at_level(logging.WARNING, logger=stage_3b.logger.name):
+        data = load_stage_3a_mappings(path)
+    assert data["mappings"] == []
+    assert any("'mappings' is not a list" in r.getMessage() for r in caplog.records)
+
+
+def test_non_list_taxonomy_options_value_treated_as_empty(tmp_path, caplog):
+    path = _write(tmp_path, [
+        {"title": "H", "level": "H1", "children": [], "taxonomy_options": "not-a-list"},
+    ])
+    with caplog.at_level(logging.WARNING, logger=stage_3b.logger.name):
+        data = load_stage_3a_mappings(path)
+    assert data["mappings"][0]["taxonomy_options"] == []
+    assert any("'taxonomy_options' is not a list" in r.getMessage() for r in caplog.records)
+
+
+def test_null_or_empty_code_is_dropped_not_stringified_to_none(tmp_path):
+    path = _write(tmp_path, [
+        {"title": "H", "level": "H1", "children": [], "taxonomy_options": [
+            {"code": None, "confidence": 0.9},
+            {"code": "", "confidence": 0.9},
+            {"code": "A", "confidence": 0.8},
+        ]},
+    ])
+    data = load_stage_3a_mappings(path)
+    assert [o["code"] for o in data["mappings"][0]["taxonomy_options"]] == ["A"]
+
+
+def test_out_of_range_or_nan_confidence_falls_back_to_default(tmp_path):
+    path = _write(tmp_path, [
+        {"title": "H", "level": "H1", "children": [], "taxonomy_options": [
+            {"code": "A", "confidence": 5.0},       # out of [0, 1]
+            {"code": "B", "confidence": -0.5},      # out of [0, 1]
+            {"code": "C", "confidence": float("nan")},
+            {"code": "D", "confidence": float("inf")},
+        ]},
+    ])
+    data = load_stage_3a_mappings(path)
+    assert [o["confidence"] for o in data["mappings"][0]["taxonomy_options"]] == [0.5, 0.5, 0.5, 0.5]
+
+
+def test_non_dict_mapping_node_is_dropped_not_left_in_the_list(tmp_path):
+    path = _write_raw(tmp_path, {"mappings": [
+        "not-a-node",
+        {"title": "H", "level": "H1", "children": [], "taxonomy_options": []},
+    ]})
+    data = load_stage_3a_mappings(path)
+    assert [n["title"] for n in data["mappings"]] == ["H"]
 
 
 def test_well_formed_mappings_pass_through_unchanged(tmp_path):

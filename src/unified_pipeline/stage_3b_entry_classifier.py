@@ -191,37 +191,58 @@ def load_stage_3a_mappings(path: Path) -> Dict:
     on a bare-string option) and lost the entire run. Normalise once, here,
     before any of those sites ever see it.
     """
-    with open(path, 'r') as f:
+    with open(path, 'r', encoding='utf-8') as f:
         data = json.load(f)
-    _normalize_taxonomy_mappings(data.get("mappings", []))
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"stage 3a artifact at {path} is not a JSON object (got "
+            f"{type(data).__name__}) -- cannot contain a 'mappings' key"
+        )
+    mappings = data.get("mappings", [])
+    if not isinstance(mappings, list):
+        logger.warning(
+            "stage 3a artifact %s: 'mappings' is not a list (%s) -- treating "
+            "as empty", path, type(mappings).__name__)
+        mappings = []
+        data["mappings"] = mappings
+    _normalize_taxonomy_mappings(mappings)
     return data
 
 
 def _normalize_taxonomy_mappings(nodes: List[Dict]) -> None:
-    """Recursively drop malformed taxonomy_options entries and coerce
+    """Recursively drop malformed nodes/taxonomy_options entries and coerce
     confidence to float, in place. See load_stage_3a_mappings (#558)."""
+    nodes[:] = [n for n in nodes if isinstance(n, dict)]
     for node in nodes:
-        if not isinstance(node, dict):
-            continue
         title = node.get("title", "?")
 
         options = node.get("taxonomy_options")
         if isinstance(options, list):
             kept = []
-            for o in options:
-                if not isinstance(o, dict) or "code" not in o:
+            for option in options:
+                if not isinstance(option, dict) or not option.get("code"):
                     logger.warning(
                         "stage 3a mapping %r: dropping malformed taxonomy_options "
-                        "entry (%r) -- not an object or missing 'code'", title, o)
+                        "entry (%r) -- not an object or missing/empty 'code'", title, option)
                     continue
-                o["code"] = str(o["code"])
-                o["confidence"] = _safe_float(o.get("confidence"), 0.5)
-                kept.append(o)
+                option["code"] = str(option["code"])
+                confidence = _safe_float(option.get("confidence"), 0.5)
+                # _safe_float only guarantees convertibility, not domain -- a
+                # confidence outside [0, 1] (including NaN/inf, which compare
+                # false against any bound) falls back to the same 0.5 default
+                # as an unparseable value.
+                option["confidence"] = confidence if 0.0 <= confidence <= 1.0 else 0.5
+                kept.append(option)
             if len(kept) != len(options):
                 logger.warning(
                     "stage 3a mapping %r: taxonomy_options dropped from %d to %d "
                     "entries after normalisation", title, len(options), len(kept))
             node["taxonomy_options"] = kept
+        elif options is not None:
+            logger.warning(
+                "stage 3a mapping %r: 'taxonomy_options' is not a list (%s) -- "
+                "treating as empty", title, type(options).__name__)
+            node["taxonomy_options"] = []
 
         children = node.get("children")
         if isinstance(children, list):
