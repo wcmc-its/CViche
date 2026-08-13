@@ -72,6 +72,26 @@ def test_iter_source_lines_reads_through_tracked_insertion_in_cell(tmp_path):
     assert "Down yndrome" not in lines
 
 
+def test_iter_source_lines_recurses_into_nested_table(tmp_path):
+    """iter_source_lines's docstring claims recursive table support
+    ("INCLUDING paragraphs inside table cells (recursively)") -- prove a
+    table nested inside a cell is actually walked, not just a single level
+    of cells."""
+    doc = Document()
+    outer_table = doc.add_table(rows=1, cols=1)
+    outer_cell = outer_table.rows[0].cells[0]
+    outer_cell.paragraphs[0].text = "Outer cell text"
+    nested_table = outer_cell.add_table(rows=1, cols=1)
+    nested_table.rows[0].cells[0].paragraphs[0].text = "Nested table text"
+
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    lines = iter_source_lines(str(path))
+    assert "Outer cell text" in lines
+    assert "Nested table text" in lines
+
+
 # ------------------------------------------------------------------ metrics
 
 _GRANT_A = "FSMB Foundation Grant | Shapiro, M. (PI) | Improving Access to Healthcare | Role: Co-PI"
