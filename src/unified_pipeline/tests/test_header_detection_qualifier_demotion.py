@@ -18,6 +18,22 @@ KNOWN_SUBSECTION_TERMS, so _enforce_hierarchy_consistency demotes any
 level-1 occurrence back down. #399 adds "selected", "representative",
 "major", "significant" to that same set, following the identical mechanism.
 
+Deliberately exercises the full detect_section_headers() pipeline (scoring +
+_enforce_hierarchy_consistency), not the hierarchy helper directly -- #399's
+bug is in the interaction between the two, and testing _enforce_hierarchy_
+consistency alone would miss the vocabulary-driven level=1 misdetection that
+triggers it.
+
+Confirmed this fixture fails on unfixed code: reverting only the
+KNOWN_SUBSECTION_TERMS addition in cv_headers.py (leaving this file as-is)
+reproduces both qualifiers landing at level 1 --
+
+    AssertionError: {'Publications': 1, 'Representative': 1, 'Selected': 1}
+    assert 1 in (2, 3)
+
+-- i.e. exactly the #399 symptom. See the PR body's Verification section for
+the full pytest transcript of that run.
+
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_header_detection_qualifier_demotion.py -p no:cacheprovider
@@ -26,11 +42,19 @@ Run with:
 import sys
 from pathlib import Path
 
+import pytest
+
+# Redundant with conftest.py (which puts src/ on sys.path for the whole
+# directory before collection) but left in place on purpose -- see
+# conftest.py's docstring: harmless, and it's what keeps this file runnable
+# standalone via the __main__ block below.
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.segmentation.header_detection import detect_section_headers  # noqa: E402
+
+QUALIFIER_TERMS = ["Selected", "Representative", "Major", "Significant"]
 
 
 def _paragraph(text, bold=False, style="Normal", alignment=None):
@@ -66,15 +90,12 @@ def _citation(text):
     return _paragraph(text, bold=False)
 
 
-def _structure():
+def _structure(qualifier):
     elements = [
         _paragraph("Publications", bold=True),
-        _paragraph("Selected", bold=True),
+        _paragraph(qualifier, bold=True),
         _empty(),
         _citation("Smith J, Doe A. Some citation title. Journal. 2020."),
-        _paragraph("Representative", bold=True),
-        _empty(),
-        _citation("Doe A, Smith J. Another citation title. Journal. 2021."),
     ]
     return {"elements": elements}
 
@@ -83,28 +104,26 @@ def _levels(headers):
     return {h["text"]: h["level"] for h in headers}
 
 
-def test_selected_and_representative_demoted_off_level_1():
-    headers = detect_section_headers(_structure())
+@pytest.mark.parametrize("qualifier", QUALIFIER_TERMS)
+def test_qualifier_demoted_off_level_1(qualifier):
+    headers = detect_section_headers(_structure(qualifier))
     levels = _levels(headers)
 
     assert levels["Publications"] == 1, "the real parent section must stay level 1"
-    assert levels["Selected"] in (2, 3), levels
-    assert levels["Representative"] in (2, 3), levels
+    # Publications (L1) is the only preceding non-subsection header, so the
+    # demoted qualifier's exact expected level is L2 -- not merely "not L1".
+    assert levels[qualifier] == 2, levels
 
 
-def test_demotion_signal_recorded():
+@pytest.mark.parametrize("qualifier", QUALIFIER_TERMS)
+def test_demotion_signal_recorded(qualifier):
     # The demotion should be visible in 'signals' for debugging, same as the
     # already-working temporal terms (e.g. "Current", "Past").
-    headers = detect_section_headers(_structure())
+    headers = detect_section_headers(_structure(qualifier))
     by_text = {h["text"]: h for h in headers}
 
-    assert "demoted_subsection" in by_text["Selected"]["signals"]
-    assert "demoted_subsection" in by_text["Representative"]["signals"]
+    assert "demoted_subsection" in by_text[qualifier]["signals"]
 
 
 if __name__ == "__main__":
-    for name, fn in sorted(globals().items()):
-        if name.startswith("test_") and callable(fn):
-            fn()
-            print(f"ok  {name}")
-    print("all passed")
+    raise SystemExit(pytest.main([__file__, "-q"]))
