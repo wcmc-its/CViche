@@ -135,6 +135,8 @@ KNOWN_SUBSECTION_TERMS = {
     'international', 'national', 'regional', 'local', 'state', 'institutional',
     # Time-based
     'current', 'past', 'completed', 'active', 'pending', 'ongoing',
+    # Qualifier-based (e.g. "Selected Publications", "Representative Grants")
+    'selected', 'representative', 'major', 'significant',
     # Role-based
     'principal investigator', 'co-investigator', 'co-pi', 'consultant',
     'advisor', 'mentor', 'co-mentor', 'coordinator', 'student',
