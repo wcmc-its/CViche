@@ -117,7 +117,9 @@ def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool
         if month and day:
             return f"{month:02d}/{day:02d}/{year}"
         elif month:
-            return f"{month:02d}/01/{year}"  # Default to 1st of month
+            # No day in the source: degrade to mm/yyyy rather than fabricate
+            # the 1st of the month — the CV never stated a day (#575).
+            return f"{month:02d}/{year}"
         return year
 
     return date_str

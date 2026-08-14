@@ -21,6 +21,16 @@ rather than building a package for one function now.
 import re
 from typing import Dict, List, Optional, Tuple
 
+# Status vocabularies for grant_status_rebucket_target (#210, #575). Kept as
+# code, not config: the words change only when the function beside them does,
+# and any rebucketing change needs a corpus render A/B regardless of where
+# the vocabulary lives.
+_NOT_FUNDED_STATUS_RE = re.compile(r'not\s+funded|unfunded|declined|rejected')
+_PENDING_STATUS_RE = re.compile(
+    r'under\s+review|in\s+review|submitted|pending|awaiting|under\s+consideration'
+)
+_COMPLETED_STATUS_RE = re.compile(r'\bcompleted?\b|\bclosed\b|\bexpired\b')
+
 def split_fused_citation_entries(pubs: List[Dict]) -> List[Dict]:
     """Un-fuse publication entries whose stage-5d ``formatted_citation`` carries
     multiple newline-separated citations.
@@ -66,21 +76,22 @@ def grant_status_rebucket_target(status: str) -> Tuple[Optional[str], Optional[s
     in (#210). Returns (target_code, reclassification_note); (None, None)
     when the status doesn't force a move.
 
-    An explicit status beats date inference: "Under review" / "Submitted" is
-    Pending (M2C) no matter what dates say; "Not funded" is kept under
-    Pending with a review comment rather than silently dropped.
+    An explicit status beats date inference: "Under review" / "In review" /
+    "Submitted" / "Awaiting sponsor decision" is Pending (M2C) no matter what
+    dates say; "Not funded" is kept under Pending with a review comment
+    rather than silently dropped.
     """
     status = (status or '').strip()
     if not status:
         return None, None
     lowered = status.lower()
-    if re.search(r'not\s+funded|unfunded|declined|rejected', lowered):
+    if _NOT_FUNDED_STATUS_RE.search(lowered):
         return 'M2C', (
             f"Status is '{status}' — kept under Pending Funding rather than "
             "dropped; confirm whether to keep this entry on the CV"
         )
-    if 'award' not in lowered and re.search(r'under\s+review|submitted|pending', lowered):
+    if 'award' not in lowered and _PENDING_STATUS_RE.search(lowered):
         return 'M2C', f"Reclassified to Pending (M2C): status is '{status}'"
-    if re.search(r'\bcompleted?\b|\bclosed\b|\bexpired\b', lowered):
+    if _COMPLETED_STATUS_RE.search(lowered):
         return 'M2B', f"Reclassified to Completed (M2B): status is '{status}'"
     return None, None

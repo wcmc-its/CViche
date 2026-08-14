@@ -67,6 +67,32 @@ def test_status_awarded_pending_contract_not_moved():
     assert target is None
 
 
+# ---------------------------------------------------------------- #575
+
+def test_status_in_review_goes_pending():
+    for status in ("In review", "In Review"):
+        target, note = grant_status_rebucket_target(status)
+        assert target == "M2C", status
+        assert "Pending" in note
+
+
+def test_status_awaiting_or_under_consideration_goes_pending():
+    for status in (
+        "Awaiting sponsor decision",
+        "Awaiting decision",
+        "Under consideration",
+    ):
+        target, note = grant_status_rebucket_target(status)
+        assert target == "M2C", status
+        assert "Pending" in note
+
+
+def test_status_awaiting_award_setup_not_moved():
+    # "Awaiting" appears, but the grant is awarded — the 'award' guard holds.
+    target, _ = grant_status_rebucket_target("Awaiting award setup")
+    assert target is None
+
+
 # ---------------------------------------------------------------- #209
 
 _FSMB_FIELDS = {
