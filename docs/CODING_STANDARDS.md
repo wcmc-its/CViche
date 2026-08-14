@@ -107,7 +107,7 @@ python3 scripts/check_function_size.py --update   # lock in an improvement
 Excess, not count, because count is perverse: splitting one 963-line function into five 200-line ones would fail a count-based gate. Excess falls whenever a function is genuinely decomposed and rises only when new oversized code appears.
 
 *Baseline at adoption:* **6,572 excess lines across 40 functions**, measured on `origin/dev` @ `4e62bbd`.
-*Escape hatch, deliberately unlocked:* if a function genuinely should stay whole, say so in the PR and run `--update`. The gate refuses to raise the baseline, so that is a visible, reviewed act rather than a silent one.
+*Escape hatch, scoped to holding or lowering the baseline:* if a function genuinely should stay whole, say so in the PR — and if the PR as a whole doesn't raise total excess (something else in it shrank), run `--update` to lock the new total in. `--update` refuses to write a baseline higher than the one on disk ("the ratchet only turns one way," in the script's own words) — that is the gate working, not a bug in the hatch. So a PR that only adds excess has no scripted unlock: offset it in the same PR, or a maintainer edits `scripts/function-size-baseline.json` by hand, a separate and visibly deliberate act rather than a silent one.
 *CI:* stdlib only, no dependencies, so it runs as its own job in a few seconds.
 
 ```yaml
@@ -137,7 +137,7 @@ Prefer readable Python to compact Python. If a construct needs a second read to 
 **3.7 No metaprogramming or dynamic attribute access. [gate]**
 No metaclasses, no `eval`/`exec`, no `type(name, bases, dict)`, no `__getattr__`/`__setattr__` overrides, and no `getattr`/`setattr`/`hasattr` whose attribute name is a variable rather than a literal. No passing `__dict__` around as a payload.
 *Why:* these defeat grep, defeat the type checker, and turn a rename into a runtime failure in a pipeline whose failures are silent content loss. `taxonomy_mapper_v2.py:3102` passes `validation_guidance.__dict__` into a prompt payload, which silently couples the prompt to attribute names.
-*This is cheap to hold:* the codebase already has **zero** metaclasses, zero `eval`/`exec`, zero dynamic class creation and zero `__getattr__` overrides. The rule is about keeping it that way, not a cleanup campaign — the only live violations are 9 dynamic accesses.
+*This is cheap to hold:* the codebase has zero metaclasses, zero `eval`/`exec`, and zero dynamic class creation — plus one deliberate, commented `__getattr__` override (`orchestrator.py:176`, added to fix §4.2's `sys.stdout` leak; see §9). The rule is about keeping the rest of it that way, not a cleanup campaign — dynamic attribute access is the one sub-check that needs an AST scan to count precisely (§9's Appendix), so treat any grep-derived figure here as a shortlist, not a total.
 
 **3.8 Clarity does not license verbosity. [judgement]**
 Rewriting for readability is right when it does not cost lines. When clarity and size genuinely conflict, leave the compact form and add one comment saying what it produces — do not expand it into boilerplate, and do not add an abstraction to make it "cleaner".
@@ -153,6 +153,8 @@ Where the simple implementation is knowingly not the general one, say so at the 
 ```
 
 It marks intent, not ignorance: the reader can tell a considered trade-off from an oversight, which is the difference between leaving it alone and "fixing" it into something more complex. Distinct from `TODO`, which means unfinished — a labelled shortcut may be finished and correct at its stated scale, permanently.
+
+*Measured, not just asserted:* `login_throttle.py`'s label is the sharpest of the four — #414 is the actual measurement behind it (200 concurrent POSTs through the real ASGI transport report 1 distinct thread ident inside the handler; the unlocked shortcut holds because `login` is an `async def` with no `await` and the container runs single-worker uvicorn). The same issue reproduces the failure with real OS threads — 18 of 200 trials over-admit once that precondition breaks — which is what turns "ponytail: fixed window" from a hopeful comment into a checked one, and names the exact three changes (sync handler, `--workers > 1`, a background task) that would reopen it.
 
 *Why it matters for review:* an unlabelled global lock, `O(n²)` scan or naive heuristic reads as a defect and invites an unnecessary rewrite. A labelled one reads as a decision with a stated upgrade path.
 
@@ -198,10 +200,11 @@ A fallback path records that it was taken. Silent fallback is indistinguishable 
 
 **5.4 No bare swallow. [gate]**
 `except Exception: pass` requires a comment stating what is expected and why continuing is correct.
+*Why:* `run_full_pipeline.py`'s stage-5b cost read was wrapped in exactly this — a missing file, malformed JSON, or a permissions error reported the same `cost: 0.0` as a stage that genuinely cost nothing, so `total_cost` was silently short and the run still claimed success (#489, fixed by logging the exception instead of swallowing it).
 
 **5.5 Tools and gates fail closed. [gate]**
 A validator, gate or script exits non-zero when it could not do its job. "Nothing to compare" is a failure, not a pass.
-*Why:* `gate_render.py` never clears its output directory and never calls `sys.exit`. Re-rendering into a reused directory after a code change that crashes every render leaves the previous arm's files in place — a run where **all 100 CVs failed** reported `compared 100 / identical 100 / CHANGED 0 / PASS`, exit 0.
+*Why:* `render_gate.py` (then `gate_render.py`) used to never clear its output directory and never call `sys.exit`. Re-rendering into a reused directory after a code change that crashed every render left the previous arm's files in place — a run where **all 100 CVs failed** reported `compared 100 / identical 100 / CHANGED 0 / PASS`, exit 0. Fixed in #589 (closing #584): the script now clears its output directory before every run and exits non-zero on any comparison failure or crash.
 
 ## 6. Testing expectations
 
@@ -222,6 +225,8 @@ Assert on rendered output, returned values, and artifact contents — not on whi
 | Behaviour change | tests asserting the new behaviour, plus render attribution with zero unexplained deltas | **before** |
 | God-function decomposition | tests pinning current behaviour | **before** |
 
+*Why:* the #398 section-split stack sat 44 commits behind `dev`, about to merge on a relocation gate alone — no fingerprint or behaviour check — which would have silently reverted 25 methods' worth of shipped stage-6 fixes (#570).
+
 A relocation gate cannot sign off a behaviour change; it is defined as proving nothing changed. Conversely, unit tests alone do not discharge a relocation — per 6.2, they largely cannot see one.
 
 **6.4 Cross-process contracts get contract tests. [gate]**
@@ -230,6 +235,11 @@ If another process consumes your output, pin its shape.
 
 **6.5 Corpus coverage is disclosed, not assumed. [judgement]**
 The corpus has holes: section E has zero entries, `M4C` has one entry in one CV, and 86 of 100 CVs have no table-sourced entry. A change touching a thinly-covered area says so, because a green gate there means little.
+
+**6.6 A gate cited as an acceptance criterion exists in the repo before anything depends on it. [judgement]**
+If a plan, wave, or PR description names a script as a pass/fail gate, that script is committed under `scripts/` — not a prototype on one contributor's machine that the plan assumes into existence.
+*Why:* #584 found that waves 3–5's own acceptance criteria — "the render gate" and "the doctor gate" — did not exist anywhere in the repo: `git log --all -- '*gate_render*' '*doctor_gate*'` returned nothing. It has since been fixed (`scripts/render_gate.py`, `scripts/doctor_gate.py` and their `_compare` counterparts, landed in #589 and wired into CI's `pipeline-tests` job), so this rule generalizes a resolved incident rather than naming a still-open gap — the same way §5.5 cites an already-fixed bug as its own *Why*. It is still distinct from what §5.5 and §6.3 already cover: §5.5 is a gate that runs and reports a false pass, §6.3 is using the wrong kind of an existing gate. Neither catches a gate that a plan relies on before it has been written at all.
+Naming an owner was also part of #584's own definition of "done," and never actually happened — no assignee, no target date, in the repo or the issue. That half has no positive incident behind it, so it isn't stated as a rule here.
 
 ## 7. Contracts and configuration
 
@@ -248,53 +258,69 @@ Do not add a mechanism; use the one that exists, or delete one first.
 **7.4 Time is an input, not an ambient fact. [judgement]**
 *Why:* `datetime.now()` in stage 6 does more than stamp a date. At `:2236` it decides whether a degree renders as in-progress, and at `:4363` it reclassifies grants with past end dates from M2A into M2B — so **the current date moves content between sections**. That makes output non-reproducible and makes any cross-midnight A/B comparison meaningless.
 
-## 8. Where the code stands against this today
+## 8. Types and literals
 
-This is a target state. The table below is every **[gate]** rule measured against `origin/dev` @ `4e62bbd`, so the distance is a number rather than an impression. Nothing here is a work item by itself — it is the honest baseline the rules are written against.
+Where §3 is about function-level shape, this is about the shape of the data and the constants that pass through it. Both rules below are **[judgement]** — the incidents behind them are real, but the mechanical check for either (three-or-more `.get()` reads on one variable; a literal used more than once) is too noisy against the current codebase to gate unconditionally without ratchet infrastructure like §3.2a's. Say so in the PR instead.
+
+**8.1 A dict crossing a function boundary is a typed record, not a bag of `.get()` calls. [judgement]**
+Data that crosses a function or stage boundary and gets read by more than one caller is a dataclass, `TypedDict`, or Pydantic model — not a raw `dict` re-interpreted ad hoc by each reader.
+*Why:* three corpus-observed defects share this exact root cause. `_fill_personal_data` assumed `home_address` was a string and called `.replace()` on it; 2 of 96 runs in one batch produced **no output document at all** (#442). The same function's `phone` field arrived as a dict of three numbers, and none of them rendered, with nothing logged (#450). `split_fused_citation_entries` called `.splitlines()` on `formatted_citation` before checking its type, which aborts the run on any non-string value (#554). None of the three would have been caught by a type annotation alone — they all arrive as `Any` off `json.load` — but a typed record forces the read site to declare what it expects, instead of discovering the mismatch at whichever method the wrong type happens to reach first. The flip side holds too: `Haystack` is already a `NamedTuple`, and all three call sites unpack it positionally anyway, one of them silently discarding `.tokens` (#280) — a typed record only pays off if callers use the names.
+Not every dict needs this: one that stays inside a single function, or is read once, is fine as-is — #554's own filer explicitly declined a dataclass fix for that specific defect in favor of a boundary-normalizing function, and that was the right call for a single read site. The signal is repetition at the boundary: `_create_grant_table`, the function CLAUDE.md names as the stage-6 field-drop example, reads its `fields` dict via `.get(` 28 times. #567 tracks this class across `stage6/` (zero `TypedDict`/`@dataclass` exist there today) and the eight review comments it collects, on top of #442/#450/#554, are what earns this its own rule rather than a line in §3.6.
+
+**8.2 A magic number or repeated string is a named constant. [judgement]**
+An inline literal used for classification, a threshold, or a comparison — not a one-off display value — gets a name that says what it means.
+*Why:* three independent misclassifications in stage 6 trace to exactly this, all three still live on `origin/dev` (#573). `_fill_licensure` treats any 10–11 digit string as an NPI and any text containing the substring `'DEA'` as a DEA number — including an entry whose text merely mentions "Dean" — so a state medical licence number can render as a federal identifier on a physician's CV (`stage_6_word_template.py:5901-5993`). `_fill_service` builds a 14-entry keyword list and then reads `journal_keywords[:10]`, an off-by-one slice that silently drops the one word "neurology," so identically-shaped Neurology and Oncology reviewer entries route to different sections (`stage6/sections/service.py:122`). And a postdoctoral-code set `{'C', 'C1', 'C2'}`, duplicated in two places, is missing `C3` in both, so Fellowship Training entries fall through to the Appendix. Naming each — `NPI_DIGIT_PATTERN`, `JOURNAL_SPECIALTY_KEYWORDS`, `POSTDOC_CODES` — doesn't fix the bug by itself, but it is what would have made the wrong value visible at the definition site instead of a corpus batch away from it.
+A second, narrower incident: `"gpt-5.1"` is a repeated default-parameter literal across 5+ function signatures in `taxonomy_mapper_v2.py` (#377), and it disagrees with the model actually resolved from `llm_config.yaml` — every run in a 96-CV batch was stamped with a model it did not use, in both the CLI banner (#444) and the stage artifacts themselves (#459). Closer to §1.5's territory than a classic magic number, but the fix is the same shape: one named source of truth instead of a literal repeated on faith.
+
+## 9. Where the code stands against this today
+
+This is a target state. The table below is every **[gate]** rule, re-measured against `origin/dev` @ `5a0035a` (2026-08-14) — the original baseline was `4e62bbd`, 144 commits earlier, and a meaningful fraction of the table had drifted in that gap. Ten PRs are open at time of writing (#600, #620, #623–625, #641–644, #647); none are merged, so this reflects `dev` as it stands, not as it will once they land. Nothing here is a work item by itself — it is the honest baseline the rules are written against.
 
 | Rule | Target | Today | |
 |---|---|---|---|
-| 1.1 dependency direction declared | every package | **0 of 8** `__init__.py` on `dev` (1 on the stage-6 branch, unmerged) | ✗ |
+| 1.1 dependency direction declared | every package | 26 total `__init__.py` on `dev`, but only **3** state an actual import-direction rule (`stage6/__init__.py`, `stage6/sections/__init__.py`, `services/__init__.py`) — the rest state contents or purpose, not direction | ✗ |
 | 1.2 pure layers import no `docx` | 0 | 0 | ✓ |
 | 1.3 peers do not import peers | 0 | 0 | ✓ |
-| 1.4 core does not import the web backend | 0 | 1 — `llm_client.py:61`, reaching 43 modules | ✗ |
+| 1.4 core does not import the web backend | 0 | 1 — `llm_client.py:62`, reaching 43 modules | ✗ |
 | 1.5 one definition per vocabulary | 1 each | taxonomy defined 3× **and they disagree**; stage→path map 4×; stage order 3× | ✗ |
 | 2.1 no `db.query(` in `api/` | 0 | 34 (21 in `admin_routes.py`) | ✗ |
-| 2.2 one driver | 1 | 3 | ✗ |
-| 2.3 stage owns its artifacts | no globbing | CLI resolves stage 6 input by `glob(f"*{uid}*")[0]` | ✗ |
-| 3.4 receive your scope | 0 doc-wide searches | 59 fuzzy lookups across 26 section fillers | ✗ |
-| 3.x oversized-function debt | falling | 6,572 excess lines, 40 functions ≥200 | ratchet |
-| 3.7 no metaprogramming | 0 | 0 metaclasses, 0 `eval`/`exec`, 0 dynamic class creation, 0 `__getattr__` | ✓ |
-| 3.7 no dynamic attribute access | 0 | 9 — 5 `getattr`, 2 `hasattr`, 2 `__dict__` | ✗ |
-| 4.1 no module state written after import | 0 | 6 | ✗ |
-| 4.2 no process-global per-run mutation | 0 | 2 — `prompt_logger` shared dir, `sys.stdout` swap | ✗ |
-| 4.3 complete cache keys | 0 | 1 — `INSTITUTION_CACHE` | ✗ |
-| 4.4 own your region | per-section | shared `_overflow_entries`, `_appendix_pending`, `_cleared_tables` | ✗ |
-| 4.5 lazy singletons locked | all | 4 locked, 1 unlocked (`storage/factory.py:18`) | ~ |
-| 5.1 error policy owned by the driver | 1 policy | 2 opposite policies — CLI catches at 11 sites, orchestrator raises | ✗ |
+| 2.2 one driver | 1 | 3 — `run_full_pipeline.py` 1,142 lines, `orchestrator.py` 1,398, `core/cv_pipeline.py` 1,602 (still imported only by its own 2 test files) | ✗ |
+| 2.3 stage owns its artifacts | no globbing | CLI still resolves stage 6 input by `glob(f"*{uid}*")[0]`, now 5 such sites in `run_full_pipeline.py` | ✗ |
+| 3.4 receive your scope | 0 doc-wide searches | 59 fuzzy lookups across 26 section fillers (not re-counted; `stage6/sections/__init__.py` now lists 23 classes, worth reconciling) | ✗ |
+| 3.x oversized-function debt | falling | **5,759** excess lines, 37 functions ≥200 — falling from the 6,572/40 baseline, though the checked-in `function-size-baseline.json` still reads 6,572 pending a `--update` | ratchet |
+| 3.7 no metaprogramming | 0 | 0 metaclasses, 0 `eval`/`exec`, 0 dynamic class creation — but **1 real `__getattr__` override**, `orchestrator.py:176`'s `_RoutedStdout`, added while fixing 4.2 below (commented, deliberate, and still a violation) | ✗ |
+| 3.7 no dynamic attribute access | 0 | not reliably re-measurable with the Appendix command — see its note below; last trustworthy figure (9) is from the `4e62bbd` baseline | ✗ |
+| 4.1 no module state written after import | 0 | at least the 3 named examples still present (`INSTITUTION_CACHE`, `_group_cache`, `_storage`); the original total of 6 wasn't independently reproducible from a stated enumeration | ✗ |
+| 4.2 no process-global per-run mutation | 0 | **0 — fixed.** `orchestrator.py`'s `_RoutedStdout` router (installed once at import, dispatches per calling thread id) replaces the per-stage `sys.stdout` swap, closing #581; `prompt_logger.py` now scopes every write under `PROMPT_LOG_DIR/<run_id>`, closing #580 (PRs #585, #586) | ✓ |
+| 4.3 complete cache keys | 0 | **0 — fixed.** `_institution_cache_key()` folds a hash of the owner context into the cache key, closing #582 (PR #585) | ✓ |
+| 4.4 own your region | per-section | shared `_overflow_entries`, `_appendix_pending`, `_cleared_tables` still present, same file | ✗ |
+| 4.5 lazy singletons locked | all | 4 locked (the documented example now at `llm_client.py:181`), 1 unlocked (`storage/factory.py:18`) | ~ |
+| 5.1 error policy owned by the driver | 1 policy | 2 opposite policies — CLI catches at 11 sites, orchestrator raises. #647 (open) adds a regression test *pinning* this divergence; it does not unify the policy | ✗ |
 | 5.2 never report success on failure | enforced | met, with a regression test (`test_run_full_pipeline_exit_status.py`) | ✓ |
-| 5.3 degradation visible in the artifact | all paths | 2 silent LLM fallbacks in stage 6 | ✗ |
-| 5.4 no bare swallow | 0 | 48 `except …: pass/continue` | ✗ |
-| 5.5 tools fail closed | all | render gate exits 0 having compared nothing | ✗ |
+| 5.3 degradation visible in the artifact | all paths | 2 silent LLM fallbacks in stage 6, both still present | ✗ |
+| 5.4 no bare swallow | 0 | 6 literal `except Exception: pass` sites — the original figure of 48 wasn't reproducible from the stated command; even the broader `except …: pass/continue` reading comes to 41 | ✗ |
+| 5.5 tools fail closed | all | **0 — fixed.** `render_gate.py` clears its output directory and exits non-zero on any comparison failure; `render_gate_compare.py` refuses PASS on any mismatch (PR #589, closing #584) | ✓ |
 | 6.1 tests assert behaviour not structure | all | largely met — this is why relocation PRs work at all | ✓ |
-| 6.2 a test fails if its subject is deleted | all | **31 of 44 stage-6 renderers deletable with 437 tests green** | ✗ |
-| 6.3 gate matches the kind of change | 3 gates | render gate exists but has no fingerprint arm | ~ |
+| 6.2 a test fails if its subject is deleted | all | the 31-of-44 ablation wasn't re-run for this refresh (it's expensive to redo); pytest collection under `src/unified_pipeline/tests/` is now 714 tests, up from 437, so the ratio specifically needs re-measuring, not assumed improved | ✗ |
+| 6.3 gate matches the kind of change | 3 gates | `render_gate_compare.py` now adds a C14N fingerprint of `document.xml` alongside the paragraph-text check — the doc's stated gap ("no fingerprint arm") is closed, though not confirmed across all three gate kinds in the table above | ~ |
 | 6.4 contract tests on cross-process output | all | met for `doctor_one`, `score_one`; absent for the stage `print()` wire | ~ |
 | 6.5 corpus coverage disclosed | practised | not practised | ✗ |
-| 7.1 nothing parses another process's stdout | 0 | 2 consumers — 6 orchestrator regexes, 4 batch-script literals | ✗ |
-| 7.2 one config source per consumer | 2 | 9 mechanisms; root `config.yaml` has 0 readers | ✗ |
-| 7.3 produced field rendered or declared | registry exists | no registry; `grant_number` silently dropped | ✗ |
-| 7.4 time is an input | 0 ambient | 7 `datetime.now()` in stage 6; 2 of them move content between sections | ✗ |
+| 7.1 nothing parses another process's stdout | 0 | 2 consumers — `PROGRESS_PATTERNS` is **4** regexes, not 6; 4 batch-script literals, now at `run_corpus_batch.sh:142-145` | ✗ |
+| 7.2 one config source per consumer | 2 | 9 mechanisms; root `config.yaml` still has 0 readers; the "should match config.yaml" comment moved to `stage6/resolution/institution.py:39` | ✗ |
+| 7.3 produced field rendered or declared | registry exists | no registry (`grep -rl DELIBERATELY_UNRENDERED\|FIELD_REGISTRY` — 0 hits). The worked example no longer holds as stated: `grant_number` is now read and rendered into Award Source (`stage6/sections/research_support.py:346-351`) — fixed as a one-off `.get()` addition, not via a registry, so the next unnamed field drops exactly as silently | ✗ |
+| 7.4 time is an input | 0 ambient | 7 `datetime.now()` in stage 6 (exact match); the 2 that move content between sections are now at `stage6/sections/education.py:78` and `stage6/sections/research_support.py:71`, relocated from `stage_6_word_template.py:2236`/`:4363` by the split | ✗ |
 
-Of 31 rows: **5 met, 3 partial, 22 not met**, plus the oversized-function debt, which is a ratchet rather than a pass/fail. That is the point of writing it down.
+Of 31 rows: **7 met, 3 partial, 20 not met**, plus the oversized-function debt, which is a ratchet rather than a pass/fail — falling since baseline, from 6,572 to 5,759 excess lines.
 
-**Reading this honestly.** Most rows are cheap and cosmetic; a few are neither. If only three things are done, they should be:
+**What changed since `4e62bbd`.** Two rows flipped to ✓, and they were the doc's own stated top priority: §4.2 and §4.3 (PRs #585/#586, closing #580/#581/#582). §5.5 also flipped to ✓ (PR #589, closing #584), which closed §6.3's fingerprint-arm gap as a side effect. One row flipped the other way: fixing §4.2's `sys.stdout` swap introduced `orchestrator.py`'s `_RoutedStdout.__getattr__` — a real §3.7 violation, deliberate and commented, but the metaprogramming row is no longer a clean ✓. None of this came from the ten open PRs; all of it is already merged to `dev`.
 
-1. **§4.2 and §4.3** — `prompt_logger`, `INSTITUTION_CACHE` and the `sys.stdout` swap are live cross-tenant data leaks, not style violations. They are the only rows here where the cost of inaction is a faculty member's data in another faculty member's output.
-2. **§6.2** — until a test fails when its subject is deleted, every other gate is being verified by a suite that demonstrably cannot see whole missing features. This is the rule the other testing rules rest on.
-3. **§5.5 and §6.3** — a gate that passes having compared nothing is worse than no gate, because it is cited as evidence.
+**Reading this honestly, again.** If only three things are done next, they should be:
 
-Rows 1.2 and 1.3 are already green, and worth noting: the stage-6 split delivered the two boundaries that make section bleed structurally harder, which is the part of that work that most deserves to be repeated elsewhere.
+1. **§6.2** — until a test fails when its subject is deleted, every other gate is being verified by a suite that demonstrably cannot see whole missing features. Nothing in the intervening 144 commits touched renderer test coverage, so there's no reason to expect this has improved even though it wasn't re-measured directly.
+2. **§5.3** — both silent stage-6 LLM fallbacks are still live, and still structurally untested: the corpus gate stubs the LLM, so the fallback path is the only path the gate ever actually exercises.
+3. **§7.3** — no registry exists yet. `grant_number` itself is fixed, but it was fixed the same way it broke — another one-off line in `_create_grant_table` — so the next stage-4 field this section doesn't name will drop exactly as silently as that one did.
+
+Rows 1.2 and 1.3 remain green, and are worth repeating: the stage-6 split delivered the two boundaries that make section bleed structurally harder, which is the part of that work most worth repeating elsewhere.
 
 ## Appendix: the checks, as commands
 
@@ -307,23 +333,23 @@ grep -rl 'import docx\|from docx' src/unified_pipeline/stage6/{parsing,normaliza
 # 1.3  sections do not import each other                            (clean today)
 grep -rn 'stage6\.sections\|from \.\.sections' src/unified_pipeline/stage6/sections/ | grep -v __init__
 
-# 1.4  pipeline core does not import the web backend        (1 violation: llm_client.py:61)
+# 1.4  pipeline core does not import the web backend        (1 violation: llm_client.py:62)
 grep -rnE '^[[:space:]]*(from|import)[[:space:]]+(app|web_interface)\b' src/unified_pipeline/
 
 # 2.1  routes do not query the database                                  (34 today)
 grep -rh 'db\.query(' web_interface/backend/app/api/*.py | wc -l
 
-# 5.4  bare swallows
+# 5.4  bare swallows                                                      (6 literal today)
 grep -rn -A1 'except Exception' src/ web_interface/ | grep -B1 'pass$'
 
-# 3.7  metaprogramming                                          (0 today — keep it there)
+# 3.7  metaprogramming                                (0 today except one commented __getattr__)
 grep -rnE 'metaclass=|[^_]\beval\(|[^_]\bexec\(|__getattr__|__setattr__' src/ web_interface/
 
-# 3.7  dynamic attribute access                                              (9 today)
+# 3.7  dynamic attribute access                                (stale — see footnote and §9's row)
 grep -rnE '\b(get|set|has|del)attr\([^,]+,[^"'"'"']' src/ web_interface/
 grep -rn '__dict__' src/ web_interface/
 ```
 
-§3.7's `getattr` form needs AST to be exact — grep cannot reliably tell a literal attribute name from a variable one, so treat the command above as a shortlist to read, not a count. The precise scan is the same AST walk `check_function_size.py` already performs; say the word and it grows a `--clarity` mode rather than becoming a second script.
+§3.7's `getattr` form needs AST to be exact — grep cannot reliably tell a literal attribute name from a variable one, so treat the command above as a shortlist to read, not a count. It also doesn't exclude a literal string argument (`getattr(x, 'foo')` still matches), which is why a 2026-08-14 re-run returned 177 raw hits, 49 with tests excluded — both numbers overcount for the same reason the original "9" undercounted precision. The precise scan is the same AST walk `check_function_size.py` already performs; say the word and it grows a `--clarity` mode rather than becoming a second script.
 
 Note for anyone reproducing these: `grep` on the dev machines is ugrep, whose recursive mode **silently skips dot-directories**. For a complete sweep use `find . -path ./.git -prune -o -type f -print | xargs grep -l …`.
