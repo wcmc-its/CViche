@@ -113,6 +113,52 @@ class TestSectionPGainsSectionOParser:
             ("Committee B", "", "2005-2008"),
         ]
 
+    def test_pipe_line_with_parenthetical_role(self):
+        # The pipe branch's inner sub-branch (the parser docstring's own
+        # example shape): role extracted from the parenthetical, pipe date wins.
+        gen = _generator()
+        entry = {
+            "text": "Pediatric Education Committee (Chair 2002-present) | 1996-Present",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+        gen._fill_administrative_activities([entry])
+
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("Pediatric Education Committee", "Chair", "1996-Present"),
+        ]
+
+    def test_leading_pipe_bare_date_joins_the_dates_pool(self):
+        # "| 1999-2010" (a one-part pipe line) unwraps to a date-only line and
+        # pairs forward like any other orphaned date.
+        gen = _generator()
+        entry = {
+            "text": "Committee A\n| 1999-2010",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+        gen._fill_administrative_activities([entry])
+
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("Committee A", "", "1999-2010"),
+        ]
+
+    def test_paren_only_line_keeps_its_row(self):
+        # The one declared behavior change beyond #572's enumerated items: a
+        # role-only parenthetical renders as a row with an empty Activity cell
+        # instead of being dropped.
+        gen = _generator()
+        entry = {
+            "text": "(Program Director 2010-2013)",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+        gen._fill_administrative_activities([entry])
+
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("", "Program Director", "2010-2013"),
+        ]
+
     def test_header_labels_are_skipped(self):
         gen = _generator()
         entry = {
@@ -244,6 +290,17 @@ class TestCitationWritersShareOneSplit:
             ("Wende ME", True),
             (", Smith J. A study of things. J Things. 2023;1:1-9.", False),
         ]
+
+    def test_plain_writer_no_match_emits_single_unbolded_run(self):
+        # No-match on the wire: the whole citation stays one unbolded run and
+        # the bolded-name counter does not move.
+        gen = _generator()
+        bolded_before = gen.stats['target_names_bolded']
+        para = gen.doc.paragraphs[0].insert_paragraph_before("")
+        gen._add_citation_with_bold_author(para, self.CITATION, "Nobody Q", "Jones")
+
+        assert [(r.text, bool(r.bold)) for r in para.runs] == [(self.CITATION, False)]
+        assert gen.stats['target_names_bolded'] == bolded_before
 
     def test_insertion_writer_produces_the_same_segmentation(self):
         gen = _generator()
