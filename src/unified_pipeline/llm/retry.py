@@ -15,7 +15,9 @@ import time
 import random
 import logging
 import threading
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 from openai import (
     RateLimitError,
     APITimeoutError,
@@ -45,15 +47,16 @@ BEDROCK_RETRYABLE_CODES = frozenset({
     "ServiceUnavailableException",
 })
 
-# Import ClientError at module level for RETRYABLE_ERRORS tuple.
-# botocore is always available as a transitive dependency of boto3,
-# but we guard the import so it doesn't fail when boto3 is not installed.
-try:
-    from botocore.exceptions import ClientError as _BotoClientError
-except ImportError:
-    _BotoClientError = type(None)  # Will never match if botocore is not installed
+# boto3 is a hard pin in requirements.txt (llm/bedrock.py already imports it
+# unconditionally), so botocore -- one of its own transitive dependencies --
+# is always present in every supported environment. The previous
+# try/except ImportError fallback here could never actually trigger and was
+# dead defensive code (PR #620 review).
+from botocore.exceptions import ClientError as _BotoClientError
 
 RETRYABLE_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, InternalServerError, _BotoClientError)
+
+T = TypeVar("T")
 
 
 # Per-pod ceiling on concurrent in-flight LLM calls. A backstop against fanning
@@ -65,7 +68,8 @@ RETRYABLE_ERRORS = (RateLimitError, APITimeoutError, APIConnectionError, Interna
 # deploy-time knob), since BoundedSemaphore is sized at construction.
 def _get_llm_config_int(key: str, default: int, min_value: int = 1) -> int:
     """Read an int LLM knob, falling back to default if unset, unparseable,
-    or below min_value."""
+    or below min_value (min_value itself is kept -- e.g. a concurrency count
+    of exactly 1 is valid)."""
     try:
         value, _ = get_config("llm", key, default=default)
         result = int(value)
@@ -76,7 +80,10 @@ def _get_llm_config_int(key: str, default: int, min_value: int = 1) -> int:
 
 def _get_llm_config_float(key: str, default: float, min_value: float = 0.0) -> float:
     """Read a float LLM knob, falling back to default if unset, unparseable,
-    or at/below min_value."""
+    or at/below min_value (min_value itself is EXCLUDED here, unlike the int
+    sibling above -- deliberately: min_value defaults to 0.0 for this
+    function's timeout/duration callers, and a 0.0 timeout is meaningless,
+    not a valid edge case to keep)."""
     try:
         value, _ = get_config("llm", key, default=default)
         result = float(value)
@@ -90,6 +97,9 @@ def _get_max_concurrent_llm_calls() -> int:
 
 
 _llm_call_semaphore = threading.BoundedSemaphore(_get_max_concurrent_llm_calls())
+# Sized once here, at import. Changing CVICHE_MAX_CONCURRENT_LLM_CALLS on a
+# running pod has no effect -- BoundedSemaphore's capacity is fixed at
+# construction -- it takes a pod restart (PR #620 review).
 
 
 def _get_llm_timeout_seconds() -> float:
@@ -127,7 +137,7 @@ def _get_llm_max_attempts() -> int:
 _client_init_lock = threading.Lock()
 
 
-def _call_with_retry(call_fn, retry_count: int = 3):
+def _call_with_retry(call_fn: Callable[[], T], retry_count: int = 3) -> tuple[T, float]:
     """Call function with exponential backoff on transient errors.
 
     Args:
@@ -147,14 +157,22 @@ def _call_with_retry(call_fn, retry_count: int = 3):
         field if something needs it, rather than folding it back into this one.
 
     Raises:
+        TypeError: If retry_count is not an int
         ValueError: If retry_count is negative
         The last error if all retries are exhausted
         Non-retryable errors immediately (including non-retryable ClientError)
     """
-    # A negative retry_count would make the loop below run zero times and fall
-    # straight through to `raise last_error` with last_error still None, which
-    # surfaces as a bare TypeError instead of the misconfiguration that caused
-    # it. retry_count is a call-site kwarg passthrough, so this is reachable.
+    # retry_count is a call-site kwarg passthrough (ultimately from
+    # llm_config.yaml via get_stage_config), so a malformed value is
+    # reachable, not just theoretical. Validate the type first: "3" < 0
+    # raises TypeError immediately, and 3.5 passes a bare `< 0` check but
+    # later breaks range(retry_count + 1) with a confusing TypeError deep in
+    # the loop. A negative int would make the loop run zero times and fall
+    # through to `raise last_error` with last_error still None -- also a
+    # bare TypeError instead of the misconfiguration that caused it
+    # (PR #620 review).
+    if isinstance(retry_count, bool) or not isinstance(retry_count, int):
+        raise TypeError(f"retry_count must be an integer, got {type(retry_count).__name__}")
     if retry_count < 0:
         raise ValueError(f"retry_count must be >= 0, got {retry_count}")
     last_error = None
@@ -173,7 +191,7 @@ def _call_with_retry(call_fn, retry_count: int = 3):
             # For botocore ClientError, only retry if the error code is retryable.
             # Non-retryable Bedrock errors (AccessDeniedException, ValidationException,
             # etc.) should propagate immediately.
-            if isinstance(e, _BotoClientError) and _BotoClientError is not type(None):
+            if isinstance(e, _BotoClientError):
                 error_code = e.response.get("Error", {}).get("Code", "")
                 if error_code not in BEDROCK_RETRYABLE_CODES:
                     raise

@@ -10,6 +10,7 @@ output, none of which the OpenAI adapter needs.
 import os
 import json
 import logging
+import re
 
 from unified_pipeline.config import calculate_cost
 from unified_pipeline.llm.retry import (
@@ -17,7 +18,6 @@ from unified_pipeline.llm.retry import (
     _client_init_lock,
     _get_llm_timeout_seconds,
     _get_llm_max_attempts,
-    BEDROCK_RETRYABLE_CODES,
 )
 
 logger = logging.getLogger(__name__)
@@ -116,6 +116,16 @@ def _schema_tool_config(response_format):
     if not isinstance(schema, dict) or schema.get("type") != "object":
         return None
     name = js.get("name") or "structured_output"
+    # Bedrock's ToolSpecification.name is a required 1-64 char field matching
+    # [a-zA-Z0-9_-]+ -- an otherwise-valid OpenAI schema name that violates
+    # this only fails once it reaches Bedrock. Catch it here with an
+    # actionable message instead (PR #620 review).
+    if not (isinstance(name, str) and 1 <= len(name) <= 64
+            and re.fullmatch(r"[a-zA-Z0-9_-]+", name)):
+        raise ValueError(
+            f"Bedrock json_schema name {name!r} must be 1-64 characters and "
+            "contain only letters, digits, '_' or '-'."
+        )
     return {
         "tools": [{"toolSpec": {
             "name": name,
@@ -180,6 +190,14 @@ def _translate_messages(messages, response_format=None, use_schema_tool=False):
     for msg in messages:
         if msg["role"] == "system":
             text = msg["content"]
+            if not isinstance(text, str):
+                # Same constraint as the user/assistant branch below (Bedrock's
+                # `text` field must be a str) -- fail loud here too instead of
+                # crashing on `text +=` or reaching boto3 with a malformed
+                # request (PR #620 review).
+                raise NotImplementedError(
+                    "Bedrock Converse translation does not support multimodal "
+                    "(list) system message content -- see #265.")
             if json_hint:
                 text += "\n\nRespond with valid JSON only."
             system_prompts.append({"text": text})
@@ -256,8 +274,6 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     Raises:
         botocore.exceptions.ClientError: On non-retryable Bedrock errors
     """
-    from botocore.exceptions import ClientError
-
     client = _get_bedrock_client()
     tool_config = _schema_tool_config(response_format)
     system_prompts, converse_messages = _translate_messages(
@@ -293,15 +309,11 @@ def _call_bedrock(model, messages, temperature, response_format=None,
     if tool_config is not None:
         call_kwargs["toolConfig"] = tool_config
 
-    try:
-        return client.converse(**call_kwargs)
-    except ClientError as e:
-        error_code = e.response["Error"]["Code"]
-        if error_code in BEDROCK_RETRYABLE_CODES:
-            # Re-raise as-is; _call_with_retry will catch it via RETRYABLE_ERRORS
-            raise
-        # Non-retryable errors propagate immediately
-        raise
+    # ClientError (retryable or not) propagates to _call_with_retry as-is --
+    # that's where BEDROCK_RETRYABLE_CODES classification actually happens.
+    # A try/except here that re-raises unconditionally in both branches was
+    # a no-op (PR #620 review); removed rather than kept as dead code.
+    return client.converse(**call_kwargs)
 
 
 def _extract_cache_tokens(usage: dict) -> tuple:
@@ -445,11 +457,14 @@ def _handle_bedrock(messages: list, response_format, cfg: dict) -> dict:
         content = retry_response["output"]["message"]["content"][0]["text"]
         retry_usage = retry_response["usage"]
         retry_cache_read, retry_cache_write = _extract_cache_tokens(retry_usage)
-        # Accumulate token usage from retry
+        # Accumulate token usage from retry. No "totalTokens" key here:
+        # _finalize_bedrock_result computes its own total from inputTokens/
+        # outputTokens/cache below, it never reads this dict's totalTokens
+        # (which also wouldn't reflect cache-expanded accounting) -- PR #620
+        # review.
         usage = {
             "inputTokens": usage["inputTokens"] + retry_usage["inputTokens"],
             "outputTokens": usage["outputTokens"] + retry_usage["outputTokens"],
-            "totalTokens": usage["totalTokens"] + retry_usage["totalTokens"],
         }
         cache_read_tokens += retry_cache_read
         cache_write_tokens += retry_cache_write

@@ -964,7 +964,7 @@ def test_pipeline_e2e_openai():
     exceptions and generates output .docx. No assertions on output quality.
 
     Requires OPENAI_API_KEY in environment. Costs money per run.
-    Run explicitly: pytest -m e2e
+    Run explicitly: RUN_LLM_E2E=1 pytest -m e2e
 
     Per D-10: Runs against OpenAI (default config) only. Bedrock E2E is
     manual when AWS credentials are available.
@@ -973,7 +973,12 @@ def test_pipeline_e2e_openai():
     import tempfile
     import shutil
 
-    # Skip if no API key available
+    # No pytest.ini/pyproject addopts filters out `-m e2e` in this repo and
+    # CI runs plain `pytest -q`, so OPENAI_API_KEY presence alone was the
+    # only thing standing between a normal test run and a real, billed
+    # OpenAI call. Require an explicit opt-in too (PR #620 review).
+    if not os.environ.get("RUN_LLM_E2E"):
+        pytest.skip("RUN_LLM_E2E not set -- skipping opt-in live E2E test")
     if not os.environ.get("OPENAI_API_KEY"):
         pytest.skip("OPENAI_API_KEY not set -- skipping E2E test")
 
