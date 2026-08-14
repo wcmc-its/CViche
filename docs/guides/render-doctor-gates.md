@@ -132,3 +132,11 @@ pre-existing, not introduced here), 58 had a locally-available source docx.
   scale wave 2's 24 issues will need is a separate, larger effort (real
   corpus-run cost is a standing open item, see
   `docs/analysis/HANDOFF-backlog-strategy-2026-08-08.md`).
+- **The LLM success path is structurally untested by this gate, not just
+  "not run this time."** `call_llm` monkeypatched to raise means both stage-6
+  call sites' `except` branches fire on every single CV, every single run --
+  never the branch where the call actually succeeds. A prompt or model
+  change can pass this gate at 100% identical with the LLM behaviour it's
+  supposedly gating not exercised at all (CODING_STANDARDS.md §5.11, §6.8).
+  This gate proves determinism and formatting correctness under the LLM's
+  *absence*; it says nothing about the correctness of the LLM's *output*.
