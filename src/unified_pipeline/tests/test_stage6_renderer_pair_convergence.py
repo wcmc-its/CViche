@@ -118,7 +118,8 @@ class TestSectionPGainsSectionOParser:
         # example shape): role extracted from the parenthetical, pipe date wins.
         gen = _generator()
         entry = {
-            "text": "Pediatric Education Committee (Chair 2002-present) | 1996-Present",
+            "text": "Pediatric Education Committee (Chair 2002-present) | 1996-Present"
+                    "\nCommittee B\nCommittee C",
             "extracted_fields": {},
             "taxonomy_code": "P",
         }
@@ -126,6 +127,8 @@ class TestSectionPGainsSectionOParser:
 
         assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
             ("Pediatric Education Committee", "Chair", "1996-Present"),
+            ("Committee B", "", ""),
+            ("Committee C", "", ""),
         ]
 
     def test_leading_pipe_bare_date_joins_the_dates_pool(self):
@@ -149,7 +152,7 @@ class TestSectionPGainsSectionOParser:
         # instead of being dropped.
         gen = _generator()
         entry = {
-            "text": "(Program Director 2010-2013)",
+            "text": "(Program Director 2010-2013)\nCommittee B\nCommittee C",
             "extracted_fields": {},
             "taxonomy_code": "P",
         }
@@ -157,6 +160,8 @@ class TestSectionPGainsSectionOParser:
 
         assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
             ("", "Program Director", "2010-2013"),
+            ("Committee B", "", ""),
+            ("Committee C", "", ""),
         ]
 
     def test_header_labels_are_skipped(self):
