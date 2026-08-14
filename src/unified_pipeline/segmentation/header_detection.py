@@ -15,6 +15,26 @@ try:
 except (ImportError, ValueError):
     from cv_headers import KNOWN_CV_HEADERS_SET, KNOWN_SUBSECTION_TERMS
 
+# Composite-scoring confidence weights. Calibrated empirically against the
+# corpus dry-run process in docs/DEV_WORKFLOW.md -- change a value only with
+# a before/after corpus comparison, not just unit tests (PR #600 review).
+TABLE_HEADER_DEFAULT_CONFIDENCE = 0.60
+HEADING_STYLE_CONFIDENCE = 0.95
+HEADING_STYLE_NAME_CONFIDENCE = 0.90
+BASE_CONFIDENCE_SHORT_TEXT = 0.30
+CENTERED_BOOST = 0.50
+ALL_CAPS_BOOST = 0.45
+BOLD_BEFORE_PLAIN_BOOST = 0.40
+BOLD_FOLLOWED_BY_BOLD_BOOST = 0.25
+BOLD_LAST_ELEMENT_BOOST = 0.30
+ENDS_COLON_BOOST = 0.35
+UNDERLINE_BOOST = 0.25
+LARGE_FONT_BOOST = 0.30
+NO_INDENT_BOOST = 0.15
+WHITESPACE_PATTERN_BOOST = 0.10
+KNOWN_HEADER_BOOST = 0.45
+HEADER_CONFIDENCE_THRESHOLD = 0.60
+
 
 def detect_section_headers(structure: Dict[str, Any]) -> List[Dict[str, Any]]:
     """
@@ -61,7 +81,7 @@ def detect_section_headers(structure: Dict[str, Any]) -> List[Dict[str, Any]]:
         # === TABLE HEADER SIGNAL (from extract_unified_elements) ===
         # Table headers already passed header detection, so give them a boost
         if elem['type'] == 'table_header':
-            confidence = elem.get('header_confidence', 0.60)
+            confidence = elem.get('header_confidence', TABLE_HEADER_DEFAULT_CONFIDENCE)
             signals_detected.append('table_header')
             # Continue to apply other signals to potentially boost further
 
@@ -69,16 +89,16 @@ def detect_section_headers(structure: Dict[str, Any]) -> List[Dict[str, Any]]:
 
         # 1. Heading style (STRONGEST - Word's native structure)
         if elem.get('outline_level') is not None:
-            confidence = 0.95
+            confidence = HEADING_STYLE_CONFIDENCE
             level = elem['outline_level']
             signals_detected.append('heading_style')
 
         # 2. Style name contains "Heading"
         elif 'Heading' in elem.get('style', ''):
-            confidence = 0.90
+            confidence = HEADING_STYLE_NAME_CONFIDENCE
             try:
                 level = int(elem['style'].split()[-1])
-            except:
+            except (ValueError, IndexError):
                 level = 1
             signals_detected.append('heading_style_name')
 
@@ -87,17 +107,17 @@ def detect_section_headers(structure: Dict[str, Any]) -> List[Dict[str, Any]]:
             # Start with base confidence for short text
             # BUT don't reset if we already have confidence from table_header
             if len(text) < 150 and confidence == 0.0:
-                confidence = 0.30  # Base score for potential header
+                confidence = BASE_CONFIDENCE_SHORT_TEXT
 
             # 3. Centered alignment (major headers like "CURRICULUM VITAE")
             if elem.get('alignment') == 'center' and len(text) < 100:
-                confidence += 0.50
+                confidence += CENTERED_BOOST
                 level = 1
                 signals_detected.append('centered')
 
             # 4. ALL CAPS (common for section headers)
             if text.isupper() and len(text) < 150:
-                confidence += 0.45
+                confidence += ALL_CAPS_BOOST
                 signals_detected.append('all_caps')
 
             # 5. Bold text
@@ -106,7 +126,7 @@ def detect_section_headers(structure: Dict[str, Any]) -> List[Dict[str, Any]]:
                 if i + 1 < len(elements):
                     next_elem = elements[i + 1]
                     if next_elem.get('type') == 'paragraph' and not next_elem.get('bold'):
-                        confidence += 0.40
+                        confidence += BOLD_BEFORE_PLAIN_BOOST
                         # Determine level: Major sections (longer, descriptive) are L1
                         # Short subsection headers (single words) are L2
                         if text.endswith(':'):
@@ -122,48 +142,48 @@ def detect_section_headers(structure: Dict[str, Any]) -> List[Dict[str, Any]]:
                             level = 2  # Default subsection
                         signals_detected.append('bold_before_plain')
                     else:
-                        confidence += 0.25
+                        confidence += BOLD_FOLLOWED_BY_BOLD_BOOST
                         signals_detected.append('bold')
                 else:
-                    confidence += 0.30
+                    confidence += BOLD_LAST_ELEMENT_BOOST
                     signals_detected.append('bold')
 
             # 6. Ends with colon (common CV pattern: "Education:")
             if text.endswith(':') and len(text) < 100:
-                confidence += 0.35
+                confidence += ENDS_COLON_BOOST
                 signals_detected.append('ends_colon')
 
             # 7. Underline formatting
             if elem.get('underline') and len(text) < 150:
-                confidence += 0.25
+                confidence += UNDERLINE_BOOST
                 signals_detected.append('underline')
 
             # 8. Larger font size (headers often bigger)
             if elem.get('font_size') and elem.get('font_size') > avg_font_size * 1.2:
-                confidence += 0.30
+                confidence += LARGE_FONT_BOOST
                 signals_detected.append('large_font')
 
             # 9. Zero indentation + short (left-aligned headers)
             if elem.get('indent_left') == 0.0 and len(text) < 80 and elem.get('list_level') is None:
-                confidence += 0.15
+                confidence += NO_INDENT_BOOST
                 signals_detected.append('no_indent')
 
             # 10. Unusual spacing/whitespace patterns (lots of spaces = formatted header)
             if '   ' in text or '\t' in text:  # Multiple spaces or tabs
-                confidence += 0.10
+                confidence += WHITESPACE_PATTERN_BOOST
                 signals_detected.append('whitespace')
 
             # 11. Known CV section header (V6: WCM taxonomy-based)
             text_lower = text.lower().rstrip(':').strip()
             if text_lower in KNOWN_CV_HEADERS_SET:
-                confidence += 0.45  # Strong boost for recognized section titles
+                confidence += KNOWN_HEADER_BOOST  # Strong boost for recognized section titles
                 signals_detected.append('known_header')
 
         # Cap confidence at 1.0
         confidence = min(confidence, 1.0)
 
         # Only include if confidence above threshold
-        if confidence >= 0.60:
+        if confidence >= HEADER_CONFIDENCE_THRESHOLD:
             headers.append({
                 'text': text,
                 # Use unified_idx if available (from extract_unified_elements), else fall back to idx
@@ -186,6 +206,10 @@ def detect_section_headers(structure: Dict[str, Any]) -> List[Dict[str, Any]]:
 def _enforce_hierarchy_consistency(headers: List[Dict]) -> List[Dict]:
     """
     Post-process headers to enforce consistent hierarchy levels.
+
+    Mutates and returns the same `headers` list/dicts passed in (in place) --
+    it does not copy. Callers that need the pre-normalization levels should
+    snapshot them before calling `detect_section_headers`/this function.
 
     Fixes common issues:
     1. Geographic terms (International/National/Regional/Local) orphaned as H1
@@ -237,7 +261,7 @@ def _enforce_hierarchy_consistency(headers: List[Dict]) -> List[Dict]:
             else:
                 header['level'] = 2
 
-            if 'signals' in header:
+            if 'signals' in header and 'demoted_subsection' not in header['signals']:
                 header['signals'].append('demoted_subsection')
 
         # Track first occurrence for consistency
@@ -251,7 +275,7 @@ def _enforce_hierarchy_consistency(headers: List[Dict]) -> List[Dict]:
                 # This prevents demoting intentionally different structures
                 if header['level'] < expected_level:
                     header['level'] = expected_level
-                    if 'signals' in header:
+                    if 'signals' in header and 'level_normalized' not in header['signals']:
                         header['signals'].append('level_normalized')
 
     return headers
