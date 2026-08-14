@@ -40,6 +40,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import unified_pipeline.stage_3b_entry_classifier as stage_3b  # noqa: E402
+# call_llm is stubbed at the module that actually calls it: the #522 split
+# moved every classification call site into stage3b/classify.py, so patching
+# the facade's copy would no longer intercept anything (#496).
+import unified_pipeline.stage3b.classify as stage3b_classify  # noqa: E402
 from unified_pipeline.stage_3b_entry_classifier import (  # noqa: E402
     TaxonomyContext,
     classify_entries_batch,
@@ -110,7 +114,7 @@ def _four_batch_call_llm(monkeypatch):
             raise RuntimeError("ThrottlingException: rate exceeded")
         raise AssertionError(f"unexpected extra call_llm invocation #{n}")
 
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
     return calls
 
 
@@ -187,7 +191,8 @@ def test_classify_entries_batch_is_under_the_ratchet_threshold():
     """The actual concern #604 exists for: classify_entries_batch itself,
     not just its helpers, must drop under check_function_size.py's 200-line
     THRESHOLD -- #522's file split alone would not have shrunk it."""
-    module_path = _SRC / "unified_pipeline" / "stage_3b_entry_classifier.py"
+    # classify_entries_batch lives in stage3b/classify.py since the #522 split.
+    module_path = _SRC / "unified_pipeline" / "stage3b" / "classify.py"
     tree = ast.parse(module_path.read_text())
     func = next(
         node
@@ -206,7 +211,7 @@ def test_classify_entries_batch_empty_input(monkeypatch):
     def _boom(**kwargs):
         raise AssertionError("call_llm must not be invoked for an empty entries list")
 
-    monkeypatch.setattr(stage_3b, "call_llm", _boom)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
 
     results, stats = classify_entries_batch([], _context(), TAXONOMY, batch_size=BATCH_SIZE)
 
@@ -242,7 +247,7 @@ def _echo_call_llm(monkeypatch):
             "model": "gpt-5.1-mini-echo",
         }
 
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
 
 
 @pytest.mark.parametrize("num_entries,batch_size,expected_llm_batches", [
@@ -281,7 +286,7 @@ def test_classify_entries_batch_handles_unparseable_llm_json(monkeypatch, caplog
             "model": "gpt-5.1-mini-bad-json",
         }
 
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
 
     with caplog.at_level(logging.ERROR, logger=stage_3b.logger.name):
         results, stats = classify_entries_batch(
@@ -316,7 +321,7 @@ def test_classify_entries_batch_handles_missing_or_empty_classifications(monkeyp
             "model": "gpt-5.1-mini-noclass",
         }
 
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
 
     results, stats = classify_entries_batch(
         [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2
@@ -347,7 +352,7 @@ def test_classify_entries_batch_malformed_indices_do_not_cross_contaminate(monke
             "model": "gpt-5.1-mini-idx",
         }
 
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
 
     results, stats = classify_entries_batch(
         [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2
@@ -379,7 +384,7 @@ def test_classify_entries_batch_uses_index_not_position(monkeypatch):
             "model": "gpt-5.1-mini-rev",
         }
 
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
 
     results, stats = classify_entries_batch(
         [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2

@@ -43,7 +43,8 @@ def test_template_escapes_json_braces_for_str_format():
 
 
 def test_classify_entries_batch_is_under_ratchet_line_budget():
-    module_path = _SRC / "unified_pipeline" / "stage_3b_entry_classifier.py"
+    # classify_entries_batch lives in stage3b/classify.py since the #522 split.
+    module_path = _SRC / "unified_pipeline" / "stage3b" / "classify.py"
     tree = ast.parse(module_path.read_text())
     func = next(
         node
@@ -64,6 +65,10 @@ def test_classify_entries_batch_actually_uses_the_hoisted_template(monkeypatch):
     function (LLM call mocked out) and assert the system message it sends
     is exactly the template rendered with the same values."""
     import unified_pipeline.stage_3b_entry_classifier as stage_3b
+    # call_llm is stubbed at the module that actually calls it: the #522 split
+    # moved every classification call site into stage3b/classify.py, so patching
+    # the facade's copy would no longer intercept anything (#496).
+    import unified_pipeline.stage3b.classify as stage3b_classify
 
     captured = {}
 
@@ -77,7 +82,7 @@ def test_classify_entries_batch_actually_uses_the_hoisted_template(monkeypatch):
             "model": "test-model",
         }
 
-    monkeypatch.setattr(stage_3b, "call_llm", fake_call_llm)
+    monkeypatch.setattr(stage3b_classify, "call_llm", fake_call_llm)
 
     context = stage_3b.TaxonomyContext()
     entries = [{"text": "Associate Professor of Medicine, 2020-present", "hierarchy": ["Positions"]}]

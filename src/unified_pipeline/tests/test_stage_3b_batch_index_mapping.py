@@ -28,6 +28,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import unified_pipeline.stage_3b_entry_classifier as stage_3b  # noqa: E402
+# call_llm is stubbed at the module that actually calls it: the #522 split
+# moved every classification call site into stage3b/classify.py, so patching
+# the facade's copy would no longer intercept anything (#496).
+import unified_pipeline.stage3b.classify as stage3b_classify  # noqa: E402
 from unified_pipeline.stage_3b_entry_classifier import (  # noqa: E402
     TaxonomyContext,
     classify_entries_batch,
@@ -72,7 +76,7 @@ def test_empty_entry_midbatch_does_not_shift_later_classifications(monkeypatch):
     The prompt labels A as [1] and B as [2]. Before the fix the lookup asked
     for positions 0 and 1, so A missed entirely and B was handed A's code.
     """
-    monkeypatch.setattr(stage_3b, "call_llm", _responder({1: "H", 2: "T"}))
+    monkeypatch.setattr(stage3b_classify, "call_llm", _responder({1: "H", 2: "T"}))
 
     results, _ = classify_entries_batch(
         [_break(), _entry("Dean's Award, 2015"), _entry("Consulting, Acme Corp")],
@@ -100,7 +104,7 @@ def test_every_entry_keeps_its_own_code_with_breaks_interleaved(monkeypatch):
         expected.append(code)
         code_by_index[len(entries) - 1] = code
 
-    monkeypatch.setattr(stage_3b, "call_llm", _responder(code_by_index))
+    monkeypatch.setattr(stage3b_classify, "call_llm", _responder(code_by_index))
     results, _ = classify_entries_batch(entries, _context(), TAXONOMY)
 
     got = [r["taxonomy_code"] if r["classification_source"] == "llm" else None
@@ -119,7 +123,7 @@ def test_malformed_classification_object_does_not_kill_the_run(monkeypatch, capl
             ]}),
             "prompt_tokens": 100, "completion_tokens": 20, "cost": 0.001,
         }
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
 
     with caplog.at_level(logging.WARNING, logger=stage_3b.logger.name):
         results, _ = classify_entries_batch(
@@ -139,7 +143,7 @@ def test_malformed_classification_object_does_not_kill_the_run(monkeypatch, capl
 def test_well_formed_batch_is_unchanged(monkeypatch):
     """Control: with no empty entries the two index schemes coincide, so the
     fix must not perturb the case that always worked."""
-    monkeypatch.setattr(stage_3b, "call_llm", _responder({0: "H", 1: "T", 2: "B1"}))
+    monkeypatch.setattr(stage3b_classify, "call_llm", _responder({0: "H", 1: "T", 2: "B1"}))
 
     results, stats = classify_entries_batch(
         [_entry("Dean's Award, 2015"), _entry("Consulting, Acme"), _entry("MD, 1998")],

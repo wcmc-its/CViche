@@ -29,6 +29,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import unified_pipeline.stage_3b_entry_classifier as stage_3b  # noqa: E402
+# call_llm is stubbed at the module that actually calls it: the #522 split
+# moved every classification call site into stage3b/classify.py, so patching
+# the facade's copy would no longer intercept anything (#496).
+import unified_pipeline.stage3b.classify as stage3b_classify  # noqa: E402
 from unified_pipeline.stage_3b_entry_classifier import (  # noqa: E402
     TaxonomyContext,
     classify_entries_batch,
@@ -68,7 +72,7 @@ def _boom(**kwargs):
 
 def test_failed_batch_falls_back_and_is_counted(monkeypatch):
     """An LLM error still falls back per entry, but the stats say so."""
-    monkeypatch.setattr(stage_3b, "call_llm", _boom)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
 
     results, stats = classify_entries_batch(
         _entries(["Dean's Award for Excellence, 2015", "Teaching Prize, 2018"]),
@@ -84,7 +88,7 @@ def test_failed_batch_falls_back_and_is_counted(monkeypatch):
 
 def test_failed_batch_logs_error_with_batch_info(monkeypatch, caplog):
     """The old print is now a logger error carrying exception + batch context."""
-    monkeypatch.setattr(stage_3b, "call_llm", _boom)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
 
     with caplog.at_level(logging.ERROR, logger=stage_3b.logger.name):
         classify_entries_batch(
@@ -102,7 +106,7 @@ def test_failed_batch_logs_error_with_batch_info(monkeypatch, caplog):
 
 
 def test_successful_batch_counts_llm_classified(monkeypatch):
-    monkeypatch.setattr(stage_3b, "call_llm", lambda **kw: _ok_response([0, 1]))
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0, 1]))
 
     results, stats = classify_entries_batch(
         _entries(["Dean's Award for Excellence, 2015", "Teaching Prize, 2018"]),
@@ -117,7 +121,7 @@ def test_successful_batch_counts_llm_classified(monkeypatch):
 
 def test_omitted_index_falls_back_without_batch_failure(monkeypatch):
     """An entry the LLM skipped is a fallback, but NOT a failed batch."""
-    monkeypatch.setattr(stage_3b, "call_llm", lambda **kw: _ok_response([0]))
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0]))
 
     results, stats = classify_entries_batch(
         _entries(["Dean's Award for Excellence, 2015", "Teaching Prize, 2018"]),
@@ -132,7 +136,7 @@ def test_omitted_index_falls_back_without_batch_failure(monkeypatch):
 def test_empty_entries_never_attempt_llm(monkeypatch):
     def _fail(**kwargs):
         raise AssertionError("call_llm must not run for empty-text entries")
-    monkeypatch.setattr(stage_3b, "call_llm", _fail)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _fail)
 
     results, stats = classify_entries_batch(
         _entries(["", "   "]), _context(), TAXONOMY)
@@ -170,7 +174,7 @@ _RUN_ENTRIES = [
 
 def test_run_fails_when_every_batch_fails(monkeypatch, tmp_path):
     """Zero successful LLM classifications in a nonempty run -> raise, no output."""
-    monkeypatch.setattr(stage_3b, "call_llm", _boom)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
     stage_2, stage_3a = _write_run_fixtures(tmp_path, _RUN_ENTRIES, _MAPPINGS)
     out_dir = tmp_path / "out"
 
@@ -195,7 +199,7 @@ def test_run_survives_partial_failure_and_reports_stats(monkeypatch, tmp_path):
             raise RuntimeError("ThrottlingException: rate exceeded")
         return _ok_response([0], code="I")
 
-    monkeypatch.setattr(stage_3b, "call_llm", _first_call_fails)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _first_call_fails)
     stage_2, stage_3a = _write_run_fixtures(tmp_path, _RUN_ENTRIES, _MAPPINGS)
     out_dir = tmp_path / "out"
 
@@ -223,7 +227,7 @@ def test_run_with_only_empty_entries_does_not_fail(monkeypatch, tmp_path):
     """No LLM call was ever attempted -> nothing failed, run completes."""
     def _fail(**kwargs):
         raise AssertionError("call_llm must not run for empty-text entries")
-    monkeypatch.setattr(stage_3b, "call_llm", _fail)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _fail)
 
     empty_entries = [
         {"element_type": "text", "text": "  ", "hierarchy": ["HONORS AND AWARDS"]},
