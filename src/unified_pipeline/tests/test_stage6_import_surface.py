@@ -103,6 +103,78 @@ def test_render_check_symbol_is_still_importable(name):
     )
 
 
+#: Names relocated by the #398 residue split into `stage6/dedup.py` and
+#: `stage6/render_check.py`. Each is pinned twice: it must still resolve from
+#: `stage_6_word_template` (the public surface -- 7 of these are also in
+#: STAGE6_IMPORT_SURFACE above, the rest are covered only here), and it must
+#: resolve in its new home, so a later re-shuffle inside `stage6/` cannot
+#: silently strand either address.
+RELOCATED_BY_398_RESIDUE = {
+    "unified_pipeline.stage6.dedup": (
+        "DEDUP_FULL_CONTAINMENT_MIN_TOKENS",
+        "DEDUP_FUSED_BLOB_RECORD_LINES",
+        "_STOP_WORDS",
+        "_drop_is_safe",
+        "_entry_signature_words",
+        "_entry_title_words",
+        "_significant_words",
+        "deduplicate_entries",
+    ),
+    "unified_pipeline.stage6.render_check": (
+        "RECORD_DATE_LINE_MIN_CHARS",
+        "RENDER_PIECE_MIN_CHARS",
+        "RENDER_PIECE_WINDOW",
+        "RENDER_TOKEN_MIN_COUNT",
+        "RENDER_TOKEN_OVERLAP",
+        "RETIRED_TAXONOMY_CODES",
+        "UNRENDERED_MIN_RECORD_LINES",
+        "_COLUMN_HEADER_WORDS",
+        "_IDENTIFYING_FIELDS",
+        "_MONTH_WORDS",
+        "_RECORD_DATE_PREFIX_RE",
+        "_RENDER_TOKEN_RE",
+        "_entry_pieces",
+        "_is_column_header_row",
+        "_looks_like_record",
+        "_norm",
+        "_record_lines",
+        "_record_rendered",
+        "_value_is_datelike",
+        "normalize_retired_code",
+        "segment_already_rendered",
+    ),
+}
+
+_RELOCATED_CASES = [
+    (home, name)
+    for home, names in sorted(RELOCATED_BY_398_RESIDUE.items())
+    for name in names
+]
+
+
+@pytest.mark.parametrize("home,name", _RELOCATED_CASES)
+def test_relocated_name_still_importable_from_stage6_module(home, name):
+    """The old address keeps working: stage_6_word_template re-exports it."""
+    mod = importlib.import_module("unified_pipeline.stage_6_word_template")
+    assert hasattr(mod, name), (
+        f"'{name}' moved to {home} but is no longer re-exported from "
+        f"stage_6_word_template -- existing callers import it by the old name."
+    )
+
+
+@pytest.mark.parametrize("home,name", _RELOCATED_CASES)
+def test_relocated_name_resolves_in_its_new_home(home, name):
+    mod = importlib.import_module(home)
+    assert hasattr(mod, name), f"'{name}' is not defined in {home}."
+
+
+def test_the_relocated_surface_is_not_silently_empty():
+    assert len(_RELOCATED_CASES) == 29, (
+        "the #398-residue relocation pin changed size -- if that is "
+        "intentional, update the count and say why in the commit message"
+    )
+
+
 #: Methods the test suite calls on a WCMTemplateGenerator INSTANCE, measured the
 #: same way. This is a second contract, distinct from the module surface above:
 #: those names are imported, these are reached for as class attributes, and the
@@ -192,6 +264,10 @@ if __name__ == "__main__":
         test_render_check_symbol_is_still_importable(_n)
     for _n in STAGE6_CLASS_SURFACE:
         test_generator_method_is_still_on_the_class(_n)
+    for _home, _n in _RELOCATED_CASES:
+        test_relocated_name_still_importable_from_stage6_module(_home, _n)
+        test_relocated_name_resolves_in_its_new_home(_home, _n)
+    test_the_relocated_surface_is_not_silently_empty()
     test_the_surface_list_is_not_silently_empty()
     test_private_names_are_a_deliberate_part_of_the_contract()
     print("OK")
