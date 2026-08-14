@@ -91,8 +91,13 @@ def test_location_inference_sees_extracted_fields():
     extraction loop fed this function bare entries and it returned an empty pool
     on every real CV. The unit checks could not see that, because they supply
     the fields themselves. This one asserts the ordering instead.
+
+    Rebinds on `stage4.extraction`, not the `stage_4_field_extractor` facade:
+    `extract_fields_from_mapped_entries` resolves its callees through the
+    extraction module's globals, so a stub bound on the facade's re-export is a
+    second binding the call never sees (#498 split, the #496 lesson).
     """
-    from unified_pipeline import stage_4_field_extractor as s4
+    from unified_pipeline.stage4 import extraction as s4
 
     mapped = [
         {'taxonomy_code': 'D1', 'text': 'Professor of Surgery, Weill Cornell Medicine',
