@@ -15,8 +15,9 @@ Two things happen to the entry list before it is numbered:
 
 The two `_add_citation_with_bold_author*` helpers exist because the CV owner's
 name has to be bold inside the citation, and Word offers no way to say that
-without splitting the text into runs. They are the same algorithm twice over
-different substrates:
+without splitting the text into runs. The author-matching and citation-splitting
+rule lives once, in `_citation_author_split` (#572); the writers are thin tails
+over two different substrates:
 
 - `_add_citation_with_bold_author` writes plain runs via python-docx, and is
   what a non-enriched citation uses.
@@ -47,6 +48,39 @@ from ..formatting import _format_citation, _set_font
 from ..normalization import split_fused_citation_entries
 from ..parsing import _extract_last_name_from_uid
 from ..sorting import sort_entries_reverse_chronological
+
+
+def _citation_author_split(citation: str, target_name: Optional[str],
+                           cv_owner_last_name: str) -> tuple[str, str, str]:
+    """Split a citation around the author name that should render bold.
+
+    The one home for the author-matching rule shared by the plain and the
+    tracked-insertion citation writers (#572): a change to the rule (suffixes
+    like "Jr.", hyphenated surnames, particles) must reach both writers, or
+    enriched and non-enriched citations in the same bibliography bold
+    different text.
+
+    Prefers `target_name` when it appears verbatim in the citation; otherwise
+    falls back to finding `cv_owner_last_name` with trailing initials, e.g.
+    "Wende ME", "Wende, M", "Wende M.".
+
+    Returns `(before, name_to_bold, after)`. When nothing matches,
+    `name_to_bold` is '' and the whole citation is in `before`.
+    """
+    name_to_bold = None
+    if target_name and target_name in citation:
+        name_to_bold = target_name
+    elif cv_owner_last_name:
+        pattern = rf'\b{re.escape(cv_owner_last_name)}\s*[A-Z]{{0,3}}\.?\b'
+        match = re.search(pattern, citation, re.IGNORECASE)
+        if match:
+            name_to_bold = match.group(0).rstrip('.,')
+
+    if not (name_to_bold and name_to_bold in citation):
+        return citation, '', ''
+
+    idx = citation.index(name_to_bold)
+    return citation[:idx], name_to_bold, citation[idx + len(name_to_bold):]
 
 
 class BibliographySection:
@@ -165,24 +199,10 @@ class BibliographySection:
         """
         para.clear()
 
-        # Determine what to bold
-        name_to_bold = None
-        if target_name and target_name in citation:
-            name_to_bold = target_name
-        elif cv_owner_last_name:
-            # Fallback: find cv_owner's name in the citation using regex
-            # Look for patterns like "Wende ME", "Wende, M", "Wende M.", etc.
-            pattern = rf'\b{re.escape(cv_owner_last_name)}\s*[A-Z]{{0,3}}\.?\b'
-            match = re.search(pattern, citation, re.IGNORECASE)
-            if match:
-                name_to_bold = match.group(0).rstrip('.,')
+        before, name_to_bold, after = _citation_author_split(
+            citation, target_name, cv_owner_last_name)
 
-        if name_to_bold and name_to_bold in citation:
-            # Split around target name
-            idx = citation.index(name_to_bold)
-            before = citation[:idx]
-            after = citation[idx + len(name_to_bold):]
-
+        if name_to_bold:
             # Add before (normal)
             if before:
                 run1 = para.add_run(before)
@@ -226,15 +246,8 @@ class BibliographySection:
             ins.set(qn('w:author'), author)
             ins.set(qn('w:date'), datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ'))
 
-            # Determine what to bold
-            name_to_bold = None
-            if target_name and target_name in citation:
-                name_to_bold = target_name
-            elif cv_owner_last_name:
-                pattern = rf'\b{re.escape(cv_owner_last_name)}\s*[A-Z]{{0,3}}\.?\b'
-                match = re.search(pattern, citation, re.IGNORECASE)
-                if match:
-                    name_to_bold = match.group(0).rstrip('.,')
+            before, name_to_bold, after = _citation_author_split(
+                citation, target_name, cv_owner_last_name)
 
             def create_run_element(text: str, bold: bool = False) -> Any:
                 """Create a w:r element with text and optional bold."""
@@ -258,12 +271,7 @@ class BibliographySection:
                 run_elem.append(t)
                 return run_elem
 
-            if name_to_bold and name_to_bold in citation:
-                # Split around target name
-                idx = citation.index(name_to_bold)
-                before = citation[:idx]
-                after = citation[idx + len(name_to_bold):]
-
+            if name_to_bold:
                 # Add before (normal)
                 if before:
                     ins.append(create_run_element(before, bold=False))

@@ -13,10 +13,12 @@ subsection is empty that is the *funding* table from a later section. Each of th
 three branches therefore reads row 0 cell 0 and refuses a table whose header says
 "Award Source" or "Funding" -- otherwise clinical entries render as grant rows.
 
-`_insert_multiline_as_bullets` is the bullet fallback used by L1 and L3. It
-splits on newlines so a multi-line source entry becomes one bullet per line
-rather than one bullet containing embedded newlines, and attaches the entry's
-Word comments to the first bullet only.
+`_insert_multiline_as_bullets` is the bullet fallback used by all three
+subsections (L2 joined L1 and L3 in #572; it used the single-bullet inserter,
+which collapsed a multi-line entry into one list paragraph with soft line
+breaks). It splits on newlines so a multi-line source entry becomes one bullet
+per line rather than one bullet containing embedded newlines, and attaches the
+entry's Word comments to the first bullet only.
 """
 from typing import Dict, List
 
@@ -219,8 +221,13 @@ class ClinicalPracticeSection:
                             continue
                         bullet_text = original_text.replace('\t', ' — ', 1).replace('\t', ' ') if '\t' in original_text else original_text
                         if bullet_text:
-                            self._insert_bulleted_entry(section_idx + 1 + bullet_count, bullet_text, entry, add_blank_before=(bullet_count == 0), list_level=0)
-                            bullet_count += 1
+                            # Use multiline helper so a multi-line entry becomes
+                            # one bullet per line, matching L1 and L3 (#572)
+                            inserted = self._insert_multiline_as_bullets(
+                                section_idx + 1 + bullet_count, bullet_text, entry,
+                                add_blank_before=(bullet_count == 0)
+                            )
+                            bullet_count += inserted
 
         # L3: Clinical Leadership
         if l3_entries:

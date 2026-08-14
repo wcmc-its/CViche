@@ -21,16 +21,19 @@ Three different repairs, in the order the writer tries them:
    describe one item out of many and `_add_multiline_committee_rows` re-parses
    the text per line.
 
-That last helper drops bare date lines outright. They are orphans from a source
-table's date column, and there is no way to tell which committee each belongs
-to -- unlike section O, where the columns arrive in matched order and can be
-paired back up.
+That last helper runs section O's line parser,
+`_parse_flattened_committee_lines` in `stage6.parsing` (#572 -- P used to run
+a drifted copy that had no pipe branch, no trailing-date branch and no
+orphaned-date pairing, so those shapes rendered with an empty Dates column).
+P keeps its own row writer because its table has a Role column O's does not:
+parsed parenthetical titles go there instead of back into the activity text.
 """
 import re
 from typing import Dict, List
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
 from ..normalization import _committee_cell_text
+from ..parsing import _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
 
@@ -164,44 +167,17 @@ class AdministrativeActivitiesSection:
         self.stats['entries_inserted'] += 1
 
     def _add_multiline_committee_rows(self, table, lines: List[str]):
-        """Add multiple committee rows from multiline content, parsing dates from each line."""
+        """Add multiple committee rows from multiline content, parsing dates from each line.
 
-        # Pattern for bare date lines (orphaned from table extraction)
-        bare_date_pattern = re.compile(r'^\s*\|?\s*\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?\s*$', re.IGNORECASE)
-
-        for line in lines:
-            line = line.strip()
-            if not line:
+        The line parser is `_parse_flattened_committee_lines`, shared with
+        section O (#572), so pipe-separated date columns, trailing dates and
+        orphaned date lines all resolve into the Dates cell instead of being
+        left inside (or dropped from) the Activity cell. Parsed role titles go
+        into P's Role column.
+        """
+        for item in _parse_flattened_committee_lines(lines):
+            role = '; '.join(item.roles)
+            # Skip if nothing renderable remains after date extraction
+            if not item.activity and not role:
                 continue
-
-            # Skip bare date lines - they're orphaned from table extraction
-            # and we can't associate them with any committee
-            if bare_date_pattern.match(line):
-                continue
-
-            activity = line
-            role = ''
-            dates = ''
-
-            # Try to parse "(Role YYYY-YYYY)" or "(YYYY-YYYY)" pattern
-            paren_match = re.search(r'\(([^)]*?)(\d{4})\s*[-–]\s*(\d{4}|present)\)', line, re.IGNORECASE)
-            if paren_match:
-                potential_role = paren_match.group(1).strip()
-                start_year = paren_match.group(2)
-                end_year = paren_match.group(3)
-                dates = f"{start_year}-{end_year}"
-                if potential_role:
-                    role = potential_role.rstrip(',').strip()
-                activity = re.sub(r'\s*\([^)]*\d{4}[^)]*\)', '', line).strip()
-            else:
-                # Try simpler pattern: just (YYYY-YYYY)
-                paren_match = re.search(r'\((\d{4})\s*[-–]\s*(\d{4}|present)\)', line, re.IGNORECASE)
-                if paren_match:
-                    dates = f"{paren_match.group(1)}-{paren_match.group(2)}"
-                    activity = re.sub(r'\s*\([^)]*\d{4}[^)]*\)', '', line).strip()
-
-            # Skip if activity is empty after date extraction
-            if not activity:
-                continue
-
-            self._add_committee_row(table, activity, role, dates)
+            self._add_committee_row(table, item.activity, role, item.dates)

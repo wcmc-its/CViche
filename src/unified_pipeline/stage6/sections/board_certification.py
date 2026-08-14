@@ -25,10 +25,41 @@ header reads "LICENSURE, BOARD CERTIFICATION", so a substring search matches it
 first and would attach the certifications to the licensure table.
 """
 import re
-from typing import Dict, List
+from typing import Dict, List, Literal, Optional
 
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from unified_pipeline.core.render_check import entry_lines
+
+# Token shapes for `_classify_cert_token`. Named module constants because each
+# used to be written out twice, once per branch of
+# `_parse_and_add_multiple_certifications` (#572).
+YEAR_PATTERN = re.compile(r'^\d{4}$')
+CERTIFICATE_NUMBER_PATTERN = re.compile(r'^[\d\-]+$')
+# `\d`, not str.isdigit(): isdigit() also accepts superscripts and circled
+# digits, which the original inline `re.match(r'^\d', ...)` did not.
+_LEADING_DIGIT = re.compile(r'^\d')
+
+CertTokenType = Optional[Literal['year', 'cert_number', 'specialty']]
+
+
+def _classify_cert_token(token: str) -> CertTokenType:
+    """Classify one token of a flattened board-certification table.
+
+    A bare 4-digit token is a year, an all-digits-and-hyphens token is a
+    certificate number, "MOC" marks a maintenance-of-certification date (kept
+    with the years), and anything not starting with a digit is a specialty.
+    Empty tokens and digit-led tokens matching none of the shapes classify as
+    None and are dropped.
+    """
+    if YEAR_PATTERN.match(token):
+        return 'year'
+    if CERTIFICATE_NUMBER_PATTERN.match(token):
+        return 'cert_number'
+    if 'MOC' in token:
+        return 'year'
+    if token and not _LEADING_DIGIT.match(token):
+        return 'specialty'
+    return None
 
 
 class BoardCertificationSection:
@@ -144,38 +175,20 @@ class BoardCertificationSection:
         # Format might be: "Specialty | CertNum | Year" on each line
         # Or mixed format from extraction artifacts
 
-        specialties = []
-        cert_numbers = []
-        years = []
+        specialties: list[str] = []
+        cert_numbers: list[str] = []
+        years: list[str] = []
+        buckets: dict[str, list[str]] = {
+            'specialty': specialties, 'cert_number': cert_numbers, 'year': years,
+        }
 
         for line in lines:
-            # Check if line contains pipe separator
-            if '|' in line:
-                parts = [p.strip() for p in line.split('|')]
-                for part in parts:
-                    if not part:
-                        continue
-                    # Classify each part
-                    if re.match(r'^\d{4}$', part):
-                        years.append(part)
-                    elif re.match(r'^[\d\-]+$', part):
-                        cert_numbers.append(part)
-                    elif 'MOC' in part:
-                        years.append(part)
-                    elif not re.match(r'^\d', part):
-                        # Doesn't start with digit - likely specialty
-                        specialties.append(part)
-            else:
-                # No pipe - classify the whole line
-                line = line.strip()
-                if re.match(r'^\d{4}$', line):
-                    years.append(line)
-                elif re.match(r'^[\d\-]+$', line):
-                    cert_numbers.append(line)
-                elif 'MOC' in line:
-                    years.append(line)
-                elif not re.match(r'^\d', line) and line:
-                    specialties.append(line)
+            # A pipe-separated line carries several tokens; a bare line is one
+            tokens = [p.strip() for p in line.split('|')] if '|' in line else [line.strip()]
+            for token in tokens:
+                token_type = _classify_cert_token(token)
+                if token_type is not None:
+                    buckets[token_type].append(token)
 
         # Match specialties with cert numbers (assume same order)
         num_certs = max(len(specialties), len(cert_numbers), 1)
