@@ -187,6 +187,7 @@ Converting a never-mutated table to `MappingProxyType` is defence in depth and i
 **5.1 The error policy belongs to the driver, not to the stage. [gate]**
 A stage raises. The driver decides whether that ends the run.
 *Why:* the same twelve stages currently have opposite semantics depending on caller — the CLI wraps each in `except Exception` and continues with a printed warning (11 sites), while the orchestrator raises and fails the run. A clean CLI run is therefore not evidence the web path works, and neither behaviour is written down anywhere a stage author would see it.
+*Check:* `test_run_full_pipeline_exit_status.py::test_a_mid_pipeline_crash_also_exits_non_zero` pins the CLI half (a mid-pipeline stage exception is recorded and the run continues to completion); `test_error_policy_driver_contract.py::test_a_stage_exception_fails_the_run_and_stops_the_pipeline` pins the orchestrator half (the same kind of exception propagates, marks the run failed, and stops the remaining stages). Together they are the regression guard for #646.
 
 **5.2 Never report success when a step failed. [gate]**
 *Why:* #448 existed because we did.
@@ -271,7 +272,7 @@ This is a target state. The table below is every **[gate]** rule measured agains
 | 4.3 complete cache keys | 0 | 1 — `INSTITUTION_CACHE` | ✗ |
 | 4.4 own your region | per-section | shared `_overflow_entries`, `_appendix_pending`, `_cleared_tables` | ✗ |
 | 4.5 lazy singletons locked | all | 4 locked, 1 unlocked (`storage/factory.py:18`) | ~ |
-| 5.1 error policy owned by the driver | 1 policy | 2 opposite policies — CLI catches at 11 sites, orchestrator raises | ✗ |
+| 5.1 error policy owned by the driver | each driver's policy documented and enforced by a test | documented (this section); both drivers' opposite policies now pinned by a regression test (#646) | ✓ |
 | 5.2 never report success on failure | enforced | met, with a regression test (`test_run_full_pipeline_exit_status.py`) | ✓ |
 | 5.3 degradation visible in the artifact | all paths | 2 silent LLM fallbacks in stage 6 | ✗ |
 | 5.4 no bare swallow | 0 | 48 `except …: pass/continue` | ✗ |
@@ -286,7 +287,7 @@ This is a target state. The table below is every **[gate]** rule measured agains
 | 7.3 produced field rendered or declared | registry exists | no registry; `grant_number` silently dropped | ✗ |
 | 7.4 time is an input | 0 ambient | 7 `datetime.now()` in stage 6; 2 of them move content between sections | ✗ |
 
-Of 31 rows: **5 met, 3 partial, 22 not met**, plus the oversized-function debt, which is a ratchet rather than a pass/fail. That is the point of writing it down.
+Of 31 rows: **6 met, 3 partial, 21 not met**, plus the oversized-function debt, which is a ratchet rather than a pass/fail. That is the point of writing it down.
 
 **Reading this honestly.** Most rows are cheap and cosmetic; a few are neither. If only three things are done, they should be:
 
