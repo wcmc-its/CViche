@@ -9,9 +9,13 @@ arbitrary root -- so the fixture has to have that shape, the same reason
 check_function_size.py's own self-test copies the script into a temp
 scripts/ dir rather than pointing it at synthetic files anywhere). One
 planted violation per check, run --report, assert it's counted; then the
---update / diff-gate mechanics against CODING_STANDARDS.md's auto block.
+--update / diff-gate mechanics against CODING_STANDARDS.md's auto block;
+then the four ratcheted rows' baseline mechanics (RATCHETED_ROWS); then
+the staleness helpers, which run against the real repo rather than the
+fixture since there's no git history to fake in a plain tempdir.
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -97,11 +101,6 @@ def build_tree(tree):
         "import re\n\nPROGRESS_PATTERNS = [\n    re.compile(r'a'),\n    re.compile(r'b'),\n    re.compile(r'c'),\n]\n",
     )
 
-    # 7.4 -- datetime.now() in stage6/
-    _write(
-        os.path.join(tree, "src", "unified_pipeline", "stage6", "sections", "gamma.py"),
-        "from datetime import datetime\n\ndef f():\n    return datetime.now()\n",
-    )
 
 
 def run(tree, *args):
@@ -144,21 +143,21 @@ def main():
         assert "today=3" in out.split("7.1")[1].split("\n")[0]
         print("7.1 PROGRESS_PATTERNS regex count          counted   ok")
 
-        assert "today=1" in out.split("7.4")[1].split("\n")[0]
-        print("7.4 datetime.now() in stage6/              counted   ok")
+        assert "7.4" not in out  # [judgement], not [gate] -- the auto table is [gate]-only
+        print("7.4 absent from --report's auto-checkable set             ok")
 
         # --report never touches the doc
         with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
             assert "placeholder" in fh.read()
 
-        # default mode: the doc's placeholder auto block doesn't match fresh
-        # numbers -> gate fails
+        # default mode, before any baseline exists: the four ratcheted rows
+        # have nothing to compare against -> gate refuses to guess
         r = run(tree)
-        assert r.returncode == 1, r.stdout
-        assert "stale" in r.stderr
-        print("default mode  stale auto block  exit=1    ok")
+        assert r.returncode == 2, r.stdout
+        assert "no baseline" in r.stderr
+        print("default mode  no baseline yet   exit=2    ok")
 
-        # --update rewrites the block in place and preserves everything else
+        # --update rewrites the doc block AND writes a fresh baseline
         r = run(tree, "--update")
         assert r.returncode == 0, r.stderr
         with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
@@ -167,7 +166,15 @@ def main():
         assert "1.2 pure layers import no `docx`" in updated
         assert "Some hand-written prose after the block" in updated
         assert updated.count("<!-- check_standards:auto:begin -->") == 1
-        print("--update rewrites only the marked block               ok")
+        assert "ratchet" in updated  # the four ratcheted rows' status symbol
+        print("--update rewrites the doc block and preserves prose        ok")
+
+        baseline_path = os.path.join(tree, "scripts", "standards-baseline.json")
+        with open(baseline_path) as fh:
+            baseline = json.load(fh)
+        assert baseline["2.1 no `db.query(` in `api/`"] == 1
+        assert baseline["7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)"] == 3
+        print("--update writes standards-baseline.json with fresh counts  ok")
 
         # now in sync -> default mode passes
         r = run(tree)
@@ -175,13 +182,92 @@ def main():
         assert "OK" in r.stdout
         print("default mode  in sync            exit=0    ok")
 
-        # fix the docx violation -> --report count drops, and the doc goes stale again
+        # add a second db.query( site -> 2.1's count rises past its baseline
+        with open(os.path.join(tree, "web_interface", "backend", "app", "api", "widgets.py"), "a") as fh:
+            fh.write("\n\ndef handler2(db):\n    return db.query(Gadget).all()\n")
+        r = run(tree)
+        assert r.returncode == 1, r.stdout
+        assert "2.1" in r.stderr and "rose 1 -> 2" in r.stderr
+        print("ratcheted row rising blocks the default gate  exit=1      ok")
+
+        # --update also refuses to lock in the regression, same as check_function_size.py
+        r = run(tree, "--update")
+        assert r.returncode == 1, r.stdout
+        assert "refusing to raise the baseline" in r.stderr
+        with open(baseline_path) as fh:
+            assert json.load(fh)["2.1 no `db.query(` in `api/`"] == 1  # unchanged
+        print("--update refuses to raise a ratcheted baseline             ok")
+
+        # while 2.1 is still regressed, ALSO genuinely fix the dynamic-
+        # attribute violation (1 -> 0) -- a --update that stops at the
+        # first blocked row would wrongly leave this real improvement
+        # unlocked and the doc's auto block untouched too
+        _write(
+            os.path.join(tree, "src", "dynattr.py"),
+            "def g(obj):\n    return getattr(obj, 'literal_is_fine')\n",
+        )
+        r = run(tree, "--update")
+        assert r.returncode == 1, r.stdout  # still blocked overall: 2.1 is still up
+        assert "2.1" in r.stderr and "refusing to raise" in r.stderr
+        with open(baseline_path) as fh:
+            b = json.load(fh)
+        assert b["2.1 no `db.query(` in `api/`"] == 1  # blocked row: untouched
+        assert b["3.7 dynamic attribute access (non-literal)"] == 0  # other row: locked in
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
+            assert "| 3.7 dynamic attribute access (non-literal) | falling | 0 | ratchet |" in fh.read()
+        print("--update locks in an unrelated improvement despite a blocked row  ok")
+
+        # restore both fixtures to their original state. dynattr's baseline
+        # needs a hand-edit back up to 1 too -- exactly the "a maintainer
+        # edits the baseline file by hand, a separate and visibly
+        # deliberate act" escape hatch §3.2a already documents for
+        # check_function_size.py; --update itself won't do this (it never
+        # raises a baseline, by design).
+        _write(
+            os.path.join(tree, "src", "dynattr.py"),
+            "def f(obj, field):\n    return getattr(obj, field)\n\n"
+            "def g(obj):\n    return getattr(obj, 'literal_is_fine')\n",
+        )
+        with open(baseline_path) as fh:
+            b = json.load(fh)
+        b["3.7 dynamic attribute access (non-literal)"] = 1
+        with open(baseline_path, "w") as fh:
+            json.dump(b, fh)
+        _write(
+            os.path.join(tree, "web_interface", "backend", "app", "api", "widgets.py"),
+            "def handler(db):\n    return db.query(Widget).all()\n",
+        )
+
+        # everything is back at its original baseline -> --update has
+        # nothing to refuse, and resyncs the doc's auto block (still
+        # showing dynattr=0 from the partial update above)
+        r = run(tree, "--update")
+        assert r.returncode == 0, r.stderr
+        print("--update resyncs cleanly once nothing is regressed        ok")
+
+        r = run(tree)
+        assert r.returncode == 0, r.stdout
+        print("reverting the regression clears the ratchet gate          ok")
+
+        # fix the docx violation (not a ratcheted row) -> the AUTO TABLE goes
+        # stale rather than the ratchet gate tripping, a different failure mode
         os.remove(os.path.join(tree, "src", "unified_pipeline", "stage6", "parsing", "bad.py"))
         r = run(tree, "--report")
         assert "today=0" in r.stdout.split("1.2")[1].split("\n")[0]
         r = run(tree)
-        assert r.returncode == 1, "fixing a violation without --update must show as drift, not silently pass"
-        print("fixed violation shows as doc drift        exit=1    ok")
+        assert r.returncode == 1 and "stale" in r.stderr, "fixing a non-ratcheted violation without --update must show as doc drift"
+        print("fixed non-ratcheted violation shows as doc drift  exit=1  ok")
+
+    # Staleness helpers run against the real repo, not the fixture -- a
+    # plain tempdir has no git history to fake a commit-distance from.
+    sys.path.insert(0, HERE)
+    import check_standards
+    sha = check_standards._table_verified_sha()
+    assert sha, "expected a `measured against `origin/dev` @ `<sha>`` sentence in CODING_STANDARDS.md"
+    behind = check_standards._commits_behind(sha)
+    assert behind is not None and behind >= 0
+    assert check_standards._commits_behind("HEAD") == 0
+    print("staleness helpers parse the doc's sha and count real commits   ok")
 
     print("\nall check_standards self-tests passed")
     return 0

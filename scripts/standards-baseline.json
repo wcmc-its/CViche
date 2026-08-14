@@ -1,0 +1,6 @@
+{
+  "2.1 no `db.query(` in `api/`": 34,
+  "3.7 dynamic attribute access (non-literal)": 8,
+  "5.4 bare swallows (`except Exception: pass`)": 6,
+  "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)": 4
+}

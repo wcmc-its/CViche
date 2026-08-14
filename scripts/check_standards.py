@@ -12,16 +12,24 @@ stays hand-written -- see CODING_STANDARDS.md §9's second table and the
 build note at its top for which is which and why.
 
     python3 scripts/check_standards.py            # CI gate: diff against the
-                                                    # doc's committed auto block
+                                                    # doc's committed auto block,
+                                                    # fail if a ratcheted row rose
     python3 scripts/check_standards.py --report   # print every row's fresh
-                                                    # value, exit 0 always
-    python3 scripts/check_standards.py --update   # rewrite the doc's auto
-                                                    # block in place
+                                                    # value (plus baseline for
+                                                    # ratcheted rows), exit 0 always
+    python3 scripts/check_standards.py --update   # rewrite the doc's auto block
+                                                    # and standards-baseline.json
+                                                    # in place (never raises a
+                                                    # baseline -- see check_function_size.py)
 
-Not a ratchet like check_function_size.py: §9 is a snapshot of where the
-code stands, not a debt budget, so a row going up is information, not a
-failure to refuse. --update always writes the fresh numbers, in either
-direction.
+Five of the nine rows are a snapshot, not a debt budget -- a row going up is
+information, not a failure to refuse, and --update always writes the fresh
+number either direction. Four rows (2.1, 3.7's dynamic-attribute row, 5.4,
+7.1) are ratcheted instead, the same way check_function_size.py ratchets
+3.x: scripts/standards-baseline.json holds one number per row, --update
+refuses to write one higher than what's on disk, and the bare command fails
+if a fresh count exceeds its baseline. See RATCHETED_ROWS below and
+CODING_STANDARDS.md's "Closing the loop" section for which rows qualify.
 
 ponytail: each check re-walks its own subtree rather than one shared
 whole-repo AST pass -- these run once in CI or by hand, not in a hot loop,
@@ -30,6 +38,7 @@ and a shared cache would only save the few hundred ms this already costs.
 
 import argparse
 import ast
+import json
 import os
 import re
 import subprocess
@@ -39,10 +48,34 @@ SCRIPTS = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(SCRIPTS)
 DOC = os.path.join(ROOT, "docs", "CODING_STANDARDS.md")
 CHECK_FUNCTION_SIZE = os.path.join(SCRIPTS, "check_function_size.py")
+BASELINE = os.path.join(SCRIPTS, "standards-baseline.json")
 SKIP_DIRS = {".git", "__pycache__", "node_modules", "outputs", "uploads", ".venv", "venv", "archive"}
 
 BEGIN_MARKER = "<!-- check_standards:auto:begin -->"
 END_MARKER = "<!-- check_standards:auto:end -->"
+
+# Rows in ROWS below whose target is "this count never rises," not "this
+# count is already zero" -- ratcheted against BASELINE the same way §3.2a
+# ratchets oversized-function debt. Which four rows qualify is a judgment
+# call made once in CODING_STANDARDS.md's "Closing the loop" section, not
+# re-derived here -- adding a row is a real decision, not a mechanical one.
+RATCHETED_ROWS = {
+    "2.1 no `db.query(` in `api/`",
+    "3.7 dynamic attribute access (non-literal)",
+    "5.4 bare swallows (`except Exception: pass`)",
+    "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)",
+}
+
+# §9's hand-narrated table cites the `origin/dev` sha it was last measured
+# against in its own prose (one definition, per §1.5, not a second field
+# that could disagree with it). Past this many commits behind HEAD it's
+# worth a human re-read (warn); past this many, treat it as failed rather
+# than trust a table that's almost certainly stale (§5.10's recourse
+# ladder). 144 commits was enough to drift the last time this was measured
+# by hand -- these thresholds are a guess at "notice early" and "stop
+# trusting it," not a measured bound; tighten if either proves wrong.
+STALE_WARN_COMMITS = 50
+STALE_FAIL_COMMITS = 200
 
 
 def iter_py_files(root, include_tests=False):
@@ -262,50 +295,79 @@ def check_progress_patterns():
     return -1, []  # PROGRESS_PATTERNS not found -- doc row needs a human look
 
 
-def check_datetime_now_in_stage6():
-    """§7.4 -- datetime.now() calls in stage6/ (time as an ambient fact)."""
-    root = os.path.join(ROOT, "src", "unified_pipeline", "stage6")
-    hits = []
-    for relpath, tree in iter_py_files(root):
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "now"
-                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "datetime"):
-                hits.append(f"{relpath}:{node.lineno}: datetime.now()")
-    # stage_6_word_template.py itself is a sibling of the stage6/ package,
-    # not inside it -- the doc's row covers "stage 6" as a whole.
-    top_level = os.path.join(ROOT, "src", "unified_pipeline", "stage_6_word_template.py")
-    if os.path.exists(top_level):
-        with open(top_level, encoding="utf-8", errors="replace") as fh:
-            tree = ast.parse(fh.read())
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and node.func.attr == "now"
-                    and isinstance(node.func.value, ast.Name) and node.func.value.id == "datetime"):
-                hits.append(f"stage_6_word_template.py:{node.lineno}: datetime.now()")
-    return len(hits), hits
+# 7.4 ("datetime.now() in stage6") used to have a check here, wired into
+# ROWS below. It's a [judgement] rule, not a [gate] -- the auto table above
+# is documented as covering only [gate] rules, so counting it was a mistake
+# (this script's, not the rule's own). Its file:line detail already lives
+# in the rule's own *Why:*, so it isn't replaced with a hand-narrated §9 row
+# either -- that would just be the same "judgement row in a [gate] table"
+# shape §9 already has two pre-existing instances of (2.3, 6.5), not fixed
+# by this round.
 
 
-# (row label, target text, check fn, status-symbol rule)
+def _load_baseline():
+    """Committed ratchet baselines for RATCHETED_ROWS, keyed by row label.
+    Missing file reads as {} -- every row then reports "no baseline," the
+    same recourse check_function_size.py gives a missing baseline."""
+    try:
+        with open(BASELINE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        return {}
+
+
+def _table_verified_sha():
+    """The `origin/dev @ <sha>` §9's hand-narrated table was last measured
+    against, parsed from the doc's own sentence rather than a second field
+    that could disagree with it (§1.5). None if the sentence isn't there."""
+    with open(DOC, encoding="utf-8") as fh:
+        text = fh.read()
+    m = re.search(r"measured against `origin/dev` @ `([0-9a-f]{7,40})`", text)
+    return m.group(1) if m else None
+
+
+def _commits_behind(sha):
+    """How many commits HEAD is ahead of `sha`. None if git can't answer
+    (shallow checkout, sha not reachable, no .git at all) -- the caller
+    skips the staleness check rather than guess at a number that isn't
+    grounded in anything."""
+    try:
+        r = subprocess.run(
+            ["git", "rev-list", "--count", f"{sha}..HEAD"],
+            capture_output=True, text=True, cwd=ROOT, check=True,
+        )
+        return int(r.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+        return None
+
+
+# (row label, target text, check fn) -- target is prose ("0", "falling"),
+# not itself the enforcement; RATCHETED_ROWS above decides how a row's
+# count is actually gated.
 ROWS = [
     ("1.2 pure layers import no `docx`", "0", check_pure_no_docx),
     ("1.3 peers do not import peers", "0", check_sections_no_peers),
     ("1.4 core does not import the web backend", "0", check_core_no_web_backend),
-    ("2.1 no `db.query(` in `api/`", "0", check_no_db_query_in_api),
+    ("2.1 no `db.query(` in `api/`", "falling", check_no_db_query_in_api),
     ("3.x oversized-function debt (excess lines)", "falling", check_function_size_excess),
     ("3.7 no metaprogramming", "0", check_no_metaprogramming),
-    ("3.7 dynamic attribute access (non-literal)", "0", check_dynamic_attribute_access),
-    ("5.4 bare swallows (`except Exception: pass`)", "0", check_bare_swallows),
-    ("7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)", "0", check_progress_patterns),
-    ("7.4 `datetime.now()` in stage6", "0 ambient", check_datetime_now_in_stage6),
+    ("3.7 dynamic attribute access (non-literal)", "falling", check_dynamic_attribute_access),
+    ("5.4 bare swallows (`except Exception: pass`)", "falling", check_bare_swallows),
+    ("7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)", "falling", check_progress_patterns),
 ]
 
 
-def render_table():
+def compute_rows():
+    """[(label, target, count, detail), ...] -- each check fn() runs once,
+    reused by --report, the doc table, and the ratchet gate below rather
+    than each recomputing it."""
+    return [(label, target, *fn()) for label, target, fn in ROWS]
+
+
+def render_table(results):
     lines = [BEGIN_MARKER, "", "| Rule | Target | Today | |", "|---|---|---|---|"]
-    for label, target, fn in ROWS:
-        count, _ = fn()
-        if label.startswith("3.x"):
+    for label, target, count, _ in results:
+        if label.startswith("3.x") or label in RATCHETED_ROWS:
             symbol = "ratchet"
         else:
             symbol = "✓" if count == 0 else "✗"
@@ -328,15 +390,17 @@ def _split_doc(doc_text):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--report", action="store_true", help="print every row's fresh value and exit 0")
-    ap.add_argument("--update", action="store_true", help="rewrite CODING_STANDARDS.md's auto block")
+    ap.add_argument("--update", action="store_true", help="rewrite CODING_STANDARDS.md's auto block and standards-baseline.json")
     args = ap.parse_args()
 
-    fresh = render_table()
+    results = compute_rows()
+    fresh = render_table(results)
+    baseline = _load_baseline()
 
     if args.report:
-        for label, target, fn in ROWS:
-            count, detail = fn()
-            print(f"  {label:52} target={target:8} today={count}")
+        for label, target, count, detail in results:
+            extra = f"  baseline={baseline.get(label, 'unset')}" if label in RATCHETED_ROWS else ""
+            print(f"  {label:52} target={target:8} today={count}{extra}")
             for d in detail[:5]:
                 print(f"      {d}")
             if len(detail) > 5:
@@ -351,16 +415,64 @@ def main():
         return 2
     before, current_block, after = parts
 
+    ratchet_counts = {label: count for label, _, count, _ in results if label in RATCHETED_ROWS}
+
     if args.update:
+        # Collect every blocked row before writing anything, the same shape
+        # as `risen` below -- a --update that stops at the first regression
+        # it meets would silently skip both the doc rewrite the module
+        # docstring promises ("always writes the fresh number either
+        # direction") and any *other* row's legitimate improvement, just
+        # because ROWS happened to iterate a worse row first.
+        new_baseline = dict(baseline)
+        blocked = []
+        for label, count in ratchet_counts.items():
+            prior = baseline.get(label)
+            if prior is not None and count > prior:
+                blocked.append((label, prior, count))
+                continue  # leave this one row's baseline untouched
+            new_baseline[label] = count
+        with open(BASELINE, "w", encoding="utf-8") as fh:
+            json.dump(new_baseline, fh, indent=2, sort_keys=True)
+            fh.write("\n")
         with open(DOC, "w", encoding="utf-8") as fh:
             fh.write(before + fresh.rstrip("\n") + "\n" + after)
-        print("CODING_STANDARDS.md's auto block updated")
+        if blocked:
+            for label, prior, count in blocked:
+                print(f"refusing to raise the baseline for {label}: {prior} -> {count}. "
+                      f"The ratchet only turns one way.", file=sys.stderr)
+            print("Every other row and the doc's auto block were still updated.", file=sys.stderr)
+            return 1
+        print("CODING_STANDARDS.md's auto block and standards-baseline.json updated")
         return 0
+
+    missing = [label for label in ratchet_counts if label not in baseline]
+    if missing:
+        for label in missing:
+            print(f"no baseline for {label!r} in {BASELINE}; run --update to set one", file=sys.stderr)
+        return 2
+
+    risen = [(label, baseline[label], count) for label, count in ratchet_counts.items() if count > baseline[label]]
+    if risen:
+        for label, base, count in risen:
+            print(f"FAIL: {label} rose {base} -> {count}. The ratchet only turns one way.", file=sys.stderr)
+        return 1
 
     if current_block.strip() != fresh.strip():
         print("FAIL: CODING_STANDARDS.md's auto-generated §9 rows are stale.", file=sys.stderr)
         print("Run: python3 scripts/check_standards.py --update", file=sys.stderr)
         return 1
+
+    sha = _table_verified_sha()
+    if sha:
+        behind = _commits_behind(sha)
+        if behind is not None and behind > STALE_WARN_COMMITS:
+            print(f"WARN: §9's hand-narrated table was last measured at {sha}, now {behind} "
+                  f"commits behind HEAD -- unlike the auto table above, it can't re-verify "
+                  f"itself by regenerating. Worth a re-read.", file=sys.stderr)
+            if behind > STALE_FAIL_COMMITS:
+                print(f"FAIL: {behind} commits behind is past the hard limit ({STALE_FAIL_COMMITS}).", file=sys.stderr)
+                return 1
 
     print("OK: CODING_STANDARDS.md's auto-generated §9 rows match current dev")
     return 0

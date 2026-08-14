@@ -8,18 +8,20 @@ Every rule here is earned by something that actually went wrong in this reposito
 
 Rules are marked **[gate]** or **[judgement]**.
 
-- **[gate]** — mechanically checkable, and a reviewer may reject on it without discussion. Each states its check.
+- **[gate]** — mechanically checkable, and a reviewer may reject on it without discussion. Each states its check. Where the count isn't already zero, the gate is enforced as *non-increasing* against a checked-in baseline (§3.2a; §9's ratcheted rows), not as an unmet zero.
 - **[judgement]** — a question the author answers in the PR description. Not a veto; an obligation to have thought about it.
 
 Nothing here is retroactive. Existing violations are listed so the direction is unambiguous, not so anyone is expected to fix them on sight. New and touched code meets the standard.
 
 ### Closing the loop: incident to class, and the standing exception
 
-Earning every rule from something that already broke is a strength — it's why nothing here is a rule nobody can trace — but taken as the *only* route to a rule, it guarantees this document can only ever describe last year's failures. Two corrections keep that from being the whole story:
+Earning every rule from something that already broke is a strength — it's why nothing here is a rule nobody can trace — but taken as the *only* route to a rule, it guarantees this document can only ever describe last year's failures. Three corrections keep that from being the whole story:
 
 **A rule names the class, not the instance.** §3.4's own `*Why:*` shows the gap: #454's shipped fix (`_cleared_tables`) "guards one of the ways two fillers can collide" — a patch scoped to the instance, by its own admission. When an incident earns a new rule or a new `*Why:*` line, the postmortem answers one more question before it's done: *which existing rule should have caught this, and why didn't it?* If the answer is "no rule could have," that is itself often the strongest evidence for the rule being added.
 
-**A standing exception to the traceability principle.** For a category where the cost of being wrong is severe enough — cross-tenant data exposure, silent content loss into a delivered document — a rule may exist *before* an incident earns it, provided it says so plainly: *"preventive — no incident yet"*, plus the cost of the incident it forestalls. §4.2/§4.3 were earned the traceable way, by two real leaks; several rules below (§5.9, §5.11, §6.7) are not, and each says which case it is rather than dressing a hunch up as history.
+**A standing exception to the traceability principle.** For a category where the cost of being wrong is severe enough — cross-tenant data exposure, silent content loss into a delivered document, or a gate silently proving less than it claims — a rule may exist *before* an incident earns it, provided it says so plainly: *"preventive — no incident yet"*, plus the cost of the incident it forestalls. §4.2/§4.3 were earned the traceable way, by two real leaks; several rules below (§4.7, §5.8, §5.11, §6.7) are not, and each says which case it is rather than dressing a hunch up as history.
+
+**A regression guard on a currently-true invariant.** Neither of the above — nothing has broken, and there's no hypothesized future cost being forestalled either. The rule exists because something is true today and stays true only if nobody reintroduces the failure mode by accident. §5.6's original half (no stage wraps its own retry loop) and §5.9 are this shape: both `*Why:*` blocks say "true today" or "this already holds," checked directly — not "here's what it would cost if it stopped." §5.6's own second half, added this round, is the opposite: an unmet-today check on the request multiplier, bundled into the same rule number because it's the same subject, not because it's the same shape.
 
 ### Two questions, two authorities
 
@@ -58,7 +60,7 @@ Modules at the same level of a package — most importantly `stage6/sections/*` 
 **1.5 A shared vocabulary has exactly one definition. [gate]**
 Taxonomy codes, section letters, stage names, stage ordering, artifact paths — each defined once and imported.
 *Why:* the WCM code vocabulary is currently defined in at least **five** places, not three, and at least two disagree outright. `core/valid_taxonomy_codes.py` lists no `E`/`F`/`L`/`P` child codes and puts `F` and `L` in `SECTIONS_WITHOUT_SUBSECTIONS`; `cv_parser/cv_taxonomy_wcm.py` defines `F1`, `L1`, `L2`, `L3`; `stage_4_field_extractor.py`'s `FIELD_SCHEMAS` and `stage_6_word_template.py`'s `TAXONOMY_TO_SECTION`/`RENDER_ROUTED_CODES` are a third, fourth and fifth, the last two containing codes neither other list has (`S0`, `S5`, `S9`, `Q4`, `N3A`/`N3B`, bare `C`). `core/valid_taxonomy_codes.py`'s definition gates `has_subsections_router` at `taxonomy_mapper_v2.py:3084` (moved from the `:4095` previously cited here — the file has shrunk since), which short-circuits any entry routed to a parent it believes has no subsections. But that router, and every enum-validated code path in `taxonomy_mapper_v2.py`, is **unreachable from either live driver** — `run_full_pipeline.py` and `orchestrator.py` both import stage 3a from `stage_3a_header_taxonomy_mapper.py`, which never imports `taxonomy_mapper_v2` at all; the only importers of the validated path are two standalone dev/eval scripts and its own tests, the same orphan-driver shape already on record for `core/cv_pipeline.py` (§2.2). Separately, the stage→output-path map is restated in four places and the stage ordering in three.
-*Check:* the literal appears in one module; everything else imports it. `grep -c "'F1'"` across the tree should concentrate, not spread.
+*Check:* the literal appears in one module; everything else imports it. `grep -cE "'F1'|\"F1\""` across the tree should concentrate, not spread (Appendix).
 
 ## 2. Where things live
 
@@ -192,6 +194,10 @@ A section renderer receives its region and its entries, and returns what it prod
 **4.6 Freezing a constant is not encapsulation. [judgement]**
 Converting a never-mutated table to `MappingProxyType` is defence in depth and is welcome, but it does not answer a concurrency review. Answer it by naming what per-run state exists and showing it cannot be reached by another run.
 
+**4.7 A log line or artifact does not carry PII beyond what it is scoped to serve. [judgement] — preventive, no incident yet.**
+No log statement, debug artifact, or diagnostic dump writes verbatim CV text, `home_address`, `phone`, or another faculty member's identifying detail, unless that content is the log's entire stated purpose — and even then, scoped per §4.2.
+*Why:* every PII incident this document already has is adjacent to this gap, not squarely inside an existing rule. §4.2's two leaks were about *whose run* a prompt log lands under, not whether the log should carry verbatim CV text at all — that's the open policy question #593 tracks. §8.1's `home_address`/`phone` incidents (#442, #450) were about a renderer crashing or silently dropping the field, not about where else that data can end up once it's read into memory. Nothing today says a stage or a stray debug print can't dump PII to a shared log, a temp file, or stdout — only that *if* it does, §4.2 says the write must be scoped per-run.
+
 ## 5. Error handling
 
 **5.1 The error policy belongs to the driver, not to the stage. [gate]**
@@ -218,6 +224,8 @@ A validator, gate or script exits non-zero when it could not do its job. "Nothin
 A stage never wraps its own retry loop around a `call_llm` call; `_call_with_retry` (`llm_client.py:230-295`) is the one place a transient LLM fault gets a second attempt.
 *Why:* true today — checked all 9 `call_llm`-calling stage modules for `for attempt in`/`retry_count=`/`@retry`/`_call_with_retry`, zero hits — but worth stating because the failure mode is cheap to introduce and expensive to notice: a stage-level retry stacked on the client's own would compound silently. It already compounds once, underneath this layer and outside this file's control: both providers' SDKs retry on their own defaults (OpenAI's client `max_retries=2`, botocore's `max_attempts=3`), so one logical `call_llm()` call can cost up to 4×3=12 raw requests today, and up to 24 when a Bedrock JSON-repair cycle also fires (`llm_client.py:727-765`) — a multiplier nothing here currently documents or caps.
 *Check:* `grep -rn 'for attempt in\|retry_count=\|@retry\|_call_with_retry' src/unified_pipeline/stage_*.py` returns nothing.
+*Also:* the compounded ceiling itself — up to 12 raw requests per logical call today, 24 with a Bedrock JSON-repair cycle — is stated once, next to the code that produces it, not only in this paragraph. Neither `_call_with_retry`'s docstring nor the JSON-repair branch (`llm_client.py:727-765`) currently names the number; a provider SDK's own `max_retries`/`max_attempts` default changing is a real change to this ceiling and should be visible at the call site, not just here.
+*Check, this half:* `llm_client.py` states the current worst case as a comment or constant next to `_call_with_retry`, and it agrees with the number in this paragraph. Unmet today — no such comment exists yet. Too fiddly a shape (a product across two SDK defaults and one conditional repair branch) for an AST scan to gate on; a human re-reading both sites is the check.
 
 **5.7 A retry is recorded, not silent. [gate]**
 An attempt count belongs in the metrics dict a stage returns, not only in a log line.
@@ -320,7 +328,7 @@ A second, narrower incident: `"gpt-5.1"` is a repeated default-parameter literal
 
 ## 9. Where the code stands against this today
 
-This is a target state, in two tables now instead of one. **Mechanically verified** is regenerated by `scripts/check_standards.py` — `--update` rewrites it in place, and the bare command is a CI gate that fails if it's gone stale. Ten rows are honest enough to reduce to a single script-checked count; the trade is that a script can't originate the file:line narrative the old hand-written version carried (which module, which line, "reaching 43 modules") — run `scripts/check_standards.py --report` for that detail. **Requires judgment** stays hand-narrated: architectural reads (how many drivers exist), incident narratives (a fallback recorded, a gate now fixed), and calls a syntax scan can't make. Together the two tables are every **[gate]** rule, measured against `origin/dev` @ `5a0035a` (2026-08-14) — the original baseline was `4e62bbd`, 144 commits earlier, and a meaningful fraction had drifted in that gap. Ten PRs are open at time of writing (#600, #620, #623–625, #641–644, #647); none are merged, so this reflects `dev` as it stands, not as it will once they land. Nothing here is a work item by itself — it is the honest baseline the rules are written against.
+This is a target state, in two tables now instead of one. **Mechanically verified** is regenerated by `scripts/check_standards.py` — `--update` rewrites it in place, and the bare command is a CI gate that fails if it's gone stale. Nine rows are honest enough to reduce to a single script-checked count; the trade is that a script can't originate the file:line narrative the old hand-written version carried (which module, which line, "reaching 43 modules") — run `scripts/check_standards.py --report` for that detail. Four of the nine (2.1, 3.7's dynamic-attribute row, 5.4, 7.1) are ratcheted against `scripts/standards-baseline.json` the same way §3.2a ratchets oversized-function debt: the target column reads "falling," not "0," and `--update` refuses to write a baseline higher than the one on disk. **Requires judgment** stays hand-narrated: architectural reads (how many drivers exist), incident narratives (a fallback recorded, a gate now fixed), and calls a syntax scan can't make. Together the two tables are every **[gate]** rule, measured against `origin/dev` @ `5a0035a` (2026-08-14) — the original baseline was `4e62bbd`, 144 commits earlier, and a meaningful fraction had drifted in that gap. `check_standards.py` now warns when that sha falls more than 50 commits behind `HEAD` and fails past 200, per §5.10's own recourse ladder — the hand-narrated table is the half that can't re-verify itself by regenerating. Ten PRs are open at time of writing (#600, #620, #623–625, #641–644, #647); none are merged, so this reflects `dev` as it stands, not as it will once they land. Nothing here is a work item by itself — it is the honest baseline the rules are written against.
 
 ### Mechanically verified
 
@@ -331,15 +339,18 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 1.2 pure layers import no `docx` | 0 | 0 | ✓ |
 | 1.3 peers do not import peers | 0 | 0 | ✓ |
 | 1.4 core does not import the web backend | 0 | 1 | ✗ |
-| 2.1 no `db.query(` in `api/` | 0 | 34 | ✗ |
+| 2.1 no `db.query(` in `api/` | falling | 34 | ratchet |
 | 3.x oversized-function debt (excess lines) | falling | 5759 | ratchet |
 | 3.7 no metaprogramming | 0 | 1 | ✗ |
-| 3.7 dynamic attribute access (non-literal) | 0 | 8 | ✗ |
-| 5.4 bare swallows (`except Exception: pass`) | 0 | 6 | ✗ |
-| 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | 0 | 4 | ✗ |
-| 7.4 `datetime.now()` in stage6 | 0 ambient | 7 | ✗ |
+| 3.7 dynamic attribute access (non-literal) | falling | 8 | ratchet |
+| 5.4 bare swallows (`except Exception: pass`) | falling | 6 | ratchet |
+| 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
 
 <!-- check_standards:auto:end -->
+
+
+
+
 
 ### Requires judgment
 
@@ -367,10 +378,11 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 6.3 gate matches the kind of change | 3 gates | `render_gate_compare.py` now adds a C14N fingerprint of `document.xml` alongside the paragraph-text check — the doc's stated gap ("no fingerprint arm") is closed, though not confirmed across all three gate kinds in the table above | ~ |
 | 6.4 contract tests on cross-process output | all | met for `doctor_one`, `score_one`; absent for the stage `print()` wire | ~ |
 | 6.5 corpus coverage disclosed | practised | not practised | ✗ |
+| 6.8 every recourse path is tested | all | 0 of 2 named stage-6 fallback paths (`_classify_geographic_scope`, `_reclassify_entry_segments`) have a test driving the `except` branch and asserting the fallback's own behaviour; tracked at #652 | ✗ |
 | 7.2 one config source per consumer | 2 | 9 mechanisms; root `config.yaml` still has 0 readers; the "should match config.yaml" comment moved to `stage6/resolution/institution.py:39` | ✗ |
 | 7.3 produced field rendered or declared | registry exists | no registry (`grep -rl DELIBERATELY_UNRENDERED\|FIELD_REGISTRY` — 0 hits). The worked example no longer holds as stated: `grant_number` is now read and rendered into Award Source (`stage6/sections/research_support.py:346-351`) — fixed as a one-off `.get()` addition, not via a registry, so the next unnamed field drops exactly as silently | ✗ |
 
-Of 34 rows across both tables: **8 met, 3 partial, 22 not met**, plus the oversized-function debt (3.x, in the mechanical table), which is a ratchet rather than a pass/fail — falling since baseline, from 6,572 to 5,759 excess lines. Three of the 34 (5.6, 5.7, 5.10) are new this revision, added the same PR that introduced the rules they measure — everything else is unchanged by this paragraph's count.
+Of 34 rows across both tables: **8 met, 3 partial, 18 not met**, plus 5 rows that are ratchets rather than pass/fail — 2.1, 3.7's dynamic-attribute row, 5.4 and 7.1 (new this revision) alongside 3.x, all falling or holding since their baselines, 3.x from 6,572 to 5,759 excess lines. §6.8 is also new this paragraph, added the same PR that added the rule it measures; 7.4 dropped out of the mechanical table this revision — it's a `[judgement]` rule, not a `[gate]`, so it was never one of the nine rows that table is scoped to (§9's own build note above). Four fewer rows read as a flat ✗ than the previous revision counted (22 → 18): the four that moved to ratchet. 6.8's addition and 7.4's removal are both ✗-shaped and net out to no change. None of this is the underlying code getting safer — it's the measurement getting more honest about which of these gates were ever going to hit zero.
 
 **What changed since `4e62bbd`.** Two rows flipped to ✓, and they were the doc's own stated top priority: §4.2 and §4.3 (PRs #585/#586, closing #580/#581/#582). §5.5 also flipped to ✓ (PR #589, closing #584), which closed §6.3's fingerprint-arm gap as a side effect. One row flipped the other way: fixing §4.2's `sys.stdout` swap introduced `orchestrator.py`'s `_RoutedStdout.__getattr__` — a real §3.7 violation, deliberate and commented, but the metaprogramming row is no longer a clean ✓. None of this came from the ten open PRs; all of it is already merged to `dev`.
 
@@ -390,8 +402,10 @@ One Appendix-style command remains, because check_standards.py doesn't reach it 
 
 ```bash
 # 1.5  a shared-vocabulary literal should concentrate in one module, not spread
-grep -c "'F1'" -r src/unified_pipeline/ web_interface/backend/app/
+grep -cE "'F1'|\"F1\"" -r src/unified_pipeline/ web_interface/backend/app/
 ```
+
+Single-quote-only undercounted — 15 single-quoted sites against 22 double-quoted ones, so the un-widened version was catching the *minority* shape. `-c -r` also prints one count per matching file, not a running total; read it as a file list, or sum the second column. A shortlist either way: an f-string or a variable holding `"F1"` won't match, the same honesty the paragraph above already gives `getattr(...)`.
 
 §7.2 (config mechanisms) doesn't get one even here: the row's own claim is that *nine* mechanisms exist, so a one-liner would first need that list curated and named — at which point it stops being a quick command and starts being the finding itself.
 
