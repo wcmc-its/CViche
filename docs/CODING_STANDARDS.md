@@ -92,7 +92,7 @@ docs/                          committed working agreements
 
 **2.2 One driver. [gate]**
 There is one place that knows the stage list, the stage order, and the artifact paths. New entry points are not created.
-*Why:* there are three today. `run_full_pipeline.py` (1,131 lines) and `pipeline/orchestrator.py` (1,321) independently restate the same twelve-stage pipeline and share 46 verbatim-identical lines; they have already drifted on error policy, cancellation, render flags and cost accounting. `core/cv_pipeline.py` (2,179 lines) is a third whose only importers are two test files — and the repository's one end-to-end test drives *it*, so it exercises neither real driver.
+*Why:* there are three today — `run_full_pipeline.py` and `pipeline/orchestrator.py` independently restate the same twelve-stage pipeline and share 46 verbatim-identical lines, and have already drifted on error policy, cancellation, render flags and cost accounting; `core/cv_pipeline.py` is a third whose only importers are two test files — and the repository's one end-to-end test drives *it*, so it exercises neither real driver. Current line counts are §9's row 2.2, not restated here — a driver's size drifts every commit and the rule doesn't need it to hold.
 
 **2.3 A stage owns its artifacts and nothing else. [judgement]**
 A stage reads named inputs and writes named outputs. It does not reach into another stage's directory, and it does not resolve its input by globbing.
@@ -107,7 +107,7 @@ A function does one thing at one level of abstraction. If describing it needs th
 
 **3.2 Size thresholds are review triggers, not limits. [judgement]**
 Over ~100 lines, the PR description says what the single responsibility is. Over ~200, it says why it should not be split. Neither is a veto — `_score_header_candidate` at 445 lines may be a flat scoring table that is genuinely clearer whole.
-*Current state, for calibration:* 1,926 non-test functions; 40 are 200+ lines and total 14,572. The largest are `classify_entries_batch` (963), `main` (900), `get_data_quality` (747), `map_cv_sections_v2` (664).
+*For calibration, not restated here because it drifts every commit:* `check_function_size.py --report` names today's count of 200+-line functions and the worst offenders; §9's own row tracks the excess-lines total (5,759 as of this measurement).
 
 **3.2a The debt does not grow. [gate]**
 Everything else in this section is judgement, which does not shrink an existing 963-line function and does not stop a new one. This rule is the enforcement: total *excess* lines over the 200-line threshold is checked in at `scripts/function-size-baseline.json` and may fall but never rise.
@@ -185,6 +185,8 @@ A section renderer receives its region and its entries, and returns what it prod
 **4.5 Lazy singletons are locked. [gate]**
 *Why:* `llm_client.py:176-180` uses a double-checked lock and documents the exact boto3 hazard. `storage/factory.py:18` constructs the same kind of client unlocked, entered by 8 threads from `admin_routes.py:336`.
 
+*(§4.6 retired — folded into this rule.)*
+
 **4.7 A log line or artifact does not carry PII beyond what it is scoped to serve. [judgement] — preventive, no incident yet.**
 No log statement, debug artifact, or diagnostic dump writes verbatim CV text, `home_address`, `phone`, or another faculty member's identifying detail, unless that content is the log's entire stated purpose — and even then, scoped per §4.2.
 *Why:* every PII incident this document already has is adjacent to this gap, not squarely inside an existing rule. §4.2's two leaks were about *whose run* a prompt log lands under, not whether the log should carry verbatim CV text at all — that's the open policy question #593 tracks. §8.1's `home_address`/`phone` incidents (#442, #450) were about a renderer crashing or silently dropping the field, not about where else that data can end up once it's read into memory. Nothing today says a stage or a stray debug print can't dump PII to a shared log, a temp file, or stdout — only that *if* it does, §4.2 says the write must be scoped per-run.
@@ -227,6 +229,8 @@ An attempt count belongs in the metrics dict a stage returns, not only in a log 
 Write to a temp path in the same directory, then rename over the final name, for any multi-step write — never open the final path directly and write into it incrementally.
 *Why:* every stage across both drivers writes its output the same way — `open(output_path, 'w')` then `json.dump`, or `Document.save(output_path)` — straight to the final path. Zero temp+rename sites exist anywhere in the pipeline (checked all twelve stages plus the stage6 package). A crash or `SIGKILL` mid-write leaves a truncated-but-present file readable under the final name, and the one place that checks a prerequisite before trusting it — `run_full_pipeline.py:188`'s `prereq_path.exists()` — checks exactly that: existence, not completeness. No CV has yet been traced to a truncated-write failure; this is the standing exception above, not the traceable route — the failure mode is a stage silently consuming a half-written JSON file and either crashing opaquely or, worse, parsing a partial structure as if it were whole.
 
+*(§5.9 retired — folded into §1.5.)*
+
 **5.10 A check that can fail has a stated recourse: retry-once-named → quarantine → raise. "Accept anyway" is not on the ladder. [gate]**
 Content that is structurally valid but wrong — a hallucinated taxonomy code, a 5,000-character span with no line breaks where segmented entries were expected — gets the same discipline as a thrown exception: something decides what happens, and that decision is visible.
 *Why:* two live, systemic gaps share this shape. No consumption site on the live driver path (`stage_3a` → `stage_3b` → `stage_4` → `stage_6`) validates an LLM-returned taxonomy code against any canonical list before using it — the one validating mechanism in the repo, `taxonomy_mapper_v2.py`'s enum-constrained schema, is unreachable from either driver (§1.5). An invalid or hallucinated code either gets a generic default field schema at stage 4 or is silently swept into the Appendix at stage 6 alongside every legitimately-unrouted code, with no distinction and no warning — generalizing what this doc already documents for `N2` specifically (§9) to the fate of *any* invalid code, by construction. Separately, a purpose-built check for exactly the "one unbroken span, no line breaks" segmentation failure already exists — `segmentation/entry_validator.py`'s oversplit/undersplit LLM judgment, with a confidence threshold and auto-repair — but it is orphaned, imported only by a module neither live driver calls. Both gaps are the same failure: a check exists or nearly exists, and nothing wires it to a disposition.
@@ -250,7 +254,7 @@ Assert on rendered output, returned values, and artifact contents — not on whi
 
 **6.2 A test must fail if the thing it covers is deleted. [gate]**
 "The suite passes" is not a standard. The standard is that the suite would notice.
-*Why:* measured by ablation over the 100-CV corpus, **31 of 44 stage-6 renderers can be deleted whole with all 437 pipeline tests green** — including publications, grants, teaching, service and memberships. Deleting `_add_track_change_deletion` removes 1,926 tracked deletions across 68 of 100 CVs and every gate still passes.
+*Why:* measured by ablation over the 100-CV corpus, **31 of 44 stage-6 renderers can be deleted whole with all 437 pipeline tests green** — including publications, grants, teaching, service and memberships. Deleting `_add_track_change_deletion` removes 1,926 tracked deletions across 68 of 100 CVs and every gate still passes. That ablation is against a 437-test collection that has since grown to 714 (§9) and hasn't been re-run — the *ratio* isn't current, only the failure mode it demonstrates is.
 *Check:* the cheapest mutation test there is — delete the function, run the test, confirm red, restore.
 
 **6.3 Match the gate to the kind of change. [gate]**
@@ -361,7 +365,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | Rule | Target | Today | |
 |---|---|---|---|
 | 1.1 dependency direction declared | every package | 26 total `__init__.py` on `dev`, but only **3** state an actual import-direction rule (`stage6/__init__.py`, `stage6/sections/__init__.py`, `services/__init__.py`) — the rest state contents or purpose, not direction | ✗ |
-| 1.5 one definition per vocabulary | 1 each | taxonomy defined 3× **and they disagree**; stage→path map 4×; stage order 3× | ✗ |
+| 1.5 one definition per vocabulary | 1 each | taxonomy defined 5× **and at least two disagree**; stage→path map 4×; stage order 3× | ✗ |
 | 2.2 one driver | 1 | 3 — `run_full_pipeline.py` 1,142 lines, `orchestrator.py` 1,398, `core/cv_pipeline.py` 1,602 (still imported only by its own 2 test files) | ✗ |
 | 2.3 stage owns its artifacts | no globbing | CLI still resolves stage 6 input by `glob(f"*{uid}*")[0]`, now 5 such sites in `run_full_pipeline.py` | ✗ |
 | 3.4 receive your scope | 0 doc-wide searches | 59 fuzzy lookups across 26 section fillers (not re-counted; `stage6/sections/__init__.py` now lists 23 classes, worth reconciling) | ✗ |
