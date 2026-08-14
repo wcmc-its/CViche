@@ -34,6 +34,27 @@ from ..normalization import _squash
 logger = logging.getLogger(__name__)
 from unified_pipeline.core.render_check import entry_lines
 
+# Q2 -> Q4D reroute vocabulary (#573). The specialty terms and the role
+# phrases were one 14-element `journal_keywords` list read through a [:10]
+# slice whose intent was "the specialty terms" -- indices 0..10 -- so the
+# off-by-one slice silently excluded exactly one term, 'neurology', and
+# Neurology peer-review entries stayed in Q2 while identically-shaped
+# Oncology and Cardiology entries rerouted. Split at the natural seam
+# instead; no slice.
+JOURNAL_SPECIALTY_KEYWORDS = (
+    'journal', 'j.', 'j ', 'pediatrics', 'lancet', 'jama',
+    'perinatology', 'neonatology', 'oncology', 'cardiology', 'neurology',
+)
+JOURNAL_ROLE_PHRASES = ('editorial board', 'ad hoc reviewer', 'manuscript review')
+REVIEWER_PATTERNS = (
+    'abstract reviewer', 'reviewer for', 'manuscript reviewer',
+    'peer reviewer', 'ad hoc reviewer',
+)
+BOARD_KEYWORDS = (
+    'committee', 'board member', 'panel member', 'council', 'task force',
+    'working group', 'planning committee', 'advisory', 'moderator',
+)
+
 
 class ServiceSection:
     """Section Q writers, mixed into `WCMTemplateGenerator`."""
@@ -64,14 +85,6 @@ class ServiceSection:
         q2_entries = list(entries_by_code.get('Q2', []))
         q4d_entries = list(entries_by_code.get('Q4D', []))
 
-        journal_keywords = ['journal', 'j.', 'j ', 'pediatrics', 'lancet', 'jama',
-                           'perinatology', 'neonatology', 'oncology', 'cardiology', 'neurology',
-                           'editorial board', 'ad hoc reviewer', 'manuscript review']
-        reviewer_patterns = ['abstract reviewer', 'reviewer for', 'manuscript reviewer',
-                            'peer reviewer', 'ad hoc reviewer']
-        board_keywords = ['committee', 'board member', 'panel member', 'council', 'task force',
-                         'working group', 'planning committee', 'advisory', 'moderator']
-
         rerouted_to_journal = []
         actual_board_entries = []
 
@@ -92,8 +105,8 @@ class ServiceSection:
 
                 for line in lines:
                     line_lower = line.lower()
-                    is_reviewer_line = any(p in line_lower for p in reviewer_patterns)
-                    is_board_line = any(kw in line_lower for kw in board_keywords)
+                    is_reviewer_line = any(p in line_lower for p in REVIEWER_PATTERNS)
+                    is_board_line = any(kw in line_lower for kw in BOARD_KEYWORDS)
 
                     if is_reviewer_line and not is_board_line:
                         journal_lines.append(line)
@@ -119,15 +132,15 @@ class ServiceSection:
             else:
                 # Single-line entry - classify based on content
                 is_journal_reviewer = (
-                    (role == 'reviewer' and any(kw in text_lower for kw in journal_keywords[:10])) or
-                    any(kw in text_lower for kw in ['editorial board', 'ad hoc reviewer', 'manuscript review']) or
-                    any(p in text_lower for p in reviewer_patterns) or
+                    (role == 'reviewer' and any(kw in text_lower for kw in JOURNAL_SPECIALTY_KEYWORDS)) or
+                    any(kw in text_lower for kw in JOURNAL_ROLE_PHRASES) or
+                    any(p in text_lower for p in REVIEWER_PATTERNS) or
                     (role == 'reviewer' and 'j ' in committee) or
                     (role == 'reviewer' and 'journal' in org)
                 )
 
                 # Check if this is clearly a board/committee entry
-                is_board_entry = any(kw in text_lower for kw in board_keywords)
+                is_board_entry = any(kw in text_lower for kw in BOARD_KEYWORDS)
 
                 if is_journal_reviewer and not is_board_entry:
                     # This looks like journal reviewing, reroute to Q4D

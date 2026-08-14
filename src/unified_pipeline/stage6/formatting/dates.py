@@ -29,6 +29,7 @@ DATE_FORMATS = MappingProxyType({
     'C': 'mm/yy',         # Postdoc Training: Dates (mm/yy - mm/yy)
     'C1': 'mm/yy',
     'C2': 'mm/yy',
+    'C3': 'mm/yy',
     'D1': 'mm/yy',        # Academic Appointments: Dates (mm/yy - mm/yy)
     'D2': 'mm/yy',        # Hospital Appointments
     'D3': 'mm/yy',        # Other Positions

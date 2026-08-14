@@ -1,9 +1,10 @@
-"""Section C: postdoctoral training, including C1 and C2 (#398).
+"""Section C: postdoctoral training, including C1, C2 and C3 (#398).
 
-Three taxonomy codes into one table -- residency, fellowship and other
-postdoctoral training are separate codes because they classify differently, but
-the WCM template lists them together. The code is kept per entry so that
-`format_date_range` can apply the right per-section date rule to each row.
+Four taxonomy codes into one table -- postdoctoral research (C1), residency
+(C2) and fellowship (C3) are separate codes because they classify
+differently, but the WCM template lists them together. The code is kept per
+entry so that `format_date_range` can apply the right per-section date rule
+to each row.
 
 Three columns: training type, institution + location, dates. Cells are MIXED
 content, as in B1 and B2, so enrichment is visible on the page;
@@ -40,20 +41,27 @@ from ..resolution import (
 )
 from ..sorting import sort_entries_reverse_chronological
 
+# Every taxonomy code the Postdoctoral Training table renders: C generic,
+# C1 postdoctoral research, C2 residency, C3 fellowship. C3 was omitted
+# from the old inline gather (and from RENDER_ROUTED_CODES and
+# DATE_FORMATS) even though stage 3b can emit it, so every C3 entry fell to
+# the Appendix by construction -- the same class of gap as N2 (#529, #573).
+POSTDOC_TRAINING_CODES = ('C', 'C1', 'C2', 'C3')
+
 
 class PostdocTrainingSection:
-    """Section C / C1 / C2 writers, mixed into `WCMTemplateGenerator`."""
+    """Section C / C1 / C2 / C3 writers, mixed into `WCMTemplateGenerator`."""
 
     def _fill_postdoc_training(self, entries_by_code: Dict[str, List[Dict]], all_entries: List[Dict] = None):
         """Fill postdoctoral training table with track changes for enriched content.
 
         Track changes are used for city/state from institution enrichment only.
         """
-        training_entries = (
-            entries_by_code.get('C', []) +
-            entries_by_code.get('C1', []) +
-            entries_by_code.get('C2', [])
-        )
+        training_entries = [
+            entry
+            for code in POSTDOC_TRAINING_CODES
+            for entry in entries_by_code.get(code, [])
+        ]
 
         if not training_entries:
             return
@@ -103,7 +111,7 @@ class PostdocTrainingSection:
             # Location from Stage 5b enrichment
             location, location_is_enriched = _get_institution_location(entry)
 
-            # Get taxonomy code for this entry (C, C1, or C2)
+            # Get taxonomy code for this entry (C, C1, C2 or C3)
             taxonomy_code = entry.get('taxonomy_code', 'C')
 
             # Dates - format according to C/C1/C2 requirements (mm/yy - mm/yy)

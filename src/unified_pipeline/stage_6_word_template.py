@@ -574,7 +574,8 @@ RENDER_ROUTED_CODES = frozenset({
     'S0',  # Researcher Profiles section
     'B1',  # Education - Academic Degrees
     'B2',  # Education - Other Educational Experiences
-    'C', 'C1', 'C2',  # Postdoctoral Training (C is generic, C1/C2 are sub-types)
+    'C', 'C1', 'C2', 'C3',  # Postdoctoral Training (C generic; C1 postdoc
+                            # research, C2 residency, C3 fellowship -- #573)
     'D1', 'D2', 'D3',  # Professional Positions
     'F1', 'F2',  # Licensure and Board Certification
     'H',   # Honors and Awards
