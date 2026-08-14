@@ -128,6 +128,27 @@ def test_license_type_field_routes_before_text():
     assert dea == ""
 
 
+def test_license_type_dea_routes_before_text():
+    """The 'dea' license_type route, with a number no shape test matches."""
+    rows, dea, npi = _render_licensure([
+        _f1("Registration 55443", number="55443", license_type="DEA"),
+    ])
+    assert rows == []
+    assert dea == "55443"
+    assert npi == ""
+
+
+def test_unstructured_npi_labelled_entry_stays_out_of_fallback():
+    """The fallback's exclude side: an unstructured entry whose text carries a
+    real NPI/DEA label must not become a raw-text licence row."""
+    rows, dea, npi = _render_licensure([
+        {"taxonomy_code": "F1", "text": "NPI number on file",
+         "extracted_fields": {}},
+    ])
+    assert rows == []
+    assert npi == ""
+
+
 def test_shape_tiebreak_applies_only_without_a_state():
     """Unlabelled, state-less entries still classify by shape."""
     rows, dea, npi = _render_licensure([
