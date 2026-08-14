@@ -27,7 +27,11 @@ from typing import Dict, List, Optional, Tuple
 # the vocabulary lives.
 _NOT_FUNDED_STATUS_RE = re.compile(r'not\s+funded|unfunded|declined|rejected')
 _PENDING_STATUS_RE = re.compile(
-    r'under\s+review|in\s+review|submitted|pending|awaiting|under\s+consideration'
+    # 'awaiting' alone would also match post-award statuses that lack the
+    # 'award' substring ("Awaiting contract execution", "Awaiting IRB
+    # approval"), so it only counts when a decision is what is awaited.
+    r'under\s+review|in\s+review|submitted|pending'
+    r'|awaiting\s+(?:sponsor\s+)?decision|under\s+consideration'
 )
 _COMPLETED_STATUS_RE = re.compile(r'\bcompleted?\b|\bclosed\b|\bexpired\b')
 

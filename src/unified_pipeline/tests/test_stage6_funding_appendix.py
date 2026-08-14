@@ -87,6 +87,14 @@ def test_status_awaiting_or_under_consideration_goes_pending():
         assert "Pending" in note
 
 
+def test_status_awaiting_non_decision_not_moved():
+    # "Awaiting" a post-award step (no 'award' substring) is not a pending
+    # application — only an awaited *decision* rebuckets.
+    for status in ("Awaiting contract execution", "Awaiting IRB approval"):
+        target, _ = grant_status_rebucket_target(status)
+        assert target is None, status
+
+
 def test_status_awaiting_award_setup_not_moved():
     # "Awaiting" appears, but the grant is awarded — the 'award' guard holds.
     target, _ = grant_status_rebucket_target("Awaiting award setup")
