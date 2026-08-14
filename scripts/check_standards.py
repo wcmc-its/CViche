@@ -31,6 +31,12 @@ refuses to write one higher than what's on disk, and the bare command fails
 if a fresh count exceeds its baseline. See RATCHETED_ROWS below and
 CODING_STANDARDS.md's "Closing the loop" section for which rows qualify.
 
+Two rows (both under §3.7) also accept a `# standards-waiver: <rule>`
+comment at the site (WAIVABLE_ROWS): a hit there is excused from that row's
+own count, but not forgotten -- it moves to a second, separately-ratcheted
+bucket ("<label> [waived]" in the baseline file), so a waiver is a budget
+too, not a free pass. A row with only waived hits reads `~`, never `✓`.
+
 ponytail: each check re-walks its own subtree rather than one shared
 whole-repo AST pass -- these run once in CI or by hand, not in a hot loop,
 and a shared cache would only save the few hundred ms this already costs.
@@ -65,6 +71,52 @@ RATCHETED_ROWS = {
     "5.4 bare swallows (`except Exception: pass`)",
     "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)",
 }
+
+# Anchored to right after `#` (mod whitespace), not a bare substring search
+# -- the token has to be what the comment IS, not something the comment
+# merely mentions. Without the anchor, a line discussing this very syntax
+# (a docstring, a nearby "# TODO: consider a standards-waiver: 3.7 here")
+# would silently excuse a real hit. Same "token starts the comment"
+# convention §3.9's `ponytail:` comments already use.
+WAIVER_RE = re.compile(r"#\s*standards-waiver:\s*(\S+)")
+
+# Rows whose hits are "relpath:lineno: message" strings precise enough to
+# check the hit's own line and the line before it (§5.4's own comment check
+# already uses this same two-line lookback) for a matching
+# `# standards-waiver: <rule>` comment. Keyed by the rule NUMBER a waiver
+# must name, not the row label -- two rows can share one rule number (both
+# §3.7 rows here), and a waiver comment names the rule, not which of its
+# checks flagged the line.
+WAIVABLE_ROWS = {
+    "3.7 no metaprogramming": "3.7",
+    "3.7 dynamic attribute access (non-literal)": "3.7",
+}
+
+
+def _split_waived(hits, rule_label):
+    """(net_hits, waived_hits) for one row's raw hit list. A waiver excuses
+    the hit from the row's own pass/fail count, but doesn't erase it -- it
+    moves to a second, separately-ratcheted bucket (see ratchet_targets)
+    rather than a free pass with no budget of its own."""
+    net, waived = [], []
+    for hit in hits:
+        m = re.match(r"([^:]+):(\d+):", hit)
+        if not m:
+            net.append(hit)
+            continue
+        relpath, lineno = m.group(1), int(m.group(2))
+        try:
+            with open(os.path.join(ROOT, relpath), encoding="utf-8", errors="replace") as fh:
+                lines = fh.readlines()
+        except FileNotFoundError:
+            net.append(hit)
+            continue
+        own = lines[lineno - 1] if 0 < lineno <= len(lines) else ""
+        prev = lines[lineno - 2] if lineno >= 2 else ""
+        wm = WAIVER_RE.search(own) or WAIVER_RE.search(prev)
+        (waived if wm and wm.group(1) == rule_label else net).append(hit)
+    return net, waived
+
 
 # §9's hand-narrated table cites the `origin/dev` sha it was last measured
 # against in its own prose (one definition, per §1.5, not a second field
@@ -358,20 +410,50 @@ ROWS = [
 
 
 def compute_rows():
-    """[(label, target, count, detail), ...] -- each check fn() runs once,
-    reused by --report, the doc table, and the ratchet gate below rather
-    than each recomputing it."""
-    return [(label, target, *fn()) for label, target, fn in ROWS]
+    """[(label, target, count, detail, waived), ...] -- each check fn() runs
+    once, reused by --report, the doc table, and the ratchet gate below
+    rather than each recomputing it. For a WAIVABLE_ROWS row, count/detail
+    are already net of anything a `# standards-waiver:` comment excused;
+    waived is that excused subset, empty for every other row."""
+    results = []
+    for label, target, fn in ROWS:
+        count, detail = fn()
+        waived = []
+        if label in WAIVABLE_ROWS:
+            detail, waived = _split_waived(detail, WAIVABLE_ROWS[label])
+            count = len(detail)
+        results.append((label, target, count, detail, waived))
+    return results
+
+
+def ratchet_targets(results):
+    """{key: count} for every number §2.1's ratchet pattern applies to:
+    RATCHETED_ROWS' net count under the row's own label, plus each
+    WAIVABLE_ROWS row's waived count under "<label> [waived]". A waiver is
+    a budget too -- it may fall, never rise, same as any other ratcheted
+    row, so it doesn't quietly become a free pass with no ceiling."""
+    targets = {}
+    for label, _, count, _, waived in results:
+        if label in RATCHETED_ROWS:
+            targets[label] = count
+        if label in WAIVABLE_ROWS:
+            targets[f"{label} [waived]"] = len(waived)
+    return targets
 
 
 def render_table(results):
     lines = [BEGIN_MARKER, "", "| Rule | Target | Today | |", "|---|---|---|---|"]
-    for label, target, count, _ in results:
+    for label, target, count, _, waived in results:
+        today = f"{count} ({len(waived)} waived)" if waived else str(count)
         if label.startswith("3.x") or label in RATCHETED_ROWS:
             symbol = "ratchet"
+        elif waived and count == 0:
+            # §5.2: never report success when a step failed applies to this
+            # table too -- a row with only waived hits is not a clean zero.
+            symbol = "~"
         else:
             symbol = "✓" if count == 0 else "✗"
-        lines.append(f"| {label} | {target} | {count} | {symbol} |")
+        lines.append(f"| {label} | {target} | {today} | {symbol} |")
     lines.append("")
     lines.append(END_MARKER)
     return "\n".join(lines) + "\n"
@@ -398,13 +480,18 @@ def main():
     baseline = _load_baseline()
 
     if args.report:
-        for label, target, count, detail in results:
+        for label, target, count, detail, waived in results:
             extra = f"  baseline={baseline.get(label, 'unset')}" if label in RATCHETED_ROWS else ""
             print(f"  {label:52} target={target:8} today={count}{extra}")
             for d in detail[:5]:
                 print(f"      {d}")
             if len(detail) > 5:
                 print(f"      ... and {len(detail) - 5} more")
+            if waived:
+                wbase = baseline.get(f"{label} [waived]", "unset")
+                print(f"      waived ({len(waived)}, baseline={wbase}):")
+                for d in waived[:5]:
+                    print(f"        {d}")
         return 0
 
     with open(DOC, encoding="utf-8") as fh:
@@ -415,7 +502,7 @@ def main():
         return 2
     before, current_block, after = parts
 
-    ratchet_counts = {label: count for label, _, count, _ in results if label in RATCHETED_ROWS}
+    ratchet_counts = ratchet_targets(results)
 
     if args.update:
         # Collect every blocked row before writing anything, the same shape

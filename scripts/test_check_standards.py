@@ -11,6 +11,8 @@ scripts/ dir rather than pointing it at synthetic files anywhere). One
 planted violation per check, run --report, assert it's counted; then the
 --update / diff-gate mechanics against CODING_STANDARDS.md's auto block;
 then the four ratcheted rows' baseline mechanics (RATCHETED_ROWS); then
+the waiver mechanism (WAIVABLE_ROWS) -- a waived hit is excused from its
+row's count but not forgotten, and the waived count itself ratchets; then
 the staleness helpers, which run against the real repo rather than the
 fixture since there's no git history to fake in a plain tempdir.
 """
@@ -74,10 +76,18 @@ def build_tree(tree):
     api = os.path.join(tree, "web_interface", "backend", "app", "api")
     _write(os.path.join(api, "widgets.py"), "def handler(db):\n    return db.query(Widget).all()\n")
 
-    # 3.7 metaprogramming -- a __getattr__ override
+    # 3.7 metaprogramming -- one unwaived __getattr__ override (still counts)
+    # and one waived one (excused, but tracked in its own ratcheted budget)
     _write(
         os.path.join(tree, "src", "meta.py"),
         "class Router:\n    def __getattr__(self, name):\n        return None\n",
+    )
+    _write(
+        os.path.join(tree, "src", "waived_meta.py"),
+        "class Router2:\n"
+        "    # standards-waiver: 3.7 -- deliberate, see #999\n"
+        "    def __getattr__(self, name):\n"
+        "        return None\n",
     )
 
     # 3.7 dynamic attribute access -- non-literal attribute name
@@ -129,8 +139,10 @@ def main():
         assert "today=1" in out.split("2.1")[1].split("\n")[0]
         print("2.1 db.query( in api/                     counted   ok")
 
-        assert "today=1" in out.split("3.7 no metaprogramming")[1].split("\n")[0]
-        print("3.7 __getattr__ override                  counted   ok")
+        section_37meta = out.split("3.7 no metaprogramming")[1].split("3.7 dynamic attribute access")[0]
+        assert "today=1" in section_37meta.split("\n")[0]  # net: waived_meta.py's hit is excused
+        assert "waived (1" in section_37meta  # but not forgotten -- tracked separately
+        print("3.7 __getattr__: unwaived counts, waived is excused but tracked  ok")
 
         dynattr_section = out.split("3.7 dynamic attribute access")[1].split("\n")[0]
         assert "today=1" in dynattr_section, dynattr_section  # only the non-literal call counts
@@ -174,6 +186,7 @@ def main():
             baseline = json.load(fh)
         assert baseline["2.1 no `db.query(` in `api/`"] == 1
         assert baseline["7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)"] == 3
+        assert baseline["3.7 no metaprogramming [waived]"] == 1  # a waiver ratchets too
         print("--update writes standards-baseline.json with fresh counts  ok")
 
         # now in sync -> default mode passes
@@ -249,6 +262,76 @@ def main():
         assert r.returncode == 0, r.stdout
         print("reverting the regression clears the ratchet gate          ok")
 
+        # a SECOND waived violation -> the waived budget itself rises past
+        # its baseline (1 -> 2). A waiver is not a free pass: this must
+        # block the gate exactly like any other ratcheted row rising.
+        _write(
+            os.path.join(tree, "src", "waived_meta2.py"),
+            "class Router3:\n"
+            "    # standards-waiver: 3.7 -- also deliberate, see #1000\n"
+            "    def __getattr__(self, name):\n"
+            "        return None\n",
+        )
+        r = run(tree)
+        assert r.returncode == 1, r.stdout
+        assert "[waived]" in r.stderr and "rose 1 -> 2" in r.stderr
+        print("a second waiver rising blocks the gate too  exit=1        ok")
+
+        r = run(tree, "--update")
+        assert r.returncode == 1, r.stdout
+        assert "refusing to raise the baseline" in r.stderr
+        print("--update refuses to raise a waived-count baseline too      ok")
+
+        # remove it -> the waived-count ratchet is satisfied again, but the
+        # blocked --update above still rewrote the doc to THAT moment's
+        # snapshot (2 waived), so one more --update is needed to resync it
+        # to the reverted state -- same "blocked rows don't freeze the
+        # doc" behavior already exercised for 2.1/dynattr above.
+        os.remove(os.path.join(tree, "src", "waived_meta2.py"))
+        r = run(tree, "--update")
+        assert r.returncode == 0, r.stderr
+        r = run(tree)
+        assert r.returncode == 0, r.stdout
+        print("removing the extra waiver clears the gate                 ok")
+
+        # now waive the ORIGINAL unwaived __getattr__ too (net -> 0, waived
+        # -> 2) and lock in the new waived-count baseline by hand -- the
+        # same deliberate maintainer edit §3.2a's own escape hatch uses,
+        # since --update itself never raises a baseline. This is the
+        # concrete case the doc promises: a row with only waived hits
+        # reads ~, never a clean ✓.
+        _write(
+            os.path.join(tree, "src", "meta.py"),
+            "class Router:\n"
+            "    # standards-waiver: 3.7 -- also deliberate, see #1001\n"
+            "    def __getattr__(self, name):\n"
+            "        return None\n",
+        )
+        with open(baseline_path) as fh:
+            b = json.load(fh)
+        b["3.7 no metaprogramming [waived]"] = 2
+        with open(baseline_path, "w") as fh:
+            json.dump(b, fh)
+        r = run(tree, "--update")
+        assert r.returncode == 0, r.stderr
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
+            doc = fh.read()
+        assert "| 3.7 no metaprogramming | 0 | 0 (2 waived) | ~ |" in doc
+        print("net-zero-but-waived renders ~, not a clean check mark      ok")
+
+        # restore meta.py's real violation (unwaived) and its baseline, so
+        # later assertions about this row aren't left in a mutated state
+        _write(
+            os.path.join(tree, "src", "meta.py"),
+            "class Router:\n    def __getattr__(self, name):\n        return None\n",
+        )
+        with open(baseline_path) as fh:
+            b = json.load(fh)
+        b["3.7 no metaprogramming [waived]"] = 1
+        with open(baseline_path, "w") as fh:
+            json.dump(b, fh)
+        run(tree, "--update")
+
         # fix the docx violation (not a ratcheted row) -> the AUTO TABLE goes
         # stale rather than the ratchet gate tripping, a different failure mode
         os.remove(os.path.join(tree, "src", "unified_pipeline", "stage6", "parsing", "bad.py"))
@@ -273,6 +356,17 @@ def main():
     behind_self = check_standards._commits_behind("HEAD")
     assert behind_self is None or behind_self == 0
     print("staleness helpers parse the doc's sha and count real commits   ok")
+
+    # WAIVER_RE must anchor to an actual comment, not just the substring
+    # appearing anywhere on the line -- a nearby line that merely mentions
+    # this syntax (discussing it, not applying it) must not excuse a real
+    # hit. Both are lines with no `#` immediately before the token.
+    assert check_standards.WAIVER_RE.search('NOTE = "standards-waiver: 3.7 "') is None
+    assert check_standards.WAIVER_RE.search(
+        'return getattr(obj, field)  # TODO: consider a "standards-waiver: 3.7" comment here'
+    ) is None
+    assert check_standards.WAIVER_RE.search("    # standards-waiver: 3.7 -- reason").group(1) == "3.7"
+    print("waiver token only matches inside an actual comment              ok")
 
     print("\nall check_standards self-tests passed")
     return 0
