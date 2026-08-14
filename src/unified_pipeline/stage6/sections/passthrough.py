@@ -15,10 +15,14 @@ neither section has a code of its own, so the only signal that an entry belongs
 here is the source heading it was found under.
 
 E writes into paragraphs, not a table. It matches on the "Label: Value" shape,
-keeps the template's own label, and appends the value after a tab -- the
-template line reads "Name of Current Employer(s):" and must keep reading that
-way. It prefers that specific paragraph to the section header, because the
-header is a heading with nothing to fill.
+routes each entry to the template row whose label means the same thing as the
+entry's own label (#571), keeps the template's own label, and appends the value
+after a tab -- the template line reads "Name of Current Employer(s):" and must
+keep reading that way. An entry whose label matches no row is logged and NOT
+written: filing a value under a label that is not its own is a wrong factual
+claim in a delivered CV, worse than an omission. It prefers the employer
+paragraph to the section header as the scan anchor, because the header is a
+heading with nothing to fill.
 
 G writes into a table, but only after checking that it is the right one.
 `_find_table_after_paragraph` returns whatever table comes next in the document,
@@ -29,9 +33,42 @@ back to bullets under the header instead of writing into a stranger's table.
 Percent effort is deliberately absent. It is in the same part of the template
 and looks like it belongs, but it is filled by hand.
 """
+import logging
 from typing import Dict, List
 
 from ..formatting import _clear_table_data, _set_font
+from ..normalization import _squash
+
+logger = logging.getLogger(__name__)
+
+# The Employment Status template rows, recognized by keyword because source CVs
+# word the labels loosely ("Name of Employer(s)", "Current Employer", ...) and
+# template revisions reword them too. Keywords are tested against a _squash()ed
+# label, so wording, spacing and case differences all collapse. The same
+# classifier runs on the entry's label and on the template paragraph's label;
+# an entry is written only into the row that classifies the SAME way, never
+# into whichever row happens to be found first (#571).
+_EMPLOYMENT_ROW_KEYWORDS: dict[str, tuple[str, ...]] = {
+    'employer': ('employer',),
+    'employment status': ('status',),
+    'position/title': ('position', 'title'),
+    'dates of employment': ('date',),
+}
+
+# How many paragraphs past the section anchor may hold its label rows. The
+# October-2022 template's block is the employer row, the status row, then a
+# dozen colon-free status options; the bound keeps a "Title:" or "Date:"
+# paragraph belonging to a LATER section out of reach.
+_EMPLOYMENT_ROW_SCAN_WINDOW = 12
+
+
+def _employment_row_key(label: str) -> str | None:
+    """Which Employment Status template row a "Label:" belongs to, or None."""
+    squashed = _squash(label)
+    for row_key, keywords in _EMPLOYMENT_ROW_KEYWORDS.items():
+        if any(keyword in squashed for keyword in keywords):
+            return row_key
+    return None
 
 
 class PassthroughSection:
@@ -103,29 +140,51 @@ class PassthroughSection:
         if self.verbose:
             print(f"  Passthrough: Filling Employment Status ({len(matching_entries)} entries)")
 
-        # Update the target paragraph with the employer info
+        # Route each entry to the template row its OWN label names. The first
+        # 'employer' paragraph must not win for every entry -- that files a
+        # position or a date under "Name of Current Employer(s):" (#571).
         for entry in matching_entries:
             text = entry.get('text', '').strip()
-            if ':' in text:
-                # Parse "Label: Value" and update the corresponding template paragraph
-                parts = text.split(':', 1)
-                label = parts[0].strip()
-                value = parts[1].strip()
+            if ':' not in text:
+                continue
+            parts = text.split(':', 1)
+            label = parts[0].strip()
+            value = parts[1].strip()
 
-                # Find and update the matching label in template
-                for i, para in enumerate(self.doc.paragraphs):
-                    para_text = para.text.strip()
-                    # Match paragraphs with similar labels (e.g., "Name of Current Employer(s):")
-                    if 'employer' in para_text.lower() and ':' in para_text:
-                        # Update the paragraph: keep the label, add the value
-                        label_end = para_text.find(':')
-                        existing_label = para_text[:label_end + 1]
-                        # Clear and rewrite
-                        para.clear()
-                        run = para.add_run(f"{existing_label}\t{value}")
-                        _set_font(run)
-                        self.stats['entries_inserted'] += 1
-                        break
+            row_key = _employment_row_key(label)
+            if row_key is None:
+                logger.warning(
+                    "Employment Status entry label %r names no known template row; "
+                    "entry not written", label)
+                continue
+            if not self._write_employment_row(target_idx, row_key, value):
+                logger.warning(
+                    "Employment Status entry %r matched no template row near the "
+                    "section; entry not written", label)
+
+    def _write_employment_row(self, anchor_idx: int, row_key: str, value: str) -> bool:
+        """Write `value` into the Employment Status row that classifies as `row_key`.
+
+        Scans forward from the section anchor (bounded, so a look-alike label in
+        a later section is unreachable), keeps the template's own label text,
+        and appends the value after a tab. Returns False -- and counts nothing --
+        when no row in the window matches, so `entries_inserted` never reports a
+        write that did not happen.
+        """
+        window = self.doc.paragraphs[anchor_idx:anchor_idx + _EMPLOYMENT_ROW_SCAN_WINDOW]
+        for para in window:
+            para_text = para.text.strip()
+            if ':' not in para_text:
+                continue
+            template_label = para_text[:para_text.find(':')]
+            if _employment_row_key(template_label) != row_key:
+                continue
+            para.clear()
+            run = para.add_run(f"{template_label}:\t{value}")
+            _set_font(run)
+            self.stats['entries_inserted'] += 1
+            return True
+        return False
 
     def _fill_hospital_affiliation(self, all_entries: List[Dict]):
         """Fill G. INSTITUTIONAL/HOSPITAL AFFILIATION section.
