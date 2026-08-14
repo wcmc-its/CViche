@@ -70,7 +70,11 @@ def test_5c_usage_carries_the_model_the_api_returned(monkeypatch):
 
 def test_5b_lookup_returns_the_model_the_api_returned(monkeypatch):
     from unified_pipeline import stage_5b_institution_enrichment as s5b
-    monkeypatch.setattr(s5b, "call_llm", lambda **kw: _fake_llm_result('{"x": {}}'))
+    # The #523 split moved lookup_institutions_llm (and its call_llm binding)
+    # into stage5b/lookup.py; patching the old facade module would patch a
+    # name the moved function no longer reads.
+    from unified_pipeline.stage5b import lookup as s5b_lookup
+    monkeypatch.setattr(s5b_lookup, "call_llm", lambda **kw: _fake_llm_result('{"x": {}}'))
     batch = [("inst-1", "Some University", "context line")]
     out = s5b.lookup_institutions_llm(batch, None, verbose=False)
     assert len(out) == 3, "the helper must return (results, cost, model) for #459"

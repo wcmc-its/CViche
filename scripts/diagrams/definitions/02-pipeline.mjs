@@ -4,7 +4,7 @@
  *
  * LLM usage is taken from the stage modules themselves (each `call_llm(...)` site),
  * NOT the step_registry uses_llm flags, which are stale (e.g. they still mark stage 2
- * and stage 5b as non-LLM). Ten of the twelve stages call an LLM; only 1b (index
+ * as non-LLM; 5b's flag was fixed by #523). Ten of the twelve stages call an LLM; only 1b (index
  * mapping) and 5 (PubMed) do not. Stage 6's headline job is deterministic Word
  * rendering, but it also calls the LLM to classify presentation/service geo-scope.
  *

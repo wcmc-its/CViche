@@ -24,21 +24,37 @@ Date: 2025-11-29
 import os
 import sys
 import json
-import re
-import hashlib
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict
 from datetime import datetime
 
-from unified_pipeline.llm_client import call_llm
+# The implementation was split into unified_pipeline/stage5b/ (#523). Every
+# name that used to live in this module is re-exported below so existing
+# imports keep working -- the surface is pinned by
+# tests/test_stage5b_import_surface.py, per the stage 6 split precedent (#500).
+from unified_pipeline.stage5b import cache
+from unified_pipeline.stage5b.cache import (  # noqa: F401  (re-exports)
+    CACHE_FILE,
+    OLD_CACHE_FILE,
+    _institution_cache_key,
+    _owner_context_hash,
+    load_institution_cache,
+    save_institution_cache,
+)
+from unified_pipeline.stage5b.lookup import (  # noqa: F401  (re-exports)
+    INSTITUTION_SYSTEM_PROMPT,
+    _build_context_string,
+    _build_owner_context,
+    lookup_institutions_llm,
+)
+from unified_pipeline.stage5b.normalize import (  # noqa: F401  (re-exports)
+    format_location,
+    is_likely_internal_unit,
+    normalize_institution_name,
+)
 
 # Paths
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_5b_institution_enrichment"
-CACHE_FILE = Path(__file__).parent / "config" / "institution_cache.json"
-OLD_CACHE_FILE = Path(__file__).parent / "config" / "ror_cache.json"
-
-# Global cache for institution lookups
-INSTITUTION_CACHE: Dict[str, Optional[Dict]] = {}
 
 # Taxonomy codes that need institution location enrichment
 INSTITUTION_CODES = ['B1', 'B2', 'C', 'C1', 'C2', 'D1', 'D2', 'D3']
@@ -46,343 +62,18 @@ INSTITUTION_CODES = ['B1', 'B2', 'C', 'C1', 'C2', 'D1', 'D2', 'D3']
 # LLM batch size
 BATCH_SIZE = 10
 
-# System prompt for institution resolution
-INSTITUTION_SYSTEM_PROMPT = """You resolve institution names to their official names and geographic locations.
 
-RULES:
-1. CLEAN: If the input contains embedded location info (e.g., "Duke Medical Center, Durham, NC"), separate it:
-   - cleaned_name = just the institution name without the location
-   - city/state/country = the geographic info
-2. RESOLVE: Use world knowledge to determine city, state, country for each institution.
-3. DISAMBIGUATE: Use the CV OWNER CONTEXT to pick the correct institution when names are ambiguous.
-   For example, "OU College of Medicine" could be University of Oklahoma or Ohio University —
-   use the owner's location history and career trajectory to pick the right one.
-4. For cleaned_name: remove trailing location fragments but preserve the meaningful institution name.
-   "Duke University Medical Center, Durham, NC" → cleaned_name = "Duke University Medical Center"
-   "Northeastern State University" → cleaned_name = "Northeastern State University" (no change needed)
-5. For official_name: return the formal institutional name that would appear in official directories.
-6. Always return country as the full name (e.g., "United States" not "USA" or "US").
-7. Always return the two-letter ISO country_code (e.g., "US", "GB", "CA").
-8. For US states, return the full state name (e.g., "New York" not "NY").
+def __getattr__(name: str):
+    """Serve INSTITUTION_CACHE from the cache module's CURRENT binding.
 
-Return ONLY a JSON object with institution IDs as keys. No markdown fences, no extra text."""
-
-
-def load_institution_cache():
-    """Load institution cache from disk, migrating from old ror_cache.json if needed."""
-    global INSTITUTION_CACHE
-
-    # Try new cache file first
-    if CACHE_FILE.exists():
-        try:
-            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                INSTITUTION_CACHE = json.load(f)
-            return
-        except Exception as e:
-            print(f"Warning: Could not load institution cache: {e}")
-            INSTITUTION_CACHE = {}
-            return
-
-    # Migrate from old ror_cache.json if it exists
-    if OLD_CACHE_FILE.exists():
-        try:
-            with open(OLD_CACHE_FILE, 'r', encoding='utf-8') as f:
-                INSTITUTION_CACHE = json.load(f)
-            # Save under new name immediately
-            save_institution_cache()
-            print(f"Migrated cache: {OLD_CACHE_FILE.name} → {CACHE_FILE.name} ({len(INSTITUTION_CACHE)} entries)")
-        except Exception as e:
-            print(f"Warning: Could not migrate old cache: {e}")
-            INSTITUTION_CACHE = {}
-        return
-
-    INSTITUTION_CACHE = {}
-
-
-def save_institution_cache():
-    """Save institution cache to disk."""
-    try:
-        CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(INSTITUTION_CACHE, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"Warning: Could not save institution cache: {e}")
-
-
-def normalize_institution_name(name: str) -> str:
-    """Normalize institution name for better matching."""
-    if not name:
-        return ""
-
-    # Remove extra whitespace
-    name = ' '.join(name.split())
-
-    # Common abbreviation expansions
-    expansions = {
-        r'\bUniv\.?\s+': 'University ',
-        r'\bU\.?\s+of\s+': 'University of ',
-        r'\bMed\.?\s+': 'Medical ',
-        r'\bCtr\.?\s+': 'Center ',
-        r'\bColl\.?\s+': 'College ',
-        r'\bDept\.?\s+': 'Department ',
-        r'\bInst\.?\s+': 'Institute ',
-        r'\bHosp\.?\s+': 'Hospital ',
-        r'\bSch\.?\s+': 'School ',
-    }
-
-    for pattern, replacement in expansions.items():
-        name = re.sub(pattern, replacement, name, flags=re.IGNORECASE)
-
-    return name.strip()
-
-
-def is_likely_internal_unit(name: str) -> bool:
+    load_institution_cache() REASSIGNS the global (``global`` + rebind), so a
+    static ``from ...cache import INSTITUTION_CACHE`` alias here would freeze
+    the pre-load dict and silently split state between the old and new import
+    paths (the #496 lesson). PEP 562 delegation always returns the live one.
     """
-    Check if institution name is likely an internal university unit rather than
-    a standalone organization.
-
-    These should NOT be looked up as they'll get false positives.
-    """
-    name_lower = name.lower()
-
-    # Common internal unit patterns
-    internal_patterns = [
-        'center for ',
-        'centre for ',
-        'office of ',
-        'department of ',
-        'division of ',
-        'school of ',  # When standalone (not "X School of Medicine")
-        'institute for ',
-        'program in ',
-        'laboratory of ',
-        'lab of ',
-    ]
-
-    # Check if it starts with an internal pattern AND doesn't contain
-    # a major institution indicator
-    major_indicators = ['university', 'college', 'hospital', 'medical center']
-
-    for pattern in internal_patterns:
-        if name_lower.startswith(pattern):
-            # Check if it also mentions a major institution
-            if not any(ind in name_lower for ind in major_indicators):
-                return True
-
-    return False
-
-
-def format_location(city: str, state: str, country: str, country_code: str) -> str:
-    """Format city, state, country into a location string."""
-    parts = []
-
-    if city:
-        parts.append(city)
-
-    if state:
-        # For US, use state abbreviation if we have country_code
-        if country_code == 'US' and state:
-            # Common state name to abbreviation mapping
-            state_abbrevs = {
-                'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR',
-                'California': 'CA', 'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE',
-                'Florida': 'FL', 'Georgia': 'GA', 'Hawaii': 'HI', 'Idaho': 'ID',
-                'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA', 'Kansas': 'KS',
-                'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD',
-                'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS',
-                'Missouri': 'MO', 'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV',
-                'New Hampshire': 'NH', 'New Jersey': 'NJ', 'New Mexico': 'NM', 'New York': 'NY',
-                'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH', 'Oklahoma': 'OK',
-                'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC',
-                'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT',
-                'Vermont': 'VT', 'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV',
-                'Wisconsin': 'WI', 'Wyoming': 'WY', 'District of Columbia': 'DC'
-            }
-            state_abbrev = state_abbrevs.get(state, state)
-            parts.append(state_abbrev)
-        else:
-            parts.append(state)
-
-    # Only add country if not US (common assumption for US CVs)
-    if country and country_code != 'US':
-        parts.append(country)
-
-    return ', '.join(parts)
-
-
-def _build_context_string(entry: Dict) -> str:
-    """Build a context string for an entry to help LLM disambiguate."""
-    fields = entry.get('extracted_fields', {})
-    code = entry.get('taxonomy_code', '')
-    parts = []
-
-    if code:
-        parts.append(code)
-
-    # Include degree/title for context
-    degree = fields.get('degree', '') or fields.get('title', '') or fields.get('training_type', '')
-    if degree:
-        parts.append(degree)
-
-    # Include dates for temporal context
-    start = fields.get('start_date', '')
-    end = fields.get('end_date', '')
-    if start or end:
-        date_str = f"{start}" if start else ""
-        if end:
-            date_str = f"{date_str}-{end}" if date_str else end
-        parts.append(date_str)
-
-    return ', '.join(parts) if parts else ''
-
-
-def _build_owner_context(cv_owner_location: Optional[Dict]) -> str:
-    """Build a CV owner context string for the LLM prompt."""
-    if not cv_owner_location or not cv_owner_location.get('inference_success'):
-        return "No location context available for CV owner."
-
-    parts = []
-    metro = cv_owner_location.get('metro_area', '')
-    # primary_location is stored raw from the LLM (stage 4) and can come back as a
-    # bare string instead of the instructed object; guard the shape before .get().
-    primary = cv_owner_location.get('primary_location') or {}
-    if not isinstance(primary, dict):
-        primary = {}
-
-    if primary:
-        inst = primary.get('institution', '')
-        city = primary.get('city', '')
-        state = primary.get('state', '')
-        country = primary.get('country', '')
-        loc_parts = [p for p in [city, state, country] if p]
-        loc_str = ', '.join(loc_parts)
-        if inst:
-            parts.append(f"Currently at {inst} in {loc_str}")
-        elif loc_str:
-            parts.append(f"Currently based in {loc_str}")
-
-    if metro:
-        parts.append(f"Metro area: {metro}")
-
-    # Include other locations for career trajectory
-    locations = cv_owner_location.get('locations', [])
-    if isinstance(locations, list) and len(locations) > 1:
-        other_locs = []
-        for loc in locations[1:]:
-            if not isinstance(loc, dict):
-                continue
-            city = loc.get('city', '')
-            state = loc.get('state', '')
-            if city and state:
-                other_locs.append(f"{city}, {state}")
-            elif city:
-                other_locs.append(city)
-        if other_locs:
-            parts.append(f"Career locations: {'; '.join(other_locs)}")
-
-    return ' | '.join(parts) if parts else "No location context available for CV owner."
-
-
-def _owner_context_hash(owner_context: str) -> str:
-    """Deterministic namespace id for an owner-disambiguation context string.
-
-    sha256[:16] (64 bits) rather than md5[:10] (40 bits) -- this is a cache
-    namespace separator, not a security boundary, but 40 bits is cheap to
-    collide by accident across a large CV corpus.
-    """
-    return hashlib.sha256(owner_context.encode('utf-8')).hexdigest()[:16]
-
-
-def _institution_cache_key(institution_name: str, owner_context: str) -> str:
-    """Cache key for an institution lookup, scoped to the CV owner's
-    disambiguation context.
-
-    INSTITUTION_CACHE used to be keyed on institution name alone, but the
-    value is produced by a prompt that is deliberately conditioned on whose
-    CV it is (INSTITUTION_SYSTEM_PROMPT rule 3, e.g. "OU College of Medicine"
-    resolving differently for an Oklahoma owner vs. an Ohio owner). A
-    name-only key let the first owner to resolve an ambiguous name decide it
-    for every owner afterwards, persisted to disk (#582). Folding a hash of
-    the owner context into the key means two owners with different contexts
-    simply never collide; two owners with the same (or no) context still
-    share the cache entry, so the common unambiguous case is unaffected.
-
-    Existing name-only keys in institution_cache.json stop matching under
-    this key shape, which is the intended migration: rather than a purge
-    script, each institution just gets one fresh, correctly-scoped LLM
-    lookup the next time its CV is processed.
-    """
-    return f"{institution_name.lower().strip()}|{_owner_context_hash(owner_context)}"
-
-
-def lookup_institutions_llm(
-    batch: List[Tuple[str, str, str]],
-    cv_owner_location: Optional[Dict],
-    model: str = "gpt-5.1",
-    verbose: bool = False
-) -> Tuple[Optional[Dict[str, Dict]], float]:
-    """
-    Look up a batch of institutions using an LLM.
-
-    Args:
-        batch: List of (inst_id, institution_name, context_string) tuples
-        cv_owner_location: CV owner location dict for disambiguation
-        model: LLM model to use
-        verbose: Print progress
-
-    Returns:
-        Tuple of (results_dict, cost):
-        - results_dict: {inst_id: {cleaned_name, official_name, city, state, country, country_code}}
-          Returns None (not {}) on failure so callers can distinguish transient errors
-          from legitimate empty results.
-        - cost: API call cost in dollars
-    """
-    # Build user prompt
-    owner_context = _build_owner_context(cv_owner_location)
-
-    lines = [f"CV OWNER CONTEXT: {owner_context}", "", "INSTITUTIONS TO RESOLVE:"]
-    for inst_id, inst_name, context in batch:
-        if context:
-            lines.append(f"[{inst_id}] {inst_name}  (context: {context})")
-        else:
-            lines.append(f"[{inst_id}] {inst_name}")
-
-    user_prompt = '\n'.join(lines)
-
-    if verbose:
-        print(f"    LLM batch: {len(batch)} institutions")
-
-    try:
-        messages = [
-            {"role": "system", "content": INSTITUTION_SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt}
-        ]
-
-        llm_result = call_llm(
-            stage="stage_5b",
-            messages=messages,
-            temperature=0.0,
-            response_format={"type": "json_object"}
-        )
-
-        cost = llm_result["cost"]
-
-        # Parse response
-        raw_text = llm_result["content"].strip()
-        results = json.loads(raw_text)
-
-        if verbose:
-            print(f"    LLM resolved {len(results)} institutions (cost: ${cost:.4f})")
-
-        # Third element is what actually served the call: the `model` param
-        # is a default no orchestrator passes, so recording it stamped every
-        # artifact with a model the run never used (#459).
-        return results, cost, llm_result.get("model")
-
-    except Exception as e:
-        if verbose:
-            print(f"    LLM institution lookup error: {e}")
-        return None, 0.0, None
+    if name == "INSTITUTION_CACHE":
+        return cache.INSTITUTION_CACHE
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def enrich_entry_with_result(entry: Dict, result: Dict) -> Dict:
@@ -571,8 +262,8 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
 
         # Check cache (skip if refreshing)
         if not refresh_cache:
-            cached = INSTITUTION_CACHE.get(cache_key) or INSTITUTION_CACHE.get(raw_key)
-            if cached is not None or cache_key in INSTITUTION_CACHE or raw_key in INSTITUTION_CACHE:
+            cached = cache.INSTITUTION_CACHE.get(cache_key) or cache.INSTITUTION_CACHE.get(raw_key)
+            if cached is not None or cache_key in cache.INSTITUTION_CACHE or raw_key in cache.INSTITUTION_CACHE:
                 # Skip old ROR-format entries — they lack cleaned_name and may have
                 # wrong matches (e.g., Northeastern State University → Magadan, Russia).
                 # Force re-lookup via LLM for accurate disambiguation.
@@ -657,7 +348,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                 result = results.get(inst_id, {})
                 if result:
                     # Cache the result
-                    INSTITUTION_CACHE[cache_key] = {
+                    cache.INSTITUTION_CACHE[cache_key] = {
                         'cleaned_name': result.get('cleaned_name', ''),
                         'official_name': result.get('official_name', ''),
                         'city': result.get('city', ''),
@@ -677,7 +368,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                         print(f"    {name[:40]:40s} → {city}, {state}")
                 else:
                     # LLM succeeded but didn't return this institution — safe to cache negative
-                    INSTITUTION_CACHE[cache_key] = None
+                    cache.INSTITUTION_CACHE[cache_key] = None
                     if verbose:
                         print(f"    {name[:40]:40s} → (no result)")
 

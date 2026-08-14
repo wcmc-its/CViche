@@ -132,7 +132,9 @@ export function verifyFacts(items) {
   };
   // The three stages whose chip flipped to LLM after reading the modules (not the flags):
   mustLlm("src/unified_pipeline/stage_2_entry_extraction.py", "stage2");
-  mustLlm("src/unified_pipeline/stage_5b_institution_enrichment.py", "stage5b");
+  // 5b's call_llm site moved to stage5b/lookup.py in the #523 split; the old
+  // module is now a facade that re-exports it.
+  mustLlm("src/unified_pipeline/stage5b/lookup.py", "stage5b");
   mustLlm("src/unified_pipeline/stage_6_word_template.py", "stage6");
   // The two genuine non-LLM stages the "ten of twelve" claim depends on:
   mustNotLlm("src/unified_pipeline/stage_1b_hierarchy_mapper.py", "stage1b");
