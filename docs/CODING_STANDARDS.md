@@ -226,10 +226,10 @@ No log statement, debug artifact, or diagnostic dump writes verbatim CV text, `h
 
 ## 5. Failure, retries, and run provenance
 
-**5.1 The error policy belongs to the driver, not to the stage. [gate — check pending]**
+**5.1 The error policy belongs to the driver, not to the stage. [gate]**
 A stage raises. The driver decides whether that ends the run.
 *Why:* the same twelve stages currently have opposite semantics depending on caller — the CLI wraps each in `except Exception` and continues with a printed warning (11 sites), while the orchestrator raises and fails the run. A clean CLI run is therefore not evidence the web path works, and neither behaviour is written down anywhere a stage author would see it.
-*Check:* `grep -n -A2 "except Exception" run_full_pipeline.py | grep "Warning: Stage"` — verified exact: 11 matches, zero false positives against the file's 12th `except Exception` (the unrelated §5.4 cost-read swallow) or against any of `orchestrator.py`'s 14 `except Exception` sites, none of which catch-and-continue a stage. Trends to 0. Not implemented yet — the grep is precise and ready to wire in, but no script runs it today; see §9.
+*Check:* `test_run_full_pipeline_exit_status.py::test_a_mid_pipeline_crash_also_exits_non_zero` pins the CLI half (a mid-pipeline stage exception is recorded and the run continues to completion); `test_error_policy_driver_contract.py::test_a_stage_exception_fails_the_run_and_stops_the_pipeline` pins the orchestrator half (the same kind of exception propagates, marks the run failed, and stops the remaining stages). Together they're the regression guard for #646 -- proof the two policies stay as documented, not that they're unified into one (§9's row 5.1, still open).
 
 **5.2 Never report success when a step failed. [gate]**
 *Why:* #448 existed because we did.
@@ -414,6 +414,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 
 
 
+
 ### Requires judgment
 
 | Rule | Target | Today | |
@@ -430,7 +431,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 4.3 complete cache keys | 0 | **0 — fixed.** `_institution_cache_key()` folds a hash of the owner context into the cache key, closing #582 (PR #585) | ✓ |
 | 4.4 own your region | per-section | shared `_overflow_entries`, `_appendix_pending`, `_cleared_tables` still present, same file | ✗ |
 | 4.5 lazy singletons locked | all | 6 locked (`llm_client.py`'s 2, `async_rate_limiter.py`, `session_idle.py`, `saml_replay.py`, `login_throttle.py`), 5 unlocked (`storage/factory.py:18`, `stage_4_field_extractor.py`, `taxonomy_mapper_v2.py` ×2, and `async_rate_limiter.py`'s own `get_rate_limiter_sync()` sharing state with its locked sibling — orphaned module, #653) — corrected this round, was "4 locked, 1 unlocked" | ~ |
-| 5.1 error policy owned by the driver | 1 policy | 2 opposite policies — CLI catches at 11 sites, orchestrator raises. #647 (open) adds a regression test *pinning* this divergence; it does not unify the policy | ✗ |
+| 5.1 error policy owned by the driver | 1 policy | 2 opposite policies — CLI catches at 11 sites, orchestrator raises, now pinned by a regression test on each side (#647, merged, §5.1); the policies themselves are still not unified | ✗ |
 | 5.2 never report success on failure | enforced | met, with a regression test (`test_run_full_pipeline_exit_status.py`) | ✓ |
 | 5.3 degradation visible in the artifact | all paths | 2 silent LLM fallbacks in stage 6, both still present | ✗ |
 | 5.5 tools fail closed | all | **0 — fixed.** `render_gate.py` clears its output directory and exits non-zero on any comparison failure; `render_gate_compare.py` refuses PASS on any mismatch (PR #589, closing #584) | ✓ |
