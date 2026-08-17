@@ -142,7 +142,108 @@ def test_row_missing_from_template_is_not_counted_and_is_logged(caplog):
     assert any("Dates of Employment" in record.getMessage() for record in caplog.records)
 
 
-@pytest.mark.skipif(not TEMPLATE_PATH.exists(), reason="WCM template not checked out")
+def test_row_at_scan_window_boundary_is_found():
+    """A row at the last paragraph the scan window covers is still routed."""
+    doc = docx.Document()
+    doc.add_paragraph("E. EMPLOYMENT STATUS")
+    doc.add_paragraph("Name of Current Employer(s):")
+    for _ in range(10):
+        doc.add_paragraph("filler")
+    doc.add_paragraph("Dates of Employment:")  # anchor offset 11, last in-window
+    generator = _StubGenerator(doc)
+
+    generator._fill_passthrough_sections([_entry("Dates of Employment: 2011-Present")])
+
+    assert "Dates of Employment:\t2011-Present" in _texts(doc)
+    assert generator.stats["entries_inserted"] == 1
+
+
+def test_row_just_outside_scan_window_is_not_found():
+    """One paragraph further than the boundary case, the row is unreachable."""
+    doc = docx.Document()
+    doc.add_paragraph("E. EMPLOYMENT STATUS")
+    doc.add_paragraph("Name of Current Employer(s):")
+    for _ in range(11):
+        doc.add_paragraph("filler")
+    doc.add_paragraph("Dates of Employment:")  # anchor offset 12, first out-of-window
+    generator = _StubGenerator(doc)
+
+    generator._fill_passthrough_sections([_entry("Dates of Employment: 2011-Present")])
+
+    assert not any("2011-Present" in text for text in _texts(doc))
+    assert generator.stats["entries_inserted"] == 0
+
+
+@pytest.mark.parametrize(
+    ("entry_text", "expected", "must_not_change"),
+    [
+        (
+            "Name of Employer(s): Weill Cornell",
+            "Name of Current Employer(s):\tWeill Cornell",
+            ["Position/Title:", "Dates of Employment:"],
+        ),
+        (
+            "Position/Title: Professor",
+            "Position/Title:\tProfessor",
+            ["Name of Current Employer(s):", "Dates of Employment:"],
+        ),
+        (
+            "Dates of Employment: 2011-Present",
+            "Dates of Employment:\t2011-Present",
+            ["Name of Current Employer(s):", "Position/Title:"],
+        ),
+    ],
+)
+def test_entry_is_not_written_to_another_employment_row(entry_text, expected, must_not_change):
+    """Each row class writes ONLY its own row -- the other two stay untouched."""
+    doc = _block_document()
+    generator = _StubGenerator(doc)
+
+    generator._fill_passthrough_sections([_entry(entry_text)])
+
+    texts = _texts(doc)
+    assert expected in texts
+    for original in must_not_change:
+        assert original in texts
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Name of Employer(s):",
+        "NAME OF EMPLOYER(S):",
+        "Name   of   Employer(s):",
+        "  Name of Employer(s):  ",
+    ],
+)
+def test_employer_label_normalization_variants(label):
+    """_squash() promises whitespace- and case-insensitive matching; prove it."""
+    doc = _block_document()
+    generator = _StubGenerator(doc)
+
+    generator._fill_passthrough_sections([_entry(f"{label} Weill Cornell")])
+
+    assert "Name of Current Employer(s):\tWeill Cornell" in _texts(doc)
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["Date of Birth", "Date Submitted", "Project Title", "Application Status"],
+)
+def test_unrelated_labels_are_not_routed_as_employment_rows(label, caplog):
+    """A generic word ("date", "title", "status") alone must not match a row --
+    only that word paired with "employ" (or "position") does (#571 review)."""
+    doc = _block_document()
+    generator = _StubGenerator(doc)
+
+    with caplog.at_level(logging.WARNING):
+        generator._fill_passthrough_sections([_entry(f"{label}: some value")])
+
+    assert not any("some value" in text for text in _texts(doc))
+    assert generator.stats["entries_inserted"] == 0
+    assert any(label in record.getMessage() for record in caplog.records)
+
+
 def test_real_wcm_template_routes_employer_and_status_rows():
     """On the committed October-2022 template, the two real rows fill independently."""
     doc = docx.Document(str(TEMPLATE_PATH))

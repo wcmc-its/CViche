@@ -44,15 +44,23 @@ logger = logging.getLogger(__name__)
 # The Employment Status template rows, recognized by keyword because source CVs
 # word the labels loosely ("Name of Employer(s)", "Current Employer", ...) and
 # template revisions reword them too. Keywords are tested against a _squash()ed
-# label, so wording, spacing and case differences all collapse. The same
-# classifier runs on the entry's label and on the template paragraph's label;
-# an entry is written only into the row that classifies the SAME way, never
-# into whichever row happens to be found first (#571).
+# label, so wording, spacing and case differences all collapse. A row's
+# keywords must ALL appear in the label (not just one) -- a lone generic word
+# like "status" or "date" also shows up in unrelated labels ("Application
+# Status", "Date of Birth") that have nothing to do with employment, so each
+# row pairs its generic word with "employ" to stay specific to this section.
+# Rows are checked in this dict order and the first full match wins; the
+# keyword sets don't overlap so order shouldn't matter in practice, but if a
+# future keyword addition makes two rows match the same label, dict order is
+# the tiebreak. The same classifier runs on the entry's label and on the
+# template paragraph's label; an entry is written only into the row that
+# classifies the SAME way, never into whichever row happens to be found
+# first (#571).
 _EMPLOYMENT_ROW_KEYWORDS: dict[str, tuple[str, ...]] = {
     'employer': ('employer',),
-    'employment status': ('status',),
-    'position/title': ('position', 'title'),
-    'dates of employment': ('date',),
+    'employment status': ('status', 'employ'),
+    'position/title': ('position',),
+    'dates of employment': ('date', 'employ'),
 }
 
 # How many paragraphs past the section anchor may hold its label rows. The
@@ -66,7 +74,7 @@ def _employment_row_key(label: str) -> str | None:
     """Which Employment Status template row a "Label:" belongs to, or None."""
     squashed = _squash(label)
     for row_key, keywords in _EMPLOYMENT_ROW_KEYWORDS.items():
-        if any(keyword in squashed for keyword in keywords):
+        if all(keyword in squashed for keyword in keywords):
             return row_key
     return None
 
