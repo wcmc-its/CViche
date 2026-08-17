@@ -56,8 +56,9 @@ def test_a_stage_exception_fails_the_run_and_stops_the_pipeline(monkeypatch, tmp
     o = _orchestrator(monkeypatch, tmp_path, db, "ERRPOLICY")
     # Raise from the real execute_step's call site (_execute_stage_logic)
     # rather than replacing execute_step itself, so execute_step's own
-    # try/except/raise (orchestrator.py:889-902) is the code under test --
-    # not bypassed by the mock.
+    # try/except/raise -- catch the stage exception, mark the run failed,
+    # re-raise to stop the pipeline -- is the code under test, not bypassed
+    # by the mock.
     monkeypatch.setattr(o, "_execute_stage_logic", _boom)
 
     with pytest.raises(RuntimeError, match="simulated stage failure"):
@@ -69,5 +70,6 @@ def test_a_stage_exception_fails_the_run_and_stops_the_pipeline(monkeypatch, tmp
 
     db.expire_all()
     run = db.query(Run).filter(Run.id == "ERRPOLICY").first()
+    assert run is not None, "run row must survive the failed execute() call"
     assert run.status == "failed"
     assert "simulated stage failure" in run.error_message
