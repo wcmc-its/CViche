@@ -5,6 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
+from app.client_ip import get_client_ip
 from app.database import get_db
 from app.models import User, Consent
 from app.auth import get_current_user
@@ -60,7 +61,7 @@ async def submit_consent(
         user_id=current_user.id,
         consent_version=current_version,
         consent_text_hash=text_hash,
-        ip_address=request.client.host if request.client else None,
+        ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent", "")[:512],
     )
     db.add(consent_record)
