@@ -281,7 +281,11 @@ def _parse_flattened_committee_lines(lines: List[str]) -> List[ParsedActivityLin
     dates_pool: List[str] = []
 
     for line in lines:
-        # Skip empty or header-like lines
+        # entry_lines() already strips every line at both call sites, but this
+        # is a shared pure-parsing function (#625 review) -- don't depend on
+        # that; normalize here too so a header label survives incidental
+        # whitespace regardless of caller.
+        line = line.strip()
         if not line or line.lower() in _COMMITTEE_HEADER_LABELS:
             continue
 

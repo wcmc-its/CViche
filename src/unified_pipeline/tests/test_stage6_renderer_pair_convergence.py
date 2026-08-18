@@ -197,6 +197,27 @@ class TestSectionOBehaviorPinned:
             ("Research Advisory Board", "", ""),
         ]
 
+    def test_bare_parenthetical_line_adds_no_blank_row(self):
+        # A line that is only a parenthetical with no role text, e.g.
+        # "(2010-2013)", parses to activity='' and roles=(). P already skips
+        # this (added by #572); O gained the same guard on review (#625) --
+        # it shares the same parser output and would otherwise add a row with
+        # nothing in it but a date.
+        gen = _generator()
+        entry = {
+            "text": "Real Committee (Chair 1999-2010)\n"
+                    "(2010-2013)\n"
+                    "Another Committee (Member 2015-2020)",
+            "extracted_fields": {},
+            "taxonomy_code": "O",
+        }
+        gen._fill_leadership([entry])
+
+        assert _rows_after(gen, "INSTITUTIONAL LEADERSHIP") == [
+            ("Real Committee (Chair)", "", "1999-2010"),
+            ("Another Committee (Member)", "", "2015-2020"),
+        ]
+
 
 class _NoClinicalTableGenerator(WCMTemplateGenerator):
     """Force every clinical subsection onto its bullet fallback path."""
@@ -218,6 +239,17 @@ def _has_numbering(para):
 
 def _soft_breaks(para):
     return len(para._p.findall(f".//{qn('w:br')}"))
+
+
+class _FundingTableGenerator(WCMTemplateGenerator):
+    """Force the L2 table lookup to return a funding table -- the shape the
+    Award Source/Funding header check exists to reject (#625 review)."""
+
+    def _find_table_after_paragraph(self, para_idx):
+        if not hasattr(self, '_funding_table'):
+            self._funding_table = self.doc.add_table(rows=1, cols=2)
+            self._funding_table.rows[0].cells[0].text = "Award Source"
+        return self._funding_table
 
 
 class TestL2FallbackMatchesL1AndL3:
@@ -242,6 +274,17 @@ class TestL2FallbackMatchesL1AndL3:
         ]
         # No line hides inside a soft break: each is its own list item
         assert all(_soft_breaks(p) == 0 for p in bullets)
+
+    def test_l2_rejects_a_funding_table_and_falls_back_to_bullets(self):
+        gen = _generator(_FundingTableGenerator)
+        entry = {"text": "Piloted a new triage protocol", "extracted_fields": {}, "taxonomy_code": "L2"}
+        gen._fill_clinical_practice({"L2": [entry]})
+
+        # Rejected, not populated: the forced funding table keeps its one row
+        assert len(gen._funding_table.rows) == 1
+        paras = _list_paragraphs_after(gen, "Clinical Innovations", 2)
+        bullets = [p for p in paras if _has_numbering(p)]
+        assert [p.text for p in bullets] == ["Piloted a new triage protocol"]
 
     def test_l2_fallback_renders_exactly_like_l1(self):
         # The convergence claim itself: identical entries through the L1 and
@@ -284,6 +327,28 @@ class TestCitationWritersShareOneSplit:
     def test_split_returns_whole_citation_when_nothing_matches(self):
         before, bold, after = _citation_author_split(self.CITATION, "Nobody Q", "Jones")
         assert (before, bold, after) == (self.CITATION, "", "")
+
+    def test_split_matches_target_name_as_a_substring_not_a_word(self):
+        # Pinned, not endorsed (#625 review): target_name is matched via `in`,
+        # so a short target_name can match inside a longer surname. Both
+        # writers shared this behavior before #572; the shared function keeps
+        # it byte-identical rather than tightening it here.
+        citation = "Wuertz K, Smith J. A study of things. J Things. 2023;1:1-9."
+        before, bold, after = _citation_author_split(citation, "Wu", "Nobody")
+        assert (before, bold, after) == (
+            "", "Wu", "ertz K, Smith J. A study of things. J Things. 2023;1:1-9.")
+
+    def test_split_falls_back_to_owner_last_name_for_a_hyphenated_surname(self):
+        citation = "Alvarez-Diaz M, Smith J. A study of things. J Things. 2023;1:1-9."
+        before, bold, after = _citation_author_split(citation, None, "Alvarez-Diaz")
+        assert (before, bold, after) == (
+            "", "Alvarez-Diaz M", ", Smith J. A study of things. J Things. 2023;1:1-9.")
+
+    def test_split_falls_back_case_insensitively_to_owner_last_name(self):
+        citation = "WENDE ME, Smith J. A study of things. J Things. 2023;1:1-9."
+        before, bold, after = _citation_author_split(citation, None, "wende")
+        assert (before, bold, after) == (
+            "", "WENDE ME", ", Smith J. A study of things. J Things. 2023;1:1-9.")
 
     def test_plain_writer_bolds_through_the_shared_split(self):
         gen = _generator()
@@ -340,7 +405,7 @@ class TestBoardCertClassifierConvergence:
         assert YEAR_PATTERN.match("2004") and not YEAR_PATTERN.match("204")
         assert CERTIFICATE_NUMBER_PATTERN.match("12-34") and not CERTIFICATE_NUMBER_PATTERN.match("12a")
 
-    def test_pipe_and_bare_lines_classify_identically_on_the_wire(self):
+    def test_pipe_and_bare_line_board_cert_formats_render_identical_rows(self):
         gen = _generator()
         # Same tokens once pipe-separated, once one per line; the parser must
         # rebuild the same two rows either way.

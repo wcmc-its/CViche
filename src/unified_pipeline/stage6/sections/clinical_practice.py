@@ -20,7 +20,7 @@ breaks). It splits on newlines so a multi-line source entry becomes one bullet
 per line rather than one bullet containing embedded newlines, and attaches the
 entry's Word comments to the first bullet only.
 """
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from ..formatting import (
     _clear_table_data,
@@ -322,7 +322,7 @@ class ClinicalPracticeSection:
                             )
                             bullet_count += inserted
 
-    def _insert_multiline_as_bullets(self, insert_idx: int, text: str, entry: Dict = None,
+    def _insert_multiline_as_bullets(self, insert_idx: int, text: str, entry: Optional[Dict] = None,
                                        add_blank_before: bool = False) -> int:
         """Insert multi-line text as separate bullets, one per line.
 

@@ -20,6 +20,7 @@ column for them.
 from typing import Dict, List
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
+from ..normalization import _committee_cell_text
 from ..parsing import _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
@@ -90,6 +91,12 @@ class LeadershipSection:
 
     def _add_leadership_row(self, table, role: str, institution: str, dates: str):
         """Add a single row to leadership table."""
+        # Defensive: never write a non-str (dict/list) into a Word cell -- it
+        # raises deep in python-docx and aborts the whole document (#256).
+        # Sibling P's _add_committee_row already does this (#625 review).
+        role = _committee_cell_text(role)
+        institution = _committee_cell_text(institution)
+        dates = _committee_cell_text(dates)
         row = table.add_row()
         num_cols = len(row.cells)
         if num_cols >= 3:
@@ -118,4 +125,10 @@ class LeadershipSection:
                 activity = f"{item.activity} ({'; '.join(item.roles)})"
             else:
                 activity = item.activity
+            # Skip if nothing renderable remains -- matches P's guard on the
+            # same shared parser's output (#625 review); a role-and-date-free
+            # parenthetical (e.g. a bare "(2010-2013)") would otherwise add a
+            # blank leadership row.
+            if not activity:
+                continue
             self._add_leadership_row(table, activity, '', item.dates)
