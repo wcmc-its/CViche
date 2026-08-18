@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Run, User
-from app.auth import decode_session_cookie, COOKIE_NAME
+from app.auth import decode_session_cookie, resolve_session_identity, COOKIE_NAME
 from app.session_idle import get_idle_store
 from app.pipeline.event_emitter import event_emitter
 from app.services.run_service import check_run_access
@@ -78,15 +78,27 @@ async def websocket_stream(websocket: WebSocket, run_id: str):
     from app.auth import get_session_epoch
     db = SessionLocal()
     try:
-        # Same global revocation gate as get_current_user -- this is the second
-        # cookie-decode site, so a revoked/old-epoch cookie must be rejected here
-        # too or a long-lived socket would outlive a "sign out everyone".
-        if int(payload.get("epoch", 0)) != get_session_epoch(db):
+        # Resolve identity (user_id, epoch) the same way get_current_user does
+        # (see resolve_session_identity) -- this is the second cookie-decode
+        # site, so it must not trust a thin {sid}-only payload directly. A
+        # thin cookie with no resolvable store record has no identity to fall
+        # back to -- the same signal as an idle timeout.
+        identity = resolve_session_identity(payload)
+        if identity is None:
+            await websocket.accept()
+            await websocket.close(code=4001, reason="Session timed out")
+            return
+        resolved_user_id, resolved_epoch = identity
+
+        # Same global revocation gate as get_current_user -- a revoked/old-epoch
+        # cookie must be rejected here too or a long-lived socket would outlive
+        # a "sign out everyone".
+        if resolved_epoch != get_session_epoch(db):
             await websocket.accept()
             await websocket.close(code=4001, reason="Session expired")
             return
 
-        user = db.query(User).filter(User.id == payload["user_id"]).first()
+        user = db.query(User).filter(User.id == resolved_user_id).first()
         if not user or user.status != "active":
             await websocket.accept()
             await websocket.close(code=4001, reason="User not found or disabled")

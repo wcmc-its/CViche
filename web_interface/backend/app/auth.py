@@ -92,16 +92,29 @@ def create_session_cookie(user: User, epoch: int = 0) -> str:
     # Valkey (independent of the absolute cookie TTL). Seeded here so every cookie
     # mint (login / SAML ACS) starts an idle key in lockstep with the cookie.
     sid = secrets.token_urlsafe(18)
-    payload = {
-        "user_id": user.id,
-        "email": user.email,
-        "role": user.role,
-        # Stamp the revocation epoch in force at mint time (see get_session_epoch).
-        "epoch": epoch,
-        "issued_at": int(time.time()),
-        "sid": sid,
-    }
-    get_idle_store().start(sid)
+    store = get_idle_store()
+    store.start(sid, user.id, epoch)
+
+    # Thin vs. rich payload (#368): when the idle store is enabled, identity
+    # is resolved server-side from the store record just written above, so the
+    # cookie itself only needs to carry the sid -- a leaked
+    # CVICHE_SESSION_SECRET alone is no longer enough to mint a session for an
+    # arbitrary user, since the attacker would also need a live,
+    # store-registered sid. When the store is disabled (no CVICHE_REDIS_URL --
+    # local/dev/docker-compose default), there's nowhere server-side to
+    # resolve identity from, so keep minting today's self-contained payload.
+    if store.enabled:
+        payload = {"sid": sid}
+    else:
+        payload = {
+            "user_id": user.id,
+            "email": user.email,
+            "role": user.role,
+            # Stamp the revocation epoch in force at mint time (see get_session_epoch).
+            "epoch": epoch,
+            "issued_at": int(time.time()),
+            "sid": sid,
+        }
     return _serializer.dumps(payload)
 
 
@@ -110,6 +123,28 @@ def decode_session_cookie(cookie_value: str) -> dict | None:
         return _serializer.loads(cookie_value, max_age=SESSION_TTL)
     except (BadSignature, SignatureExpired):
         return None
+
+
+def resolve_session_identity(payload: dict) -> tuple[int, int] | None:
+    """Resolve (user_id, epoch) for a decoded session payload.
+
+    Tries the server-side store first via the payload's sid -- authoritative
+    whether the cookie is today's thin {sid}-only shape or a legacy rich one
+    whose sid happens to be store-registered. Falls back to the payload's own
+    embedded fields when the store returns nothing (disabled, unreachable, or
+    no record for this sid): this is the backward-compat path so sessions
+    already in flight at deploy time keep working without a forced re-login.
+    Returns None only when neither source has an identity to offer (a thin
+    cookie with no resolvable store record) -- there is nothing safe to fall
+    back to, and the caller must reject the request rather than trust it.
+    """
+    sid = payload.get("sid")
+    resolved = get_idle_store().resolve(sid) if sid else None
+    if resolved is not None:
+        return int(resolved["user_id"]), int(resolved.get("epoch", 0))
+    if "user_id" in payload:
+        return int(payload["user_id"]), int(payload.get("epoch", 0))
+    return None
 
 
 def _best_effort_commit(db: Session, what: str) -> bool:
@@ -150,17 +185,31 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
             detail={"error": "auth_required", "message": "Session expired. Please log in again."}
         )
 
+    # Resolve identity (user_id, epoch) server-side when possible; falls back
+    # to the payload's embedded fields for legacy/unregistered sessions. See
+    # resolve_session_identity(). A thin cookie has no embedded fields to fall
+    # back to, so an unresolved lookup here means the store record this cookie
+    # depends on is gone -- functionally the same signal as an idle timeout.
+    identity = resolve_session_identity(payload)
+    if identity is None:
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "session_idle",
+                    "message": "Your session timed out due to inactivity. Please log in again."}
+        )
+    resolved_user_id, resolved_epoch = identity
+
     # Global revocation gate: a cookie minted before the current session epoch
     # (bumped by the admin "sign out everyone" action) is dead. A missing epoch
     # -- cookies minted before this feature shipped -- is read as 0, so the
     # rollout itself does not force a mass re-login; the first epoch bump does.
-    if int(payload.get("epoch", 0)) != get_session_epoch(db):
+    if resolved_epoch != get_session_epoch(db):
         raise HTTPException(
             status_code=401,
             detail={"error": "auth_required", "message": "Session expired. Please log in again."}
         )
 
-    user = db.query(User).filter(User.id == payload["user_id"]).first()
+    user = db.query(User).filter(User.id == resolved_user_id).first()
     if not user:
         raise HTTPException(
             status_code=401,

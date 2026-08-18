@@ -32,14 +32,14 @@ def _fake_store(ttl=1200):
 def test_disabled_store_is_noop_and_fails_open():
     store = IdleSessionStore("", 1200)
     assert store.enabled is False
-    store.start("s1")          # no-op, must not raise
+    store.start("s1", user_id=1, epoch=0)          # no-op, must not raise
     assert store.touch("s1") is True   # disabled -> always active
     store.end("s1")
 
 
 def test_start_then_touch_keeps_session_active():
     store = _fake_store()
-    store.start("s1")
+    store.start("s1", user_id=1, epoch=0)
     assert store.touch("s1") is True
 
 
@@ -51,14 +51,14 @@ def test_touch_without_start_is_expired():
 
 def test_touch_after_expiry_is_rejected():
     store = _fake_store(ttl=1)
-    store.start("s1")
+    store.start("s1", user_id=1, epoch=0)
     time.sleep(1.1)
     assert store.touch("s1") is False
 
 
 def test_touch_slides_the_window():
     store = _fake_store(ttl=100)
-    store.start("s1")
+    store.start("s1", user_id=1, epoch=0)
     key = "cviche:session:idle:s1"
     store._client.expire(key, 5)          # pretend it's about to lapse
     assert store.touch("s1") is True
@@ -67,7 +67,7 @@ def test_touch_slides_the_window():
 
 def test_end_deletes_key():
     store = _fake_store()
-    store.start("s1")
+    store.start("s1", user_id=1, epoch=0)
     store.end("s1")
     assert store.touch("s1") is False
 

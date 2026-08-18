@@ -26,9 +26,19 @@ safely:
 
 Cookies minted before this feature shipped carry no ``sid``; callers skip the
 check for them, so they remain bounded by the absolute cookie TTL only.
+
+As of #368, when this store is enabled the Valkey value is no longer the bare
+marker string "1" -- it's a JSON blob carrying identity ({user_id, epoch,
+issued_at}). The key is then the session's identity of record, not just an
+idle marker: auth.py mints a thin, identity-free cookie and resolves the real
+user_id/epoch here on every request via ``resolve()``. ``touch()``/``end()``
+never need to parse the value, so their fail-open/no-op behavior and key
+format are unchanged.
 """
+import json
 import logging
 import threading
+import time
 
 from app.config_loader import get_config
 from app.services.config_service import SESSION_IDLE_TIMEOUT
@@ -71,15 +81,50 @@ class IdleSessionStore:
                     )
         return self._client
 
-    def start(self, sid: str) -> None:
-        """Seed a session's idle key at login with the full TTL."""
+    def start(self, sid: str, user_id: int, epoch: int) -> None:
+        """Seed a session's idle key at login with the full TTL, storing the
+        session's identity ({user_id, epoch, issued_at}) as the value so
+        resolve() can serve it back as the session's identity of record."""
         if not self.enabled or not sid:
             return
+        value = json.dumps({
+            "user_id": user_id,
+            "epoch": epoch,
+            "issued_at": int(time.time()),
+        })
         try:
-            self._redis().set(_KEY.format(sid=sid), "1", ex=self.ttl)
+            self._redis().set(_KEY.format(sid=sid), value, ex=self.ttl)
         except Exception:
             # Fail open: a login must not break because Valkey is unreachable.
             logger.warning("Idle-session start failed (failing open)", exc_info=True)
+
+    def resolve(self, sid: str) -> dict | None:
+        """Resolve a session's identity ({user_id, epoch, issued_at}) from the
+        store, or None if it can't be resolved.
+
+        Unlike touch()'s fail-OPEN idle check, this fails CLOSED: enforcement
+        disabled, no sid, Valkey unreachable, the key absent/expired, or a
+        value that doesn't parse as the expected shape (e.g. a pre-#368 key
+        still holding the bare "1" marker) all return None rather than
+        inventing an identity. The caller's job on None is to fall back to
+        the cookie's own embedded payload, not to trust a partial result.
+        """
+        if not self.enabled or not sid:
+            return None
+        try:
+            raw = self._redis().get(_KEY.format(sid=sid))
+        except Exception:
+            logger.warning("Idle-session resolve failed (failing closed)", exc_info=True)
+            return None
+        if raw is None:
+            return None
+        try:
+            data = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(data, dict) or "user_id" not in data:
+            return None
+        return data
 
     def touch(self, sid: str) -> bool:
         """Slide the idle window for an active session.
