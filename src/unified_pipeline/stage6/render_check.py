@@ -51,9 +51,12 @@ RETIRED_TAXONOMY_CODES = MappingProxyType({
 def normalize_retired_code(entry: Dict) -> str:
     """Rewrite a retired taxonomy code on ``entry`` to its live equivalent.
 
-    Preserves the pre-normalization code under ``taxonomy_code_original`` (same
-    convention as the #261 mismatch path) and returns the effective code. A
-    non-retired code is returned unchanged and the entry is left untouched.
+    Mutates ``entry`` IN PLACE when its code is retired: sets
+    ``taxonomy_code`` to the live code and preserves the pre-normalization
+    code under ``taxonomy_code_original`` (same convention as the #261
+    mismatch path). Returns the effective code either way. A non-retired
+    code is returned unchanged and the entry is left untouched -- callers
+    that need the original entry preserved must copy it first.
     """
     code = entry.get('taxonomy_code', 'T')
     live = RETIRED_TAXONOMY_CODES.get(code)
@@ -70,6 +73,11 @@ _IDENTIFYING_FIELDS = (
     'title', 'project_title', 'agency', 'award_source',
     'mentee_name', 'organization', 'grant_number',
 )
+
+# A title this short can't identify a record on its own ("Professor",
+# "Chair") -- see the conjunction rule below, which requires it alongside
+# both date endpoints and (when present) the institution.
+SHORT_TITLE_MAX_CHARS = 15
 
 # Month words (>=4 alphabetic chars) allowed inside a date-like field value.
 _MONTH_WORDS = frozenset((
@@ -133,7 +141,7 @@ def segment_already_rendered(segment_text: str, extracted_fields: Dict) -> bool:
     # so the recovery token check alone can't recognize it as rendered.
     title = _norm_val(extracted_fields.get('title')
                       or extracted_fields.get('project_title'))
-    if not (title and len(title) < 15 and _word_in_seg(title)):
+    if not (title and len(title) < SHORT_TITLE_MAX_CHARS and _word_in_seg(title)):
         return False
     dates = [_norm_val(d) for d in (extracted_fields.get('start_date'),
                                     extracted_fields.get('end_date'))]
@@ -170,6 +178,13 @@ RENDER_PIECE_WINDOW = 40
 # beyond the bare date range.
 UNRENDERED_MIN_RECORD_LINES = 2
 RECORD_DATE_LINE_MIN_CHARS = 20
+# ponytail: deliberately recall-favoring -- a line that merely LOOKS like a
+# date-range record (e.g. a sentence that happens to open "1969 - the year
+# the department was founded...") can false-positive into _record_lines. No
+# corpus-observed instance of that yet; tightening it risks the opposite,
+# worse failure (a genuine record line no longer counted, so it's silently
+# never re-verified by the recovery pass at all -- see _record_rendered).
+# Revisit with corpus evidence before narrowing.
 _RECORD_DATE_PREFIX_RE = re.compile(r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]")
 
 

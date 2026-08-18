@@ -90,11 +90,33 @@ def _drop_is_safe(dropped_entry: Dict, kept_entry: Dict) -> bool:
     every significant word of a token-rich dropped entry appears in the kept
     entry (both are true-duplicate shapes) AND the kept entry is not a fused
     multi-record blob, or the dropped entry is a fused multi-record candidate —
-    those the #221/#225 recovery pass re-verifies line by line against the
+    those the #221/#225 recovery pass (`WCMTemplateGenerator._recover_unrendered_records`,
+    `stage_6_word_template.py`, called on the PRE-dedup snapshot so a dropped
+    entry's lines are still checked) re-verifies line by line against the
     rendered document. A single-line entry that merely SCORES similar is the
     #227 loss class: distinct records sharing role/date/venue boilerplate (7 of
     8 drops on 2Q1_ZQ were real content loss, all single-line); a distinct
-    record swallowed by a fused table blob is the same loss class (C0ZGFW)."""
+    record swallowed by a fused table blob is the same loss class (C0ZGFW).
+
+    #666 (adversarially re-checked, not yet fixed): all three branches below
+    can approve an unsafe drop for realistic prose CV entries, not just the
+    final fallback. The shared root cause is _record_lines()'s narrow shape
+    (pipe/tab row, or a line-initial date-range prefix) -- an ordinary
+    single-paragraph entry (a mentee mention, a committee-succession
+    sentence) has ZERO record lines, so _recover_unrendered_records skips it
+    entirely and the "#221/#225 will catch it" assumption below never
+    engages for that entry at all, regardless of which branch dropped it.
+    Confirmed with repros: two distinct mentees fused into one un-split
+    entry defeats the verbatim-containment branch (one mentee's text is a
+    literal substring of the fused pair's text); two distinct multi-year
+    committee/board memberships defeat the subset-containment branch when
+    one entry's narrative prose mentions the other's identifying nouns and
+    years in passing (successor-committee framing). The final fallback has
+    its own additional, narrower hole: the recovery pass's own token-overlap
+    check (`_RENDER_TOKEN_RE`) is digit-blind, so even a fused entry that
+    DOES clear the record-line threshold can still evade recovery if two
+    records differ only by date. Corpus-verified fix needed before any of
+    this changes; see the issue for candidate directions."""
     dropped_squashed = _squash(dropped_entry.get('text', ''))
     if dropped_squashed and dropped_squashed in _squash(kept_entry.get('text', '')):
         return True
@@ -127,6 +149,15 @@ def deduplicate_entries(entries: List[Dict], verbose: bool = False,
     values plus dropped/kept text) so the caller can persist the decision
     trail for the run doctor (#227: at these thresholds a drop is not always
     a true duplicate).
+
+    Pairwise and order-dependent by design, not clustered: entries are
+    compared left-to-right and a drop removes that index from further
+    comparison (see the `break` below), so for A~B~C where A and C aren't
+    themselves similar enough to pair directly, which of {A, B} survives
+    depends on iteration order. Deliberate trade-off, not an oversight —
+    building duplicate clusters and picking one canonical record per cluster
+    would need its own corpus-verified safety pass; documented here instead
+    of changed blind.
     """
     if len(entries) <= 1:
         return entries

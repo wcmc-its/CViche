@@ -154,11 +154,24 @@ _RELOCATED_CASES = [
 
 @pytest.mark.parametrize("home,name", _RELOCATED_CASES)
 def test_relocated_name_still_importable_from_stage6_module(home, name):
-    """The old address keeps working: stage_6_word_template re-exports it."""
-    mod = importlib.import_module("unified_pipeline.stage_6_word_template")
-    assert hasattr(mod, name), (
+    """The old address is a facade over the new one, not a stale duplicate.
+
+    hasattr() alone only proves both modules expose *a* name -- it would
+    still pass if stage_6_word_template.py kept its own copy of the
+    implementation while stage6/ grew a second, independent one. Comparing
+    identity proves it is the SAME object: a straight re-export, one
+    implementation, two addresses.
+    """
+    legacy = importlib.import_module("unified_pipeline.stage_6_word_template")
+    new = importlib.import_module(home)
+    assert hasattr(legacy, name), (
         f"'{name}' moved to {home} but is no longer re-exported from "
         f"stage_6_word_template -- existing callers import it by the old name."
+    )
+    assert getattr(legacy, name) is getattr(new, name), (
+        f"'{name}' resolves in both stage_6_word_template and {home}, but to "
+        f"two DIFFERENT objects -- stage_6_word_template is not re-exporting "
+        f"the {home} implementation, it has a stale duplicate."
     )
 
 
