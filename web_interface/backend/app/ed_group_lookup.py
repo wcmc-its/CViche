@@ -214,7 +214,10 @@ def _ldap_check_membership(cwid: str, group_dn: str, cfg: LDAPConfig) -> bool:
         )
 
         if not conn.entries:
-            logger.debug("No LDAP entry found for cwid=%s", cwid)
+            logger.warning(
+                "No ED directory entry for cwid=%s (not in directory -- "
+                "distinct from not-in-group)", cwid
+            )
             return False
 
         user_entry = conn.entries[0]

@@ -514,6 +514,35 @@ class TestGroupOfURLsMembership:
         )
         assert result is True
 
+
+class TestNotInDirectoryLogging:
+    """#422: no LDAP entry for the cwid must log distinctly from 'not in
+    group', at a level visible in prod (default level is INFO)."""
+
+    @patch("app.ed_group_lookup.Connection")
+    @patch("app.ed_group_lookup.Server")
+    def test_no_ldap_entry_logs_warning_distinct_from_not_in_group(
+        self, _mock_server_cls, mock_conn_cls, caplog
+    ):
+        """No entries come back for the uid= lookup -> WARNING log containing
+        'not in directory', and the function still returns False."""
+        mock_conn = MagicMock()
+        mock_conn_cls.return_value = mock_conn
+        mock_conn.entries = []  # user lookup finds nothing
+
+        with caplog.at_level("WARNING", logger="app.ed_group_lookup"):
+            result = _ldap_check_membership(
+                cwid="ghost0001",
+                group_dn=_GOU_GROUP_DN,
+                **LDAP_PARAMS,
+            )
+
+        assert result is False
+        assert any(
+            record.levelname == "WARNING" and "not in directory" in record.getMessage()
+            for record in caplog.records
+        )
+
 # ---------------------------------------------------------------------------
 # Integration tests: ACS handler ED wiring
 # ---------------------------------------------------------------------------
