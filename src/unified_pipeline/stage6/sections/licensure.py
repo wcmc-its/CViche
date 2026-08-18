@@ -78,17 +78,18 @@ def _classify_licensure_entry(state: str, license_number: str,
     NPI by shape alone -- shape-first classification consumed real state
     licences (#573).
     """
-    if not license_number:
-        return KIND_LICENSE
-    label = license_type.lower()
+    label = str(license_type or '').lower()
+    text = str(original_text or '')
     if 'npi' in label:
         return KIND_NPI
     if 'dea' in label:
         return KIND_DEA
-    if _NPI_LABEL_RE.search(original_text):
+    if _NPI_LABEL_RE.search(text):
         return KIND_NPI
-    if _DEA_LABEL_RE.search(original_text):
+    if _DEA_LABEL_RE.search(text):
         return KIND_DEA
+    if not license_number:
+        return KIND_LICENSE
     if not state:
         if _NPI_SHAPE_RE.match(license_number):
             return KIND_NPI
@@ -107,7 +108,7 @@ def _claim_identifier_slot(slot_name: str, current: str | None,
     if current and current != candidate:
         logger.warning(
             "F1: second %s candidate %r (entry text %r) ignored; keeping %r",
-            slot_name, candidate, original_text[:80], current)
+            slot_name, candidate, original_text[:40], current)
         return current
     return candidate
 
@@ -151,11 +152,14 @@ class LicensureSection:
 
         for entry in sorted_entries:
             fields = entry.get('extracted_fields', {}) or {}
-            original_text = entry.get('text', '')
+            original_text = str(entry.get('text') or '')
 
             state = fields.get('state_country') or fields.get('state') or fields.get('jurisdiction') or ''
-            license_number = fields.get('license_number') or fields.get('number') or ''
+            license_number = str(fields.get('license_number') or fields.get('number') or '').strip()
             issue_date = fields.get('issue_date') or fields.get('date') or ''
+            # WCM's template column is "Date of last registration"; stage 4's
+            # extraction schema has no separate field for it, so the closest
+            # available value -- expiration_date -- is what fills it.
             expiration_date = fields.get('expiration_date') or ''
 
             # NPI/DEA vs state licence: label first, shape as tiebreak (#573)
@@ -179,9 +183,13 @@ class LicensureSection:
                     'issue_date': format_date_for_section(issue_date, 'F1') if issue_date else '',
                     'expiration_date': format_date_for_section(expiration_date, 'F1') if expiration_date else ''
                 })
-            elif original_text and not (_NPI_LABEL_RE.search(original_text) or
-                                        _DEA_LABEL_RE.search(original_text)):
-                # Fallback to raw text for unstructured entries
+            elif original_text:
+                # Fallback to raw text for unstructured entries. No NPI/DEA
+                # label re-check here: _classify_licensure_entry() already
+                # tests original_text for both labels before returning
+                # KIND_LICENSE, so reaching this branch already proves
+                # neither label is present -- re-testing it here would only
+                # duplicate the classifier's own answer (#573 review).
                 regular_licenses.append({
                     'state': original_text[:100],
                     'license_number': '',
@@ -201,6 +209,10 @@ class LicensureSection:
             elif num_cols >= 2:
                 row.cells[0].text = lic['state'] or ''
                 row.cells[1].text = lic['license_number'] or ''
+            else:
+                # Table narrower than the fallback can address -- nothing
+                # was written, so don't count it as inserted.
+                continue
 
             for cell in row.cells:
                 for para in cell.paragraphs:
@@ -211,22 +223,24 @@ class LicensureSection:
         # Fill DEA/NPI table (Table 9 in template)
         self._fill_dea_npi(dea_number, npi_number)
 
-    def _fill_dea_npi(self, dea_number: str, npi_number: str):
+    def _fill_dea_npi(self, dea_number: str | None, npi_number: str | None):
         """Fill DEA and NPI numbers in their dedicated table.
 
         The WCM template has a 2-row table:
         Row 0: DEA number: (optional) | [value]
         Row 1: NPI number: (optional) | [value]
-        """
-        if not dea_number and not npi_number:
-            return
 
+        Always finds the table and sets both cells (blanking whichever value
+        is absent) rather than returning early when both are empty, so a
+        second call on a reused document/generator can't leave a stale
+        value from an earlier call in place.
+        """
         # Find the DEA/NPI table by looking for a table containing "DEA number"
         dea_npi_table = None
         for table in self.doc.tables:
             for row in table.rows:
                 for cell in row.cells:
-                    if 'DEA number' in cell.text:
+                    if 'dea number' in cell.text.lower():
                         dea_npi_table = table
                         break
                 if dea_npi_table:
@@ -241,13 +255,13 @@ class LicensureSection:
         for row in dea_npi_table.rows:
             if len(row.cells) >= 2:
                 label = row.cells[0].text.lower()
-                if 'dea' in label and dea_number:
-                    row.cells[1].text = dea_number
+                if 'dea' in label:
+                    row.cells[1].text = dea_number or ''
                     for para in row.cells[1].paragraphs:
                         for run in para.runs:
                             _set_font(run)
-                elif 'npi' in label and npi_number:
-                    row.cells[1].text = npi_number
+                elif 'npi' in label:
+                    row.cells[1].text = npi_number or ''
                     for para in row.cells[1].paragraphs:
                         for run in para.runs:
                             _set_font(run)

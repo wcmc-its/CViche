@@ -31,6 +31,7 @@ boundary, so tabs become ", " rather than rendering as a run of whitespace.
 `field_of_study` is appended only when it is not already contained in the type,
 which is common once the tab join has run.
 """
+import re
 from typing import Dict, List
 
 from ..formatting import _clear_table_data, format_date_range
@@ -49,6 +50,30 @@ from ..sorting import sort_entries_reverse_chronological
 POSTDOC_TRAINING_CODES = ('C', 'C1', 'C2', 'C3')
 
 
+def _join_if_list(value) -> str:
+    """A fused multi-record entry (one training block extracted from
+    several source records) extracts a field like training_type as a list,
+    one item per record, instead of a string (corpus CV FIHL8A). Any other
+    non-string value is coerced too, so downstream string methods never see
+    a non-str."""
+    if isinstance(value, (list, tuple)):
+        return ', '.join(str(v).strip() for v in value if str(v).strip())
+    return str(value or '')
+
+# Missing training_type/title used to fall back to the single word
+# "Postdoctoral" for every code, which mislabels a C2 residency or C3
+# fellowship. Keyed by taxonomy code so the fallback names the actual
+# training type (#573 review).
+DEFAULT_TRAINING_TYPES = {
+    'C': 'Postdoctoral',
+    'C1': 'Postdoctoral Research',
+    'C2': 'Residency',
+    'C3': 'Fellowship',
+}
+
+INSTITUTION_ENRICHMENT_REASON = "Institution Enrichment"
+
+
 class PostdocTrainingSection:
     """Section C / C1 / C2 / C3 writers, mixed into `WCMTemplateGenerator`."""
 
@@ -57,8 +82,14 @@ class PostdocTrainingSection:
 
         Track changes are used for city/state from institution enrichment only.
         """
+        # entries_by_code's key is the authoritative routing code -- stamp it
+        # onto a shallow copy of each entry rather than trusting (or
+        # mutating) whatever the entry's own 'taxonomy_code' field says, so
+        # a C3 entry can't silently fall back to the generic C date rule if
+        # that field is missing or disagrees with how it was routed (#573
+        # review).
         training_entries = [
-            entry
+            {**entry, 'taxonomy_code': code}
             for code in POSTDOC_TRAINING_CODES
             for entry in entries_by_code.get(code, [])
         ]
@@ -87,15 +118,25 @@ class PostdocTrainingSection:
         sorted_entries = sort_entries_reverse_chronological(training_entries)
 
         for entry in sorted_entries:
-            fields = entry.get('extracted_fields', {})
+            fields = entry.get('extracted_fields') or {}
+            # entries_by_code stamped this above; it's authoritative.
+            taxonomy_code = entry.get('taxonomy_code', 'C')
 
-            # Training type/title (clean up tabs that may have been extracted)
-            training_type = fields.get('training_type', '') or fields.get('title', 'Postdoctoral')
+            # Training type/title (clean up tabs that may have been extracted).
+            # Default by taxonomy code -- C1/C2/C3 are postdoctoral research,
+            # residency and fellowship respectively, so a blanket "Postdoctoral"
+            # mislabels a residency or fellowship with no extracted title.
+            training_type = (fields.get('training_type', '') or fields.get('title', '')
+                             or DEFAULT_TRAINING_TYPES.get(taxonomy_code, 'Postdoctoral'))
+            # A fused multi-record entry extracts these as a list, one item
+            # per record (corpus CV FIHL8A), not a string -- join before any
+            # string method sees it.
+            training_type = _join_if_list(training_type)
             # Replace tabs with comma-space for cleaner display
             if '\t' in training_type:
                 training_type = ', '.join(part.strip() for part in training_type.split('\t') if part.strip())
-            field_of_study = fields.get('field_of_study', '') or fields.get('specialty', '')
-            if field_of_study and field_of_study not in training_type:
+            field_of_study = _join_if_list(fields.get('field_of_study', '') or fields.get('specialty', ''))
+            if field_of_study and field_of_study.casefold() not in training_type.casefold():
                 training_type = f"{training_type}, {field_of_study}" if training_type else field_of_study
 
             # Institution with location from enrichment
@@ -110,9 +151,6 @@ class PostdocTrainingSection:
 
             # Location from Stage 5b enrichment
             location, location_is_enriched = _get_institution_location(entry)
-
-            # Get taxonomy code for this entry (C, C1, C2 or C3)
-            taxonomy_code = entry.get('taxonomy_code', 'C')
 
             # Dates - format according to C/C1/C2 requirements (mm/yy - mm/yy)
             start = fields.get('start_date', '')
@@ -129,8 +167,10 @@ class PostdocTrainingSection:
                 location_parts = location.split(',')
                 if location_parts:
                     city = location_parts[0].strip()
-                    # Check for city name in institution (case-insensitive)
-                    if city.lower() in institution.lower():
+                    # Word-boundary match so a short city name can't match
+                    # inside an unrelated longer word in the institution name.
+                    if city and re.search(r'\b' + re.escape(city) + r'\b',
+                                          institution, re.IGNORECASE):
                         location_already_present = True
 
             if location and location_is_enriched and not location_already_present:
@@ -138,10 +178,10 @@ class PostdocTrainingSection:
                 if institution:
                     institution_content = [
                         (institution, False, ""),
-                        (f", {location}", True, "Institution Enrichment")
+                        (f", {location}", True, INSTITUTION_ENRICHMENT_REASON)
                     ]
                 else:
-                    institution_content = [(location, True, "Institution Enrichment")]
+                    institution_content = [(location, True, INSTITUTION_ENRICHMENT_REASON)]
             elif location and not location_already_present:
                 institution_full = f"{institution}, {location}" if institution else location
                 institution_content = [(institution_full, False, "")]

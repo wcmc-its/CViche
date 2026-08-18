@@ -2840,7 +2840,7 @@ Now analyze the text above:"""
         # Skip for K-codes (teaching entries) since they have free-form content like director names
         # that aren't separate extraction fields, and skip if Stage 5c has already formatted the entry
         taxonomy_code = entry.get('taxonomy_code', '')
-        fields = entry.get('extracted_fields', {})
+        fields = entry.get('extracted_fields') or {}
         is_k_code = taxonomy_code.startswith('K')
         has_formatted_text = fields.get('formatted_text') or fields.get('formatting_source') == 'stage_5c_llm'
 
@@ -2883,7 +2883,7 @@ Now analyze the text above:"""
                 })
 
         # Comments in extracted_fields
-        fields = entry.get('extracted_fields', {})
+        fields = entry.get('extracted_fields') or {}
         if fields.get('comment'):
             comments_to_add.append({
                 'text': fields['comment'],

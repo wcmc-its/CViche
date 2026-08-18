@@ -27,7 +27,7 @@ def extract_sort_date(entry: Dict) -> tuple:
     Returns:
         Tuple (year, month, day) for sorting
     """
-    fields = entry.get('extracted_fields', {})
+    fields = entry.get('extracted_fields') or {}
 
     # Try various date fields in order of preference
     date_candidates = [

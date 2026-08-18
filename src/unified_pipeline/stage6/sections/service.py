@@ -54,6 +54,11 @@ BOARD_KEYWORDS = (
     'committee', 'board member', 'panel member', 'council', 'task force',
     'working group', 'planning committee', 'advisory', 'moderator',
 )
+# A multi-line Q2 entry's trailing date-only lines (e.g. "2014, 2017-2020")
+# describe the line before them; nothing else should be treated as a
+# continuation (#573 review).
+_DATE_ONLY_LINE_RE = re.compile(
+    r'^\d{4}(?:\s*[-–,]\s*(?:\d{4}|present|current))*\s*$', re.IGNORECASE)
 
 
 class ServiceSection:
@@ -99,35 +104,74 @@ class ServiceSection:
             # Check if this is a multi-line entry with mixed activities
             lines = entry_lines(text)
             if len(lines) > 1:
-                # Split into journal reviewing and board entries
+                # Split into journal reviewing and board entries. A bare
+                # date-only continuation line is appended to the text of
+                # the *previous* line rather than starting a new
+                # board-defaulted entry -- the old default put stray dates
+                # in the board entry even when the line they described was
+                # rerouted to journal reviewing, and each journal_lines item
+                # becomes its own synthetic entry below, so a continuation
+                # must extend the existing line rather than adding a new
+                # one (#573 review). Gated on actually looking like a date
+                # -- an unclassified *content* line (neither pattern list
+                # matches it, e.g. "Academic Pediatrics Journal Reviewer",
+                # which REVIEWER_PATTERNS doesn't cover) must still become
+                # its own board_lines item, not get silently absorbed into
+                # whatever line happened to precede it.
                 journal_lines = []
                 board_lines = []
+                last_group = None
 
                 for line in lines:
                     line_lower = line.lower()
                     is_reviewer_line = any(p in line_lower for p in REVIEWER_PATTERNS)
                     is_board_line = any(kw in line_lower for kw in BOARD_KEYWORDS)
 
+                    if (not is_reviewer_line and not is_board_line and last_group
+                            and _DATE_ONLY_LINE_RE.match(line)):
+                        last_group[-1] = f"{last_group[-1]} {line}"
+                        continue
+
                     if is_reviewer_line and not is_board_line:
                         journal_lines.append(line)
+                        last_group = journal_lines
                     else:
                         board_lines.append(line)
+                        last_group = board_lines
 
-                # Create separate entries for journal reviewing lines
+                # Create separate entries for journal reviewing lines. Carry
+                # only the parent entry's date fields forward, not its
+                # identity fields (organization/committee_name/role/
+                # journal_name) -- a fused multi-line entry can mix several
+                # unrelated activities under ONE set of extracted_fields
+                # (corpus CV HU4DXA: "NY Regional...Panel Member" carries
+                # committee_name/dates for *that* line, followed by twelve
+                # unrelated reviewer/board lines), and identity fields
+                # belong to whichever line they were extracted from, not
+                # to every sibling line in the same fused block. Dates are
+                # comparatively safe to share (the reviewer's actual ask:
+                # don't silently drop them) and _fill_journal_reviewing
+                # already parses a missing journal name from jline's own
+                # raw text, which is correct per-line where committee_name
+                # would just repeat the first line's value on every entry.
+                date_fields = {k: v for k, v in fields.items()
+                               if k in ('start_date', 'end_date', 'year')}
                 for jline in journal_lines:
                     new_entry = {
                         'text': jline,
                         'taxonomy_code': 'Q4D',
                         'rerouted_from_q2': True,
-                        'extracted_fields': {'organization': jline}
+                        'extracted_fields': dict(date_fields),
                     }
                     rerouted_to_journal.append(new_entry)
 
-                # Keep remaining lines as board entry (if any)
+                # Keep remaining lines as a board entry (if any), as a new
+                # dict rather than a mutation of the shared original -- the
+                # same entry object also lives in the flattened all_entries
+                # list the orchestrator builds from entries_by_code (#573
+                # review).
                 if board_lines:
-                    # Update the original entry to only contain board lines
-                    entry['text'] = '\n'.join(board_lines)
-                    actual_board_entries.append(entry)
+                    actual_board_entries.append({**entry, 'text': '\n'.join(board_lines)})
 
             else:
                 # Single-line entry - classify based on content
@@ -143,10 +187,10 @@ class ServiceSection:
                 is_board_entry = any(kw in text_lower for kw in BOARD_KEYWORDS)
 
                 if is_journal_reviewer and not is_board_entry:
-                    # This looks like journal reviewing, reroute to Q4D
-                    entry['taxonomy_code'] = 'Q4D'
-                    entry['rerouted_from_q2'] = True
-                    rerouted_to_journal.append(entry)
+                    # This looks like journal reviewing, reroute to Q4D --
+                    # as a copy, not a mutation of the shared original.
+                    rerouted_to_journal.append(
+                        {**entry, 'taxonomy_code': 'Q4D', 'rerouted_from_q2': True})
                 else:
                     actual_board_entries.append(entry)
 
@@ -185,8 +229,9 @@ class ServiceSection:
         # Find the Service on Boards section
         service_idx = self._find_paragraph_with_text("Service on Boards")
         if service_idx is None:
-            if self.verbose:
-                print(f"  Warning: Could not find section for Service on Boards")
+            logger.warning(
+                "Service on Boards: section not found in template; "
+                "%d entries not rendered", len(entries))
             return
 
         # Find Regional, National, and International subsection tables
@@ -211,8 +256,9 @@ class ServiceSection:
                 tables_by_scope['National'] = table
 
         if not tables_by_scope:
-            if self.verbose:
-                print(f"  Warning: Could not find any table for Service on Boards")
+            logger.warning(
+                "Service on Boards: no Regional/National/International table "
+                "found in template; %d entries not rendered", len(entries))
             return
 
         # Clear tables and mark as populated
@@ -237,9 +283,15 @@ class ServiceSection:
             if not scope_entries:
                 continue
 
-            # Find the table for this scope (fall back to National)
+            # Fall back to the National table when this scope has none of
+            # its own -- but only if a National table was actually found;
+            # if that's also missing, the entries have nowhere to go.
             table = tables_by_scope.get(scope) or tables_by_scope.get('National')
             if not table:
+                logger.warning(
+                    "Service on Boards: no %s or National table found; "
+                    "%d %s entries not rendered",
+                    scope, len(scope_entries), scope)
                 continue
 
             sorted_entries = sort_entries_reverse_chronological(scope_entries)
@@ -366,10 +418,8 @@ class ServiceSection:
         """
 
         # Patterns for date detection
-        year_only_pattern = re.compile(r'^(\d{4})\s*$')
         date_range_pattern = re.compile(r'^(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?(?:\s*,\s*\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)*)$', re.IGNORECASE)
         embedded_date_pattern = re.compile(r'\|\s*(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)\s*$', re.IGNORECASE)
-        trailing_date_pattern = re.compile(r'(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)\s*$', re.IGNORECASE)
 
         # Role indicators
         role_keywords = ['member', 'chair', 'reviewer', 'liaison', 'mentor', 'committee',
@@ -528,14 +578,16 @@ class ServiceSection:
             section_idx = self._find_paragraph_with_text("Ad hoc Reviewing")
 
         if section_idx is None:
-            if self.verbose:
-                print(f"  Warning: Could not find Journal Reviewing section")
+            logger.warning(
+                "Journal Reviewing: section not found in template; "
+                "%d entries not rendered", len(filtered_entries))
             return
 
         table = self._find_table_after_paragraph(section_idx)
         if not table:
-            if self.verbose:
-                print(f"  Warning: Could not find Journal Reviewing table")
+            logger.warning(
+                "Journal Reviewing: table not found in template; "
+                "%d entries not rendered", len(filtered_entries))
             return
 
         _clear_table_data(table, keep_header=True)

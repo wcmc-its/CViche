@@ -29,7 +29,10 @@ if str(_SRC) not in sys.path:
 
 from docx import Document  # noqa: E402
 
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    RENDER_ROUTED_CODES,
+    WCMTemplateGenerator,
+)
 from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_taxonomy_code_coverage,
 )
@@ -172,6 +175,22 @@ def test_second_npi_candidate_warns_and_keeps_first(caplog):
     assert "second NPI candidate" in caplog.text
 
 
+def test_license_type_wins_over_a_conflicting_shape_and_missing_number():
+    """Conflicting-signal precedence: a state licence number's shape looks
+    like an NPI, but an explicit license_type label must still win, even
+    when license_number is empty (the label check used to run after the
+    'no number' guard, so a label-only entry fell through to KIND_LICENSE
+    and vanished entirely -- #573 review)."""
+    rows, dea, npi = _render_licensure([
+        _f1("Provider identifier on file", state="CA", number="",
+            license_type="NPI"),
+    ])
+    assert rows == []
+    assert dea == ""
+    # nothing to report (no number), but it must not become a licence row
+    assert npi == ""
+
+
 def test_unstructured_dean_entry_keeps_its_fallback_row():
     """The unstructured-entry guard used the same 'DEA' substring, so a raw
     line mentioning "Dean" was dropped from the document entirely."""
@@ -181,6 +200,19 @@ def test_unstructured_dean_entry_keeps_its_fallback_row():
     ])
     assert rows == [["Dean of Students certificate", "", "", ""]]
     assert dea == ""
+
+
+def test_none_extracted_fields_does_not_crash():
+    """extracted_fields is sometimes explicitly None, not merely absent;
+    entry.get('extracted_fields', {}) only supplies {} when the key is
+    missing, so a bare .get() default doesn't cover this case."""
+    rows, dea, npi = _render_licensure([
+        {"taxonomy_code": "F1", "text": "New York Medical License 123456",
+         "extracted_fields": None},
+    ])
+    assert rows == [["New York Medical License 123456", "", "", ""]]
+    assert dea == ""
+    assert npi == ""
 
 
 # ---------------------------------------------------------------------------
@@ -252,6 +284,37 @@ def test_board_committee_entry_stays_in_boards_table():
     assert [r[0] for r in boards] == ["Education Committee"]
 
 
+def test_multiline_q2_entry_splits_journal_and_board_lines():
+    """A mixed multi-line Q2 entry must route each line to the correct
+    table, and a trailing bare-date continuation line must stay attached to
+    the line it describes rather than defaulting to the board entry -- the
+    old default silently orphaned it there even when the described line was
+    rerouted to journal reviewing."""
+    boards, journal = _render_service([
+        {"taxonomy_code": "Q2",
+         "text": "John Smith\nReviewer for JAMA\n2024",
+         "extracted_fields": {}},
+    ])
+    assert [r[0] for r in boards] == ["John Smith"]
+    assert len(journal) == 1
+    assert journal[0][0].startswith("JAMA") or "JAMA" in journal[0][0]
+    assert "2024" in journal[0][0]
+
+
+def test_multiline_q2_reroute_preserves_entry_level_dates():
+    """The synthetic per-line entry created for a rerouted journal line must
+    not discard the parent entry's own extracted_fields (start/end dates) --
+    the old version replaced extracted_fields wholesale with only
+    {'organization': jline}."""
+    boards, journal = _render_service([
+        {"taxonomy_code": "Q2",
+         "text": "Ad hoc reviewer, Annals of Neurology\nMember, Education Committee",
+         "extracted_fields": {"start_date": "2020", "end_date": "2022",
+                              "committee_name": "Education Committee"}},
+    ])
+    assert journal[0][1] != ""  # dates column is populated, not blank
+
+
 # ---------------------------------------------------------------------------
 # 3. C3 (Fellowship Training) render path
 
@@ -269,9 +332,12 @@ def _render_postdoc(entries_by_code):
 
 
 def test_c3_fellowship_renders_in_postdoc_table():
-    """C3 was absent from the gather, so fellowships fell to the Appendix
-    regardless of confidence. The date must use the section's mm/yy rule --
-    a missing DATE_FORMATS['C3'] falls back to yyyy."""
+    """C3 must reach the Postdoctoral Training table using its own mm/yy
+    date rule (07/18-06/21, not a yyyy fallback). Before this fix, C3 was
+    absent from the gather entirely, so fellowships fell to the Appendix
+    regardless of confidence -- see test_coverage_lint_accepts_c3 and the
+    RENDER_ROUTED_CODES assertion below for the direct Appendix-routing
+    regression check."""
     rows = _render_postdoc({
         "C2": [{"taxonomy_code": "C2", "text": "Residency, Pediatrics",
                 "extracted_fields": {"training_type": "Residency",
@@ -296,6 +362,13 @@ def test_c3_has_a_date_format():
     assert DATE_FORMATS["C3"] == "mm/yy"
 
 
+def test_c3_is_render_routed_not_appendix_bound():
+    """The direct negative assertion for the historical bug: a code missing
+    from RENDER_ROUTED_CODES falls through to the Appendix by construction
+    (#529's class of gap). C3 must be in the set."""
+    assert 'C3' in RENDER_ROUTED_CODES
+
+
 def test_coverage_lint_accepts_c3():
     """The #529 coverage lint reads RENDER_ROUTED_CODES; C3 entries must no
     longer be flagged as appendix-by-construction."""
@@ -304,3 +377,49 @@ def test_coverage_lint_accepts_c3():
          "text": "Fellowship, Neonatology"},
     ]}
     assert lint_taxonomy_code_coverage(stage3b) == []
+
+
+def test_none_extracted_fields_does_not_crash_postdoc():
+    """extracted_fields=None must not raise -- the postdoc renderer and the
+    institution-location resolver it calls both used to default only on a
+    missing key, not an explicit None."""
+    rows = _render_postdoc({
+        "C2": [{"taxonomy_code": "C2", "text": "Residency, Pediatrics",
+                "extracted_fields": None}],
+    })
+    assert len(rows) == 1
+    assert rows[0][2] == ""  # no dates extracted, but it didn't crash
+
+
+def test_list_valued_training_type_does_not_crash():
+    """A fused multi-record entry extracts training_type/field_of_study as
+    a list, one item per record, not a string (corpus CV FIHL8A) -- must
+    join into display text, not crash on a list where a string method
+    (.casefold(), tab-splitting) is expected."""
+    rows = _render_postdoc({
+        "C1": [{"taxonomy_code": "C1", "text": "fellowship entries",
+                "extracted_fields": {
+                    "training_type": ["Cytopathology fellow", "Pathology chief resident"],
+                    "specialty": ["Cytopathology", "Pathology"],
+                    "institution": "Fictional Health System",
+                }}],
+    })
+    assert len(rows) == 1
+    assert "Cytopathology fellow" in rows[0][0]
+    assert "Pathology chief resident" in rows[0][0]
+
+
+def test_missing_training_type_uses_taxonomy_default():
+    """A C2/C3 entry with neither training_type nor title must not render
+    as the generic "Postdoctoral" -- that mislabels a residency or
+    fellowship."""
+    rows = _render_postdoc({
+        "C2": [{"taxonomy_code": "C2", "text": "residency entry",
+                "extracted_fields": {"institution": "Fictional Hospital"}}],
+        "C3": [{"taxonomy_code": "C3", "text": "fellowship entry",
+                "extracted_fields": {"institution": "Fictional Hospital"}}],
+    })
+    types = {r[0] for r in rows}
+    assert "Residency" in types
+    assert "Fellowship" in types
+    assert "Postdoctoral" not in types
