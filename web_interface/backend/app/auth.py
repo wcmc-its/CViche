@@ -145,6 +145,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
     payload = decode_session_cookie(cookie)
     if not payload:
+        logger.info("SESSION_EXPIRED", extra={"reason": "invalid_or_expired_cookie"})
         raise HTTPException(
             status_code=401,
             detail={"error": "auth_required", "message": "Session expired. Please log in again."}
@@ -155,6 +156,14 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     # -- cookies minted before this feature shipped -- is read as 0, so the
     # rollout itself does not force a mass re-login; the first epoch bump does.
     if int(payload.get("epoch", 0)) != get_session_epoch(db):
+        logger.info(
+            "SESSION_REVOKED",
+            extra={
+                "user_id": payload.get("user_id"),
+                "email": payload.get("email"),
+                "reason": "epoch_mismatch",
+            },
+        )
         raise HTTPException(
             status_code=401,
             detail={"error": "auth_required", "message": "Session expired. Please log in again."}
@@ -180,6 +189,14 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     # absolute cookie TTL. No-op / fail-open when Valkey is unset or unreachable.
     sid = payload.get("sid")
     if sid and not get_idle_store().touch(sid):
+        logger.info(
+            "SESSION_EXPIRED",
+            extra={
+                "user_id": payload.get("user_id"),
+                "email": payload.get("email"),
+                "reason": "idle_timeout",
+            },
+        )
         raise HTTPException(
             status_code=401,
             detail={"error": "session_idle",
@@ -226,6 +243,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                     membership = get_stale_membership(user.cwid)
                     if membership is None:
                         # No stale data available -- cannot verify membership
+                        logger.info("DIRECTORY_UNAVAILABLE", extra={"cwid": user.cwid})
                         raise HTTPException(
                             status_code=401,
                             detail={"error": "directory_unavailable",
@@ -235,6 +253,10 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
             if not membership["in_access_group"]:
                 # User removed from access group -- deny
                 logger.warning("Per-request ED check: %s no longer in access group", user.cwid)
+                logger.info(
+                    "GROUP_MEMBERSHIP_REMOVED",
+                    extra={"user_id": user.id, "cwid": user.cwid},
+                )
                 raise HTTPException(
                     status_code=401,
                     detail={"error": "not_authorized",
@@ -244,8 +266,13 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
             # Sync role from ED group membership
             new_role = "admin" if membership.get("in_admin_group") else "user"
             if user.role != new_role:
+                old_role = user.role
                 user.role = new_role
                 _best_effort_commit(db, "role sync")
+                logger.info(
+                    "ROLE_CHANGED",
+                    extra={"user_id": user.id, "old_role": old_role, "new_role": new_role},
+                )
 
     # Debounced last_active_at update (once per 60s)
     now = datetime.now()

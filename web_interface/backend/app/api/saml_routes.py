@@ -155,6 +155,10 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
             )
             if not membership["in_access_group"]:
                 logger.warning("SAML ACS: user %s not in ED access group", attrs["cwid"])
+                logger.info(
+                    "LOGIN_FAILED",
+                    extra={"cwid": attrs["cwid"], "reason": "not_authorized"},
+                )
                 return RedirectResponse("/login?error=not_authorized", status_code=302)
             # Cache the result for per-request checks (keyed on cwid)
             set_cached_membership(attrs["cwid"], membership)
@@ -184,6 +188,17 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
     token = create_session_cookie(user, get_session_epoch(db))
     cookie_settings = get_cookie_settings()
     response.set_cookie(value=token, **cookie_settings)
+
+    logger.info(
+        "LOGIN_SUCCESS",
+        extra={
+            "user_id": user.id,
+            "email": user.email,
+            "role": user.role,
+            "auth_method": "saml",
+        },
+    )
+
     return response
 
 

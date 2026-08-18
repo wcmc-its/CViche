@@ -69,6 +69,10 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
 
     if email_lower not in allowed_lower:
         logger.warning("Login rejected for unrecognised email: %s", body.email)
+        logger.info(
+            "LOGIN_FAILED",
+            extra={"email": body.email, "reason": "not_allowlisted"},
+        )
         return JSONResponse(
             status_code=403,
             content={"error": "forbidden", "message": "Email not in the allowed users list."},
@@ -100,6 +104,17 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
     cookie_settings = get_cookie_settings()
     token = create_session_cookie(user, get_session_epoch(db))
     response.set_cookie(value=token, **cookie_settings)
+
+    logger.info(
+        "LOGIN_SUCCESS",
+        extra={
+            "user_id": user.id,
+            "email": user.email,
+            "role": user.role,
+            "auth_method": "simple",
+        },
+    )
+
     return response
 
 
@@ -115,6 +130,16 @@ async def logout(request: Request):
     payload = decode_session_cookie(cookie) if cookie else None
     if payload and payload.get("sid"):
         get_idle_store().end(payload["sid"])
+
+    if payload:
+        logger.info(
+            "SESSION_REVOKED",
+            extra={
+                "user_id": payload.get("user_id"),
+                "email": payload.get("email"),
+                "reason": "user_logout",
+            },
+        )
 
     response = JSONResponse(content={"message": "Logged out."})
     response.delete_cookie(**get_cookie_delete_settings())
