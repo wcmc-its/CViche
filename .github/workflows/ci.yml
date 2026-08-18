@@ -71,9 +71,12 @@ jobs:
         run: python3 scripts/test_render_doctor_gates.py
 
   function-size:
-    # Ratchet on oversized functions (CODING_STANDARDS.md 3.2a). Stdlib only --
-    # no pip install, so this is the cheapest job here. The baseline may fall
-    # but never rise; raising it is a deliberate, reviewed `--update`.
+    # Ratchet on oversized functions (CODING_STANDARDS.md 3.2a), plus §9's
+    # mechanically-checkable rows (CODING_STANDARDS.md 9, check_standards.py).
+    # Both stdlib only -- no pip install, so this stays the cheapest job here.
+    # The function-size baseline may fall but never rise (a deliberate,
+    # reviewed --update); §9's auto block just has to match current dev, in
+    # either direction -- it's a snapshot, not a debt budget.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -84,6 +87,10 @@ jobs:
         run: python3 scripts/check_function_size.py
       - name: Ratchet self-test
         run: python3 scripts/test_check_function_size.py
+      - name: CODING_STANDARDS.md §9 auto rows are current
+        run: python3 scripts/check_standards.py
+      - name: check_standards.py self-test
+        run: python3 scripts/test_check_standards.py
 
   frontend-typecheck:
     runs-on: ubuntu-latest

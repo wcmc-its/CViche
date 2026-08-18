@@ -95,9 +95,9 @@ cheaper than answering them one comment at a time:
 |---|---|---|
 | Split the function — one responsibility, one level of abstraction | 24 | #577 |
 | Builtin generics (`dict`, not `typing.Dict`) and full annotations | 23 | #533 |
-| A dataclass or `TypedDict` instead of a bare `dict` + `.get()` chain crossing a function boundary | 18 | #567, #494 |
+| A dataclass or `TypedDict` instead of a bare `dict` + `.get()` chain crossing a function boundary | 18 | #567, #494 — now also `CODING_STANDARDS.md` §8.1 |
 | No silently swallowed exception, no bare `except Exception` | 17 | — |
-| A named constant or `Enum` instead of an inline taxonomy code or format literal | 16 | — |
+| A named constant or `Enum` instead of an inline taxonomy code or format literal | 16 | now `CODING_STANDARDS.md` §8.2 |
 | No `print()` in `src/` — and mind the two parsers that consume stage output | 8 | #563 |
 
 Those five standing issues absorb roughly 60% of everything written in review, so
