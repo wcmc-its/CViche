@@ -306,11 +306,18 @@ def test_login_failed_event_saml_not_authorized(
 # disabled user, PII-in-logs (PR #656 review, 2026-08-19)
 # ---------------------------------------------------------------------------
 
-def test_cookie_settings_path_matches_delete_settings():
-    """The cookie is minted from both /api/auth/login and /api/saml/acs;
-    without a matching explicit path, a browser can refuse to send a
-    SAML-created cookie to /api/auth/me, or refuse the logout deletion."""
-    assert get_cookie_settings()["path"] == get_cookie_delete_settings()["path"] == "/"
+def test_cookie_settings_security_attributes():
+    """Regression coverage for the cookie's security-relevant attributes,
+    not just code inspection: HttpOnly, SameSite, Max-Age, and Path -- the
+    last of which #656's review caught missing from get_cookie_settings()."""
+    settings = get_cookie_settings()
+    assert settings["httponly"] is True
+    assert settings["samesite"] == "lax"
+    assert settings["max_age"] > 0
+    # The cookie is minted from both /api/auth/login and /api/saml/acs;
+    # without a matching explicit path, a browser can refuse to send a
+    # SAML-created cookie to /api/auth/me, or refuse the logout deletion.
+    assert settings["path"] == get_cookie_delete_settings()["path"] == "/"
 
 
 def test_get_current_user_rejects_malformed_payload_not_500(client, seed_simple_mode, caplog):
