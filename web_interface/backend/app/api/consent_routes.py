@@ -1,6 +1,6 @@
 """Consent API endpoints."""
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -10,21 +10,22 @@ from app.database import get_db
 from app.models import User, Consent
 from app.auth import get_current_user
 from app.config_loader import get_config_value
-from app.errors import validation_error
 from app.consent import get_consent_text, get_consent_hash
-from app.schemas import ConsentStatus, ConsentSubmit
+from app.schemas import ConsentStatus, ConsentSubmit, ConsentSubmitResponse
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+DEFAULT_CONSENT_VERSION = "1.0"
+
 
 @router.get("/consent", response_model=ConsentStatus)
-async def get_consent(
+def get_consent(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Return current consent text, version, and whether the user has consented."""
-    current_version = str(get_config_value(db, "consent_version") or "1.0")
+    current_version = str(get_config_value(db, "consent_version") or DEFAULT_CONSENT_VERSION)
     consent_text = get_consent_text()
     current_hash = get_consent_hash()
 
@@ -41,22 +42,20 @@ async def get_consent(
     )
 
 
-@router.post("/consent")
-async def submit_consent(
+@router.post("/consent", response_model=ConsentSubmitResponse)
+def submit_consent(
     body: ConsentSubmit,
     request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Record consent and update user record."""
-    # Validate submission type
-    if body.default_submission_type not in ("own_cv", "authorized_admin"):
-        raise validation_error("default_submission_type must be 'own_cv' or 'authorized_admin'.")
-
-    current_version = str(get_config_value(db, "consent_version") or "1.0")
+    current_version = str(get_config_value(db, "consent_version") or DEFAULT_CONSENT_VERSION)
     text_hash = get_consent_hash()
 
-    # Create consent audit record
+    # Consent is an append-only audit/event table by design: every submission
+    # (including a repeat consent to the same version) intentionally gets its
+    # own row -- this is not a bug to dedupe.
     consent_record = Consent(
         user_id=current_user.id,
         consent_version=current_version,
@@ -68,10 +67,14 @@ async def submit_consent(
 
     # Update user record
     current_user.consent_version = current_version
-    current_user.consent_date = datetime.now()
+    current_user.consent_date = datetime.now(timezone.utc)
     current_user.default_submission_type = body.default_submission_type
 
-    db.commit()
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
 
     logger.info(
         "consent_given",
@@ -83,8 +86,8 @@ async def submit_consent(
         },
     )
 
-    return {
-        "message": "Consent recorded successfully.",
-        "consent_version": current_version,
-        "default_submission_type": body.default_submission_type,
-    }
+    return ConsentSubmitResponse(
+        message="Consent recorded successfully.",
+        consent_version=current_version,
+        default_submission_type=body.default_submission_type,
+    )

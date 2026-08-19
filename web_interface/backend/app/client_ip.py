@@ -23,19 +23,32 @@ It assumes the load-balancer contract documented in
 ALB, which appends rather than trusts the incoming header -- so that the
 last hop is always the one the LB itself observed.
 """
+import ipaddress
+
 from fastapi import Request
 
 
 def get_client_ip(request: Request) -> str | None:
     """Return the best-effort real client IP for `request`.
 
-    Reads the raw ``X-Forwarded-For`` header and takes its last non-empty
-    entry (the hop ALB appends, which a client cannot override). Falls back
-    to ``request.client.host`` when the header is absent or empty.
+    Reads the raw ``X-Forwarded-For`` header -- combining every repeated
+    header field, since a proxy chain may send it as several header entries
+    rather than one comma-joined value -- and takes its last non-empty entry
+    (the hop ALB appends, which a client cannot override). That trailing
+    entry must also pass ``ipaddress.ip_address()`` validation; if it does
+    not, the header is untrusted entirely and the function falls back to
+    ``request.client.host`` rather than an earlier, attacker-forgeable
+    entry -- the same fallback used when the header is absent or empty.
     """
-    forwarded_for = request.headers.get("x-forwarded-for", "")
-    entries = [entry.strip() for entry in forwarded_for.split(",")]
-    entries = [entry for entry in entries if entry]
-    if entries:
-        return entries[-1]
+    raw_values = request.headers.getlist("x-forwarded-for")
+    for raw_value in reversed(raw_values):
+        for entry in reversed(raw_value.split(",")):
+            candidate = entry.strip()
+            if not candidate:
+                continue
+            try:
+                ipaddress.ip_address(candidate)
+            except ValueError:
+                return request.client.host if request.client else None
+            return candidate
     return request.client.host if request.client else None
