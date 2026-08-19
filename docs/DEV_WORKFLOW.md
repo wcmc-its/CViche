@@ -72,8 +72,8 @@ The standing verdict on most reviews is:
 > suggestions, not bugs. If any of them cannot be addressed now, please leave a
 > comment explaining why. I will merge the PR as is."
 
-So a review is not a gate. The friction is in how we answer it. Two rules, both
-written from complaints we actually caused:
+So a review is not a gate. The friction is in how we answer it. Three rules,
+all written from complaints we actually caused:
 
 1. **Never decline without a reason.** "Declined" with no explanation drew the
    same objection seven times across #514 and #517 — *"Declined without any
@@ -84,6 +84,18 @@ written from complaints we actually caused:
    that does not in fact cover the comment is the same failure with extra steps —
    *"I don't see this issue included in #494"* (#503). Open the issue, then paste
    its number.
+3. **Fix it in the same PR unless the fix needs a file genuinely unrelated to
+   it.** "Off-diff" is not, by itself, a reason to spin a review comment into a
+   separate issue — #656 filed 8 issues for findings that mostly turned out
+   fixable in the same three files already touched (frozenset membership
+   checks, an isolated-session write, a single-flight lock, a dropped-async
+   conversion once actually checked for real `await`s inside). Only 2 of the 8
+   survived a second look: both needed test files genuinely outside the PR's
+   diff. The test is falsifiable — *does this fix touch a file the PR doesn't
+   already touch* — not a judgment call about whether the finding "feels"
+   architecturally big. When the test says yes, open a **PR**, not an issue: a
+   filed issue with no PR attached is where findings go to be forgotten (see
+   rule 2 above).
 
 ### What reviews here consistently ask for
 
