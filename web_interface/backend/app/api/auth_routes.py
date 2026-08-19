@@ -64,9 +64,12 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
     # Normalise email for comparison
     email_lower = normalize_email(body.email)
 
-    # Check allowed_users from SystemConfig
+    # Check allowed_users from SystemConfig. frozenset, not list: O(1) membership
+    # instead of a linear scan on every login. Rebuilt per-request rather than
+    # cached at module scope -- admin_users/allowed_users are edited live via
+    # SystemConfig, and a cached copy would need its own invalidation story.
     allowed_users = get_config_value(db, "allowed_users") or []
-    allowed_lower = [e.lower() for e in allowed_users]
+    allowed_lower = frozenset(e.lower() for e in allowed_users)
 
     if email_lower not in allowed_lower:
         logger.warning("Login rejected for unrecognised email: %s", body.email)
@@ -81,7 +84,7 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
 
     # Determine role
     admin_users = get_config_value(db, "admin_users") or []
-    admin_lower = [e.lower() for e in admin_users]
+    admin_lower = frozenset(e.lower() for e in admin_users)
     role = "admin" if email_lower in admin_lower else "user"
 
     # Create or update User record
