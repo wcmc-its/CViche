@@ -92,6 +92,40 @@ def clear_cache() -> None:
         _stale_cache.clear()
 
 
+# Per-cwid locks, bounded/expiring the same way _group_cache is above -- a
+# concurrent cache miss for the same cwid (several tabs/requests from one
+# user landing at once on a cold cache) should query LDAP once, not once per
+# request. TTL'd rather than permanent so this can't grow without bound
+# across the lifetime of a process serving many distinct users.
+# ponytail: per-process only -- each pod still does one LDAP call on a
+# simultaneous cold cache; a distributed lock (Valkey SETNX, matching
+# saml_replay.py's pattern) would close cross-pod amplification if that ever
+# measures as a real problem.
+_lookup_locks: TTLCache = TTLCache(maxsize=1024, ttl=60)
+_lookup_locks_guard = threading.Lock()
+
+
+def ed_lookup_lock(cwid: str) -> threading.Lock:
+    """Per-cwid lock guarding a cache-miss ED query. Callers must re-check
+    the cache after acquiring it -- another thread may have just populated
+    it while this one waited:
+
+        membership = get_cached_membership(cwid)
+        if membership is None:
+            with ed_lookup_lock(cwid):
+                membership = get_cached_membership(cwid)
+                if membership is None:
+                    membership = check_ed_membership(...)
+                    set_cached_membership(cwid, membership)
+    """
+    with _lookup_locks_guard:
+        lock = _lookup_locks.get(cwid)
+        if lock is None:
+            lock = threading.Lock()
+            _lookup_locks[cwid] = lock
+        return lock
+
+
 # ---------------------------------------------------------------------------
 # Internal LDAP helper
 # ---------------------------------------------------------------------------

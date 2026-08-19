@@ -3,8 +3,11 @@ import logging
 import os
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import RedirectResponse, Response
 from saml2.metadata import create_metadata_string
+from saml2.sigver import SigverError, CertificateError
+from saml2.response import IncorrectlySigned
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -31,8 +34,14 @@ BINDING_HTTP_POST = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
 # GET /api/saml/login -- redirect to IdP
 # ---------------------------------------------------------------------------
 @router.get("/saml/login")
-async def saml_login(request: Request, db: Session = Depends(get_db)):
-    """Initiate SAML login -- redirect user to IdP for authentication."""
+def saml_login(request: Request, db: Session = Depends(get_db)):
+    """Initiate SAML login -- redirect user to IdP for authentication.
+
+    Plain `def`, not `async def`: this does synchronous DB/pysaml2 work and
+    no `await`. FastAPI runs a sync path function in its threadpool
+    automatically, exactly like it already does for the sync
+    get_current_user dependency -- so this keeps the blocking work off the
+    event loop with no async infrastructure change needed."""
     # Mode guard: only available in SAML mode
     auth_mode = get_config_value(db, "auth_mode") or "simple"
     if auth_mode != "saml":
@@ -62,14 +71,28 @@ async def saml_login(request: Request, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 @router.post("/saml/acs")
 async def saml_acs(request: Request, db: Session = Depends(get_db)):
-    """SAML Assertion Consumer Service -- receives IdP response, provisions user, sets session."""
+    """SAML Assertion Consumer Service -- receives IdP response, provisions user, sets session.
+
+    The only genuinely async step is reading the request body; everything
+    after (pysaml2 parsing, LDAP, DB) is synchronous and runs via
+    run_in_threadpool in _saml_acs_process, off the event loop, the same way
+    FastAPI already threadpools a plain `def` route -- see saml_login's
+    docstring."""
     # Mode guard
     auth_mode = get_config_value(db, "auth_mode") or "simple"
     if auth_mode != "saml":
         return RedirectResponse("/login?error=saml_not_enabled", status_code=302)
 
+    form = await request.form()
+    # dict(): cross into the threadpool with a plain dict, not Starlette's
+    # FormData -- simplest thing that's safe to hand to another thread.
+    return await run_in_threadpool(_saml_acs_process, dict(form), db)
+
+
+def _saml_acs_process(form: dict, db: Session):
+    """Synchronous body of saml_acs() -- SAML parse, replay/ED checks,
+    provisioning, session creation. See saml_acs's docstring."""
     try:
-        form = await request.form()
         saml_response = form.get("SAMLResponse", "")
         # CWE-601: the IdP echoes RelayState back verbatim; validate it as a
         # same-site relative path before using it as the post-auth redirect.
@@ -116,15 +139,20 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
         # Missing required attribute (e.g., mail)
         logger.warning("SAML ACS: missing attributes -- %s", str(e))
         return RedirectResponse("/login?error=missing_attributes", status_code=302)
-    except Exception as e:
-        # SEC-02: Log signature/validation failures with [SECURITY] prefix
-        err_msg = str(e).lower()
-        if "signature" in err_msg or "signed" in err_msg:
-            logger.warning(
-                "[SECURITY] SAML signature validation failed: %s", str(e)
-            )
-        else:
-            logger.error("SAML ACS processing failed", exc_info=True)
+    except (SigverError, CertificateError, IncorrectlySigned) as e:
+        # SEC-02: signature/validation failures get the [SECURITY] prefix.
+        # Narrow exception types, not string-matching str(e) -- pysaml2's
+        # exception message text isn't a stable API across dependency
+        # versions. Verified against the installed pysaml2: SigverError is
+        # the base of SignatureError/BadSignature/MissingKey/XmlsecError;
+        # CertificateError is its own separate root (not a SigverError
+        # subclass); IncorrectlySigned is response.py's distinct
+        # signature-failure type. Together these are pysaml2's full
+        # signature/cert-validation exception surface.
+        logger.warning("[SECURITY] SAML signature validation failed: %s", str(e))
+        return RedirectResponse("/login?error=auth_failed", status_code=302)
+    except Exception:
+        logger.error("SAML ACS processing failed", exc_info=True)
         return RedirectResponse("/login?error=auth_failed", status_code=302)
 
     # ED group authorization check (if enabled)
@@ -205,7 +233,7 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
 # GET /api/saml/metadata -- SP metadata XML
 # ---------------------------------------------------------------------------
 @router.get("/saml/metadata")
-async def saml_metadata(db: Session = Depends(get_db)):
+def saml_metadata(db: Session = Depends(get_db)):
     """Serve SP metadata XML for IdP registration."""
     auth_mode = get_config_value(db, "auth_mode") or "simple"
     if auth_mode != "saml":
@@ -226,7 +254,7 @@ async def saml_metadata(db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 # POST/GET /api/saml/logout -- local session logout
 # ---------------------------------------------------------------------------
-async def _saml_logout(request: Request):
+def _saml_logout(request: Request):
     """Clear local session and redirect to login page (no IdP SLO round-trip)."""
     # Best-effort: drop the server-side idle key so the cleared cookie can't be
     # replayed before its absolute TTL lapses.
@@ -241,12 +269,20 @@ async def _saml_logout(request: Request):
 
 
 @router.post("/saml/logout")
-async def saml_logout_post(request: Request):
+def saml_logout_post(request: Request):
     """SAML logout via POST."""
-    return await _saml_logout(request)
+    return _saml_logout(request)
 
 
 @router.get("/saml/logout")
-async def saml_logout_get(request: Request):
-    """SAML logout via GET (browser convenience)."""
-    return await _saml_logout(request)
+def saml_logout_get(request: Request):
+    """SAML logout via GET.
+
+    Not just "browser convenience" -- this is the endpoint registered with
+    the IdP as the Single Logout Service, and it's registered with
+    HTTP-Redirect binding (docs/sp-registration.md), which is IdP-initiated:
+    the IdP sends the browser here via a 302, i.e. a GET, by the SAML
+    standard's own binding. Removing GET or requiring POST-then-confirm
+    would break that registered contract, not just a convenience link --
+    reviewed and kept as-is (#674)."""
+    return _saml_logout(request)

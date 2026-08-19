@@ -106,6 +106,20 @@ class TestSessionSecret:
             assert _validate_session_secret(secret) == secret
         assert not [r for r in caplog.records if "[SECURITY]" in r.getMessage()]
 
+    def test_short_secret_fails_closed_outside_development(self):
+        """Same weak secret that only warns in `development` must refuse to
+        boot anywhere else -- a live deployment shouldn't run brute-forceable
+        session cookies just because nobody rotated the default."""
+        from app.auth import _validate_session_secret
+        for env in ("production", "staging", "anything-not-development"):
+            with pytest.raises(RuntimeError, match="shorter than 32"):
+                _validate_session_secret("short-but-real", env)
+
+    def test_strong_secret_accepted_in_production(self):
+        from app.auth import _validate_session_secret
+        secret = "f" * 64
+        assert _validate_session_secret(secret, "production") == secret
+
 
 class TestSamlSignature:
     """SEC-02: SAML assertions require valid IdP signatures."""
@@ -153,11 +167,18 @@ class TestSamlSignature:
                 f"want_assertions_signed should be True, got {sp_config['want_assertions_signed']}"
 
     def test_signature_failure_logs_security_warning(self, client, db, seed_saml_mode, caplog):
-        """Signature validation failure at ACS logs WARNING with [SECURITY] prefix."""
+        """Signature validation failure at ACS logs WARNING with [SECURITY] prefix.
+
+        Raises the real pysaml2 exception type (#656 review response,
+        2026-08-19: saml_acs() now catches specific pysaml2 exception types
+        instead of string-matching str(e), so a stand-in generic Exception
+        with matching text no longer exercises this path -- the real type
+        does)."""
+        from saml2.sigver import SignatureError
         # Simulate a SAML response that triggers a signature error
         with patch("app.api.saml_routes.get_saml_client") as mock_client:
             mock_client.return_value.parse_authn_request_response.side_effect = \
-                Exception("Signature verification failed")
+                SignatureError("Signature verification failed")
 
             with caplog.at_level(logging.WARNING):
                 response = client.post(

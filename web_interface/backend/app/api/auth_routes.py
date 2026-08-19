@@ -25,10 +25,17 @@ router = APIRouter()
 # GET /api/auth/config
 # ---------------------------------------------------------------------------
 @router.get("/auth/config", response_model=AuthConfigResponse, response_model_exclude_none=True)
-async def get_auth_config(db: Session = Depends(get_db)):
+def get_auth_config(db: Session = Depends(get_db)):
     """Return public auth configuration for frontend mode detection.
     This endpoint requires NO authentication -- the frontend needs it
-    before the user has logged in."""
+    before the user has logged in.
+
+    Plain `def`, not `async def`, here and on the rest of this module's
+    routes: none of them `await` anything -- every call inside is
+    synchronous DB/service work. FastAPI runs a sync path function in its
+    threadpool automatically, exactly like it already does for the sync
+    get_current_user dependency, so this keeps the blocking work off the
+    event loop with no async infrastructure change needed."""
     mode = get_config_value(db, "auth_mode") or "simple"
     response = {"mode": mode}
     if mode == "saml":
@@ -40,7 +47,7 @@ async def get_auth_config(db: Session = Depends(get_db)):
 # POST /api/auth/login
 # ---------------------------------------------------------------------------
 @router.post("/auth/login")
-async def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
+def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     """Authenticate a user by email against the allowed_users list."""
     # Mode guard: reject simple login when SAML is active
     auth_mode = get_config_value(db, "auth_mode") or "simple"
@@ -126,7 +133,7 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
 # POST /api/auth/logout
 # ---------------------------------------------------------------------------
 @router.post("/auth/logout")
-async def logout(request: Request):
+def logout(request: Request):
     """Clear the session cookie and drop its server-side idle key."""
     # Best-effort: delete the Valkey idle key so the session can't be revived by
     # replaying the (now-cleared) cookie before its absolute TTL lapses.
@@ -158,7 +165,7 @@ async def logout(request: Request):
 # GET /api/auth/me
 # ---------------------------------------------------------------------------
 @router.get("/auth/me")
-async def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Return the current authenticated user's info."""
     quota_data = get_quota(user, db)
     data = MeResponse(

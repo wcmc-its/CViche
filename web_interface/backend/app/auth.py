@@ -18,6 +18,7 @@ from app.ed_group_lookup import (
     set_cached_membership,
     get_stale_membership,
     check_ed_membership,
+    ed_lookup_lock,
     EdUnavailableError,
     LDAPConfig,
 )
@@ -54,7 +55,7 @@ _PLACEHOLDER_SECRETS = frozenset({
 _GENERATE_HINT = 'Generate one with: python -c "import secrets; print(secrets.token_hex(32))"'
 
 
-def _validate_session_secret(secret: str | None) -> str:
+def _validate_session_secret(secret: str | None, environment: str = "development") -> str:
     if not secret:
         raise RuntimeError(
             "CVICHE_SESSION_SECRET environment variable is required. "
@@ -66,14 +67,26 @@ def _validate_session_secret(secret: str | None) -> str:
             "cookies signed with it are forgeable. " + _GENERATE_HINT
         )
     if len(secret) < 32:
-        logger.warning(
-            "[SECURITY] CVICHE_SESSION_SECRET is shorter than 32 characters; "
-            "session cookies are easier to brute-force. %s", _GENERATE_HINT,
+        message = (
+            "CVICHE_SESSION_SECRET is shorter than 32 characters; session "
+            "cookies are easier to brute-force. %s" % _GENERATE_HINT
         )
+        # Same ENVIRONMENT convention main.py already uses. A hard gate
+        # everywhere could take down a live deployment whose real secret is
+        # merely short with no chance to rotate first -- so `development`
+        # (the default, e.g. a fresh local checkout) only warns; anything
+        # else fails closed rather than boot with a brute-forceable key.
+        if environment == "development":
+            logger.warning("[SECURITY] %s", message)
+        else:
+            raise RuntimeError("[SECURITY] " + message)
     return secret
 
 
-_secret = _validate_session_secret(os.environ.get("CVICHE_SESSION_SECRET"))
+_secret = _validate_session_secret(
+    os.environ.get("CVICHE_SESSION_SECRET"),
+    os.environ.get("ENVIRONMENT", "development"),
+)
 
 _serializer = URLSafeTimedSerializer(_secret)
 _secure_cookies = os.environ.get("CVICHE_SECURE_COOKIES", "true").lower() == "true"
@@ -119,25 +132,54 @@ def decode_session_cookie(cookie_value: str) -> dict | None:
         return None
 
 
-def _best_effort_commit(db: Session, what: str) -> bool:
-    """Commit a non-critical per-request write (last_active_at bump, role sync).
+def _is_retryable_write_conflict(exc: OperationalError) -> bool:
+    """Whether exc is the specific benign concurrent-write conflict
+    _best_effort_persist exists to swallow, not any OperationalError.
 
-    A page load fires several API calls at once, each running this dependency
-    and writing the same `users` row. On some MySQL configurations the racing
-    writers raise OperationalError 1020 ("Record has changed since last read"),
-    which would otherwise surface as a 500. These writes aren't required to
-    serve the current request, so on conflict we roll back and continue; the
-    update simply lands on a later request.
+    MySQL (prod): pymysql raises error 1020 ("Record has changed since last
+    read") as a 2-tuple (code, message) in .orig.args.
+    SQLite (tests): sqlite3 raises "database is locked" as a plain message,
+    no error code.
+    Anything else -- connection loss, a real outage -- is a different
+    problem and must not be swallowed the same way.
+    """
+    orig_args = getattr(exc.orig, "args", ())
+    if orig_args and orig_args[0] == 1020:
+        return True
+    return "database is locked" in str(exc).lower()
+
+
+def _best_effort_persist(user_id: int, what: str, **fields) -> bool:
+    """Persist a non-critical per-request field update (last_active_at bump,
+    role sync) through its own short-lived session, isolated from the
+    request's shared `db` session -- so this dependency can never commit
+    unrelated work staged elsewhere in the same request as a side effect.
+
+    A page load fires several API calls at once, each running this
+    dependency and writing the same `users` row; concurrent writers can hit
+    the retryable conflict _is_retryable_write_conflict names, which isn't
+    required to serve the current request -- on that specific conflict we
+    roll back and continue; the update simply lands on a later request. Any
+    other OperationalError (connection loss, a real outage) propagates.
 
     Returns True if committed, False if the conflict was swallowed.
     """
+    from app.database import SessionLocal  # see other SessionLocal call
+    # sites in this codebase (main.py, runs.py, ...) -- imported locally so
+    # tests that patch app.database.SessionLocal are honored at call time.
+    session = SessionLocal()
     try:
-        db.commit()
+        session.query(User).filter(User.id == user_id).update(fields)
+        session.commit()
         return True
     except OperationalError as e:
-        db.rollback()
+        session.rollback()
+        if not _is_retryable_write_conflict(e):
+            raise
         logger.warning("Skipped %s write due to concurrent DB conflict: %s", what, e)
         return False
+    finally:
+        session.close()
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
@@ -238,49 +280,55 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                 )
             membership = get_cached_membership(user.cwid)
             if membership is None:
-                # Cache miss -- query ED
-                from app.config_loader import get_config
-
-                ed_access_group = get_config_value(db, "ed_access_group") or ""
-                ed_admin_group = get_config_value(db, "ed_admin_group") or ""
-                ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
-                ldap_bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
-                bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
-                if not ldap_url or not ldap_bind_dn or not ed_access_group:
-                    # Same guard saml_acs() applies at login -- an incomplete
-                    # ED config can't be told apart from "not authorized"
-                    # without this, so treat it as directory-unavailable.
-                    logger.error("ED LDAP config incomplete for per-request re-check")
-                    logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
-                    raise HTTPException(
-                        status_code=401,
-                        detail={"error": "directory_unavailable",
-                                "message": "Unable to verify group membership. Please try again later."}
-                    )
-                ldap_cfg = LDAPConfig(
-                    ldap_url=ldap_url, bind_dn=ldap_bind_dn,
-                    bind_password=SecretStr(bind_password),
-                )
-                try:
-                    membership = check_ed_membership(
-                        cwid=user.cwid,
-                        access_group=ed_access_group,
-                        admin_group=ed_admin_group,
-                        cfg=ldap_cfg,
-                    )
-                    set_cached_membership(user.cwid, membership)
-                except EdUnavailableError:
-                    # ED unreachable -- use stale cache
-                    logger.warning("ED unavailable during per-request check for %s", user.cwid)
-                    membership = get_stale_membership(user.cwid)
+                # Cache miss -- single-flight so N concurrent requests for the
+                # same cwid on a cold cache query LDAP once, not N times.
+                with ed_lookup_lock(user.cwid):
+                    membership = get_cached_membership(user.cwid)  # a waiting
+                    # thread may have populated it while this one waited.
                     if membership is None:
-                        # No stale data available -- cannot verify membership
-                        logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
-                        raise HTTPException(
-                            status_code=401,
-                            detail={"error": "directory_unavailable",
-                                    "message": "Unable to verify group membership. Please try again later."}
+                        from app.config_loader import get_config
+
+                        ed_access_group = get_config_value(db, "ed_access_group") or ""
+                        ed_admin_group = get_config_value(db, "ed_admin_group") or ""
+                        ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
+                        ldap_bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
+                        bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
+                        if not ldap_url or not ldap_bind_dn or not ed_access_group:
+                            # Same guard saml_acs() applies at login -- an
+                            # incomplete ED config can't be told apart from
+                            # "not authorized" without this, so treat it as
+                            # directory-unavailable.
+                            logger.error("ED LDAP config incomplete for per-request re-check")
+                            logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
+                            raise HTTPException(
+                                status_code=401,
+                                detail={"error": "directory_unavailable",
+                                        "message": "Unable to verify group membership. Please try again later."}
+                            )
+                        ldap_cfg = LDAPConfig(
+                            ldap_url=ldap_url, bind_dn=ldap_bind_dn,
+                            bind_password=SecretStr(bind_password),
                         )
+                        try:
+                            membership = check_ed_membership(
+                                cwid=user.cwid,
+                                access_group=ed_access_group,
+                                admin_group=ed_admin_group,
+                                cfg=ldap_cfg,
+                            )
+                            set_cached_membership(user.cwid, membership)
+                        except EdUnavailableError:
+                            # ED unreachable -- use stale cache
+                            logger.warning("ED unavailable during per-request check for %s", user.cwid)
+                            membership = get_stale_membership(user.cwid)
+                            if membership is None:
+                                # No stale data available -- cannot verify membership
+                                logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
+                                raise HTTPException(
+                                    status_code=401,
+                                    detail={"error": "directory_unavailable",
+                                            "message": "Unable to verify group membership. Please try again later."}
+                                )
 
             if not membership["in_access_group"]:
                 # User removed from access group -- deny
@@ -300,7 +348,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
             if user.role != new_role:
                 old_role = user.role
                 user.role = new_role
-                _best_effort_commit(db, "role sync")
+                _best_effort_persist(user.id, "role sync", role=new_role)
                 logger.info(
                     ROLE_CHANGED,
                     extra={"user_id": user.id, "old_role": old_role, "new_role": new_role},
@@ -310,7 +358,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     now = datetime.now()
     if not user.last_active_at or (now - user.last_active_at).total_seconds() > 60:
         user.last_active_at = now
-        _best_effort_commit(db, "last_active_at")
+        _best_effort_persist(user.id, "last_active_at", last_active_at=now)
 
     return user
 
