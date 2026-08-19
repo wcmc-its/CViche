@@ -24,6 +24,13 @@ from app.ed_group_lookup import (
 from pydantic import SecretStr
 from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
 from app.session_idle import get_idle_store
+from app.audit_events import (
+    SESSION_EXPIRED,
+    SESSION_REVOKED,
+    ROLE_CHANGED,
+    GROUP_MEMBERSHIP_REMOVED,
+    DIRECTORY_UNAVAILABLE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,21 +152,35 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
     payload = decode_session_cookie(cookie)
     if not payload:
-        logger.info("SESSION_EXPIRED", extra={"reason": "invalid_or_expired_cookie"})
+        logger.info(SESSION_EXPIRED, extra={"reason": "invalid_or_expired_cookie"})
         raise HTTPException(
             status_code=401,
             detail={"error": "auth_required", "message": "Session expired. Please log in again."}
+        )
+
+    # A validly-signed cookie can still carry a malformed payload -- a legacy
+    # shape, or a future one (e.g. #657's thin {sid}-only cookie). Fail closed
+    # with 401 rather than let a KeyError/TypeError/ValueError from a raw
+    # subscript become an unhandled 500.
+    try:
+        user_id = payload["user_id"]
+        epoch = int(payload.get("epoch", 0))
+    except (KeyError, TypeError, ValueError):
+        logger.info(SESSION_EXPIRED, extra={"reason": "malformed_payload"})
+        raise HTTPException(
+            status_code=401,
+            detail={"error": "auth_required", "message": "Session invalid. Please log in again."}
         )
 
     # Global revocation gate: a cookie minted before the current session epoch
     # (bumped by the admin "sign out everyone" action) is dead. A missing epoch
     # -- cookies minted before this feature shipped -- is read as 0, so the
     # rollout itself does not force a mass re-login; the first epoch bump does.
-    if int(payload.get("epoch", 0)) != get_session_epoch(db):
+    if epoch != get_session_epoch(db):
         logger.info(
-            "SESSION_REVOKED",
+            SESSION_REVOKED,
             extra={
-                "user_id": payload.get("user_id"),
+                "user_id": user_id,
                 "email": payload.get("email"),
                 "reason": "epoch_mismatch",
             },
@@ -169,7 +190,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
             detail={"error": "auth_required", "message": "Session expired. Please log in again."}
         )
 
-    user = db.query(User).filter(User.id == payload["user_id"]).first()
+    user = db.query(User).filter(User.id == user_id).first()
     if not user:
         raise HTTPException(
             status_code=401,
@@ -190,9 +211,9 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     sid = payload.get("sid")
     if sid and not get_idle_store().touch(sid):
         logger.info(
-            "SESSION_EXPIRED",
+            SESSION_EXPIRED,
             extra={
-                "user_id": payload.get("user_id"),
+                "user_id": user_id,
                 "email": payload.get("email"),
                 "reason": "idle_timeout",
             },
@@ -225,6 +246,17 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                 ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
                 ldap_bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
                 bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
+                if not ldap_url or not ldap_bind_dn or not ed_access_group:
+                    # Same guard saml_acs() applies at login -- an incomplete
+                    # ED config can't be told apart from "not authorized"
+                    # without this, so treat it as directory-unavailable.
+                    logger.error("ED LDAP config incomplete for per-request re-check")
+                    logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
+                    raise HTTPException(
+                        status_code=401,
+                        detail={"error": "directory_unavailable",
+                                "message": "Unable to verify group membership. Please try again later."}
+                    )
                 ldap_cfg = LDAPConfig(
                     ldap_url=ldap_url, bind_dn=ldap_bind_dn,
                     bind_password=SecretStr(bind_password),
@@ -243,7 +275,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                     membership = get_stale_membership(user.cwid)
                     if membership is None:
                         # No stale data available -- cannot verify membership
-                        logger.info("DIRECTORY_UNAVAILABLE", extra={"cwid": user.cwid})
+                        logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
                         raise HTTPException(
                             status_code=401,
                             detail={"error": "directory_unavailable",
@@ -254,7 +286,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                 # User removed from access group -- deny
                 logger.warning("Per-request ED check: %s no longer in access group", user.cwid)
                 logger.info(
-                    "GROUP_MEMBERSHIP_REMOVED",
+                    GROUP_MEMBERSHIP_REMOVED,
                     extra={"user_id": user.id, "cwid": user.cwid},
                 )
                 raise HTTPException(
@@ -270,7 +302,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                 user.role = new_role
                 _best_effort_commit(db, "role sync")
                 logger.info(
-                    "ROLE_CHANGED",
+                    ROLE_CHANGED,
                     extra={"user_id": user.id, "old_role": old_role, "new_role": new_role},
                 )
 
@@ -299,6 +331,11 @@ def get_cookie_settings() -> dict:
         "samesite": "lax",
         "secure": _secure_cookies,
         "max_age": SESSION_TTL,
+        # Explicit -- the cookie is minted from both /api/auth/login and
+        # /api/saml/acs. Without an explicit path here it must match
+        # get_cookie_delete_settings()'s '/' by luck of the browser's default,
+        # or a cookie minted from one path can end up not sent to another.
+        "path": "/",
     }
 
 

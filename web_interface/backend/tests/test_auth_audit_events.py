@@ -16,14 +16,16 @@ from unittest.mock import MagicMock, patch
 
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
-from app.auth import COOKIE_NAME, create_session_cookie
+from app.auth import COOKIE_NAME, create_session_cookie, get_cookie_settings, get_cookie_delete_settings
 from app.ed_group_lookup import EdUnavailableError, clear_cache
 from app.models import SystemConfig, User
+from itsdangerous import URLSafeTimedSerializer
 
 
-def _make_user(db, email="user@example.com", role="user", cwid=None, auth_method="simple"):
+def _make_user(db, email="user@example.com", role="user", cwid=None, auth_method="simple",
+                status="active"):
     user = User(
-        email=email, display_name="User", role=role, status="active",
+        email=email, display_name="User", role=role, status=status,
         cwid=cwid, auth_method=auth_method,
     )
     db.add(user)
@@ -297,3 +299,88 @@ def test_login_failed_event_saml_not_authorized(
 
     # The pre-existing free-text warning must still fire alongside it.
     assert any("not in ED access group" in r.getMessage() for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Review-response coverage: cookie path, malformed payload, role downgrade,
+# disabled user, PII-in-logs (PR #656 review, 2026-08-19)
+# ---------------------------------------------------------------------------
+
+def test_cookie_settings_path_matches_delete_settings():
+    """The cookie is minted from both /api/auth/login and /api/saml/acs;
+    without a matching explicit path, a browser can refuse to send a
+    SAML-created cookie to /api/auth/me, or refuse the logout deletion."""
+    assert get_cookie_settings()["path"] == get_cookie_delete_settings()["path"] == "/"
+
+
+def test_get_current_user_rejects_malformed_payload_not_500(client, seed_simple_mode, caplog):
+    """A validly-signed cookie missing the fields get_current_user requires
+    must fail closed with 401, not raise KeyError/ValueError into a 500."""
+    forged = URLSafeTimedSerializer("test-secret-not-for-production").dumps({"sid": "x"})
+    client.cookies.set(COOKIE_NAME, forged)
+
+    with caplog.at_level(logging.INFO, logger="app.auth"):
+        resp = client.get("/api/auth/me")
+    assert resp.status_code == 401
+
+    events = _events_named(caplog, "SESSION_EXPIRED")
+    assert any(e.reason == "malformed_payload" for e in events)
+
+
+def test_get_current_user_rejects_non_numeric_epoch_not_500(client, seed_simple_mode, caplog):
+    forged = URLSafeTimedSerializer("test-secret-not-for-production").dumps(
+        {"user_id": 1, "epoch": "not-a-number"}
+    )
+    client.cookies.set(COOKIE_NAME, forged)
+
+    resp = client.get("/api/auth/me")
+    assert resp.status_code == 401
+
+
+@patch.dict(os.environ, _ED_ENV)
+@patch("app.auth.check_ed_membership")
+def test_role_changed_event_on_ed_downgrade(mock_check_ed, client, db, seed_ed_enabled, caplog):
+    """Per-request ED re-check demotes a user -> ROLE_CHANGED fires (not just
+    the promotion direction)."""
+    clear_cache()
+    user = _make_user(db, email="ed-downgrade@example.com", role="admin",
+                       cwid="eddowngrade1", auth_method="saml")
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
+
+    mock_check_ed.return_value = {"in_access_group": True, "in_admin_group": False}
+
+    with caplog.at_level(logging.INFO, logger="app.auth"):
+        resp = client.get("/api/auth/me")
+    assert resp.status_code == 200
+    assert resp.json()["role"] == "user"
+
+    events = _events_named(caplog, "ROLE_CHANGED")
+    assert len(events) == 1
+    assert events[0].old_role == "admin"
+    assert events[0].new_role == "user"
+
+
+def test_disabled_user_rejected(client, db, seed_simple_mode):
+    user = _make_user(db, email="disabled@example.com", status="disabled")
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
+
+    resp = client.get("/api/auth/me")
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"] == "account_disabled"
+
+
+def test_login_does_not_log_the_session_secret_or_cookie_value(client, seed_simple_mode, caplog):
+    """Data-minimization spot check: whatever a login logs, it must not be
+    the signed cookie value or the signing secret itself."""
+    with caplog.at_level(logging.INFO):
+        resp = client.post(
+            "/api/auth/login",
+            json={"email": "test@example.com", "display_name": "Test"},
+        )
+    assert resp.status_code == 200
+    cookie_value = resp.cookies.get(COOKIE_NAME)
+    assert cookie_value
+
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert cookie_value not in log_text
+    assert "test-secret-not-for-production" not in log_text

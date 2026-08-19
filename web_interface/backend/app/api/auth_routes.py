@@ -14,6 +14,7 @@ from app.login_throttle import get_login_throttle
 from app.config_loader import get_config_value
 from app.rate_limiter import get_quota
 from app.services.user_service import provision_user, normalize_email
+from app.audit_events import LOGIN_SUCCESS, LOGIN_FAILED, SESSION_REVOKED
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +71,7 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
     if email_lower not in allowed_lower:
         logger.warning("Login rejected for unrecognised email: %s", body.email)
         logger.info(
-            "LOGIN_FAILED",
+            LOGIN_FAILED,
             extra={"email": body.email, "reason": "not_allowlisted"},
         )
         return JSONResponse(
@@ -106,7 +107,7 @@ async def login(body: LoginRequest, request: Request, db: Session = Depends(get_
     response.set_cookie(value=token, **cookie_settings)
 
     logger.info(
-        "LOGIN_SUCCESS",
+        LOGIN_SUCCESS,
         extra={
             "user_id": user.id,
             "email": user.email,
@@ -133,8 +134,12 @@ async def logout(request: Request):
 
     if payload:
         logger.info(
-            "SESSION_REVOKED",
+            SESSION_REVOKED,
             extra={
+                # payload.get(...): logout() reads defensively regardless of
+                # cookie shape. #657 will make this the *only* option once
+                # the thin {sid}-only cookie lands; repoint through its
+                # resolve_session_identity() then instead of the raw payload.
                 "user_id": payload.get("user_id"),
                 "email": payload.get("email"),
                 "reason": "user_logout",
