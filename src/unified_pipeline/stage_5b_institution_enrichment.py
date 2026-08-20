@@ -24,9 +24,12 @@ Date: 2025-11-29
 import os
 import sys
 import json
+import logging
 from pathlib import Path
 from typing import Dict
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 # The implementation was split into unified_pipeline/stage5b/ (#523). Every
 # name that used to live in this module is re-exported below so existing
@@ -80,12 +83,16 @@ def enrich_entry_with_result(entry: Dict, result: Dict) -> Dict:
     """
     Apply a pre-looked-up institution result to an entry.
 
+    Mutates `entry` in place (and its nested `extracted_fields`/`enriched_fields`)
+    and also returns it -- callers that need an unmodified copy of the input
+    must copy.deepcopy() it first.
+
     Args:
         entry: Entry dictionary with extracted_fields
         result: LLM result dict with cleaned_name, official_name, city, state, country, country_code
 
     Returns:
-        Entry with enriched location data
+        The same entry dict, with enriched location data added
     """
     fields = entry.get('extracted_fields', {})
 
@@ -174,21 +181,26 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         stage4_dir = Path(__file__).parent / "outputs" / "stage_4_field_extraction"
         # Extract base UID (without stage suffixes)
         base_uid = document_uid.replace('_enriched', '').replace('_institution_enriched', '')
-        candidates = list(stage4_dir.glob(f"*{base_uid}*_fields.json"))
+        candidates = sorted(stage4_dir.glob(f"*{base_uid}*_fields.json"))
         if not candidates:
             # Try broader match
             parts = base_uid.split('_', 1)
             if len(parts) > 1:
-                candidates = list(stage4_dir.glob(f"{parts[0]}*_fields.json"))
+                candidates = sorted(stage4_dir.glob(f"{parts[0]}*_fields.json"))
         if candidates:
+            if len(candidates) > 1:
+                logger.warning(
+                    "Ambiguous Stage 4 context match for %s: %d candidates, using %s",
+                    base_uid, len(candidates), candidates[0].name,
+                )
             try:
                 with open(candidates[0], 'r') as f:
                     stage4_data = json.load(f)
                 cv_owner_location = stage4_data.get('cv_owner_location')
                 if cv_owner_location and cv_owner_location.get('inference_success') and verbose:
                     print(f"Loaded cv_owner_location from Stage 4 output")
-            except Exception:
-                pass
+            except (OSError, json.JSONDecodeError) as e:
+                logger.warning("Could not load Stage 4 context from %s: %s", candidates[0], e)
 
     if verbose:
         if cv_owner_location and cv_owner_location.get('inference_success'):
@@ -262,8 +274,8 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
 
         # Check cache (skip if refreshing)
         if not refresh_cache:
-            cached = cache.INSTITUTION_CACHE.get(cache_key) or cache.INSTITUTION_CACHE.get(raw_key)
-            if cached is not None or cache_key in cache.INSTITUTION_CACHE or raw_key in cache.INSTITUTION_CACHE:
+            found, cached = cache.lookup(cache_key, raw_key)
+            if found:
                 # Skip old ROR-format entries — they lack cleaned_name and may have
                 # wrong matches (e.g., Northeastern State University → Magadan, Russia).
                 # Force re-lookup via LLM for accurate disambiguation.
@@ -296,8 +308,8 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         institutions_to_lookup[cache_key]['entry_indices'].append(idx)
 
     uncached_count = len(institutions_to_lookup)
-    cached_count = sum(1 for idx in entry_to_cache_key if idx not in
-                       [i for info in institutions_to_lookup.values() for i in info['entry_indices']])
+    needs_lookup_indices = {i for info in institutions_to_lookup.values() for i in info['entry_indices']}
+    cached_count = sum(1 for idx in entry_to_cache_key if idx not in needs_lookup_indices)
 
     if verbose:
         print(f"\nCache hits: {cached_count}")
@@ -348,7 +360,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                 result = results.get(inst_id, {})
                 if result:
                     # Cache the result
-                    cache.INSTITUTION_CACHE[cache_key] = {
+                    cache.set_cached(cache_key, {
                         'cleaned_name': result.get('cleaned_name', ''),
                         'official_name': result.get('official_name', ''),
                         'city': result.get('city', ''),
@@ -356,7 +368,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                         'country': result.get('country', ''),
                         'country_code': result.get('country_code', ''),
                         'source': 'llm'
-                    }
+                    })
 
                     # Apply to all entries that share this institution
                     for entry_idx in info['entry_indices']:
@@ -368,7 +380,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                         print(f"    {name[:40]:40s} → {city}, {state}")
                 else:
                     # LLM succeeded but didn't return this institution — safe to cache negative
-                    cache.INSTITUTION_CACHE[cache_key] = None
+                    cache.set_cached(cache_key, None)
                     if verbose:
                         print(f"    {name[:40]:40s} → (no result)")
 

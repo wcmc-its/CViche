@@ -8,12 +8,21 @@ load_institution_cache(), so other modules must read it as an attribute of this
 module (``cache.INSTITUTION_CACHE``), never via
 ``from ...cache import INSTITUTION_CACHE`` -- a from-import freezes the
 pre-load binding and silently splits state (the #496 lesson).
+
+Single-process, single-thread only: load/modify/save has no locking. Stage 5b
+currently runs one pipeline worker at a time (the Taskiq/Valkey concurrent-
+worker migration hasn't shipped), so a lost-update race isn't reachable yet.
+Add file locking (or move to a transactional store) before that changes.
 """
 
 import hashlib
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
 
 # Paths, anchored to src/unified_pipeline/ (this module moved one directory
 # down in the #523 split; the cache files did not).
@@ -32,37 +41,72 @@ def load_institution_cache():
     if CACHE_FILE.exists():
         try:
             with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-                INSTITUTION_CACHE = json.load(f)
-            return
-        except Exception as e:
-            print(f"Warning: Could not load institution cache: {e}")
+                loaded = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("Could not load institution cache: %s", e)
             INSTITUTION_CACHE = {}
             return
+        if not isinstance(loaded, dict):
+            logger.warning("Institution cache at %s is not a JSON object; ignoring", CACHE_FILE)
+            INSTITUTION_CACHE = {}
+            return
+        INSTITUTION_CACHE = loaded
+        return
 
     # Migrate from old ror_cache.json if it exists
     if OLD_CACHE_FILE.exists():
         try:
             with open(OLD_CACHE_FILE, 'r', encoding='utf-8') as f:
-                INSTITUTION_CACHE = json.load(f)
-            # Save under new name immediately
-            save_institution_cache()
-            print(f"Migrated cache: {OLD_CACHE_FILE.name} → {CACHE_FILE.name} ({len(INSTITUTION_CACHE)} entries)")
-        except Exception as e:
-            print(f"Warning: Could not migrate old cache: {e}")
+                loaded = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("Could not migrate old cache: %s", e)
             INSTITUTION_CACHE = {}
+            return
+        if not isinstance(loaded, dict):
+            logger.warning("Old cache at %s is not a JSON object; ignoring", OLD_CACHE_FILE)
+            INSTITUTION_CACHE = {}
+            return
+        INSTITUTION_CACHE = loaded
+        # Save under new name immediately
+        save_institution_cache()
+        logger.info("Migrated cache: %s -> %s (%d entries)",
+                     OLD_CACHE_FILE.name, CACHE_FILE.name, len(INSTITUTION_CACHE))
         return
 
     INSTITUTION_CACHE = {}
 
 
 def save_institution_cache():
-    """Save institution cache to disk."""
+    """Save institution cache to disk atomically (write to a temp file, then rename)."""
     try:
         CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(CACHE_FILE, 'w', encoding='utf-8') as f:
+        tmp_path = CACHE_FILE.with_suffix(f"{CACHE_FILE.suffix}.tmp")
+        with open(tmp_path, 'w', encoding='utf-8') as f:
             json.dump(INSTITUTION_CACHE, f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        print(f"Warning: Could not save institution cache: {e}")
+        os.replace(tmp_path, CACHE_FILE)
+    except OSError as e:
+        logger.warning("Could not save institution cache: %s", e)
+
+
+def lookup(cache_key: str, raw_key: str = None):
+    """Look up an institution by its cache key, falling back to a secondary
+    raw_key only when cache_key has no entry at all.
+
+    Returns (found, value): `found` distinguishes "no entry under either
+    key" from a legitimately cached negative result (value=None means
+    "looked up, no match"). A plain `cache.get(a) or cache.get(b)` gets this
+    wrong -- a None cached under `a` would fall through to `b`'s (possibly
+    stale) value instead of respecting the negative result.
+    """
+    if cache_key in INSTITUTION_CACHE:
+        return True, INSTITUTION_CACHE[cache_key]
+    if raw_key is not None and raw_key in INSTITUTION_CACHE:
+        return True, INSTITUTION_CACHE[raw_key]
+    return False, None
+
+
+def set_cached(key: str, value: Optional[Dict]) -> None:
+    INSTITUTION_CACHE[key] = value
 
 
 def _owner_context_hash(owner_context: str) -> str:
@@ -94,4 +138,4 @@ def _institution_cache_key(institution_name: str, owner_context: str) -> str:
     script, each institution just gets one fresh, correctly-scoped LLM
     lookup the next time its CV is processed.
     """
-    return f"{institution_name.lower().strip()}|{_owner_context_hash(owner_context)}"
+    return f"{institution_name.casefold().strip()}|{_owner_context_hash(owner_context)}"

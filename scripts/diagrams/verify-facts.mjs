@@ -16,7 +16,7 @@
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const REPO = join(here, "..", "..");
@@ -46,7 +46,14 @@ function srcMatch(relPath, re, label) {
 export function verifyFacts(items) {
   const problems = [];
   let hay = items.map(diagramText).join("  ");
-  try { hay += "  " + readFileSync(join(REPO, "docs/architecture/index.html"), "utf8"); } catch { /* not built yet */ }
+  try {
+    hay += "  " + readFileSync(join(REPO, "docs/architecture/index.html"), "utf8");
+  } catch (e) {
+    // Only the expected "not built yet" case is silent. A permission error,
+    // a bad path, or anything else that isn't "the file doesn't exist" means
+    // this verifier can't see what it's supposed to check — fail loud.
+    if (e.code !== "ENOENT") throw e;
+  }
   const has = (s) => hay.includes(s);
 
   // (1) LLM models — from src/unified_pipeline/config/llm_config.yaml.
@@ -114,31 +121,49 @@ export function verifyFacts(items) {
   }
   if (!has("12-stage") && !has("12 stages")) problems.push(`stages: "12-stage" not shown in any diagram`);
 
-  // (8) LLM-stage taxonomy. The step_registry uses_llm flags are STALE (they still
-  // mark stage 2 and stage 5b as non-LLM), so the truth is taken from the stage
-  // modules themselves: a module is an LLM stage iff it calls call_llm(). Exactly
-  // two stages run without an LLM — 1b (header→index mapping) and 5 (PubMed). Assert
-  // that invariant against the real modules, then check the diagrams quote it right.
-  const callsLlm = (rel) => { const r = read(rel); return r.err ? r : { yes: /call_llm\(/.test(r.txt) }; };
-  const mustLlm = (rel, label) => {
-    const r = callsLlm(rel);
-    if (r.err) problems.push(`${label}: ${r.err}`);
-    else if (!r.yes) problems.push(`${label}: ${rel} no longer calls call_llm — recount the LLM stages`);
-  };
-  const mustNotLlm = (rel, label) => {
-    const r = callsLlm(rel);
-    if (r.err) problems.push(`${label}: ${r.err}`);
-    else if (r.yes) problems.push(`${label}: ${rel} now calls call_llm — it was a non-LLM stage; recount`);
-  };
-  // The three stages whose chip flipped to LLM after reading the modules (not the flags):
-  mustLlm("src/unified_pipeline/stage_2_entry_extraction.py", "stage2");
-  // 5b's call_llm site moved to stage5b/lookup.py in the #523 split; the old
-  // module is now a facade that re-exports it.
-  mustLlm("src/unified_pipeline/stage5b/lookup.py", "stage5b");
-  mustLlm("src/unified_pipeline/stage_6_word_template.py", "stage6");
-  // The two genuine non-LLM stages the "ten of twelve" claim depends on:
-  mustNotLlm("src/unified_pipeline/stage_1b_hierarchy_mapper.py", "stage1b");
-  mustNotLlm("src/unified_pipeline/stage_5_pubmed_enrichment.py", "stage5");
+  // (8) LLM-stage taxonomy. The step_registry uses_llm flags are STALE for
+  // stage 2 (still marked non-LLM; 5b's flag was fixed by #523), so the
+  // truth is taken from the stage modules themselves: a module is an LLM
+  // stage iff it calls call_llm(). This enumerates ALL 12 canonical stages
+  // (not just a hand-picked subset) so a stage silently gaining or losing
+  // call_llm() is always caught, not just the ones someone remembered to list.
+  const ALL_STAGES = [
+    ["1a", "src/unified_pipeline/segmentation/chunked_chat_hierarchy_extractor.py"],
+    ["1b", "src/unified_pipeline/stage_1b_hierarchy_mapper.py"],
+    ["2", "src/unified_pipeline/stage_2_entry_extraction.py"],
+    ["3a", "src/unified_pipeline/stage_3a_header_taxonomy_mapper.py"],
+    ["3b", "src/unified_pipeline/stage_3b_entry_classifier.py"],
+    ["4", "src/unified_pipeline/stage_4_field_extractor.py"],
+    ["4.5", "src/unified_pipeline/stage_4_5_research_summary.py"],
+    ["5", "src/unified_pipeline/stage_5_pubmed_enrichment.py"],
+    // 5b's call_llm site moved to stage5b/lookup.py in the #523 split; the
+    // old stage_5b_institution_enrichment.py is now a facade that re-exports it.
+    ["5b", "src/unified_pipeline/stage5b/lookup.py"],
+    ["5c", "src/unified_pipeline/stage_5c_teaching_formatter.py"],
+    ["5d", "src/unified_pipeline/stage_5d_citation_formatter.py"],
+    ["6", "src/unified_pipeline/stage_6_word_template.py"],
+  ];
+  // The two genuine non-LLM stages the "ten of twelve" claim depends on.
+  const EXPECTED_NON_LLM = new Set(["1b", "5"]);
+
+  if (ALL_STAGES.length !== 12)
+    problems.push(`stages: ALL_STAGES in verify-facts.mjs lists ${ALL_STAGES.length}, not the canonical 12 — fix the verifier itself`);
+
+  let llmCount = 0;
+  for (const [id, rel] of ALL_STAGES) {
+    const r = read(rel);
+    if (r.err) { problems.push(`stage${id}: ${r.err}`); continue; }
+    const callsLlm = /call_llm\(/.test(r.txt);
+    if (callsLlm) llmCount++;
+    const shouldBeLlm = !EXPECTED_NON_LLM.has(id);
+    if (callsLlm !== shouldBeLlm) {
+      problems.push(shouldBeLlm
+        ? `stage${id}: ${rel} no longer calls call_llm — recount the LLM stages`
+        : `stage${id}: ${rel} now calls call_llm — it was a non-LLM stage; recount`);
+    }
+  }
+  if (llmCount !== 10)
+    problems.push(`stages: ${llmCount} of ${ALL_STAGES.length} stage modules call call_llm(), diagrams say ten`);
   if (!(has("Ten of the") || has("ten of its twelve") || has("LLM (10 stages)")))
     problems.push(`stages: diagrams should state that ten of the twelve stages call an LLM`);
   for (const stale of ["Seven stages", "Eight stages", "LLM (7 stages)", "LLM (8 stages)"])
@@ -153,7 +178,7 @@ export function verifyFacts(items) {
 }
 
 // Standalone run: load the definitions, verify, report, set exit code.
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   const dir = join(here, "definitions");
   const items = [];
   for (const f of readdirSync(dir).filter((f) => f.endsWith(".mjs")).sort()) {

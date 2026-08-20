@@ -57,7 +57,7 @@ const nodes = {
 
   llm: { x: 196, y: 72, w: 1072, h: 80, kind: "aws", title: "AWS Bedrock — Claude",
          sub: ["Sonnet 4.6 — default (all LLM stages)", "Haiku 4.5 — stage 3b only",
-               "provider: openai → gpt-4o-mini"] },
+               "if llm_config.yaml is missing: openai / gpt-4o-mini"] },
 
   pubmed: { x: 883, y: 556, w: 180, h: 56, kind: "ext", title: "NCBI PubMed",
             sub: ["E-utilities"] },
