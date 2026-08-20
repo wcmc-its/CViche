@@ -173,6 +173,7 @@ class _RoutedStdout:
     def flush(self) -> None:
         self._target().flush()
 
+    # standards-waiver: 3.7 -- fixes #581's sys.stdout leak, see docstring above
     def __getattr__(self, name):
         # isatty(), encoding, etc. -- anything we don't model ourselves goes
         # to the real stdout, not whichever run happens to be registered.

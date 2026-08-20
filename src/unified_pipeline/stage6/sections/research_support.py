@@ -12,8 +12,11 @@ date rule is applied by the writer, which annotates the move as a comment.
 
 Known gap, unchanged by this move: `_create_grant_table` is a fixed-slot
 `fields.get(...)` enumeration, so a stage-4 field it does not name is dropped
-with no warning (`grant_number` is the standing example). Adding a field means
-editing this file, not just stage 4.
+with no warning. `grant_number` used to be the standing example -- 528 of 537
+corpus values reached no render -- until it was folded into the Award Source
+label below; that fix is a one-off `.get()` addition, not a registry, so the
+*next* unnamed field will drop exactly as silently. Adding a field means
+editing this file, not just stage 4 (CODING_STANDARDS.md §7.3).
 """
 import re
 from datetime import datetime
