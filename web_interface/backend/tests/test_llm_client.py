@@ -91,15 +91,23 @@ def _make_bedrock_response(content="test response", input_tokens=100,
 
 @pytest.fixture(autouse=True)
 def reset_state():
-    """Reset config cache, OpenAI client, and Bedrock client before each test."""
+    """Reset config cache, OpenAI client, and Bedrock client before each test.
+
+    The client caches live in llm.openai / llm.bedrock (#496), not
+    llm_client -- resetting a same-named attribute on llm_client itself
+    would rebind only that module's name, not the global `_get_openai_client`
+    / `_get_bedrock_client` read via `global` in the modules that actually
+    own it, leaving the real cache unreset.
+    """
     reload_config()
-    import unified_pipeline.llm_client as mod
-    mod._openai_client = None
-    mod._bedrock_client = None
+    import unified_pipeline.llm.openai as openai_mod
+    import unified_pipeline.llm.bedrock as bedrock_mod
+    openai_mod._openai_client = None
+    bedrock_mod._bedrock_client = None
     yield
     reload_config()
-    mod._openai_client = None
-    mod._bedrock_client = None
+    openai_mod._openai_client = None
+    bedrock_mod._bedrock_client = None
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +121,7 @@ def test_call_llm_openai():
     mock_response = _make_mock_response()
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
+         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -139,7 +147,7 @@ def test_call_llm_params():
     mock_response = _make_mock_response()
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_stage_4_config()), \
-         patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
+         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -160,7 +168,7 @@ def test_call_llm_temperature():
     mock_response = _make_mock_response()
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
+         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -179,7 +187,7 @@ def test_call_llm_kwargs_override():
     mock_response = _make_mock_response()
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
+         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -212,7 +220,7 @@ def test_normalized_response():
     )
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
+         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -243,7 +251,7 @@ def test_normalized_response_cost():
     mock_response = _make_mock_response(prompt_tokens=1000, completion_tokens=500, total_tokens=1500)
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
+         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -261,7 +269,7 @@ def test_normalized_response_latency():
     mock_response = _make_mock_response()
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
+         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -286,7 +294,7 @@ def test_normalized_response_bedrock():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -326,7 +334,7 @@ def test_call_llm_retry_on_rate_limit():
     )
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls, \
+         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls, \
          patch("unified_pipeline.llm_client.time.sleep"):  # skip actual sleep
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = [
@@ -354,7 +362,7 @@ def test_call_llm_retry_exhausted():
     )
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls, \
+         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls, \
          patch("unified_pipeline.llm_client.time.sleep"):
         mock_client = MagicMock()
         # retry_count=3 means 4 total attempts (initial + 3 retries)
@@ -384,7 +392,7 @@ def test_call_llm_no_retry_on_auth_error():
     )
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls, \
+         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls, \
          patch("unified_pipeline.llm_client.time.sleep"):
         mock_client = MagicMock()
         mock_client.chat.completions.create.side_effect = auth_error
@@ -429,7 +437,7 @@ def test_call_llm_bedrock():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -456,7 +464,7 @@ def test_call_llm_bedrock_params():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -480,7 +488,7 @@ def test_call_llm_bedrock_temperature():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=cfg), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -500,7 +508,7 @@ def test_call_llm_bedrock_kwargs_override():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -524,7 +532,7 @@ def test_call_llm_bedrock_system_message_separation():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -554,7 +562,7 @@ def test_call_llm_bedrock_stop_reason_mapping():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -578,7 +586,7 @@ def test_call_llm_bedrock_retry_on_throttle():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client, \
          patch("unified_pipeline.llm_client.time.sleep"):
         mock_client = MagicMock()
         mock_client.converse.side_effect = [
@@ -606,7 +614,7 @@ def test_call_llm_bedrock_retry_exhausted():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client, \
          patch("unified_pipeline.llm_client.time.sleep"):
         mock_client = MagicMock()
         mock_client.converse.side_effect = [
@@ -632,7 +640,7 @@ def test_call_llm_bedrock_no_retry_on_access_denied():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client, \
          patch("unified_pipeline.llm_client.time.sleep"):
         mock_client = MagicMock()
         mock_client.converse.side_effect = access_error
@@ -657,7 +665,7 @@ def test_bedrock_json_valid_passthrough():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -681,7 +689,7 @@ def test_bedrock_json_invalid_triggers_retry():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.side_effect = [first_response, retry_response]
         mock_get_client.return_value = mock_client
@@ -705,7 +713,7 @@ def test_bedrock_json_second_failure_returns_as_is():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.side_effect = [first_response, retry_response]
         mock_get_client.return_value = mock_client
@@ -768,7 +776,7 @@ def test_bedrock_json_schema_fenced_response_is_stripped():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -803,7 +811,7 @@ def test_bedrock_json_object_fenced_response_is_stripped():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -826,7 +834,7 @@ def test_bedrock_json_schema_appends_json_only_hint():
 
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -856,29 +864,31 @@ def test_bedrock_json_schema_appends_json_only_hint():
 def test_openai_client_lazy_init():
     """Importing llm_client does not create an OpenAI client. First call does."""
     import unified_pipeline.llm_client as mod
+    import unified_pipeline.llm.openai as openai_mod
 
     # After import (and reset in fixture), client should be None
-    assert mod._openai_client is None
+    assert openai_mod._openai_client is None
 
     mock_response = _make_mock_response()
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
+         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
 
         # After calling, client should be set
         mod.call_llm("stage_2", [{"role": "user", "content": "test"}])
-        assert mod._openai_client is not None
+        assert openai_mod._openai_client is not None
 
 
 def test_bedrock_client_lazy_init():
     """Importing llm_client does not create a Bedrock client. First Bedrock call does."""
     import unified_pipeline.llm_client as mod
+    import unified_pipeline.llm.bedrock as bedrock_mod
 
     # After import (and reset in fixture), client should be None
-    assert mod._bedrock_client is None
+    assert bedrock_mod._bedrock_client is None
 
     mock_response = _make_bedrock_response()
     mock_client = MagicMock()
@@ -889,7 +899,7 @@ def test_bedrock_client_lazy_init():
          patch("boto3.client", return_value=mock_client):
 
         mod.call_llm("stage_2", [{"role": "user", "content": "test"}])
-        assert mod._bedrock_client is not None
+        assert bedrock_mod._bedrock_client is not None
 
 
 # ---------------------------------------------------------------------------
@@ -904,7 +914,7 @@ def test_response_format_passthrough():
     rf = {"type": "json_object"}
 
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_default_config()), \
-         patch("unified_pipeline.llm_client.OpenAI") as mock_openai_cls:
+         patch("unified_pipeline.llm.openai.OpenAI") as mock_openai_cls:
         mock_client = MagicMock()
         mock_client.chat.completions.create.return_value = mock_response
         mock_openai_cls.return_value = mock_client
@@ -954,7 +964,7 @@ def test_pipeline_e2e_openai():
     exceptions and generates output .docx. No assertions on output quality.
 
     Requires OPENAI_API_KEY in environment. Costs money per run.
-    Run explicitly: pytest -m e2e
+    Run explicitly: RUN_LLM_E2E=1 pytest -m e2e
 
     Per D-10: Runs against OpenAI (default config) only. Bedrock E2E is
     manual when AWS credentials are available.
@@ -963,7 +973,12 @@ def test_pipeline_e2e_openai():
     import tempfile
     import shutil
 
-    # Skip if no API key available
+    # No pytest.ini/pyproject addopts filters out `-m e2e` in this repo and
+    # CI runs plain `pytest -q`, so OPENAI_API_KEY presence alone was the
+    # only thing standing between a normal test run and a real, billed
+    # OpenAI call. Require an explicit opt-in too (PR #620 review).
+    if not os.environ.get("RUN_LLM_E2E"):
+        pytest.skip("RUN_LLM_E2E not set -- skipping opt-in live E2E test")
     if not os.environ.get("OPENAI_API_KEY"):
         pytest.skip("OPENAI_API_KEY not set -- skipping E2E test")
 
@@ -1078,7 +1093,7 @@ def test_bedrock_floors_maxtokens_when_none():
 
     mock_response = _make_bedrock_response()
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=cfg), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -1102,7 +1117,7 @@ def test_bedrock_explicit_maxtokens_overrides_floor():
     mock_response = _make_bedrock_response()
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -1124,7 +1139,7 @@ def test_bedrock_config_maxtokens_respected():
 
     mock_response = _make_bedrock_response()
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=cfg), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = mock_response
         mock_get_client.return_value = mock_client
@@ -1173,7 +1188,7 @@ def test_bedrock_json_schema_sends_forced_toolconfig():
     resp = _make_bedrock_tool_response({"title": "T", "agency": "NIH"})
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = resp
         mock_get_client.return_value = mock_client
@@ -1213,7 +1228,7 @@ def test_bedrock_json_schema_hard_fails_when_tool_not_used():
     }
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = resp
         mock_get_client.return_value = mock_client
@@ -1231,7 +1246,7 @@ def test_bedrock_json_object_still_uses_prompt_hint_not_toolconfig():
     resp = _make_bedrock_response(content='{"ok": true}', stop_reason="end_turn")
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.return_value = resp
         mock_get_client.return_value = mock_client
@@ -1284,7 +1299,7 @@ def test_call_llm_logs_response_exactly_once_per_provider_path():
 
     # 1. OpenAI
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=openai_cfg), \
-         patch("unified_pipeline.llm_client._get_openai_client") as mock_openai, \
+         patch("unified_pipeline.llm.openai._get_openai_client") as mock_openai, \
          patch("unified_pipeline.llm_client.log_prompt_response") as logged:
         mock_openai.return_value.chat.completions.create.return_value = _make_mock_response()
         call_llm("stage_2", [{"role": "user", "content": "hi"}])
@@ -1292,7 +1307,7 @@ def test_call_llm_logs_response_exactly_once_per_provider_path():
 
     # 2. Bedrock text/json_object path
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client, \
          patch("unified_pipeline.llm_client.log_prompt_response") as logged:
         mock_get_client.return_value.converse.return_value = _make_bedrock_response()
         call_llm("stage_2", [{"role": "user", "content": "hi"}])
@@ -1307,7 +1322,7 @@ def test_call_llm_logs_response_exactly_once_per_provider_path():
         "usage": {"inputTokens": 100, "outputTokens": 50, "totalTokens": 150},
     }
     with patch("unified_pipeline.llm_client.get_stage_config", return_value=_bedrock_config()), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client, \
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client, \
          patch("unified_pipeline.llm_client.log_prompt_response") as logged:
         mock_get_client.return_value.converse.return_value = tool_response
         call_llm("stage_2", [{"role": "user", "content": "hi"}],
@@ -1423,7 +1438,7 @@ def test_bedrock_json_retry_backs_off_on_throttle():
     with patch("unified_pipeline.llm_client.get_stage_config",
                return_value=_bedrock_config()), \
          patch("unified_pipeline.llm_client.time.sleep"), \
-         patch("unified_pipeline.llm_client._get_bedrock_client") as mock_get_client:
+         patch("unified_pipeline.llm.bedrock._get_bedrock_client") as mock_get_client:
         mock_client = MagicMock()
         mock_client.converse.side_effect = [
             _make_bedrock_response(content="not json at all"),  # triggers retry

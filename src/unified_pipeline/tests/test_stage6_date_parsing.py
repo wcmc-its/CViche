@@ -93,6 +93,13 @@ def test_both_functions_use_the_shared_parser():
     ("2019-05-15", "M2D", "05/2019"),  # day-precision: day dropped, not fabricated
     ("August 2021", "M2D", "08/2021"), # month-precision
     ("2019", "M2D", "2019"),           # year-only: no month to fall back on
+    # F1 (mm/dd/yyyy, Licensure) — #575: a stated day is preserved, but a
+    # month-only date must degrade to mm/yyyy, never fabricate the 1st.
+    ("2019-03-14", "F1", "03/14/2019"),
+    ("2019-03", "F1", "03/2019"),
+    ("March 2019", "F1", "03/2019"),
+    ("03/2019", "F1", "03/2019"),
+    ("2019", "F1", "2019"),
 ])
 def test_format_date_for_section_outputs(date_str, code, expected):
     assert format_date_for_section(date_str, code) == expected
