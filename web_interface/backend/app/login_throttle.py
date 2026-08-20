@@ -81,6 +81,12 @@ class LoginThrottle:
 
     def _allow_local(self, ip: str) -> bool:
         """Per-process sliding-window fallback (the original in-memory limiter)."""
+        # ponytail: unsynchronized by design -- login is an async def with no
+        # await and uvicorn runs single-worker, so this never sees two threads
+        # (#414: 200 concurrent POSTs -> 1 thread ident; reproduces with real OS
+        # threads, 18/200 over-admit). Add a threading.Lock if login becomes a
+        # sync def, workers > 1, or this is ever called from a background task
+        # or asyncio.to_thread.
         now = time.time()
         # Bound the dict: an IP seen once is otherwise retained for the life of
         # the process, and client_ip comes from a client-supplied XFF header.
