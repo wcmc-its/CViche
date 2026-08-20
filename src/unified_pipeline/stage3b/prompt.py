@@ -8,13 +8,17 @@ slot. Changing a byte of either changes what the model sees on every batch;
 `test_stage3b_prompt_template.py` pins the rendered output.
 """
 
-from typing import Dict, List
+import logging
+from collections.abc import Collection
+from typing import Dict
+
+logger = logging.getLogger(__name__)
 
 
 def build_taxonomy_codes_for_prompt(
     taxonomy: Dict,
-    relevant_families: List[str] = None,
-    context_codes: List[str] = None
+    relevant_codes_or_families: Collection[str] | None = None,
+    context_codes: Collection[str] | None = None
 ) -> str:
     """
     Build taxonomy reference for classification prompt.
@@ -24,27 +28,40 @@ def build_taxonomy_codes_for_prompt(
 
     Args:
         taxonomy: Full taxonomy dict
-        relevant_families: Code families to include (e.g., ['S', 'H', 'T'])
+        relevant_codes_or_families: Family letters (e.g. "S") and/or exact
+                      codes (e.g. "S1") to include -- an entry is kept if
+                      either its family letter or its full code appears here.
         context_codes: Specific codes from hierarchy context - these get full
                       disambiguation notes (common_confusions, key_rules)
 
     Returns:
         Formatted taxonomy reference string
+
+    A malformed entry (missing/empty/non-string "code" or "label") is logged
+    and skipped rather than raising -- this renders once per batch on the
+    classification path, so one bad entry in the taxonomy JSON must not raise
+    KeyError/IndexError and abort the whole batch.
     """
     codes_list = taxonomy.get("codes", [])
     context_codes_set = set(context_codes) if context_codes else set()
 
     lines = []
-    for code_def in codes_list:
-        code = code_def["code"]
+    for entry_index, code_def in enumerate(codes_list):
+        code = code_def.get("code")
+        label = code_def.get("label")
+        if not isinstance(code, str) or not code or not isinstance(label, str) or not label:
+            logger.warning(
+                "Skipping malformed taxonomy entry at index %d: code=%r label=%r",
+                entry_index, code, label
+            )
+            continue
 
-        # Filter to relevant families if specified
-        if relevant_families:
+        # Filter to relevant families/codes if specified
+        if relevant_codes_or_families:
             family = code[0]  # First letter is family
-            if family not in relevant_families and code not in relevant_families:
+            if family not in relevant_codes_or_families and code not in relevant_codes_or_families:
                 continue
 
-        label = code_def["label"]
         purpose = code_def.get("purpose", "")
 
         lines.append(f"{code}: {label}")
@@ -68,6 +85,13 @@ def build_taxonomy_codes_for_prompt(
 
     return "\n".join(lines)
 
+
+# Single source of truth for the classification policy version baked into
+# the template below. Referenced (not duplicated) in the two places the
+# template names its own version, and exposed here so callers can attach it
+# to classification telemetry/artifacts to identify exactly which rules
+# version produced a given run's output.
+CLASSIFICATION_RULES_VERSION = "2.6.0"
 
 _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE = """You are an expert at classifying academic CV entries into a standardized taxonomy.
 
@@ -844,3 +868,17 @@ Example:
   {{"index": 0, "code": "S1", "confidence": 0.95}},
   {{"index": 1, "code": "H", "confidence": 0.85, "reasoning": "Content is clearly an award (H), despite Teaching section placement"}}
 ]}}"""
+
+# Tie both in-template version mentions to CLASSIFICATION_RULES_VERSION so they
+# cannot drift apart from each other or from the constant callers read for
+# telemetry. .replace() runs once at import time and reproduces the previous
+# literal text exactly (2.6.0 -> "v2.6" / "2.6.0"); it is not a general
+# templating mechanism and does not touch the {context_str}/{taxonomy_ref}
+# str.format() placeholders callers still fill in.
+_CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.replace(
+    "CV TAXONOMY CLASSIFICATION RULES v2.6",
+    f"CV TAXONOMY CLASSIFICATION RULES v{CLASSIFICATION_RULES_VERSION.rsplit('.', 1)[0]}",
+).replace(
+    "Version: 2.6.0",
+    f"Version: {CLASSIFICATION_RULES_VERSION}",
+)

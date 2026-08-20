@@ -179,6 +179,7 @@ def test_four_batch_shapes_produce_exact_expected_results_and_stats(monkeypatch,
         "llm_classified": 3,   # 2 from batch 2 + 1 from batch 3
         "fallback_entries": 3,  # 1 from batch 3 + 2 from batch 4
         "empty_entries": 2,    # batch 1
+        "classification_rules_version": "2.6.0",
     }
 
     # The malformed object in batch 4 is logged, same as before the split.
@@ -222,6 +223,7 @@ def test_classify_entries_batch_empty_input(monkeypatch):
         "total_tokens": 0,
         "cost": 0.0,
         "model": None,
+        "classification_rules_version": "2.6.0",
         "entries_classified": 0,
         "llm_batches": 0,
         "failed_batches": 0,
@@ -229,6 +231,43 @@ def test_classify_entries_batch_empty_input(monkeypatch):
         "fallback_entries": 0,
         "empty_entries": 0,
     }
+
+
+def test_classify_entries_batch_size_zero_raises(monkeypatch):
+    """batch_size=0 is passed straight into range(0, len(entries), batch_size)
+    (classify.py:279), which itself raises ValueError("range() arg 3 must not
+    be zero") before any entry is touched. Pin that boundary explicitly
+    rather than leaving it as an unasserted implicit side effect of the
+    stdlib call."""
+    def _boom(**kwargs):
+        raise AssertionError("call_llm must not be invoked when batch_size=0")
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
+
+    with pytest.raises(ValueError):
+        classify_entries_batch(
+            [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=0
+        )
+
+
+def test_classify_entries_batch_size_negative_raises(monkeypatch):
+    """A negative batch_size used to make range(0, len(entries), batch_size)
+    an EMPTY range under Python's negative-step semantics (start=0 already >=
+    stop), so the for loop in classify_entries_batch silently skipped every
+    entry with no error at all -- arguably more dangerous than batch_size=0,
+    which at least raised. classify_entries_batch now guards `batch_size <= 0`
+    explicitly (before either boundary reaches range()), so both raise the
+    same way: pinned here as the negative counterpart to
+    test_classify_entries_batch_size_zero_raises above."""
+    def _boom(**kwargs):
+        raise AssertionError("call_llm must not be invoked when batch_size<0")
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
+
+    with pytest.raises(ValueError):
+        classify_entries_batch(
+            [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=-1
+        )
 
 
 def _echo_call_llm(monkeypatch):
@@ -338,7 +377,23 @@ def test_classify_entries_batch_handles_missing_or_empty_classifications(monkeyp
 def test_classify_entries_batch_malformed_indices_do_not_cross_contaminate(monkeypatch):
     """Duplicate/out-of-range/negative/non-integer indices must never let one
     entry receive another entry's classification data (#520/#521's silent-
-    failure class), even though none of them raise."""
+    failure class), even though none of them raise.
+
+    class_by_idx is a dict keyed by the raw "index" value the LLM returned
+    (classify.py:185-189), looked up as class_by_idx.get(orig_idx) where
+    orig_idx is always a plain non-negative int from enumerate(batch_entries).
+    So the classic "Python treats -1 as a valid sequence index" hazard does
+    NOT apply here -- dict.get(-1) never coincidentally resolves to the last
+    entry the way list[-1] indexing would; this test pins that explicitly
+    below instead of leaving it implicit in "entry 1 falls back".
+
+    Duplicate index=0 objects are pinned as last-write-wins: that is plain
+    dict overwrite semantics from an unconditional `class_by_idx[idx] = c`
+    with no existing-key check, not a documented contract. If ambiguous
+    duplicate indices from the LLM should instead be rejected/fall back
+    (arguably the safer read of an inconsistent response), that check
+    belongs in classify.py -- this test only pins what the code does today.
+    """
     def call(**kwargs):
         return {
             "content": json.dumps({"classifications": [
@@ -359,14 +414,50 @@ def test_classify_entries_batch_malformed_indices_do_not_cross_contaminate(monke
     )
 
     assert len(results) == 2
-    # Entry 0: only ever sees index=0 objects (last one wins) -- never the
-    # out-of-range/negative/string-indexed data.
+    # Entry 0: only ever sees index=0 objects (last one wins, see docstring)
+    # -- never the out-of-range/negative/string-indexed data.
     assert results[0]["classification_source"] == "llm"
     assert results[0]["taxonomy_code"] == "T"
     assert results[0]["taxonomy_confidence"] == 0.99
-    # Entry 1: the string index "1" does not match int orig_idx=1, so it
-    # falls back rather than being corrupted by a wrong entry's object.
+    # Entry 1: none of index=99 (out of range), index=-1 (negative -- proven
+    # NOT to alias the last entry the way list[-1] would), or index="1"
+    # (string, not int) match int orig_idx=1, so it falls back instead of
+    # being corrupted by any of that data.
     assert results[1]["classification_source"] == "fallback"
+    assert results[1]["taxonomy_code"] != "Y"  # would mean -1 aliased entry 1
+    assert results[1]["taxonomy_code"] != "Z"  # would mean "1" aliased entry 1
+
+
+def test_classify_entries_batch_bool_and_float_indices_alias_int_lookup(monkeypatch):
+    """The string-index case above proves a non-int "index" is safely
+    rejected -- but that does NOT generalize to every non-int type. Python's
+    dict keys compare by == with matching hashes, and True == 1 and
+    0.0 == 0 both hold, so class_by_idx.get(orig_idx) resolves a key stored
+    as a bool or float exactly as it would resolve a plain int key.
+    classify.py never coerces or type-checks "index" before using it as a
+    dict key (classify.py:185-189), so this is real, reachable behavior for
+    any LLM response that emits a JSON float (or unlikely but valid JSON
+    boolean) where an int was expected -- not a hypothetical."""
+    def call(**kwargs):
+        return {
+            "content": json.dumps({"classifications": [
+                {"index": True, "code": "H", "confidence": 0.9},  # aliases int 1
+                {"index": 0.0, "code": "T", "confidence": 0.8},   # aliases int 0
+            ]}),
+            "prompt_tokens": 20, "completion_tokens": 5, "cost": 0.0005,
+            "model": "gpt-5.1-mini-alias",
+        }
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2
+    )
+
+    assert results[0]["classification_source"] == "llm"
+    assert results[0]["taxonomy_code"] == "T"  # 0.0 aliased orig_idx=0
+    assert results[1]["classification_source"] == "llm"
+    assert results[1]["taxonomy_code"] == "H"  # True aliased orig_idx=1
 
 
 def test_classify_entries_batch_uses_index_not_position(monkeypatch):

@@ -17,12 +17,16 @@ stage3b module.
 import json
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from ..llm_client import call_llm
 from .context import TaxonomyContext
 from .io import _safe_float
-from .prompt import _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE, build_taxonomy_codes_for_prompt
+from .prompt import (
+    CLASSIFICATION_RULES_VERSION,
+    _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
+    build_taxonomy_codes_for_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +46,36 @@ class _BatchStats:
     llm_batches: int = 0  # 1 if this batch attempted an LLM call, else 0
     observed_model: Optional[str] = None  # model id the API actually served (#459)
     failed_batches: int = 0  # 1 if this batch's LLM call raised, else 0
+
+
+def _valid_taxonomy_codes(taxonomy: Dict) -> Set[str]:
+    """The set of codes `taxonomy` actually defines.
+
+    Every classification below comes from an LLM call made with
+    ``response_format={"type": "json_object"}`` and no schema -- the model
+    can echo back a code that isn't in taxonomy_v7.json at all (a
+    hallucination, a typo, a code from an older taxonomy version). That is
+    untrusted input; a code outside this set must not be persisted as a
+    real classification.
+    """
+    return {
+        c["code"] for c in taxonomy.get("codes", [])
+        if isinstance(c, dict) and isinstance(c.get("code"), str) and c["code"]
+    }
+
+
+def _normalize_confidence(value: object, default: float = 0.5) -> float:
+    """Coerce an LLM-provided confidence to a float constrained to [0.0, 1.0].
+
+    `_safe_float` only guarantees the value converts to *some* float (e.g. a
+    stringified number); it does not guarantee that float is a valid
+    probability. A value outside [0, 1] -- including NaN/inf, which compare
+    false against any bound -- falls back to `default` instead of being
+    persisted as a confidence, mirroring the clamp stage3b/io.py already
+    applies to stage 3a's taxonomy_options (#558).
+    """
+    confidence = _safe_float(value, default)
+    return confidence if 0.0 <= confidence <= 1.0 else default
 
 
 def _build_taxonomy_ref_for_batch(
@@ -66,7 +100,7 @@ def _build_taxonomy_ref_for_batch(
         # Pass ALL suggested codes so they get full disambiguation notes
         taxonomy_ref = build_taxonomy_codes_for_prompt(
             taxonomy,
-            relevant_families=list(relevant_families),
+            relevant_codes_or_families=list(relevant_families),
             context_codes=all_suggested_codes
         )
     else:
@@ -86,12 +120,23 @@ def _classify_one_batch(
     all_suggested_codes: List[str],
     taxonomy_ref: str,
     model: str,
+    valid_codes: Set[str],
 ) -> Tuple[List[Dict], _BatchStats]:
     """Classify a single batch against a taxonomy_ref built once by the caller.
 
     Returns this batch's own results list and its own stats contribution --
     it never appends to a shared list or mutates an outer accumulator, so
     classify_entries_batch can extend/sum the return values after the call.
+
+    `model` is intentionally NOT forwarded to call_llm() below: stage_3b's
+    model is pinned per-stage in llm_config.yaml (Haiku 4.5, chosen because
+    it is both more accurate and ~2.9x cheaper than the "gpt-5.1" every
+    caller currently defaults this parameter to -- see #459 and the stats
+    dict's "model" comment in classify_entries_batch). Passing `model`
+    through would silently override that config on every real run, since no
+    caller in this codebase currently supplies a non-default value.
+    `observed_model`/stats["model"] records what the config actually served,
+    which is the field to trust for audit metadata, not this parameter.
     """
     stats = _BatchStats()
 
@@ -151,6 +196,22 @@ Return ONLY valid JSON with the classifications array."""
         content = llm_result["content"]
         result = json.loads(content)
         classifications = result.get("classifications", [])
+        # `.get(..., [])` only substitutes when the key is absent -- an
+        # explicit `"classifications": null` (or any non-list value) survives
+        # that default and reaches the "for c in classifications" loop below,
+        # which is deliberately outside this try/except (see comment there)
+        # so it can't be caught as a batch failure. Coerce here so a
+        # malformed container degrades the same way a malformed element
+        # already does: a loud skip, not an uncaught TypeError that crashes
+        # the whole run.
+        if not isinstance(classifications, list):
+            logger.warning(
+                "Stage 3b: response's \"classifications\" was %s, not a list "
+                "(batch at offset %d); treating as empty -- every entry in "
+                "this batch falls back to the default code",
+                type(classifications).__name__, batch_start
+            )
+            classifications = []
 
         # Track tokens/cost
         stats.input_tokens = llm_result["prompt_tokens"]
@@ -222,13 +283,32 @@ Return ONLY valid JSON with the classifications array."""
             # indistinguishable downstream from a correct classification (#520).
             c = class_by_idx.get(orig_idx)
             if c is not None:
+                fallback_code = all_suggested_codes[0] if all_suggested_codes else "T"
+                code = c.get("code")
+                # isinstance-guard before the set membership check: `code`
+                # is untrusted LLM output and could be any JSON type (e.g. a
+                # list), which would raise TypeError: unhashable type on
+                # `in valid_codes` instead of degrading to the fallback.
+                if code and (not isinstance(code, str) or code not in valid_codes):
+                    # The LLM answered with a code that doesn't exist in
+                    # taxonomy_v7.json (or isn't a string at all) --
+                    # untrusted model output, not trustworthy enough to
+                    # persist as a real classification.
+                    logger.warning(
+                        "Stage 3b: LLM returned unknown taxonomy code %r for "
+                        "entry %d (batch at offset %d); falling back to the "
+                        "default code", code, orig_idx, batch_start
+                    )
+                    code = None
                 results.append({
                     **entry,
-                    # Coalesce an explicit-null/empty LLM code to the fallback,
-                    # and coerce a stringified confidence to float, so the
-                    # persisted values never crash downstream .startswith / < 0.7.
-                    "taxonomy_code": c.get("code") or (all_suggested_codes[0] if all_suggested_codes else "T"),
-                    "taxonomy_confidence": _safe_float(c.get("confidence"), 0.5),
+                    # Coalesce an explicit-null/empty/unknown LLM code to the
+                    # fallback, and clamp confidence to [0, 1], so the
+                    # persisted values never crash downstream .startswith /
+                    # < 0.7 and never store a hallucinated code as if it were
+                    # a real classification.
+                    "taxonomy_code": code or fallback_code,
+                    "taxonomy_confidence": _normalize_confidence(c.get("confidence"), 0.5),
                     "classification_reasoning": c.get("reasoning"),
                     "classification_source": "llm"
                 })
@@ -265,6 +345,13 @@ def classify_entries_batch(
     Returns:
         Tuple of (classified_entries, stats)
     """
+    if batch_size <= 0:
+        # range(0, len(entries), batch_size) raises ValueError("range() arg 3
+        # must not be zero") for 0, and silently returns an empty range for
+        # negative batch_size (every entry skipped, no error at all) -- fail
+        # loudly and specifically instead of either.
+        raise ValueError("batch_size must be greater than zero")
+
     all_results = []
     total_input_tokens = 0
     total_output_tokens = 0
@@ -274,13 +361,15 @@ def classify_entries_batch(
     failed_batches = 0  # batches whose LLM call raised (entries fell back)
 
     all_suggested_codes, taxonomy_ref = _build_taxonomy_ref_for_batch(taxonomy_context, taxonomy)
+    valid_codes = _valid_taxonomy_codes(taxonomy)
 
     # Process in batches
     for batch_start in range(0, len(entries), batch_size):
         batch_entries = entries[batch_start:batch_start + batch_size]
 
         batch_results, batch_stats = _classify_one_batch(
-            batch_entries, batch_start, taxonomy_context, all_suggested_codes, taxonomy_ref, model
+            batch_entries, batch_start, taxonomy_context, all_suggested_codes,
+            taxonomy_ref, model, valid_codes
         )
         all_results.extend(batch_results)
         total_input_tokens += batch_stats.input_tokens
@@ -300,6 +389,11 @@ def classify_entries_batch(
         # with a model the run never used -- and 3b is the one deliberately on
         # Haiku, which is exactly the comparison the field exists for (#459).
         "model": observed_model,
+        # Which revision of the classification policy (prompt.py's
+        # CLASSIFICATION_RULES_VERSION) produced this run's classifications --
+        # a rules change should be identifiable in artifacts the same way a
+        # model change already is via "model" above.
+        "classification_rules_version": CLASSIFICATION_RULES_VERSION,
         "entries_classified": len(all_results),
         "llm_batches": llm_batches,
         "failed_batches": failed_batches,
@@ -321,7 +415,11 @@ def group_entries_by_hierarchy(entries: List[Dict]) -> Dict[str, List[Dict]]:
 
     for entry in entries:
         hierarchy = entry.get("hierarchy", [])
-        key = " > ".join(hierarchy) if hierarchy else "(no hierarchy)"
+        # str()-coerce each element: hierarchy is normally a list of strings,
+        # but " > ".join() raises TypeError on a non-string element (e.g. a
+        # stray int), which would otherwise crash the whole classification
+        # run over a single malformed hierarchy entry.
+        key = " > ".join(str(h) for h in hierarchy) if hierarchy else "(no hierarchy)"
 
         if key not in groups:
             groups[key] = []
@@ -345,10 +443,18 @@ def validate_t_classifications(
     Args:
         entries: List of classified entries (some may have taxonomy_code="T")
         taxonomy: Full taxonomy reference
-        model: OpenAI model to use
+        model: Not currently forwarded to call_llm() -- see the identical
+            note on _classify_one_batch's `model` parameter in this module
+            for why (stage_3b's model is pinned in llm_config.yaml, and
+            every caller here currently defaults this parameter to a
+            different model than that config specifies).
 
     Returns:
-        Tuple of (updated_entries, stats) where T entries may be reclassified
+        Tuple of (updated_entries, stats) where T entries may be reclassified.
+        `entries` itself is never mutated -- a fresh list of copies is built
+        and returned instead (see the "Apply reclassifications" comment
+        below), so a caller holding onto its original list is unaffected by
+        this call.
     """
     # Find entries classified as exactly "T" (miscellaneous)
     # NOTE: We only review "T", not T-family codes like T1 (Community Engagement)
@@ -490,31 +596,82 @@ Respond with a JSON array of objects, one per entry:
             elif "classifications" in result:
                 reclassifications = result["classifications"]
             else:
-                # Assume the dict values are the results
-                reclassifications = list(result.values())[0] if result else []
+                # An unrecognized wrapper shape is malformed, not a puzzle to
+                # guess at: reaching for "the first dict value" made an
+                # unexpected response shape look like a valid one instead of
+                # a visible, logged failure.
+                logger.warning(
+                    "Stage 3b T-validation: response object has none of "
+                    "results/entries/classifications (keys=%s); treating as "
+                    "no reclassifications", list(result.keys())
+                )
+                reclassifications = []
         else:
             reclassifications = result
 
-        # Apply reclassifications
-        reclassified_count = 0
-        for reclass in reclassifications:
-            entry_idx = reclass.get("entry_index")
-            new_code = reclass.get("new_code") or "T"
-            confidence = _safe_float(reclass.get("confidence"), 0.5)
-            reasoning = reclass.get("reasoning", "")
+        if not isinstance(reclassifications, list):
+            logger.warning(
+                "Stage 3b T-validation: reclassifications was %s, not a "
+                "list; treating as none", type(reclassifications).__name__
+            )
+            reclassifications = []
 
-            if entry_idx is not None and 0 <= entry_idx < len(entries):
-                old_code = entries[entry_idx].get("taxonomy_code")
-                if old_code == "T" and new_code != "T":
-                    entries[entry_idx]["taxonomy_code"] = new_code
-                    entries[entry_idx]["taxonomy_confidence"] = confidence
-                    entries[entry_idx]["classification_reasoning"] = f"[T-validation reclassified from T] {reasoning}"
-                    entries[entry_idx]["t_validation_applied"] = True
-                    reclassified_count += 1
-                elif old_code == "T" and new_code == "T":
-                    # T was confirmed - add note
-                    entries[entry_idx]["classification_reasoning"] = f"[T-validation confirmed] {reasoning}"
-                    entries[entry_idx]["t_validation_applied"] = True
+        valid_codes = _valid_taxonomy_codes(taxonomy)
+
+        # Apply reclassifications to copies, never the caller's own entries:
+        # this is untrusted LLM output, and a caller shouldn't be able to
+        # observe a half-applied mutation of its own list on partial failure.
+        updated_entries = [dict(e) for e in entries]
+
+        reclassified_count = 0
+        malformed = 0
+        for reclass in reclassifications:
+            if not isinstance(reclass, dict):
+                malformed += 1
+                continue
+
+            entry_idx = reclass.get("entry_index")
+            # bool is a subclass of int (isinstance(True, int) is True), so a
+            # boolean entry_index must be excluded explicitly or it would
+            # pass this check and index entries[True]/entries[False].
+            if (not isinstance(entry_idx, int) or isinstance(entry_idx, bool)
+                    or not (0 <= entry_idx < len(updated_entries))):
+                malformed += 1
+                continue
+
+            new_code = reclass.get("new_code") or "T"
+            # isinstance-guard before the set membership check: `new_code` is
+            # untrusted LLM output and could be any JSON type, which would
+            # raise TypeError: unhashable type on `in valid_codes` instead of
+            # degrading to "T".
+            if not isinstance(new_code, str) or new_code not in valid_codes:
+                logger.warning(
+                    "Stage 3b T-validation: LLM returned unknown taxonomy "
+                    "code %r for entry %d; keeping T", new_code, entry_idx
+                )
+                new_code = "T"
+            confidence = _normalize_confidence(reclass.get("confidence"), 0.5)
+            reasoning = reclass.get("reasoning", "")
+            if not isinstance(reasoning, str):
+                reasoning = ""
+
+            old_code = updated_entries[entry_idx].get("taxonomy_code")
+            if old_code == "T" and new_code != "T":
+                updated_entries[entry_idx]["taxonomy_code"] = new_code
+                updated_entries[entry_idx]["taxonomy_confidence"] = confidence
+                updated_entries[entry_idx]["classification_reasoning"] = f"[T-validation reclassified from T] {reasoning}"
+                updated_entries[entry_idx]["t_validation_applied"] = True
+                reclassified_count += 1
+            elif old_code == "T" and new_code == "T":
+                # T was confirmed - add note
+                updated_entries[entry_idx]["classification_reasoning"] = f"[T-validation confirmed] {reasoning}"
+                updated_entries[entry_idx]["t_validation_applied"] = True
+
+        if malformed:
+            logger.warning(
+                "Stage 3b T-validation: skipped %d malformed reclassification "
+                "object(s)", malformed
+            )
 
         # Calculate cost (call_llm already returns token counts and priced cost)
         input_tokens = llm_result["prompt_tokens"]
@@ -529,13 +686,22 @@ Respond with a JSON array of objects, one per entry:
             "cost": cost
         }
 
-        return entries, stats
+        return updated_entries, stats
 
-    except Exception as e:
-        print(f"    ⚠ T-validation error: {e}")
-        # Report reclassifications already applied to entries before the error,
-        # so meta.stats reflects reality even on a partial failure.
-        return entries, {"t_entries_reviewed": len(t_entries), "t_entries_reclassified": locals().get("reclassified_count", 0), "cost": 0.0, "error": str(e)}
+    except Exception as exc:
+        logger.exception(
+            "Stage 3b T-validation failed",
+            extra={"t_entries_reviewed": len(t_entries)},
+        )
+        # Nothing was applied: updated_entries only gets built after a
+        # successful parse above, so the caller's original entries -- never
+        # mutated -- come back untouched on any failure here.
+        return entries, {
+            "t_entries_reviewed": len(t_entries),
+            "t_entries_reclassified": 0,
+            "cost": 0.0,
+            "error": str(exc),
+        }
 
 
 def reconnect_fragments(
@@ -555,7 +721,8 @@ def reconnect_fragments(
 
     Args:
         entries: List of classified entries (sorted by element_idx_start)
-        model: OpenAI model to use
+        model: Not currently forwarded to call_llm() -- see the identical
+            note on _classify_one_batch's `model` parameter in this module.
 
     Returns:
         Tuple of (updated_entries, stats) where fragments are annotated
@@ -672,11 +839,20 @@ Fragment at index {idx}:
         # Apply reconnections
         reconnected_count = 0
         for decision in fragment_decisions:
+            if not isinstance(decision, dict):
+                continue
             idx = decision.get("index")
             belongs_to = decision.get("belongs_to", "standalone")
             reasoning = decision.get("reasoning", "")
+            if not isinstance(reasoning, str):
+                reasoning = ""
 
-            if idx is not None and 0 <= idx < len(entries):
+            # bool is a subclass of int (isinstance(True, int) is True), so a
+            # boolean index must be excluded explicitly or it would pass this
+            # check and index entries[True]/entries[False].
+            valid_idx = (isinstance(idx, int) and not isinstance(idx, bool)
+                         and 0 <= idx < len(entries))
+            if valid_idx:
                 entry = entries[idx]
 
                 if belongs_to == "previous" and idx > 0:
@@ -716,7 +892,10 @@ Fragment at index {idx}:
         return entries, stats
 
     except Exception as e:
-        print(f"    ⚠ Fragment reconnection error: {e}")
+        logger.exception(
+            "Stage 3b fragment reconnection failed",
+            extra={"fragments_reviewed": len(fragment_candidates)},
+        )
         # Report reconnections already applied to entries before the error.
         return entries, {"fragments_reviewed": len(fragment_candidates), "fragments_reconnected": locals().get("reconnected_count", 0), "cost": 0.0, "error": str(e)}
 
@@ -750,69 +929,76 @@ def detect_duplicates(entries: List[Dict], similarity_threshold: float = 0.9) ->
         text = re.sub(r'[^\w\s]', '', text)
         return text.strip()
 
-    def text_similarity(t1: str, t2: str) -> float:
-        """Calculate similarity ratio between two texts."""
-        n1, n2 = normalize_text(t1), normalize_text(t2)
+    def normalized_similarity(n1: str, n2: str) -> float:
+        """Similarity ratio between two ALREADY-normalized texts."""
         if not n1 or not n2:
             return 0.0
         # Use SequenceMatcher for fuzzy matching
         return SequenceMatcher(None, n1, n2).ratio()
 
-    # Build text index for faster lookup
-    text_index = {}  # normalized_text -> list of (idx, entry)
+    # Candidates for comparison: entries with enough text to be meaningfully
+    # compared (skip near-empty fragments). normalize_text runs once per
+    # candidate here rather than repeatedly inside the comparison loop below.
+    candidates = []
     for idx, entry in enumerate(entries):
         text = entry.get("text", "")
         if len(text) < 20:  # Skip very short entries
             continue
-        norm = normalize_text(text)
-        # Use first 100 chars as key for grouping similar entries
-        key = norm[:100] if len(norm) > 100 else norm
-        if key not in text_index:
-            text_index[key] = []
-        text_index[key].append((idx, entry, norm))
+        candidates.append((idx, entry, normalize_text(text)))
 
     # Find duplicates
     duplicate_pairs = []
     seen_duplicates = set()  # Track which indices have been marked as duplicates
 
-    for key, items in text_index.items():
-        if len(items) < 2:
-            continue
+    # O(n^2) over `candidates`. This used to bucket entries by their first
+    # 100 normalized characters and only compare within a bucket -- a real
+    # correctness bug, not just an optimization: two near-duplicate entries
+    # that diverged in that prefix (different opening wording, a prepended
+    # date/title) landed in different buckets and were NEVER compared,
+    # silently missing real duplicates. Compare every eligible pair instead.
+    # CV entry counts are small (at most a few hundred per document), so the
+    # quadratic comparison is fine in practice; do not reintroduce prefix
+    # bucketing (or any other blocking key) without proving it can't split a
+    # genuinely similar pair the way the prefix key did.
+    for i, (idx1, entry1, norm1) in enumerate(candidates):
+        for idx2, entry2, norm2 in candidates[i + 1:]:
+            if idx1 in seen_duplicates and idx2 in seen_duplicates:
+                continue
 
-        # Compare all pairs in this group
-        for i, (idx1, entry1, norm1) in enumerate(items):
-            for idx2, entry2, norm2 in items[i+1:]:
-                if idx1 in seen_duplicates and idx2 in seen_duplicates:
-                    continue
+            sim = normalized_similarity(norm1, norm2)
+            if sim >= similarity_threshold:
+                # A duplicate pair is recorded once per (idx1, idx2)
+                # comparison that clears the threshold -- the loop above
+                # only *skips* a pair when BOTH sides are already marked
+                # duplicate, so one entry CAN appear in more than one
+                # recorded pair (e.g. three near-identical entries A/B/C
+                # produce pairs (A,B) and (A,C), both B and C marked
+                # duplicate, A left as the surviving original).
+                duplicate_pairs.append({
+                    "entry1_idx": idx1,
+                    "entry2_idx": idx2,
+                    "similarity": sim,
+                    "entry1_hierarchy": entry1.get("hierarchy", []),
+                    "entry2_hierarchy": entry2.get("hierarchy", []),
+                    "entry1_code": entry1.get("taxonomy_code"),
+                    "entry2_code": entry2.get("taxonomy_code"),
+                    "text_preview": entry1.get("text", "")[:100]
+                })
 
-                sim = text_similarity(entry1.get("text", ""), entry2.get("text", ""))
-                if sim >= similarity_threshold:
-                    # These are duplicates
-                    duplicate_pairs.append({
-                        "entry1_idx": idx1,
-                        "entry2_idx": idx2,
-                        "similarity": sim,
-                        "entry1_hierarchy": entry1.get("hierarchy", []),
-                        "entry2_hierarchy": entry2.get("hierarchy", []),
-                        "entry1_code": entry1.get("taxonomy_code"),
-                        "entry2_code": entry2.get("taxonomy_code"),
-                        "text_preview": entry1.get("text", "")[:100]
-                    })
+                # Mark the second one as duplicate (keep the first)
+                # Prefer M2 classification over T
+                code1 = entry1.get("taxonomy_code") or ""
+                code2 = entry2.get("taxonomy_code") or ""
 
-                    # Mark the second one as duplicate (keep the first)
-                    # Prefer M2 classification over T
-                    code1 = entry1.get("taxonomy_code") or ""
-                    code2 = entry2.get("taxonomy_code") or ""
-
-                    if code1.startswith("T") and code2.startswith("M"):
-                        # Second one is better classified, mark first as duplicate
-                        seen_duplicates.add(idx1)
-                    elif code2.startswith("T") and code1.startswith("M"):
-                        # First one is better classified, mark second as duplicate
-                        seen_duplicates.add(idx2)
-                    else:
-                        # Default: mark second as duplicate
-                        seen_duplicates.add(idx2)
+                if code1.startswith("T") and code2.startswith("M"):
+                    # Second one is better classified, mark first as duplicate
+                    seen_duplicates.add(idx1)
+                elif code2.startswith("T") and code1.startswith("M"):
+                    # First one is better classified, mark second as duplicate
+                    seen_duplicates.add(idx2)
+                else:
+                    # Default: mark second as duplicate
+                    seen_duplicates.add(idx2)
 
     # Mark duplicates in entries
     for idx, entry in enumerate(entries):

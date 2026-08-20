@@ -3,10 +3,21 @@
 Moved verbatim from `stage_3b_entry_classifier.py`: `TaxonomyContext`,
 `build_mapping_index`, `get_taxonomy_context`. Stage 3a's header hierarchy
 comes in; the taxonomy suggestions for one entry's hierarchy path come out.
+
+The `taxonomy_options` dicts this module reads (``o["code"]``,
+``o["confidence"]``) are not validated here. They are validated once, at the
+configuration boundary, by `stage3b/io.py`'s `load_stage_3a_mappings()` /
+`_normalize_taxonomy_mappings()` -- the sole production source of the
+`mappings` this module's `build_mapping_index()` indexes -- which drops any
+option missing a `code` and coerces `confidence` to a float in [0, 1] before
+this module ever sees it. Bare subscripts below rely on that guarantee.
 """
 
+import logging
 from dataclasses import dataclass
 from typing import Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -27,15 +38,23 @@ class TaxonomyContext:
         return []
 
     def get_all_suggested_codes(self) -> List[str]:
-        """Get ALL suggested codes from ALL hierarchy levels (for taxonomy filtering)."""
-        codes = set()
-        if self.subsection and self.subsection.get("taxonomy_options"):
-            codes.update(o["code"] for o in self.subsection["taxonomy_options"])
-        if self.section and self.section.get("taxonomy_options"):
-            codes.update(o["code"] for o in self.section["taxonomy_options"])
-        if self.meta_section and self.meta_section.get("taxonomy_options"):
-            codes.update(o["code"] for o in self.meta_section["taxonomy_options"])
-        return list(codes)
+        """Get ALL suggested codes from ALL hierarchy levels (for taxonomy filtering).
+
+        Order matters: classify.py's `_classify_one_batch` falls back to
+        ``all_suggested_codes[0]`` as the classification for an all-empty
+        batch, so this must return the most-specific (subsection) codes
+        first, then section, then meta_section, deduplicated without
+        disturbing that order. A `set` iterates in an implementation-
+        dependent order and would make that fallback code nondeterministic.
+        """
+        codes: List[str] = []
+        for level in (self.subsection, self.section, self.meta_section):
+            if level and level.get("taxonomy_options"):
+                for o in level["taxonomy_options"]:
+                    code = o["code"]
+                    if code not in codes:
+                        codes.append(code)
+        return codes
 
     def format_context_string(self) -> str:
         """Format hierarchy context for LLM prompt with clear framing."""
@@ -76,6 +95,13 @@ def build_mapping_index(mappings: List[Dict], index: Dict = None, path: List[str
     Build an index from header title to taxonomy mapping.
 
     Returns dict mapping title -> mapping node
+
+    Two keys are stored per node: the short `title` (ambiguous if the same
+    title recurs under different parents -- last node wins, logged when it
+    happens) and the full-path tuple (unambiguous, since two nodes cannot
+    share a path). `get_taxonomy_context()` looks up the full-path key first
+    and only falls back to the short-title key when no exact path match
+    exists, so the ambiguous key is a fallback, not the primary lookup.
     """
     if index is None:
         index = {}
@@ -86,6 +112,11 @@ def build_mapping_index(mappings: List[Dict], index: Dict = None, path: List[str
         title = node.get("title", "")
         # Store with full path for disambiguation
         full_path = tuple(path + [title])
+        if title in index and index[title] is not node:
+            logger.warning(
+                "build_mapping_index: title %r appears under more than one "
+                "parent -- short-title lookup will resolve to %s; full-path "
+                "lookups for either branch are unaffected", title, full_path)
         index[title] = node
         index[full_path] = node
 
@@ -113,19 +144,23 @@ def get_taxonomy_context(hierarchy: List[str], mapping_index: Dict) -> TaxonomyC
     if not hierarchy:
         return context
 
-    # Try to match each level
+    # Try to match each level. Top-level sections have no parent to
+    # disambiguate against, so only the bare title is looked up there.
     if len(hierarchy) >= 1:
         context.meta_section = mapping_index.get(hierarchy[0])
 
     if len(hierarchy) >= 2:
-        context.section = mapping_index.get(hierarchy[1])
-        # Try full path if simple lookup fails
-        if not context.section:
-            context.section = mapping_index.get(tuple(hierarchy[:2]))
+        # Full path first: it is the unambiguous key. The bare title is
+        # ambiguous when the same title recurs under a different parent
+        # (see build_mapping_index), so it is only a fallback for when the
+        # taxonomy tree has no exact path match for this hierarchy.
+        context.section = mapping_index.get(tuple(hierarchy[:2]))
+        if context.section is None:
+            context.section = mapping_index.get(hierarchy[1])
 
     if len(hierarchy) >= 3:
-        context.subsection = mapping_index.get(hierarchy[2])
-        if not context.subsection:
-            context.subsection = mapping_index.get(tuple(hierarchy[:3]))
+        context.subsection = mapping_index.get(tuple(hierarchy[:3]))
+        if context.subsection is None:
+            context.subsection = mapping_index.get(hierarchy[2])
 
     return context
