@@ -144,7 +144,6 @@ def process_cv(
     result = extract_fields_from_mapped_entries(
         valid_entries,
         batch_size=10,
-        model=model,
         document_uid=document_uid,
         cancel_check=cancel_check,
     )

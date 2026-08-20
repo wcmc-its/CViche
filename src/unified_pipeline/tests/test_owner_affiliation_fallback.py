@@ -28,6 +28,20 @@ def test_end_year_ranks_present_above_any_year():
     assert _entry_end_year({'end_date': None}) == 0
 
 
+def test_end_year_survives_malformed_or_unrecognized_values():
+    """Text that isn't a year at all must sort last, not raise or misparse."""
+    assert _entry_end_year({'end_date': 'unknown'}) == 0
+    assert _entry_end_year({'end_date': 'N/A'}) == 0
+    assert _entry_end_year({'end_date': 'TBD'}) == 0
+    assert _entry_end_year({'end_date': 'ongoing'}) == 0
+    # No 4-digit run in the string at all.
+    assert _entry_end_year({'end_date': 'March 3, 22'}) == 0
+    assert _entry_end_year({'dates_attended_end_date': 'unknown'}) == 0
+    # Malformed but still contains a recognizable 4-digit year -- the regex
+    # fallback grabs it rather than failing closed.
+    assert _entry_end_year({'end_date': '13/45/2020'}) == 2020
+
+
 def test_employer_is_treated_as_current_even_without_a_date():
     lines = _owner_affiliation_lines([
         _entry('E', employer='Weill Cornell Medicine, New York, NY'),

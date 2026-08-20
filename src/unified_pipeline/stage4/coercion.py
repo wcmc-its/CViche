@@ -4,6 +4,7 @@ Moved verbatim from `stage_4_field_extractor.py` (#498), which re-exports every
 name here. Pure functions over extracted-field dicts: no LLM calls, no I/O.
 """
 
+import re
 from typing import Dict, Any
 
 
@@ -33,9 +34,19 @@ def coerce_field_value_types(extracted_fields: Dict[str, Any]) -> Dict[str, Any]
     - everything else is returned untouched, so numeric fields (``year``,
       ``volume``) stay numeric, structured fields (``locations`` and other
       list-of-dict / dict values) keep their shape, and ``None`` stays ``None``.
+
+    Raises:
+        TypeError: if ``extracted_fields`` is not a dict. The declared return
+            type is ``Dict[str, Any]``; silently handing back a non-dict input
+            unchanged would violate that contract for any caller that skips
+            its own type check. Callers on an untrusted-JSON boundary (e.g.
+            LLM output) must validate/guard before calling this function, not
+            rely on it to no-op.
     """
     if not isinstance(extracted_fields, dict):
-        return extracted_fields
+        raise TypeError(
+            f"extracted_fields must be a dict, got {type(extracted_fields).__name__}"
+        )
 
     coerced = {}
     for key, value in extracted_fields.items():
@@ -62,10 +73,12 @@ def normalize_dates(extracted_fields: Dict[str, Any]) -> Dict[str, Any]:
         extracted_fields: Dictionary of extracted fields
 
     Returns:
-        Dictionary with normalized date fields (always uses start_date/end_date)
+        Dictionary with normalized date fields (always uses start_date/end_date).
+        Existing non-empty canonical start_date/end_date values take precedence
+        over anything derived from a raw date-range field (date/year/years/...):
+        a value split out of the raw field only fills in a canonical field that
+        is missing or empty, it never overwrites one that is already set.
     """
-    import re
-
     normalized = extracted_fields.copy()
 
     # Fields that might contain date ranges
@@ -85,9 +98,12 @@ def normalize_dates(extracted_fields: Dict[str, Any]) -> Dict[str, Any]:
         match = re.match(r'^(\d{4})-(\d{4})$', value_str)
         if match:
             start_year, end_year = match.groups()
-            # Always use standardized start_date/end_date field names
-            normalized['start_date'] = start_year
-            normalized['end_date'] = end_year
+            # Standardized start_date/end_date field names -- but never
+            # clobber a canonical value that is already set (#3819068608).
+            if not normalized.get('start_date'):
+                normalized['start_date'] = start_year
+            if not normalized.get('end_date'):
+                normalized['end_date'] = end_year
             # Remove original field to avoid duplication
             del normalized[field_name]
             continue
@@ -96,8 +112,10 @@ def normalize_dates(extracted_fields: Dict[str, Any]) -> Dict[str, Any]:
         match = re.match(r'^(\d{4})-(present|ongoing|current)$', value_str, re.IGNORECASE)
         if match:
             start_year = match.group(1)
-            normalized['start_date'] = start_year
-            normalized['end_date'] = 'present'
+            if not normalized.get('start_date'):
+                normalized['start_date'] = start_year
+            if not normalized.get('end_date'):
+                normalized['end_date'] = 'present'
             del normalized[field_name]
             continue
 
@@ -105,8 +123,10 @@ def normalize_dates(extracted_fields: Dict[str, Any]) -> Dict[str, Any]:
         match = re.match(r'^(\d{4}-\d{2})-(\d{4}-\d{2})$', value_str)
         if match:
             start_date, end_date = match.groups()
-            normalized['start_date'] = start_date
-            normalized['end_date'] = end_date
+            if not normalized.get('start_date'):
+                normalized['start_date'] = start_date
+            if not normalized.get('end_date'):
+                normalized['end_date'] = end_date
             del normalized[field_name]
             continue
 
@@ -144,8 +164,6 @@ def normalize_authors_vancouver(authors_string: str) -> str:
     Returns:
         Normalized Vancouver-style author string
     """
-    import re
-
     if not authors_string:
         return authors_string
 
@@ -174,7 +192,16 @@ def normalize_authors_vancouver(authors_string: str) -> str:
 
         # Try to parse "LastName, FirstName MiddleName" format
         # e.g., "Smith, John Albert" or "Smith, J. A." or "Smith, JA"
-        comma_match = re.match(r'^([A-Za-z\-\']+),\s*(.+)$', author)
+        # Unicode-aware (not ASCII-only) so accented surnames (e.g. "Garcia"
+        # with an accent, "Muller" with an umlaut) and compound surnames with
+        # internal hyphens/apostrophes/spaces (e.g. "de la Cruz", "O'Brien",
+        # "Garcia-Lopez") match instead of silently falling through to the
+        # less-accurate "FirstName LastName" / cleanup paths below. `[^\W\d_]`
+        # is any Unicode letter; digits, underscore, and other punctuation
+        # stay excluded.
+        comma_match = re.match(
+            r"^([^\W\d_][^\W\d_\-'\s]*(?:[-'\s][^\W\d_]+)*),\s*(.+)$", author
+        )
         if comma_match:
             last_name = comma_match.group(1)
             first_parts = comma_match.group(2)
@@ -234,8 +261,6 @@ def extract_initials(name_parts: str) -> str:
     Returns:
         Uppercase initials without periods or spaces
     """
-    import re
-
     if not name_parts:
         return ""
 
@@ -254,6 +279,166 @@ def extract_initials(name_parts: str) -> str:
 
     return ''.join(initials)
 
+#: Taxonomy codes/prefixes gating which regex post-processors below apply to
+#: a given entry. Named per CODING_STANDARDS.md 8.2 (no bare literals in the
+#: gating logic).
+IDENTIFIER_TAXONOMY_PREFIX = 'S'          # S1, S2, ... -- scholarship/publication codes
+IDENTIFIER_TAXONOMY_CODES = ('R', 'N4')   # non-'S' codes that also carry PMID/PMCID/DOI
+ORCID_TAXONOMY_CODES = ('A', 'S0')        # profile-section codes that carry an ORCID
+GRANT_EFFORT_TAXONOMY_PREFIX = 'M2'       # grant entries where percent-effort/FTE applies
+
+
+def _normalize_pmid(original_text: str, updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+    """Extract a PMID from the source text if the LLM didn't already fill it in."""
+    if updated.get('pmid'):
+        return
+    pmid_match = re.search(REGEX_PATTERNS['pmid'], original_text, re.IGNORECASE)
+    if pmid_match:
+        pmid_value = pmid_match.group(1)  # Just the number
+        updated['pmid'] = pmid_value
+        reformatted['pmid'] = {
+            'original': pmid_match.group(0),  # Full match like "PMID: 12345678"
+            'reformatted': pmid_value,
+            'reason': 'Extracted PMID number via regex'
+        }
+
+
+def _normalize_pmcid(original_text: str, updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+    """Extract a PMCID from the source text if the LLM didn't already fill it in."""
+    if updated.get('pmcid'):
+        return
+    pmcid_match = re.search(REGEX_PATTERNS['pmcid'], original_text, re.IGNORECASE)
+    if pmcid_match:
+        pmcid_value = f"PMC{pmcid_match.group(1)}"
+        updated['pmcid'] = pmcid_value
+        reformatted['pmcid'] = {
+            'original': pmcid_match.group(0),
+            'reformatted': pmcid_value,
+            'reason': 'Extracted PMCID via regex'
+        }
+
+
+def _normalize_doi(original_text: str, updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+    """Extract a DOI if missing, or normalize an existing one (strip doi.org/doi: prefixes)."""
+    if not updated.get('doi'):
+        doi_match = re.search(REGEX_PATTERNS['doi'], original_text)
+        if doi_match:
+            # Clean up trailing punctuation that might have been captured
+            doi_value = re.sub(r'[\.,;:]+$', '', doi_match.group(1))
+            updated['doi'] = doi_value
+            reformatted['doi'] = {
+                'original': doi_match.group(0),
+                'reformatted': doi_value,
+                'reason': 'Extracted DOI via regex'
+            }
+        return
+
+    # Normalize existing DOI (remove doi.org prefix, etc.)
+    existing_doi = updated['doi']
+    normalized_doi = re.sub(r'^https?://(dx\.)?doi\.org/', '', existing_doi)
+    normalized_doi = re.sub(r'^doi:', '', normalized_doi, flags=re.IGNORECASE)
+    normalized_doi = re.sub(r'[\.,;:]+$', '', normalized_doi)
+    if normalized_doi != existing_doi:
+        updated['doi'] = normalized_doi
+        reformatted['doi'] = {
+            'original': existing_doi,
+            'reformatted': normalized_doi,
+            'reason': 'Normalized DOI format'
+        }
+
+
+def _normalize_orcid(original_text: str, updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+    """Extract an ORCID from the source text if the LLM didn't already fill it in."""
+    if updated.get('orcid'):
+        return
+    orcid_match = re.search(REGEX_PATTERNS['orcid'], original_text)
+    if orcid_match:
+        updated['orcid'] = orcid_match.group(1)
+        reformatted['orcid'] = {
+            'original': orcid_match.group(0),
+            'reformatted': orcid_match.group(1),
+            'reason': 'Extracted ORCID via regex'
+        }
+
+
+def _normalize_authors_field(updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+    """Rewrite the authors field to Vancouver style (LastName AB, LastName CD), if it changes anything."""
+    if not updated.get('authors'):
+        return
+    original_authors = updated['authors']
+    normalized_authors = normalize_authors_vancouver(original_authors)
+    if normalized_authors != original_authors:
+        updated['authors'] = normalized_authors
+        reformatted['authors'] = {
+            'original': original_authors,
+            'reformatted': normalized_authors,
+            'reason': 'Normalized to Vancouver author format'
+        }
+
+
+def _clean_title_field(updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+    """Strip leading status labels (e.g. "Featured:", "Submitted:") and stray punctuation from a title."""
+    if not updated.get('title'):
+        return
+    original_title = updated['title']
+    cleaned_title = re.sub(
+        r'^(Featured|Submitted|In Review|In Preparation|Accepted)[:\s]+', '',
+        original_title, flags=re.IGNORECASE
+    )
+    cleaned_title = re.sub(r'^[:\?\s]+', '', cleaned_title)
+    cleaned_title = re.sub(r'[:\?\s]+$', '', cleaned_title)
+    if cleaned_title != original_title:
+        updated['title'] = cleaned_title
+        reformatted['title'] = {
+            'original': original_title,
+            'reformatted': cleaned_title,
+            'reason': 'Removed prefix label from title'
+        }
+
+
+# Regex candidates for percent-effort/FTE, tried in order; the first to match
+# wins. The decimal-FTE pattern captures the WHOLE decimal value (integer +
+# fractional part, e.g. ".8", "0.08", "1.0") instead of only the digits after
+# the point, so ".8 FTE" converts to 80% rather than 8% (#3819054910: the old
+# two-pattern version dropped the integer part and treated the raw digit
+# string as already the percent, which only read correctly by coincidence
+# for exactly-two-digit fractions like ".08").
+_FTE_DECIMAL_PATTERN = r'(\d*\.\d{1,2})\s*FTE'      # .08FTE, 0.08 FTE, .8 FTE, 1.0 FTE
+_FTE_PERCENT_PATTERNS = (
+    r'(\d{1,3})\s*%\s*(?:effort|FTE)?',             # 8%, 8 %, 8% effort
+    r'(\d{1,3})\s*percent',                          # 8 percent
+)
+
+
+def _normalize_grant_effort(original_text: str, updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+    """Extract percent-effort/FTE for grant entries, if the LLM didn't already fill it in."""
+    if updated.get('percent_effort'):
+        return
+
+    decimal_match = re.search(_FTE_DECIMAL_PATTERN, original_text, re.IGNORECASE)
+    if decimal_match:
+        match = decimal_match
+        percent_effort = f"{round(float(decimal_match.group(1)) * 100)}%"
+    else:
+        match = None
+        percent_effort = None
+        for pattern in _FTE_PERCENT_PATTERNS:
+            percent_match = re.search(pattern, original_text, re.IGNORECASE)
+            if percent_match:
+                match = percent_match
+                percent_effort = f"{percent_match.group(1)}%"
+                break
+        if match is None:
+            return
+
+    updated['percent_effort'] = percent_effort
+    reformatted['percent_effort'] = {
+        'original': match.group(0),
+        'reformatted': percent_effort,
+        'reason': 'Extracted percent effort via regex'
+    }
+
+
 def apply_regex_post_processing(
     original_text: str,
     extracted_fields: Dict[str, Any],
@@ -262,7 +447,11 @@ def apply_regex_post_processing(
     """
     Apply regex patterns to catch identifiers missed by LLM extraction.
 
-    Also tracks reformatted values for transparency.
+    Also tracks reformatted values for transparency. Each distinct concern
+    (identifiers, DOI, ORCID, author formatting, title cleanup, grant effort)
+    is a small helper above; this function is the orchestrator that decides,
+    per taxonomy code, which ones apply, in the same order as before the
+    split.
 
     Args:
         original_text: Original CV entry text
@@ -274,133 +463,28 @@ def apply_regex_post_processing(
         - updated_fields: Extracted fields with regex-caught values added
         - reformatted_fields: Dict tracking original -> reformatted values
     """
-    import re
-
     updated = extracted_fields.copy()
     reformatted = {}
 
     # Only apply identifier extraction to relevant taxonomy codes
-    if taxonomy_code.startswith('S') or taxonomy_code in ('R', 'N4'):
-
-        # Extract PMID if not already present
-        if not updated.get('pmid'):
-            pmid_match = re.search(REGEX_PATTERNS['pmid'], original_text, re.IGNORECASE)
-            if pmid_match:
-                original_pmid_text = pmid_match.group(0)  # Full match like "PMID: 12345678"
-                pmid_value = pmid_match.group(1)  # Just the number
-                updated['pmid'] = pmid_value
-                reformatted['pmid'] = {
-                    'original': original_pmid_text,
-                    'reformatted': pmid_value,
-                    'reason': 'Extracted PMID number via regex'
-                }
-
-        # Extract PMCID if not already present
-        if not updated.get('pmcid'):
-            pmcid_match = re.search(REGEX_PATTERNS['pmcid'], original_text, re.IGNORECASE)
-            if pmcid_match:
-                pmcid_value = f"PMC{pmcid_match.group(1)}"
-                updated['pmcid'] = pmcid_value
-                reformatted['pmcid'] = {
-                    'original': pmcid_match.group(0),
-                    'reformatted': pmcid_value,
-                    'reason': 'Extracted PMCID via regex'
-                }
-
-        # Extract/normalize DOI if not already present
-        if not updated.get('doi'):
-            doi_match = re.search(REGEX_PATTERNS['doi'], original_text)
-            if doi_match:
-                doi_value = doi_match.group(1)
-                # Clean up trailing punctuation that might have been captured
-                doi_value = re.sub(r'[\.,;:]+$', '', doi_value)
-                updated['doi'] = doi_value
-                reformatted['doi'] = {
-                    'original': doi_match.group(0),
-                    'reformatted': doi_value,
-                    'reason': 'Extracted DOI via regex'
-                }
-        elif updated.get('doi'):
-            # Normalize existing DOI (remove doi.org prefix, etc.)
-            existing_doi = updated['doi']
-            normalized_doi = re.sub(r'^https?://(dx\.)?doi\.org/', '', existing_doi)
-            normalized_doi = re.sub(r'^doi:', '', normalized_doi, flags=re.IGNORECASE)
-            normalized_doi = re.sub(r'[\.,;:]+$', '', normalized_doi)
-            if normalized_doi != existing_doi:
-                updated['doi'] = normalized_doi
-                reformatted['doi'] = {
-                    'original': existing_doi,
-                    'reformatted': normalized_doi,
-                    'reason': 'Normalized DOI format'
-                }
+    if taxonomy_code.startswith(IDENTIFIER_TAXONOMY_PREFIX) or taxonomy_code in IDENTIFIER_TAXONOMY_CODES:
+        _normalize_pmid(original_text, updated, reformatted)
+        _normalize_pmcid(original_text, updated, reformatted)
+        _normalize_doi(original_text, updated, reformatted)
 
     # Extract ORCID for profile sections
-    if taxonomy_code in ('A', 'S0'):
-        if not updated.get('orcid'):
-            orcid_match = re.search(REGEX_PATTERNS['orcid'], original_text)
-            if orcid_match:
-                updated['orcid'] = orcid_match.group(1)
-                reformatted['orcid'] = {
-                    'original': orcid_match.group(0),
-                    'reformatted': orcid_match.group(1),
-                    'reason': 'Extracted ORCID via regex'
-                }
+    if taxonomy_code in ORCID_TAXONOMY_CODES:
+        _normalize_orcid(original_text, updated, reformatted)
 
     # Normalize author formatting to Vancouver style
     # Vancouver: LastName AB, LastName CD (no periods in initials, no comma before initials)
-    if updated.get('authors'):
-        original_authors = updated['authors']
-        normalized_authors = normalize_authors_vancouver(original_authors)
-        if normalized_authors != original_authors:
-            updated['authors'] = normalized_authors
-            reformatted['authors'] = {
-                'original': original_authors,
-                'reformatted': normalized_authors,
-                'reason': 'Normalized to Vancouver author format'
-            }
+    _normalize_authors_field(updated, reformatted)
 
     # Clean title (remove leading labels like "Featured:", "Submitted:")
-    if updated.get('title'):
-        original_title = updated['title']
-        # Remove common prefixes
-        cleaned_title = re.sub(r'^(Featured|Submitted|In Review|In Preparation|Accepted)[:\s]+', '',
-                               original_title, flags=re.IGNORECASE)
-        # Remove stray punctuation artifacts
-        cleaned_title = re.sub(r'^[:\?\s]+', '', cleaned_title)
-        cleaned_title = re.sub(r'[:\?\s]+$', '', cleaned_title)
-        if cleaned_title != original_title:
-            updated['title'] = cleaned_title
-            reformatted['title'] = {
-                'original': original_title,
-                'reformatted': cleaned_title,
-                'reason': 'Removed prefix label from title'
-            }
+    _clean_title_field(updated, reformatted)
 
     # Extract percent effort/FTE for grant entries
-    if taxonomy_code.startswith('M2'):
-        if not updated.get('percent_effort'):
-            # Match various FTE formats: .08FTE, 0.08 FTE, 8%, 8 %, .08 FTE, 8% effort, etc.
-            fte_patterns = [
-                r'\.(\d{1,2})\s*FTE',          # .08FTE, .08 FTE
-                r'0\.(\d{1,2})\s*FTE',         # 0.08FTE, 0.08 FTE
-                r'(\d{1,3})\s*%\s*(?:effort|FTE)?',  # 8%, 8 %, 8% effort
-                r'(\d{1,3})\s*percent',        # 8 percent
-            ]
-            for pattern in fte_patterns:
-                fte_match = re.search(pattern, original_text, re.IGNORECASE)
-                if fte_match:
-                    fte_value = fte_match.group(1)
-                    # Normalize to percentage format
-                    if '.' not in pattern:  # Already a percentage
-                        percent_effort = f"{fte_value}%"
-                    else:  # Decimal FTE format, convert to percentage
-                        percent_effort = f"{int(fte_value)}%"
-                    updated['percent_effort'] = percent_effort
-                    reformatted['percent_effort'] = {
-                        'original': fte_match.group(0),
-                        'reformatted': percent_effort,
-                        'reason': 'Extracted percent effort via regex'
-                    }
-                    break
+    if taxonomy_code.startswith(GRANT_EFFORT_TAXONOMY_PREFIX):
+        _normalize_grant_effort(original_text, updated, reformatted)
 
     return updated, reformatted

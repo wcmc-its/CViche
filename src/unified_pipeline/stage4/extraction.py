@@ -12,7 +12,11 @@ function in play (the #496 split-state lesson).
 """
 
 import json
+import logging
 from typing import Dict, List, Any, Optional, Callable
+
+from openai import APITimeoutError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from unified_pipeline.llm_client import call_llm
 
@@ -33,6 +37,45 @@ from unified_pipeline.stage4.schemas import (
     get_field_schema,
     get_taxonomy_label,
 )
+
+logger = logging.getLogger(__name__)
+
+# Stable error-code strings for extraction_error / llm_recovery_error fields.
+# A caller can branch on these programmatically; str(exception) is for the
+# log line only (via logger.exception, which records the full traceback),
+# never for a field another stage or the frontend reads.
+LLM_RESPONSE_INVALID = "llm_response_invalid"
+LLM_TIMEOUT = "llm_timeout"
+LLM_PROVIDER_ERROR = "llm_provider_error"
+
+
+class _ExtractedEntryFields(BaseModel):
+    """Shape of one item in the batch extraction LLM's `entries` list.
+
+    Validated at the external trust boundary before being merged into
+    pipeline state: `entry_index` is the only field this module depends on
+    structurally. Every other key is an arbitrary taxonomy-schema field name
+    the LLM decided to include, so extras are allowed through rather than
+    enumerated here.
+    """
+    model_config = ConfigDict(extra="allow")
+
+    entry_index: int
+
+
+class _RecoveredEntry(BaseModel):
+    """Shape of one item in the recovery LLM's `recovered_entries` list."""
+    model_config = ConfigDict(extra="allow")
+
+    entry_id: str
+    fields: Dict[str, Any] = Field(default_factory=dict)
+
+
+class _RecoveryResponse(BaseModel):
+    """Shape of the recovery LLM's JSON response, validated before use."""
+
+    recovered_entries: List[_RecoveredEntry] = Field(default_factory=list)
+    recovery_notes: str = ""
 
 
 def calculate_unextracted_content(original_text: str, extracted_fields: Dict[str, Any]) -> Dict[str, Any]:
@@ -154,10 +197,20 @@ def needs_llm_recovery(entry: Dict[str, Any], min_original_chars: int = 200, max
 
     return has_dates or has_structure
 
+
+def _recovery_entry_id(entry: Dict[str, Any]) -> str:
+    """Deterministic id for one entry, stable across the recovery round-trip.
+
+    Reuses the same (element_idx_start, element_idx_end) pair the merge-back
+    step in `extract_fields_batch` already keys on, instead of minting a new
+    field on the entry.
+    """
+    return f"{entry.get('element_idx_start')}_{entry.get('element_idx_end')}"
+
+
 def attempt_llm_recovery(
     entries: List[Dict[str, Any]],
-    model: str = None
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     """
     Attempt LLM-assisted recovery for entries with poor extraction coverage.
 
@@ -166,22 +219,31 @@ def attempt_llm_recovery(
 
     Args:
         entries: List of entries needing recovery (same taxonomy code)
-        model: Unused -- the model is resolved from llm_config.yaml, not this argument
 
     Returns:
-        List of entries with recovered fields
+        Dict with:
+        - entries: List of entries with recovered fields (unchanged or
+          error-tagged originals for any that failed to recover)
+        - cost: USD cost of the recovery LLM call (0.0 if none was billed)
+        - tokens: total tokens used by the recovery LLM call
     """
     if not entries:
-        return entries
+        return {"entries": entries, "cost": 0.0, "tokens": 0}
 
     # All entries should have the same taxonomy code
     taxonomy_code = entries[0].get("taxonomy_code", "UNKNOWN")
     taxonomy_label = get_taxonomy_label(taxonomy_code)
     schema = get_field_schema(taxonomy_code)
 
-    # Combine all entry texts for context
+    # Combine all entry texts for context, each tagged with the deterministic
+    # id the LLM must echo back. Matching recovered fields to entries by a
+    # lowercase substring check against the first 100 chars of entry text
+    # (the prior approach) lets two similar entries satisfy the same snippet,
+    # or one recovery result apply to the wrong entry -- an exact id lookup
+    # cannot mismap.
     combined_text = "\n---ENTRY BOUNDARY---\n".join(
-        entry.get("text", "") for entry in entries
+        f"[entry_id: {_recovery_entry_id(entry)}]\n{entry.get('text', '')}"
+        for entry in entries
     )
 
     # Build recovery prompt with taxonomy context
@@ -194,7 +256,7 @@ def attempt_llm_recovery(
 **Field Descriptions**:
 {_get_field_descriptions(taxonomy_code)}
 
-**Raw Text to Parse**:
+**Raw Text to Parse** (each entry is preceded by its exact entry_id in brackets):
 {combined_text}
 
 **Instructions**:
@@ -207,12 +269,13 @@ def attempt_llm_recovery(
 4. Extract ALL entries you can identify, even if some fields are missing
 5. For each entry, extract: {', '.join(schema['fields'][:5])}{'...' if len(schema['fields']) > 5 else ''}
 6. Use "---ENTRY BOUNDARY---" markers to identify separate entry groups if present
+7. Echo the entry's exact "entry_id" (the string shown in brackets before its text, e.g. "12_12") back in your response so results can be matched precisely -- do not paraphrase or truncate it
 
 **Return JSON**:
 {{
   "recovered_entries": [
     {{
-      "original_text_snippet": "first 50 chars of the entry text",
+      "entry_id": "the exact entry_id shown in brackets above the entry text",
       "fields": {{
         "field1": "value1",
         "field2": "value2",
@@ -224,6 +287,7 @@ def attempt_llm_recovery(
   "recovery_notes": "Brief explanation of how you parsed the structure"
 }}"""
 
+    llm_result = None
     try:
         llm_result = call_llm(
             stage="stage_4",
@@ -236,38 +300,29 @@ def attempt_llm_recovery(
         )
 
         result_text = llm_result["content"]
-        result = json.loads(result_text)
-
-        recovered = result.get("recovered_entries", [])
-        recovery_notes = result.get("recovery_notes", "")
+        parsed = json.loads(result_text)
+        validated = _RecoveryResponse.model_validate(parsed)
 
         cost = llm_result["cost"]
+        tokens = llm_result.get("total_tokens", 0)
 
-        print(f"    LLM Recovery: {len(recovered)} entries recovered | ${cost:.4f}")
-        if recovery_notes:
-            print(f"       Notes: {recovery_notes[:100]}...")
+        logger.info("LLM Recovery: %d entries recovered | $%.4f", len(validated.recovered_entries), cost)
+        if validated.recovery_notes:
+            logger.info("Recovery notes: %s", validated.recovery_notes[:100])
 
-        # Match recovered entries back to original entries
-        # This is approximate - we try to match by text snippet
+        # Match recovered entries back to original entries by exact id.
+        recovered_by_id = {rec.entry_id: rec for rec in validated.recovered_entries}
+
         recovered_entries = []
         for entry in entries:
-            entry_text = entry.get("text", "")
-            matched_recovery = None
+            matched = recovered_by_id.get(_recovery_entry_id(entry))
 
-            # Try to find a matching recovery by text snippet
-            for rec in recovered:
-                snippet = rec.get("original_text_snippet", "")
-                if snippet and snippet.lower() in entry_text.lower()[:100]:
-                    matched_recovery = rec
-                    break
-
-            if matched_recovery:
-                # Apply recovered fields
-                recovered_fields = matched_recovery.get("fields", {})
+            if matched:
                 # Coerce off-type LLM values before regex/downstream consumers
-                recovered_fields = coerce_field_value_types(recovered_fields)
+                recovered_fields = coerce_field_value_types(dict(matched.fields))
                 # Normalize dates
                 recovered_fields = normalize_dates(recovered_fields)
+                entry_text = entry.get("text", "")
                 # Apply regex post-processing
                 recovered_fields, reformatted = apply_regex_post_processing(
                     entry_text, recovered_fields, taxonomy_code
@@ -293,12 +348,39 @@ def attempt_llm_recovery(
                     "llm_recovery_matched": False
                 })
 
-        return recovered_entries
+        return {"entries": recovered_entries, "cost": cost, "tokens": tokens}
 
-    except Exception as e:
-        print(f"    ⚠ LLM Recovery failed: {e}")
-        # Return original entries unchanged
-        return [{**entry, "llm_recovery_error": str(e)} for entry in entries]
+    except APITimeoutError:
+        logger.exception("Stage 4 recovery LLM call timed out for taxonomy %s", taxonomy_code)
+        return {
+            "entries": [{**entry, "llm_recovery_error": LLM_TIMEOUT} for entry in entries],
+            "cost": 0.0,
+            "tokens": 0,
+        }
+    except json.JSONDecodeError:
+        logger.exception("Stage 4 recovery response for taxonomy %s was not valid JSON", taxonomy_code)
+        return {
+            "entries": [{**entry, "llm_recovery_error": LLM_RESPONSE_INVALID} for entry in entries],
+            "cost": llm_result["cost"] if llm_result else 0.0,
+            "tokens": llm_result.get("total_tokens", 0) if llm_result else 0,
+        }
+    except ValidationError as exc:
+        logger.warning(
+            "Stage 4 recovery response for taxonomy %s failed shape validation: %s",
+            taxonomy_code, exc,
+        )
+        return {
+            "entries": [{**entry, "llm_recovery_error": LLM_RESPONSE_INVALID} for entry in entries],
+            "cost": llm_result["cost"] if llm_result else 0.0,
+            "tokens": llm_result.get("total_tokens", 0) if llm_result else 0,
+        }
+    except Exception:
+        logger.exception("Stage 4 recovery LLM call failed for taxonomy %s", taxonomy_code)
+        return {
+            "entries": [{**entry, "llm_recovery_error": LLM_PROVIDER_ERROR} for entry in entries],
+            "cost": llm_result["cost"] if llm_result else 0.0,
+            "tokens": llm_result.get("total_tokens", 0) if llm_result else 0,
+        }
 
 def _get_field_descriptions(taxonomy_code: str) -> str:
     """Get human-readable descriptions of expected fields for a taxonomy code.
@@ -313,112 +395,50 @@ def _get_field_descriptions(taxonomy_code: str) -> str:
 
     return f"Extract all available fields: {', '.join(get_field_schema(taxonomy_code)['fields'])}"
 
-def build_extraction_prompt(entry: Dict[str, Any], schema: Dict[str, Any]) -> str:
-    """
-    Build LLM prompt for field extraction.
-    """
-    taxonomy_code = entry.get("taxonomy_code", "UNKNOWN")
-    taxonomy_label = entry.get("taxonomy_label", "Unknown")
-    text = entry.get("text", "")
-
-    fields = schema["fields"]
-    required = schema.get("required", [])
-
-    prompt = f"""Extract structured fields from this CV entry.
-
-**Entry Classification**: {taxonomy_code} - {taxonomy_label}
-
-**Entry Text**:
-{text}
-
-**Fields to Extract**:
-{', '.join(fields)}
-
-**Required Fields** (must extract if present):
-{', '.join(required)}
-
-**Instructions**:
-1. Extract all available fields from the text
-2. Use null for fields not found
-3. For dates: use YYYY-MM-DD format when possible, or YYYY if only year available
-4. For authors: extract as a single string (e.g., "Smith J, Doe A, et al.")
-5. Be precise - only extract what is explicitly stated
-6. Do not infer or guess missing information
-
-Return JSON with the extracted fields."""
-
-    return prompt
-
-def extract_fields_batch(
+def build_extraction_prompt(
     entries: List[Dict[str, Any]],
-    batch_idx: int,
-    total_batches: int,
-    model: str = None,
-    cv_owner_name: Optional[Dict[str, str]] = None
-) -> Dict[str, Any]:
+    schema: Dict[str, Any],
+    code: str,
+    cv_owner_name: Optional[Dict[str, str]] = None,
+) -> str:
     """
-    Extract fields from a batch of entries using LLM.
+    Build the batch LLM prompt for field extraction for one taxonomy-code group.
+
+    Single source of truth for the production extraction prompt.
+    `extract_fields_batch()` calls this rather than building the prompt
+    inline -- it previously did both, with this function building an unused,
+    simpler single-entry variant that could silently drift from the real one.
 
     Args:
-        entries: List of entries to process
-        batch_idx: Current batch index
-        total_batches: Total number of batches
-        model: Unused -- the model is resolved from llm_config.yaml, not this argument
-        cv_owner_name: Dict with 'last_name' and optionally 'full_name' of CV owner
+        entries: Entries for this taxonomy code (already grouped by caller)
+        schema: Field schema for `code` (fields, required)
+        code: Taxonomy code for this group (e.g. "M2A", "S8")
+        cv_owner_name: Dict with 'last_name' and optionally 'full_name' of CV
+            owner, used to hint the target_name instruction for publications
+            and presentations (codes starting with "S", and "R")
     """
-    print(f"  Processing batch {batch_idx + 1}/{total_batches} ({len(entries)} entries)...")
+    code_label = get_taxonomy_label(code)
 
-    # Group by taxonomy code for better prompting
-    entries_by_code = {}
-    for entry in entries:
-        code = entry.get("taxonomy_code", "UNKNOWN")
-        if code not in entries_by_code:
-            entries_by_code[code] = []
-        entries_by_code[code].append(entry)
-
-    all_extracted = []
-    total_cost = 0.0
-    total_tokens = 0
-    total_cache_read_tokens = 0
-    total_cache_write_tokens = 0
-
-    for code, code_entries in entries_by_code.items():
-        schema = get_field_schema(code)
-
-        # Build batch prompt
-        batch_items = []
-        for i, entry in enumerate(code_entries):
-            item = {
-                "entry_index": i,
-                "text": entry.get("text", ""),
-                "element_idx_start": entry.get("element_idx_start"),
-                "element_idx_end": entry.get("element_idx_end")
-            }
-            batch_items.append(item)
-
-        # Get label for this taxonomy code
-        code_label = get_taxonomy_label(code)
-
-        # Build target_name instruction for publications/presentations
-        target_name_instruction = ""
-        if code.startswith('S') or code == 'R':
-            if cv_owner_name and cv_owner_name.get('last_name'):
-                last_name = cv_owner_name['last_name']
-                target_name_instruction = f"""
+    # Build target_name instruction for publications/presentations
+    target_name_instruction = ""
+    if code.startswith('S') or code == 'R':
+        if cv_owner_name and cv_owner_name.get('last_name'):
+            last_name = cv_owner_name['last_name']
+            target_name_instruction = f"""
 9. **target_name**: This is the CV owner's publication. Find "{last_name}" (or similar) in the author list and extract their name EXACTLY as it appears (e.g., "{last_name} JA" or "{last_name}, J."). This identifies the CV owner among the authors."""
-            else:
-                target_name_instruction = """
+        else:
+            target_name_instruction = """
 9. **target_name**: Extract the CV owner's name from the author list. In a CV, the owner is typically the first author, last author, or marked with an asterisk (*). Extract the name exactly as it appears in the author list."""
 
-        # Build field guide from FIELD_DESCRIPTIONS if available for this code
-        field_guide_section = ""
-        if code in FIELD_DESCRIPTIONS:
-            guide_lines = []
-            for field_name, desc in FIELD_DESCRIPTIONS[code].items():
-                guide_lines.append(f"- {field_name}: {desc}")
-            field_guide_section = "\n**Field Guide** (what each field should contain):\n" + "\n".join(guide_lines) + "\n"
+    # Build field guide from FIELD_DESCRIPTIONS if available for this code
+    field_guide_section = ""
+    if code in FIELD_DESCRIPTIONS:
+        guide_lines = []
+        for field_name, desc in FIELD_DESCRIPTIONS[code].items():
+            guide_lines.append(f"- {field_name}: {desc}")
+        field_guide_section = "\n**Field Guide** (what each field should contain):\n" + "\n".join(guide_lines) + "\n"
 
-        prompt = f"""Extract structured fields from these CV entries.
+    prompt = f"""Extract structured fields from these CV entries.
 
 **Classification**: {code} - {code_label}
 
@@ -428,37 +448,37 @@ def extract_fields_batch(
 
 **Entries**:
 """
-        for item in batch_items:
-            prompt += f"\n[Entry {item['entry_index']}]:\n{item['text']}\n"
+    for i, entry in enumerate(entries):
+        prompt += f"\n[Entry {i}]:\n{entry.get('text', '')}\n"
 
-        # Add code-specific instructions
-        code_specific_instructions = ""
-        if code.startswith('M2'):
-            code_specific_instructions = """
+    # Add code-specific instructions
+    code_specific_instructions = ""
+    if code.startswith('M2'):
+        code_specific_instructions = """
 9. **GRANTS (M2A/M2B/M2C)**:
    - pi_name = a PERSON'S NAME (e.g., "Susan Bostwick", "John Smith") - NOT the project title
    - title = the scientific project title - NOT a person's name, NOT FTE information
    - percent_effort = extract FTE as percentage (e.g., ".08FTE" → "8%", "0.1 FTE" → "10%")
    - Do NOT put the project title in pi_name field
    - If no PI name is found, leave pi_name as null"""
-        elif code == 'K4':
-            code_specific_instructions = """
+    elif code == 'K4':
+        code_specific_instructions = """
 9. **CONTINUING EDUCATION (K4)** - CRITICAL field separation:
    - If text reads "[Role] of/for [Title]" (e.g., "Creator and Presenter of Insomnia evaluation and management"):
      * role = "Creator and Presenter" (everything BEFORE "of/for")
      * activity_title = "Insomnia evaluation and management" (everything AFTER "of/for")
    - activity_title must NEVER include the person's role
    - role must NEVER include the activity/course name"""
-        elif code == 'I':
-            code_specific_instructions = """
+    elif code == 'I':
+        code_specific_instructions = """
 9. **MEMBERSHIPS (I)** - CRITICAL field separation:
    - If text reads "Fellow | American Academy of Pediatrics" or "Fellow, Organization Name":
      * membership_type = "Fellow" (the designation/level)
      * organization = "American Academy of Pediatrics" (the society name only)
    - Common membership_type values: Fellow, Member, Diplomat, Associate Member, Honorary Member
    - Do NOT merge membership_type into organization - they are separate fields"""
-        elif code == 'Q2':
-            code_specific_instructions = """
+    elif code == 'Q2':
+        code_specific_instructions = """
 9. **EXTRAMURAL COMMITTEES (Q2)** - CRITICAL three-way field separation:
    - committee_name = the specific committee name ONLY (e.g., "Education Committee")
    - role = ONLY the role word (e.g., "Member", "Chair") - NOT the committee name
@@ -468,14 +488,14 @@ def extract_fields_batch(
      * role = "Member"
      * organization = "American Academy of Neurology"
    - Do NOT put the committee name in the role field or vice versa"""
-        elif code == 'P':
-            code_specific_instructions = """
+    elif code == 'P':
+        code_specific_instructions = """
 9. **INSTITUTIONAL COMMITTEES (P)** - CRITICAL field separation:
    - committee_name = the committee/body name ONLY (e.g., "Quality Improvement Committee")
    - role = ONLY the role word(s) (e.g., "Chair", "Member") - NOT the committee name
    - Do NOT merge role into committee_name or vice versa"""
 
-        prompt += f"""
+    prompt += f"""
 **Instructions**:
 1. For each entry, extract all available fields
 2. Use null for fields not found
@@ -505,6 +525,49 @@ Return JSON with format:
   ]
 }}"""
 
+    return prompt
+
+def extract_fields_batch(
+    entries: List[Dict[str, Any]],
+    batch_idx: int,
+    total_batches: int,
+    cv_owner_name: Optional[Dict[str, str]] = None
+) -> Dict[str, Any]:
+    """
+    Extract fields from a batch of entries using LLM.
+
+    Args:
+        entries: List of entries to process
+        batch_idx: Current batch index
+        total_batches: Total number of batches
+        cv_owner_name: Dict with 'last_name' and optionally 'full_name' of CV owner
+    """
+    logger.info("Processing batch %d/%d (%d entries)...", batch_idx + 1, total_batches, len(entries))
+
+    # Group by taxonomy code for better prompting
+    entries_by_code = {}
+    for entry in entries:
+        code = entry.get("taxonomy_code", "UNKNOWN")
+        if code not in entries_by_code:
+            entries_by_code[code] = []
+        entries_by_code[code].append(entry)
+
+    all_extracted = []
+    total_cost = 0.0
+    total_tokens = 0
+    total_cache_read_tokens = 0
+    total_cache_write_tokens = 0
+    # Taxonomy-code groups within this batch whose LLM call or response
+    # failed outright (as opposed to individual entries the LLM just didn't
+    # return a match for, which are marked per-entry below). Rolled up into
+    # this batch's "success"/"failed_groups" so the caller can tell a batch
+    # that silently lost an entire code group from one that fully succeeded.
+    failed_groups = 0
+
+    for code, code_entries in entries_by_code.items():
+        schema = get_field_schema(code)
+        prompt = build_extraction_prompt(code_entries, schema, code, cv_owner_name)
+
         # Call LLM
         try:
             messages = [
@@ -530,25 +593,42 @@ Return JSON with format:
             total_cache_write_tokens += llm_result.get("cache_write_tokens", 0)
 
             # Log cost for this call
-            print(f"    [{code}] {len(code_entries)} entries | {llm_result['total_tokens']:,} tokens | ${cost:.4f}")
+            logger.info(
+                "[%s] %d entries | %s tokens | $%.4f",
+                code, len(code_entries), f"{llm_result['total_tokens']:,}", cost,
+            )
 
             # Merge extracted fields back with entries
             # CRITICAL: Use entry_index from LLM response to match correctly
-            extractions = result.get("entries", result.get("extractions", []))
+            raw_extractions = result.get("entries", result.get("extractions", []))
+            if not isinstance(raw_extractions, list):
+                logger.warning(
+                    "Stage 4 batch extraction response for %s was not a list (got %s); treating as empty",
+                    code, type(raw_extractions).__name__,
+                )
+                raw_extractions = []
 
-            # Create index map for safe merging
-            extraction_map = {}
-            for extracted in extractions:
-                entry_idx = extracted.get("entry_index")
-                if entry_idx is not None:
-                    extraction_map[entry_idx] = extracted
+            # Validate each item at the external trust boundary -- raw LLM
+            # JSON -- before it is merged into pipeline state. A malformed
+            # item (missing/non-int entry_index, not an object) is dropped
+            # with a warning rather than crashing the whole batch or being
+            # merged in with an unvalidated shape.
+            extraction_map: Dict[int, Dict[str, Any]] = {}
+            for raw_item in raw_extractions:
+                try:
+                    validated_item = _ExtractedEntryFields.model_validate(raw_item)
+                except ValidationError as exc:
+                    logger.warning(
+                        "Stage 4 batch extraction for %s dropped one malformed LLM entry: %s",
+                        code, exc,
+                    )
+                    continue
+                extraction_map[validated_item.entry_index] = validated_item.model_dump(exclude={"entry_index"})
 
             # Merge using explicit indices to avoid mismapping
             for i, entry in enumerate(code_entries):
                 if i in extraction_map:
-                    # Remove entry_index from extracted fields (it's just for matching)
-                    extracted_fields = {k: v for k, v in extraction_map[i].items()
-                                       if k != "entry_index"}
+                    extracted_fields = extraction_map[i]
 
                     # Coerce off-type LLM values (e.g. list-valued strings) before
                     # any string/number consumer (regex post-processing, downstream
@@ -589,15 +669,35 @@ Return JSON with format:
                         "extraction_error": "No matching extraction in LLM response"
                     })
 
-        except Exception as e:
-            print(f"    ⚠ Error extracting fields for code {code}: {e}")
-            # Fallback: mark as failed
+        except APITimeoutError:
+            logger.exception("Stage 4 extraction LLM call timed out for code %s", code)
+            failed_groups += 1
             for entry in code_entries:
                 all_extracted.append({
                     **entry,
                     "extracted_fields": {},
                     "extraction_success": False,
-                    "extraction_error": str(e)
+                    "extraction_error": LLM_TIMEOUT
+                })
+        except json.JSONDecodeError:
+            logger.exception("Stage 4 extraction response for code %s was not valid JSON", code)
+            failed_groups += 1
+            for entry in code_entries:
+                all_extracted.append({
+                    **entry,
+                    "extracted_fields": {},
+                    "extraction_success": False,
+                    "extraction_error": LLM_RESPONSE_INVALID
+                })
+        except Exception:
+            logger.exception("Stage 4 extraction failed for code %s", code)
+            failed_groups += 1
+            for entry in code_entries:
+                all_extracted.append({
+                    **entry,
+                    "extracted_fields": {},
+                    "extraction_success": False,
+                    "extraction_error": LLM_PROVIDER_ERROR
                 })
 
     # ==========================================================================
@@ -606,7 +706,7 @@ Return JSON with format:
     entries_needing_recovery = [e for e in all_extracted if needs_llm_recovery(e)]
 
     if entries_needing_recovery:
-        print(f"\n  🔧 LLM Recovery: {len(entries_needing_recovery)} entries with poor extraction coverage")
+        logger.info("LLM Recovery: %d entries with poor extraction coverage", len(entries_needing_recovery))
 
         # Group by taxonomy code for better context
         recovery_by_code = {}
@@ -619,13 +719,16 @@ Return JSON with format:
         # Attempt recovery for each code group
         recovered_entries = {}
         recovery_cost = 0.0
+        recovery_tokens = 0
 
         for code, code_entries in recovery_by_code.items():
-            print(f"    [{code}] Attempting recovery for {len(code_entries)} entries...")
-            recovered = attempt_llm_recovery(code_entries, model=model)
+            logger.info("[%s] Attempting recovery for %d entries...", code, len(code_entries))
+            recovery_result = attempt_llm_recovery(code_entries)
+            recovery_cost += recovery_result.get("cost", 0.0)
+            recovery_tokens += recovery_result.get("tokens", 0)
 
             # Track recovered entries by their element_idx for replacement
-            for rec_entry in recovered:
+            for rec_entry in recovery_result.get("entries", code_entries):
                 key = (rec_entry.get("element_idx_start"), rec_entry.get("element_idx_end"))
                 recovered_entries[key] = rec_entry
 
@@ -639,10 +742,15 @@ Return JSON with format:
                 final_extracted.append(entry)
 
         all_extracted = final_extracted
+        # Recovery calls are real LLM spend -- fold them into this batch's
+        # reported totals so a run's cost/token accounting isn't silently
+        # short by whatever the recovery pass spent.
+        total_cost += recovery_cost
+        total_tokens += recovery_tokens
 
         # Log recovery summary
         successful_recoveries = sum(1 for e in all_extracted if e.get("llm_recovery_applied"))
-        print(f"  ✓ Recovery complete: {successful_recoveries}/{len(entries_needing_recovery)} entries improved")
+        logger.info("Recovery complete: %d/%d entries improved", successful_recoveries, len(entries_needing_recovery))
 
     return {
         "entries": all_extracted,
@@ -650,13 +758,13 @@ Return JSON with format:
         "tokens": total_tokens,
         "cache_read_tokens": total_cache_read_tokens,
         "cache_write_tokens": total_cache_write_tokens,
-        "success": True
+        "success": failed_groups == 0,
+        "failed_groups": failed_groups,
     }
 
 def extract_fields_from_mapped_entries(
     mapped_entries: List[Dict[str, Any]],
     batch_size: int = 10,
-    model: str = None,
     document_uid: str = "",
     cancel_check: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
@@ -666,26 +774,32 @@ def extract_fields_from_mapped_entries(
     Args:
         mapped_entries: List of taxonomy-mapped entries from Stage 3
         batch_size: Number of entries to process per batch (default: 10)
-        model: Unused -- the model is resolved from llm_config.yaml, not this argument
         document_uid: Document identifier for extracting CV owner name
         cancel_check: Optional zero-arg callable invoked at the top of each
             batch iteration. It should raise to abort the run (the web
             orchestrator passes its check_cancelled). None (the standalone CLI
             default) is a no-op.
     """
-    print(f"\n{'='*80}")
-    print("Stage 4: Intra-Entry Field Extraction")
-    print(f"{'='*80}")
-    print(f"Total entries: {len(mapped_entries)}")
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+
+    logger.info("=" * 80)
+    logger.info("Stage 4: Intra-Entry Field Extraction")
+    logger.info("=" * 80)
+    logger.info("Total entries: %d", len(mapped_entries))
 
     # Load and display schema version
     schemas = get_active_schemas()
-    print(f"Field schemas: v{FIELD_SCHEMA_VERSION} ({len(schemas)} taxonomy codes)")
+    logger.info("Field schemas: v%s (%d taxonomy codes)", FIELD_SCHEMA_VERSION, len(schemas))
 
     # Extract CV owner's name for target_name identification
     cv_owner_name = extract_cv_owner_name(document_uid, mapped_entries)
     if cv_owner_name.get('last_name'):
-        print(f"CV Owner: {cv_owner_name.get('full_name', cv_owner_name['last_name'])} (last name: {cv_owner_name['last_name']})")
+        logger.info(
+            "CV Owner: %s (last name: %s)",
+            cv_owner_name.get('full_name', cv_owner_name['last_name']),
+            cv_owner_name['last_name'],
+        )
 
     # Location inference runs *after* extraction -- see the call site below.
 
@@ -707,11 +821,11 @@ def extract_fields_from_mapped_entries(
                 "skip_reason": "empty_or_minimal_text" if len(text) < 5 else "empty_text"
             })
 
-    print(f"  - Valid entries (with text): {len(valid_entries)}")
-    print(f"  - Skipped entries (empty/minimal text): {len(skipped_entries)}")
+    logger.info("  - Valid entries (with text): %d", len(valid_entries))
+    logger.info("  - Skipped entries (empty/minimal text): %d", len(skipped_entries))
 
     if not valid_entries:
-        print("\n⚠ No valid entries to process")
+        logger.warning("No valid entries to process")
         return {
             "entries": skipped_entries,
             "total_cost": 0.0,
@@ -726,6 +840,11 @@ def extract_fields_from_mapped_entries(
     total_tokens = 0
     total_cache_read_tokens = 0
     total_cache_write_tokens = 0
+    # Batches where at least one taxonomy group inside them failed outright
+    # (see extract_fields_batch's failed_groups). Surfaced in stats below so
+    # a degraded run is visible in the artifact rather than reading identical
+    # to a clean one.
+    failed_batches = 0
 
     for batch_idx in range(num_batches):
         # Check for cancellation before each batch's LLM calls so an aborted
@@ -737,16 +856,28 @@ def extract_fields_from_mapped_entries(
         end_idx = min(start_idx + batch_size, len(valid_entries))
         batch = valid_entries[start_idx:end_idx]
 
-        result = extract_fields_batch(batch, batch_idx, num_batches, model=model, cv_owner_name=cv_owner_name)
+        result = extract_fields_batch(batch, batch_idx, num_batches, cv_owner_name=cv_owner_name)
 
-        if result.get("success"):
-            all_entries.extend(result.get("entries", []))
-            total_cost += result.get("cost", 0.0)
-            total_tokens += result.get("tokens", 0)
-            total_cache_read_tokens += result.get("cache_read_tokens", 0)
-            total_cache_write_tokens += result.get("cache_write_tokens", 0)
-            # Show running total after each batch
-            print(f"  Batch {batch_idx + 1}/{num_batches} complete | Running total: ${total_cost:.4f}")
+        # Always keep whatever entries came back. A batch that had one failed
+        # taxonomy group still successfully extracted every other group in it
+        # (see extract_fields_batch's per-code error handling), so gating
+        # this on an all-or-nothing "success" would silently drop real data
+        # for entries that extracted fine.
+        all_entries.extend(result.get("entries", []))
+        total_cost += result.get("cost", 0.0)
+        total_tokens += result.get("tokens", 0)
+        total_cache_read_tokens += result.get("cache_read_tokens", 0)
+        total_cache_write_tokens += result.get("cache_write_tokens", 0)
+
+        if not result.get("success", True):
+            failed_batches += 1
+            logger.warning(
+                "Stage 4 batch %d/%d had %d failed taxonomy group(s) (%s)",
+                batch_idx + 1, num_batches, result.get("failed_groups", 0), document_uid,
+            )
+
+        # Show running total after each batch
+        logger.info("Batch %d/%d complete | Running total: $%.4f", batch_idx + 1, num_batches, total_cost)
 
     # Add back skipped entries
     all_entries.extend(skipped_entries)
@@ -765,12 +896,12 @@ def extract_fields_from_mapped_entries(
         all_entries = add_target_names(all_entries, cv_owner_last_name)
         pub_with_target = sum(1 for e in all_entries if e.get('extracted_fields', {}).get('target_name'))
         if pub_with_target > 0:
-            print(f"\n✓ target_name identified in {pub_with_target} publication/presentation entries")
+            logger.info("target_name identified in %d publication/presentation entries", pub_with_target)
 
     # Count entries with reformatted fields
     reformatted_count = sum(1 for e in all_entries if e.get('reformatted_fields'))
     if reformatted_count > 0:
-        print(f"✓ Applied reformatting to {reformatted_count} entries")
+        logger.info("Applied reformatting to %d entries", reformatted_count)
 
     # Infer CV owner's current location(s) for geographic scope classification.
     # This runs after extraction, not before it: the affiliation fallback reads
@@ -786,15 +917,29 @@ def extract_fields_from_mapped_entries(
         primary = cv_owner_location.get('primary_location', {})
         if primary:
             loc_str = f"{primary.get('institution', '')} in {primary.get('city', '')}, {primary.get('state', '')}"
-            print(f"CV Location: {loc_str} (metro: {metro})")
+            logger.info("CV Location: %s (metro: %s)", loc_str, metro)
             if cv_owner_location.get('cost'):
-                print(f"  Location inference cost: ${cv_owner_location['cost']:.4f}")
+                logger.info("Location inference cost: $%.4f", cv_owner_location['cost'])
     else:
         cv_owner_location = None  # Set to None if inference failed
 
     # Include location inference cost in total
     location_cost = cv_owner_location.get('cost', 0) if cv_owner_location else 0
     location_tokens = cv_owner_location.get('tokens', 0) if cv_owner_location else 0
+
+    # Observability: "extracted" previously counted entries ATTEMPTED
+    # (len(valid_entries)) regardless of whether the LLM actually returned a
+    # match for them, so a run where every batch failed still reported the
+    # same "extracted" count as one where nothing failed. Count real outcomes
+    # instead, and keep the attempted count under its own key.
+    extracted_ok = sum(
+        1 for e in all_entries
+        if e.get("extraction_success") and not e.get("extraction_skipped")
+    )
+    extraction_failed = sum(
+        1 for e in all_entries
+        if not e.get("extraction_success") and not e.get("extraction_skipped")
+    )
 
     return {
         "entries": all_entries,
@@ -806,12 +951,17 @@ def extract_fields_from_mapped_entries(
         "cache_write_tokens": total_cache_write_tokens,
         "stats": {
             "total_entries": len(all_entries),
-            "extracted": len(valid_entries),
+            "attempted": len(valid_entries),
+            "extracted": extracted_ok,
+            "extraction_failed": extraction_failed,
             "skipped": len(skipped_entries),
             "batches_processed": num_batches,
+            "failed_batches": failed_batches,
+            "had_extraction_errors": failed_batches > 0,
             "entries_reformatted": reformatted_count,
             "cache_read_tokens": total_cache_read_tokens,
             "cache_write_tokens": total_cache_write_tokens
         },
-        "success": True
+        "success": True,
+        "partial_success": failed_batches > 0,
     }

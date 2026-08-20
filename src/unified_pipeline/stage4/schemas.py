@@ -10,16 +10,24 @@ never sees the lazy initialisation (the #496 split-state lesson). Reach it as
 `unified_pipeline.stage4.schemas._LOADED_SCHEMAS` or not at all.
 """
 
+import copy
 import json
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
+
+
+class SchemaConfigurationError(Exception):
+    """Raised when a field-schema config file is structurally malformed."""
 
 
 # ============================================================================
 # Field Schema Configuration
 # ============================================================================
 
-def load_field_schemas_from_config(config_path: Optional[str] = None) -> Dict[str, Any]:
+def load_field_schemas_from_config(config_path: Optional[str] = None) -> "dict[str, Any] | None":
     """
     Load field schemas from versioned config file.
 
@@ -30,53 +38,79 @@ def load_field_schemas_from_config(config_path: Optional[str] = None) -> Dict[st
         config_path: Path to config file. If None, uses default location.
 
     Returns:
-        Dict mapping taxonomy codes to field lists (only extractable fields)
+        Dict mapping taxonomy codes to field lists (only extractable fields),
+        or None if the config file does not exist.
+
+    Raises:
+        SchemaConfigurationError: the config file exists but is structurally
+            malformed (a schema's "fields" value, or an individual field
+            entry, is not a dict).
     """
     if config_path is None:
         config_path = FIELD_SCHEMA_CONFIG_PATH
 
-    if Path(config_path).exists():
-        with open(config_path, "r") as f:
+    try:
+        with Path(config_path).open("r", encoding="utf-8") as f:
             config = json.load(f)
-
-        # Convert config format to simple {code: {"fields": [...], "required": []}} format
-        # Only include fields where extract=true
-        schemas = {}
-        total_fields = 0
-        extracted_fields = 0
-
-        for code, schema_data in config.get("schemas", {}).items():
-            # Skip non-dict entries (e.g., comment strings like "__NOTE_...")
-            if not isinstance(schema_data, dict):
-                continue
-            fields_config = schema_data.get("fields", {})
-            # Filter to only fields with extract=true
-            extractable_fields = [
-                field_name for field_name, field_info in fields_config.items()
-                if field_info.get("extract", True)  # Default to True for backwards compatibility
-            ]
-
-            total_fields += len(fields_config)
-            extracted_fields += len(extractable_fields)
-
-            schemas[code] = {
-                "fields": extractable_fields,
-                "required": [],
-                "description": schema_data.get("description", ""),
-                "wcm_section": schema_data.get("wcm_section"),
-                "extraction_mode": schema_data.get("extraction_mode", "minimal")
-            }
-
-        version = config.get('version', '?')
-        print(f"  Loaded field schemas v{version} ({len(schemas)} codes, {extracted_fields}/{total_fields} fields active)")
-        return schemas
-    else:
-        print(f"  Warning: Config file not found at {config_path}, using built-in schemas")
+    except FileNotFoundError:
+        logger.warning("Config file not found at %s, using built-in schemas", config_path)
         return None
+
+    version = config.get("version", "?")
+    if version != FIELD_SCHEMA_VERSION:
+        logger.warning(
+            "Field schema config version mismatch: module expects v%s but config "
+            "file %s declares v%s; proceeding with the config file as loaded",
+            FIELD_SCHEMA_VERSION, config_path, version,
+        )
+
+    # Convert config format to simple {code: {"fields": [...]}} format
+    # Only include fields where extract=true
+    schemas = {}
+    total_fields = 0
+    extracted_fields = 0
+
+    for code, schema_data in config.get("schemas", {}).items():
+        # Skip non-dict entries (e.g., comment strings like "__NOTE_...")
+        if not isinstance(schema_data, dict):
+            continue
+
+        fields_config = schema_data.get("fields", {})
+        if not isinstance(fields_config, dict):
+            raise SchemaConfigurationError(
+                f"Schema config for taxonomy code '{code}' has a non-dict 'fields' "
+                f"value ({type(fields_config).__name__}): {fields_config!r}"
+            )
+
+        extractable_fields = []
+        for field_name, field_info in fields_config.items():
+            if not isinstance(field_info, dict):
+                raise SchemaConfigurationError(
+                    f"Schema config for taxonomy code '{code}', field '{field_name}' "
+                    f"must be a dict, got {type(field_info).__name__}: {field_info!r}"
+                )
+            if field_info.get("extract", True):  # Default to True for backwards compatibility
+                extractable_fields.append(field_name)
+
+        total_fields += len(fields_config)
+        extracted_fields += len(extractable_fields)
+
+        schemas[code] = {
+            "fields": extractable_fields,
+            "description": schema_data.get("description", ""),
+            "wcm_section": schema_data.get("wcm_section"),
+            "extraction_mode": schema_data.get("extraction_mode", "minimal")
+        }
+
+    logger.info(
+        "Loaded field schemas v%s (%d codes, %d/%d fields active)",
+        version, len(schemas), extracted_fields, total_fields,
+    )
+    return schemas
 
 # Schema version info
 FIELD_SCHEMA_VERSION = "1.1"
-FIELD_SCHEMA_CONFIG_PATH = Path(__file__).parent / "config" / "field_schemas_v1.1.json"
+FIELD_SCHEMA_CONFIG_PATH = Path(__file__).parent.parent / "config" / "field_schemas_v1.1.json"
 
 # ============================================================================
 # Field Extraction Schemas by Taxonomy Code
@@ -90,7 +124,6 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "A": {  # Personal/Contact Information (parent)
         "fields": ["name", "title", "degrees", "department", "institution", "email", "phone", "address", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -98,11 +131,9 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "B1": {  # Academic Degrees
         "fields": ["degree", "institution", "discipline", "year", "thesis_title", "advisor", "narrative"],
-        "required": []
     },
     "B2": {  # Other Educational Experiences (certificates, training programs, compliance training)
         "fields": ["program_type", "program_name", "institution", "year", "duration", "description", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -110,7 +141,6 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "C": {  # Postdoctoral Training (residency, fellowship, postdoc, graduate assistantship)
         "fields": ["training_type", "specialty", "institution", "department", "mentor", "start_date", "end_date", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -118,15 +148,12 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "D1": {  # Academic Appointments (faculty, endowed chairs, emeritus, museum appointments)
         "fields": ["title", "institution", "department", "start_date", "end_date", "track", "tenure_status", "narrative"],
-        "required": []
     },
     "D2": {  # Hospital Appointments (attending, consulting, hospitalist)
         "fields": ["title", "institution", "department", "start_date", "end_date", "appointment_type", "narrative"],
-        "required": []
     },
     "D3": {  # Other Professional Positions (non-faculty research staff, industry, consulting)
         "fields": ["title", "organization", "department", "start_date", "end_date", "role_type", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -134,7 +161,6 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "E": {  # Employment Status
         "fields": ["status", "fte_percentage", "effective_date", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -142,11 +168,9 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "F1": {  # Licensure
         "fields": ["license_type", "state_country", "license_number", "issue_date", "expiration_date", "status", "narrative"],
-        "required": []
     },
     "F2": {  # Board Certification
         "fields": ["specialty", "certifying_board", "year_certified", "recertification_date", "status", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -154,7 +178,6 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "G": {  # Institutional & Hospital Affiliations
         "fields": ["affiliation_type", "organization", "department", "start_date", "end_date", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -162,7 +185,6 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "H": {  # Honors & Awards
         "fields": ["award_name", "granting_body", "date", "amount", "description", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -170,7 +192,6 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "I": {  # Professional Organizations & Society Memberships
         "fields": ["organization", "membership_type", "start_date", "end_date", "fellowship_designation", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -178,7 +199,6 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "J": {  # Percent Effort & Institutional Responsibilities
         "fields": ["clinical_percent", "research_percent", "teaching_percent", "admin_percent", "description", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -186,23 +206,18 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "K1": {  # Didactic Teaching
         "fields": ["course_code", "course_title", "institution", "department", "role", "level", "start_date", "end_date", "enrollment", "hours_per_year", "narrative"],
-        "required": []
     },
     "K2": {  # Research Mentoring & Clinical Teaching
         "fields": ["teaching_role", "institution", "setting", "learner_level", "start_date", "end_date", "hours_per_week", "description", "narrative"],
-        "required": []
     },
     "K3": {  # Educational Program Leadership
         "fields": ["program_name", "role", "institution", "start_date", "end_date", "scope", "description", "narrative"],
-        "required": []
     },
     "K4": {  # CME & Professional Education
         "fields": ["activity_title", "institution", "role", "date", "cme_credits", "target_audience", "description", "narrative"],
-        "required": []
     },
     "K5": {  # Community Education or Patient Outreach
         "fields": ["activity_title", "audience", "location", "date", "description", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -210,15 +225,12 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "L1": {  # Clinical Practice
         "fields": ["clinical_role", "institution", "service_setting", "fte_clinical", "sessions_per_week", "start_date", "end_date", "description", "narrative"],
-        "required": []
     },
     "L2": {  # Clinical Innovations (QI projects)
         "fields": ["project_name", "institution", "role", "start_date", "end_date", "outcome", "description", "narrative"],
-        "required": []
     },
     "L3": {  # Clinical Leadership
         "fields": ["leadership_role", "institution", "unit_program", "start_date", "end_date", "scope", "description", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -226,27 +238,21 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "M1": {  # Research Activities - narrative IS the primary content here
         "fields": ["research_area", "description", "institution", "start_date", "end_date", "narrative"],
-        "required": []
     },
     "M2": {  # Research Support (generic grant)
         "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "annual_funding", "percent_effort", "narrative"],
-        "required": []
     },
     "M2A": {  # Current Research Funding (active grants)
         "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "annual_funding", "percent_effort", "narrative"],
-        "required": []
     },
     "M2B": {  # Past Research Funding (completed grants)
         "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "start_date", "end_date", "total_funding", "percent_effort", "narrative"],
-        "required": []
     },
     "M2C": {  # Pending Research Funding (submitted grants)
         "fields": ["grant_number", "title", "pi_name", "pi_role", "agency", "total_funding_requested", "submission_date", "narrative"],
-        "required": []
     },
     "M2D": {  # Patents & Innovations (formerly M3)
         "fields": ["patent_number", "title", "inventors", "filing_date", "issue_date", "status", "assignee", "narrative"],
-        "required": []
     },
     # NOTE: M4 clinical trial codes have been removed. Clinical trials should now be
     # classified as M2A (active/current), M2B (completed/past), or M2C (pending) based
@@ -257,27 +263,21 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "N1": {  # Leadership and Mentoring in Programs
         "fields": ["program_name", "role", "institution", "start_date", "end_date", "number_trainees", "narrative"],
-        "required": []
     },
     "N2": {  # Institutional Training Grants and Mentored Trainee Grants
         "fields": ["grant_number", "grant_title", "role", "agency", "start_date", "end_date", "trainees_supported", "narrative"],
-        "required": []
     },
     "N3": {  # Mentees (generic)
         "fields": ["mentee_name", "mentee_level", "start_date", "end_date", "thesis_title", "current_position", "narrative"],
-        "required": []
     },
     "N3A": {  # Current Mentees
         "fields": ["mentee_name", "mentee_level", "program", "start_date", "expected_completion", "research_focus", "narrative"],
-        "required": []
     },
     "N3B": {  # Past Mentees
         "fields": ["mentee_name", "mentee_level", "program", "start_date", "end_date", "thesis_title", "current_position", "narrative"],
-        "required": []
     },
     "N4": {  # Scholarly Outputs Resulting From Mentorship
         "fields": ["output_type", "mentee_name", "title", "date", "description", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -285,7 +285,6 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "O": {  # Institutional Leadership Activities
         "fields": ["leadership_role", "institution", "division_department", "start_date", "end_date", "budget_authority", "personnel_supervised", "description", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -293,7 +292,6 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "P": {  # Institutional Administrative Activities (committee membership)
         "fields": ["committee_name", "role", "institution", "start_date", "end_date", "description", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -301,35 +299,27 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "Q1": {  # Leadership in Extramural Organizations
         "fields": ["role", "organization", "start_date", "end_date", "scope", "narrative"],
-        "required": []
     },
     "Q2": {  # Service on External Boards/Committees
         "fields": ["committee_name", "role", "organization", "start_date", "end_date", "narrative"],
-        "required": []
     },
     "Q3": {  # Grant Reviewing / Study Sections
         "fields": ["panel_name", "agency", "role", "start_date", "end_date", "review_type", "narrative"],
-        "required": []
     },
     "Q4": {  # Editorial Activities (generic)
         "fields": ["role", "journal_name", "start_date", "end_date", "narrative"],
-        "required": []
     },
     "Q4A": {  # Editor/Co-Editor
         "fields": ["role", "journal_name", "publisher", "start_date", "end_date", "narrative"],
-        "required": []
     },
     "Q4B": {  # Associate/Section Editor
         "fields": ["role", "journal_name", "section", "start_date", "end_date", "narrative"],
-        "required": []
     },
     "Q4C": {  # Editorial Board Membership
         "fields": ["journal_name", "start_date", "end_date", "narrative"],
-        "required": []
     },
     "Q4D": {  # Journal Reviewing / Ad hoc Reviewing
         "fields": ["journal_name", "year", "number_reviews", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -337,7 +327,6 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "R": {  # Invitations to Speak/Present
         "fields": ["title", "event_name", "location", "date", "presentation_type", "host_organization", "authors", "target_name", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -346,43 +335,33 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "S0": {  # Researcher Profile & Bibliometric Summary
         "fields": ["orcid", "google_scholar_url", "scopus_id", "researchgate_url", "h_index", "total_citations", "publication_count", "narrative"],
-        "required": []
     },
     "S1": {  # Peer-Reviewed Research Articles
         "fields": ["authors", "year", "title", "journal", "volume", "issue", "pages", "doi", "pmid", "pmcid", "target_name", "narrative"],
-        "required": []
     },
     "S2": {  # Reviews and Editorials
         "fields": ["authors", "year", "title", "journal", "volume", "issue", "pages", "doi", "pmid", "pmcid", "target_name", "narrative"],
-        "required": []
     },
     "S3": {  # Books
         "fields": ["authors", "editors", "year", "title", "publisher", "edition", "isbn", "target_name", "narrative"],
-        "required": []
     },
     "S4": {  # Book Chapters
         "fields": ["authors", "year", "chapter_title", "book_title", "editors", "publisher", "pages", "doi", "target_name", "narrative"],
-        "required": []
     },
     "S5": {  # Non-peer-reviewed Research Publications
         "fields": ["authors", "year", "title", "publication_venue", "report_number", "url", "target_name", "narrative"],
-        "required": []
     },
     "S6": {  # Case Reports
         "fields": ["authors", "year", "title", "journal", "volume", "pages", "doi", "pmid", "pmcid", "target_name", "narrative"],
-        "required": []
     },
     "S7": {  # In Review / Submitted / In Preparation
         "fields": ["authors", "year", "title", "status", "target_journal", "target_name", "narrative"],
-        "required": []
     },
     "S8": {  # Abstracts & Conference Proceedings
         "fields": ["authors", "year", "title", "conference_name", "location", "abstract_number", "doi", "target_name", "narrative"],
-        "required": []
     },
     "S9": {  # Other Media (Podcasts, Blogs, Videos)
         "fields": ["authors", "year", "title", "media_type", "venue", "url", "target_name", "narrative"],
-        "required": []
     },
 
     # -------------------------------------------------------------------------
@@ -390,7 +369,6 @@ FIELD_SCHEMAS = {
     # -------------------------------------------------------------------------
     "T": {  # Appendix/Other (structural elements, references, misc)
         "fields": ["content_type", "description", "narrative"],
-        "required": []
     },
 }
 
@@ -554,7 +532,6 @@ FIELD_DESCRIPTIONS = {
 # Fallback for unlisted codes
 DEFAULT_SCHEMA = {
     "fields": ["text", "date", "description"],
-    "required": []
 }
 
 # Taxonomy code labels for prompt context
@@ -633,37 +610,35 @@ _LOADED_SCHEMAS: Optional[Dict[str, Any]] = None
 
 def get_active_schemas() -> Dict[str, Any]:
     """
-    Get the active field schemas, loading from config if available.
+    Get the active field schemas: built-in FIELD_SCHEMAS with config-file
+    schemas merged over top.
 
-    Returns config-based schemas if available, otherwise built-in FIELD_SCHEMAS.
+    Config-file schemas (when the config file loads and parses successfully)
+    override matching taxonomy codes; codes absent from the config file keep
+    their built-in FIELD_SCHEMAS default. Returns a deep copy on every call
+    so callers can't mutate the process-wide cache through the return value.
     """
     global _LOADED_SCHEMAS
 
     if _LOADED_SCHEMAS is None:
-        # Try to load from config file
-        _LOADED_SCHEMAS = load_field_schemas_from_config()
+        config_schemas = load_field_schemas_from_config()
+        merged = copy.deepcopy(FIELD_SCHEMAS)
+        if config_schemas:
+            merged.update(config_schemas)
+        _LOADED_SCHEMAS = merged
 
-        if _LOADED_SCHEMAS is None:
-            # Fall back to built-in schemas
-            _LOADED_SCHEMAS = FIELD_SCHEMAS
-
-    return _LOADED_SCHEMAS
+    return copy.deepcopy(_LOADED_SCHEMAS)
 
 def get_field_schema(taxonomy_code: str) -> Dict[str, Any]:
     """
     Get the field extraction schema for a taxonomy code.
 
     Prefers schemas from config file, falls back to built-in schemas.
+    Unknown codes fall back to DEFAULT_SCHEMA.
     """
     schemas = get_active_schemas()
 
-    # Try exact match first
     if taxonomy_code in schemas:
         return schemas[taxonomy_code]
-
-    # Try parent code (e.g., S1 → S)
-    parent_code = taxonomy_code[0] if taxonomy_code else None
-    if parent_code in schemas:
-        return schemas[parent_code]
 
     return DEFAULT_SCHEMA
