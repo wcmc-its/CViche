@@ -134,11 +134,17 @@ def test_unknown_taxonomy_code_falls_back_instead_of_persisting(monkeypatch, cap
     ))
 
     with caplog.at_level(logging.WARNING, logger=classify.logger.name):
-        results, _ = classify.classify_entries_batch(
+        results, stats = classify.classify_entries_batch(
             [_entry("Dean's Award, 2015")], _context(["H"]), _taxonomy()
         )
 
     assert results[0]["taxonomy_code"] == "H"  # falls back to the suggested code, not ZZ99
+    # Tagged distinctly from a clean "llm" classification -- CODING_STANDARDS.md
+    # #5.3/#5.10: a rejected/degraded result must be visible in the artifact
+    # itself, not only in a log line the artifact's own consumer never reads.
+    assert results[0]["classification_source"] == "llm_invalid_code"
+    assert stats["invalid_code_entries"] == 1
+    assert stats["llm_classified"] == 0
     assert any("unknown taxonomy code" in r.getMessage() for r in caplog.records)
 
 
@@ -293,6 +299,10 @@ def test_unknown_new_code_falls_back_to_t(monkeypatch, caplog):
     assert updated[0]["taxonomy_code"] == "T"
     assert stats["t_entries_reclassified"] == 0
     assert any("unknown taxonomy" in r.getMessage() for r in caplog.records)
+    # Reads as a rejected hallucination in the artifact, not as genuine
+    # T-validation agreement -- the two are different outcomes.
+    assert "unknown code rejected" in updated[0]["classification_reasoning"]
+    assert "confirmed" not in updated[0]["classification_reasoning"]
 
 
 def test_llm_raise_leaves_entries_untouched_and_logs_via_logger(monkeypatch, caplog):

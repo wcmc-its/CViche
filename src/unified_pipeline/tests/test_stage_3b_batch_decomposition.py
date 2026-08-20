@@ -179,6 +179,7 @@ def test_four_batch_shapes_produce_exact_expected_results_and_stats(monkeypatch,
         "llm_classified": 3,   # 2 from batch 2 + 1 from batch 3
         "fallback_entries": 3,  # 1 from batch 3 + 2 from batch 4
         "empty_entries": 2,    # batch 1
+        "invalid_code_entries": 0,
         "classification_rules_version": "2.6.0",
     }
 
@@ -230,6 +231,7 @@ def test_classify_entries_batch_empty_input(monkeypatch):
         "llm_classified": 0,
         "fallback_entries": 0,
         "empty_entries": 0,
+        "invalid_code_entries": 0,
     }
 
 

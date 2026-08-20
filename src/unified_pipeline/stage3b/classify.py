@@ -289,7 +289,8 @@ Return ONLY valid JSON with the classifications array."""
                 # is untrusted LLM output and could be any JSON type (e.g. a
                 # list), which would raise TypeError: unhashable type on
                 # `in valid_codes` instead of degrading to the fallback.
-                if code and (not isinstance(code, str) or code not in valid_codes):
+                code_rejected = code and (not isinstance(code, str) or code not in valid_codes)
+                if code_rejected:
                     # The LLM answered with a code that doesn't exist in
                     # taxonomy_v7.json (or isn't a string at all) --
                     # untrusted model output, not trustworthy enough to
@@ -310,7 +311,13 @@ Return ONLY valid JSON with the classifications array."""
                     "taxonomy_code": code or fallback_code,
                     "taxonomy_confidence": _normalize_confidence(c.get("confidence"), 0.5),
                     "classification_reasoning": c.get("reasoning"),
-                    "classification_source": "llm"
+                    # A rejected code is a degraded result, not a clean LLM
+                    # classification -- tagging it "llm" would make this
+                    # fallback indistinguishable from success in the artifact
+                    # (CODING_STANDARDS.md #5.3/#5.10: "accept anyway" isn't
+                    # a silent option; the degradation has to be visible
+                    # somewhere other than a log line).
+                    "classification_source": "llm_invalid_code" if code_rejected else "llm"
                 })
             else:
                 # Fallback to primary code
@@ -400,6 +407,11 @@ def classify_entries_batch(
         "llm_classified": sum(1 for r in all_results if r.get("classification_source") == "llm"),
         "fallback_entries": sum(1 for r in all_results if r.get("classification_source") == "fallback"),
         "empty_entries": sum(1 for r in all_results if r.get("classification_source") == "empty_entry"),
+        # A hallucinated/unknown taxonomy code the LLM answered with, rejected
+        # and coalesced to the fallback code (#5.10) -- counted separately
+        # from "llm" (clean) and "fallback" (the whole batch's call failed)
+        # so this specific degradation mode is visible in the artifact.
+        "invalid_code_entries": sum(1 for r in all_results if r.get("classification_source") == "llm_invalid_code"),
     }
 
     return all_results, stats
@@ -639,17 +651,20 @@ Respond with a JSON array of objects, one per entry:
                 malformed += 1
                 continue
 
-            new_code = reclass.get("new_code") or "T"
+            raw_new_code = reclass.get("new_code") or "T"
             # isinstance-guard before the set membership check: `new_code` is
             # untrusted LLM output and could be any JSON type, which would
             # raise TypeError: unhashable type on `in valid_codes` instead of
             # degrading to "T".
-            if not isinstance(new_code, str) or new_code not in valid_codes:
+            new_code_rejected = not isinstance(raw_new_code, str) or raw_new_code not in valid_codes
+            if new_code_rejected:
                 logger.warning(
                     "Stage 3b T-validation: LLM returned unknown taxonomy "
-                    "code %r for entry %d; keeping T", new_code, entry_idx
+                    "code %r for entry %d; keeping T", raw_new_code, entry_idx
                 )
                 new_code = "T"
+            else:
+                new_code = raw_new_code
             confidence = _normalize_confidence(reclass.get("confidence"), 0.5)
             reasoning = reclass.get("reasoning", "")
             if not isinstance(reasoning, str):
@@ -663,8 +678,15 @@ Respond with a JSON array of objects, one per entry:
                 updated_entries[entry_idx]["t_validation_applied"] = True
                 reclassified_count += 1
             elif old_code == "T" and new_code == "T":
-                # T was confirmed - add note
-                updated_entries[entry_idx]["classification_reasoning"] = f"[T-validation confirmed] {reasoning}"
+                # T was confirmed for real, or the LLM proposed a code that
+                # doesn't exist in the taxonomy and got coerced back to T --
+                # these are different outcomes (one is agreement, the other
+                # is a rejected hallucination) and must read differently in
+                # the artifact, not both as "confirmed" (#5.3/#5.10: a
+                # rejected result silently relabelled as a clean one is the
+                # exact failure those rules exist to catch).
+                tag = "T-validation: unknown code rejected, kept T" if new_code_rejected else "T-validation confirmed"
+                updated_entries[entry_idx]["classification_reasoning"] = f"[{tag}] {reasoning}"
                 updated_entries[entry_idx]["t_validation_applied"] = True
 
         if malformed:
