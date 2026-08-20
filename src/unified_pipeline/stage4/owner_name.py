@@ -11,7 +11,8 @@ from typing import Dict, List, Any, Optional
 
 from pydantic import BaseModel, Field, ValidationError
 
-from unified_pipeline.llm_client import call_llm, RETRYABLE_ERRORS
+from unified_pipeline.llm_client import call_llm
+from unified_pipeline.llm.retry import RETRYABLE_ERRORS
 
 logger = logging.getLogger(__name__)
 
