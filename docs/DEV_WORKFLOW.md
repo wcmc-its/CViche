@@ -72,7 +72,7 @@ The standing verdict on most reviews is:
 > suggestions, not bugs. If any of them cannot be addressed now, please leave a
 > comment explaining why. I will merge the PR as is."
 
-So a review is not a gate. The friction is in how we answer it. Three rules,
+So a review is not a gate. The friction is in how we answer it. Four rules,
 all written from complaints we actually caused:
 
 1. **Never decline without a reason.** "Declined" with no explanation drew the
@@ -96,6 +96,18 @@ all written from complaints we actually caused:
    architecturally big. When the test says yes, open a **PR**, not an issue: a
    filed issue with no PR attached is where findings go to be forgotten (see
    rule 2 above).
+4. **Never resolve a review thread. That is the reviewer's act.** Replying,
+   pushing the fix and then clicking *Resolved* makes the author both developer
+   and reviewer, and ends the round unilaterally — *"...marked them as resolved,
+   and then clicked 'Resolved' without assigning the PR back to me for another
+   review."* All 56 threads on #625 were closed by the author; on #641 and #624
+   every resolved thread was closed by the reviewer, which is the convention that
+   one PR broke. Hand back instead: reply, push, add the reviewer as assignee
+   **and** re-request their review (`gh pr edit <N> --add-reviewer <login>`).
+   Adding an assignee alone does not put the PR back in anyone's review queue —
+   that is the half we actually missed on #625, and it is the half that makes a
+   round look finished when it is not. Leave every thread open for the reviewer
+   to close.
 
 ### What reviews here consistently ask for
 
