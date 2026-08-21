@@ -39,7 +39,7 @@ python3 run_full_pipeline.py sample_vasquez_cv
 
 ### Prerequisites
 
-- Python 3.11+
+- Python 3.14 (matches the backend image, `python:3.14-slim`)
 - LLM provider credentials -- either:
   - **AWS Bedrock** (default): uses the boto3 default credential chain (env vars, `~/.aws/credentials`, or IAM roles)
   - **OpenAI**: get a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)

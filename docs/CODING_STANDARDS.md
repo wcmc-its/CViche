@@ -368,6 +368,11 @@ Every model change lands with its Alembic migration in the same PR. Every migrat
 §7.1 says what a log line can't be (a wire protocol); §4.7 says what it can't contain. This says what one is *for*: **ERROR** means a person should act; **WARNING** means degradation someone will need to find later — and per §5.3 the artifact, not the log, is the durable record of that; **INFO** marks run lifecycle; **DEBUG** is free. Anything WARNING or above carries the run id — in a process running three concurrent pipelines, a log line that can't be attributed to a run is noise at best and misattribution at worst.
 *Why:* no incident named. The nearest miss is §4.2's — `Log` rows written against the wrong run — fixed as a state bug; the fix only stays fixed if run-attribution is a stated obligation rather than an accident of the current code. Level choice isn't mechanically checkable, which is why this is `[judgement]` rather than a fourth marker; the run-id half is closer to checkable and could split out as its own narrow gate later if it proves worth enforcing on its own.
 
+**7.9 The runtime version is defined once, by the image tag. [gate]**
+`FROM python:X.Y-slim` in `web_interface/backend/Dockerfile` is the definition. Every other place that states the version — the `setup-python` pins in `ci.yml` and `deps-audit.yml`, the prerequisites bullet in a README — restates that number and must agree with it. Today that number is **3.14**. Moving it is a deliberate PR that changes the tag first and everything that echoes it in the same commit.
+*Why:* §1.5's one-definition failure, in prose. The version has moved twice — `af2cef4` (`python:3.11-slim` → `python:3.13-slim`) and `8bc3750` (→ `python:3.14-slim`) — and both commits correctly carried the Dockerfile, both workflow pins and `requirements.txt` together, so the executable copies never drifted. The five prose copies did: `README.md`, `docs/PIPELINE_README.md`, `docs/TECHNICAL_README.md`, `web_interface/README.md` and `web_interface/TECHNICAL_README.md` were still claiming 3.9, 3.10 or 3.11 against a 3.14 image more than five weeks after the last bump. The cost isn't a broken build — nothing executable read them — it's that a contributor who reads a prerequisites bullet argues for the wrong runtime, which is the incident (2026-08-21): a working session spent disputing the project's Python version on the strength of a stale README, against a `dev` tree that is uniformly 3.14 in every place a machine looks.
+*Check:* `scripts/check_standards.py` reads the version out of the backend Dockerfile and flags every `python-version:` in `.github/workflows/` and every "Python X.Y" in a Markdown file that disagrees with it. 0 today. The scan is deliberately literal: prose that has to name a superseded version for history writes the bare number, without the word "Python" in front of it — there is no waiver comment for Markdown, since §3.7's `# standards-waiver:` form is a heading here.
+
 ## 8. Types and literals
 
 Where §3 is about function-level shape, this is about the shape of the data and the constants that pass through it. Both rules below are **[judgement]** — the incidents behind them are real, but the mechanical check for either (three-or-more `.get()` reads on one variable; a literal used more than once) is too noisy against the current codebase to gate unconditionally without ratchet infrastructure like §3.2a's. Say so in the PR instead.
@@ -401,6 +406,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 3.7 dynamic attribute access (non-literal) | falling | 8 | ratchet |
 | 5.4 bare swallows (`except Exception: pass`) | falling | 6 | ratchet |
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
+| 7.9 restated Python version != the build image | 0 | 0 | ✓ |
 
 <!-- check_standards:auto:end -->
 

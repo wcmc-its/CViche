@@ -32,7 +32,7 @@ A modern web interface for CViche with real-time progress tracking, cost monitor
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.14 (matches the backend image, `python:3.14-slim`)
 - Node.js 18+ and npm
 - OpenAI API key
 
