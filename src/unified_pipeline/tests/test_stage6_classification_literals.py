@@ -20,8 +20,11 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_stage6_classification_literals.py -p no:cacheprovider
 """
 
+import dataclasses
 import sys
 from pathlib import Path
+
+import pytest
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -37,6 +40,25 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: E402
     lint_taxonomy_code_coverage,
 )
 from unified_pipeline.stage6.formatting import DATE_FORMATS  # noqa: E402
+from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
+    IdentifierSet,
+    LicenseRecord,
+    LicensureEntry,
+    LicensureResult,
+    _license_record,
+    _normalize_licensure_entry,
+    _resolve_licensure,
+)
+from unified_pipeline.stage6.sections.postdoc_training import (  # noqa: E402
+    DEFAULT_TRAINING_TYPES,
+    FALLBACK_TRAINING_TYPE,
+    INSTITUTION_ENRICHMENT_REASON,
+    POSTDOC_TRAINING_CODES,
+    PostdocTrainingRecord,
+    _institution_content,
+    _normalize_training_entry,
+    _resolve_postdoc_training,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -213,6 +235,158 @@ def test_none_extracted_fields_does_not_crash():
     assert rows == [["New York Medical License 123456", "", "", ""]]
     assert dea == ""
     assert npi == ""
+
+
+# ---------------------------------------------------------------------------
+# 1b. Licensure: the normalization step, pinned on its own
+#
+# `_fill_licensure` is now a renderer only -- `_normalize_licensure_entry`,
+# `_license_record` and `_resolve_licensure` decide everything and touch no
+# document (#624 review). These tests call them directly, with no
+# WCMTemplateGenerator and no docx object, which is the property the split was
+# for. The alias chains they pin are `or` chains, not `.get(key, default)`:
+# stage 4 writes an alias as an empty string about as often as it omits the
+# key, so an empty string MUST fall through to the next alias. A `.get`
+# default would keep the empty string and silently drop the real value.
+
+
+def test_normalize_prefers_the_first_state_alias():
+    """Precedence, all three aliases present and non-empty."""
+    entry = _normalize_licensure_entry({
+        "extracted_fields": {"state_country": "New York", "state": "NY",
+                             "jurisdiction": "New York State"},
+    })
+    assert isinstance(entry, LicensureEntry)
+    assert entry.state == "New York"
+
+
+def test_normalize_state_alias_falls_through_an_empty_string():
+    """The falsy-fallback half of the chain: an alias present but empty must
+    not win. This is what an `or` chain does and a `.get(key, default)` does
+    not -- the whole reason the chain is written this way."""
+    assert _normalize_licensure_entry({
+        "extracted_fields": {"state_country": "", "state": "NY"},
+    }).state == "NY"
+    assert _normalize_licensure_entry({
+        "extracted_fields": {"state_country": "", "state": "",
+                             "jurisdiction": "Ontario"},
+    }).state == "Ontario"
+    assert _normalize_licensure_entry({
+        "extracted_fields": {"state_country": "", "state": "",
+                             "jurisdiction": ""},
+    }).state == ""
+
+
+def test_normalize_number_alias_falls_through_an_empty_string():
+    """`license_number` then `number`, same falsy-fallback rule, and the
+    result is stringified and stripped."""
+    assert _normalize_licensure_entry({
+        "extracted_fields": {"license_number": "123456", "number": "999"},
+    }).number == "123456"
+    assert _normalize_licensure_entry({
+        "extracted_fields": {"license_number": "", "number": "  999  "},
+    }).number == "999"
+    assert _normalize_licensure_entry({
+        "extracted_fields": {"number": 123456},
+    }).number == "123456"
+    assert _normalize_licensure_entry({"extracted_fields": {}}).number == ""
+
+
+def test_normalize_issue_date_alias_falls_through_an_empty_string():
+    assert _normalize_licensure_entry({
+        "extracted_fields": {"issue_date": "2020-01-01", "date": "1999"},
+    }).issue_date == "2020-01-01"
+    assert _normalize_licensure_entry({
+        "extracted_fields": {"issue_date": "", "date": "1999"},
+    }).issue_date == "1999"
+
+
+def test_normalize_defaults_every_field_to_empty_string():
+    """extracted_fields is sometimes explicitly None, not merely absent, and
+    'text' likewise -- the record must still be fully populated."""
+    entry = _normalize_licensure_entry({"extracted_fields": None, "text": None})
+    assert entry == LicensureEntry()
+    assert (entry.state, entry.number, entry.issue_date,
+            entry.expiration_date, entry.license_type,
+            entry.original_text) == ("", "", "", "", "", "")
+
+
+def test_normalized_entry_is_frozen():
+    """A typed boundary record the renderer cannot edit behind the
+    normalizer's back."""
+    entry = _normalize_licensure_entry({"extracted_fields": {"state": "NY"}})
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        entry.state = "NJ"
+
+
+def test_license_record_formats_dates_and_fills_the_registration_column():
+    """expiration_date fills the template's 'Date of last registration'
+    column, both dates through the F1 mm/dd/yyyy rule."""
+    record = _license_record(LicensureEntry(
+        state="New York", number="123456",
+        issue_date="2015-07-01", expiration_date="2027-06-30"))
+    assert isinstance(record, LicenseRecord)
+    assert record.state == "New York"
+    assert record.number == "123456"
+    assert record.issue_date == "07/01/2015"
+    assert record.last_registration_date == "06/30/2027"
+
+
+def test_license_record_leaves_absent_dates_blank():
+    """An empty date is written as '' rather than run through the formatter."""
+    record = _license_record(LicensureEntry(state="NY", number="1"))
+    assert (record.issue_date, record.last_registration_date) == ("", "")
+
+
+def test_license_record_falls_back_to_truncated_raw_text():
+    """No jurisdiction and no number: the raw line becomes the state cell,
+    capped, and the other three columns stay blank."""
+    record = _license_record(LicensureEntry(original_text="x" * 150))
+    assert record == LicenseRecord(state="x" * 100)
+
+
+def test_license_record_is_none_when_there_is_nothing_to_render():
+    assert _license_record(LicensureEntry()) is None
+
+
+def test_resolve_licensure_returns_a_typed_result_without_a_document():
+    """The whole point of the split: routing, ordering and date formatting
+    decided with no WCMTemplateGenerator, no docx object and no stats."""
+    result = _resolve_licensure([
+        _f1("New York State Medical License 123456",
+            state="New York", number="123456", issue_date="2015-07-01"),
+        _f1("NPI: 1234567890", number="1234567890"),
+        _f1("DEA registration AB1234567", number="AB1234567"),
+    ])
+    assert isinstance(result, LicensureResult)
+    assert isinstance(result.identifiers, IdentifierSet)
+    assert result.licenses == (
+        LicenseRecord(state="New York", number="123456",
+                      issue_date="07/01/2015", last_registration_date=""),
+    )
+    assert result.identifiers == IdentifierSet(dea="AB1234567",
+                                               npi="1234567890")
+
+
+def test_resolve_licensure_leaves_unseen_identifier_slots_none():
+    """None, not '' -- _fill_dea_npi is what turns an absent slot into a
+    blanked cell, and it must still be able to tell the two apart."""
+    result = _resolve_licensure([_f1("NY license 1", state="NY", number="1")])
+    assert result.identifiers == IdentifierSet(dea=None, npi=None)
+
+
+def test_resolve_licensure_normalizes_before_classifying():
+    """The state alias resolved by the normalizer is the one that disables
+    the shape tiebreak: a 10-digit number under 'jurisdiction' alone must
+    stay a licence row, not become the NPI."""
+    result = _resolve_licensure([
+        {"taxonomy_code": "F1", "text": "Medical License 3512345678",
+         "extracted_fields": {"state_country": "", "state": "",
+                              "jurisdiction": "Michigan",
+                              "license_number": "3512345678"}},
+    ])
+    assert result.identifiers.npi is None
+    assert [r.state for r in result.licenses] == ["Michigan"]
 
 
 # ---------------------------------------------------------------------------
@@ -423,3 +597,323 @@ def test_missing_training_type_uses_taxonomy_default():
     assert "Residency" in types
     assert "Fellowship" in types
     assert "Postdoctoral" not in types
+
+
+# ---------------------------------------------------------------------------
+# 3b. Postdoc training: the normalization step, pinned on its own
+#
+# `_fill_postdoc_training` is now a renderer only -- `_resolve_postdoc_training`
+# and `_normalize_training_entry` decide everything and touch no document
+# (#624 review). These tests call them directly, with no WCMTemplateGenerator
+# and no docx object, which is the property the split was for. The alias
+# chains they pin are `or` chains, not `.get(key, default)`: stage 4 writes an
+# alias as an empty string about as often as it omits the key, so an empty
+# string MUST fall through to the next alias. A `.get` default would keep the
+# empty string and render a row with a blank training type instead of the
+# taxonomy default.
+
+
+def test_normalize_prefers_training_type_over_title():
+    """Precedence, both aliases present and non-empty."""
+    record = _normalize_training_entry(
+        {"extracted_fields": {"training_type": "Research Fellow",
+                              "title": "Senior Fellow"}}, "C1")
+    assert isinstance(record, PostdocTrainingRecord)
+    assert record.training_type == "Research Fellow"
+
+
+def test_normalize_training_type_falls_through_an_empty_string():
+    """The falsy-fallback half of the chain: an alias present but empty must
+    not win, and must not shadow the taxonomy default either. This is what an
+    `or` chain does and a `.get(key, default)` does not -- the whole reason
+    the chain is written this way."""
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": "", "title": "Senior Fellow"}},
+        "C1").training_type == "Senior Fellow"
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": "", "title": ""}},
+        "C2").training_type == "Residency"
+    # an empty list is falsy too -- a fused multi-record entry can produce one
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": [], "title": "Chief Resident"}},
+        "C2").training_type == "Chief Resident"
+
+
+def test_normalize_field_of_study_falls_through_an_empty_string():
+    """`field_of_study` then `specialty`, same falsy-fallback rule, appended
+    to the type rather than replacing it."""
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": "Fellow",
+                              "field_of_study": "Neonatology",
+                              "specialty": "Cardiology"}},
+        "C3").training_type == "Fellow, Neonatology"
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": "Fellow",
+                              "field_of_study": "", "specialty": "Cardiology"}},
+        "C3").training_type == "Fellow, Cardiology"
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": "Fellow",
+                              "field_of_study": "", "specialty": ""}},
+        "C3").training_type == "Fellow"
+
+
+def test_normalize_does_not_duplicate_field_of_study_case_insensitively():
+    """"Fellow in CARDIOLOGY" plus field_of_study "cardiology" must not become
+    "Fellow in CARDIOLOGY, cardiology". The containment check is casefolded
+    because the tab join immediately above routinely changes the casing that
+    reaches it -- a case-sensitive check would append the specialty a second
+    time. Asked for by name as
+    test_field_of_study_is_not_duplicated_case_insensitively (#624 review)."""
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": "Fellow in CARDIOLOGY",
+                              "field_of_study": "cardiology"}},
+        "C1").training_type == "Fellow in CARDIOLOGY"
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": "Fellow\tcardiology",
+                              "specialty": "Cardiology"}},
+        "C1").training_type == "Fellow, cardiology"
+
+
+def test_normalize_institution_falls_through_an_empty_cleaned_name():
+    """Stage 5b's cleaned name wins, but only when it is non-empty -- an
+    empty one must fall through to official_name and then to the raw
+    extracted field, not blank the institution."""
+    enriched = {"extracted_fields": {"institution": "Duke Medical Center, Durham, NC"},
+                "institution_enrichment": {"cleaned_name": "Duke Medical Center"}}
+    assert _normalize_training_entry(enriched, "C1").institution == "Duke Medical Center"
+
+    official_only = {"extracted_fields": {"institution": "raw inst"},
+                     "institution_enrichment": {"cleaned_name": "",
+                                                "official_name": "Fictional Regional Hospital"}}
+    assert _normalize_training_entry(official_only, "C1").institution == "Fictional Regional Hospital"
+
+    raw_only = {"extracted_fields": {"institution": "Fictional University"},
+                "institution_enrichment": {"cleaned_name": "", "official_name": ""}}
+    assert _normalize_training_entry(raw_only, "C1").institution == "Fictional University"
+
+
+def test_normalize_recovers_a_missing_institution_from_nearby_entries():
+    """Third and last institution step, and the one that needs `all_entries`
+    -- which is why the normalizer takes it. It runs only when the first two
+    produced nothing."""
+    entry = {"text": "Graduate Research Assistant",
+             "element_idx_start": 4, "element_idx_end": 4,
+             "extracted_fields": {"training_type": "Fellow"}}
+    neighbours = [{"element_idx_start": 5, "text": "University of Nowhere"}]
+    assert _normalize_training_entry(entry, "C1", neighbours).institution == "University of Nowhere"
+    # no neighbours passed at all: still normalizes, just without recovery
+    assert _normalize_training_entry(entry, "C1").institution == ""
+
+
+@pytest.mark.parametrize(("code", "expected"), [
+    ("C", "Postdoctoral"),
+    ("C1", "Postdoctoral Research"),
+    ("C2", "Residency"),
+    ("C3", "Fellowship"),
+])
+def test_normalize_missing_training_type_uses_the_taxonomy_default(code, expected):
+    """A C2/C3 entry with neither training_type nor title must not render as
+    the generic "Postdoctoral" -- that mislabels a residency or fellowship
+    (#573 review). Same assertion as the rendered-table test above, but on
+    the rule itself rather than on a Word cell."""
+    record = _normalize_training_entry({"extracted_fields": {}}, code)
+    assert record.training_type == expected
+    assert DEFAULT_TRAINING_TYPES[code] == expected
+
+
+def test_normalize_unknown_code_uses_the_generic_fallback():
+    """A code outside POSTDOC_TRAINING_CODES cannot reach the renderer today,
+    but the default must still be a word rather than a blank cell."""
+    assert "C9" not in POSTDOC_TRAINING_CODES
+    assert _normalize_training_entry(
+        {"extracted_fields": {}}, "C9").training_type == FALLBACK_TRAINING_TYPE
+
+
+def test_normalize_none_extracted_fields_does_not_crash():
+    """extracted_fields is sometimes explicitly None, not merely absent --
+    the record must still be fully populated with empty strings."""
+    record = _normalize_training_entry({"extracted_fields": None}, "C2")
+    assert record.training_type == "Residency"
+    assert (record.institution, record.location, record.dates) == ("", "", "")
+    assert record.location_is_enriched is False
+
+
+def test_normalize_joins_tabs_and_lists_into_display_text():
+    """A tab is the extractor having flattened a table cell boundary; a list
+    is a fused multi-record entry (corpus CV FIHL8A). Both are joined before
+    any string method sees them."""
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": "Fellow\tCardiology\t"}},
+        "C1").training_type == "Fellow, Cardiology"
+    assert _normalize_training_entry(
+        {"extracted_fields": {"training_type": ["Cytopathology fellow",
+                                                "Pathology chief resident"]}},
+        "C1").training_type == "Cytopathology fellow, Pathology chief resident"
+
+
+def test_normalize_drops_a_location_the_institution_already_names():
+    """"Massachusetts General Hospital, Boston, MA" must not gain a second
+    Boston. Dropping it in the normalizer is what lets the renderer have no
+    de-duplication rule of its own to keep in step with this one."""
+    duplicated = {"extracted_fields": {"institution": "Fictional General Hospital, Springfield, MA"},
+                  "institution_enrichment": {"city": "Springfield",
+                                             "state": "Massachusetts",
+                                             "country_code": "US"}}
+    assert _normalize_training_entry(duplicated, "C1").location == ""
+
+    fresh = {"extracted_fields": {"institution": "Fictional General Hospital"},
+             "institution_enrichment": {"city": "Springfield",
+                                        "state": "Massachusetts",
+                                        "country_code": "US"}}
+    record = _normalize_training_entry(fresh, "C1")
+    assert record.location == "Springfield, MA"
+    assert record.location_is_enriched is True
+
+
+def test_normalize_location_match_is_word_boundary_anchored():
+    """A short city name must not match inside an unrelated longer word --
+    "York" is not already present in "Yorkshire Institute"."""
+    entry = {"extracted_fields": {"institution": "Yorkshire Institute"},
+             "institution_enrichment": {"city": "York", "state": "New York",
+                                        "country_code": "US"}}
+    assert _normalize_training_entry(entry, "C1").location == "York, NY"
+
+
+def test_normalize_formats_dates_with_the_entrys_own_code():
+    """C3 gets the mm/yy rule, not a generic yyyy fallback -- the reason the
+    routing code is carried per record rather than per table."""
+    entry = {"extracted_fields": {"start_date": "2018-07", "end_date": "2021-06"}}
+    assert _normalize_training_entry(entry, "C3").dates == "07/18-06/21"
+    assert _normalize_training_entry({"extracted_fields": {}}, "C3").dates == ""
+
+
+def test_normalized_record_is_frozen():
+    """A typed boundary record the renderer cannot edit behind the
+    normalizer's back."""
+    record = _normalize_training_entry({"extracted_fields": {}}, "C1")
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        record.training_type = "Something else"
+
+
+def test_resolve_postdoc_training_returns_records_without_a_document():
+    """The whole point of the split: gathering, ordering, the taxonomy
+    defaults and date formatting decided with no WCMTemplateGenerator, no
+    docx object and no stats."""
+    records = _resolve_postdoc_training({
+        "C2": [{"taxonomy_code": "C2", "text": "Residency",
+                "extracted_fields": {"institution": "Fictional Hospital",
+                                     "start_date": "2015-07", "end_date": "2018-06"}}],
+        "C3": [{"taxonomy_code": "C3", "text": "Fellowship",
+                "extracted_fields": {"institution": "Made-up Children's",
+                                     "start_date": "2018-07", "end_date": "2021-06"}}],
+    })
+    assert all(isinstance(r, PostdocTrainingRecord) for r in records)
+    # reverse chronological: the fellowship is the more recent of the two
+    assert [r.taxonomy_code for r in records] == ["C3", "C2"]
+    assert [r.training_type for r in records] == ["Fellowship", "Residency"]
+    assert [r.dates for r in records] == ["07/18-06/21", "07/15-06/18"]
+
+
+def test_resolve_postdoc_training_stamps_the_routing_code_over_the_entrys_own():
+    """entries_by_code's key is authoritative: an entry filed under C3 whose
+    own taxonomy_code field says C must still get C3's date rule, so a C3
+    entry cannot silently fall back to the generic C rule (#573 review)."""
+    records = _resolve_postdoc_training({
+        "C3": [{"taxonomy_code": "C", "text": "Fellowship",
+                "extracted_fields": {"start_date": "2018-07", "end_date": "2021-06"}}],
+    })
+    assert [r.taxonomy_code for r in records] == ["C3"]
+    assert records[0].training_type == "Fellowship"
+    assert records[0].dates == "07/18-06/21"
+    # the record carries the stamped copy, not the caller's entry
+    assert records[0].source_entry["taxonomy_code"] == "C3"
+
+
+def test_resolve_postdoc_training_does_not_mutate_the_input_entries():
+    """The routing code is stamped onto a shallow copy. The caller's stage-4
+    entry keeps whatever it arrived with."""
+    entry = {"taxonomy_code": "C", "text": "Fellowship", "extracted_fields": {}}
+    _resolve_postdoc_training({"C3": [entry]})
+    assert entry["taxonomy_code"] == "C"
+
+
+def test_resolve_postdoc_training_is_empty_when_no_code_matches():
+    assert _resolve_postdoc_training({}) == ()
+    assert _resolve_postdoc_training({"C9": [{"text": "x"}], "C": []}) == ()
+
+
+def test_pipeline_comments_reach_the_row_with_the_stamped_code():
+    """`source_entry` exists on the record for exactly one reason: it is what
+    `_add_table_row_with_mixed_content` reads to attach upstream pipeline
+    comments to the row. And it is the STAMPED copy, so the comment names the
+    code the entry was routed under (C3) rather than the one the entry itself
+    claimed (C) -- dropping the field, or carrying the raw entry, both change
+    what a reviewer sees in the document."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.emit_comments = True
+    gen.doc = Document()
+    gen.doc.add_paragraph("C. POSTDOCTORAL TRAINING")
+    gen.doc.add_table(rows=1, cols=3)
+    gen._fill_postdoc_training({"C3": [
+        {"taxonomy_code": "C", "text": "Fellowship",
+         "classification_reasoning": "matched a fellowship heading",
+         "extracted_fields": {"institution": "Fictional University"}}]})
+    assert [c["text"] for c in gen._comments] == [
+        "Classified as C3: matched a fellowship heading"]
+
+
+def test_institution_content_marks_only_the_enriched_location_as_a_change():
+    """Three branches, one per way a location can reach the cell: enriched
+    (tracked insertion), extracted (plain text), or absent."""
+    enriched = PostdocTrainingRecord(institution="Fictional General Hospital",
+                                     location="Springfield, MA",
+                                     location_is_enriched=True)
+    assert _institution_content(enriched) == [
+        ("Fictional General Hospital", False, ""),
+        (", Springfield, MA", True, INSTITUTION_ENRICHMENT_REASON),
+    ]
+
+    extracted = PostdocTrainingRecord(institution="Fictional University",
+                                      location="Columbus, OH")
+    assert _institution_content(extracted) == [
+        ("Fictional University, Columbus, OH", False, ""),
+    ]
+
+    no_location = PostdocTrainingRecord(institution="Fictional University")
+    assert _institution_content(no_location) == [("Fictional University", False, "")]
+
+
+def test_institution_content_renders_a_lone_location():
+    """No institution at all: the location stands on its own, still tracked
+    when it came from enrichment."""
+    assert _institution_content(
+        PostdocTrainingRecord(location="Springfield, MA", location_is_enriched=True)
+    ) == [("Springfield, MA", True, INSTITUTION_ENRICHMENT_REASON)]
+    assert _institution_content(
+        PostdocTrainingRecord(location="Columbus, OH")
+    ) == [("Columbus, OH", False, "")]
+
+
+def test_template_without_the_section_does_not_normalize_entries():
+    """A template with no POSTDOCTORAL/TRAINING paragraph must return quietly,
+    without normalizing a single entry.
+
+    `_normalize_training_entry` reads stage-4 fields and a malformed one can
+    raise (a list-valued `location` reaches `location.split(',')` unguarded).
+    Hoisting normalization above the section lookup -- which the #624 review
+    refactor briefly did -- turns that quiet return into an AttributeError
+    that aborts the whole of stage 6 for a template that never had the table.
+    `_gather_postdoc_entries` exists to give `_fill_postdoc_training` its
+    entry count without that risk; this pins the ordering.
+    """
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    gen.doc.add_paragraph("A. BIOGRAPHICAL")  # no postdoc section at all
+
+    gen._fill_postdoc_training({
+        "C1": [{"text": "Postdoctoral Fellow, Fictional University",
+                "extracted_fields": {"location": ["Boston", "MA"],
+                                     "institution": "Fictional University"}}],
+    })
+
+    assert gen.stats['tables_populated'] == 0
