@@ -58,12 +58,51 @@ _DATE_ONLY_LINE_RE = re.compile(
 
 # Role titles recognized when Stage 4 merges a committee name into the role
 # field (e.g. role="Chair, Ultrasound Committee") and it needs splitting
-# back apart. Used only by `_fill_service_boards`.
+# back apart. Used only by `_fill_service_boards`. Single source of truth
+# for base titles -- `_is_board_role_title` below extends it to qualified
+# and chair-variant phrasing without duplicating any of these strings.
 BOARD_ROLE_TITLES = (
     'chair', 'co-chair', 'deputy chair', 'vice chair', 'member',
     'secretary', 'treasurer', 'president', 'vice president', 'director',
     'advisor', 'liaison', 'representative', 'reviewer', 'editor', 'delegate',
 )
+
+# "Chair" variants BOARD_ROLE_TITLES spells only as "chair"/"co-chair"/
+# "deputy chair"/"vice chair"; recognized directly so a Stage-4 role of
+# "Chairperson, Ultrasound Committee" still splits (#624 review).
+_CHAIR_TITLE_VARIANTS = ('chairperson', 'chairman', 'chairwoman')
+
+# Qualifiers Stage 4 sometimes prefixes onto a board role title (e.g.
+# role="Past President, XYZ Committee"). Recognized only as an exact
+# "<qualifier> <base title>" two-word phrase -- whole-phrase matching, not
+# a startswith/substring heuristic, so a phrase like "membership
+# committee" that merely shares a substring with a base title is never
+# mistaken for one (#624 review).
+_ROLE_QUALIFIERS = (
+    'past', 'interim', 'acting', 'honorary', 'deputy', 'vice', 'co',
+    'associate', 'assistant',
+)
+
+
+def _is_board_role_title(role_word: str) -> bool:
+    """True when `role_word` (already stripped/lowercased) is a board role
+    title Stage 4 may have merged a committee name onto.
+
+    Recognizes an exact `BOARD_ROLE_TITLES` entry, a chair variant
+    (`_CHAIR_TITLE_VARIANTS`), or an exact `<qualifier> <base title>`
+    two-word phrase built from `_ROLE_QUALIFIERS` -- whole-phrase equality
+    checks only, never startswith/substring, so "membership committee" is
+    not mistaken for a role title (#624 review).
+    """
+    if role_word in BOARD_ROLE_TITLES or role_word in _CHAIR_TITLE_VARIANTS:
+        return True
+    parts = role_word.split(' ', 1)
+    if len(parts) == 2:
+        qualifier, base = parts
+        if qualifier in _ROLE_QUALIFIERS and (
+                base in BOARD_ROLE_TITLES or base in _CHAIR_TITLE_VARIANTS):
+            return True
+    return False
 
 
 def _split_q2_lines(lines: list[str]) -> tuple[list[str], list[str]]:
@@ -178,6 +217,54 @@ def _route_q2_entries(q2_entries: list[dict]) -> tuple[list[dict], list[dict]]:
                 actual_board_entries.append(entry)
 
     return rerouted_to_journal, actual_board_entries
+
+
+# Specific, multi-word organization names/acronyms used by
+# `_parse_extramural_leadership_lines`. Matched as a plain substring
+# anywhere in the line -- safe because each is specific enough that no
+# plausible role phrase contains it.
+_KNOWN_ORG_NAMES = (
+    'association of pediatric program directors', 'appd',
+    'american academy of pediatrics', 'aap',
+    'academic pediatric association', 'apa',
+    'pediatric academic society', 'pas',
+    'national board of medical examiners', 'nbme',
+    'american medical association', 'ama',
+    'american board of pediatrics', 'abp',
+    'acgme', 'lenox hill',
+)
+
+# Generic organization terms that also occur inside role phrases ("Board
+# Member", "Committee Chair"). Matched as a whole word/phrase, and only
+# when the line does not also carry role vocabulary -- otherwise a role
+# line that names its own kind of body ("Board Member") reads as an
+# organization instead of the role it is (#624 review).
+_GENERIC_ORG_TERMS = (
+    'american college', 'society', 'association', 'academy', 'board',
+    'institute',
+)
+
+
+def _is_known_org_line(line_lower: str, role_keywords: list[str]) -> bool:
+    """True when a leadership-table line names a known organization.
+
+    Two tiers: a `_KNOWN_ORG_NAMES` entry matches unconditionally as a
+    substring, since it is specific enough not to collide with role
+    phrasing. A `_GENERIC_ORG_TERMS` entry matches only as a whole
+    word/phrase, and is vetoed entirely when the line also matches
+    `role_keywords` -- so "Board Member" and "Member, Board of Directors"
+    classify as role lines, not organizations, while "American College of
+    Cardiology" and "Society of Critical Care Medicine" still classify as
+    organizations (#624 review).
+    """
+    if any(name in line_lower for name in _KNOWN_ORG_NAMES):
+        return True
+    if any(kw in line_lower for kw in role_keywords):
+        return False
+    return any(
+        re.search(rf'\b{re.escape(term)}\b', line_lower)
+        for term in _GENERIC_ORG_TERMS
+    )
 
 
 class ServiceSection:
@@ -328,8 +415,11 @@ class ServiceSection:
                 if not committee and ', ' in role:
                     role_parts = role.split(', ', 1)
                     role_word = role_parts[0].strip().lower()
-                    # Only split if the first part looks like a role title
-                    if role_word in BOARD_ROLE_TITLES:
+                    # Only split if the first part looks like a role title,
+                    # including a qualified or chair-variant title Stage 4
+                    # sometimes writes ("Past President", "Chairperson") --
+                    # whole-phrase matching only (#624 review).
+                    if _is_board_role_title(role_word):
                         role = role_parts[0].strip()
                         committee = role_parts[1].strip()
 
@@ -441,19 +531,6 @@ class ServiceSection:
         role_keywords = ['member', 'chair', 'reviewer', 'liaison', 'mentor', 'committee',
                          'board', 'council', 'advisor', 'director', 'leader', 'representative']
 
-        # Known organizations for context
-        known_orgs = [
-            'Association of Pediatric Program Directors', 'APPD',
-            'American Academy of Pediatrics', 'AAP',
-            'Academic Pediatric Association', 'APA',
-            'Pediatric Academic Society', 'PAS',
-            'National Board of Medical Examiners', 'NBME',
-            'American Medical Association', 'AMA',
-            'American Board of Pediatrics', 'ABP',
-            'ACGME', 'Lenox Hill', 'American College',
-            'Society', 'Association', 'Academy', 'Board', 'Institute'
-        ]
-
         # First pass: categorize each line
         content_lines = []  # (text, embedded_date, is_org, is_role, original_idx)
         date_only_lines = []  # standalone dates
@@ -482,7 +559,7 @@ class ServiceSection:
 
             # Determine if this is an organization or a role
             line_lower = line.lower()
-            is_org = any(org.lower() in line_lower for org in known_orgs)
+            is_org = _is_known_org_line(line_lower, role_keywords)
             is_role = any(kw in line_lower for kw in role_keywords) and not is_org
 
             # Indented lines are usually sub-items (roles under an org)

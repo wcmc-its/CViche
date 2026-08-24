@@ -60,6 +60,8 @@ from unified_pipeline.stage6.sections.postdoc_training import (  # noqa: E402
     _resolve_postdoc_training,
 )
 from unified_pipeline.stage6.sections.service import (  # noqa: E402
+    _is_board_role_title,
+    _is_known_org_line,
     _is_q2_journal_reviewer,
     _route_q2_entries,
     _split_q2_lines,
@@ -587,6 +589,151 @@ def test_route_q2_entries_does_not_mutate_the_input_entry():
     original = dict(entry)
     _route_q2_entries([entry])
     assert entry == original
+
+
+# ---------------------------------------------------------------------------
+# 2c. Service: precise organization detection in
+# `_parse_extramural_leadership_lines` (#624 review)
+#
+# `is_org = any(org.lower() in line_lower for org in known_orgs)` used
+# unrestricted substring matching, and known_orgs ended with generic bare
+# terms ('Society', 'Association', 'Academy', 'Board', 'Institute',
+# 'American College'), so "Board Member" -- plainly a role -- classified as
+# an organization. `_is_known_org_line` is the free predicate that replaced
+# it: a specific multi-word name/acronym still matches unconditionally, but
+# a bare generic term matches only as a whole word and is vetoed entirely
+# when the line also carries role vocabulary.
+
+# Mirrors the `role_keywords` list local to
+# `_parse_extramural_leadership_lines` (service.py); passed explicitly
+# because `_is_known_org_line` takes it as a parameter rather than reading
+# a module global.
+_ROLE_KEYWORDS = ['member', 'chair', 'reviewer', 'liaison', 'mentor', 'committee',
+                  'board', 'council', 'advisor', 'director', 'leader', 'representative']
+
+
+def test_board_member_is_a_role_line_not_an_org():
+    """The reviewer's motivating example: 'board' is a generic org term,
+    but 'Board Member' names a role, not an organization."""
+    assert _is_known_org_line("board member", _ROLE_KEYWORDS) is False
+
+
+def test_member_board_of_directors_is_a_role_line():
+    assert _is_known_org_line("member, board of directors", _ROLE_KEYWORDS) is False
+
+
+def test_american_college_of_cardiology_is_an_org():
+    assert _is_known_org_line("american college of cardiology", _ROLE_KEYWORDS) is True
+
+
+def test_american_academy_of_pediatrics_is_an_org():
+    """Control: a specific multi-word name already in `_KNOWN_ORG_NAMES`
+    keeps matching unconditionally."""
+    assert _is_known_org_line("american academy of pediatrics", _ROLE_KEYWORDS) is True
+
+
+def test_society_of_critical_care_medicine_is_an_org():
+    assert _is_known_org_line("society of critical care medicine", _ROLE_KEYWORDS) is True
+
+
+def test_bare_generic_term_does_not_match_inside_a_longer_word():
+    """Whole-word matching: 'associationism' must not match the generic
+    'association' term as a mere prefix -- plain substring matching would
+    have caught this false positive."""
+    assert _is_known_org_line("associationism studies group", _ROLE_KEYWORDS) is False
+
+
+# ---------------------------------------------------------------------------
+# 2d. Service: qualified/variant role titles in `_fill_service_boards`
+# (#624 review)
+#
+# `role.split(', ', 1)` followed by `role_word in BOARD_ROLE_TITLES` only
+# recognized an exact base title, so "Chairperson, Ultrasound Committee"
+# and "Past President, XYZ Committee" never split -- the whole string
+# stayed in the role column. `_is_board_role_title` extends BOARD_ROLE_TITLES
+# (still the single source of truth for base titles) with chair variants
+# and an explicit qualifier list, whole-phrase matching only.
+
+
+def test_is_board_role_title_exact_base_title():
+    """Control: an exact BOARD_ROLE_TITLES entry still matches."""
+    assert _is_board_role_title("chair") is True
+
+
+def test_is_board_role_title_chair_variant():
+    assert _is_board_role_title("chairperson") is True
+
+
+def test_is_board_role_title_qualified_president():
+    assert _is_board_role_title("past president") is True
+
+
+def test_is_board_role_title_qualified_chair_variant():
+    assert _is_board_role_title("interim chairperson") is True
+
+
+def test_is_board_role_title_rejects_membership_committee():
+    """Negative control: 'membership committee' shares the substring
+    'member' with the base title 'member', but whole-phrase matching must
+    not mistake it for a role title."""
+    assert _is_board_role_title("membership committee") is False
+
+
+def test_is_board_role_title_rejects_unknown_word():
+    assert _is_board_role_title("coordinator") is False
+
+
+def test_fill_service_boards_splits_chairperson_variant():
+    """The reviewer's first example, driven through the real
+    `_fill_service_boards` render path."""
+    boards, _ = _render_service([
+        {"taxonomy_code": "Q2", "text": "Chairperson, Ultrasound Committee",
+         "extracted_fields": {"role": "Chairperson, Ultrasound Committee"}},
+    ])
+    assert len(boards) == 1
+    committee, role, org, _dates = boards[0]
+    assert committee == "Ultrasound Committee"
+    assert role == "Chairperson"
+
+
+def test_fill_service_boards_splits_past_president_variant():
+    """The reviewer's second example."""
+    boards, _ = _render_service([
+        {"taxonomy_code": "Q2", "text": "Past President, XYZ Committee",
+         "extracted_fields": {"role": "Past President, XYZ Committee"}},
+    ])
+    assert len(boards) == 1
+    committee, role, org, _dates = boards[0]
+    assert committee == "XYZ Committee"
+    assert role == "Past President"
+
+
+def test_fill_service_boards_still_splits_an_exact_base_title():
+    """Control: the pre-existing behavior for an exact base title
+    ('Chair') must keep splitting."""
+    boards, _ = _render_service([
+        {"taxonomy_code": "Q2", "text": "Chair, X Committee",
+         "extracted_fields": {"role": "Chair, X Committee"}},
+    ])
+    assert len(boards) == 1
+    committee, role, org, _dates = boards[0]
+    assert committee == "X Committee"
+    assert role == "Chair"
+
+
+def test_fill_service_boards_leaves_a_comma_free_role_whole():
+    """Control: a role with no comma is never split, and falls back to
+    'Member' -> committee via the organization fallback since none is
+    given here."""
+    boards, _ = _render_service([
+        {"taxonomy_code": "Q2", "text": "Board Member",
+         "extracted_fields": {"role": "Member",
+                              "organization": "Regional Health Board"}},
+    ])
+    assert len(boards) == 1
+    committee, role, org, _dates = boards[0]
+    assert role == "Member"
+    assert committee == "Regional Health Board"
 
 
 # ---------------------------------------------------------------------------
