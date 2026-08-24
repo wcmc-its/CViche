@@ -59,6 +59,11 @@ from unified_pipeline.stage6.sections.postdoc_training import (  # noqa: E402
     _normalize_training_entry,
     _resolve_postdoc_training,
 )
+from unified_pipeline.stage6.sections.service import (  # noqa: E402
+    _is_q2_journal_reviewer,
+    _route_q2_entries,
+    _split_q2_lines,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -487,6 +492,101 @@ def test_multiline_q2_reroute_preserves_entry_level_dates():
                               "committee_name": "Education Committee"}},
     ])
     assert journal[0][1] != ""  # dates column is populated, not blank
+
+
+# ---------------------------------------------------------------------------
+# 2b. Service: the Q2 reroute routing, pinned on its own
+#
+# `_fill_service` is now a dispatcher only -- `_route_q2_entries`,
+# `_split_q2_lines` and `_is_q2_journal_reviewer` decide the Q2/Q4D reroute
+# and touch no document (#624 review). These tests call them directly, with
+# no WCMTemplateGenerator and no docx object, which is the property the
+# split was for.
+
+
+def test_is_q2_journal_reviewer_true_for_specialty_role():
+    """role == 'reviewer' plus a JOURNAL_SPECIALTY_KEYWORDS hit reroutes."""
+    assert _is_q2_journal_reviewer(
+        "reviewer, annals of neurology", "reviewer", "", "") is True
+
+
+def test_is_q2_journal_reviewer_false_when_board_keyword_present():
+    """BOARD_KEYWORDS vetoes the reroute even when a journal signal also
+    matches."""
+    assert _is_q2_journal_reviewer(
+        "ad hoc reviewer, education committee", "reviewer", "", "") is False
+
+
+def test_is_q2_journal_reviewer_false_with_no_signal():
+    assert _is_q2_journal_reviewer(
+        "member, education committee", "member", "", "") is False
+
+
+def test_split_q2_lines_separates_journal_and_board_lines():
+    journal_lines, board_lines = _split_q2_lines(
+        ["John Smith", "Reviewer for JAMA"])
+    assert board_lines == ["John Smith"]
+    assert journal_lines == ["Reviewer for JAMA"]
+
+
+def test_split_q2_lines_extends_previous_line_with_trailing_date():
+    """A trailing bare-date line stays attached to the line it describes
+    rather than starting a new board-defaulted entry."""
+    journal_lines, board_lines = _split_q2_lines(
+        ["John Smith", "Reviewer for JAMA", "2024"])
+    assert board_lines == ["John Smith"]
+    assert journal_lines == ["Reviewer for JAMA 2024"]
+
+
+def test_split_q2_lines_unclassified_content_line_starts_its_own_item():
+    """An unclassified content line -- matching neither pattern list, and
+    not a date -- must become its own board_lines item, not be silently
+    absorbed into the preceding journal line."""
+    journal_lines, board_lines = _split_q2_lines(
+        ["Reviewer for JAMA", "Academic Pediatrics Journal Reviewer"])
+    assert journal_lines == ["Reviewer for JAMA"]
+    assert board_lines == ["Academic Pediatrics Journal Reviewer"]
+
+
+def test_route_q2_entries_reroutes_single_line_journal_entry():
+    rerouted, boards = _route_q2_entries([_q2_reviewer("Annals of Neurology")])
+    assert boards == []
+    assert len(rerouted) == 1
+    assert rerouted[0]["taxonomy_code"] == "Q4D"
+    assert rerouted[0]["rerouted_from_q2"] is True
+
+
+def test_route_q2_entries_keeps_board_entry_unrerouted():
+    entry = {"taxonomy_code": "Q2", "text": "Member, Education Committee",
+             "extracted_fields": {"role": "Member",
+                                  "committee_name": "Education Committee"}}
+    rerouted, boards = _route_q2_entries([entry])
+    assert rerouted == []
+    assert boards == [entry]
+
+
+def test_route_q2_entries_splits_multiline_entry_and_preserves_dates():
+    """The synthetic per-line entry keeps the parent's date fields but not
+    its identity fields (organization/committee_name/role/journal_name)."""
+    rerouted, boards = _route_q2_entries([
+        {"taxonomy_code": "Q2",
+         "text": "Ad hoc reviewer, Annals of Neurology\nMember, Education Committee",
+         "extracted_fields": {"start_date": "2020", "end_date": "2022",
+                              "committee_name": "Education Committee"}},
+    ])
+    assert len(rerouted) == 1
+    assert rerouted[0]["extracted_fields"] == {"start_date": "2020", "end_date": "2022"}
+    assert len(boards) == 1
+    assert boards[0]["text"] == "Member, Education Committee"
+
+
+def test_route_q2_entries_does_not_mutate_the_input_entry():
+    entry = {"taxonomy_code": "Q2", "text": "Reviewer, Annals of Neurology",
+             "extracted_fields": {"role": "Reviewer",
+                                  "organization": "Annals of Neurology"}}
+    original = dict(entry)
+    _route_q2_entries([entry])
+    assert entry == original
 
 
 # ---------------------------------------------------------------------------

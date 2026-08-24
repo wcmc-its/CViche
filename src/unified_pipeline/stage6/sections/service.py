@@ -34,13 +34,9 @@ from ..normalization import _squash
 logger = logging.getLogger(__name__)
 from unified_pipeline.core.render_check import entry_lines
 
-# Q2 -> Q4D reroute vocabulary (#573). The specialty terms and the role
-# phrases were one 14-element `journal_keywords` list read through a [:10]
-# slice whose intent was "the specialty terms" -- indices 0..10 -- so the
-# off-by-one slice silently excluded exactly one term, 'neurology', and
-# Neurology peer-review entries stayed in Q2 while identically-shaped
-# Oncology and Cardiology entries rerouted. Split at the natural seam
-# instead; no slice.
+# Q2 -> Q4D reroute vocabulary, split at the natural seam between specialty
+# terms and role phrases rather than a fixed-width slice of one combined
+# list (#573).
 JOURNAL_SPECIALTY_KEYWORDS = (
     'journal', 'j.', 'j ', 'pediatrics', 'lancet', 'jama',
     'perinatology', 'neonatology', 'oncology', 'cardiology', 'neurology',
@@ -59,6 +55,129 @@ BOARD_KEYWORDS = (
 # continuation (#573 review).
 _DATE_ONLY_LINE_RE = re.compile(
     r'^\d{4}(?:\s*[-–,]\s*(?:\d{4}|present|current))*\s*$', re.IGNORECASE)
+
+# Role titles recognized when Stage 4 merges a committee name into the role
+# field (e.g. role="Chair, Ultrasound Committee") and it needs splitting
+# back apart. Used only by `_fill_service_boards`.
+BOARD_ROLE_TITLES = (
+    'chair', 'co-chair', 'deputy chair', 'vice chair', 'member',
+    'secretary', 'treasurer', 'president', 'vice president', 'director',
+    'advisor', 'liaison', 'representative', 'reviewer', 'editor', 'delegate',
+)
+
+
+def _split_q2_lines(lines: list[str]) -> tuple[list[str], list[str]]:
+    """Split one multi-line Q2 entry's lines into journal and board lines.
+
+    A bare date-only continuation line extends the *previous* line rather
+    than starting a new board-defaulted entry, so a stray date does not end
+    up in the board entry when the line it describes was rerouted to
+    journal reviewing. Gated on actually looking like a date: an
+    unclassified content line (neither pattern list matches it) still
+    starts its own board_lines item rather than being silently absorbed
+    into whatever line happened to precede it (#573 review).
+    """
+    journal_lines: list[str] = []
+    board_lines: list[str] = []
+    last_group: list[str] | None = None
+
+    for line in lines:
+        line_lower = line.lower()
+        is_reviewer_line = any(p in line_lower for p in REVIEWER_PATTERNS)
+        is_board_line = any(kw in line_lower for kw in BOARD_KEYWORDS)
+
+        if (not is_reviewer_line and not is_board_line and last_group
+                and _DATE_ONLY_LINE_RE.match(line)):
+            last_group[-1] = f"{last_group[-1]} {line}"
+            continue
+
+        if is_reviewer_line and not is_board_line:
+            journal_lines.append(line)
+            last_group = journal_lines
+        else:
+            board_lines.append(line)
+            last_group = board_lines
+
+    return journal_lines, board_lines
+
+
+def _is_q2_journal_reviewer(text_lower: str, role: str, committee: str,
+                            org: str) -> bool:
+    """True when a single-line Q2 entry is really journal reviewing.
+
+    BOARD_KEYWORDS vetoes the reroute even when a journal signal also
+    matches, so an entry naming both a journal and a committee stays a
+    board entry.
+    """
+    is_journal_reviewer = (
+        (role == 'reviewer' and any(kw in text_lower for kw in JOURNAL_SPECIALTY_KEYWORDS)) or
+        any(kw in text_lower for kw in JOURNAL_ROLE_PHRASES) or
+        any(p in text_lower for p in REVIEWER_PATTERNS) or
+        (role == 'reviewer' and 'j ' in committee) or
+        (role == 'reviewer' and 'journal' in org)
+    )
+    is_board_entry = any(kw in text_lower for kw in BOARD_KEYWORDS)
+    return is_journal_reviewer and not is_board_entry
+
+
+def _route_q2_entries(q2_entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Reroute Q2 entries that are really journal reviewing to Q4D.
+
+    Handles misclassified single-line entries (a journal "Reviewer" role
+    coded as Q2) and multi-line entries mixing both activities, split line
+    by line via `_split_q2_lines`. Takes plain entry dicts, no docx object
+    and no `self` access, so the routing decision is testable without a
+    document (#624 review).
+    """
+    rerouted_to_journal: list[dict] = []
+    actual_board_entries: list[dict] = []
+
+    for entry in q2_entries:
+        text = entry.get('text', '')
+        text_lower = text.lower()
+        fields = entry.get('extracted_fields', {}) or {}
+        role = (fields.get('role', '') or '').lower()
+        committee = (fields.get('committee_name', '') or '').lower()
+        org = (fields.get('organization', '') or '').lower()
+
+        lines = entry_lines(text)
+        if len(lines) > 1:
+            journal_lines, board_lines = _split_q2_lines(lines)
+
+            # Each journal line becomes its own synthetic entry, carrying
+            # forward only the parent entry's date fields, not its identity
+            # fields (organization/committee_name/role/journal_name) -- a
+            # fused multi-line entry can mix several unrelated activities
+            # under ONE set of extracted_fields (corpus CV HU4DXA), so an
+            # identity field belongs only to the line it was extracted
+            # from. _fill_journal_reviewing already parses a missing
+            # journal name from each line's own raw text.
+            date_fields = {k: v for k, v in fields.items()
+                           if k in ('start_date', 'end_date', 'year')}
+            for jline in journal_lines:
+                rerouted_to_journal.append({
+                    'text': jline,
+                    'taxonomy_code': 'Q4D',
+                    'rerouted_from_q2': True,
+                    'extracted_fields': dict(date_fields),
+                })
+
+            # The remaining lines become a board entry, as a new dict
+            # rather than a mutation of the shared original -- the same
+            # entry object also lives in the flattened all_entries list the
+            # orchestrator builds from entries_by_code (#573 review).
+            if board_lines:
+                actual_board_entries.append(
+                    {**entry, 'text': '\n'.join(board_lines)})
+        else:
+            if _is_q2_journal_reviewer(text_lower, role, committee, org):
+                # As a copy, not a mutation of the shared original.
+                rerouted_to_journal.append(
+                    {**entry, 'taxonomy_code': 'Q4D', 'rerouted_from_q2': True})
+            else:
+                actual_board_entries.append(entry)
+
+    return rerouted_to_journal, actual_board_entries
 
 
 class ServiceSection:
@@ -84,115 +203,15 @@ class ServiceSection:
         if self.verbose:
             print(f"Filling Service Activities ({len(q_entries)} entries)...")
 
-        # Reroute Q2 entries that are actually journal reviewing to Q4D
-        # This handles misclassified entries where "Reviewer" role for a journal was coded as Q2
-        # Also handles multi-line entries that contain mixed activities
+        # Reroute Q2 entries that are actually journal reviewing to Q4D.
+        # Handles misclassified single-line entries ("Reviewer" role for a
+        # journal coded as Q2) and multi-line entries mixing both
+        # activities; the routing decision itself is _route_q2_entries, a
+        # free function that touches no docx object (#624 review).
         q2_entries = list(entries_by_code.get('Q2', []))
         q4d_entries = list(entries_by_code.get('Q4D', []))
 
-        rerouted_to_journal = []
-        actual_board_entries = []
-
-        for entry in q2_entries:
-            text = entry.get('text', '')
-            text_lower = text.lower()
-            fields = entry.get('extracted_fields', {}) or {}
-            role = (fields.get('role', '') or '').lower()
-            committee = (fields.get('committee_name', '') or '').lower()
-            org = (fields.get('organization', '') or '').lower()
-
-            # Check if this is a multi-line entry with mixed activities
-            lines = entry_lines(text)
-            if len(lines) > 1:
-                # Split into journal reviewing and board entries. A bare
-                # date-only continuation line is appended to the text of
-                # the *previous* line rather than starting a new
-                # board-defaulted entry -- the old default put stray dates
-                # in the board entry even when the line they described was
-                # rerouted to journal reviewing, and each journal_lines item
-                # becomes its own synthetic entry below, so a continuation
-                # must extend the existing line rather than adding a new
-                # one (#573 review). Gated on actually looking like a date
-                # -- an unclassified *content* line (neither pattern list
-                # matches it, e.g. "Academic Pediatrics Journal Reviewer",
-                # which REVIEWER_PATTERNS doesn't cover) must still become
-                # its own board_lines item, not get silently absorbed into
-                # whatever line happened to precede it.
-                journal_lines = []
-                board_lines = []
-                last_group = None
-
-                for line in lines:
-                    line_lower = line.lower()
-                    is_reviewer_line = any(p in line_lower for p in REVIEWER_PATTERNS)
-                    is_board_line = any(kw in line_lower for kw in BOARD_KEYWORDS)
-
-                    if (not is_reviewer_line and not is_board_line and last_group
-                            and _DATE_ONLY_LINE_RE.match(line)):
-                        last_group[-1] = f"{last_group[-1]} {line}"
-                        continue
-
-                    if is_reviewer_line and not is_board_line:
-                        journal_lines.append(line)
-                        last_group = journal_lines
-                    else:
-                        board_lines.append(line)
-                        last_group = board_lines
-
-                # Create separate entries for journal reviewing lines. Carry
-                # only the parent entry's date fields forward, not its
-                # identity fields (organization/committee_name/role/
-                # journal_name) -- a fused multi-line entry can mix several
-                # unrelated activities under ONE set of extracted_fields
-                # (corpus CV HU4DXA: "NY Regional...Panel Member" carries
-                # committee_name/dates for *that* line, followed by twelve
-                # unrelated reviewer/board lines), and identity fields
-                # belong to whichever line they were extracted from, not
-                # to every sibling line in the same fused block. Dates are
-                # comparatively safe to share (the reviewer's actual ask:
-                # don't silently drop them) and _fill_journal_reviewing
-                # already parses a missing journal name from jline's own
-                # raw text, which is correct per-line where committee_name
-                # would just repeat the first line's value on every entry.
-                date_fields = {k: v for k, v in fields.items()
-                               if k in ('start_date', 'end_date', 'year')}
-                for jline in journal_lines:
-                    new_entry = {
-                        'text': jline,
-                        'taxonomy_code': 'Q4D',
-                        'rerouted_from_q2': True,
-                        'extracted_fields': dict(date_fields),
-                    }
-                    rerouted_to_journal.append(new_entry)
-
-                # Keep remaining lines as a board entry (if any), as a new
-                # dict rather than a mutation of the shared original -- the
-                # same entry object also lives in the flattened all_entries
-                # list the orchestrator builds from entries_by_code (#573
-                # review).
-                if board_lines:
-                    actual_board_entries.append({**entry, 'text': '\n'.join(board_lines)})
-
-            else:
-                # Single-line entry - classify based on content
-                is_journal_reviewer = (
-                    (role == 'reviewer' and any(kw in text_lower for kw in JOURNAL_SPECIALTY_KEYWORDS)) or
-                    any(kw in text_lower for kw in JOURNAL_ROLE_PHRASES) or
-                    any(p in text_lower for p in REVIEWER_PATTERNS) or
-                    (role == 'reviewer' and 'j ' in committee) or
-                    (role == 'reviewer' and 'journal' in org)
-                )
-
-                # Check if this is clearly a board/committee entry
-                is_board_entry = any(kw in text_lower for kw in BOARD_KEYWORDS)
-
-                if is_journal_reviewer and not is_board_entry:
-                    # This looks like journal reviewing, reroute to Q4D --
-                    # as a copy, not a mutation of the shared original.
-                    rerouted_to_journal.append(
-                        {**entry, 'taxonomy_code': 'Q4D', 'rerouted_from_q2': True})
-                else:
-                    actual_board_entries.append(entry)
+        rerouted_to_journal, actual_board_entries = _route_q2_entries(q2_entries)
 
         if rerouted_to_journal and self.verbose:
             print(f"  Rerouted {len(rerouted_to_journal)} Q2 entries/lines to Journal Reviewing")
@@ -310,10 +329,7 @@ class ServiceSection:
                     role_parts = role.split(', ', 1)
                     role_word = role_parts[0].strip().lower()
                     # Only split if the first part looks like a role title
-                    if role_word in ('chair', 'co-chair', 'deputy chair', 'vice chair',
-                                     'member', 'secretary', 'treasurer', 'president',
-                                     'vice president', 'director', 'advisor', 'liaison',
-                                     'representative', 'reviewer', 'editor', 'delegate'):
+                    if role_word in BOARD_ROLE_TITLES:
                         role = role_parts[0].strip()
                         committee = role_parts[1].strip()
 
@@ -644,17 +660,13 @@ class ServiceSection:
         if not entries:
             return
 
-        # Group by section
-        # Q4B = Associate/Guest Editor roles, Q4C = Editorial Board Member
-        # These should go to Editorial Activities section, not generic Professional Service
-        # Q4A is Editor-in-Chief / Senior Editor / Co-Editor (stage_3b:807), i.e.
-        # editorial -- not extramural leadership. It used to share Q1's anchor,
-        # and 'EXTRAMURAL PROFESSIONAL RESPONSIBILITIES' resolves to the
-        # top-level Q header whose first following table is the Leadership table
-        # Q1 had just filled. The clear below then wiped it: 0 of 76 Q1
-        # organizations reached their table on the 10 corpus CVs carrying both,
-        # and 39 entries on 6 CVs vanished from the document entirely (#454).
-        # 'Editor/Co-Editor' is Q4A's own template table and was previously dead.
+        # Group by section. Q4A (Editor-in-Chief/Senior Editor/Co-Editor) is
+        # editorial, not extramural leadership: it routes to its own
+        # 'Editor/Co-Editor' table and must never resolve to
+        # 'EXTRAMURAL PROFESSIONAL RESPONSIBILITIES', which is Q1's anchor
+        # (#454). Q4B (Associate/Guest Editor) and Q4C (Editorial Board
+        # Member) go to Editorial Activities, not generic Professional
+        # Service.
         sections = {
             'Q3': ('Grant Reviewing', ['Grant Reviewing', 'Study Sections']),
             'Q4': ('Professional Service', ['EXTRAMURAL PROFESSIONAL RESPONSIBILITIES', 'Leadership in Extramural']),
@@ -716,22 +728,12 @@ class ServiceSection:
                                     fields.get('agency', '') or
                                     fields.get('journal_name', ''))
 
-                    # Q3 keeps the study-section name in 'panel_name', which no
-                    # code here ever read: every Grant Reviewing row rendered as
-                    # a bare agency ("Reviewer | NIH | 2018-2020") and the
-                    # identifier -- the entire content of the line -- was
-                    # dropped. 279 of the corpus's Q3 entries across 35 CVs
-                    # carry one, and 190 of those appear nowhere in the output
-                    # document (#466).
-                    #
-                    # Appended, deliberately, rather than promoted into the
-                    # chain above: agency and panel_name are BOTH populated on
-                    # 286 of 380 corpus Q3 entries, so preferring panel_name
-                    # would evict the agency on 269 of them and trade one
-                    # omission for another. Gated on Q3 because that is the only
-                    # code measured to carry the field -- panel_name is absent
-                    # from all 309 Q1, 24 Q4A, 105 Q4B and 157 Q4C entries, so
-                    # today the gate is a no-op that pins the intent.
+                    # Q3 carries the study-section name in 'panel_name'.
+                    # Append it to the agency/organization chain above --
+                    # never promote it over agency, which is populated
+                    # alongside panel_name on most Q3 entries and must not
+                    # be evicted. Gated on Q3 because no other code is
+                    # known to carry the field (#466).
                     panel_name = fields.get('panel_name', '')
                     if taxonomy_code == 'Q3' and panel_name:
                         if not organization:
