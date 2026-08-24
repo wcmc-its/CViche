@@ -97,6 +97,22 @@ class TestSectionPGainsSectionOParser:
             ("Research Advisory Board", "", ""),
         ]
 
+    def test_truthy_non_dict_extracted_fields_renders_instead_of_raising(self):
+        # extracted_fields as a truthy non-Mapping used to slip past `or {}`
+        # and AttributeError on the first fields.get(); the isinstance guard
+        # drops it to {} so the parenthetical repair still recovers the row.
+        gen = _generator()
+        entry = {
+            "text": "Curriculum Committee (Chair 1999-2010)",
+            "extracted_fields": ["stray", "list"],
+            "taxonomy_code": "P",
+        }
+        gen._fill_administrative_activities([entry])
+
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("Curriculum Committee", "Chair", "1999-2010"),
+        ]
+
     def test_orphaned_date_lines_pair_forward_instead_of_dropping(self):
         # A flattened source table arrives as column 1's lines then column 2's:
         # the drifted copy dropped the bare date lines outright.

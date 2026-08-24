@@ -8,6 +8,7 @@ The key is total on purpose. A record with no parseable date sorts to (0, 0, 0)
 -- last -- and a current one to (9999, 12, 31) -- first. Neither raises, because
 a section that raises mid-render loses the whole document.
 """
+from collections.abc import Mapping
 from typing import Dict, List
 
 from ..parsing.dates import _parse_date_components
@@ -27,7 +28,10 @@ def extract_sort_date(entry: Dict) -> tuple:
     Returns:
         Tuple (year, month, day) for sorting
     """
-    fields = entry.get('extracted_fields', {})
+    # Total over malformed payloads too: a truthy non-dict (a stray list, say)
+    # must sort to (0, 0, 0), not AttributeError on fields.get().
+    raw_fields = entry.get('extracted_fields')
+    fields = raw_fields if isinstance(raw_fields, Mapping) else {}
 
     # Try various date fields in order of preference
     date_candidates = [

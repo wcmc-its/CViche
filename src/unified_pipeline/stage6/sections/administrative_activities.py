@@ -29,6 +29,7 @@ P keeps its own row writer because its table has a Role column O's does not:
 parsed parenthetical titles go there instead of back into the activity text.
 """
 import re
+from collections.abc import Mapping
 from typing import Dict, List
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
@@ -69,7 +70,10 @@ class AdministrativeActivitiesSection:
         sorted_entries = sort_entries_reverse_chronological(entries)
 
         for entry in sorted_entries:
-            fields = entry.get('extracted_fields', {}) or {}
+            # Guard the type, not just falsiness: a truthy non-dict here (a stray
+            # list, say) would AttributeError on every fields.get() below.
+            raw_fields = entry.get('extracted_fields')
+            fields = raw_fields if isinstance(raw_fields, Mapping) else {}
             taxonomy_code = entry.get('taxonomy_code', 'P')
             original_text = entry.get('text', '')
 
