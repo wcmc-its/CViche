@@ -107,17 +107,19 @@ a comment that maps onto one of them belongs there rather than in a new issue.
 document said so in as many words: testability appeared only as an argument for
 splitting a function, never as a standalone request, so coverage was ours to
 decide. That stopped being true. On #644 (opened
-2026-08-14), mrj4001 opened six review threads that are nothing but enumerated
-positive/negative test cases, one thread per function — about 110 named cases
-across `_classify_one_batch`, `classify_entries_batch`,
-`group_entries_by_hierarchy`, `validate_t_classifications`,
-`reconnect_fragments` and `detect_duplicates` — then followed up on every one
-of the six with the same line: *"I don't see all of the requested test case
-changes covered in the code review comment. Could you please point me to
-where each of them has been implemented?"* #625 asked the same way,
-function-by-function: *"Please test the emit_track_changes == False branch
-and the XML-construction exception fallback. Both are explicit production
-paths."* Test coverage is asked for in review now, in exactly this shape: an
+2026-08-14), mrj4001 opened seven review threads that are nothing but
+enumerated positive/negative test cases, one thread per function — 119 named
+cases across `_build_taxonomy_ref_for_batch`, `_classify_one_batch`,
+`classify_entries_batch`, `group_entries_by_hierarchy`,
+`validate_t_classifications`, `reconnect_fragments` and `detect_duplicates` —
+then followed up on six of the seven asking, in substance, the same thing:
+*"I don't see all of the requested test case changes covered in the code
+review comment. Could you please point me to where each of them has been
+implemented?"* #625 asked the same way, function-by-function: *"Please test
+the emit_track_changes == False branch and the XML-construction exception
+fallback. Both are explicit production paths in
+_add_citation_with_bold_author_as_insertion(), and neither is currently
+covered."* Test coverage is asked for in review now, in exactly this shape: an
 enumerated case list per function, checked case by case against what actually
 shipped.
 
