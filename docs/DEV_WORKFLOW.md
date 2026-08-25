@@ -103,9 +103,26 @@ cheaper than answering them one comment at a time:
 Those five standing issues absorb roughly 60% of everything written in review, so
 a comment that maps onto one of them belongs there rather than in a new issue.
 
-Nobody asks for tests in review. Testability appears only as an argument for
-splitting a function, never as a standalone request — which means test coverage
-is ours to decide, not something a reviewer will catch.
+**That held through #535. It does not hold any more.** On #644 (opened
+2026-08-14), mrj4001 opened six review threads that are nothing but enumerated
+positive/negative test cases, one thread per function — about 110 named cases
+across `_classify_one_batch`, `classify_entries_batch`,
+`group_entries_by_hierarchy`, `validate_t_classifications`,
+`reconnect_fragments` and `detect_duplicates` — then followed up on every one
+of the six with the same line: *"I don't see all of the requested test case
+changes covered in the code review comment. Could you please point me to
+where each of them has been implemented?"* #625 asked the same way,
+function-by-function: *"Please test the emit_track_changes == False branch
+and the XML-construction exception fallback. Both are explicit production
+paths."* Test coverage is asked for in review now, in exactly this shape: an
+enumerated case list per function, checked case by case against what actually
+shipped.
+
+Practical consequence: for a new or substantially rewritten function that
+validates input or handles errors, enumerate its positive and negative cases
+in the PR description and name the test that covers each. That is the form
+review takes anyway — doing it up front is cheaper than reconstructing the
+list one reply at a time. The rule is `CODING_STANDARDS.md` §6.9.
 
 ## Merging
 
