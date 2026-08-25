@@ -200,10 +200,21 @@ class TestSamlSignature:
                 f"Expected [SECURITY] WARNING log for signature failure. Got logs: {[r.getMessage() for r in caplog.records]}"
 
     def test_non_signature_error_logs_at_error_level(self, client, db, seed_saml_mode, caplog):
-        """Non-signature exceptions at ACS still log at ERROR level (not WARNING)."""
+        """Non-signature exceptions at ACS still log at ERROR level (not WARNING).
+
+        Raises a real, non-signature pysaml2 exception type (PR #656 review
+        item 6 / #672: saml_acs()'s final except now catches
+        RuntimeError/OSError/SAMLError/SourceNotFound instead of bare
+        Exception, so a stand-in generic Exception no longer exercises this
+        path -- a genuinely unexpected exception type now propagates instead,
+        see test_acs_unexpected_exception_propagates in test_saml_sp.py).
+        StatusError is pysaml2's own exception for an IdP-reported error
+        SAML Status -- a real, expected non-signature failure, and a
+        saml2.SAMLError subclass."""
+        from saml2.response import StatusError
         with patch("app.api.saml_routes.get_saml_client") as mock_client:
             mock_client.return_value.parse_authn_request_response.side_effect = \
-                Exception("Some other pysaml2 failure")
+                StatusError("Some other pysaml2 failure")
 
             with caplog.at_level(logging.DEBUG):
                 response = client.post(

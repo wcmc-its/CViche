@@ -5,6 +5,8 @@ import os
 from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import RedirectResponse, Response
+from saml2 import SAMLError
+from saml2.mdstore import SourceNotFound
 from saml2.metadata import create_metadata_string
 from saml2.sigver import SigverError, CertificateError
 from saml2.response import IncorrectlySigned
@@ -61,8 +63,27 @@ def saml_login(request: Request, db: Session = Depends(get_db)):
         # If no Location header found, something went wrong
         logger.error("SAML login: no Location header in prepare_for_authenticate response")
         return RedirectResponse("/login?error=auth_failed", status_code=302)
-    except Exception:
-        logger.error("SAML login initiation failed", exc_info=True)
+    except (RuntimeError, OSError, SAMLError, CertificateError, SourceNotFound) as e:
+        # RuntimeError: our own config-validation raises in get_saml_client()
+        # (missing saml_sp_base_url, half-populated cert dir, no xmlsec1
+        # binary). OSError: get_saml_client() -> Saml2Config.load() eagerly
+        # fetches the remote IdP metadata over HTTP (verified against the
+        # installed pysaml2: saml2.mdstore.MetadataStore.load() calls
+        # MetaDataExtern.load() unconditionally); a network failure surfaces
+        # as requests' ConnectionError/Timeout, both OSError subclasses.
+        # SAMLError/CertificateError/SourceNotFound: pysaml2's own errors
+        # building the AuthnRequest (e.g. SignOnError when the IdP metadata
+        # supports neither binding) or fetching/parsing that metadata (a
+        # SourceNotFound on a non-200 response). These are all real,
+        # expected operational failure modes -- redirect like before.
+        #
+        # A genuinely unexpected exception (a bug, not an operational
+        # failure) is deliberately NOT caught here: it propagates to
+        # main.py's global exception handler, which logs the full traceback
+        # server-side and returns a sanitized 500 to the client. Swallowing
+        # it into "auth_failed" would mask a real bug as a routine login
+        # failure (mrj4001 review, PR #656 item 6 / #672).
+        logger.error("SAML login initiation failed: %s", e, exc_info=True)
         return RedirectResponse("/login?error=auth_failed", status_code=302)
 
 
@@ -151,8 +172,20 @@ def _saml_acs_process(form: dict, db: Session):
         # signature/cert-validation exception surface.
         logger.warning("[SECURITY] SAML signature validation failed: %s", str(e))
         return RedirectResponse("/login?error=auth_failed", status_code=302)
-    except Exception:
-        logger.error("SAML ACS processing failed", exc_info=True)
+    except (RuntimeError, OSError, SAMLError, SourceNotFound) as e:
+        # Same taxonomy as saml_login (get_saml_client() is the shared call
+        # that can raise RuntimeError/OSError/SourceNotFound), plus
+        # SAMLError for pysaml2's other real response-processing errors not
+        # already narrowed above -- e.g. StatusError (IdP reported an error
+        # status) and VerificationError (audience/recipient/conditions
+        # check failed). CertificateError is intentionally omitted from
+        # this tuple: it's already caught above alongside the
+        # signature-specific exceptions.
+        #
+        # A genuinely unexpected exception still propagates rather than
+        # redirecting -- see saml_login's comment for why (mrj4001 review,
+        # PR #656 item 6 / #672).
+        logger.error("SAML ACS processing failed: %s", e, exc_info=True)
         return RedirectResponse("/login?error=auth_failed", status_code=302)
 
     # ED group authorization check (if enabled)
@@ -246,8 +279,17 @@ def saml_metadata(db: Session = Depends(get_db)):
         # `config=` is provided directly.
         metadata_str = create_metadata_string("", config=client.config)
         return Response(content=metadata_str, media_type="application/xml")
-    except Exception:
-        logger.error("SAML metadata generation failed", exc_info=True)
+    except (RuntimeError, OSError, SAMLError, CertificateError, SourceNotFound) as e:
+        # Same expected-failure taxonomy as saml_login (shared
+        # get_saml_client() call), plus pysaml2's own metadata-building
+        # errors from create_metadata_string(). This endpoint is
+        # unauthenticated and IdP-facing, not a login attempt, but it's
+        # still a security-relevant surface -- the same choice applies: a
+        # genuinely unexpected exception propagates to the global handler
+        # (sanitized 500, full traceback logged server-side) instead of
+        # being folded into the same "not available" response an ops/config
+        # problem gets (mrj4001 review, PR #656 item 6 / #672).
+        logger.error("SAML metadata generation failed: %s", e, exc_info=True)
         return Response(content="SAML metadata not available", status_code=500)
 
 
