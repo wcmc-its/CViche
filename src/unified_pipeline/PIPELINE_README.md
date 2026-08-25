@@ -356,7 +356,7 @@ Stage 5b enriches education and position entries with institution location data 
 
 Entries with these taxonomy codes are eligible for institution enrichment:
 - **B1, B2**: Education (university locations)
-- **C, C1, C2**: Postdoctoral Training
+- **C, C1, C2, C3**: Postdoctoral Training
 - **D1, D2, D3**: Professional Positions
 
 ### Enrichment Data

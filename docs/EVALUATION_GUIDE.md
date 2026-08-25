@@ -45,7 +45,7 @@ Each WCM section requires a specific date format. Verify dates match:
 | Taxonomy Code | Section | Required Format | Example |
 |--------------|---------|----------------|---------|
 | B1, B2 | Education | mm/yyyy | 08/1989 |
-| C, C1, C2 | Postdoc Training | mm/yy | 01/94 |
+| C, C1, C2, C3 | Postdoc Training | mm/yy | 01/94 |
 | D1, D2, D3 | Positions | mm/yy | 07/10 |
 | F1 | Licensure | mm/dd/yyyy | 07/01/1994 |
 | F2 | Board Certification | yyyy | 2010 |

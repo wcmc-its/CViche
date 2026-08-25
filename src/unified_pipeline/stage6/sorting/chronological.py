@@ -29,7 +29,8 @@ def extract_sort_date(entry: Dict) -> tuple:
         Tuple (year, month, day) for sorting
     """
     # Total over malformed payloads too: a truthy non-dict (a stray list, say)
-    # must sort to (0, 0, 0), not AttributeError on fields.get().
+    # must sort to (0, 0, 0), not AttributeError on fields.get(). This subsumes
+    # the `or {}` form -- that one still reaches .get() on a truthy non-dict.
     raw_fields = entry.get('extracted_fields')
     fields = raw_fields if isinstance(raw_fields, Mapping) else {}
 
