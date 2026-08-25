@@ -37,6 +37,16 @@ on that function); the certificate-number grammar and the MOC-token check are
 each anchored instead of matching anywhere in the string; and header-line
 filtering matches whole flattened-table cells exactly instead of testing
 whether a header phrase merely occurs somewhere in the line.
+
+An adversarial re-gate (2026-08-25) found `_is_fused_certification` still
+over-triggers on real single certifications that say "board" twice ("Sub-
+board of the American Board of Psychiatry and Neurology"; "American Board
+of X, Board Eligible", which the template's own certificate column invites
+by reading "Certificate # (indicate if board eligible)"). Rather than chase
+the predicate further, `_backfill_missing_fields_from_structured` makes a
+wrong dispatch harmless: a single reparsed row missing a certificate number
+or date is filled from the entry's structured fields when they are
+unambiguous, independent of why the row came up short.
 """
 import logging
 import re
@@ -217,6 +227,71 @@ def _is_reconstruction_confident(
     if years and len(years) != len(specialties):
         return False
     return True
+
+
+def _backfill_missing_fields_from_structured(
+    rows: List[tuple], fields: Dict, structured_cert: str,
+) -> List[tuple]:
+    """Fill a blank certificate number or date in a reparsed row from the
+    entry's own structured fields, when it is unambiguous to do so.
+
+    DATA-LOSS GATE, per-FIELD/per-ROW (2026-08-25, adversarial re-gate of
+    #625): `_is_fused_certification` still over-triggers on real single
+    certifications -- "Sub-board of the American Board of Psychiatry and
+    Neurology" (real ABPN subspecialty phrasing) and "American Board of X,
+    Board Eligible" (the template's own certificate column reads
+    "Certificate # (indicate if board eligible)") both contain "board"
+    twice. Routed to the text reparse, when it recovers a year but no
+    certificate number for that one row, the whole-entry safety net in
+    `_parse_and_add_multiple_certifications` does not fire -- it only
+    rescues the case where NOTHING was recovered -- so the row rendered
+    with its certificate number blanked. This makes that class of mistake
+    harmless instead of trying to make the predicate perfect: it does not
+    matter WHY the reparse under- or over-produced rows, a row that is
+    missing a field the entry's structured data already answered gets it
+    filled in here.
+
+    Safe only when there is exactly ONE reparsed row: with more than one
+    row, a single structured `certificate_number`/`year_certified` cannot
+    be attributed to a particular row without guessing which one it
+    belongs to -- copying it into one row (or worse, all of them) would
+    invent an association the entry never stated. That case is left
+    exactly as the reparse produced it and logged instead, so the miss is
+    visible (§5.3/§5.10) rather than silently declined. A structured field
+    that is ITSELF a comma-separated list of more than one value (a
+    genuine multi-certification entry) is ambiguous on its own terms and is
+    never treated as a candidate, regardless of row count.
+    """
+    cert_candidates = _split_multi(structured_cert)
+    cert_candidate = cert_candidates[0] if len(cert_candidates) == 1 else ''
+    year_candidates = _split_multi(fields.get('year_certified', ''))
+    date_candidate = (
+        _format_certification_date_str(fields) if len(year_candidates) <= 1 else ''
+    )
+
+    if len(rows) != 1:
+        missing = [
+            row for row in rows
+            if (not row[1] and cert_candidate) or (not row[2] and date_candidate)
+        ]
+        if missing:
+            logger.warning(
+                "board certification: %d of %d reparsed row(s) are missing "
+                "a certificate number or date that the entry's structured "
+                "fields cannot be attributed to a single row -- leaving "
+                "blank rather than guessing which row it belongs to "
+                "(certificate_number=%r, year_certified=%r)",
+                len(missing), len(rows), structured_cert,
+                fields.get('year_certified', ''),
+            )
+        return rows
+
+    specialty, cert_num, year = rows[0]
+    if not cert_num and cert_candidate:
+        cert_num = cert_candidate
+    if not year and date_candidate:
+        year = date_candidate
+    return [(specialty, cert_num, year)]
 
 
 def _reconstruct_certification_rows(
@@ -488,6 +563,16 @@ class BoardCertificationSection:
         # logs when the token counts disagree instead of silently pairing by
         # position as if it were certain -- see _reconstruct_certification_rows.
         rows = _reconstruct_certification_rows(specialties, cert_numbers, years)
+
+        # PER-ROW SAFETY NET (2026-08-25, adversarial re-gate): the
+        # whole-entry fallback right below only fires when NO row recovered
+        # anything. A single row that recovered a year but not a
+        # certificate number (or vice versa) slips past it -- backfill that
+        # from the entry's own structured fields when unambiguous, before
+        # that all-or-nothing check runs. See
+        # _backfill_missing_fields_from_structured for what "unambiguous"
+        # means and why multi-row entries are excluded.
+        rows = _backfill_missing_fields_from_structured(rows, fields, structured_cert)
 
         # HARD SAFETY NET, continued: a reparse that recovered no
         # certificate number and no year anywhere is strictly worse than

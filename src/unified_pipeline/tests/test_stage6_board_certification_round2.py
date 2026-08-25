@@ -598,3 +598,113 @@ class TestRejectedTokenIsLogged:
         with caplog.at_level(logging.DEBUG):
             assert _classify_cert_token("") is None
         assert not caplog.records
+
+
+class TestPerRowBackfillFromStructuredFields:
+    """Adversarial re-gate follow-up (2026-08-25): `_is_fused_certification`'s
+    "more than one occurrence of 'board'" signal fires on real single
+    certifications ("Sub-board of the American Board of Psychiatry and
+    Neurology"; "American Board of X, Board Eligible" -- the template's own
+    certificate column literally reads "Certificate # (indicate if board
+    eligible)"). Routed to the free-text reparse, when it recovers a year
+    but no certificate number the old whole-entry safety net
+    (`not any(cert_num or year for _, cert_num, year in rows)`) does not
+    fire, because a year WAS recovered -- so the row rendered with its
+    certificate number blanked even though the entry's own structured
+    fields had it.
+
+    The fix is per-FIELD, per-ROW backfill, not a smarter predicate: a
+    single reparsed row missing a certificate number or date takes it from
+    the entry's structured fields when those fields supply exactly one
+    unambiguous candidate. It deliberately does NOT apply across multiple
+    reparsed rows -- a single structured `certificate_number` cannot be
+    attributed to one row out of several without inventing which row it
+    belongs to, so that case is left blank and logged instead (§5.3/§5.10).
+    """
+
+    def test_sub_board_phrase_backfills_certificate_number_from_structured_fields(self):
+        # (a) Real ABPN subspecialty phrasing containing "board" twice.
+        gen = _generator()
+        entry = {
+            "extracted_fields": {
+                "certifying_board": "Sub-board of the American Board of Psychiatry and Neurology",
+                "certificate_number": "67890",
+                "year_certified": "2015",
+            },
+            "text": "Child and Adolescent Psychiatry, Sub-board of the American Board "
+                    "of Psychiatry and Neurology\n2015",
+        }
+        gen._fill_board_certification([entry])
+        rows = _rows_after_board(gen)
+        assert len(rows) == 1
+        assert rows[0][1] == "67890", f"certificate number was blanked, got {rows[0]!r}"
+        assert rows[0][2] == "2015"
+
+    def test_board_eligible_phrase_backfills_certificate_number_from_structured_fields(self):
+        # (b) The template's own certificate column reads "Certificate #
+        # (indicate if board eligible)" -- extraction plausibly emits this.
+        gen = _generator()
+        entry = {
+            "extracted_fields": {
+                "certifying_board": "American Board of Surgery, Board Eligible",
+                "certificate_number": "11223",
+                "year_certified": "2018",
+            },
+            "text": "American Board of Surgery, Board Eligible\n2018",
+        }
+        gen._fill_board_certification([entry])
+        rows = _rows_after_board(gen)
+        assert len(rows) == 1
+        assert rows[0][1] == "11223", f"certificate number was blanked, got {rows[0]!r}"
+        assert rows[0][2] == "2018"
+
+    def test_genuinely_fused_multi_row_entry_does_not_duplicate_certificate_number(self):
+        # (c) A real fusion with its OWN multiple structured certificate
+        # numbers/years reparses into two full rows, unchanged from before
+        # this fix. The structured `certificate_number` is itself a
+        # comma-separated pair here, so it is already ambiguous -- backfill
+        # must not pick one of the two and copy it into the row that is
+        # missing a token, nor drop that row.
+        gen = _generator()
+        entry = {
+            "extracted_fields": {
+                "certifying_board": "Board A, Board B",
+                "certificate_number": "111, 222",
+                "year_certified": "2010, 2012",
+            },
+            "text": "Board A | 111 | 2010\nBoard B | 2012",
+        }
+        gen._fill_board_certification([entry])
+        rows = _rows_after_board(gen)
+        assert rows == [
+            ("Board A", "111", "2010"),
+            ("Board B", "", "2012"),
+        ]
+        assert rows[0][1] != rows[1][1], "the two rows must not share one certificate number"
+
+    def test_single_structured_cert_number_not_attributable_across_multiple_rows_is_logged(self, caplog):
+        # (d) The structured `certificate_number` here IS a single,
+        # unambiguous candidate ("111") -- but the reparse produced two
+        # rows, and it cannot be pinned to "Board A" (which already has its
+        # own "111") vs "Board B" (which has none) without guessing. Backfill
+        # must decline, leave Board B's certificate number blank, and log
+        # that it declined rather than doing nothing visibly.
+        gen = _generator()
+        entry = {
+            "extracted_fields": {
+                "certifying_board": "Board A, Board B",
+                "certificate_number": "111",
+                "year_certified": "2010",
+            },
+            "text": "Board A | 111 | 2010\nBoard B | | 2012",
+        }
+        with caplog.at_level(logging.WARNING):
+            gen._fill_board_certification([entry])
+        rows = _rows_after_board(gen)
+        assert rows == [
+            ("Board A", "111", "2010"),
+            ("Board B", "", "2012"),
+        ]
+        assert any(
+            "cannot be attributed to a single row" in r.message for r in caplog.records
+        ), [r.message for r in caplog.records]
