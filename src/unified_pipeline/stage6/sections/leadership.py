@@ -25,6 +25,17 @@ from ..parsing import _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
 
+# Canonical Section O header, verbatim from
+# key_files/wcm_cv_template_faculty_october_2022_final.docx paragraph 156.
+# Exact match only (#625 review): the old fallback searched for the bare
+# substring "Leadership", which also matches "Clinical Leadership" (para 104),
+# "Leadership and mentoring in programs" (para 138), and "Leadership in
+# Extramural Organizations" (para 168) -- all of which appear in the same
+# template and precede or follow the real O section. A substring hit on any
+# of those would bind this table to the wrong section and silently write
+# leadership rows into someone else's content.
+_LEADERSHIP_SECTION_HEADER = "INSTITUTIONAL LEADERSHIP ACTIVITIES"
+
 
 class LeadershipSection:
     """Section O writers, mixed into `WCMTemplateGenerator`."""
@@ -40,10 +51,13 @@ class LeadershipSection:
         if self.verbose:
             print(f"Filling Institutional Leadership ({len(entries)} entries)...")
 
-        # Find Leadership section
-        section_idx = self._find_paragraph_with_text("INSTITUTIONAL LEADERSHIP")
-        if section_idx is None:
-            section_idx = self._find_paragraph_with_text("Leadership")
+        # Find Leadership section by exact canonical header (#625 review) --
+        # fail closed rather than risk binding to a near-miss heading. See
+        # _LEADERSHIP_SECTION_HEADER above for why a substring match is unsafe
+        # here: writing real content into the wrong section is worse than
+        # omitting it (entries not rendered here are still picked up by the
+        # unrendered-record recovery pass that runs after all sections fill).
+        section_idx = self._find_paragraph_exact(_LEADERSHIP_SECTION_HEADER)
         if section_idx is None:
             return
 

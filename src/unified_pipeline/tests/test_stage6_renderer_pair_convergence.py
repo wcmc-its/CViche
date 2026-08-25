@@ -196,6 +196,133 @@ class TestSectionPGainsSectionOParser:
         ]
 
 
+class TestAdministrativeActivitiesReviewFixes:
+    """PR #625 review-round fixes to this file, one test per thread. See
+    docs/analysis for the full brief; thread ids are the GitHub review
+    comment ids."""
+
+    def test_parenthetical_present_date_renders_capital_p(self):
+        # review thread 3849996402: the parenthetical-derived dates now route
+        # through format_date_range, like every extracted date, instead of a
+        # second hand-built date string that never capitalized "present".
+        gen = _generator()
+        entry = {
+            "text": "University Senate (2010-present)",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+        gen._fill_administrative_activities([entry])
+
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("University Senate", "", "2010-Present"),
+        ]
+
+    def test_parenthetical_cleaned_even_when_activity_already_extracted(self):
+        # review thread 3850003492: his exact example -- when `activity` is
+        # pre-populated WITH the parenthetical still inside it, the
+        # parenthetical used to survive in the Activity column while Role and
+        # Dates rendered it a second time. The unrelated "(Emeritus)"
+        # parenthetical is left alone -- only the one carrying a year is
+        # stripped, so this isn't a blanket paren-strip (HARD SAFETY GATE:
+        # realistic content still renders).
+        gen = _generator()
+        entry = {
+            "text": "Committee A (Emeritus) (Chair 2005-2007)",
+            "extracted_fields": {"activity": "Committee A (Emeritus) (Chair 2005-2007)"},
+            "taxonomy_code": "P",
+        }
+        gen._fill_administrative_activities([entry])
+
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("Committee A (Emeritus)", "Chair", "2005-2007"),
+        ]
+
+    def test_committee_alias_precedence_is_explicit_and_wins_over_conflicts(self):
+        # review threads 3850009796 and 3850014030, same underlying fix: the
+        # committee_name/committee/activity alias chain now resolves through
+        # one named precedence (_COMMITTEE_ALIAS_KEYS) instead of a silent
+        # `or` chain, and this is the conflicting-populated-fields test he
+        # asked for -- committee_name wins whether the conflict is scalar
+        # values or, per the pre-existing list-detection order, competing
+        # lists.
+        gen = _generator()
+        scalar_entry = {
+            "text": "irrelevant",
+            "extracted_fields": {
+                "committee_name": "IRB",
+                "committee": "Wrong Committee",
+                "activity": "Even More Wrong",
+            },
+            "taxonomy_code": "P",
+        }
+        gen._fill_administrative_activities([scalar_entry])
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("IRB", "", ""),
+        ]
+
+        gen2 = _generator()
+        list_entry = {
+            "text": "irrelevant",
+            "extracted_fields": {
+                "committee_name": [{"committee_name": "Right List Committee"}],
+                "activity": [{"activity": "Wrong List Committee"}],
+            },
+            "taxonomy_code": "P",
+        }
+        gen2._fill_administrative_activities([list_entry])
+        assert _rows_after(gen2, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("Right List Committee", "", ""),
+        ]
+
+    def test_committee_record_boundary_coerces_dict_activity_before_paren_cleanup(self):
+        # review thread 3850017930: `_CommitteeRecord.from_raw` coerces a
+        # domain value to plain text at the point it's read out of `fields`,
+        # not only inside `_add_committee_row`'s final safeguard. This is
+        # also what keeps the thread-3850003492 fix above safe: without the
+        # early coercion, `activity or original_text` could hand a raw dict
+        # to `_PARENTHETICAL_WITH_YEAR_RE.sub`, which raises on a non-string.
+        gen = _generator()
+        entry = {
+            "text": "(Chair 2011-2013)",
+            "extracted_fields": {"activity": {"committee_name": "Nested Committee"}},
+            "taxonomy_code": "P",
+        }
+        gen._fill_administrative_activities([entry])
+
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("Nested Committee", "Chair", "2011-2013"),
+        ]
+
+    def test_parse_failure_mid_entries_leaves_existing_table_content_untouched(self):
+        # review thread 3850029915: entries are parsed into a complete row
+        # list BEFORE the table is cleared. A malformed later entry raising
+        # during parsing (here: a non-dict entry, to force the failure
+        # deterministically) must not leave the table cleared with only a
+        # partial render in its place, and the exception must still
+        # propagate -- not be swallowed (coding standards 5.4).
+        gen = _generator()
+        section_idx = gen._find_paragraph_with_text("INSTITUTIONAL ADMINISTRATIVE")
+        table = gen._find_table_after_paragraph(section_idx)
+        table.add_row().cells[0].text = "Pre-existing Row"
+        rows_before = _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE")
+        assert ("Pre-existing Row", "", "") in rows_before
+
+        entries = [
+            {"text": "Committee A", "extracted_fields": {}, "taxonomy_code": "P"},
+            None,
+        ]
+        raised = False
+        try:
+            gen._fill_administrative_activities(entries)
+        except AttributeError:
+            raised = True
+        assert raised, "a malformed entry must still raise, not be swallowed"
+
+        # Never cleared: the table is byte-for-byte what it was before the
+        # call, sentinel row included -- not cleared with a partial render.
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == rows_before
+
+
 class TestSectionOBehaviorPinned:
     def test_leadership_rows_unchanged_by_the_shared_parser(self):
         # O's outputs for the same seven shapes, exactly as before #572: role
@@ -459,3 +586,221 @@ def _rows_after_board(gen):
     table = gen._find_table_after_paragraph(section_idx)
     assert table is not None
     return [tuple(cell.text for cell in row.cells) for row in table.rows[1:]]
+
+
+# --- Appended 2026-08-25: PR #625 review, threads 3850063781 and 3851117744
+# (both reopened by the reviewer after a wrong #567 attribution / a "still
+# want it in this PR" pushback). `pytest` is imported here, at the tail of
+# the file, instead of being promoted into the top-of-file import block, to
+# avoid a line-level collision with a parallel edit to that block.
+import pytest  # noqa: E402
+
+
+class TestExtractedFieldsMappingGuard:
+    """Thread 3850063781: the reviewer's parametrized ask, misattributed in
+    our earlier reply to #567 (which is about a typed-record replacement, not
+    this). The real fix already landed in 5978252 -- an isinstance(Mapping)
+    guard in both _fill_administrative_activities and the shared sorter,
+    replacing a bare `entry.get('extracted_fields', {}) or {}` that let a
+    truthy non-dict (a string, an int) through to raise AttributeError on the
+    first .get() call. That commit's own test only covers a stray list; this
+    sweeps the reviewer's full parametrize list -- None, [], "", "invalid",
+    123 -- against the same guard.
+    """
+
+    @pytest.mark.parametrize(
+        "extracted_fields",
+        [None, [], "", "invalid", 123],
+    )
+    def test_non_mapping_extracted_fields_render_instead_of_raising(self, extracted_fields):
+        gen = _generator()
+        entry = {
+            "taxonomy_code": "P",
+            "text": "Quality Committee",
+            "extracted_fields": extracted_fields,
+        }
+        gen._fill_administrative_activities([entry])
+
+        # No dates, no parenthetical, one line of raw text: the guard drops
+        # extracted_fields to {} and the row falls back to the raw activity
+        # text with an empty Role/Dates, same as any entry with no fields.
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("Quality Committee", "", ""),
+        ]
+
+
+class TestInsertionWriterNeverLosesTheCitation:
+    """Thread 3851117744: the two production paths in
+    _add_citation_with_bold_author_as_insertion() that fall back to the plain
+    writer instead of building w:ins -- disabled track changes, and a raise
+    partway through XML construction. 65ad64d added three shared-split
+    author-matching tests but neither of these; the reviewer asked again
+    specifically for these two."""
+
+    CITATION = TestCitationWritersShareOneSplit.CITATION
+
+    def test_disabled_track_changes_skips_ins_and_renders_plain(self):
+        # Issue #153's documented contract: emit_track_changes == False must
+        # never reach the w:ins builder -- it should render exactly like
+        # _add_citation_with_bold_author.
+        gen = _generator()
+        gen.emit_track_changes = False
+        added_before = gen.stats['track_changes_added']
+        para = gen.doc.paragraphs[0].insert_paragraph_before("")
+        gen._add_citation_with_bold_author_as_insertion(para, self.CITATION, None, "Wende")
+
+        assert para._p.find(qn("w:ins")) is None
+        assert [(r.text, bool(r.bold)) for r in para.runs] == [
+            ("Wende ME", True),
+            (", Smith J. A study of things. J Things. 2023;1:1-9.", False),
+        ]
+        assert gen.stats['track_changes_added'] == added_before
+
+    def test_xml_construction_failure_falls_back_to_plain_citation(self, monkeypatch):
+        # bibliography.py's own module docstring promises an enrichment can
+        # never cost the citation itself. Force the w:ins build to raise
+        # partway through (patching the one XML-element constructor it calls,
+        # not the module under test) and assert the citation still lands as
+        # plain runs instead of the paragraph coming up empty or the call
+        # propagating the exception.
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("simulated XML construction failure")
+
+        monkeypatch.setattr(
+            "unified_pipeline.stage6.sections.bibliography.OxmlElement", _boom)
+
+        gen = _generator()
+        assert gen.emit_track_changes
+        para = gen.doc.paragraphs[0].insert_paragraph_before("")
+        gen._add_citation_with_bold_author_as_insertion(para, self.CITATION, None, "Wende")
+
+        assert para._p.find(qn("w:ins")) is None
+        assert [(r.text, bool(r.bold)) for r in para.runs] == [
+            ("Wende ME", True),
+            (", Smith J. A study of things. J Things. 2023;1:1-9.", False),
+        ]
+
+
+# --- Appended 2026-08-25: PR #625 review, thread 3843817401 (#665). `logging`
+# is imported here, at the tail of the file, rather than promoted into the
+# top-of-file import block, for the same reason as `pytest` above -- avoiding
+# a line-level collision with a parallel edit to that block.
+import logging  # noqa: E402
+
+
+class TestOrphanedDateAlignmentValidatesBeforePairing:
+    """Thread 3843817401 (#665): the forward pairing between `dates_pool` and
+    date-less items assumes the two runs are the same length because they
+    come from the same flattened table. When extraction drops or inserts a
+    line -- an extra header, a split row -- that assumption breaks and
+    positional pairing shifts a real date onto the wrong activity. A wrong
+    date is worse than no date: it renders with the same confident look as a
+    correct one, so nothing downstream can tell the two apart.
+
+    _parse_flattened_committee_lines now only pairs positionally when the
+    counts agree; on a mismatch every affected item stays dateless (a blank
+    Dates cell -- a visible gap, not a silent wrong answer) and a warning
+    names the mismatch. Exercised through P's real fill method, same as the
+    rest of this file, so a regression here fails against the actual
+    document output, not just the parser's return value.
+    """
+
+    LOGGER_NAME = "unified_pipeline.stage6.parsing.text"
+
+    def test_matching_counts_pair_every_activity_exactly_as_before(self):
+        # No regression: when the two runs are the same length, every
+        # activity still gets its own date, forward, positionally.
+        gen = _generator()
+        entry = {
+            "text": "Alpha Committee\nBeta Committee\nGamma Committee\n"
+                    "2001-2002\n2003-2004\n2005-2006",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+        gen._fill_administrative_activities([entry])
+
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("Alpha Committee", "", "2001-2002"),
+            ("Beta Committee", "", "2003-2004"),
+            ("Gamma Committee", "", "2005-2006"),
+        ]
+
+    def test_more_dates_than_undated_activities_assigns_none_and_logs(self, caplog):
+        # 2 undated activities, 3 orphaned dates: no way to know which date
+        # belongs to which committee (or which date is the extra one), so
+        # none get assigned rather than guessing.
+        gen = _generator()
+        entry = {
+            "text": "Alpha Committee\nBeta Committee\n"
+                    "2001-2002\n2003-2004\n2005-2006",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+        with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
+            gen._fill_administrative_activities([entry])
+
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("Alpha Committee", "", ""),
+            ("Beta Committee", "", ""),
+        ]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("3" in r.getMessage() and "2" in r.getMessage() for r in warnings), (
+            f"expected a warning naming both counts (3 dates, 2 activities), got: "
+            f"{[r.getMessage() for r in warnings]}"
+        )
+
+    def test_fewer_dates_than_undated_activities_assigns_none_and_logs(self, caplog):
+        # 3 undated activities, 2 orphaned dates: same disagreement, the
+        # other direction.
+        gen = _generator()
+        entry = {
+            "text": "Alpha Committee\nBeta Committee\nGamma Committee\n"
+                    "2001-2002\n2003-2004",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+        with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
+            gen._fill_administrative_activities([entry])
+
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("Alpha Committee", "", ""),
+            ("Beta Committee", "", ""),
+            ("Gamma Committee", "", ""),
+        ]
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("2" in r.getMessage() and "3" in r.getMessage() for r in warnings), (
+            f"expected a warning naming both counts (2 dates, 3 activities), got: "
+            f"{[r.getMessage() for r in warnings]}"
+        )
+
+    def test_extra_line_mid_list_never_shifts_a_date_onto_the_wrong_activity(self, caplog):
+        # His actual failure scenario: an extra line lands between two
+        # committee names, ahead of the date run. Pre-fix, forward pairing
+        # would hand Alpha's real date to the extra line and starve Beta of
+        # its own date entirely -- silently, with no sign anything went
+        # wrong. Post-fix, the count mismatch (3 undated activities, 2
+        # dates) means nobody gets a date instead of somebody getting the
+        # wrong one.
+        gen = _generator()
+        entry = {
+            "text": "Alpha Committee\nSubcommittee Notes\nBeta Committee\n"
+                    "1999-2010\n2005-2008",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+        with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
+            gen._fill_administrative_activities([entry])
+
+        rows = _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE")
+        assert rows == [
+            ("Alpha Committee", "", ""),
+            ("Subcommittee Notes", "", ""),
+            ("Beta Committee", "", ""),
+        ]
+        # The specific failure this thread named: 1999-2010 must not land on
+        # "Subcommittee Notes", and Beta must not come up empty while an
+        # unrelated line holds a date instead.
+        dates_by_activity = {activity: dates for activity, _role, dates in rows}
+        assert dates_by_activity["Subcommittee Notes"] != "1999-2010"
+        assert all(dates == "" for dates in dates_by_activity.values())
+        assert caplog.records, "counts disagree -- the mismatch must be logged"

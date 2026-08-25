@@ -35,11 +35,25 @@ def extract_sort_date(entry: Dict) -> tuple:
     fields = raw_fields if isinstance(raw_fields, Mapping) else {}
 
     # Try various date fields in order of preference
+    #
+    # `recertification_date` / `year_certified` are F2 (Board Certification)
+    # fields -- the schema (field_schemas_v1.json / v1.1.json) defines both
+    # nowhere else, so no other section's entries can carry them and no other
+    # section's sort key can change by adding them here (#625 thread
+    # 3850478580: the sort was wired into board_certification.py but its real
+    # date fields weren't in this list, so real F2 entries all keyed to
+    # (0, 0, 0) and kept their input order). `recertification_date` is placed
+    # near `end_date` and `year_certified` near `start_date` because a
+    # recertification is the more recent event for a certification renewed
+    # over time, so it should dominate `year_certified` the same way an
+    # `end_date` dominates a `start_date`.
     date_candidates = [
         fields.get('end_date', ''),
+        fields.get('recertification_date', ''),
         fields.get('year', ''),
         fields.get('year_awarded', ''),
         fields.get('start_date', ''),
+        fields.get('year_certified', ''),
         fields.get('date', ''),
         fields.get('publication_date', ''),
     ]

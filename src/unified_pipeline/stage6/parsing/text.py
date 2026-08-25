@@ -15,8 +15,11 @@ Names keep their leading underscore deliberately. Renaming and relocating in the
 same change means a failure cannot be attributed to either; the rename is a
 separate, mechanical follow-up.
 """
+import logging
 import re
 from typing import Dict, List, NamedTuple, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 def _extract_name_from_uid(uid: str) -> str:
     """Extract formatted name from document UID."""
@@ -271,7 +274,15 @@ def _parse_flattened_committee_lines(lines: List[str]) -> List[ParsedActivityLin
     The last shape feeds `dates_pool`: when column 1 and column 2 of a source
     table arrive as separate runs of lines, the dates are orphaned and are
     matched back to date-less items by position, forward, because both columns
-    come from the same table and are therefore in the same order.
+    come from the same table and are therefore in the same order -- *when*
+    the two runs are the same length. If extraction drops or inserts a line
+    (an extra header, a split row) the counts disagree and position no
+    longer proves the two runs still line up; pairing anyway would put a
+    real date on the wrong activity, which is worse than no date at all
+    because a wrong date looks exactly as confident as a right one once it's
+    in the document. So the forward pairing only runs when the counts match;
+    otherwise the affected items stay dateless (review thread 3843817401 /
+    #665) and a warning is logged naming the mismatch.
 
     A line carrying several parentheticals ("(Vice Chair 2006-2008) (Chair
     2008-2010)") is one role held under changing titles, so it becomes one
@@ -351,13 +362,27 @@ def _parse_flattened_committee_lines(lines: List[str]) -> List[ParsedActivityLin
         # Plain text line - no date found
         items.append(ParsedActivityLine(line, (), ''))
 
-    # Match dates_pool to items without dates using forward mapping.
-    # Both items and dates come from the same source table (column 1 -> items,
-    # column 2 -> dates), so they're always in the same order.
-    date_idx = 0
-    for i, item in enumerate(items):
-        if not item.dates and date_idx < len(dates_pool):
-            items[i] = item._replace(dates=dates_pool[date_idx])
-            date_idx += 1
+    # Match dates_pool to items without dates using forward mapping. Both
+    # items and dates come from the same source table (column 1 -> items,
+    # column 2 -> dates), and are always in the same order -- but only when
+    # the two runs are the same length is that order still provable. Pair
+    # positionally only on a matching count; on a mismatch, leave the
+    # dateless items dateless rather than shift a real date onto the wrong
+    # activity (review thread 3843817401 / #665). A dateless item renders
+    # with a blank Dates cell -- a visible gap, not a silent wrong answer.
+    undated_count = sum(1 for item in items if not item.dates)
+    if dates_pool and undated_count == len(dates_pool):
+        date_idx = 0
+        for i, item in enumerate(items):
+            if not item.dates:
+                items[i] = item._replace(dates=dates_pool[date_idx])
+                date_idx += 1
+    elif dates_pool:
+        logger.warning(
+            "committee/leadership date alignment: %d orphaned date(s) but "
+            "%d undated activity line(s) -- counts disagree, leaving dates "
+            "unassigned instead of pairing positionally",
+            len(dates_pool), undated_count,
+        )
 
     return items
