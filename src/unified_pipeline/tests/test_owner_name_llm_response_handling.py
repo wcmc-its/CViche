@@ -1,13 +1,13 @@
 """LLM-response handling regressions for stage4/owner_name.py.
 
-Two failure modes fixed together here:
+Three failure modes fixed together here:
 
 1. `extract_cv_owner_name`'s except clause used to catch bare `Exception`,
    which silently converted a real bug (a future TypeError/AttributeError, or
    a bug inside `call_llm` itself) into an ordinary "surname fallback" as if
    it were an expected LLM/parsing failure. The except is now narrowed to
-   `(json.JSONDecodeError, KeyError, *RETRYABLE_ERRORS)`; anything else must
-   propagate.
+   `(json.JSONDecodeError, KeyError, ValidationError, *RETRYABLE_ERRORS)`;
+   anything else must propagate.
 
 2. `infer_cv_owner_location`'s `_query` helper parsed the LLM's location JSON
    without validating its shape. A syntactically-valid-but-wrong reply (e.g.
@@ -18,6 +18,17 @@ Two failure modes fixed together here:
    by a pydantic model and treated as "no location found" instead of being
    propagated to stage 5b / stage 6, which call `.get()`/iterate on it
    assuming the instructed shape.
+
+3. `extract_cv_owner_name` itself parsed the LLM's name JSON the same
+   unvalidated way (2) used to: `parsed.get('first_name', '').strip()`. A
+   syntactically-valid reply with a null-valued field (e.g.
+   `{"first_name": null, ...}` -- a plausible reply given the prompt's own
+   "if you cannot determine a field, return an empty string" instruction,
+   which an LLM can still answer with JSON `null` instead) raised an
+   uncaught AttributeError on `.strip()` and failed the whole stage 4 run,
+   where the pre-#643 code degraded to the uid-based surname fallback. Now
+   validated via `_OwnerNameResponse`, mirroring (2)'s
+   `_LocationInferenceResponse` pattern, so this degrades the same way.
 
 Self-contained: `call_llm` stubbed at the module attribute, no Bedrock/OpenAI.
 """
@@ -67,6 +78,33 @@ def test_owner_name_extraction_still_falls_back_on_malformed_json(monkeypatch):
     )
 
     assert result["last_name"] == "Test"
+
+
+def test_owner_name_extraction_falls_back_on_null_valued_field(monkeypatch):
+    """A syntactically-valid reply with a null field must not raise.
+
+    The pre-fix code ran `parsed.get('first_name', '').strip()` -- `.get`
+    only supplies the default for a *missing* key, so a key present with
+    JSON `null` reached `.strip()` on `None` and raised an uncaught
+    AttributeError, failing the whole stage 4 run instead of degrading to
+    the uid-based surname fallback.
+    """
+    null_field_reply = json.dumps({
+        "first_name": None,
+        "middle_name": "",
+        "last_name": "Smith",
+        "suffix": "",
+        "full_name": "John Smith",
+        "full_name_with_credentials": "",
+    })
+    monkeypatch.setattr(owner_name, "call_llm", lambda **kwargs: _llm_result(null_field_reply))
+
+    result = owner_name.extract_cv_owner_name(
+        "2024_Test_CV", [{"text": "John Smith, MD, Professor of Surgery"}]
+    )
+
+    assert result["last_name"] == "Test"
+    assert result["first_name"] == ""
 
 
 # ---------------------------------------------------------------------------

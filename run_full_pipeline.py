@@ -1139,4 +1139,36 @@ def main():
 
 
 if __name__ == '__main__':
+    # Only the CLI entry point needs this, not a test that imports this module
+    # and calls main() directly: nothing in this file (or any non-test
+    # src/unified_pipeline module) configures a logging handler, so the stage
+    # narration migrated from print() to logger.* in #643's review round
+    # (98c0884) was silently dropped -- Python's root logger has only a
+    # last-resort WARNING-only handler, and CLI runs went quiet.
+    #
+    # dictConfig, not logging.basicConfig() (project convention -- see
+    # web_interface/backend/app/logging_config.py's module docstring), but
+    # deliberately NOT that module's configure_logging(): CODING_STANDARDS.md
+    # 1.4 -- "the pipeline core does not import the web backend" -- exists
+    # precisely because reaching into web_interface/backend/app/ from the
+    # pipeline side makes the CLI unable to run without the web app's config
+    # layout. This is self-contained instead: no cross-boundary import, no
+    # sys.stdout swap to track (that only happens inside the web
+    # orchestrator's own process), so a plain "ext://sys.stdout" is fine.
+    import logging.config
+    logging.config.dictConfig({
+        "version": 1,
+        "disable_existing_loggers": False,
+        "formatters": {
+            "plain": {"format": "%(asctime)s %(levelname)s %(name)s %(message)s"},
+        },
+        "handlers": {
+            "default": {
+                "class": "logging.StreamHandler",
+                "formatter": "plain",
+                "stream": "ext://sys.stdout",
+            },
+        },
+        "root": {"level": "INFO", "handlers": ["default"]},
+    })
     sys.exit(main())

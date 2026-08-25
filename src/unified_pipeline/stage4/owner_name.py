@@ -17,6 +17,28 @@ from unified_pipeline.llm.retry import RETRYABLE_ERRORS
 logger = logging.getLogger(__name__)
 
 
+class _OwnerNameResponse(BaseModel):
+    """Expected shape of the name-extraction LLM response.
+
+    Mirrors _LocationInferenceResponse below: the prompt instructs a specific
+    JSON shape but nothing enforces it, so a syntactically-valid-but-wrong
+    reply (most concretely, a null-valued field -- a plausible "if you cannot
+    determine a field" reply the prompt's own instructions invite) must not
+    reach the plain `parsed.get(key, '').strip()` calls this used to run
+    straight off the raw dict: `.get(key, '')` only supplies the default for
+    a *missing* key, not a key present with value `None`, so `.strip()` on
+    that `None` raised an uncaught AttributeError and failed the whole stage
+    4 run instead of degrading to the uid-based surname fallback below.
+    """
+
+    first_name: str = ''
+    middle_name: str = ''
+    last_name: str = ''
+    suffix: str = ''
+    full_name: str = ''
+    full_name_with_credentials: str = ''
+
+
 def extract_cv_owner_name(document_uid: str, mapped_entries: List[Dict[str, Any]]) -> Dict[str, str]:
     """
     Extract CV owner's name using LLM from the first chunk of CV content.
@@ -113,24 +135,30 @@ If you cannot determine a field, return an empty string for it."""
         response_text = llm_result["content"]
         parsed = json.loads(response_text)
 
-        result['first_name'] = parsed.get('first_name', '').strip()
-        result['middle_name'] = parsed.get('middle_name', '').strip()
-        result['last_name'] = parsed.get('last_name', '').strip()
-        result['suffix'] = parsed.get('suffix', '').strip()
-        result['full_name'] = parsed.get('full_name', '').strip()
-        result['full_name_with_credentials'] = parsed.get('full_name_with_credentials', '').strip()
+        # Validate before trusting it -- see _OwnerNameResponse's docstring.
+        validated = _OwnerNameResponse.model_validate(parsed)
+
+        result['first_name'] = validated.first_name.strip()
+        result['middle_name'] = validated.middle_name.strip()
+        result['last_name'] = validated.last_name.strip()
+        result['suffix'] = validated.suffix.strip()
+        result['full_name'] = validated.full_name.strip()
+        result['full_name_with_credentials'] = validated.full_name_with_credentials.strip()
 
     # Narrowed to the failure modes an LLM name-extraction call is actually
-    # expected to hit: a non-JSON reply, a response missing an expected key,
+    # expected to hit: a non-JSON reply, a response missing an expected key, a
+    # response whose values don't match the expected shape (ValidationError --
+    # e.g. a null-valued field, which a plain dict.get(key, '').strip() would
+    # raise AttributeError on instead of degrading to fallback_from_uid()),
     # and the LLM client's own documented failure types (RETRYABLE_ERRORS --
     # openai's RateLimitError/APITimeoutError/APIConnectionError/
     # InternalServerError plus botocore's ClientError for Bedrock, raised by
     # call_llm once its own internal retries are exhausted). A bare `except
-    # Exception` here would also swallow a real bug (a future TypeError or
-    # AttributeError in this file, or inside call_llm) and misreport it as an
-    # ordinary LLM hiccup, silently falling back to a fabricated surname
-    # instead of surfacing the actual defect.
-    except (json.JSONDecodeError, KeyError, *RETRYABLE_ERRORS) as e:
+    # Exception` here would also swallow a real bug (a future TypeError in
+    # this file, or inside call_llm) and misreport it as an ordinary LLM
+    # hiccup, silently falling back to a fabricated surname instead of
+    # surfacing the actual defect.
+    except (json.JSONDecodeError, KeyError, ValidationError, *RETRYABLE_ERRORS) as e:
         logger.warning("LLM name extraction failed: %s", e)
         fallback_from_uid()
 
