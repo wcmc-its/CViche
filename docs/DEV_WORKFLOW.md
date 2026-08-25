@@ -103,10 +103,11 @@ cheaper than answering them one comment at a time:
 Those five standing issues absorb roughly 60% of everything written in review, so
 a comment that maps onto one of them belongs there rather than in a new issue.
 
-**Tests are asked for in review now.** Through #535 they were not, and this
-document said so in as many words: testability appeared only as an argument for
-splitting a function, never as a standalone request, so coverage was ours to
-decide. That stopped being true. On #644 (opened
+**Tests are asked for in review now.** This document used to say the opposite,
+in as many words: testability appeared only as an argument for splitting a
+function, never as a standalone request, so coverage was ours to decide. That
+claim was drawn from the sample in the table above, which ends at #535. It does
+not hold today, whatever the exact PR it stopped holding on. On #644 (opened
 2026-08-14), mrj4001 opened seven review threads that are nothing but
 enumerated positive/negative test cases, one thread per function — 119 named
 cases across `_build_taxonomy_ref_for_batch`, `_classify_one_batch`,
