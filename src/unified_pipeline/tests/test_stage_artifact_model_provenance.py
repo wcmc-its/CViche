@@ -14,7 +14,9 @@ the 100-CV corpus of the 2026-07-25 batch:
 stage_3b is the one that matters most: it is deliberately on Haiku 4.5, so its
 artifacts claiming a different model defeats exactly the comparison the field
 exists for. Same root cause as #444 -- a model asserted at the write site rather
-than observed from the call.
+than observed from the call. stage_3b's `model` parameter was later removed
+outright (#644 review), not just deprioritized like the other three below --
+it was never forwarded to call_llm() in the first place.
 
 The tests use a SENTINEL model id rather than the shipped config: asserting the
 artifact equals whatever ``llm_config.yaml`` resolves would pass against a
@@ -78,14 +80,18 @@ def test_5b_lookup_returns_the_model_the_api_returned(monkeypatch):
 
 
 def test_the_recorded_model_is_not_the_inert_default():
-    """The defaults that were being written into every artifact."""
+    """The defaults that were being written into every artifact.
+
+    stage_3b is excluded here: its `model` parameter was removed outright
+    rather than kept and deprioritized behind the observed model (#644
+    review), so there is no default left to pin -- see
+    test_stage_3b_model_parameter_was_removed_not_deprioritized below.
+    """
     import inspect
-    from unified_pipeline import (stage_3b_entry_classifier as s3b,
-                                  stage_5b_institution_enrichment as s5b,
+    from unified_pipeline import (stage_5b_institution_enrichment as s5b,
                                   stage_5c_teaching_formatter as s5c,
                                   stage_5d_citation_formatter as s5d)
     defaults = {
-        "stage_3b": inspect.signature(s3b.run_stage_3b).parameters["model"].default,
         "stage_5b": inspect.signature(s5b.run_stage5b).parameters.get("model"),
         "stage_5c": inspect.signature(s5c.run_stage_5c).parameters["model"].default,
         "stage_5d": inspect.signature(s5d.run_stage_5d).parameters["model"].default,
@@ -94,9 +100,19 @@ def test_the_recorded_model_is_not_the_inert_default():
     # artifact prefers the OBSERVED model over them. Pin that they are still
     # the OpenAI-shaped strings, so this test fails loudly if someone "fixes"
     # #459 by editing the default instead of recording reality.
-    assert defaults["stage_3b"].startswith("gpt-"), \
-        "if the default changed, re-check that the artifact records the OBSERVED model"
     assert defaults["stage_5d"].startswith("gpt-")
+
+
+def test_stage_3b_model_parameter_was_removed_not_deprioritized():
+    """stage_3b took the harder fix of the four: its `model` parameter was
+    never forwarded to call_llm() at all, so it was removed outright rather
+    than kept around and merely outranked by the observed model (#644
+    review -- a parameter that doesn't affect behavior is dangerous
+    precisely because callers believe they're selecting a model when they
+    aren't). Guards against it quietly coming back as dead weight."""
+    import inspect
+    from unified_pipeline import stage_3b_entry_classifier as s3b
+    assert "model" not in inspect.signature(s3b.run_stage_3b).parameters
 
 
 if __name__ == "__main__":

@@ -106,6 +106,48 @@ def test_failed_batch_logs_error_with_batch_info(monkeypatch, caplog):
     assert "HONORS AND AWARDS" in rec.getMessage()
 
 
+def test_entry_with_none_hierarchy_degrades_instead_of_crashing(monkeypatch, caplog):
+    """An entry with an explicit "hierarchy": None must not crash
+    _classify_one_batch's bare " > ".join(...) calls -- neither the one that
+    labels the LLM prompt nor the one inside the except handler (where
+    raising would mask the original exception being handled instead of just
+    logging it). Route this entry through a FAILING call_llm so the batch
+    reaches both guarded call sites in the same run."""
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
+
+    entries = [{"text": "Dean's Award for Excellence, 2015", "hierarchy": None}]
+    with caplog.at_level(logging.ERROR, logger=stage_3b.logger.name):
+        results, stats = classify_entries_batch(entries, _context(), TAXONOMY)
+
+    assert results[0]["classification_source"] == "fallback"
+    assert stats["failed_batches"] == 1
+    records = [r for r in caplog.records
+               if "batch classification failed" in r.getMessage()]
+    assert len(records) == 1
+    # The except-handler's own hierarchy_path build (classify.py) must have
+    # degraded None to its default rather than raising TypeError there,
+    # which would have masked the RuntimeError this test actually raises.
+    assert "(no hierarchy)" in records[0].getMessage()
+
+
+def test_all_batches_fail_when_more_than_one_forms(monkeypatch):
+    """Every failed_batches assertion elsewhere in the suite tops out at 1,
+    always paired with llm_batches of 1, 2, or 3 -- no test drives
+    batch_size < len(entries) (so the loop forms MULTIPLE internal batches)
+    where every one of them raises. Pin failed_batches == llm_batches for
+    llm_batches > 1, not just the trivial 1-of-1 case."""
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
+
+    results, stats = classify_entries_batch(
+        _entries(["Award A", "Award B", "Award C", "Award D"]),
+        _context(), TAXONOMY, batch_size=2,
+    )
+
+    assert [r["classification_source"] for r in results] == ["fallback"] * 4
+    assert stats["llm_batches"] == 2
+    assert stats["failed_batches"] == 2
+
+
 def test_successful_batch_counts_llm_classified(monkeypatch):
     monkeypatch.setattr(
         stage3b_classify, "call_llm",

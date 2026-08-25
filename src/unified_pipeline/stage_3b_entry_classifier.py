@@ -93,8 +93,7 @@ def run_stage_3b(
     document_uid: str,
     stage_2_path: Optional[str] = None,
     stage_3a_path: Optional[str] = None,
-    output_dir: Optional[str] = None,
-    model: str = "gpt-5.1"
+    output_dir: Optional[str] = None
 ) -> Dict:
     """
     Run Stage 3b entry classification.
@@ -104,7 +103,12 @@ def run_stage_3b(
         stage_2_path: Path to Stage 2 entries (optional, will auto-detect)
         stage_3a_path: Path to Stage 3a mappings (optional, will auto-detect)
         output_dir: Output directory (optional, will auto-detect)
-        model: OpenAI model to use
+
+    No `model` parameter: it used to exist here purely to be silently
+    dropped -- never forwarded to call_llm() -- so it was removed rather
+    than forwarded (#644 review). Stage 3b's model is pinned per-stage in
+    llm_config.yaml; the model that actually served each call is recorded
+    in the returned stats/output instead (see "model" below, #459).
 
     Returns:
         Result dict with classified entries, stats, and output path
@@ -198,8 +202,7 @@ def run_stage_3b(
         classified, stats = classify_entries_batch(
             group_entries,
             context,
-            taxonomy,
-            model=model
+            taxonomy
         )
 
         all_classified.extend(classified)
@@ -253,8 +256,7 @@ def run_stage_3b(
         print(f"T-validation gate: reviewing {t_count_before} entries classified as T...")
         all_classified, t_validation_stats = validate_t_classifications(
             all_classified,
-            taxonomy,
-            model=model
+            taxonomy
         )
         t_count_after = sum(1 for e in all_classified if e.get("taxonomy_code") == "T")
         reclassified = t_validation_stats.get("t_entries_reclassified", 0)
@@ -278,8 +280,7 @@ def run_stage_3b(
         print()
         print(f"Fragment reconnection: checking {t_count_remaining} remaining T entries...")
         all_classified, fragment_stats = reconnect_fragments(
-            all_classified,
-            model=model
+            all_classified
         )
         fragments_reviewed = fragment_stats.get("fragments_reviewed", 0)
         fragments_reconnected = fragment_stats.get("fragments_reconnected", 0)
@@ -610,7 +611,8 @@ def run_stage_3b(
         },
         "entries": all_classified,
         "meta": {
-            "model": total_stats.get("model") or model,
+            # No `or model` fallback (#644, param removed); total_stats["model"] is the OBSERVED model, None when no calls were made (#459).
+            "model": total_stats.get("model"),
             "taxonomy_version": taxonomy["meta"]["version"],
             "total_entries": len(all_classified),
             "duplicate_entries": duplicate_count,
@@ -689,9 +691,8 @@ def run_stage_3b(
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python stage_3b_entry_classifier.py <document_uid> [model]")
+        print("Usage: python stage_3b_entry_classifier.py <document_uid>")
         print("  document_uid: Document identifier (e.g., 2086_Jones_Webb)")
-        print("  model: Optional, defaults to gpt-5.1")
         print()
         print("Prerequisites:")
         print("  - Stage 2 output: outputs/stage_2_entry_extraction/{uid}_entries.json")
@@ -699,6 +700,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     document_uid = sys.argv[1]
-    model = sys.argv[2] if len(sys.argv) > 2 else "gpt-5.1"
-
-    result = run_stage_3b(document_uid, model=model)
+    # No optional [model] CLI arg any more: run_stage_3b's `model` parameter
+    # was removed, not forwarded (#644 review) -- it never reached
+    # call_llm(); stage_3b's model is pinned in llm_config.yaml.
+    result = run_stage_3b(document_uid)

@@ -121,6 +121,42 @@ def test_taxonomy_context_raising_propagates():
         classify._build_taxonomy_ref_for_batch(_BrokenContext(), _taxonomy())
 
 
+def test_malformed_taxonomy_entries_are_skipped_not_a_crash():
+    """A non-empty taxonomy with corrupt entries (missing "code", missing
+    "label", non-string "code") must not crash _build_taxonomy_ref_for_batch
+    itself, not just its delegate: build_taxonomy_codes_for_prompt skips and
+    logs each malformed entry (see its docstring), and this drives that same
+    malformed taxonomy through _build_taxonomy_ref_for_batch rather than
+    calling the delegate directly (test_stage3b_taxonomy_render.py already
+    covers the delegate in isolation)."""
+    taxonomy = {"codes": [
+        {"label": "No code"},  # missing "code"
+        {"code": "S1"},  # missing "label"
+        {"code": 123, "label": "Non-string code"},
+        {"code": "H", "label": "Honors"},
+    ]}
+    codes, ref = classify._build_taxonomy_ref_for_batch(_context(["H"]), taxonomy)
+    assert codes == ["H"]
+    assert ref == "H: Honors"
+
+
+def test_context_returns_malformed_codes_does_not_crash():
+    """get_all_suggested_codes() returning malformed entries (empty string,
+    a non-string) alongside a valid code must not crash on `c[0]`
+    (IndexError for "", TypeError for 123) -- those entries are filtered
+    before the family lookup, and the function still returns a usable
+    taxonomy_ref built from the surviving valid code."""
+    class _MalformedCodesContext:
+        def get_all_suggested_codes(self):
+            return ["", 123, "S1"]
+
+    codes, ref = classify._build_taxonomy_ref_for_batch(
+        _MalformedCodesContext(), _taxonomy(("H", "T", "S1"))
+    )
+    assert codes == ["S1"]
+    assert "S1:" in ref
+
+
 # ---------------------------------------------------------------------------
 # classify_entries_batch / _classify_one_batch -- taxonomy + confidence
 # validation on LLM output (untrusted input)
@@ -168,6 +204,89 @@ def test_confidence_below_zero_clamps_to_default(monkeypatch):
     assert results[0]["taxonomy_confidence"] == 0.5
 
 
+def test_string_confidence_converts_correctly(monkeypatch):
+    """The LLM call uses response_format={"type": "json_object"} with no
+    schema, so a numeric confidence can come back stringified. _safe_float
+    must parse it, not just accept values that are already float/int."""
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(
+        [{"index": 0, "code": "S1", "confidence": "0.85"}]
+    ))
+    results, _ = classify.classify_entries_batch(
+        [_entry("A publication")], _context(["S1"]), _taxonomy()
+    )
+    assert results[0]["taxonomy_confidence"] == 0.85
+    assert results[0]["classification_source"] == "llm"
+
+
+def test_confidence_non_numeric_falls_back_to_default(monkeypatch):
+    """Distinct from test_confidence_above_one/below_zero_clamps_to_default,
+    which use in-range-type floats merely out of the [0, 1] bound: this
+    supplies a confidence _safe_float cannot parse into a float AT ALL, and
+    must still fall back to the default rather than raising or persisting
+    garbage."""
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(
+        [{"index": 0, "code": "S1", "confidence": "high"}]
+    ))
+    results, _ = classify.classify_entries_batch(
+        [_entry("A publication")], _context(["S1"]), _taxonomy()
+    )
+    assert results[0]["taxonomy_confidence"] == 0.5
+    assert results[0]["classification_source"] == "llm"
+
+
+def test_missing_confidence_key_gets_default(monkeypatch):
+    """No "confidence" key at all (as opposed to a present-but-invalid one)
+    must default the same way."""
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(
+        [{"index": 0, "code": "S1"}]
+    ))
+    results, _ = classify.classify_entries_batch(
+        [_entry("A publication")], _context(["S1"]), _taxonomy()
+    )
+    assert results[0]["taxonomy_confidence"] == 0.5
+    assert results[0]["classification_source"] == "llm"
+
+
+def test_missing_code_key_falls_back_and_is_tagged_invalid(monkeypatch):
+    """A classification object with "index" present but "code" absent must
+    coalesce to the suggested fallback code -- and, since the LLM did not
+    actually supply a usable code, must be tagged distinctly from a clean
+    classification rather than persisted as classification_source "llm"
+    (CODING_STANDARDS.md #5.3/#5.10: a degraded result has to be visible in
+    the artifact itself, not only in a log line)."""
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(
+        [{"index": 0, "confidence": 0.9}]
+    ))
+    results, stats = classify.classify_entries_batch(
+        [_entry("A publication")], _context(["S1"]), _taxonomy()
+    )
+    assert results[0]["taxonomy_code"] == "S1"
+    assert results[0]["classification_source"] == "llm_invalid_code"
+    assert stats["invalid_code_entries"] == 1
+    assert stats["llm_classified"] == 0
+
+
+def test_entry_with_non_string_text_degrades_instead_of_crashing(monkeypatch):
+    """An entry whose "text" field is present but non-string (e.g. an
+    explicit None) must not crash _classify_one_batch's bare .strip() calls
+    (classify.py's _entry_text guard) -- it degrades to the same
+    "empty_entry" treatment a genuinely blank/absent text already gets, and
+    the rest of the batch classifies normally instead of the whole batch
+    crashing over one malformed entry."""
+    monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(
+        [{"index": 1, "code": "H", "confidence": 0.9}]
+    ))
+    entries = [
+        {"text": None, "hierarchy": ["HONORS AND AWARDS"]},
+        _entry("Dean's Award, 2015"),
+    ]
+    results, _ = classify.classify_entries_batch(entries, _context(["H"]), _taxonomy())
+
+    assert results[0]["classification_source"] == "empty_entry"
+    assert results[1]["classification_source"] == "llm"
+    assert results[1]["taxonomy_code"] == "H"
+
+
 def test_batch_size_larger_than_entries_still_classifies_everything(monkeypatch):
     """A single oversized batch is just one batch, not an error."""
     monkeypatch.setattr(classify, "call_llm", lambda **kw: _llm_response(
@@ -183,6 +302,18 @@ def test_batch_size_larger_than_entries_still_classifies_everything(monkeypatch)
 # ---------------------------------------------------------------------------
 # group_entries_by_hierarchy
 # ---------------------------------------------------------------------------
+
+def test_one_hierarchy_produces_a_single_group():
+    """Every entry sharing exactly ONE non-empty hierarchy path, isolated
+    from test_multiple_hierarchies_produce_separate_groups_and_same_hierarchy_merges
+    below, whose fixture deliberately uses TWO hierarchy values (that's how
+    it also proves "same hierarchy merges") and so never puts the function
+    through an input where only one group is ever formed."""
+    entries = [_entry("A", ["HONORS"]), _entry("B", ["HONORS"])]
+    groups = classify.group_entries_by_hierarchy(entries)
+    assert list(groups.keys()) == ["HONORS"]
+    assert len(groups["HONORS"]) == 2
+
 
 def test_multiple_hierarchies_produce_separate_groups_and_same_hierarchy_merges():
     entries = [

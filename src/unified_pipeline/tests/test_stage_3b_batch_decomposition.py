@@ -246,7 +246,7 @@ def test_classify_entries_batch_size_zero_raises(monkeypatch):
 
     monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="batch_size must be greater than zero"):
         classify_entries_batch(
             [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=0
         )
@@ -266,7 +266,7 @@ def test_classify_entries_batch_size_negative_raises(monkeypatch):
 
     monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="batch_size must be greater than zero"):
         classify_entries_batch(
             [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=-1
         )
@@ -344,6 +344,123 @@ def test_classify_entries_batch_handles_unparseable_llm_json(monkeypatch, caplog
     # same as a raised call_llm exception.
     assert stats["input_tokens"] == 0
     assert stats["model"] is None
+
+
+def test_llm_result_missing_content_key_is_treated_as_batch_failure(monkeypatch):
+    """llm_result["content"] is a bare subscript inside the try block -- a
+    response dict that omits "content" entirely must raise KeyError there
+    and be caught the same way a raised call_llm exception or invalid JSON
+    already are, not escape uncaught."""
+    def call(**kwargs):
+        return {
+            "prompt_tokens": 50, "completion_tokens": 10, "cost": 0.001,
+            "model": "gpt-5.1-mini-nocontent",
+        }
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2
+    )
+
+    assert len(results) == 2
+    assert all(r["classification_source"] == "fallback" for r in results)
+    assert all(r["taxonomy_code"] == "H" for r in results)
+    assert stats["failed_batches"] == 1
+    assert stats["llm_batches"] == 1
+    # KeyError fires before any llm_result field is read, so stats stay at
+    # _BatchStats' defaults, same as a raised call_llm exception.
+    assert stats["input_tokens"] == 0
+    assert stats["model"] is None
+
+
+def test_llm_result_missing_prompt_tokens_is_treated_as_batch_failure(monkeypatch):
+    """llm_result["prompt_tokens"] is read AFTER content parses and yields a
+    real classification -- a response missing it must still be caught as a
+    batch failure, discarding that already-parsed classification rather
+    than escaping uncaught or silently keeping a half-applied result."""
+    def call(**kwargs):
+        return {
+            "content": json.dumps({"classifications": [
+                {"index": 0, "code": "H", "confidence": 0.9},
+            ]}),
+            "completion_tokens": 10, "cost": 0.001,
+            "model": "gpt-5.1-mini-notokens",
+            # "prompt_tokens" deliberately omitted
+        }
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Award A")], _context(), TAXONOMY
+    )
+
+    assert len(results) == 1
+    # The parsed classification above must NOT survive -- the batch is
+    # counted failed and the entry falls back, exactly as if call_llm had
+    # raised before returning anything at all.
+    assert results[0]["classification_source"] == "fallback"
+    assert stats["failed_batches"] == 1
+    assert stats["llm_batches"] == 1
+    assert stats["input_tokens"] == 0
+    assert stats["model"] is None
+
+
+def test_llm_result_missing_cost_is_treated_as_batch_failure(monkeypatch):
+    """llm_result["cost"] is read last of the three token/cost fields -- a
+    response with both token fields present but no "cost" must still be
+    caught as a batch failure."""
+    def call(**kwargs):
+        return {
+            "content": json.dumps({"classifications": [
+                {"index": 0, "code": "H", "confidence": 0.9},
+            ]}),
+            "prompt_tokens": 50, "completion_tokens": 10,
+            "model": "gpt-5.1-mini-nocost",
+            # "cost" deliberately omitted
+        }
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Award A")], _context(), TAXONOMY
+    )
+
+    assert len(results) == 1
+    assert results[0]["classification_source"] == "fallback"
+    assert stats["failed_batches"] == 1
+    assert stats["llm_batches"] == 1
+    assert stats["cost"] == 0.0
+
+
+def test_single_entry_batch_gets_normal_llm_classification(monkeypatch):
+    """A batch of exactly one entry with a normal, in-range, successful LLM
+    response. Every existing single-entry call_llm stub in the suite
+    deliberately supplies an edge-case response (out-of-range confidence, a
+    raising call_llm, a malformed object); the closest well-formed evidence
+    is a two-entry batch (batch 2 of the four-batch test above). Pin the
+    plain one-entry/one-classification case directly."""
+    def call(**kwargs):
+        return {
+            "content": json.dumps({"classifications": [
+                {"index": 0, "code": "H", "confidence": 0.9, "reasoning": "clear award"},
+            ]}),
+            "prompt_tokens": 50, "completion_tokens": 10, "cost": 0.001,
+            "model": "gpt-5.1-mini-single",
+        }
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Dean's Award for Excellence, 2015")], _context(), TAXONOMY
+    )
+
+    assert len(results) == 1
+    assert results[0]["classification_source"] == "llm"
+    assert results[0]["taxonomy_code"] == "H"
+    assert results[0]["taxonomy_confidence"] == 0.9
+    assert stats["llm_batches"] == 1
+    assert stats["llm_classified"] == 1
 
 
 @pytest.mark.parametrize("response_json", [

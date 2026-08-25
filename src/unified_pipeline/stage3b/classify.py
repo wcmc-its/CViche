@@ -79,6 +79,36 @@ def _normalize_confidence(value: object, default: float = 0.5) -> float:
     return confidence if 0.0 <= confidence <= 1.0 else default
 
 
+def _entry_text(entry: Dict) -> str:
+    """Coerce an entry's "text" field to a string.
+
+    `entry.get("text", "")` only substitutes when the key is ABSENT -- an
+    entry with an explicit `"text": None` (or any other non-string value)
+    survives that default and reaches a bare `.strip()` call, raising
+    AttributeError. Two call sites in `_classify_one_batch` need this check
+    and sit outside its try/except, so a malformed entry there must degrade
+    (treated the same as empty text) instead of crashing the whole batch.
+    """
+    text = entry.get("text")
+    return text if isinstance(text, str) else ""
+
+
+def _hierarchy_path(hierarchy: object, default: str) -> str:
+    """Render an entry's "hierarchy" field as a " > "-joined path.
+
+    Mirrors the str()-coercion `group_entries_by_hierarchy` already applies:
+    hierarchy is normally a list of strings, but a bare `" > ".join(...)`
+    raises TypeError on a None/absent hierarchy or a non-string element. Two
+    call sites in `_classify_one_batch` build this same path outside its
+    try/except (one of them INSIDE the except handler, where raising would
+    mask the original exception being handled), so malformed hierarchy there
+    must degrade to `default` instead.
+    """
+    if not hierarchy:
+        return default
+    return " > ".join(str(h) for h in hierarchy) or default
+
+
 def _build_taxonomy_ref_for_batch(
     taxonomy_context: TaxonomyContext,
     taxonomy: Dict,
@@ -92,6 +122,9 @@ def _build_taxonomy_ref_for_batch(
     # Get ALL suggested codes from ALL hierarchy levels for taxonomy filtering
     # This ensures we don't miss codes suggested at parent levels
     all_suggested_codes = taxonomy_context.get_all_suggested_codes()
+    # Drop non-string/empty codes here (not just for c[0] below): this is also the
+    # list _classify_one_batch indexes at [0] as an unvalidated fallback taxonomy_code.
+    all_suggested_codes = [c for c in all_suggested_codes if isinstance(c, str) and c]
     relevant_families = set(c[0] for c in all_suggested_codes) if all_suggested_codes else None
 
     # Build taxonomy reference with disambiguation info for all suggested codes
@@ -120,7 +153,6 @@ def _classify_one_batch(
     taxonomy_context: TaxonomyContext,
     all_suggested_codes: List[str],
     taxonomy_ref: str,
-    model: str,
     valid_codes: Set[str],
 ) -> Tuple[List[Dict], _BatchStats]:
     """Classify a single batch against a taxonomy_ref built once by the caller.
@@ -129,20 +161,18 @@ def _classify_one_batch(
     it never appends to a shared list or mutates an outer accumulator, so
     classify_entries_batch can extend/sum the return values after the call.
 
-    `model` is intentionally NOT forwarded to call_llm() below: stage_3b's
-    model is pinned per-stage in llm_config.yaml (Haiku 4.5, chosen because
-    it is both more accurate and ~2.9x cheaper than the "gpt-5.1" every
-    caller currently defaults this parameter to -- see #459 and the stats
-    dict's "model" comment in classify_entries_batch). Passing `model`
-    through would silently override that config on every real run, since no
-    caller in this codebase currently supplies a non-default value.
-    `observed_model`/stats["model"] records what the config actually served,
-    which is the field to trust for audit metadata, not this parameter.
+    call_llm() below is called with no `model` argument at all: stage_3b's
+    model is pinned per-stage in llm_config.yaml (Haiku 4.5, both more
+    accurate and ~2.9x cheaper than gpt-5.1 -- #459). Every function here
+    used to take a `model` parameter that was never forwarded; it was
+    removed rather than wired up, since an argument that cannot affect
+    behaviour is worse than none (#644 review). `observed_model`/
+    stats["model"] is what actually served the call -- trust that for audit.
     """
     stats = _BatchStats()
 
-    # Skip empty entries
-    entries_with_text = [(i, e) for i, e in enumerate(batch_entries) if e.get("text", "").strip()]
+    # Skip empty entries; _entry_text degrades malformed "text" (outside try/except below).
+    entries_with_text = [(i, e) for i, e in enumerate(batch_entries) if _entry_text(e).strip()]
 
     if not entries_with_text:
         # All empty - assign parent code with low confidence
@@ -167,7 +197,8 @@ def _classify_one_batch(
     # Build entries list for user message (include per-entry hierarchy)
     entries_lines = []
     for i, e in entries_with_text:
-        hierarchy_path = " > ".join(e.get("hierarchy", [])) or "unknown"
+        # _hierarchy_path degrades malformed hierarchy too (also outside try/except).
+        hierarchy_path = _hierarchy_path(e.get("hierarchy"), "unknown")
         entries_lines.append(f"[{i}] (Section: {hierarchy_path}) {e['text'][:500]}")
     entries_text = "\n".join(entries_lines)
 
@@ -225,7 +256,9 @@ Return ONLY valid JSON with the classifications array."""
         # the caller aggregates failed_batches and fails the run if NO
         # batch ever produced a real classification (#61).
         stats.failed_batches = 1
-        hierarchy_path = " > ".join(batch_entries[0].get("hierarchy", [])) or "(no hierarchy)"
+        # _hierarchy_path INSIDE the except handler: raising here would mask
+        # the original exception, not just fail to log it.
+        hierarchy_path = _hierarchy_path(batch_entries[0].get("hierarchy"), "(no hierarchy)")
         logger.exception(
             "Stage 3b batch classification failed; %d entries fall back to "
             "default codes (batch at offset %d, hierarchy: %s)",
@@ -261,7 +294,9 @@ Return ONLY valid JSON with the classifications array."""
     # Map results back to entries
     results = []
     for orig_idx, entry in enumerate(batch_entries):
-        if not entry.get("text", "").strip():
+        # _entry_text again: re-walks ALL of batch_entries, so a malformed
+        # "text" would crash this unguarded .strip() too.
+        if not _entry_text(entry).strip():
             # Empty entry
             primary = all_suggested_codes[0] if all_suggested_codes else "T"
             results.append({
@@ -290,7 +325,9 @@ Return ONLY valid JSON with the classifications array."""
                 # is untrusted LLM output and could be any JSON type (e.g. a
                 # list), which would raise TypeError: unhashable type on
                 # `in valid_codes` instead of degrading to the fallback.
-                code_rejected = code and (not isinstance(code, str) or code not in valid_codes)
+                # No `code and`: an omitted key is falsy, skipped this check,
+                # and persisted "llm" as the source. Mirrors `new_code_rejected`.
+                code_rejected = not isinstance(code, str) or code not in valid_codes
                 if code_rejected:
                     # The LLM answered with a code that doesn't exist in
                     # taxonomy_v7.json (or isn't a string at all) --
@@ -337,7 +374,6 @@ def classify_entries_batch(
     entries: List[Dict],
     taxonomy_context: TaxonomyContext,
     taxonomy: Dict,
-    model: str = "gpt-5.1",
     batch_size: int = 15
 ) -> Tuple[List[Dict], Dict]:
     """
@@ -347,7 +383,6 @@ def classify_entries_batch(
         entries: List of entry dicts with 'text' field
         taxonomy_context: Shared taxonomy context for these entries
         taxonomy: Full taxonomy reference
-        model: OpenAI model to use
         batch_size: Max entries per LLM call
 
     Returns:
@@ -377,7 +412,7 @@ def classify_entries_batch(
 
         batch_results, batch_stats = _classify_one_batch(
             batch_entries, batch_start, taxonomy_context, all_suggested_codes,
-            taxonomy_ref, model, valid_codes
+            taxonomy_ref, valid_codes
         )
         all_results.extend(batch_results)
         total_input_tokens += batch_stats.input_tokens
@@ -392,10 +427,12 @@ def classify_entries_batch(
         "output_tokens": total_output_tokens,
         "total_tokens": total_input_tokens + total_output_tokens,
         "cost": total_cost,
-        # What actually served the calls. The `model` parameter is a default no
-        # orchestrator passes, so recording it stamped 100/100 corpus artifacts
-        # with a model the run never used -- and 3b is the one deliberately on
-        # Haiku, which is exactly the comparison the field exists for (#459).
+        # What actually served the calls. This function used to also accept a
+        # `model` parameter no orchestrator ever passed a non-default value
+        # for, so recording IT stamped 100/100 corpus artifacts with a model
+        # the run never used (#459) -- and 3b is the one deliberately on
+        # Haiku, which is exactly the comparison the field exists for. That
+        # dead parameter was removed rather than forwarded (#644 review).
         "model": observed_model,
         # Which revision of the classification policy (prompt.py's
         # CLASSIFICATION_RULES_VERSION) produced this run's classifications --
@@ -443,8 +480,7 @@ def group_entries_by_hierarchy(entries: List[Dict]) -> Dict[str, List[Dict]]:
 
 def validate_t_classifications(
     entries: List[Dict],
-    taxonomy: Dict,
-    model: str = "gpt-5.1"
+    taxonomy: Dict
 ) -> Tuple[List[Dict], Dict]:
     """
     T-validation gate: Re-evaluate any entries classified as T (miscellaneous).
@@ -456,11 +492,6 @@ def validate_t_classifications(
     Args:
         entries: List of classified entries (some may have taxonomy_code="T")
         taxonomy: Full taxonomy reference
-        model: Not currently forwarded to call_llm() -- see the identical
-            note on _classify_one_batch's `model` parameter in this module
-            for why (stage_3b's model is pinned in llm_config.yaml, and
-            every caller here currently defaults this parameter to a
-            different model than that config specifies).
 
     Returns:
         Tuple of (updated_entries, stats) where T entries may be reclassified.
@@ -656,8 +687,7 @@ Respond with a JSON array of objects, one per entry:
 
 
 def reconnect_fragments(
-    entries: List[Dict],
-    model: str = "gpt-5.1"
+    entries: List[Dict]
 ) -> Tuple[List[Dict], Dict]:
     """
     Reconnect fragment entries (classified as T) to their adjacent entries.
@@ -672,8 +702,6 @@ def reconnect_fragments(
 
     Args:
         entries: List of classified entries (sorted by element_idx_start)
-        model: Not currently forwarded to call_llm() -- see the identical
-            note on _classify_one_batch's `model` parameter in this module.
 
     Returns:
         Tuple of (updated_entries, stats) where fragments are annotated
@@ -893,7 +921,13 @@ def detect_duplicates(entries: List[Dict], similarity_threshold: float = 0.9) ->
     candidates = []
     for idx, entry in enumerate(entries):
         text = entry.get("text", "")
-        if len(text) < 20:  # Skip very short entries
+        # `.get(..., "")` only substitutes when "text" is ABSENT -- an entry
+        # with an explicit `"text": None` (or any other non-string value)
+        # survives that default and reaches `len(text)` below, raising
+        # TypeError. Such an entry has no content to meaningfully compare,
+        # so it is simply excluded from duplicate detection, the same as an
+        # entry that is merely too short.
+        if not isinstance(text, str) or len(text) < 20:  # Skip very short/non-string entries
             continue
         candidates.append((idx, entry, normalize_text(text)))
 
