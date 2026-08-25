@@ -15,6 +15,7 @@ from app.models import SystemConfig
 from app.ed_group_lookup import (
     clear_cache,
     set_cached_membership,
+    MembershipResult,
     EdUnavailableError,
 )
 
@@ -232,7 +233,7 @@ class TestSamlErrorPaths:
         """POST to ACS with ED enabled, user not in access group -> redirect to /login?error=not_authorized."""
         clear_cache()
         mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
-        mock_check_ed.return_value = {"in_access_group": False, "in_admin_group": False}
+        mock_check_ed.return_value = MembershipResult(in_access_group=False, in_admin_group=False)
         response = client.post(
             "/api/saml/acs",
             data={"SAMLResponse": "base64data", "RelayState": "/"},

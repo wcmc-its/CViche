@@ -19,6 +19,7 @@ from app.ed_group_lookup import (
     clear_cache,
     set_cached_membership,
     _group_cache,
+    MembershipResult,
     EdUnavailableError,
 )
 
@@ -194,15 +195,22 @@ class TestSamlModeWithED:
     """Validate ED group authorization with SAML mode."""
 
     @patch.dict(os.environ, _ED_ENV)
+    @patch("app.auth.check_ed_membership")
     @patch("app.api.saml_routes.check_ed_membership")
     @patch("app.api.saml_routes.get_saml_client")
     def test_ed_user_in_access_group_full_cycle(
-        self, mock_get_client, mock_check_ed, client, db, seed_ed_enabled
+        self, mock_get_client, mock_check_ed, mock_auth_check_ed, client, db, seed_ed_enabled
     ):
-        """Mock ACS with user in access group -> session created -> /api/auth/me succeeds."""
+        """Mock ACS with user in access group -> session created -> /api/auth/me succeeds.
+
+        check_ed_membership now owns the cache-aside flow itself, so mocking it
+        out at the ACS call site means nothing is cached for the per-request
+        re-check -- the auth.py call site is mocked too, with the same answer.
+        """
         clear_cache()
         mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
-        mock_check_ed.return_value = {"in_access_group": True, "in_admin_group": False}
+        mock_check_ed.return_value = MembershipResult(in_access_group=True, in_admin_group=False)
+        mock_auth_check_ed.return_value = MembershipResult(in_access_group=True, in_admin_group=False)
 
         # ACS: user in access group
         acs_resp = client.post(
@@ -234,7 +242,7 @@ class TestSamlModeWithED:
         """Mock ACS with user in both groups -> user.role is "admin"."""
         clear_cache()
         mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
-        mock_check_ed.return_value = {"in_access_group": True, "in_admin_group": True}
+        mock_check_ed.return_value = MembershipResult(in_access_group=True, in_admin_group=True)
 
         client.post(
             "/api/saml/acs",
@@ -255,7 +263,7 @@ class TestSamlModeWithED:
         """Mock ACS with user NOT in access group -> redirect to /login?error=not_authorized, no user created."""
         clear_cache()
         mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
-        mock_check_ed.return_value = {"in_access_group": False, "in_admin_group": False}
+        mock_check_ed.return_value = MembershipResult(in_access_group=False, in_admin_group=False)
 
         response = client.post(
             "/api/saml/acs",
@@ -279,7 +287,7 @@ class TestSamlModeWithED:
         """Cache expiry triggers ED re-check on /api/auth/me."""
         clear_cache()
         mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
-        mock_acs_check_ed.return_value = {"in_access_group": True, "in_admin_group": False}
+        mock_acs_check_ed.return_value = MembershipResult(in_access_group=True, in_admin_group=False)
 
         # Step 1: Login via ACS (populates cache)
         acs_resp = client.post(
@@ -300,7 +308,7 @@ class TestSamlModeWithED:
         _group_cache.clear()
 
         # Step 3: Mock auth.check_ed_membership for the per-request re-check
-        mock_auth_check_ed.return_value = {"in_access_group": True, "in_admin_group": True}
+        mock_auth_check_ed.return_value = MembershipResult(in_access_group=True, in_admin_group=True)
 
         # Step 4: /api/auth/me triggers re-check
         me_resp = client.get("/api/auth/me", cookies={COOKIE_NAME: cookie_value})
