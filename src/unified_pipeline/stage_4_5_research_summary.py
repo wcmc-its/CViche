@@ -77,6 +77,10 @@ ENTRY_LIMITS = {
 PI_BONUS = 0.15           # Bonus for PI role on grants
 SENIOR_AUTHOR_BONUS = 0.1  # Bonus for senior/first author on pubs
 
+# Taxonomy code groups (see docs/CODING_STANDARDS.md §8.2)
+GRANT_TAXONOMY_PREFIX = 'M2'  # M2A/M2B/M2C/M2D -- all grant/funding entries
+PUBLICATION_TAXONOMY_CODES = ('S1', 'S2', 'S7', 'S8')  # publication-like codes that need a title
+
 
 def score_entry_seniority(entry: Dict, taxonomy_code: str, cv_owner_name: str = '') -> float:
     """
@@ -90,7 +94,7 @@ def score_entry_seniority(entry: Dict, taxonomy_code: str, cv_owner_name: str = 
     text = entry.get('text', '')
 
     # Grant seniority (PI vs Co-I)
-    if taxonomy_code.startswith('M2'):
+    if taxonomy_code.startswith(GRANT_TAXONOMY_PREFIX):
         role = fields.get('pi_role', '') or fields.get('role', '')
         if role:
             role_lower = role.lower()
@@ -209,13 +213,13 @@ def is_valid_entry(code: str, entry: Dict) -> bool:
     text = (entry.get('text') or '').strip()
 
     # Grant entries need a valid title
-    if code.startswith('M2'):
+    if code.startswith(GRANT_TAXONOMY_PREFIX):
         title = (fields.get('title') or '').strip()
         if not title or title.lower() == 'none':
             return False
 
     # Publications need a title
-    if code in ('S1', 'S2', 'S7', 'S8'):
+    if code in PUBLICATION_TAXONOMY_CODES:
         title = (fields.get('title') or '').strip()
         if not title or title.lower() == 'none':
             return False
@@ -240,7 +244,7 @@ def format_entry_for_context(code: str, entry: Dict) -> str:
         year = fields.get('year', '')
         return f"[PUB] {authors}. {title}. {journal}. {year}"
 
-    elif code.startswith('M2'):  # Grant
+    elif code.startswith(GRANT_TAXONOMY_PREFIX):  # Grant
         title = fields.get('title', '')
         role = fields.get('pi_role', '') or fields.get('role', '')
         agency = fields.get('agency', '')

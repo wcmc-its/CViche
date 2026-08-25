@@ -40,6 +40,11 @@ from ..resolution import (
 )
 from ..sorting import sort_entries_reverse_chronological
 
+# Postdoctoral training codes (docs/CODING_STANDARDS.md §8.2). Missing 'C3' is a
+# known, separately tracked gap (#573, #624) -- do not add it here; this constant
+# names the set exactly as it renders today.
+POSTDOC_CODES = ('C', 'C1', 'C2')
+
 
 class PostdocTrainingSection:
     """Section C / C1 / C2 writers, mixed into `WCMTemplateGenerator`."""
@@ -49,11 +54,9 @@ class PostdocTrainingSection:
 
         Track changes are used for city/state from institution enrichment only.
         """
-        training_entries = (
-            entries_by_code.get('C', []) +
-            entries_by_code.get('C1', []) +
-            entries_by_code.get('C2', [])
-        )
+        training_entries = []
+        for code in POSTDOC_CODES:
+            training_entries += entries_by_code.get(code, [])
 
         if not training_entries:
             return

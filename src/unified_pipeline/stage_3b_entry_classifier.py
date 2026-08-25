@@ -49,6 +49,11 @@ from core.validators.block_coherence_corrector import apply_block_coherence_corr
 
 logger = logging.getLogger(__name__)
 
+# Taxonomy code prefixes for duplicate-pair resolution (see docs/CODING_STANDARDS.md §8.2):
+# an "M"-series classification (grants etc.) is preferred over the unclassified "T" (Appendix) fallback.
+APPENDIX_TAXONOMY_PREFIX = "T"
+M_SERIES_TAXONOMY_PREFIX = "M"
+
 
 @dataclass
 class TaxonomyContext:
@@ -1926,10 +1931,10 @@ def detect_duplicates(entries: List[Dict], similarity_threshold: float = 0.9) ->
                     code1 = entry1.get("taxonomy_code") or ""
                     code2 = entry2.get("taxonomy_code") or ""
 
-                    if code1.startswith("T") and code2.startswith("M"):
+                    if code1.startswith(APPENDIX_TAXONOMY_PREFIX) and code2.startswith(M_SERIES_TAXONOMY_PREFIX):
                         # Second one is better classified, mark first as duplicate
                         seen_duplicates.add(idx1)
-                    elif code2.startswith("T") and code1.startswith("M"):
+                    elif code2.startswith(APPENDIX_TAXONOMY_PREFIX) and code1.startswith(M_SERIES_TAXONOMY_PREFIX):
                         # First one is better classified, mark second as duplicate
                         seen_duplicates.add(idx2)
                     else:
