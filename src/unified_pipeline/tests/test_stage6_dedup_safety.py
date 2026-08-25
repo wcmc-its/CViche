@@ -14,6 +14,8 @@ Fixtures mirror the 2Q1_ZQ decision shapes with fictional content. Run with:
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -110,3 +112,89 @@ def test_unsafe_drop_records_no_decision():
     phd = {"text": "PhD: Recreational Cartography Studies"}
     deduplicate_entries([phd, ms], decisions=decisions)
     assert decisions == []
+
+
+# ------------------------------------- career-progression date-overlap guard
+
+def test_date_aware_dedup_keeps_distinct_career_progression():
+    # require_date_overlap=True is what actually protects DATE_AWARE_DEDUP_CODES
+    # (D1/D2/D3/C/B1) in production (stage_6_word_template.py) -- these two
+    # roles at the same institution would otherwise score similar enough to
+    # dedup (shared institution/department vocabulary), but their dates don't
+    # overlap. Never previously exercised by this file.
+    resident = {"text": "Resident Physician, Department of Whimsical Medicine, "
+                        "Untethered Services University, Jul 2018-Jun 2021"}
+    chief = {"text": "Chief Resident, Department of Whimsical Medicine, "
+                     "Untethered Services University, Jul 2021-Jun 2022"}
+    result = deduplicate_entries([resident, chief], require_date_overlap=True)
+    assert result == [resident, chief]
+
+
+# ------------------------------------------------------- known open gap, #666
+
+@pytest.mark.xfail(
+    reason="#666: dates are invisible to both the fused-blob fallback in "
+           "_drop_is_safe and the recovery pass's token-overlap check "
+           "(digit-blind _RENDER_TOKEN_RE), so two distinct multi-line "
+           "committee terms differing only by year can be silently dropped. "
+           "Flip to a plain assertion once #666 lands a corpus-verified fix.",
+    strict=True,
+)
+def test_distinct_fused_terms_different_dates_kept():
+    kept = {"text": "Chair | Committee on Institutional Research Compliance "
+                    "and Ethics Standards Review | Office of Research "
+                    "Integrity | oversees annual protocol review\n"
+                    "Member | Subcommittee on Data Governance and Ethics "
+                    "Standards Review | Office of Research Integrity | "
+                    "2021-2024"}
+    dropped = {"text": "Chair | Committee on Institutional Research "
+                       "Compliance and Ethics Standards Review | Office of "
+                       "Research Integrity | 2015-2018\n"
+                       "Member | Subcommittee on Data Governance and Ethics "
+                       "Standards Review | Office of Research Integrity | "
+                       "quarterly meetings"}
+    result = deduplicate_entries([kept, dropped])
+    assert result == [kept, dropped]
+
+
+@pytest.mark.xfail(
+    reason="#666: verbatim-containment branch of _drop_is_safe fires on "
+           "prose with no record-shaped lines at all, so the #221/#225 "
+           "recovery pass never even looks at either entry (0 record lines "
+           "on both sides). Two distinct mentees fused into one un-split "
+           "entry: one mentee's text is a literal substring of the other. "
+           "Flip to a plain assertion once #666 lands a corpus-verified fix.",
+    strict=True,
+)
+def test_distinct_mentees_fused_into_prose_entry_kept():
+    smith = {"text": "Mentor: John Smith, PhD Candidate, Dept of Biology"}
+    fused = {"text": "Mentor: John Smith, PhD Candidate, Dept of Biology and "
+                     "Maria Garcia, MS Candidate, Dept of Chemistry, "
+                     "Weill Cornell Medicine, 2019-2023"}
+    result = deduplicate_entries([smith, fused])
+    assert result == [smith, fused]
+
+
+@pytest.mark.xfail(
+    reason="#666: subset-containment branch of _drop_is_safe is fooled by "
+           "narrative prose that mentions a prior, distinct record's "
+           "identifying nouns/years in passing (successor-committee "
+           "framing) -- full token subset containment holds even though "
+           "the two DSMB memberships are different trials, different "
+           "terms. Committee/service codes are outside "
+           "DATE_AWARE_DEDUP_CODES, so require_date_overlap doesn't help "
+           "here either. Flip to a plain assertion once #666 lands a "
+           "corpus-verified fix.",
+    strict=True,
+)
+def test_distinct_committee_memberships_mentioned_in_passing_kept():
+    prior_term = {"text": "Member, Data Safety Monitoring Board for the ABC "
+                          "diabetes trial, 2015-2018"}
+    current_term = {"text": "Member, Data Safety Monitoring Board, XYZ "
+                            "diabetes trial, 2021-2024. Data safety "
+                            "monitoring board service for NIH-funded "
+                            "diabetes trials dates to 2015; this board "
+                            "succeeds the ABC trial DSMB, which concluded "
+                            "in 2018."}
+    result = deduplicate_entries([prior_term, current_term])
+    assert result == [prior_term, current_term]

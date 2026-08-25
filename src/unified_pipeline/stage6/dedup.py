@@ -1,0 +1,258 @@
+"""Near-duplicate removal within a taxonomy-code group (#398).
+
+Pure move out of `stage_6_word_template.py` (which re-exports every name here,
+so existing callers are unchanged). `deduplicate_entries` is called once per
+code group before rendering; `_drop_is_safe` is the #227 guard that only lets
+a drop through when the loss is provably recoverable. The docstrings and the
+constants' comments carry the accuracy history (#227, #208, C0ZGFW, 2Q1_ZQ)
+and are the spec.
+
+Depends one level down on `render_check` (`_record_lines` and its
+fused-multi-record threshold) because "is this a fused blob" is the same
+question both answer. Nothing here may import `stage_6_word_template`.
+"""
+import re
+from typing import Dict, List, Optional
+
+from .normalization import _squash
+from .parsing import _dates_overlap_or_match
+from .render_check import UNRENDERED_MIN_RECORD_LINES, _record_lines
+
+
+_STOP_WORDS = frozenset({
+    'a', 'an', 'and', 'as', 'at', 'be', 'by', 'for', 'from', 'i', 'in',
+    'is', 'it', 'of', 'on', 'or', 'the', 'to', 'was', 'with',
+})
+
+
+def _significant_words(text: str) -> set:
+    """Extract significant words from text, stripping stop words and punctuation."""
+    tokens = re.findall(r'[a-z0-9]+', text.lower())
+    return {t for t in tokens if t not in _STOP_WORDS and len(t) > 1}
+
+
+def _entry_signature_words(entry: Dict) -> set:
+    """Extract significant words from an entry's full text."""
+    return _significant_words(entry.get('text') or '')
+
+
+def _entry_title_words(entry: Dict) -> set:
+    """Extract significant words from the title/activity portion of an entry.
+
+    Tries multiple strategies to isolate the meaningful title:
+    1. Text before first tab (structured entries)
+    2. Quoted text (presentation titles often in quotes)
+    3. extracted_fields 'title' or 'activity_title'
+    4. Fallback to first 100 chars
+    """
+    text = (entry.get('text') or '')
+    if '\t' in text:
+        title = text.split('\t')[0]
+    else:
+        # Try to find quoted title (common for presentations)
+        quoted = re.findall(r'["\u201c](.+?)["\u201d]', text)
+        if quoted:
+            title = ' '.join(quoted)
+        else:
+            # Try extracted fields
+            fields = entry.get('extracted_fields', {}) or {}
+            title = (fields.get('title') or fields.get('activity_title') or
+                     fields.get('presentation_title') or '')
+            if not title:
+                title = text[:100]
+    return _significant_words(title)
+
+
+# _drop_is_safe: a reworded true duplicate ("Associate Professor, HPE, USUHS"
+# inside "...Department of Health Professions Education (HPE) Uniformed
+# Services University...") has EVERY significant word contained in the kept
+# entry — but so does a 3-token degree line whose distinguishing token the
+# tokenizer destroyed ('M.S' vs 'PhD', the 2Q1_ZQ B1 loss). Full containment
+# only proves duplication when the dropped entry carries enough tokens.
+DEDUP_FULL_CONTAINMENT_MIN_TOKENS = 5
+
+# _drop_is_safe token-containment is a TRUE-DUPLICATE signal only when the kept
+# entry is itself a single record. When the kept entry is a FUSED multi-record
+# blob (a whole layout table captured atomically, #208), a distinct single
+# record is fully token-contained in it merely because the blob swallowed it —
+# dropping it is real content loss, not deduplication (C0ZGFW: 35 invited
+# presentations + 3 teaching records dropped into "Title/Institution/Dates"
+# table blobs of 52 and 13 record-lines). A blob this size is the fusion bug,
+# not a duplicate. ponytail: gate on record-line count; the source fix is
+# de-fusing the table in stage 2 (#208/#248).
+DEDUP_FUSED_BLOB_RECORD_LINES = 5
+
+
+def _drop_is_safe(dropped_entry: Dict, kept_entry: Dict) -> bool:
+    """#227 guard: only drop an entry when the loss is provably recoverable.
+
+    Safe when the dropped text is verbatim-contained in the kept entry, or
+    every significant word of a token-rich dropped entry appears in the kept
+    entry (both are true-duplicate shapes) AND the kept entry is not a fused
+    multi-record blob, or the dropped entry is a fused multi-record candidate —
+    those the #221/#225 recovery pass (`WCMTemplateGenerator._recover_unrendered_records`,
+    `stage_6_word_template.py`, called on the PRE-dedup snapshot so a dropped
+    entry's lines are still checked) re-verifies line by line against the
+    rendered document. A single-line entry that merely SCORES similar is the
+    #227 loss class: distinct records sharing role/date/venue boilerplate (7 of
+    8 drops on 2Q1_ZQ were real content loss, all single-line); a distinct
+    record swallowed by a fused table blob is the same loss class (C0ZGFW).
+
+    #666 (adversarially re-checked, not yet fixed): all three branches below
+    can approve an unsafe drop for realistic prose CV entries, not just the
+    final fallback. The shared root cause is _record_lines()'s narrow shape
+    (pipe/tab row, or a line-initial date-range prefix) -- an ordinary
+    single-paragraph entry (a mentee mention, a committee-succession
+    sentence) has ZERO record lines, so _recover_unrendered_records skips it
+    entirely and the "#221/#225 will catch it" assumption below never
+    engages for that entry at all, regardless of which branch dropped it.
+    Confirmed with repros: two distinct mentees fused into one un-split
+    entry defeats the verbatim-containment branch (one mentee's text is a
+    literal substring of the fused pair's text); two distinct multi-year
+    committee/board memberships defeat the subset-containment branch when
+    one entry's narrative prose mentions the other's identifying nouns and
+    years in passing (successor-committee framing). The final fallback has
+    its own additional, narrower hole: the recovery pass's own token-overlap
+    check (`_RENDER_TOKEN_RE`) is digit-blind, so even a fused entry that
+    DOES clear the record-line threshold can still evade recovery if two
+    records differ only by date. Corpus-verified fix needed before any of
+    this changes; see the issue for candidate directions."""
+    dropped_squashed = _squash(dropped_entry.get('text', ''))
+    if dropped_squashed and dropped_squashed in _squash(kept_entry.get('text', '')):
+        return True
+    dropped_sig = _entry_signature_words(dropped_entry)
+    if (len(dropped_sig) >= DEDUP_FULL_CONTAINMENT_MIN_TOKENS
+            and dropped_sig <= _entry_signature_words(kept_entry)
+            and len(_record_lines(kept_entry.get('text', ''))) < DEDUP_FUSED_BLOB_RECORD_LINES):
+        return True
+    return len(_record_lines(dropped_entry.get('text', ''))) >= UNRENDERED_MIN_RECORD_LINES
+
+
+def deduplicate_entries(entries: List[Dict], verbose: bool = False,
+                        require_date_overlap: bool = False,
+                        decisions: Optional[List[Dict]] = None) -> List[Dict]:
+    """Remove near-duplicate entries within a code group.
+
+    Uses two metrics to catch duplicates:
+    1. Jaccard similarity (symmetric) — catches similar-length entries
+    2. Containment (asymmetric) — catches when a short entry is a subset
+       of a longer one (e.g., brief mention vs. detailed description)
+
+    When two entries are duplicates, the longer / more detailed one is kept.
+
+    If require_date_overlap is True, text-similar entries are only deduped when
+    their date ranges match or overlap.  This prevents false positives on career
+    progression sequences (e.g., Intern -> Resident -> Chief Resident at same
+    institution) where word overlap is high but dates differ.
+
+    If decisions is a list, every drop is appended to it as a dict (metric
+    values plus dropped/kept text) so the caller can persist the decision
+    trail for the run doctor (#227: at these thresholds a drop is not always
+    a true duplicate).
+
+    Pairwise and order-dependent by design, not clustered: entries are
+    compared left-to-right and a drop removes that index from further
+    comparison (see the `break` below), so for A~B~C where A and C aren't
+    themselves similar enough to pair directly, which of {A, B} survives
+    depends on iteration order. Deliberate trade-off, not an oversight —
+    building duplicate clusters and picking one canonical record per cluster
+    would need its own corpus-verified safety pass; documented here instead
+    of changed blind.
+    """
+    if len(entries) <= 1:
+        return entries
+
+    sigs = [_entry_signature_words(e) for e in entries]
+    titles = [_entry_title_words(e) for e in entries]
+    drop_indices = set()
+
+    for i in range(len(entries)):
+        if i in drop_indices:
+            continue
+        for j in range(i + 1, len(entries)):
+            if j in drop_indices:
+                continue
+            if not sigs[i] or not sigs[j]:
+                continue
+            intersection = sigs[i] & sigs[j]
+            union = sigs[i] | sigs[j]
+            smaller = min(len(sigs[i]), len(sigs[j]))
+
+            jaccard = len(intersection) / len(union) if union else 0
+            containment = len(intersection) / smaller if smaller else 0
+
+            # Also check title-only similarity (text before first tab).
+            # This catches cases where both entries describe the same activity
+            # but have very different narrative descriptions.
+            # Require at least 4 significant words in the smaller title to avoid
+            # false positives from short generic titles like "Emergency Medicine".
+            title_containment = 0.0
+            if titles[i] and titles[j]:
+                title_smaller = min(len(titles[i]), len(titles[j]))
+                if title_smaller >= 4:
+                    title_inter = titles[i] & titles[j]
+                    title_containment = len(title_inter) / title_smaller if title_smaller else 0
+
+            is_dup = jaccard >= 0.6 or containment >= 0.75 or title_containment >= 0.8
+
+            # Safety check: if full-text metrics trigger but titles are clearly
+            # different, these are likely distinct items at the same venue (e.g.,
+            # two different talks at the same grand rounds session).
+            if is_dup and title_containment < 0.8 and titles[i] and titles[j]:
+                title_union = titles[i] | titles[j]
+                title_jaccard = (len(titles[i] & titles[j]) / len(title_union)
+                                 if title_union else 0)
+                if title_jaccard <= 0.25 and min(len(titles[i]), len(titles[j])) >= 3:
+                    if verbose:
+                        print(f"    Dedup: skipping (different titles, "
+                              f"title_jaccard={title_jaccard:.2f}) "
+                              f"[{entries[i].get('text', '')[:50]}...]")
+                    is_dup = False
+
+            # For career-progression codes, require date overlap to confirm
+            if is_dup and require_date_overlap:
+                if not _dates_overlap_or_match(entries[i], entries[j]):
+                    if verbose:
+                        print(f"    Dedup: skipping (dates differ) "
+                              f"[{entries[i].get('text', '')[:50]}...]")
+                    is_dup = False
+            if is_dup:
+                # Keep the longer (more detailed) entry
+                len_i = len(entries[i].get('text', ''))
+                len_j = len(entries[j].get('text', ''))
+                drop = j if len_i >= len_j else i
+                kept = i if drop == j else j
+                if not _drop_is_safe(entries[drop], entries[kept]):
+                    if verbose:
+                        print(f"    Dedup: skipping (similar but not "
+                              f"verbatim-contained, single record — keeping "
+                              f"both, #227) "
+                              f"[{entries[drop].get('text', '')[:50]}...]")
+                    continue
+                if jaccard >= 0.6:
+                    metric = f"jaccard={jaccard:.2f}"
+                elif containment >= 0.75:
+                    metric = f"containment={containment:.2f}"
+                else:
+                    metric = f"title={title_containment:.2f}"
+                if verbose:
+                    print(f"    Dedup: dropping entry ({metric}), "
+                          f"keeping [{entries[kept].get('text', '')[:60]}...]")
+                if decisions is not None:
+                    decisions.append({
+                        "metric": metric,
+                        "jaccard": round(jaccard, 2),
+                        "containment": round(containment, 2),
+                        "title_containment": round(title_containment, 2),
+                        "dropped_text": entries[drop].get('text', '')[:500],
+                        "kept_text": entries[kept].get('text', '')[:500],
+                    })
+                drop_indices.add(drop)
+                if drop == i:
+                    # i is gone: it must not keep vouching to drop later j's
+                    # (observed over-drop vector in the 2Q1_ZQ S8 trace, #227)
+                    break
+
+    if drop_indices:
+        return [e for idx, e in enumerate(entries) if idx not in drop_indices]
+    return entries

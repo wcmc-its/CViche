@@ -47,7 +47,7 @@ def _get_institution_location(entry: Dict) -> Tuple[str, bool]:
     }
 
     # Check if this is a known institution that should use default location
-    fields = entry.get('extracted_fields', {})
+    fields = entry.get('extracted_fields') or {}
     institution_name = (fields.get('institution', '') or '').lower()
     original_text = (entry.get('text', '') or '').lower()
 
@@ -105,7 +105,7 @@ def _get_institution_location(entry: Dict) -> Tuple[str, bool]:
             return (city, True)  # True = from enrichment
 
     # Fall back to extracted_fields.location (not from enrichment)
-    fields = entry.get('extracted_fields', {})
+    fields = entry.get('extracted_fields') or {}
     return (fields.get('location', ''), False)  # False = not from enrichment
 
 
