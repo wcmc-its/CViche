@@ -84,7 +84,10 @@ def _classify_cert_token(token: str) -> CertTokenType:
     certificate number, "MOC" marks a maintenance-of-certification date (kept
     with the years), and anything not starting with a digit is a specialty.
     Empty tokens and digit-led tokens matching none of the shapes classify as
-    None and are dropped.
+    None and are dropped. A non-empty rejection (e.g. "123-", a bare "-") is
+    logged at debug level so the drop is visible somewhere other than
+    nowhere (§5.3/§5.10) -- empty tokens are the routine case from splitting
+    on "|" and are not logged.
     """
     if YEAR_PATTERN.match(token):
         return 'year'
@@ -94,6 +97,11 @@ def _classify_cert_token(token: str) -> CertTokenType:
         return 'year'
     if token and _HAS_LETTER.search(token) and not _LEADING_DIGIT.match(token):
         return 'specialty'
+    if token:
+        logger.debug(
+            "board certification: rejected token %r -- matches no known "
+            "shape (year, certificate number, MOC, or specialty)", token,
+        )
     return None
 
 
@@ -109,6 +117,19 @@ def _split_multi(value) -> List[str]:
     return [p.strip() for p in str(value or '').replace(';', ',').split(',') if p.strip()]
 
 
+# Real ABMS board names name exactly one board and routinely contain a
+# comma of their own: "American Board of Psychiatry and Neurology, Inc.",
+# "American Board of Internal Medicine, Cardiovascular Disease". Splitting
+# `certifying_board` on commas to detect fusion (an earlier version of
+# `_is_fused_certification` did this) can't tell those apart from a genuine
+# two-board fusion like "Board A, Board B" -- both split into exactly two
+# comma-delimited parts. The word "board" itself is the more reliable
+# signal: a real single board name contains it once ("American Board of
+# ..."), so a SECOND occurrence is evidence a second board name was packed
+# into the same field, independent of how many commas are in the string.
+_BOARD_WORD_RE = re.compile(r'\bboard\b', re.IGNORECASE)
+
+
 def _is_fused_certification(fields: Dict, cert_numbers: List[str]) -> bool:
     """True when an entry's extracted fields describe more than one certification.
 
@@ -116,17 +137,63 @@ def _is_fused_certification(fields: Dict, cert_numbers: List[str]) -> bool:
     `_parse_and_add_multiple_certifications` used to be `len(cert_numbers) >
     1` alone. An entry with several specialties or dates but only one
     extracted certificate number took the single-cert path and could render a
-    flattened, mixed entry as one row (#625 thread 3850459808). This
-    considers `certifying_board` too: it carries the same comma/semicolon
-    joined shape as a fused `certificate_number` when several boards were
-    flattened together, so splitting it the same way catches that case as
-    well. It cannot see a fusion signalled only by the raw `text` (a third
+    flattened, mixed entry as one row (#625 thread 3850459808). This also
+    treats more than one `year_certified` as fusion evidence, and treats a
+    second occurrence of the word "board" inside `certifying_board` as
+    evidence a second board name was flattened in (see `_BOARD_WORD_RE`).
+
+    What this predicate does NOT do, on purpose, is treat a comma inside
+    `certifying_board` as fusion evidence by itself. An earlier version
+    split `certifying_board` on commas/semicolons the same way as a fused
+    `certificate_number`; real board names routinely contain a comma of
+    their own ("American Board of Psychiatry and Neurology, Inc."), so that
+    treated every genuine single-board entry with a comma in its name as
+    fused and discarded its structured `certificate_number` and
+    `year_certified` for a destructive text reparse -- a data-loss defect
+    found reproducing HEAD~1 vs HEAD on exactly that board name (2026-08-25).
+    Punctuation in a single free-text name is not reliable evidence of how
+    many things are named in it; a count (of certificate numbers, of years,
+    or of board-name occurrences) is.
+
+    This still cannot see a fusion signalled only by the raw `text` (a third
     specialty with neither its own certificate number nor board name) --
     that would need extraction/normalization changes outside this file.
     """
     if len(cert_numbers) > 1:
         return True
-    return len(_split_multi(fields.get('certifying_board', ''))) > 1
+    if len(_split_multi(fields.get('year_certified', ''))) > 1:
+        return True
+    board = str(fields.get('certifying_board') or '')
+    return len(_BOARD_WORD_RE.findall(board)) > 1
+
+
+def _format_certification_date_str(fields: Dict) -> str:
+    """Build the F2 "yyyy-yyyy" (or "yyyy-Present") date string for one
+    entry's structured fields.
+
+    Prefers `start_date`/`end_date`; falls back to `year_certified`/
+    `recertification_date` when those are absent. Factored out so the
+    single-certification path and `_parse_and_add_multiple_certifications`'s
+    structured-fallback (HARD SAFETY NET, see that function) build the same
+    string the same way instead of two copies drifting apart.
+    """
+    start_date = fields.get('start_date') or fields.get('year_certified') or ''
+    end_date = fields.get('end_date') or fields.get('recertification_date') or ''
+
+    start_fmt = format_date_for_section(str(start_date), 'F2') if start_date else ''
+    end_fmt = format_date_for_section(str(end_date), 'F2') if end_date else ''
+
+    if start_fmt and end_fmt:
+        if end_fmt.lower() == 'present':
+            return f"{start_fmt}-Present"
+        if end_fmt != start_fmt:
+            return f"{start_fmt}-{end_fmt}"
+        return start_fmt
+    if start_fmt:
+        return start_fmt
+    if end_fmt:
+        return end_fmt
+    return ''
 
 
 def _is_reconstruction_confident(
@@ -191,12 +258,54 @@ def _reconstruct_certification_rows(
 # exactly, rather than as a substring of the whole line -- a substring test
 # ('date of certification' in line) also matched real content that happened
 # to mention one of these phrases, dropping it (#625 thread 3850468238).
+#
+# The three entries below (name of specialty / board certificate[ #] / date
+# of certification) do not match the WCM template's OWN F2 header row --
+# verified 2026-08-25 via python-docx against
+# key_files/wcm_cv_template_faculty_october_2022_final.docx, table 10, row
+# 0: ['Full Name of Board', 'Certificate # \n(indicate if board eligible)',
+# 'Dates of Certification \n(yyyy–yyyy)']. That's not a regression --
+# the old substring check didn't match the real cells either -- but it does
+# mean a source CV that reused the template's own header row verbatim was
+# never being filtered. The three 'full name of board' / 'certificate # ...'
+# / 'dates of certification ...' entries below are that real header, added
+# alongside the old ones rather than in place of them: purely additive, so
+# it cannot turn a previously-kept data line into a dropped one, and is
+# covered by test_data_line_merely_mentioning_a_header_phrase_is_kept plus
+# the new TestRealTemplateHeaderCellsAreFilteredWithoutRejectingData below.
+#
+# Known gap, out of this defect's scope: `entry_lines` (this module's only
+# caller of this filter goes through it) splits strictly on "\n", so a
+# header cell that keeps its OWN embedded line break -- as the two
+# multi-line cells above do in the template -- is already broken into more
+# than one physical line before this function ever sees a whole row to
+# match against. Widening the set does not, and cannot, fix that; it only
+# helps when the header row reaches here already flattened to one line per
+# cell (see TestRealTemplateHeaderCellsAreFilteredWithoutRejectingData's
+# comment for why).
 _CERTIFICATION_HEADER_CELLS = {
     'name of specialty',
     'board certificate',
     'board certificate #',
     'date of certification',
+    'full name of board',
+    'certificate # (indicate if board eligible)',
+    'dates of certification (yyyy–yyyy)',
 }
+
+_HEADER_CELL_WHITESPACE_RE = re.compile(r'\s+')
+
+
+def _normalize_header_cell(cell: str) -> str:
+    """Case- and whitespace-fold one flattened table cell for header matching.
+
+    Folds any run of whitespace -- including the embedded newline the real
+    WCM template header cells carry (e.g. "Certificate # \\n(indicate if
+    board eligible)") -- to a single space, so a header cell that survives
+    text-flattening with its line break intact still matches the
+    single-line phrase in `_CERTIFICATION_HEADER_CELLS`.
+    """
+    return _HEADER_CELL_WHITESPACE_RE.sub(' ', cell).strip().lower()
 
 
 def _is_certification_header_line(line: str) -> bool:
@@ -207,7 +316,7 @@ def _is_certification_header_line(line: str) -> bool:
     cell keeps the whole line. A bare (non-pipe) line is a header only when
     the whole line, normalized, matches one exactly.
     """
-    cells = [c.strip().lower() for c in line.split('|')] if '|' in line else [line.strip().lower()]
+    cells = [_normalize_header_cell(c) for c in line.split('|')] if '|' in line else [_normalize_header_cell(line)]
     cells = [c for c in cells if c]
     if not cells:
         return False
@@ -262,8 +371,6 @@ class BoardCertificationSection:
 
             certifying_board = fields.get('certifying_board', '')
             certificate_number = fields.get('certificate_number', '')
-            year_certified = fields.get('year_certified', '')
-            recertification_date = fields.get('recertification_date', '')
 
             # Handle certificate_number being a list (from LLM extraction) or string
             if isinstance(certificate_number, list):
@@ -285,38 +392,62 @@ class BoardCertificationSection:
                     self._parse_and_add_multiple_certifications(table, original_text, entry)
                 else:
                     # Single certification - format dates as yyyy-yyyy per WCM template
-                    # Use start_date/end_date if available, fall back to year_certified/recertification_date
-                    start_date = fields.get('start_date') or year_certified
-                    end_date = fields.get('end_date') or recertification_date
-
-                    start_fmt = format_date_for_section(str(start_date), 'F2') if start_date else ''
-                    end_fmt = format_date_for_section(str(end_date), 'F2') if end_date else ''
-
-                    # Build date range string
-                    if start_fmt and end_fmt:
-                        if end_fmt.lower() == 'present':
-                            date_str = f"{start_fmt}-Present"
-                        elif end_fmt != start_fmt:
-                            date_str = f"{start_fmt}-{end_fmt}"
-                        else:
-                            date_str = start_fmt
-                    elif start_fmt:
-                        date_str = start_fmt
-                    elif end_fmt:
-                        date_str = end_fmt
-                    else:
-                        date_str = ''
-
+                    date_str = _format_certification_date_str(fields)
                     self._add_board_cert_row(table, certifying_board, certificate_number, date_str)
             else:
                 # No structured fields - try to parse from text
                 self._parse_and_add_multiple_certifications(table, original_text, entry)
 
     def _parse_and_add_multiple_certifications(self, table, text: str, entry: Dict):
-        """Parse multiple board certifications from raw text and add rows."""
-        if not text:
-            return
+        """Parse multiple board certifications from raw text and add rows.
 
+        HARD SAFETY NET (data-loss gate, 2026-08-25): every caller reaches
+        this because something -- `_is_fused_certification`, or the "no
+        structured fields at all" branch -- decided a text reparse was
+        needed. Either decision can be wrong for an entry that DOES carry a
+        usable `certifying_board`/`certificate_number`/`year_certified`: an
+        empty (or header-only) `text` used to make this return immediately
+        with no log, silently dropping the whole row; and a reparse that
+        recovers no certificate number or year for ANY row would otherwise
+        discard ones the entry already had. Both now fall back to rendering
+        the entry's own structured fields as a single row instead of
+        rendering less than the entry already provides, and log why. This
+        is independent of how good `_is_fused_certification`'s predicate
+        is -- it holds even if a future change to that predicate misfires.
+        """
+        fields = entry.get('extracted_fields', {}) or {}
+        structured_board = fields.get('certifying_board', '')
+        structured_cert = fields.get('certificate_number', '')
+        if isinstance(structured_cert, list):
+            structured_cert = ', '.join(str(c).strip() for c in structured_cert if str(c).strip())
+        else:
+            structured_cert = str(structured_cert) if structured_cert else ''
+        has_structured_data = bool(
+            structured_board or structured_cert
+            or fields.get('year_certified') or fields.get('recertification_date')
+        )
+
+        def _render_structured_fallback(reason: str):
+            logger.warning(
+                "board certification: %s -- rendering the entry's already-"
+                "extracted fields instead of losing them (certifying_board="
+                "%r, certificate_number=%r)",
+                reason, structured_board, structured_cert,
+            )
+            self._add_board_cert_row(
+                table, structured_board, structured_cert,
+                _format_certification_date_str(fields),
+            )
+
+        if not text:
+            if has_structured_data:
+                _render_structured_fallback("no free text to reparse")
+            else:
+                logger.debug(
+                    "board certification: entry has neither text nor "
+                    "structured fields -- nothing to render",
+                )
+            return
 
         # Handle pipe-separated format: "Specialty | CertNum | Year"
         # First, split on newlines and filter empty lines
@@ -328,6 +459,9 @@ class BoardCertificationSection:
         lines = [l for l in lines if not _is_certification_header_line(l)]
 
         if not lines:
+            if has_structured_data:
+                _render_structured_fallback(
+                    "text had no data lines left after header filtering")
             return
 
         # Try to parse pipe-separated rows first
@@ -353,7 +487,18 @@ class BoardCertificationSection:
         # 3850459808: reconstruction now goes through an explicit helper that
         # logs when the token counts disagree instead of silently pairing by
         # position as if it were certain -- see _reconstruct_certification_rows.
-        for specialty, cert_num, year in _reconstruct_certification_rows(specialties, cert_numbers, years):
+        rows = _reconstruct_certification_rows(specialties, cert_numbers, years)
+
+        # HARD SAFETY NET, continued: a reparse that recovered no
+        # certificate number and no year anywhere is strictly worse than
+        # the structured fields the entry already had -- prefer those over
+        # a specialty-only guess.
+        if has_structured_data and not any(cert_num or year for _, cert_num, year in rows):
+            _render_structured_fallback(
+                "reparse recovered no certificate number or year for any row")
+            return
+
+        for specialty, cert_num, year in rows:
             # Format year as yyyy per WCM template
             if year:
                 year = format_date_for_section(year, 'F2')

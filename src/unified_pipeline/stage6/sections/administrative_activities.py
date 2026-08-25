@@ -88,11 +88,22 @@ def _first_committee_alias(fields: Mapping, *, as_list: bool = False):
     explicit precedence declared by `_COMMITTEE_ALIAS_KEYS`.
 
     `as_list=True` returns the first alias whose value is a `list` (detects a
-    stage-4 multi-committee record burst, #208/#248 fusion); otherwise
-    returns the first alias with a truthy scalar value -- the same selection
-    the previous `x or y or z` chain made, just made in one named place
-    instead of three, with the order stated rather than implied by the write
-    order of an `or` expression (review threads 3850009796, 3850014030)."""
+    stage-4 multi-committee record burst, #208/#248 fusion) -- this path's
+    precedence (committee_name, then committee, then activity) matches the
+    order the list-detection code already used, so it is unchanged.
+
+    The scalar (as_list=False) path -- the top-level `activity`/`role`/dates
+    resolution `_CommitteeRecord.from_raw` calls -- is NOT a no-op rewrite of
+    the `activity or committee or committee_name` chain it replaced. That
+    chain was activity-first; this function is committee_name-first, the
+    same order as the list-detection path, because the reviewer asked for
+    ONE stated precedence used everywhere the alias chain is read rather
+    than two different orders in the same file (review threads 3850009796,
+    3850014030). The two orders agree unless an entry has more than one
+    alias populated with a truthy value -- when it does, this now returns
+    the `committee_name` value where the old chain would have returned
+    `activity`. That is the intended behavior change this round, not a
+    bug: keep it, don't revert it back to activity-first."""
     for key in _COMMITTEE_ALIAS_KEYS:
         value = fields.get(key)
         if as_list:

@@ -454,3 +454,147 @@ class TestNarrowTableSkipsRowInsteadOfBlankOrRaise:
         table = narrow_doc.add_table(rows=1, cols=0)
         # Must not raise -- a raise here would abort the rest of the document.
         gen._add_board_cert_row(table, "Internal Medicine", "123-456", "2020")
+
+
+class TestFusedCertificationPredicateIgnoresBoardNameCommas:
+    """DATA-LOSS GATE (2026-08-25): `_is_fused_certification` used to split
+    `certifying_board` on commas to detect fusion. Real ABMS board names
+    routinely contain a comma of their own ("American Board of Psychiatry
+    and Neurology, Inc.", "American Board of Internal Medicine,
+    Cardiovascular Disease"), so a genuine single-board entry with a comma
+    in its name was misread as fusion and routed to the destructive
+    text-reparse path, discarding its structured certificate_number and
+    year_certified.
+    """
+
+    def test_comma_and_inc_suffix_board_name_keeps_cert_number_and_year(self):
+        # The exact regressed case the gate reproduced against HEAD~1 vs
+        # HEAD: HEAD~1 rendered ('American Board of Psychiatry and
+        # Neurology, Inc.', '54321', '2010'); HEAD rendered ('Diplomate,
+        # American Board of Psychiatry and Neurology, Inc.', '', '') -- the
+        # certificate number and year were gone.
+        gen = _generator()
+        entry = {
+            "extracted_fields": {
+                "certifying_board": "American Board of Psychiatry and Neurology, Inc.",
+                "certificate_number": "54321",
+                "year_certified": "2010",
+            },
+            "text": "Diplomate, American Board of Psychiatry and Neurology, Inc.",
+        }
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("American Board of Psychiatry and Neurology, Inc.", "54321", "2010"),
+        ]
+
+    def test_same_entry_with_empty_text_still_renders_its_row(self):
+        # Same entry, `text` empty. HEAD silently omitted the entire row --
+        # `_parse_and_add_multiple_certifications` returned early on empty
+        # text with no log at all.
+        gen = _generator()
+        entry = {
+            "extracted_fields": {
+                "certifying_board": "American Board of Psychiatry and Neurology, Inc.",
+                "certificate_number": "54321",
+                "year_certified": "2010",
+            },
+            "text": "",
+        }
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("American Board of Psychiatry and Neurology, Inc.", "54321", "2010"),
+        ]
+
+    def test_subspecialty_comma_renders_as_one_row_not_two(self):
+        # A comma that separates a board name from its subspecialty, not a
+        # second board, must not be misread as fusion either.
+        gen = _generator()
+        entry = {
+            "extracted_fields": {
+                "certifying_board": "American Board of Internal Medicine, Cardiovascular Disease",
+                "certificate_number": "98765",
+                "year_certified": "2015",
+            },
+            "text": "American Board of Internal Medicine, Cardiovascular Disease | 98765 | 2015",
+        }
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("American Board of Internal Medicine, Cardiovascular Disease", "98765", "2015"),
+        ]
+
+    def test_genuinely_fused_entry_still_takes_the_multi_cert_path(self):
+        # Proof the fix did not just disable the fused-certification
+        # feature: more than one certificate number/year is still real
+        # fusion evidence and still renders every row it did before the fix.
+        gen = _generator()
+        entry = {
+            "extracted_fields": {
+                "certifying_board": "American Board of Psychiatry and Neurology, Inc.",
+                "certificate_number": "111, 222",
+                "year_certified": "2010, 2012",
+            },
+            "text": "American Board of Psychiatry and Neurology, Inc. | 111 | 2010\n"
+                    "American Board of Pediatrics | 222 | 2012",
+        }
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("American Board of Psychiatry and Neurology, Inc.", "111", "2010"),
+            ("American Board of Pediatrics", "222", "2012"),
+        ]
+
+
+class TestRealTemplateHeaderCellsAreFilteredWithoutRejectingData:
+    """Defect 3 (accuracy gate, 2026-08-25): `_CERTIFICATION_HEADER_CELLS`
+    matched none of the WCM template's own F2 header cells (verified via
+    python-docx against
+    key_files/wcm_cv_template_faculty_october_2022_final.docx). Widening the
+    set must filter the real header row while still keeping a genuine data
+    line -- including one that legitimately contains "board", the same word
+    the real header cells contain.
+    """
+
+    def test_real_template_header_row_is_filtered(self):
+        from unified_pipeline.stage6.sections.board_certification import (
+            _is_certification_header_line,
+        )
+        assert _is_certification_header_line(
+            "Full Name of Board | Certificate # \n(indicate if board eligible) "
+            "| Dates of Certification \n(yyyy–yyyy)"
+        )
+
+    def test_genuine_data_line_is_still_kept(self):
+        # `entry_lines` (used upstream of this filter) splits strictly on
+        # "\n", so a header cell's OWN embedded line break (present in the
+        # template's raw cells) already separates it into more than one
+        # physical line before this function ever sees a whole row -- that
+        # is a pre-existing, out-of-scope limitation of entry_lines, not
+        # something this defect touches. This models the realistic case a
+        # per-cell filter CAN act on: the header row flattened to one
+        # physical line per cell (its own internal whitespace collapsed),
+        # which `_normalize_header_cell` folds and matches.
+        gen = _generator()
+        entry = {
+            "text": "Full Name of Board | Certificate # (indicate if board eligible) "
+                    "| Dates of Certification (yyyy–yyyy)\n"
+                    "American Board of Surgery | 13579 | 2018",
+            "extracted_fields": {},
+        }
+        gen._fill_board_certification([entry])
+        assert _rows_after_board(gen) == [
+            ("American Board of Surgery", "13579", "2018"),
+        ]
+
+
+class TestRejectedTokenIsLogged:
+    """Defect 4 (accuracy gate, 2026-08-25): a token like '123-' or '-'
+    classifies to None with no log anywhere (§5.3/§5.10)."""
+
+    def test_rejected_token_is_named_in_a_debug_log(self, caplog):
+        with caplog.at_level(logging.DEBUG):
+            assert _classify_cert_token("123-") is None
+        assert any("123-" in r.message for r in caplog.records)
+
+    def test_empty_token_is_not_logged(self, caplog):
+        with caplog.at_level(logging.DEBUG):
+            assert _classify_cert_token("") is None
+        assert not caplog.records
