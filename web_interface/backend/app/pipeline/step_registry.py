@@ -1,9 +1,31 @@
-"""Registry of all pipeline steps - aligned with run_full_pipeline.py (V15)."""
-from typing import List
+"""Registry of all pipeline steps - aligned with run_full_pipeline.py (V15).
+
+STEP_REGISTRY is static application configuration (immutable: StepDefinition
+is a frozen, slotted dataclass and the registry itself is a tuple, not a
+list) so a caller can't accidentally mutate it and skew progress reporting
+for every subsequent run.
+
+Two invariants are documented here and enforced by validate_registry(),
+which runs once at import time (below) so a malformed registry fails at
+startup instead of surfacing indirectly at runtime:
+  - stage_id and number are each unique across all steps, and number is
+    contiguous from 1..len(STEP_REGISTRY)
+  - weight is positive for every step, and the weights sum to exactly 100
+    (see the comment on STEP_REGISTRY below)
+
+The claim that this registry's stage order "matches run_full_pipeline.py" is
+enforced by a contract test, not by anything at runtime:
+web_interface/backend/tests/test_step_registry_contract.py::
+test_registry_order_matches_run_full_pipeline_driver compares this module's
+order against run_full_pipeline.get_stage_order() directly, so one driver
+adding/reordering/removing a stage without the other fails that test instead
+of silently drifting progress reporting.
+"""
 from dataclasses import dataclass
+from typing import Dict, List, Tuple, TypedDict
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class StepDefinition:
     """Definition of a pipeline step."""
     number: int
@@ -16,10 +38,11 @@ class StepDefinition:
     estimated_seconds: int = 30  # Estimated duration in seconds for time-based progress
 
 
-# Define all 12 steps - matches run_full_pipeline.py exactly
+# Define all 12 steps - matches run_full_pipeline.py's own stage order
+# (enforced by test_step_registry_contract.py, see module docstring above).
 # Weights and estimated_seconds based on empirical observation (~8 min total processing)
 # Total weight = 100, distributed proportionally to typical duration
-STEP_REGISTRY: List[StepDefinition] = [
+STEP_REGISTRY: Tuple[StepDefinition, ...] = (
     StepDefinition(
         number=1,
         stage_id='1a',
@@ -148,7 +171,52 @@ STEP_REGISTRY: List[StepDefinition] = [
         weight=3.0,  # Fast Word doc generation
         estimated_seconds=15
     ),
-]
+)
+
+
+def validate_registry(steps: Tuple[StepDefinition, ...]) -> None:
+    """Fail fast on a malformed registry.
+
+    Checks the invariants documented on STEP_REGISTRY above: stage_id and
+    number are each unique, number is contiguous from 1..len(steps), every
+    weight is positive, and the weights sum to exactly 100. Called on
+    STEP_REGISTRY at the bottom of this module so a broken registry raises
+    at import time rather than producing a wrong progress calculation at
+    runtime; also called directly (with deliberately-broken inputs) by
+    test_step_registry_contract.py to pin each failure mode.
+    """
+    stage_ids = [s.stage_id for s in steps]
+    if len(stage_ids) != len(set(stage_ids)):
+        dupes = sorted({sid for sid in stage_ids if stage_ids.count(sid) > 1})
+        raise ValueError(f"STEP_REGISTRY has duplicate stage_id value(s): {dupes}")
+
+    numbers = [s.number for s in steps]
+    if len(numbers) != len(set(numbers)):
+        dupes = sorted({n for n in numbers if numbers.count(n) > 1})
+        raise ValueError(f"STEP_REGISTRY has duplicate step number(s): {dupes}")
+
+    expected_numbers = list(range(1, len(steps) + 1))
+    if sorted(numbers) != expected_numbers:
+        raise ValueError(
+            "STEP_REGISTRY step numbers must be contiguous from 1.."
+            f"{len(steps)}, got {sorted(numbers)}"
+        )
+
+    non_positive = [s.stage_id for s in steps if s.weight <= 0]
+    if non_positive:
+        raise ValueError(
+            f"STEP_REGISTRY has non-positive weight(s) for stage(s): {non_positive}"
+        )
+
+    total_weight = sum(s.weight for s in steps)
+    if abs(total_weight - 100.0) > 1e-9:
+        raise ValueError(
+            "STEP_REGISTRY total weight must be 100 (documented invariant), "
+            f"got {total_weight}"
+        )
+
+
+validate_registry(STEP_REGISTRY)
 
 
 def get_step_by_stage_id(stage_id: str) -> StepDefinition:
@@ -164,20 +232,44 @@ def get_stage_order() -> List[str]:
     return [step.stage_id for step in STEP_REGISTRY]
 
 
-def get_step_weights() -> dict:
+class StepWeightEntry(TypedDict):
+    """Per-step slice of the get_step_weights() progress payload."""
+    weight: float
+    weight_pct: float
+    estimated_seconds: int
+    cumulative_weight_before: float
+    cumulative_weight_pct_before: float
+
+
+class StepWeights(TypedDict):
+    """Return shape of get_step_weights(), so callers and static analysis
+    can validate the response instead of treating it as an untyped dict."""
+    total_weight: float
+    total_estimated_seconds: int
+    steps: Dict[str, StepWeightEntry]
+
+
+def get_step_weights() -> StepWeights:
     """Return step weights and estimated times for progress calculation."""
     total_weight = sum(step.weight for step in STEP_REGISTRY)
+    total_estimated_seconds = sum(step.estimated_seconds for step in STEP_REGISTRY)
+
+    steps: Dict[str, StepWeightEntry] = {}
+    cumulative_weight_before = 0.0
+    for step in STEP_REGISTRY:
+        # Running total, not sum(STEP_REGISTRY[:i]) recomputed per stage:
+        # O(n) over the registry instead of O(n^2).
+        steps[step.stage_id] = {
+            'weight': step.weight,
+            'weight_pct': (step.weight / total_weight) * 100,
+            'estimated_seconds': step.estimated_seconds,
+            'cumulative_weight_before': cumulative_weight_before,
+            'cumulative_weight_pct_before': (cumulative_weight_before / total_weight) * 100,
+        }
+        cumulative_weight_before += step.weight
+
     return {
         'total_weight': total_weight,
-        'total_estimated_seconds': sum(step.estimated_seconds for step in STEP_REGISTRY),
-        'steps': {
-            step.stage_id: {
-                'weight': step.weight,
-                'weight_pct': (step.weight / total_weight) * 100,
-                'estimated_seconds': step.estimated_seconds,
-                'cumulative_weight_before': sum(s.weight for s in STEP_REGISTRY[:i]),
-                'cumulative_weight_pct_before': (sum(s.weight for s in STEP_REGISTRY[:i]) / total_weight) * 100
-            }
-            for i, step in enumerate(STEP_REGISTRY)
-        }
+        'total_estimated_seconds': total_estimated_seconds,
+        'steps': steps,
     }
