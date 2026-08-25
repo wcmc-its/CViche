@@ -72,7 +72,7 @@ The standing verdict on most reviews is:
 > suggestions, not bugs. If any of them cannot be addressed now, please leave a
 > comment explaining why. I will merge the PR as is."
 
-So a review is not a gate. The friction is in how we answer it. Two rules, both
+So a review is not a gate. The friction is in how we answer it. Four rules, all
 written from complaints we actually caused:
 
 1. **Never decline without a reason.** "Declined" with no explanation drew the
@@ -84,6 +84,37 @@ written from complaints we actually caused:
    that does not in fact cover the comment is the same failure with extra steps —
    *"I don't see this issue included in #494"* (#503). Open the issue, then paste
    its number.
+3. **Every reply that claims a fix cites the commit that made it.** The
+   reviewer asked for this outright on #624 (2026-08-24) — *"There are 150+
+   comments on this PR#624, and it is becoming difficult to cross-check
+   multiple commit hashes to confirm whether each issue has actually been
+   fixed. Please ask Claude to provide the commit hash for every code fix it
+   makes in this PR, for each corresponding review comment."* — and had to
+   repeat it the next day: *"My ask was please add the commit hash to each
+   code review comment. It is difficult to determine where each fix was made
+   when the comments are present but the corresponding commit IDs are
+   missing."* On #625, of the 58 replies we posted, only 10 named an actual
+   commit; the rest claimed a fix without saying where it landed. This is not
+   bookkeeping — the commit hash is what lets one person cross-check a
+   150-comment review at all. One commit that covers several comments gets
+   cited on each of them; a fix that spans several commits lists every one.
+4. **If the fix is localized to a file already in the PR, it goes in the PR.**
+   A separate issue or PR is for genuinely cross-file work only — this decides
+   *whether* to file, ahead of rule 2's *file before you reply*. On #625, 24 of
+   the reviewer's 29 follow-up comments on 2026-08-25 were re-asking for
+   something we had deferred instead of fixing in place, e.g. *"As we
+   discussed and as mentioned in the coding standards, the change is
+   localized to this file. I don't think any changes outside this file are
+   required. Therefore, I would insist that we fix this as part of the
+   current PR."* He said "mentioned in the coding standards" — it wasn't
+   written down anywhere, which is the actual cost of not having this rule.
+   The same round, 5 of those 29 comments said he could not find what we had
+   pointed him at; an unfindable pointer costs the same round as no pointer,
+   so if pointing elsewhere really is right, link the exact comment URL
+   (`.../issues/N#issuecomment-<id>`) and say whether it's an issue or a PR —
+   on #625 our reference to #660 was correct but he searched PRs for it, and
+   #660 is an issue. The test: does the fix touch a file outside the PR? If
+   not, it goes in the PR.
 
 ### What reviews here consistently ask for
 
