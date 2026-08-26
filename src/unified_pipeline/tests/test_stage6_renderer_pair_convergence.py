@@ -804,3 +804,107 @@ class TestOrphanedDateAlignmentValidatesBeforePairing:
         assert dates_by_activity["Subcommittee Notes"] != "1999-2010"
         assert all(dates == "" for dates in dates_by_activity.values())
         assert caplog.records, "counts disagree -- the mismatch must be logged"
+
+
+# --- Appended 2026-08-26: PR #625 review, follow-up on the #256 crash guard.
+# The reviewer asked for "a focused wire-level regression test with multiple
+# record dictionaries, including list-valued committee fields, and an
+# assertion that each record produces its own Word row" to pin the
+# production rendering behavior of the record_list expansion in
+# administrative_activities.py -- structured/list-valued records must be
+# normalized to plain strings before they reach python-docx, not merged into
+# one row or handed to `cell.text` unnormalized.
+
+
+class TestRecordListBurstNormalizesBeforePythonDocx:
+    """#256: a stage-4 multi-committee entry can arrive as a LIST of record
+    dicts under committee_name/committee/activity (#208/#248 fusion). Before
+    the fix, that list went into a single Word cell whole and python-docx
+    raised deep in the XML layer, aborting the entire document -- not just
+    this section. `_first_committee_alias(as_list=True)` detects the burst
+    and expands it to one row per record; `_CommitteeRecord.from_raw` (and
+    `_add_committee_row`'s own final safeguard) run every field through
+    `_committee_cell_text`, which is the thing that must never see a
+    list/dict reach `cell.text` unconverted.
+
+    This entry deliberately exercises all three alias keys the docstring
+    names (committee_name, committee, activity) as the field carrying the
+    LIST-OF-RECORDS burst, and separately exercises list- and dict-valued
+    fields *within* one record (a record's own committee_name or role
+    arriving as a list, and activity arriving as a nested dict) -- the two
+    other structured shapes `_committee_cell_text` has to cover, not just
+    the top-level burst shape.
+    """
+
+    def test_multi_record_committee_burst_each_becomes_its_own_row_with_str_cells(self):
+        gen = _generator()
+        entry = {
+            "text": "irrelevant -- a structured record burst, not flattened text",
+            "extracted_fields": {
+                "committee_name": [
+                    {
+                        # Baseline record: every field a plain scalar.
+                        "committee_name": "Curriculum Committee",
+                        "role": "Chair",
+                        "start_date": "2010",
+                        "end_date": "2012",
+                    },
+                    {
+                        # #256's exact crash shape: a LIST reaching what used
+                        # to be treated as a single string field, on both
+                        # the activity alias and the role field at once.
+                        "committee_name": ["Executive Committee", "Executive Board"],
+                        "role": ["Vice Chair", "Secretary"],
+                        "start_date": "2013",
+                        "end_date": "2014",
+                    },
+                    {
+                        # The second alias in precedence order, itself
+                        # list-valued.
+                        "committee": ["IRB", "IACUC"],
+                        "start_date": "2015",
+                        "end_date": "2016",
+                    },
+                    {
+                        # The third alias, a DICT-valued field rather than a
+                        # list -- the other structured shape stage 4 emits.
+                        "activity": {"committee_name": "Nested Task Force"},
+                        "start_date": "2017",
+                        "end_date": "2018",
+                    },
+                ]
+            },
+            "taxonomy_code": "P",
+        }
+
+        gen._fill_administrative_activities([entry])
+
+        section_idx = gen._find_paragraph_with_text("INSTITUTIONAL ADMINISTRATIVE")
+        table = gen._find_table_after_paragraph(section_idx)
+        data_rows = table.rows[1:]
+
+        # (a) each of the four record dictionaries produced its OWN row --
+        # not one row merging the whole burst, and no exception mid-render.
+        # This exact-text compare is the operative pin: in #256's
+        # python-docx, `cell.text = <list-or-dict>` raised deep in the XML
+        # layer and aborted the whole document. The currently-installed
+        # python-docx instead fails SILENTLY on the same inputs -- a list
+        # assigned to `cell.text` has its elements concatenated with no
+        # separator, and a dict assigned to it is reduced to just its own
+        # key name, with the value lost. Removing the `_committee_cell_text`
+        # normalization reproduces that silent mis-render here: row 2 becomes
+        # ("Executive CommitteeExecutive Board", "Vice ChairSecretary", ...)
+        # instead of the semicolon-joined values below, and row 4's first
+        # cell becomes "committee_name" (the dict's key) instead of "Nested
+        # Task Force" -- so this compare, not a type check on `cell.text`
+        # (which python-docx's getter always returns as `str` regardless of
+        # what was assigned), is what catches the reversion.
+        assert len(data_rows) == 4
+        assert _rows_after(gen, "INSTITUTIONAL ADMINISTRATIVE") == [
+            ("Curriculum Committee", "Chair", "2010-2012"),
+            ("Executive Committee; Executive Board", "Vice Chair; Secretary", "2013-2014"),
+            ("IRB; IACUC", "", "2015-2016"),
+            ("Nested Task Force", "", "2017-2018"),
+        ]
+
+        assert gen.stats['entries_inserted'] == 4
