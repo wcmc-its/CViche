@@ -12,7 +12,7 @@ and for mixins-not-composition is in `__init__.py`; this file is the index.
 | `personal_data.py` | A | Name, addresses, phones, emails | `_fill_personal_data` |
 | `education.py` | B1 | Conferred academic degrees | `_fill_education`, `_degree_is_in_progress` |
 | `other_education.py` | B2 | Non-degree training, certificates, workshops | `_fill_other_education` |
-| `postdoc_training.py` | C, C1, C2 | Postdoctoral training, residency, fellowship | `_fill_postdoc_training` |
+| `postdoc_training.py` | C, C1, C2, C3 | Postdoctoral training, residency, fellowship | `_fill_postdoc_training` |
 | `positions.py` | D1–D3 | Academic, hospital and other appointments | `_fill_positions`, `_merge_grouped_appointments`, `_add_position_row`, … |
 | `passthrough.py` | E and G | Employment status; institutional/hospital affiliation | `_fill_passthrough_sections`, `_fill_employment_status`, `_fill_hospital_affiliation` |
 | `licensure.py` | F1 | State licences, plus the DEA and NPI numbers | `_fill_licensure`, `_fill_dea_npi` |
