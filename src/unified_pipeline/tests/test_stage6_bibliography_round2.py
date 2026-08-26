@@ -1,6 +1,8 @@
 """Round 2 of PR #625 review on `stage6/sections/bibliography.py`.
 
-Four fixes, five threads (two threads share one fix):
+Five fixes, five threads (two threads share one fix), plus a follow-up
+comment on the print-vs-logger thread naming two prints the first pass
+missed:
 
 - 3850074822 / 3850078575: the insertion anchor for each bibliography
   subsection was re-resolved by indexing ``self.doc.paragraphs[insert_idx]``
@@ -21,6 +23,14 @@ Four fixes, five threads (two threads share one fix):
   increment after the insertion actually lands on the paragraph.
 - 3850161322: the tracked-insertion writer's exception handler printed a
   ``self.verbose``-gated warning instead of using the project logger.
+- follow-up on 3850161322 ("there are 2 more print statements on lines 199
+  and 203"): ``_fill_bibliography`` itself still had two ``self.verbose``-gated
+  prints -- a "could not find section header" warning and a per-section
+  "N entries -> header" progress line. Neither string matches
+  ``orchestrator.py``'s ``PROGRESS_PATTERNS`` or
+  ``run_corpus_batch.sh``'s four literal greps, so converting them is safe.
+  Both now log unconditionally: warning for the not-found case, info for
+  the progress line.
 
 Run with:
 
@@ -314,6 +324,63 @@ def test_bibliography_renders_when_enrichment_fields_are_non_string_or_none():
     citation_texts = [p.text for p in gen.doc.paragraphs[header_idx:header_idx + 3]]
     assert "1. Doe J. A study with odd enrichment fields. J. 2024;1:1-2." in citation_texts
     assert gen.stats["entries_inserted"] == 1
+
+
+# --- review thread: 2 more prints on `_fill_bibliography` itself (#625) ---
+#
+# `_add_citation_with_bold_author_as_insertion`'s print was fixed above
+# (3850161322); the reviewer's follow-up named two more, in
+# `_fill_bibliography` -- the "could not find section header" warning and
+# the per-section "N entries -> header" progress line. Both were gated on
+# `self.verbose`; the conversion (matching aeea7a7's earlier one in this
+# same file) drops the gate so the log always fires, at a level chosen by
+# content: warning for the not-found case, info for plain progress.
+
+
+def test_missing_section_header_logs_warning_via_project_logger_not_print(caplog, capsys):
+    gen = _generator()
+    doc = Document()  # no bibliography headers at all
+    gen.doc = doc
+
+    entries = {"S1": [_citation_entry("Doe J. A study. J. 2024;1:1-2.", "Doe J", 2024)]}
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage6.sections.bibliography"):
+        gen._fill_bibliography(entries, cv_owner={}, document_uid="")  # must not raise
+
+    assert any(
+        "Could not find section header" in record.message
+        and "Peer-reviewed Research Articles:" in record.message
+        for record in caplog.records
+    )
+    # Nothing went to stdout -- the print() is gone, not just quieter.
+    assert capsys.readouterr().out == ""
+    # The header was never found, so nothing was inserted.
+    assert gen.stats["entries_inserted"] == 0
+
+
+def test_section_entry_count_logs_info_via_project_logger_not_print(caplog, capsys):
+    gen = _generator()
+
+    entries = {
+        "S1": [
+            _citation_entry("Alpha A. Study one. J1. 2020;1:1-2.", "Alpha A", 2020),
+            _citation_entry("Beta B. Study two. J2. 2022;2:2-3.", "Beta B", 2022),
+        ]
+    }
+
+    with caplog.at_level(logging.INFO, logger="unified_pipeline.stage6.sections.bibliography"):
+        gen._fill_bibliography(entries, cv_owner={}, document_uid="")
+
+    assert any(
+        record.levelno == logging.INFO
+        and "S1" in record.message
+        and "2 entries" in record.message
+        and "Peer-reviewed Research Article" in record.message  # header_text[:30]
+        for record in caplog.records
+    )
+    # Nothing went to stdout -- the print() is gone, not just quieter.
+    assert capsys.readouterr().out == ""
+    assert gen.stats["entries_inserted"] == 2
 
 
 if __name__ == "__main__":

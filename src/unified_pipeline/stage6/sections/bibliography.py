@@ -195,12 +195,10 @@ class BibliographySection:
             # Find the section header in the template
             section_idx = self._find_paragraph_with_text(header_text)
             if section_idx is None:
-                if self.verbose:
-                    print(f"  Warning: Could not find section header '{header_text}'")
+                logger.warning("Could not find section header %r", header_text)
                 continue
 
-            if self.verbose:
-                print(f"  {code}: {len(pubs)} entries -> '{header_text[:30]}...'")
+            logger.info("%s: %d entries -> '%s...'", code, len(pubs), header_text[:30])
 
             # Sort reverse chronologically (most recent first)
             pubs_sorted = sort_entries_reverse_chronological(pubs)
