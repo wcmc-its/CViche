@@ -402,13 +402,16 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 1.3 peers do not import peers | 0 | 0 | ✓ |
 | 1.4 core does not import the web backend | 0 | 1 | ✗ |
 | 2.1 no `db.query(` in `api/` | falling | 34 | ratchet |
-| 3.x oversized-function debt (excess lines) | falling | 5759 | ratchet |
+| 3.x oversized-function debt (excess lines) | falling | 5679 | ratchet |
 | 3.7 no metaprogramming | 0 | 0 (1 waived) | ~ |
 | 3.7 dynamic attribute access (non-literal) | falling | 8 | ratchet |
 | 5.4 bare swallows (`except Exception: pass`) | falling | 6 | ratchet |
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
 
 <!-- check_standards:auto:end -->
+
+
+
 
 
 

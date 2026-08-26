@@ -8,6 +8,7 @@ The key is total on purpose. A record with no parseable date sorts to (0, 0, 0)
 -- last -- and a current one to (9999, 12, 31) -- first. Neither raises, because
 a section that raises mid-render loses the whole document.
 """
+from collections.abc import Mapping
 from typing import Dict, List
 
 from ..parsing.dates import _parse_date_components
@@ -27,14 +28,32 @@ def extract_sort_date(entry: Dict) -> tuple:
     Returns:
         Tuple (year, month, day) for sorting
     """
-    fields = entry.get('extracted_fields') or {}
+    # Total over malformed payloads too: a truthy non-dict (a stray list, say)
+    # must sort to (0, 0, 0), not AttributeError on fields.get(). This subsumes
+    # the `or {}` form -- that one still reaches .get() on a truthy non-dict.
+    raw_fields = entry.get('extracted_fields')
+    fields = raw_fields if isinstance(raw_fields, Mapping) else {}
 
     # Try various date fields in order of preference
+    #
+    # `recertification_date` / `year_certified` are F2 (Board Certification)
+    # fields -- the schema (field_schemas_v1.json / v1.1.json) defines both
+    # nowhere else, so no other section's entries can carry them and no other
+    # section's sort key can change by adding them here (#625 thread
+    # 3850478580: the sort was wired into board_certification.py but its real
+    # date fields weren't in this list, so real F2 entries all keyed to
+    # (0, 0, 0) and kept their input order). `recertification_date` is placed
+    # near `end_date` and `year_certified` near `start_date` because a
+    # recertification is the more recent event for a certification renewed
+    # over time, so it should dominate `year_certified` the same way an
+    # `end_date` dominates a `start_date`.
     date_candidates = [
         fields.get('end_date', ''),
+        fields.get('recertification_date', ''),
         fields.get('year', ''),
         fields.get('year_awarded', ''),
         fields.get('start_date', ''),
+        fields.get('year_certified', ''),
         fields.get('date', ''),
         fields.get('publication_date', ''),
     ]
