@@ -12,6 +12,47 @@ from unified_pipeline.llm_client import call_llm
 
 logger = logging.getLogger(__name__)
 
+# Length cap for a single CV-derived string folded into the LLM prompt
+# (institution name, per-entry context, or the built owner-context string).
+# Matches the truncation convention already used for CV-derived text
+# elsewhere in this pipeline when it goes into an LLM prompt (e.g.
+# stage_3b_entry_classifier.py and stage_2_entry_extraction.py both cap
+# entry text at 500 chars for the same reason: a legitimate CV field this
+# long doesn't exist, so anything past it is already anomalous).
+_MAX_PROMPT_FIELD_LEN = 500
+
+
+def _sanitize_prompt_field(value, field_name: str) -> str:
+    """Validate one untrusted, CV-derived string before it is formatted into
+    the institution-lookup prompt (#642 review follow-up).
+
+    This is a structural boundary -- type, length, format -- not a second
+    injection filter; INSTITUTION_SYSTEM_PROMPT already tells the model to
+    treat this text as DATA, not instructions, and this function makes no
+    attempt to re-detect prompt injection.
+
+    - Type: anything that is not already a ``str`` never reaches an
+      f-string as ``str(value)`` (which would silently emit something like
+      ``<Institution object at 0x...>`` into the prompt). There is no
+      sensible way to recover an institution name or context string from an
+      arbitrary object, so the safer failure mode is to drop it -- logged,
+      replaced with "" -- rather than guess at a stringification.
+    - Length: a string longer than ``_MAX_PROMPT_FIELD_LEN`` is truncated
+      with a "... [truncated]" marker rather than the whole institution
+      being dropped, so one anomalously long field doesn't silently remove
+      an otherwise-valid lookup from the batch.
+    """
+    if not isinstance(value, str):
+        logger.warning(
+            "Non-string %s reached the institution-lookup prompt boundary (got %s); dropping",
+            field_name, type(value).__name__,
+        )
+        return ""
+    if len(value) > _MAX_PROMPT_FIELD_LEN:
+        return value[:_MAX_PROMPT_FIELD_LEN] + "... [truncated]"
+    return value
+
+
 # System prompt for institution resolution
 INSTITUTION_SYSTEM_PROMPT = """You resolve institution names to their official names and geographic locations.
 
@@ -142,11 +183,15 @@ def lookup_institutions_llm(
         - observed_model: the model that actually served the call (#459), or
           None on failure
     """
-    # Build user prompt
-    owner_context = _build_owner_context(cv_owner_location)
+    # Build user prompt. Every piece below is CV-derived (ultimately from
+    # stage-4 LLM output), so it is validated at this boundary -- type,
+    # length -- before being formatted into the prompt (#642 review).
+    owner_context = _sanitize_prompt_field(_build_owner_context(cv_owner_location), "owner_context")
 
     lines = [f"CV OWNER CONTEXT: {owner_context}", "", "INSTITUTIONS TO RESOLVE:"]
     for inst_id, inst_name, context in batch:
+        inst_name = _sanitize_prompt_field(inst_name, "institution_name")
+        context = _sanitize_prompt_field(context, "context")
         if context:
             lines.append(f"[{inst_id}] {inst_name}  (context: {context})")
         else:
@@ -155,7 +200,7 @@ def lookup_institutions_llm(
     user_prompt = '\n'.join(lines)
 
     if verbose:
-        print(f"    LLM batch: {len(batch)} institutions")
+        logger.info("LLM batch: %d institutions", len(batch))
 
     try:
         messages = [
@@ -182,7 +227,7 @@ def lookup_institutions_llm(
             )
 
         if verbose:
-            print(f"    LLM resolved {len(results)} institutions (cost: ${cost:.4f})")
+            logger.info("LLM resolved %d institutions (cost: $%.4f)", len(results), cost)
 
         # Third element is what actually served the call: the `model` param
         # is a default no orchestrator passes, so recording it stamped every

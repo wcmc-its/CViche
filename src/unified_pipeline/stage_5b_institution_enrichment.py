@@ -171,10 +171,10 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
     cv_owner_location = data.get('cv_owner_location')
 
     if verbose:
-        print(f"\n{'='*60}")
-        print(f"Stage 5b: Institution Enrichment (LLM) - {document_uid}")
-        print(f"{'='*60}")
-        print(f"Model: {model}")
+        logger.info("%s", '=' * 60)
+        logger.info("Stage 5b: Institution Enrichment (LLM) - %s", document_uid)
+        logger.info("%s", '=' * 60)
+        logger.info("Model: %s", model)
 
     # Load cv_owner_location from Stage 4 if not in input
     if not cv_owner_location or not cv_owner_location.get('inference_success'):
@@ -198,7 +198,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                     stage4_data = json.load(f)
                 cv_owner_location = stage4_data.get('cv_owner_location')
                 if cv_owner_location and cv_owner_location.get('inference_success') and verbose:
-                    print(f"Loaded cv_owner_location from Stage 4 output")
+                    logger.info("Loaded cv_owner_location from Stage 4 output")
             except (OSError, json.JSONDecodeError) as e:
                 logger.warning("Could not load Stage 4 context from %s: %s", candidates[0], e)
 
@@ -208,9 +208,12 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
             primary = cv_owner_location.get('primary_location') or {}
             if not isinstance(primary, dict):
                 primary = {}
-            print(f"CV owner context: {metro} ({primary.get('city', '')}, {primary.get('state', '')})")
+            logger.info(
+                "CV owner context: %s (%s, %s)",
+                metro, primary.get('city', ''), primary.get('state', ''),
+            )
         else:
-            print("CV owner context: not available")
+            logger.info("CV owner context: not available")
 
     # Institutions are disambiguated using this owner context (see
     # INSTITUTION_SYSTEM_PROMPT rule 3), so it has to be part of the cache
@@ -228,11 +231,11 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
     )
 
     if verbose:
-        print(f"Total entries: {len(entries)}")
-        print(f"Entries needing institution lookup: {institution_entries}")
-        print(f"  (Codes: {', '.join(INSTITUTION_CODES)})")
+        logger.info("Total entries: %d", len(entries))
+        logger.info("Entries needing institution lookup: %d", institution_entries)
+        logger.info("  (Codes: %s)", ', '.join(INSTITUTION_CODES))
         if refresh_cache:
-            print(f"  ** Refresh mode: ignoring cached entries **")
+            logger.info("  ** Refresh mode: ignoring cached entries **")
 
     # Load cache
     load_institution_cache()
@@ -312,8 +315,8 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
     cached_count = sum(1 for idx in entry_to_cache_key if idx not in needs_lookup_indices)
 
     if verbose:
-        print(f"\nCache hits: {cached_count}")
-        print(f"Institutions needing LLM lookup: {uncached_count}")
+        logger.info("Cache hits: %d", cached_count)
+        logger.info("Institutions needing LLM lookup: %d", uncached_count)
 
     # Batch LLM lookups
     total_cost = 0.0
@@ -333,7 +336,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
             batches.append(batch)
 
         if verbose:
-            print(f"LLM batches: {len(batches)} (batch size: {BATCH_SIZE})")
+            logger.info("LLM batches: %d (batch size: %d)", len(batches), BATCH_SIZE)
 
         for batch_idx, batch in enumerate(batches):
             # Prepare for LLM call
@@ -352,7 +355,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
             # None means the LLM call itself failed — don't cache anything
             if results is None:
                 if verbose:
-                    print(f"    Batch failed — skipping cache writes for {len(batch)} institutions")
+                    logger.info("Batch failed — skipping cache writes for %d institutions", len(batch))
                 continue
 
             # Process results (LLM call succeeded)
@@ -377,12 +380,12 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
                     if verbose:
                         city = result.get('city', '')
                         state = result.get('state', '')
-                        print(f"    {name[:40]:40s} → {city}, {state}")
+                        logger.info("%-40s → %s, %s", name[:40], city, state)
                 else:
                     # LLM succeeded but didn't return this institution — safe to cache negative
                     cache.set_cached(cache_key, None)
                     if verbose:
-                        print(f"    {name[:40]:40s} → (no result)")
+                        logger.info("%-40s → (no result)", name[:40])
 
     # Save cache
     save_institution_cache()
@@ -395,9 +398,9 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
     )
 
     if verbose:
-        print(f"\nInstitutions enriched: {enriched_count}/{institution_entries}")
-        print(f"LLM calls: {llm_calls}")
-        print(f"Total cost: ${total_cost:.4f}")
+        logger.info("Institutions enriched: %d/%d", enriched_count, institution_entries)
+        logger.info("LLM calls: %d", llm_calls)
+        logger.info("Total cost: $%.4f", total_cost)
 
     # Prepare output
     data['entries'] = entries
@@ -422,7 +425,7 @@ def run_stage5b(input_path: str, output_path: str = None, verbose: bool = True,
         json.dump(data, f, indent=2, ensure_ascii=False)
 
     if verbose:
-        print(f"\nSaved to: {output_path}")
+        logger.info("Saved to: %s", output_path)
 
     return output_path
 
@@ -455,7 +458,7 @@ def main():
         if candidates:
             input_path = str(candidates[0])
         else:
-            print(f"Error: Could not find input file: {args.input}")
+            logger.error("Could not find input file: %s", args.input)
             sys.exit(1)
 
     output_path = run_stage5b(
@@ -464,7 +467,7 @@ def main():
         model=args.model,
         refresh_cache=args.refresh_cache
     )
-    print(f"\nGenerated: {output_path}")
+    logger.info("Generated: %s", output_path)
 
 
 if __name__ == '__main__':
