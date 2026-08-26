@@ -179,8 +179,7 @@ class BibliographySection:
         pub_codes = ['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']
         total_pubs = sum(len(entries_by_code.get(code, [])) for code in pub_codes)
 
-        if self.verbose:
-            print(f"Filling Bibliography ({total_pubs} publications)...")
+        logger.info("Filling Bibliography (%d publications)...", total_pubs)
 
         # Process each publication type
         for code in pub_codes:

@@ -335,6 +335,11 @@ def test_bibliography_renders_when_enrichment_fields_are_non_string_or_none():
 # `self.verbose`; the conversion (matching aeea7a7's earlier one in this
 # same file) drops the gate so the log always fires, at a level chosen by
 # content: warning for the not-found case, info for plain progress.
+#
+# The file's last print -- `_fill_bibliography`'s own verbose-gated
+# "Filling Bibliography (N publications)..." line -- is folded into the
+# INFO test below rather than given its own test, since it already drives
+# `_fill_bibliography` at INFO level.
 
 
 def test_missing_section_header_logs_warning_via_project_logger_not_print(caplog, capsys):
@@ -376,6 +381,14 @@ def test_section_entry_count_logs_info_via_project_logger_not_print(caplog, caps
         and "S1" in record.message
         and "2 entries" in record.message
         and "Peer-reviewed Research Article" in record.message  # header_text[:30]
+        for record in caplog.records
+    )
+    # The verbose-gated "Filling Bibliography (N publications)..." print is
+    # gone too -- it now always fires as an INFO log record.
+    assert any(
+        record.levelno == logging.INFO
+        and "Filling Bibliography" in record.message
+        and "2 publications" in record.message
         for record in caplog.records
     )
     # Nothing went to stdout -- the print() is gone, not just quieter.
