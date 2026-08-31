@@ -3,6 +3,6 @@
   "3.7 dynamic attribute access (non-literal)": 8,
   "3.7 dynamic attribute access (non-literal) [waived]": 0,
   "3.7 no metaprogramming [waived]": 1,
-  "5.4 bare swallows (`except Exception: pass`)": 5,
+  "5.4 bare swallows (`except Exception: pass`)": 4,
   "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)": 4
 }
