@@ -10,29 +10,31 @@ every row but the first, so the writer looks past the fields at the raw text and
 counts lines: 3+ lines, or 2 lines with no extracted role, means re-parse rather
 than trust the fields.
 
-`_add_multiline_leadership_rows` is that re-parse, and its shape is dictated by
-what a flattened source table looks like once the column structure is gone:
-
-    "Committee (Chair 1999-2010)"       parenthetical role + date range
-    "Committee | 1996-Present"          pipe-separated date column
-    "Committee    1999-2010"            trailing date
-    "1999-2010"                         a date whose activity is on another line
-
-The last case is why `dates_pool` exists. When column 1 and column 2 of a source
-table are extracted as separate runs of lines, the dates arrive orphaned; they
-are matched back to date-less items by position, forward, because both columns
-come from the same table and are therefore in the same order.
-
-A line carrying several parentheticals ("(Vice Chair 2006-2008) (Chair
-2008-2010)") is one role held under changing titles, so it becomes one row: the
-latest date range, with every title collected into the activity text.
+`_add_multiline_leadership_rows` is that re-parse. The line parser itself is
+`_parse_flattened_committee_lines` in `stage6.parsing`, shared with section P
+next door (#572 -- P used to run a drifted copy that lost dates); its docstring
+describes the flattened-table shapes it handles. O's own job is folding the
+parsed role titles back into the activity text, because its table has no role
+column for them.
 """
-import re
 from typing import Dict, List
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
+from ..normalization import _committee_cell_text
+from ..parsing import _parse_flattened_committee_lines
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
+
+# Canonical Section O header, verbatim from
+# key_files/wcm_cv_template_faculty_october_2022_final.docx paragraph 156.
+# Exact match only (#625 review): the old fallback searched for the bare
+# substring "Leadership", which also matches "Clinical Leadership" (para 104),
+# "Leadership and mentoring in programs" (para 138), and "Leadership in
+# Extramural Organizations" (para 168) -- all of which appear in the same
+# template and precede or follow the real O section. A substring hit on any
+# of those would bind this table to the wrong section and silently write
+# leadership rows into someone else's content.
+_LEADERSHIP_SECTION_HEADER = "INSTITUTIONAL LEADERSHIP ACTIVITIES"
 
 
 class LeadershipSection:
@@ -49,10 +51,13 @@ class LeadershipSection:
         if self.verbose:
             print(f"Filling Institutional Leadership ({len(entries)} entries)...")
 
-        # Find Leadership section
-        section_idx = self._find_paragraph_with_text("INSTITUTIONAL LEADERSHIP")
-        if section_idx is None:
-            section_idx = self._find_paragraph_with_text("Leadership")
+        # Find Leadership section by exact canonical header (#625 review) --
+        # fail closed rather than risk binding to a near-miss heading. See
+        # _LEADERSHIP_SECTION_HEADER above for why a substring match is unsafe
+        # here: writing real content into the wrong section is worse than
+        # omitting it (entries not rendered here are still picked up by the
+        # unrendered-record recovery pass that runs after all sections fill).
+        section_idx = self._find_paragraph_exact(_LEADERSHIP_SECTION_HEADER)
         if section_idx is None:
             return
 
@@ -100,6 +105,12 @@ class LeadershipSection:
 
     def _add_leadership_row(self, table, role: str, institution: str, dates: str):
         """Add a single row to leadership table."""
+        # Defensive: never write a non-str (dict/list) into a Word cell -- it
+        # raises deep in python-docx and aborts the whole document (#256).
+        # Sibling P's _add_committee_row already does this (#625 review).
+        role = _committee_cell_text(role)
+        institution = _committee_cell_text(institution)
+        dates = _committee_cell_text(dates)
         row = table.add_row()
         num_cols = len(row.cells)
         if num_cols >= 3:
@@ -119,105 +130,19 @@ class LeadershipSection:
     def _add_multiline_leadership_rows(self, table, lines: List[str]):
         """Parse multiple leadership/committee lines and add separate rows.
 
-        Handles patterns like:
-        - "Committee Name (Chair 1999-2010)" - parenthetical role+date
-        - "Committee Name | 1999-2010" - pipe-separated date column
-        - "Committee Name    1999-2010" - trailing date
-        - Lines followed by date-only lines (from table column extraction)
+        The line parser is `_parse_flattened_committee_lines`, shared with
+        section P (#572). O's table has no role column, so parenthetical role
+        titles are folded back into the activity text: "Committee (Chair)".
         """
-
-        # Date patterns
-        year_pattern = re.compile(r'^(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)$', re.IGNORECASE)
-        trailing_date = re.compile(r'(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)\s*$', re.IGNORECASE)
-        # Parenthetical with role+date: "(Chair 1999-2010)" or "(Vice Chair 2006-2008)"
-        paren_role_date = re.compile(r'\(([^)]*?)(\d{4})\s*[-–]\s*(\d{4}|present)\s*\)', re.IGNORECASE)
-
-        items = []  # (activity_text, institution, date)
-        dates_pool = []
-
-        for line in lines:
-            # Skip empty or header-like lines
-            if not line or line.lower() in ['dates', 'role', 'committee', 'institution']:
+        for item in _parse_flattened_committee_lines(lines):
+            if item.roles:
+                activity = f"{item.activity} ({'; '.join(item.roles)})"
+            else:
+                activity = item.activity
+            # Skip if nothing renderable remains -- matches P's guard on the
+            # same shared parser's output (#625 review); a role-and-date-free
+            # parenthetical (e.g. a bare "(2010-2013)") would otherwise add a
+            # blank leadership row.
+            if not activity:
                 continue
-
-            # Handle pipe separator from table column extraction
-            # e.g., "Committee (Chair 2002-present) | 1996-Present"
-            if '|' in line:
-                parts = [p.strip() for p in line.split('|') if p.strip()]
-                if len(parts) >= 2 and trailing_date.match(parts[-1]):
-                    # Last part is a date, rest is the activity
-                    activity = ' | '.join(parts[:-1])
-                    pipe_date = parts[-1]
-                    # Also extract any parenthetical role+date from the activity
-                    paren_match = paren_role_date.search(activity)
-                    if paren_match:
-                        role_text = paren_match.group(1).strip().rstrip(',')
-                        clean_activity = paren_role_date.sub('', activity).strip()
-                        if role_text:
-                            clean_activity = f"{clean_activity} ({role_text})"
-                    else:
-                        clean_activity = activity
-                    items.append((clean_activity, '', pipe_date))
-                    continue
-                elif len(parts) == 1:
-                    line = parts[0]
-                # else fall through to normal processing
-
-            # Check if this is a date-only line
-            if year_pattern.match(line):
-                dates_pool.append(line)
-                continue
-
-            # Check for parenthetical role+date: "Committee (Chair 1999-2010)"
-            paren_match = paren_role_date.search(line)
-            if paren_match:
-                role_text = paren_match.group(1).strip().rstrip(',')
-                start_year = paren_match.group(2)
-                end_year = paren_match.group(3)
-                item_date = f"{start_year}-{end_year}"
-                # Clean the activity text: remove the parenthetical
-                clean_activity = paren_role_date.sub('', line).strip()
-                if role_text:
-                    clean_activity = f"{clean_activity} ({role_text})"
-                # Check for multiple parentheticals on same line
-                # e.g., "(Vice Chair 2006-2008) (Chair 2008-2010)"
-                all_parens = list(paren_role_date.finditer(line))
-                if len(all_parens) > 1:
-                    # Take the latest date range
-                    last = all_parens[-1]
-                    item_date = f"{last.group(2)}-{last.group(3)}"
-                    # Reconstruct clean activity with all roles
-                    clean_activity = paren_role_date.sub('', line).strip()
-                    roles = [m.group(1).strip().rstrip(',') for m in all_parens if m.group(1).strip()]
-                    if roles:
-                        clean_activity = f"{clean_activity} ({'; '.join(roles)})"
-                items.append((clean_activity, '', item_date))
-                continue
-
-            # Check if line has embedded date at the end (not in parentheses)
-            date_match = trailing_date.search(line)
-            if date_match:
-                item_text = line[:date_match.start()].strip()
-                item_date = date_match.group(1)
-                if item_text:
-                    items.append((item_text, '', item_date))
-                else:
-                    # Just a date with no text - add to pool
-                    dates_pool.append(item_date)
-                continue
-
-            # Plain text line - no date found
-            items.append((line, '', ''))
-
-        # Match dates_pool to items without dates using forward mapping.
-        # Both items and dates come from the same source table (column 1 → items,
-        # column 2 → dates), so they're always in the same order.
-        date_idx = 0
-        for i in range(len(items)):
-            if not items[i][2] and date_idx < len(dates_pool):
-                items[i] = (items[i][0], items[i][1], dates_pool[date_idx])
-                date_idx += 1
-
-        # Add rows for each item
-        for role, institution, item_date in items:
-            self._add_leadership_row(table, role, institution, item_date)
+            self._add_leadership_row(table, activity, '', item.dates)

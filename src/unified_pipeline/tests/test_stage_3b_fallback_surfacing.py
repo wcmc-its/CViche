@@ -29,6 +29,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import unified_pipeline.stage_3b_entry_classifier as stage_3b  # noqa: E402
+# call_llm is stubbed at the module that actually calls it: the #522 split
+# moved every classification call site into stage3b/classify.py, so patching
+# the facade's copy would no longer intercept anything (#496).
+import unified_pipeline.stage3b.classify as stage3b_classify  # noqa: E402
 from unified_pipeline.stage_3b_entry_classifier import (  # noqa: E402
     TaxonomyContext,
     classify_entries_batch,
@@ -49,7 +53,7 @@ def _context(codes=("H",)):
     })
 
 
-def _ok_response(indices, code="H"):
+def _ok_response(indices, code="H", model="test-model"):
     return {
         "content": json.dumps({"classifications": [
             {"index": i, "code": code, "confidence": 0.9} for i in indices
@@ -57,6 +61,7 @@ def _ok_response(indices, code="H"):
         "prompt_tokens": 100,
         "completion_tokens": 20,
         "cost": 0.001,
+        "model": model,
     }
 
 
@@ -68,7 +73,7 @@ def _boom(**kwargs):
 
 def test_failed_batch_falls_back_and_is_counted(monkeypatch):
     """An LLM error still falls back per entry, but the stats say so."""
-    monkeypatch.setattr(stage_3b, "call_llm", _boom)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
 
     results, stats = classify_entries_batch(
         _entries(["Dean's Award for Excellence, 2015", "Teaching Prize, 2018"]),
@@ -84,7 +89,7 @@ def test_failed_batch_falls_back_and_is_counted(monkeypatch):
 
 def test_failed_batch_logs_error_with_batch_info(monkeypatch, caplog):
     """The old print is now a logger error carrying exception + batch context."""
-    monkeypatch.setattr(stage_3b, "call_llm", _boom)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
 
     with caplog.at_level(logging.ERROR, logger=stage_3b.logger.name):
         classify_entries_batch(
@@ -101,8 +106,52 @@ def test_failed_batch_logs_error_with_batch_info(monkeypatch, caplog):
     assert "HONORS AND AWARDS" in rec.getMessage()
 
 
+def test_entry_with_none_hierarchy_degrades_instead_of_crashing(monkeypatch, caplog):
+    """An entry with an explicit "hierarchy": None must not crash
+    _classify_one_batch's bare " > ".join(...) calls -- neither the one that
+    labels the LLM prompt nor the one inside the except handler (where
+    raising would mask the original exception being handled instead of just
+    logging it). Route this entry through a FAILING call_llm so the batch
+    reaches both guarded call sites in the same run."""
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
+
+    entries = [{"text": "Dean's Award for Excellence, 2015", "hierarchy": None}]
+    with caplog.at_level(logging.ERROR, logger=stage_3b.logger.name):
+        results, stats = classify_entries_batch(entries, _context(), TAXONOMY)
+
+    assert results[0]["classification_source"] == "fallback"
+    assert stats["failed_batches"] == 1
+    records = [r for r in caplog.records
+               if "batch classification failed" in r.getMessage()]
+    assert len(records) == 1
+    # The except-handler's own hierarchy_path build (classify.py) must have
+    # degraded None to its default rather than raising TypeError there,
+    # which would have masked the RuntimeError this test actually raises.
+    assert "(no hierarchy)" in records[0].getMessage()
+
+
+def test_all_batches_fail_when_more_than_one_forms(monkeypatch):
+    """Every failed_batches assertion elsewhere in the suite tops out at 1,
+    always paired with llm_batches of 1, 2, or 3 -- no test drives
+    batch_size < len(entries) (so the loop forms MULTIPLE internal batches)
+    where every one of them raises. Pin failed_batches == llm_batches for
+    llm_batches > 1, not just the trivial 1-of-1 case."""
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
+
+    results, stats = classify_entries_batch(
+        _entries(["Award A", "Award B", "Award C", "Award D"]),
+        _context(), TAXONOMY, batch_size=2,
+    )
+
+    assert [r["classification_source"] for r in results] == ["fallback"] * 4
+    assert stats["llm_batches"] == 2
+    assert stats["failed_batches"] == 2
+
+
 def test_successful_batch_counts_llm_classified(monkeypatch):
-    monkeypatch.setattr(stage_3b, "call_llm", lambda **kw: _ok_response([0, 1]))
+    monkeypatch.setattr(
+        stage3b_classify, "call_llm",
+        lambda **kw: _ok_response([0, 1], model="test-model"))
 
     results, stats = classify_entries_batch(
         _entries(["Dean's Award for Excellence, 2015", "Teaching Prize, 2018"]),
@@ -113,11 +162,93 @@ def test_successful_batch_counts_llm_classified(monkeypatch):
     assert stats["failed_batches"] == 0
     assert stats["llm_classified"] == 2
     assert stats["fallback_entries"] == 0
+    assert stats["model"] == "test-model"
+
+
+def test_mixed_success_and_failure_batches_merge_stats(monkeypatch):
+    """Two internal batches in ONE classify_entries_batch call: the first
+    succeeds, the second raises. Pins the cross-batch aggregation in
+    classify_entries_batch itself, distinct from run_stage_3b's per-group
+    aggregation (each hierarchy group is its own classify_entries_batch call
+    there, so that path never exercises summing multiple _BatchStats within
+    a single call)."""
+    calls = {"n": 0}
+
+    def call(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _ok_response([0, 1], code="H")
+        raise RuntimeError("LLM unavailable")
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        _entries([
+            "Award A",
+            "Award B",
+            "Award C",
+            "Award D",
+        ]),
+        _context(),
+        TAXONOMY,
+        batch_size=2,
+    )
+
+    assert calls["n"] == 2
+
+    assert [r["classification_source"] for r in results] == [
+        "llm",
+        "llm",
+        "fallback",
+        "fallback",
+    ]
+
+    assert stats["llm_batches"] == 2
+    assert stats["failed_batches"] == 1
+    assert stats["llm_classified"] == 2
+    assert stats["fallback_entries"] == 2
+    assert stats["entries_classified"] == 4
+
+
+@pytest.mark.parametrize(
+    "response_json",
+    [
+        {"classifications": None},
+        {"classifications": {}},
+        {"classifications": "not-a-list"},
+    ],
+)
+def test_invalid_classifications_container_falls_back(monkeypatch, response_json):
+    """A malformed *container* (not just a malformed element inside it) must
+    not crash the batch. ``{"classifications": None}`` used to reach
+    ``for c in classifications`` uncaught (that loop is deliberately outside
+    the call_llm try/except) and raise TypeError, escaping
+    classify_entries_batch entirely instead of falling back per entry."""
+    def call(**kwargs):
+        return {
+            "content": json.dumps(response_json),
+            "prompt_tokens": 40,
+            "completion_tokens": 8,
+            "cost": 0.0008,
+            "model": "test-model",
+        }
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        _entries(["Award A", "Award B"]),
+        _context(),
+        TAXONOMY,
+        batch_size=2,
+    )
+
+    assert len(results) == 2
+    assert all(r["classification_source"] == "fallback" for r in results)
 
 
 def test_omitted_index_falls_back_without_batch_failure(monkeypatch):
     """An entry the LLM skipped is a fallback, but NOT a failed batch."""
-    monkeypatch.setattr(stage_3b, "call_llm", lambda **kw: _ok_response([0]))
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0]))
 
     results, stats = classify_entries_batch(
         _entries(["Dean's Award for Excellence, 2015", "Teaching Prize, 2018"]),
@@ -132,7 +263,7 @@ def test_omitted_index_falls_back_without_batch_failure(monkeypatch):
 def test_empty_entries_never_attempt_llm(monkeypatch):
     def _fail(**kwargs):
         raise AssertionError("call_llm must not run for empty-text entries")
-    monkeypatch.setattr(stage_3b, "call_llm", _fail)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _fail)
 
     results, stats = classify_entries_batch(
         _entries(["", "   "]), _context(), TAXONOMY)
@@ -170,7 +301,7 @@ _RUN_ENTRIES = [
 
 def test_run_fails_when_every_batch_fails(monkeypatch, tmp_path):
     """Zero successful LLM classifications in a nonempty run -> raise, no output."""
-    monkeypatch.setattr(stage_3b, "call_llm", _boom)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
     stage_2, stage_3a = _write_run_fixtures(tmp_path, _RUN_ENTRIES, _MAPPINGS)
     out_dir = tmp_path / "out"
 
@@ -195,7 +326,7 @@ def test_run_survives_partial_failure_and_reports_stats(monkeypatch, tmp_path):
             raise RuntimeError("ThrottlingException: rate exceeded")
         return _ok_response([0], code="I")
 
-    monkeypatch.setattr(stage_3b, "call_llm", _first_call_fails)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _first_call_fails)
     stage_2, stage_3a = _write_run_fixtures(tmp_path, _RUN_ENTRIES, _MAPPINGS)
     out_dir = tmp_path / "out"
 
@@ -219,11 +350,43 @@ def test_run_survives_partial_failure_and_reports_stats(monkeypatch, tmp_path):
     assert sources == ["fallback", "llm"]
 
 
+def test_run_with_zero_entries_does_not_raise_zero_llm_error(monkeypatch, tmp_path):
+    """Zero entries (empty content list) is NOT the same state as "entries
+    exist but their text is blank" (see test_run_with_only_empty_entries_does_not_fail
+    below): here there are no hierarchy groups at all, so llm_batches stays 0
+    and the "zero LLM classifications" guard -- which only fires when
+    llm_batches > 0 -- must not raise."""
+    def _fail(**kwargs):
+        raise AssertionError("call_llm must not be called")
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", _fail)
+
+    stage_2, stage_3a = _write_run_fixtures(
+        tmp_path,
+        [],
+        _MAPPINGS,
+    )
+    out_dir = tmp_path / "out"
+
+    result = stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV",
+        stage_2_path=str(stage_2),
+        stage_3a_path=str(stage_3a),
+        output_dir=str(out_dir),
+    )
+
+    output = json.loads(Path(result["output_path"]).read_text())
+
+    assert output["entries"] == []
+    assert output["meta"]["classification_stats"]["llm_batches"] == 0
+    assert output["meta"]["classification_stats"]["failed_batches"] == 0
+
+
 def test_run_with_only_empty_entries_does_not_fail(monkeypatch, tmp_path):
     """No LLM call was ever attempted -> nothing failed, run completes."""
     def _fail(**kwargs):
         raise AssertionError("call_llm must not run for empty-text entries")
-    monkeypatch.setattr(stage_3b, "call_llm", _fail)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _fail)
 
     empty_entries = [
         {"element_type": "text", "text": "  ", "hierarchy": ["HONORS AND AWARDS"]},
