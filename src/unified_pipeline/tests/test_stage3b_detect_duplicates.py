@@ -127,6 +127,27 @@ def test_m2_first_t_second_still_marks_the_t_entry_as_duplicate():
 
 
 # ---------------------------------------------------------------------------
+# Same non-M2 classification on both sides (neither M2/T preference branch
+# applies -- the plain `else` fallback decides)
+# ---------------------------------------------------------------------------
+
+def test_same_non_m2_code_on_both_sides_marks_the_second_entry_duplicate():
+    """Reviewer's case 9, "Same non-M2 classification": both entries share
+    identical text AND the identical non-M2, non-T taxonomy code (S1), so
+    neither of detect_duplicates's M2/T preference branches (`if`/`elif` on
+    code1/code2.startswith) has anything to prefer -- the plain `else:
+    mark second as duplicate` fallback decides, and the first entry (the
+    earlier index) survives untouched."""
+    text = "A randomized controlled trial of a new intervention for pediatric asthma"
+    entries = [_dup_entry(text, code="S1"), _dup_entry(text, code="S1")]
+    updated, pairs = classify.detect_duplicates(entries)
+
+    assert len(pairs) == 1
+    assert updated[1]["is_duplicate"] is True  # second entry, marked duplicate
+    assert "is_duplicate" not in updated[0]  # first entry, survives
+
+
+# ---------------------------------------------------------------------------
 # Similarity threshold boundary (detect_duplicates's `sim >= similarity_threshold` check)
 # ---------------------------------------------------------------------------
 
