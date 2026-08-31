@@ -65,12 +65,15 @@ def run_stage_3(
     print()
 
     # Run Stage 3b: Entry Classification
+    # No model= here: run_stage_3b's `model` parameter was removed, not
+    # forwarded (#644 review) -- it never reached call_llm(); stage_3b's
+    # model is pinned per-stage in llm_config.yaml. Stage 3a above still
+    # takes model= -- only 3b's copy of the dead parameter was removed.
     result_3b = run_stage_3b(
         document_uid=document_uid,
         stage_2_path=stage_2_path,
         stage_3a_path=result_3a["output_path"],
-        output_dir=output_dir_3b,
-        model=model
+        output_dir=output_dir_3b
     )
 
     print()
