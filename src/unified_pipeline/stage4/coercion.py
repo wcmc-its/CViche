@@ -5,10 +5,10 @@ name here. Pure functions over extracted-field dicts: no LLM calls, no I/O.
 """
 
 import re
-from typing import Dict, Any
+from typing import Any
 
 
-def coerce_field_value_types(extracted_fields: Dict[str, Any]) -> Dict[str, Any]:
+def coerce_field_value_types(extracted_fields: dict[str, Any]) -> dict[str, Any]:
     """Coerce LLM-extracted field values to the scalar types downstream stages assume.
 
     Stage 4 stores raw LLM JSON (the extraction call uses
@@ -37,7 +37,7 @@ def coerce_field_value_types(extracted_fields: Dict[str, Any]) -> Dict[str, Any]
 
     Raises:
         TypeError: if ``extracted_fields`` is not a dict. The declared return
-            type is ``Dict[str, Any]``; silently handing back a non-dict input
+            type is ``dict[str, Any]``; silently handing back a non-dict input
             unchanged would violate that contract for any caller that skips
             its own type check. Callers on an untrusted-JSON boundary (e.g.
             LLM output) must validate/guard before calling this function, not
@@ -60,7 +60,7 @@ def coerce_field_value_types(extracted_fields: Dict[str, Any]) -> Dict[str, Any]
             coerced[key] = value
     return coerced
 
-def normalize_dates(extracted_fields: Dict[str, Any]) -> Dict[str, Any]:
+def normalize_dates(extracted_fields: dict[str, Any]) -> dict[str, Any]:
     """
     Normalize date fields by splitting ranges into start_date and end_date.
 
@@ -288,7 +288,7 @@ ORCID_TAXONOMY_CODES = ('A', 'S0')        # profile-section codes that carry an 
 GRANT_EFFORT_TAXONOMY_PREFIX = 'M2'       # grant entries where percent-effort/FTE applies
 
 
-def _normalize_pmid(original_text: str, updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+def _normalize_pmid(original_text: str, updated: dict[str, Any], reformatted: dict[str, Any]) -> None:
     """Extract a PMID from the source text if the LLM didn't already fill it in."""
     if updated.get('pmid'):
         return
@@ -303,7 +303,7 @@ def _normalize_pmid(original_text: str, updated: Dict[str, Any], reformatted: Di
         }
 
 
-def _normalize_pmcid(original_text: str, updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+def _normalize_pmcid(original_text: str, updated: dict[str, Any], reformatted: dict[str, Any]) -> None:
     """Extract a PMCID from the source text if the LLM didn't already fill it in."""
     if updated.get('pmcid'):
         return
@@ -318,7 +318,7 @@ def _normalize_pmcid(original_text: str, updated: Dict[str, Any], reformatted: D
         }
 
 
-def _normalize_doi(original_text: str, updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+def _normalize_doi(original_text: str, updated: dict[str, Any], reformatted: dict[str, Any]) -> None:
     """Extract a DOI if missing, or normalize an existing one (strip doi.org/doi: prefixes)."""
     if not updated.get('doi'):
         doi_match = re.search(REGEX_PATTERNS['doi'], original_text)
@@ -347,7 +347,7 @@ def _normalize_doi(original_text: str, updated: Dict[str, Any], reformatted: Dic
         }
 
 
-def _normalize_orcid(original_text: str, updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+def _normalize_orcid(original_text: str, updated: dict[str, Any], reformatted: dict[str, Any]) -> None:
     """Extract an ORCID from the source text if the LLM didn't already fill it in."""
     if updated.get('orcid'):
         return
@@ -361,7 +361,7 @@ def _normalize_orcid(original_text: str, updated: Dict[str, Any], reformatted: D
         }
 
 
-def _normalize_authors_field(updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+def _normalize_authors_field(updated: dict[str, Any], reformatted: dict[str, Any]) -> None:
     """Rewrite the authors field to Vancouver style (LastName AB, LastName CD), if it changes anything."""
     if not updated.get('authors'):
         return
@@ -376,7 +376,7 @@ def _normalize_authors_field(updated: Dict[str, Any], reformatted: Dict[str, Any
         }
 
 
-def _clean_title_field(updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+def _clean_title_field(updated: dict[str, Any], reformatted: dict[str, Any]) -> None:
     """Strip leading status labels (e.g. "Featured:", "Submitted:") and stray punctuation from a title."""
     if not updated.get('title'):
         return
@@ -410,7 +410,7 @@ _FTE_PERCENT_PATTERNS = (
 )
 
 
-def _normalize_grant_effort(original_text: str, updated: Dict[str, Any], reformatted: Dict[str, Any]) -> None:
+def _normalize_grant_effort(original_text: str, updated: dict[str, Any], reformatted: dict[str, Any]) -> None:
     """Extract percent-effort/FTE for grant entries, if the LLM didn't already fill it in."""
     if updated.get('percent_effort'):
         return
@@ -441,9 +441,9 @@ def _normalize_grant_effort(original_text: str, updated: Dict[str, Any], reforma
 
 def apply_regex_post_processing(
     original_text: str,
-    extracted_fields: Dict[str, Any],
+    extracted_fields: dict[str, Any],
     taxonomy_code: str
-) -> tuple[Dict[str, Any], Dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Apply regex patterns to catch identifiers missed by LLM extraction.
 

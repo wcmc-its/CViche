@@ -26,7 +26,7 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Callable
+from typing import Any, Callable
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -84,8 +84,8 @@ from unified_pipeline.stage4.schemas import (  # noqa: F401
 def process_cv(
     docx_path: str,
     model: str = None,
-    cancel_check: Optional[Callable[[], None]] = None,
-) -> Dict[str, Any]:
+    cancel_check: Callable[[], None] | None = None,
+) -> dict[str, Any]:
     """
     Main pipeline: Load Stage 3b classified entries and extract fields.
 

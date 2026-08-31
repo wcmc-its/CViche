@@ -13,7 +13,7 @@ function in play (the #496 split-state lesson).
 
 import json
 import logging
-from typing import Dict, List, Any, Optional, Callable
+from typing import Any, Callable, NotRequired, TypedDict
 
 from openai import APITimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -68,17 +68,84 @@ class _RecoveredEntry(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     entry_id: str
-    fields: Dict[str, Any] = Field(default_factory=dict)
+    fields: dict[str, Any] = Field(default_factory=dict)
 
 
 class _RecoveryResponse(BaseModel):
     """Shape of the recovery LLM's JSON response, validated before use."""
 
-    recovered_entries: List[_RecoveredEntry] = Field(default_factory=list)
+    recovered_entries: list[_RecoveredEntry] = Field(default_factory=list)
     recovery_notes: str = ""
 
 
-def calculate_unextracted_content(original_text: str, extracted_fields: Dict[str, Any]) -> Dict[str, Any]:
+# The `entry` dict (`{'taxonomy_code': ..., 'extracted_fields': ..., ...}`)
+# stays dict[str, Any] throughout this module: it is produced by stage 3b and
+# consumed by stages 5 and 6, so a typed contract for it is cross-module and
+# belongs to a follow-up ticket, not this file.
+
+
+class UnextractedContentReport(TypedDict):
+    """Return shape of `calculate_unextracted_content`."""
+
+    unextracted_words: list[str]
+    extraction_coverage_percent: float
+    total_original_words: int
+    total_extracted_words: int
+
+
+class BatchExtractionResult(TypedDict):
+    """Return shape of `extract_fields_batch`.
+
+    `entries` is left as list[dict[str, Any]]: each item is the cross-stage
+    entry record described above, not a shape this module owns.
+    """
+
+    entries: list[dict[str, Any]]
+    cost: float
+    tokens: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+    success: bool
+    failed_groups: int
+
+
+class ExtractionStats(TypedDict):
+    """Shape of the `stats` dict nested in `ExtractionResult`."""
+
+    total_entries: int
+    attempted: int
+    extracted: int
+    extraction_failed: int
+    skipped: int
+    batches_processed: int
+    failed_batches: int
+    had_extraction_errors: bool
+    entries_reformatted: int
+    cache_read_tokens: int
+    cache_write_tokens: int
+
+
+class ExtractionResult(TypedDict):
+    """Return shape of `extract_fields_from_mapped_entries`.
+
+    The "no valid entries" early-out only sets entries/total_cost/
+    total_tokens/success (see that function's first `return`); the other
+    keys are NotRequired because that path never populates them.
+    """
+
+    entries: list[dict[str, Any]]
+    total_cost: float
+    total_tokens: int
+    success: bool
+    cv_owner: NotRequired[dict[str, str]]
+    cv_owner_location: NotRequired[dict[str, Any] | None]
+    cache_read_tokens: NotRequired[int]
+    cache_write_tokens: NotRequired[int]
+    stats: NotRequired[ExtractionStats]
+    partial_success: NotRequired[bool]
+
+
+def calculate_unextracted_content(original_text: str, extracted_fields: dict[str, Any]) -> UnextractedContentReport:
     """
     Calculate what content from the original text was not extracted into any field.
 
@@ -150,7 +217,7 @@ def calculate_unextracted_content(original_text: str, extracted_fields: Dict[str
 # LLM-ASSISTED RECOVERY FOR MESSY TABLE STRUCTURES
 # =============================================================================
 
-def needs_llm_recovery(entry: Dict[str, Any], min_original_chars: int = 200, max_coverage: float = 30.0) -> bool:
+def needs_llm_recovery(entry: dict[str, Any], min_original_chars: int = 200, max_coverage: float = 30.0) -> bool:
     """
     Determine if an entry needs LLM-assisted recovery due to poor extraction.
 
@@ -198,7 +265,7 @@ def needs_llm_recovery(entry: Dict[str, Any], min_original_chars: int = 200, max
     return has_dates or has_structure
 
 
-def _recovery_entry_id(entry: Dict[str, Any]) -> str:
+def _recovery_entry_id(entry: dict[str, Any]) -> str:
     """Deterministic id for one entry, stable across the recovery round-trip.
 
     Reuses the same (element_idx_start, element_idx_end) pair the merge-back
@@ -209,8 +276,8 @@ def _recovery_entry_id(entry: Dict[str, Any]) -> str:
 
 
 def attempt_llm_recovery(
-    entries: List[Dict[str, Any]],
-) -> Dict[str, Any]:
+    entries: list[dict[str, Any]],
+) -> dict[str, Any]:
     """
     Attempt LLM-assisted recovery for entries with poor extraction coverage.
 
@@ -396,10 +463,10 @@ def _get_field_descriptions(taxonomy_code: str) -> str:
     return f"Extract all available fields: {', '.join(get_field_schema(taxonomy_code)['fields'])}"
 
 def build_extraction_prompt(
-    entries: List[Dict[str, Any]],
-    schema: Dict[str, Any],
+    entries: list[dict[str, Any]],
+    schema: dict[str, Any],
     code: str,
-    cv_owner_name: Optional[Dict[str, str]] = None,
+    cv_owner_name: dict[str, str] | None = None,
 ) -> str:
     """
     Build the batch LLM prompt for field extraction for one taxonomy-code group.
@@ -528,11 +595,11 @@ Return JSON with format:
     return prompt
 
 def extract_fields_batch(
-    entries: List[Dict[str, Any]],
+    entries: list[dict[str, Any]],
     batch_idx: int,
     total_batches: int,
-    cv_owner_name: Optional[Dict[str, str]] = None
-) -> Dict[str, Any]:
+    cv_owner_name: dict[str, str] | None = None
+) -> BatchExtractionResult:
     """
     Extract fields from a batch of entries using LLM.
 
@@ -613,7 +680,7 @@ def extract_fields_batch(
             # item (missing/non-int entry_index, not an object) is dropped
             # with a warning rather than crashing the whole batch or being
             # merged in with an unvalidated shape.
-            extraction_map: Dict[int, Dict[str, Any]] = {}
+            extraction_map: dict[int, dict[str, Any]] = {}
             for raw_item in raw_extractions:
                 try:
                     validated_item = _ExtractedEntryFields.model_validate(raw_item)
@@ -763,11 +830,11 @@ def extract_fields_batch(
     }
 
 def extract_fields_from_mapped_entries(
-    mapped_entries: List[Dict[str, Any]],
+    mapped_entries: list[dict[str, Any]],
     batch_size: int = 10,
     document_uid: str = "",
-    cancel_check: Optional[Callable[[], None]] = None,
-) -> Dict[str, Any]:
+    cancel_check: Callable[[], None] | None = None,
+) -> ExtractionResult:
     """
     Extract structured fields from all mapped entries.
 

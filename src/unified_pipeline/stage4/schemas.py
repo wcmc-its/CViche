@@ -14,7 +14,7 @@ import copy
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ class SchemaConfigurationError(Exception):
 # Field Schema Configuration
 # ============================================================================
 
-def load_field_schemas_from_config(config_path: Optional[str] = None) -> "dict[str, Any] | None":
+def load_field_schemas_from_config(config_path: str | None = None) -> "dict[str, Any] | None":
     """
     Load field schemas from versioned config file.
 
@@ -606,9 +606,9 @@ def get_taxonomy_label(taxonomy_code: str) -> str:
     return "Unknown"
 
 # Global variable to hold loaded schemas (initialized lazily)
-_LOADED_SCHEMAS: Optional[Dict[str, Any]] = None
+_LOADED_SCHEMAS: dict[str, Any] | None = None
 
-def get_active_schemas() -> Dict[str, Any]:
+def get_active_schemas() -> dict[str, Any]:
     """
     Get the active field schemas: built-in FIELD_SCHEMAS with config-file
     schemas merged over top.
@@ -629,7 +629,7 @@ def get_active_schemas() -> Dict[str, Any]:
 
     return copy.deepcopy(_LOADED_SCHEMAS)
 
-def get_field_schema(taxonomy_code: str) -> Dict[str, Any]:
+def get_field_schema(taxonomy_code: str) -> dict[str, Any]:
     """
     Get the field extraction schema for a taxonomy code.
 

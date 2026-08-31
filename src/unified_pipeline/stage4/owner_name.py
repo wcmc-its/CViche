@@ -7,7 +7,8 @@ name here. `extract_cv_owner_name` carries the uid surname fallback
 
 import json
 import logging
-from typing import Dict, List, Any, Optional
+import re
+from typing import Any, NamedTuple
 
 from pydantic import BaseModel, Field, ValidationError
 
@@ -39,7 +40,7 @@ class _OwnerNameResponse(BaseModel):
     full_name_with_credentials: str = ''
 
 
-def extract_cv_owner_name(document_uid: str, mapped_entries: List[Dict[str, Any]]) -> Dict[str, str]:
+def extract_cv_owner_name(document_uid: str, mapped_entries: list[dict[str, Any]]) -> dict[str, str]:
     """
     Extract CV owner's name using LLM from the first chunk of CV content.
 
@@ -191,22 +192,43 @@ _LOCATION_INFERENCE_TAXONOMY = {
 # conference city is not the owner's location.
 _OWNER_AFFILIATION_FIELDS = ('employer', 'institution', 'organization', 'address')
 
-def _entry_end_year(fields: Dict[str, Any]) -> int:
-    """Sort key for recency: 'present' beats any year, an absent date sorts last."""
-    import re
+_CURRENT_POSITION_PATTERN = re.compile(r'\b(?:present|current)\b')
 
+
+def _entry_end_year(fields: dict[str, Any]) -> int:
+    """Sort key for recency: 'present' beats any year, an absent date sorts last.
+
+    The 'present'/'current' check is word-boundary-anchored, not a bare
+    substring test: a bare `'present' in text` also matches unrelated text
+    that happens to contain that substring, e.g. "currently unavailable" or
+    "the present position was eliminated" being read as an ongoing role. The
+    regex only matches the whole word.
+    """
     raw = fields.get('end_date', '') or fields.get('dates_attended_end_date', '') or ''
     text = str(raw).lower()
-    if 'present' in text or 'current' in text:
+    if _CURRENT_POSITION_PATTERN.search(text):
         return CURRENT_POSITION_YEAR
     match = re.search(r'(\d{4})', text)
     return int(match.group(1)) if match else 0
 
-def _owner_affiliation_lines(
-    mapped_entries: List[Dict[str, Any]],
+class _RankedAffiliation(NamedTuple):
+    """One affiliation value ranked for recency by `_rank_owner_affiliations`."""
+
+    value: str
+    count: int
+    is_current: bool
+
+
+def _rank_owner_affiliations(
+    mapped_entries: list[dict[str, Any]],
     limit: int = 15,
-) -> List[str]:
-    """Recency-ranked affiliation lines drawn from *any* taxonomy code.
+) -> list[_RankedAffiliation]:
+    """Recency-ranked affiliation values drawn from *any* taxonomy code.
+
+    Structured counterpart to `_owner_affiliation_lines`: this does the actual
+    ranking and returns it as data (value, how many times it was stated, and
+    whether it is a current affiliation), so callers -- tests included -- can
+    assert on the ranking itself instead of on rendered prompt text.
 
     The primary pool in infer_cv_owner_location is gated on a fixed list of
     section codes, which assumes the owner's location appears under Personal
@@ -215,8 +237,8 @@ def _owner_affiliation_lines(
     an empty pool. This builds a last-resort pool instead of growing the
     allow-list, so it does not matter which section the CV happens to use.
     """
-    counts: Dict[str, int] = {}
-    best_year: Dict[str, int] = {}
+    counts: dict[str, int] = {}
+    best_year: dict[str, int] = {}
 
     for entry in mapped_entries:
         fields = entry.get('extracted_fields', {}) or {}
@@ -239,10 +261,38 @@ def _owner_affiliation_lines(
     # one just by appearing more often. Frequency only breaks recency ties.
     ranked = sorted(counts, key=lambda v: (best_year[v], counts[v]), reverse=True)[:limit]
 
+    return [
+        _RankedAffiliation(value=v, count=counts[v], is_current=best_year[v] == CURRENT_POSITION_YEAR)
+        for v in ranked
+    ]
+
+
+def _owner_affiliation_lines(
+    mapped_entries: list[dict[str, Any]],
+    limit: int = 15,
+) -> list[str]:
+    """Recency-ranked affiliation lines drawn from *any* taxonomy code.
+
+    Thin renderer over `_rank_owner_affiliations` -- see that function's
+    docstring for why this last-resort pool exists and how it is ranked. Kept
+    as its own function with this exact name and signature: it is pinned by
+    test_stage4_import_surface.py and called directly by
+    infer_cv_owner_location.
+
+    One deliberate behaviour change came with the renderer split: an empty
+    pool now returns `[]` rather than a list holding the header alone. The
+    caller guards on `if fallback_lines:`, so the old header-only list was
+    truthy and sent the LLM a fallback prompt listing zero affiliations. The
+    rendered text for a non-empty pool is unchanged.
+    """
+    ranked = _rank_owner_affiliations(mapped_entries, limit=limit)
+    if not ranked:
+        return []
+
     lines = ["AFFILIATIONS STATED ACROSS THE CV (most recent first, with how often each appears):"]
-    for value in ranked:
-        marker = " [current]" if best_year[value] == CURRENT_POSITION_YEAR else ""
-        lines.append(f"  - {value[:150]} (x{counts[value]}){marker}")
+    for affiliation in ranked:
+        marker = " [current]" if affiliation.is_current else ""
+        lines.append(f"  - {affiliation.value[:150]} (x{affiliation.count}){marker}")
     return lines
 
 class _InferredLocation(BaseModel):
@@ -270,14 +320,14 @@ class _LocationInferenceResponse(BaseModel):
     standing between a malformed LLM reply and a downstream crash.
     """
 
-    locations: List[_InferredLocation] = Field(default_factory=list)
+    locations: list[_InferredLocation] = Field(default_factory=list)
     metro_area: str = ''
-    primary_location: Optional[_InferredLocation] = None
+    primary_location: _InferredLocation | None = None
 
 
 def infer_cv_owner_location(
-    mapped_entries: List[Dict[str, Any]],
-) -> Dict[str, Any]:
+    mapped_entries: list[dict[str, Any]],
+) -> dict[str, Any]:
     """
     Infer CV owner's current location(s) from employment, education, and training history.
 
@@ -569,7 +619,7 @@ def find_target_name_in_authors(text: str, cv_owner_last_name: str) -> str:
     # Multiple unmarked matches - return first one (usually most prominent position)
     return matches[0]
 
-def add_target_names(entries: List[Dict[str, Any]], cv_owner_last_name: str) -> List[Dict[str, Any]]:
+def add_target_names(entries: list[dict[str, Any]], cv_owner_last_name: str) -> list[dict[str, Any]]:
     """
     Add target_name field to publication and presentation entries.
 
@@ -577,12 +627,27 @@ def add_target_names(entries: List[Dict[str, Any]], cv_owner_last_name: str) -> 
     This preserves the exact representation from the original CV (including markers,
     formatting variations, and "et al." as written).
 
+    Side-effectful API contract: this mutates the entry dicts in `entries` IN
+    PLACE (each entry's `extracted_fields` gets `target_name` set directly) and
+    the list this returns is the SAME list object passed in, not a copy. A
+    caller that needs an unmodified copy of the input must copy.deepcopy() it
+    first.
+
+    This is the pipeline-wide convention, not a one-off: stage 5b's
+    `enrich_entry_with_result` (stage_5b_institution_enrichment.py) mutates its
+    `entry` argument in place and documents the same contract in its own
+    docstring, and stage 2's section-hierarchy pass
+    (stage_2_entry_extraction.py, `entry["hierarchy"] = hierarchy_path`)
+    assigns directly onto entries it did not construct. Matching that
+    convention here keeps callers from having to special-case this function.
+
     Args:
         entries: List of extracted entries
         cv_owner_last_name: CV owner's last name to search for
 
     Returns:
-        Updated entries with target_name field added
+        The same `entries` list, with target_name added to each entry's
+        extracted_fields where found (mutated in place, not copied).
     """
     for entry in entries:
         code = entry.get('taxonomy_code', '')
