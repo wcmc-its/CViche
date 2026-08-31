@@ -13,6 +13,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 # Add src/ to path so unified_pipeline is importable.
 # tests/ -> backend/ -> web_interface/ -> project_root/ -> src/
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
@@ -68,9 +70,17 @@ def test_numbers_in_list_are_stringified_in_join():
     assert coerce_field_value_types({"codes": [1, 2, 3]})["codes"] == "1; 2; 3"
 
 
-def test_non_dict_input_returned_as_is():
-    assert coerce_field_value_types(None) is None
-    assert coerce_field_value_types("not a dict") == "not a dict"
+def test_non_dict_input_raises_type_error():
+    # Declared return type is Dict[str, Any] -- silently handing back a
+    # non-dict input would violate that contract for any caller that skips
+    # its own type check. Callers on an untrusted-JSON boundary (e.g. LLM
+    # output) must validate/guard before calling this function.
+    with pytest.raises(TypeError):
+        coerce_field_value_types(None)
+    with pytest.raises(TypeError):
+        coerce_field_value_types("not a dict")
+    with pytest.raises(TypeError):
+        coerce_field_value_types(["not", "a", "dict"])
 
 
 def test_coerced_values_survive_downstream_operations():
