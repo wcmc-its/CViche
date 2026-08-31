@@ -24,6 +24,7 @@ import json
 import logging
 import logging.config
 import os
+import sys
 import time
 import uuid
 
@@ -83,6 +84,40 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+class _DynamicStdout:
+    """A stream proxy that resolves ``sys.stdout`` fresh on every call.
+
+    ``dictConfig``'s ``"ext://sys.stdout"`` stream reference resolves to
+    whatever object ``sys.stdout`` names *at dictConfig time*, and
+    ``logging.StreamHandler`` then holds that object directly -- a later
+    reassignment of the ``sys.stdout`` name (e.g.
+    ``app.pipeline.orchestrator``'s module-level ``sys.stdout =
+    _STDOUT_ROUTER``, installed the first time something imports that
+    module) never reaches an already-constructed handler. Since
+    ``app.main`` calls :func:`configure_logging` before that import chain
+    runs, every ``logger.*`` call was writing to the pre-swap stdout --
+    invisible to the orchestrator's per-run live-log capture, which only
+    ever sees writes made through the current ``sys.stdout``.
+
+    ``print()`` never has this problem: CPython looks up the *name*
+    ``sys.stdout`` fresh on every call. This proxy gives the logging
+    handler the same behavior -- it holds no direct stream reference of its
+    own, so ``write``/``flush`` always target whatever ``sys.stdout``
+    currently is, regardless of import/swap order.
+    """
+
+    def write(self, text: str) -> int:
+        return sys.stdout.write(text)
+
+    def flush(self) -> None:
+        sys.stdout.flush()
+
+
+# Shared singleton: the handler config below hands this object (not the
+# "ext://sys.stdout" string) to logging.StreamHandler as its stream.
+_DYNAMIC_STDOUT = _DynamicStdout()
+
+
 def _build_config(level: str, fmt: str) -> dict:
     """Build the dictConfig payload."""
     formatters = {
@@ -108,7 +143,8 @@ def _build_config(level: str, fmt: str) -> dict:
                 "class": "logging.StreamHandler",
                 "formatter": formatter_name,
                 "filters": ["request_id"],
-                "stream": "ext://sys.stdout",
+                # Not "ext://sys.stdout" -- see _DynamicStdout's docstring.
+                "stream": _DYNAMIC_STDOUT,
             },
         },
         "root": {
