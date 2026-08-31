@@ -109,8 +109,13 @@ def test_fields_outside_the_allow_list_are_not_harvested():
 def test_limit_zero_returns_no_lines():
     """Review item 6 (limit=0): read, don't invent, the real contract.
     `sorted(...)[:0]` yields an empty ranked list, so the renderer returns []
-    -- not even the header line. Documented here as the actual (if a caller
-    might find it mildly surprising) behavior; production is left unchanged.
+    -- not even the header line.
+
+    This is the one input where the renderer split changed the output: the
+    pre-split code fell through to `lines = [header]` and returned that
+    header-only list. No production caller passes limit=0 (the sole call site
+    uses the default 15), so nothing in the pipeline changes -- but the delta
+    is real and is pinned here rather than left implicit.
     """
     entries = [_entry('D1', institution=f'Institution {i}, City {i}, NY') for i in range(5)]
     assert _owner_affiliation_lines(entries, limit=0) == []
@@ -315,7 +320,11 @@ def test_infer_cv_owner_location_prompt_carries_extracted_affiliations(monkeypat
 
     mapped_entries = [{
         'taxonomy_code': 'D1',
-        'text': 'Professor of Surgery, Weill Cornell Medicine',
+        # The raw text deliberately omits the institution: the positions
+        # renderer falls back to e['text'][:150] when field harvesting finds
+        # nothing, so an institution that also appears in `text` would let this
+        # assertion pass even if the extracted_fields path broke entirely.
+        'text': 'Professor of Surgery',
         'extracted_fields': {
             'title': 'Professor of Surgery',
             'institution': 'Weill Cornell Medicine, New York, NY',

@@ -279,11 +279,12 @@ def _owner_affiliation_lines(
     test_stage4_import_surface.py and called directly by
     infer_cv_owner_location.
 
-    One deliberate behaviour change came with the renderer split: an empty
-    pool now returns `[]` rather than a list holding the header alone. The
-    caller guards on `if fallback_lines:`, so the old header-only list was
-    truthy and sent the LLM a fallback prompt listing zero affiliations. The
-    rendered text for a non-empty pool is unchanged.
+    One behaviour delta came with the renderer split, and it is confined to
+    `limit <= 0` over a non-empty pool: that now returns `[]` where the
+    pre-split code returned a list holding the header alone. An empty pool
+    returned `[]` before the split too. The sole production caller
+    (infer_cv_owner_location) uses the default limit=15, so no production path
+    changes; output is byte-identical for every other input.
     """
     ranked = _rank_owner_affiliations(mapped_entries, limit=limit)
     if not ranked:
