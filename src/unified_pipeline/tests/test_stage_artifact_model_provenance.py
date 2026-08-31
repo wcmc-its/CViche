@@ -27,6 +27,7 @@ hardcoded string too.
 Self-contained: no DB, no network, no real LLM call.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -72,11 +73,55 @@ def test_5c_usage_carries_the_model_the_api_returned(monkeypatch):
 
 def test_5b_lookup_returns_the_model_the_api_returned(monkeypatch):
     from unified_pipeline import stage_5b_institution_enrichment as s5b
-    monkeypatch.setattr(s5b, "call_llm", lambda **kw: _fake_llm_result('{"x": {}}'))
+    # The #523 split moved lookup_institutions_llm (and its call_llm binding)
+    # into stage5b/lookup.py; patching the old facade module would patch a
+    # name the moved function no longer reads.
+    from unified_pipeline.stage5b import lookup as s5b_lookup
+    monkeypatch.setattr(s5b_lookup, "call_llm", lambda **kw: _fake_llm_result('{"x": {}}'))
     batch = [("inst-1", "Some University", "context line")]
-    out = s5b.lookup_institutions_llm(batch, None, verbose=False)
-    assert len(out) == 3, "the helper must return (results, cost, model) for #459"
-    assert out[2] == SENTINEL
+    results, cost, model = s5b.lookup_institutions_llm(batch, None, verbose=False)
+    assert model == SENTINEL
+    assert results == {"x": {}}
+    assert cost == 0.001
+
+
+def test_5b_artifact_records_observed_model_not_just_the_helper_return(monkeypatch, tmp_path):
+    """The helper returning the observed model isn't enough -- prove
+    run_stage5b() actually WRITES it into institution_enrichment_stats.model
+    in the output artifact. A regression at the artifact-writing layer (e.g.
+    someone reintroducing `model` as the recorded value instead of
+    `observed_model or model`) would pass every other test in this file.
+    """
+    from unified_pipeline import stage_5b_institution_enrichment as s5b
+    from unified_pipeline.stage5b import cache as s5b_cache
+    from unified_pipeline.stage5b import lookup as s5b_lookup
+
+    # Isolate the on-disk cache so this test can't read or write the real one.
+    monkeypatch.setattr(s5b_cache, "CACHE_FILE", tmp_path / "institution_cache.json")
+    monkeypatch.setattr(s5b_cache, "OLD_CACHE_FILE", tmp_path / "ror_cache.json")
+    monkeypatch.setattr(s5b_lookup, "call_llm",
+                         lambda **kw: _fake_llm_result('{"INST-0001": {"city": "Ithaca", "state": "New York", "country": "United States", "country_code": "US"}}'))
+
+    input_path = tmp_path / "input.json"
+    input_path.write_text(json.dumps({
+        "document_uid": "test-uid",
+        "entries": [{
+            "taxonomy_code": "B1",
+            "extracted_fields": {"institution": "Cornell University"},
+        }],
+    }))
+    output_path = tmp_path / "output.json"
+
+    s5b.run_stage5b(str(input_path), output_path=str(output_path), verbose=False, refresh_cache=True)
+
+    written = json.loads(output_path.read_text())
+    recorded_model = written["institution_enrichment_stats"]["model"]
+    assert recorded_model == SENTINEL, (
+        f"artifact recorded model={recorded_model!r}, expected the observed "
+        f"SENTINEL -- the write site may be using the inert `model` default "
+        f"instead of `observed_model`"
+    )
+    assert recorded_model != "gpt-5.1", "recorded the inert default, not the observed model"
 
 
 def test_the_recorded_model_is_not_the_inert_default():
@@ -92,7 +137,7 @@ def test_the_recorded_model_is_not_the_inert_default():
                                   stage_5c_teaching_formatter as s5c,
                                   stage_5d_citation_formatter as s5d)
     defaults = {
-        "stage_5b": inspect.signature(s5b.run_stage5b).parameters.get("model"),
+        "stage_5b": inspect.signature(s5b.run_stage5b).parameters["model"].default,
         "stage_5c": inspect.signature(s5c.run_stage_5c).parameters["model"].default,
         "stage_5d": inspect.signature(s5d.run_stage_5d).parameters["model"].default,
     }
@@ -100,7 +145,13 @@ def test_the_recorded_model_is_not_the_inert_default():
     # artifact prefers the OBSERVED model over them. Pin that they are still
     # the OpenAI-shaped strings, so this test fails loudly if someone "fixes"
     # #459 by editing the default instead of recording reality.
+    assert defaults["stage_5b"].startswith("gpt-")
     assert defaults["stage_5d"].startswith("gpt-")
+    # Negative assertion: the regression was a hard-coded default landing in
+    # the artifact instead of the observed model. SENTINEL never starts with
+    # "gpt-", so this also catches someone changing the defaults to SENTINEL
+    # itself and making the positive asserts above vacuously true.
+    assert not SENTINEL.startswith("gpt-")
 
 
 def test_stage_3b_model_parameter_was_removed_not_deprioritized():
@@ -113,13 +164,3 @@ def test_stage_3b_model_parameter_was_removed_not_deprioritized():
     import inspect
     from unified_pipeline import stage_3b_entry_classifier as s3b
     assert "model" not in inspect.signature(s3b.run_stage_3b).parameters
-
-
-if __name__ == "__main__":
-    class _MP:
-        def setattr(self, obj, name, value):
-            setattr(obj, name, value)
-    for _name, _fn in sorted(globals().items()):
-        if _name.startswith("test_") and callable(_fn):
-            _fn(_MP()) if _fn.__code__.co_argcount else _fn()
-    print("OK")
