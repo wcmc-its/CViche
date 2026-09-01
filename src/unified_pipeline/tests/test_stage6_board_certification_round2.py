@@ -5,6 +5,10 @@ and asked for each of these fixed in this PR, kept local to
 `board_certification.py`. One test class per thread; thread ids are in each
 class docstring so a reader can match a test back to the review comment.
 
+`TestBlankRowGuardIsUniformAcrossColumnBranches` (2026-09-01) is a later
+addition, not one of the 7 threads: it closes #663 item 8, the one item from
+that issue this PR takes -- see that class's docstring.
+
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_board_certification_round2.py -p no:cacheprovider
@@ -708,3 +712,117 @@ class TestPerRowBackfillFromStructuredFields:
         assert any(
             "cannot be attributed to a single row" in r.message for r in caplog.records
         ), [r.message for r in caplog.records]
+
+
+class TestBlankRowGuardIsUniformAcrossColumnBranches:
+    """#663 item 8: the too-narrow (<2 column) branch already dropped a row
+
+    left with nothing written into it (see
+    TestNarrowTableSkipsRowInsteadOfBlankOrRaise above, from #625), but that
+    guard lived only in the `else` branch. The `>= 3` and `>= 2` branches had
+    no equivalent check: given a specialty, certificate number, and dates
+    that are all empty or falsy, they wrote every cell as `''` and still
+    incremented `entries_inserted` for a row with literally nothing on it.
+    The fix moves the check ahead of the column-count branching so it
+    applies once, to every branch, instead of needing a copy per branch.
+    """
+
+    def test_three_column_table_skips_a_fully_blank_row(self, caplog):
+        gen = _generator()
+        wide_doc = Document()
+        table = wide_doc.add_table(rows=1, cols=3)
+        rows_before = len(table.rows)
+        entries_before = gen.stats['entries_inserted']
+
+        with caplog.at_level(logging.WARNING):
+            gen._add_board_cert_row(table, "", "", "")
+
+        assert len(table.rows) == rows_before, "the blank row must be removed, not left behind"
+        assert gen.stats['entries_inserted'] == entries_before
+        assert any("skipping blank row" in r.message for r in caplog.records)
+
+    def test_two_column_table_skips_a_fully_blank_row(self, caplog):
+        gen = _generator()
+        two_col_doc = Document()
+        table = two_col_doc.add_table(rows=1, cols=2)
+        rows_before = len(table.rows)
+        entries_before = gen.stats['entries_inserted']
+
+        with caplog.at_level(logging.WARNING):
+            gen._add_board_cert_row(table, "", "", "")
+
+        assert len(table.rows) == rows_before, "the blank row must be removed, not left behind"
+        assert gen.stats['entries_inserted'] == entries_before
+        assert any("skipping blank row" in r.message for r in caplog.records)
+
+    def test_falsy_but_non_blank_inputs_are_not_treated_as_blank(self):
+        # None and "0" style falsy-but-meaningful-if-present inputs aside,
+        # this pins that a row with just ONE real value (dates only, as in
+        # a certification with no recovered specialty or cert number) still
+        # renders -- the guard is "all three empty", not "any one empty".
+        gen = _generator()
+        doc = Document()
+        table = doc.add_table(rows=1, cols=3)
+        entries_before = gen.stats['entries_inserted']
+
+        gen._add_board_cert_row(table, "", "", "2020")
+
+        assert len(table.rows) == 2, "a row with a real date must still be written"
+        assert table.rows[1].cells[2].text == "2020"
+        assert gen.stats['entries_inserted'] == entries_before + 1
+
+    def test_three_and_two_column_tables_still_render_real_content(self):
+        # Still-renders proof: the new guard must not touch the ordinary,
+        # non-blank path either branch already handled correctly.
+        gen = _generator()
+
+        wide_doc = Document()
+        wide_table = wide_doc.add_table(rows=1, cols=3)
+        gen._add_board_cert_row(wide_table, "Internal Medicine", "123-456", "2020")
+        assert tuple(c.text for c in wide_table.rows[1].cells) == (
+            "Internal Medicine", "123-456", "2020",
+        )
+
+        two_col_doc = Document()
+        two_col_table = two_col_doc.add_table(rows=1, cols=2)
+        gen._add_board_cert_row(two_col_table, "Internal Medicine", "123-456", "2020")
+        assert tuple(c.text for c in two_col_table.rows[1].cells) == (
+            "Internal Medicine", "123-456 (2020)",
+        )
+
+    def test_break_the_uniform_guard_goes_red(self):
+        # Rule 6.2 ablation: reproduce the pre-fix behaviour (the blank
+        # check living only in the narrow-table `else` branch) and confirm
+        # it would have let a fully blank row through on a 3-column table.
+        import unified_pipeline.stage6.sections.board_certification as bc
+
+        gen = _generator()
+        doc = Document()
+        table = doc.add_table(rows=1, cols=3)
+        entries_before = gen.stats['entries_inserted']
+
+        def _pre_fix_add_board_cert_row(self, table, specialty, cert_number, dates):
+            row = table.add_row()
+            num_cols = len(row.cells)
+            if num_cols >= 3:
+                row.cells[0].text = specialty or ''
+                row.cells[1].text = cert_number or ''
+                row.cells[2].text = dates or ''
+            elif num_cols >= 2:
+                row.cells[0].text = specialty or ''
+                row.cells[1].text = f"{cert_number} ({dates})" if dates else (cert_number or '')
+            else:
+                row._element.getparent().remove(row._element)
+                return
+            self.stats['entries_inserted'] += 1
+
+        original = bc.BoardCertificationSection._add_board_cert_row
+        try:
+            bc.BoardCertificationSection._add_board_cert_row = _pre_fix_add_board_cert_row
+            gen._add_board_cert_row(table, "", "", "")
+            assert len(table.rows) == 2, "expected the pre-fix code to leave the blank row behind"
+            assert gen.stats['entries_inserted'] == entries_before + 1, (
+                "expected the pre-fix code to count the blank row as inserted"
+            )
+        finally:
+            bc.BoardCertificationSection._add_board_cert_row = original
