@@ -137,17 +137,23 @@ class EventEmitter:
 
         The single write path, shared by the broadcast (_deliver_local) and the
         point-to-point replay (send_direct), so the terminal dedup cannot hold
-        on one route and not the other.
+        on one route and not the other. For a terminal event the mark is
+        claimed before the send is awaited, not after: the replay and a live
+        broadcast can run concurrently, and if both passed the membership
+        check before either marked, they could both await send_text and both
+        deliver (#657 review, thread 6, interleaved case).
         """
-        if is_terminal and websocket in self._terminal_delivered:
-            logger.debug("Terminal event already delivered to this socket; skipping")
-            return True
+        if is_terminal:
+            if websocket in self._terminal_delivered:
+                logger.debug("Terminal event already delivered to this socket; skipping")
+                return True
+            self._terminal_delivered.add(websocket)
         try:
             await websocket.send_text(message)
         except Exception:
+            if is_terminal:
+                self._terminal_delivered.discard(websocket)
             return False
-        if is_terminal:
-            self._terminal_delivered.add(websocket)
         return True
 
     async def _deliver_local(self, run_id: str, message: str) -> None:

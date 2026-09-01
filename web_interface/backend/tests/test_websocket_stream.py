@@ -406,6 +406,37 @@ def test_terminal_event_once_when_the_live_event_precedes_the_replay():
     assert _event_names(socket) == ["RUN_FAILED"]
 
 
+class _InterleavingSocket(_RecordingSocket):
+    """A _RecordingSocket whose send_text yields control once before
+    recording, so two coroutines racing to deliver to the same socket can
+    both pass a dedup check made before the yield."""
+
+    async def send_text(self, message: str):
+        await asyncio.sleep(0)
+        await super().send_text(message)
+
+
+def test_terminal_event_once_when_replay_and_live_delivery_interleave():
+    """The replay (send_direct) and a live broadcast (_deliver_local) can run
+    concurrently: a client connecting in the same instant the run finishes.
+    If send_text yields before the dedup mark is claimed, both routes can
+    pass the membership check before either marks, and the socket is told
+    twice (#657 review, thread 6)."""
+    emitter = EventEmitter()
+    socket = _InterleavingSocket()
+
+    async def scenario():
+        await emitter.connect("R1", socket)
+        await asyncio.gather(
+            emitter.send_direct("R1", socket, {"event": "RUN_COMPLETE", "total_cost": 1.0}),
+            emitter.emit_run_complete("R1", 1.0, 10, 5),
+        )
+
+    _run(scenario)
+
+    assert _event_names(socket) == ["RUN_COMPLETE"]
+
+
 def test_non_terminal_events_are_never_deduped():
     """The dedup is scoped to the three run-ending events; a run emits many
     LOG/PROGRESS events and every one of them must arrive."""

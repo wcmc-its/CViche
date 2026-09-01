@@ -194,15 +194,13 @@ async def _replay_terminal_event(run_id: str, websocket: WebSocket) -> None:
     peers, and through the emitter so it shares the per-socket terminal dedup
     with live delivery: without that, a client connecting in the same instant
     the orchestrator emits RUN_COMPLETE receives it twice (#657 review,
-    thread 6).
+    thread 6). send_direct does not raise on a closed socket -- it drops it
+    and logs -- so there is nothing to catch here.
     """
     terminal_event = await run_in_threadpool(_terminal_snapshot, run_id)
     if terminal_event is None:
         return
-    try:
-        await event_emitter.send_direct(run_id, websocket, terminal_event)
-    except (WebSocketDisconnect, RuntimeError):
-        logger.info("Terminal replay for run %s not delivered: socket closed", run_id)
+    await event_emitter.send_direct(run_id, websocket, terminal_event)
 
 
 async def _stream_until_closed(websocket: WebSocket, cookie_value: str | None) -> None:

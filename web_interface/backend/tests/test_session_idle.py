@@ -202,7 +202,7 @@ def test_disabled_store_resolve_and_end_are_noops():
 
 def test_client_is_built_with_socket_timeouts(monkeypatch):
     """The lazily-built client must bound socket ops so a hung Valkey raises
-    (and then fails open) instead of blocking the request thread forever."""
+    SessionStoreUnavailable instead of blocking the request thread forever."""
     import redis
     captured = {}
 
