@@ -21,12 +21,25 @@ Two fields can be enriched, and each is attributed separately:
 `dates_attended_start_date`, a nested dict, or plain `start_date`), and all
 three are tried before the range is formatted.
 
-`_degree_is_in_progress` and its `_IN_PROGRESS_DEGREE_MARKERS` vocabulary are
+`_degree_is_in_progress` and its `_IN_PROGRESS_DEGREE_PATTERN` vocabulary are
 here because a year in the "Year Awarded" column asserts the degree was
 conferred. A CV that says "PhD, expected May 2030" has a year, and printing it
 bare turns an anticipated degree into a granted one. Two general signals mark
 it: an explicit marker word, or an award year later than the run year. Neither
 is tied to a particular CV. The column then reads "Expected 2030".
+
+The marker match is word-bounded, not a bare substring (#549): 'present' as a
+bare substring matched inside "presented", "presentation", "presently", and
+'candidate' or 'pending' as an ordinary noun matched inside unrelated prose,
+so a conferred degree could render "Expected <year>". `candidate` and
+`present` are dropped from the vocabulary entirely rather than just bounded --
+neither earned its place once bounded: `\b`-bounded `candidate` still matches
+whole-word uses like "Candidate for Honors" (an award name, not a degree
+status), and `present` as a genuine *degree* marker normally shows up in a
+date range ("2019-present"), a case the fallback in `_fill_education` already
+folds into `year_awarded` and that the future-year branch below covers when a
+real year is present. `pending` is kept because it does not have the same
+noun-collision problem in practice.
 
 `_degree_is_in_progress` is pinned on the class surface by
 `tests/test_stage6_import_surface.py` -- the suite calls it on an instance. The
@@ -50,25 +63,27 @@ from ..sorting import sort_entries_reverse_chronological
 class EducationSection:
     """Section B1 writers, mixed into `WCMTemplateGenerator`."""
 
-    # Phrases a CV uses to mark a degree that has not yet been conferred.
-    _IN_PROGRESS_DEGREE_MARKERS = (
-        'expected', 'anticipated', 'in progress', 'in-progress', 'ongoing',
-        'to be conferred', 'to be awarded', 'candidate', 'pending', 'present',
+    # Word-bounded phrases a CV uses to mark a degree that has not yet been
+    # conferred. Matched with \b on both sides so "presented" or "Candidate
+    # for Honors" cannot fire this the way a bare substring test would (#549).
+    _IN_PROGRESS_DEGREE_PATTERN = re.compile(
+        r'\b(expected|anticipated|in[- ]progress|ongoing|'
+        r'to be conferred|to be awarded|pending)\b',
+        re.IGNORECASE,
     )
 
     def _degree_is_in_progress(self, raw_text: str, year_awarded: str) -> bool:
         """Return True when a degree has not yet been conferred.
 
         Two general signals, neither tied to any specific CV:
-        1. The source line carries an explicit "not yet awarded" marker
-           ("expected", "anticipated", "in progress", "candidate", ...).
+        1. The source line carries an explicit, word-bounded "not yet
+           awarded" marker ("expected", "anticipated", "in progress", ...).
         2. The award year parses to a year later than the current (run) year, so
            it cannot already have been conferred.
         """
-        text = (raw_text or '').lower()
-        for marker in self._IN_PROGRESS_DEGREE_MARKERS:
-            if marker in text:
-                return True
+        text = raw_text or ''
+        if self._IN_PROGRESS_DEGREE_PATTERN.search(text):
+            return True
 
         # Future award year => not yet conferred. year_awarded is already
         # normalized to a 4-digit year by format_date_for_section(..., 'H').
