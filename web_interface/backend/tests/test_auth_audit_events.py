@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 from app.auth import COOKIE_NAME, create_session_cookie, get_cookie_settings, get_cookie_delete_settings
-from app.ed_group_lookup import EdUnavailableError, clear_cache
+from app.ed_group_lookup import EdUnavailableError, MembershipResult, clear_cache
 from app.models import SystemConfig, User
 from itsdangerous import URLSafeTimedSerializer
 
@@ -194,7 +194,7 @@ def test_role_changed_event_on_ed_recheck(mock_check_ed, client, db, seed_ed_ena
                        cwid="edrole1", auth_method="saml")
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
 
-    mock_check_ed.return_value = {"in_access_group": True, "in_admin_group": True}
+    mock_check_ed.return_value = MembershipResult(in_access_group=True, in_admin_group=True)
 
     with caplog.at_level(logging.INFO, logger="app.auth"):
         resp = client.get("/api/auth/me")
@@ -217,7 +217,7 @@ def test_group_membership_removed_event(mock_check_ed, client, db, seed_ed_enabl
                        cwid="edremoved1", auth_method="saml")
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
 
-    mock_check_ed.return_value = {"in_access_group": False, "in_admin_group": False}
+    mock_check_ed.return_value = MembershipResult(in_access_group=False, in_admin_group=False)
 
     with caplog.at_level(logging.INFO, logger="app.auth"):
         resp = client.get("/api/auth/me")
@@ -280,7 +280,7 @@ def test_login_failed_event_saml_not_authorized(
 ):
     clear_cache()
     mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
-    mock_check_ed.return_value = {"in_access_group": False, "in_admin_group": False}
+    mock_check_ed.return_value = MembershipResult(in_access_group=False, in_admin_group=False)
 
     with caplog.at_level(logging.INFO, logger="app.api.saml_routes"):
         resp = client.post(
@@ -354,7 +354,7 @@ def test_role_changed_event_on_ed_downgrade(mock_check_ed, client, db, seed_ed_e
                        cwid="eddowngrade1", auth_method="saml")
     client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
 
-    mock_check_ed.return_value = {"in_access_group": True, "in_admin_group": False}
+    mock_check_ed.return_value = MembershipResult(in_access_group=True, in_admin_group=False)
 
     with caplog.at_level(logging.INFO, logger="app.auth"):
         resp = client.get("/api/auth/me")
