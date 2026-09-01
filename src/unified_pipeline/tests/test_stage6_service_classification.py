@@ -47,7 +47,7 @@ still regressed two groups. `\\b` sits between a word character and a
 non-word character, so a DIGIT counts as part of the word and cannot open
 one: "2010-2012Director, ..." (6 occurrences, 1 UID) read as an
 organization. And a word-start anchor cannot reach a keyword that is a
-compound's SUFFIX: "subcommittee" (50 occurrences, 6 unique lines, 14 UIDs)
+compound's SUFFIX: "subcommittee" (50 occurrences, 5 unique lines, 14 UIDs)
 likewise read as an organization. Fix: the left boundary becomes the
 letters-only lookbehind `(?<![A-Za-z])`, so a digit or punctuation is a
 legitimate word start and only a preceding LETTER means the keyword is
