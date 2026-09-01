@@ -2648,9 +2648,14 @@ Now analyze the text above:"""
             rPr.append(sz)
             run_elem.append(rPr)
 
-            # Add the text
+            # Add the text. #552: lxml's raw `.text` setter raises on the
+            # same control-code range python-docx's own Run.text rejects --
+            # sanitize before assignment so an LLM-written field with a
+            # stray control character doesn't kill the render. \t\n\r are
+            # valid XML and are preserved (test_cell_separators.py:34-37
+            # pins the tab contract downstream of this text).
             t = OxmlElement('w:t')
-            t.text = text
+            t.text = self._sanitize_run_text(text)
             if text.startswith(' ') or text.endswith(' '):
                 t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
             run_elem.append(t)
@@ -2706,9 +2711,11 @@ Now analyze the text above:"""
             rPr.append(sz)
             run_elem.append(rPr)
 
-            # Add the deleted text element (w:delText instead of w:t)
+            # Add the deleted text element (w:delText instead of w:t). #552:
+            # same lxml `.text` control-character raise as the insertion
+            # path -- sanitize before assignment, preserving \t\n\r.
             delText = OxmlElement('w:delText')
-            delText.text = text
+            delText.text = self._sanitize_run_text(text)
             if text.startswith(' ') or text.endswith(' '):
                 delText.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
             run_elem.append(delText)

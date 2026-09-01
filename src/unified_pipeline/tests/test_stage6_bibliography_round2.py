@@ -32,6 +32,14 @@ missed:
   Both now log unconditionally: warning for the not-found case, info for
   the progress line.
 
+#662 items 2-4 name the same three fixes above (IndexError guard, double-
+count, font duplication) as still-open review gaps; re-measured against this
+file's current HEAD they are already the code above and already covered by
+the tests below -- confirmed, not touched, by this PR. Item 4's "silently
+diverge" half was not fully closed by the round-2 fix (named constants can
+still drift out of sync with ``_set_font`` by hand), so one test is added
+below deriving the constants from ``_set_font``'s own defaults instead.
+
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_bibliography_round2.py -p no:cacheprovider
@@ -207,6 +215,34 @@ def test_tracked_and_plain_paths_render_identical_typography():
     # not a second pair of literals that happens to currently agree.
     assert tracked_font_name == bibliography.TRACKED_INSERTION_FONT_NAME
     assert tracked_font_half_points == bibliography.TRACKED_INSERTION_FONT_SIZE_HALF_POINTS
+
+
+# --- #662 item 4: the constants above are DERIVED from _set_font, not a
+# second pair of literals that happen to agree with it today ---
+
+
+def test_tracked_insertion_font_constants_track_set_font_default_changes(monkeypatch):
+    # The round-2 fix above (named constants) only proves the two paths
+    # currently agree -- it says nothing about what happens if _set_font's
+    # own default policy changes, which is the actual "silently diverge"
+    # risk #662 item 4 names. Mutate _set_font's defaults and reload
+    # bibliography.py: if the module constants are read live from
+    # inspect.signature(_set_font), as they are now, they follow; if they
+    # were hand-copied literals, as on the pre-#662-item-4 code, they would
+    # not move and this assertion would fail.
+    import importlib
+
+    monkeypatch.setattr(
+        bibliography._set_font, "__defaults__", ("Times New Roman", 14, False, False)
+    )
+    try:
+        reloaded = importlib.reload(bibliography)
+        assert reloaded.TRACKED_INSERTION_FONT_NAME == "Times New Roman"
+        assert reloaded.TRACKED_INSERTION_FONT_SIZE_HALF_POINTS == "28"
+    finally:
+        # Restore the real defaults for every test that runs after this one
+        # in the same process (module state is otherwise process-global).
+        importlib.reload(bibliography)
 
 
 # --- 3850159506: no double-counted stat on a late tracked-insertion failure ---
