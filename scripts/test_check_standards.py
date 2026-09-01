@@ -111,6 +111,18 @@ def build_tree(tree):
         "import re\n\nPROGRESS_PATTERNS = [\n    re.compile(r'a'),\n    re.compile(r'b'),\n    re.compile(r'c'),\n]\n",
     )
 
+    # 7.9 -- a 3.14 image, one doc that disagrees (the violation) and one
+    # workflow pin that agrees (must NOT count)
+    _write(
+        os.path.join(tree, "web_interface", "backend", "Dockerfile"),
+        "FROM python:3.14-slim AS deps\nRUN pip install nothing\n",
+    )
+    _write(os.path.join(tree, "docs", "STALE_README.md"), "### Prerequisites\n\n- Python 3.11+\n")
+    _write(
+        os.path.join(tree, ".github", "workflows", "ci.yml"),
+        "jobs:\n  t:\n    steps:\n      - uses: actions/setup-python@v5\n        with:\n          python-version: \"3.14\"\n",
+    )
+
 
 
 def run(tree, *args):
@@ -154,6 +166,9 @@ def main():
 
         assert "today=3" in out.split("7.1")[1].split("\n")[0]
         print("7.1 PROGRESS_PATTERNS regex count          counted   ok")
+
+        assert "today=1" in out.split("7.9")[1].split("\n")[0], out.split("7.9")[1][:200]
+        print("7.9 doc disagreeing with the image tag    counted   ok (matching CI pin excluded)")
 
         assert "7.4" not in out  # [judgement], not [gate] -- the auto table is [gate]-only
         print("7.4 absent from --report's auto-checkable set             ok")

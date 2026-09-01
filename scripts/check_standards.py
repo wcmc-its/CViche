@@ -393,6 +393,49 @@ def _commits_behind(sha):
         return None
 
 
+# 7.9 -- the backend image tag is the runtime's one definition (1.5); every
+# other statement of the version is a copy that can drift silently, which is
+# what five docs had already done (3.9 / 3.10 / 3.11 against a 3.14 image).
+PY_IMAGE_RE = re.compile(r"^FROM python:(\d+\.\d+)", re.M)
+# Two shapes only: a workflow's `python-version:` pin, and prose naming
+# "Python X.Y". ponytail: deliberately literal -- a doc that must name an
+# older version for history writes the number without the word "Python" in
+# front of it. There is no markdown waiver: WAIVER_RE is `#`-anchored and `#`
+# is a heading here. Widen this only if that proves too tight in practice.
+PY_RESTATED_RE = re.compile(r"python-version:\s*[\"']?(\d+\.\d+)|Python (\d+\.\d+)")
+
+DOCKERFILE = os.path.join("web_interface", "backend", "Dockerfile")
+
+
+def check_python_version_drift():
+    """7.9 -- every restatement of the Python version, in a workflow pin or in
+    prose, matches the version the backend image is actually built on."""
+    try:
+        with open(os.path.join(ROOT, DOCKERFILE), encoding="utf-8") as fh:
+            match = PY_IMAGE_RE.search(fh.read())
+    except OSError:
+        match = None
+    if match is None:
+        # 5.5: no readable source of truth is a failure, not a free pass.
+        return 1, [f"{DOCKERFILE}: no `FROM python:X.Y` to read the runtime version from"]
+    runtime = match.group(1)
+    hits = []
+    for dirpath, dirnames, filenames in os.walk(ROOT):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for name in filenames:
+            if not (name.endswith(".md") or (name.endswith((".yml", ".yaml")) and ".github" in dirpath)):
+                continue
+            path = os.path.join(dirpath, name)
+            relpath = os.path.relpath(path, ROOT)
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for lineno, line in enumerate(fh, 1):
+                    for pin, prose in PY_RESTATED_RE.findall(line):
+                        stated = pin or prose
+                        if stated != runtime:
+                            hits.append(f"{relpath}:{lineno}: says {stated}, image is {runtime}")
+    return len(hits), hits
+
+
 # (row label, target text, check fn) -- target is prose ("0", "falling"),
 # not itself the enforcement; RATCHETED_ROWS above decides how a row's
 # count is actually gated.
@@ -406,6 +449,7 @@ ROWS = [
     ("3.7 dynamic attribute access (non-literal)", "falling", check_dynamic_attribute_access),
     ("5.4 bare swallows (`except Exception: pass`)", "falling", check_bare_swallows),
     ("7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)", "falling", check_progress_patterns),
+    ("7.9 restated Python version != the build image", "0", check_python_version_drift),
 ]
 
 
