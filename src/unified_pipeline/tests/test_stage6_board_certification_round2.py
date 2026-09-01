@@ -790,39 +790,20 @@ class TestBlankRowGuardIsUniformAcrossColumnBranches:
             "Internal Medicine", "123-456 (2020)",
         )
 
-    def test_break_the_uniform_guard_goes_red(self):
-        # Rule 6.2 ablation: reproduce the pre-fix behaviour (the blank
-        # check living only in the narrow-table `else` branch) and confirm
-        # it would have let a fully blank row through on a 3-column table.
-        import unified_pipeline.stage6.sections.board_certification as bc
-
+    def test_whitespace_only_inputs_are_treated_as_blank(self):
+        # #663 item 8 follow-up: format_date_for_section returns an
+        # unparseable value unchanged, so a whitespace-only year_certified
+        # (e.g. '  ') reaches this function as a non-empty-but-blank
+        # string. Truthiness alone ("if not (specialty or cert_number or
+        # dates)") does not catch this -- '  ' is truthy -- so the guard
+        # must strip before testing.
         gen = _generator()
         doc = Document()
         table = doc.add_table(rows=1, cols=3)
+        rows_before = len(table.rows)
         entries_before = gen.stats['entries_inserted']
 
-        def _pre_fix_add_board_cert_row(self, table, specialty, cert_number, dates):
-            row = table.add_row()
-            num_cols = len(row.cells)
-            if num_cols >= 3:
-                row.cells[0].text = specialty or ''
-                row.cells[1].text = cert_number or ''
-                row.cells[2].text = dates or ''
-            elif num_cols >= 2:
-                row.cells[0].text = specialty or ''
-                row.cells[1].text = f"{cert_number} ({dates})" if dates else (cert_number or '')
-            else:
-                row._element.getparent().remove(row._element)
-                return
-            self.stats['entries_inserted'] += 1
+        gen._add_board_cert_row(table, "  ", "\t", " ")
 
-        original = bc.BoardCertificationSection._add_board_cert_row
-        try:
-            bc.BoardCertificationSection._add_board_cert_row = _pre_fix_add_board_cert_row
-            gen._add_board_cert_row(table, "", "", "")
-            assert len(table.rows) == 2, "expected the pre-fix code to leave the blank row behind"
-            assert gen.stats['entries_inserted'] == entries_before + 1, (
-                "expected the pre-fix code to count the blank row as inserted"
-            )
-        finally:
-            bc.BoardCertificationSection._add_board_cert_row = original
+        assert len(table.rows) == rows_before, "a whitespace-only row must be removed, not left behind"
+        assert gen.stats['entries_inserted'] == entries_before

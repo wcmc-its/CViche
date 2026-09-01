@@ -606,21 +606,24 @@ class BoardCertificationSection:
         should not cost every section after it).
 
         That guard used to live only in the too-narrow (<2 column) branch,
-        which meant a caller that supplies no content at all -- e.g. the
-        structured fallback in `_parse_and_add_multiple_certifications`,
-        reached when `year_certified`/`recertification_date` alone made
-        `has_structured_data` true but the date failed to format and
-        `certifying_board`/`certificate_number` were both empty -- still
-        wrote a fully blank row on the >=3 and >=2 branches, with
-        `entries_inserted` incremented for it (#663 item 8). The blank
-        check now runs once, before any column-count branch, so every path
-        through this function shares it instead of each branch needing its
-        own copy.
+        which meant a caller that supplies no content at all still wrote a
+        fully blank row on the >=3 and >=2 branches, with `entries_inserted`
+        incremented for it (#663 item 8). The only reproduced trigger is
+        synthetic -- a caller passing all-empty or whitespace-only strings
+        directly, as the tests below do -- not a confirmed corpus path; no
+        production caller has been shown to reach this function with
+        `specialty`, `cert_number`, and `dates` all blank. The blank check
+        now runs once, before any column-count branch, so every path through
+        this function shares it instead of each branch needing its own copy.
         """
         row = table.add_row()
         num_cols = len(row.cells)
 
-        if not (specialty or cert_number or dates):
+        if not (
+            (specialty or '').strip()
+            or (cert_number or '').strip()
+            or (dates or '').strip()
+        ):
             row._element.getparent().remove(row._element)
             logger.warning(
                 "board certification: skipping blank row -- specialty, "
