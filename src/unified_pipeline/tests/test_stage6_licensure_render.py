@@ -1,4 +1,5 @@
-"""Wire tests for the two #575 fixes, driven through the real render paths.
+"""Wire tests for the two #575 fixes, driven through the real render paths,
+plus the licensure half of #658 (bare substring label matching).
 
 1. `_fill_licensure` formats F1 dates through `format_date_for_section`. A
    month-only issue date ("March 2019") must land in the Licensure table as
@@ -9,6 +10,13 @@
    `grant_status_rebucket_target`. An M2A grant whose status reads "In review"
    must render under Pending Funding, not Current Research Funding — the same
    symptom #210 fixed for the literal "Under review".
+
+3. `_classify_licensure_entry`'s `license_type` label check, and
+   `_fill_dea_npi`'s template-row label check, used bare `'npi' in label` /
+   `'dea' in label` substring tests -- so a label containing "dea" or "npi"
+   as a run of characters inside an unrelated word (e.g. "Idea Number")
+   misclassified. Bounded the same way #573 already bounded the raw-text
+   check for "Dean".
 
 Run with:
 
@@ -28,6 +36,12 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
+from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
+    KIND_DEA,
+    KIND_LICENSE,
+    KIND_NPI,
+    _classify_licensure_entry,
+)
 
 
 _LICENSE_ENTRY = {
@@ -107,3 +121,69 @@ def test_in_review_grant_renders_under_pending_funding():
         "grant with status 'In review' rendered before the Pending Funding "
         "header — it stayed in Current Research Funding"
     )
+
+
+# ---------------------------------------------------------------------------
+# 3. #658: bounded label matching in licensure classification
+
+
+def test_license_type_label_embedded_dea_substring_does_not_misclassify():
+    """A `license_type` value with "dea" embedded in an unrelated word must
+    not route to the DEA slot. Bare `'dea' in label` matched "dea" inside
+    "Idea" the same way the pre-#573 raw-text check matched it inside
+    "Dean"."""
+    kind = _classify_licensure_entry(
+        state="New York", license_number="123456",
+        license_type="Idea for renewal", original_text="")
+    assert kind == KIND_LICENSE
+
+
+def test_license_type_label_embedded_npi_substring_does_not_misclassify():
+    kind = _classify_licensure_entry(
+        state="New York", license_number="123456",
+        license_type="Alnpine board license", original_text="")
+    assert kind == KIND_LICENSE
+
+
+def test_license_type_label_still_classifies_a_real_npi():
+    """Control: a genuine whole-word "NPI" label still routes to the NPI
+    slot -- the fix bounds the match, it does not remove it."""
+    kind = _classify_licensure_entry(
+        state="", license_number="1234567890",
+        license_type="NPI", original_text="")
+    assert kind == KIND_NPI
+
+
+def test_license_type_label_still_classifies_a_real_dea():
+    kind = _classify_licensure_entry(
+        state="", license_number="AB1234567",
+        license_type="DEA registration", original_text="")
+    assert kind == KIND_DEA
+
+
+def _dea_npi_table(gen):
+    gen.doc.add_paragraph("Identifiers")
+    table = gen.doc.add_table(rows=3, cols=2)
+    table.rows[0].cells[0].text = "DEA number: (optional)"
+    # A row whose label contains "dea" only as a substring of an unrelated
+    # word -- the finder above still locates this table via row 0's own
+    # "DEA number" text, but this row must not itself be treated as the
+    # DEA row.
+    table.rows[1].cells[0].text = "Idea Reference Number"
+    table.rows[2].cells[0].text = "NPI number: (optional)"
+    return table
+
+
+def test_fill_dea_npi_does_not_write_into_an_embedded_substring_row():
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document()
+    table = _dea_npi_table(gen)
+
+    gen._fill_dea_npi("AB1234567", "1234567890")
+
+    assert table.rows[0].cells[1].text == "AB1234567"
+    assert table.rows[1].cells[1].text == "", (
+        "the 'Idea Reference Number' row was written to -- 'dea' matched as "
+        "a bare substring of 'Idea'"
+    )
+    assert table.rows[2].cells[1].text == "1234567890"

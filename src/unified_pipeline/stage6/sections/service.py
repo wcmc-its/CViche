@@ -67,6 +67,22 @@ BOARD_KEYWORDS = (
     'committee', 'board member', 'panel member', 'council', 'task force',
     'working group', 'planning committee', 'advisory', 'moderator',
 )
+
+
+def _matches_bounded(text_lower: str, keywords) -> bool:
+    """True when any keyword/phrase in `keywords` matches `text_lower` as a
+    whole word or phrase, not merely as a run of characters inside a larger
+    word (#658).
+
+    Plain substring containment (`kw in text_lower`) let "reviewer education
+    committee" trip both REVIEWER_PATTERNS and BOARD_KEYWORDS on fragments
+    that happened to co-occur, and would match a keyword embedded in an
+    unrelated longer word. `\\b` around each escaped keyword/phrase fixes
+    both without changing which whole-word/whole-phrase hits count.
+    """
+    return any(re.search(rf'\b{re.escape(kw)}\b', text_lower) for kw in keywords)
+
+
 # A multi-line Q2 entry's trailing date-only lines (e.g. "2014, 2017-2020")
 # describe the line before them; nothing else should be treated as a
 # continuation (#573 review).
@@ -139,8 +155,8 @@ def _split_q2_lines(lines: list[str]) -> tuple[list[str], list[str]]:
 
     for line in lines:
         line_lower = line.lower()
-        is_reviewer_line = any(p in line_lower for p in REVIEWER_PATTERNS)
-        is_board_line = any(kw in line_lower for kw in BOARD_KEYWORDS)
+        is_reviewer_line = _matches_bounded(line_lower, REVIEWER_PATTERNS)
+        is_board_line = _matches_bounded(line_lower, BOARD_KEYWORDS)
 
         if (not is_reviewer_line and not is_board_line and last_group
                 and _DATE_ONLY_LINE_RE.match(line)):
@@ -168,11 +184,11 @@ def _is_q2_journal_reviewer(text_lower: str, role: str, committee: str,
     is_journal_reviewer = (
         (role == 'reviewer' and any(kw in text_lower for kw in JOURNAL_SPECIALTY_KEYWORDS)) or
         any(kw in text_lower for kw in JOURNAL_ROLE_PHRASES) or
-        any(p in text_lower for p in REVIEWER_PATTERNS) or
+        _matches_bounded(text_lower, REVIEWER_PATTERNS) or
         (role == 'reviewer' and 'j ' in committee) or
         (role == 'reviewer' and 'journal' in org)
     )
-    is_board_entry = any(kw in text_lower for kw in BOARD_KEYWORDS)
+    is_board_entry = _matches_bounded(text_lower, BOARD_KEYWORDS)
     return is_journal_reviewer and not is_board_entry
 
 
@@ -276,7 +292,7 @@ def _is_known_org_line(line_lower: str, role_keywords: list[str]) -> bool:
     """
     if any(name in line_lower for name in _KNOWN_ORG_NAMES):
         return True
-    if any(kw in line_lower for kw in role_keywords):
+    if _matches_bounded(line_lower, role_keywords):
         return False
     return any(
         re.search(rf'\b{re.escape(term)}\b', line_lower)
