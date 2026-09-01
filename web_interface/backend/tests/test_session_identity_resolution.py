@@ -19,6 +19,11 @@ Contract exercised here, after the review response:
   - get_session_epoch never defaults; an unreadable epoch is a 503.
   - create_session_cookie reads the epoch itself and refuses to mint a cookie
     it could not register server-side.
+
+The store's own fail-closed contract is pinned one level down, in
+test_session_idle.py ("store outages fail CLOSED"): start(), resolve(), end()
+and touch() each raise SessionStoreUnavailable when the Redis client raises.
+The tests here drive the same failures through the auth dependency and HTTP.
 """
 import json
 import logging
