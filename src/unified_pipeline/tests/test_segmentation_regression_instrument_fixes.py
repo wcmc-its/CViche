@@ -284,8 +284,11 @@ def test_load_metrics_missing_snapshot_raises(tmp_path, monkeypatch):
 # ------------------------------------------------------------ #616 item iii
 
 def test_load_metrics_reads_utf8_encoding_explicitly(tmp_path, monkeypatch):
-    """The read must use encoding="utf-8" explicitly, not the platform
-    default -- proven by a non-ASCII title round-tripping intact."""
+    """_load_metrics() must round-trip non-ASCII content intact. (This does
+    not, by itself, distinguish an explicit encoding="utf-8" from the
+    platform default, since that default is UTF-8 on this platform; the
+    explicit encoding= argument on every read_text()/write_text() call is
+    verified directly by grep in the PR body, item iii.)"""
     monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
     snap = _snapshot_dir("utf8")
     snap.mkdir(parents=True)
@@ -298,9 +301,11 @@ def test_load_metrics_reads_utf8_encoding_explicitly(tmp_path, monkeypatch):
 
 
 def test_run_compare_report_written_with_utf8_encoding(tmp_path, monkeypatch):
-    """REPORT.md must be written with encoding="utf-8" explicitly -- proven
-    by a non-ASCII lost-line sample round-tripping through the written
-    file when read back with the same encoding."""
+    """REPORT.md must round-trip a non-ASCII lost-line sample intact when
+    read back with encoding="utf-8". (Same caveat as
+    test_load_metrics_reads_utf8_encoding_explicitly above: the platform
+    default is UTF-8 too, so this alone doesn't prove the write is
+    explicit -- that's confirmed by grep, PR body item iii.)"""
     monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
     baseline_dir = _snapshot_dir("base")
     candidate_dir = _snapshot_dir("cand")
@@ -335,6 +340,14 @@ def test_snapshot_dir_accepts_normal_label():
     assert path.name == "segsnap_baseline_2026-08-01"
 
 
+def test_snapshot_dir_rejects_trailing_newline_label():
+    # re.match's `$` matches just before a trailing "\n", so a match()-based
+    # check alone would accept "abc\n" and produce a directory literally
+    # named "segsnap_abc\n". fullmatch() anchors both ends and closes this.
+    with pytest.raises(ValueError, match="invalid snapshot label"):
+        _snapshot_dir("abc\n")
+
+
 # -------------------------------------------------------------- #616 item v
 
 def test_snapshot_raises_typed_exception_on_missing_cv_dir(tmp_path):
@@ -351,9 +364,13 @@ def test_snapshot_raises_typed_exception_on_no_docx_files(tmp_path):
 
 
 def test_main_translates_segmentation_regression_error_to_sys_exit(tmp_path, monkeypatch):
-    """main() is the sole place a SegmentationRegressionError becomes a
-    process exit (CODING_STANDARDS §5.1) -- proven at the CLI entry point,
-    not just at the raising function."""
+    """Proves main() surfaces a SegmentationRegressionError raised deep in
+    the call stack (_load_metrics(), via run_compare()) as a matching
+    SystemExit at the CLI entry point. (This alone doesn't distinguish
+    main() from a hypothetical sys.exit() still inside _load_metrics() --
+    that _load_metrics() raises rather than exits is pinned separately by
+    test_load_metrics_missing_snapshot_raises above, which asserts the
+    SegmentationRegressionError type directly.)"""
     monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
     monkeypatch.setattr(sys, "argv", ["segmentation_regression", "compare", "nope1", "nope2"])
 

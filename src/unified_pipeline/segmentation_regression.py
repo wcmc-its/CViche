@@ -401,7 +401,7 @@ def _outputs_root() -> Path:
 
 
 def _snapshot_dir(label: str) -> Path:
-    if not _SNAPSHOT_LABEL_RE.match(label):
+    if not _SNAPSHOT_LABEL_RE.fullmatch(label):
         raise ValueError(
             f"invalid snapshot label {label!r}: must match {_SNAPSHOT_LABEL_RE.pattern}"
         )
@@ -534,8 +534,8 @@ def run_compare(baseline_label: str, candidate_label: str) -> int:
 
     width = max(len(row[0]) for row in rows)
     lines = [f"Segmentation regression: {baseline_label} -> {candidate_label}", ""]
-    for uid, verdict, detail in rows:
-        lines.append(f"{uid:<{width}}  {verdict:<10}  {detail}")
+    for uid, label, detail in rows:
+        lines.append(f"{uid:<{width}}  {label:<10}  {detail}")
     lines.append("")
     total = len(shared) + len(missing)
     missing_note = f" ({len(missing)} missing from candidate)" if missing else ""
