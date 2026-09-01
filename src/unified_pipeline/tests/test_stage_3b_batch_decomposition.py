@@ -40,6 +40,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import unified_pipeline.stage_3b_entry_classifier as stage_3b  # noqa: E402
+# call_llm is stubbed at the module that actually calls it: the #522 split
+# moved every classification call site into stage3b/classify.py, so patching
+# the facade's copy would no longer intercept anything (#496).
+import unified_pipeline.stage3b.classify as stage3b_classify  # noqa: E402
 from unified_pipeline.stage_3b_entry_classifier import (  # noqa: E402
     TaxonomyContext,
     classify_entries_batch,
@@ -110,7 +114,7 @@ def _four_batch_call_llm(monkeypatch):
             raise RuntimeError("ThrottlingException: rate exceeded")
         raise AssertionError(f"unexpected extra call_llm invocation #{n}")
 
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
     return calls
 
 
@@ -175,6 +179,8 @@ def test_four_batch_shapes_produce_exact_expected_results_and_stats(monkeypatch,
         "llm_classified": 3,   # 2 from batch 2 + 1 from batch 3
         "fallback_entries": 3,  # 1 from batch 3 + 2 from batch 4
         "empty_entries": 2,    # batch 1
+        "invalid_code_entries": 0,
+        "classification_rules_version": "2.6.0",
     }
 
     # The malformed object in batch 4 is logged, same as before the split.
@@ -187,7 +193,8 @@ def test_classify_entries_batch_is_under_the_ratchet_threshold():
     """The actual concern #604 exists for: classify_entries_batch itself,
     not just its helpers, must drop under check_function_size.py's 200-line
     THRESHOLD -- #522's file split alone would not have shrunk it."""
-    module_path = _SRC / "unified_pipeline" / "stage_3b_entry_classifier.py"
+    # classify_entries_batch lives in stage3b/classify.py since the #522 split.
+    module_path = _SRC / "unified_pipeline" / "stage3b" / "classify.py"
     tree = ast.parse(module_path.read_text())
     func = next(
         node
@@ -206,7 +213,7 @@ def test_classify_entries_batch_empty_input(monkeypatch):
     def _boom(**kwargs):
         raise AssertionError("call_llm must not be invoked for an empty entries list")
 
-    monkeypatch.setattr(stage_3b, "call_llm", _boom)
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
 
     results, stats = classify_entries_batch([], _context(), TAXONOMY, batch_size=BATCH_SIZE)
 
@@ -217,13 +224,52 @@ def test_classify_entries_batch_empty_input(monkeypatch):
         "total_tokens": 0,
         "cost": 0.0,
         "model": None,
+        "classification_rules_version": "2.6.0",
         "entries_classified": 0,
         "llm_batches": 0,
         "failed_batches": 0,
         "llm_classified": 0,
         "fallback_entries": 0,
         "empty_entries": 0,
+        "invalid_code_entries": 0,
     }
+
+
+def test_classify_entries_batch_size_zero_raises(monkeypatch):
+    """batch_size=0 is passed straight into range(0, len(entries), batch_size)
+    (classify.py:279), which itself raises ValueError("range() arg 3 must not
+    be zero") before any entry is touched. Pin that boundary explicitly
+    rather than leaving it as an unasserted implicit side effect of the
+    stdlib call."""
+    def _boom(**kwargs):
+        raise AssertionError("call_llm must not be invoked when batch_size=0")
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
+
+    with pytest.raises(ValueError, match="batch_size must be greater than zero"):
+        classify_entries_batch(
+            [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=0
+        )
+
+
+def test_classify_entries_batch_size_negative_raises(monkeypatch):
+    """A negative batch_size used to make range(0, len(entries), batch_size)
+    an EMPTY range under Python's negative-step semantics (start=0 already >=
+    stop), so the for loop in classify_entries_batch silently skipped every
+    entry with no error at all -- arguably more dangerous than batch_size=0,
+    which at least raised. classify_entries_batch now guards `batch_size <= 0`
+    explicitly (before either boundary reaches range()), so both raise the
+    same way: pinned here as the negative counterpart to
+    test_classify_entries_batch_size_zero_raises above."""
+    def _boom(**kwargs):
+        raise AssertionError("call_llm must not be invoked when batch_size<0")
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", _boom)
+
+    with pytest.raises(ValueError, match="batch_size must be greater than zero"):
+        classify_entries_batch(
+            [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=-1
+        )
 
 
 def _echo_call_llm(monkeypatch):
@@ -242,7 +288,7 @@ def _echo_call_llm(monkeypatch):
             "model": "gpt-5.1-mini-echo",
         }
 
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
 
 
 @pytest.mark.parametrize("num_entries,batch_size,expected_llm_batches", [
@@ -281,7 +327,7 @@ def test_classify_entries_batch_handles_unparseable_llm_json(monkeypatch, caplog
             "model": "gpt-5.1-mini-bad-json",
         }
 
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
 
     with caplog.at_level(logging.ERROR, logger=stage_3b.logger.name):
         results, stats = classify_entries_batch(
@@ -300,6 +346,123 @@ def test_classify_entries_batch_handles_unparseable_llm_json(monkeypatch, caplog
     assert stats["model"] is None
 
 
+def test_llm_result_missing_content_key_is_treated_as_batch_failure(monkeypatch):
+    """llm_result["content"] is a bare subscript inside the try block -- a
+    response dict that omits "content" entirely must raise KeyError there
+    and be caught the same way a raised call_llm exception or invalid JSON
+    already are, not escape uncaught."""
+    def call(**kwargs):
+        return {
+            "prompt_tokens": 50, "completion_tokens": 10, "cost": 0.001,
+            "model": "gpt-5.1-mini-nocontent",
+        }
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2
+    )
+
+    assert len(results) == 2
+    assert all(r["classification_source"] == "fallback" for r in results)
+    assert all(r["taxonomy_code"] == "H" for r in results)
+    assert stats["failed_batches"] == 1
+    assert stats["llm_batches"] == 1
+    # KeyError fires before any llm_result field is read, so stats stay at
+    # _BatchStats' defaults, same as a raised call_llm exception.
+    assert stats["input_tokens"] == 0
+    assert stats["model"] is None
+
+
+def test_llm_result_missing_prompt_tokens_is_treated_as_batch_failure(monkeypatch):
+    """llm_result["prompt_tokens"] is read AFTER content parses and yields a
+    real classification -- a response missing it must still be caught as a
+    batch failure, discarding that already-parsed classification rather
+    than escaping uncaught or silently keeping a half-applied result."""
+    def call(**kwargs):
+        return {
+            "content": json.dumps({"classifications": [
+                {"index": 0, "code": "H", "confidence": 0.9},
+            ]}),
+            "completion_tokens": 10, "cost": 0.001,
+            "model": "gpt-5.1-mini-notokens",
+            # "prompt_tokens" deliberately omitted
+        }
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Award A")], _context(), TAXONOMY
+    )
+
+    assert len(results) == 1
+    # The parsed classification above must NOT survive -- the batch is
+    # counted failed and the entry falls back, exactly as if call_llm had
+    # raised before returning anything at all.
+    assert results[0]["classification_source"] == "fallback"
+    assert stats["failed_batches"] == 1
+    assert stats["llm_batches"] == 1
+    assert stats["input_tokens"] == 0
+    assert stats["model"] is None
+
+
+def test_llm_result_missing_cost_is_treated_as_batch_failure(monkeypatch):
+    """llm_result["cost"] is read last of the three token/cost fields -- a
+    response with both token fields present but no "cost" must still be
+    caught as a batch failure."""
+    def call(**kwargs):
+        return {
+            "content": json.dumps({"classifications": [
+                {"index": 0, "code": "H", "confidence": 0.9},
+            ]}),
+            "prompt_tokens": 50, "completion_tokens": 10,
+            "model": "gpt-5.1-mini-nocost",
+            # "cost" deliberately omitted
+        }
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Award A")], _context(), TAXONOMY
+    )
+
+    assert len(results) == 1
+    assert results[0]["classification_source"] == "fallback"
+    assert stats["failed_batches"] == 1
+    assert stats["llm_batches"] == 1
+    assert stats["cost"] == 0.0
+
+
+def test_single_entry_batch_gets_normal_llm_classification(monkeypatch):
+    """A batch of exactly one entry with a normal, in-range, successful LLM
+    response. Every existing single-entry call_llm stub in the suite
+    deliberately supplies an edge-case response (out-of-range confidence, a
+    raising call_llm, a malformed object); the closest well-formed evidence
+    is a two-entry batch (batch 2 of the four-batch test above). Pin the
+    plain one-entry/one-classification case directly."""
+    def call(**kwargs):
+        return {
+            "content": json.dumps({"classifications": [
+                {"index": 0, "code": "H", "confidence": 0.9, "reasoning": "clear award"},
+            ]}),
+            "prompt_tokens": 50, "completion_tokens": 10, "cost": 0.001,
+            "model": "gpt-5.1-mini-single",
+        }
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Dean's Award for Excellence, 2015")], _context(), TAXONOMY
+    )
+
+    assert len(results) == 1
+    assert results[0]["classification_source"] == "llm"
+    assert results[0]["taxonomy_code"] == "H"
+    assert results[0]["taxonomy_confidence"] == 0.9
+    assert stats["llm_batches"] == 1
+    assert stats["llm_classified"] == 1
+
+
 @pytest.mark.parametrize("response_json", [
     {"foo": "bar"},           # no "classifications" key at all
     {"classifications": []},  # key present but empty
@@ -316,7 +479,7 @@ def test_classify_entries_batch_handles_missing_or_empty_classifications(monkeyp
             "model": "gpt-5.1-mini-noclass",
         }
 
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
 
     results, stats = classify_entries_batch(
         [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2
@@ -333,7 +496,23 @@ def test_classify_entries_batch_handles_missing_or_empty_classifications(monkeyp
 def test_classify_entries_batch_malformed_indices_do_not_cross_contaminate(monkeypatch):
     """Duplicate/out-of-range/negative/non-integer indices must never let one
     entry receive another entry's classification data (#520/#521's silent-
-    failure class), even though none of them raise."""
+    failure class), even though none of them raise.
+
+    class_by_idx is a dict keyed by the raw "index" value the LLM returned
+    (classify.py:185-189), looked up as class_by_idx.get(orig_idx) where
+    orig_idx is always a plain non-negative int from enumerate(batch_entries).
+    So the classic "Python treats -1 as a valid sequence index" hazard does
+    NOT apply here -- dict.get(-1) never coincidentally resolves to the last
+    entry the way list[-1] indexing would; this test pins that explicitly
+    below instead of leaving it implicit in "entry 1 falls back".
+
+    Duplicate index=0 objects are pinned as last-write-wins: that is plain
+    dict overwrite semantics from an unconditional `class_by_idx[idx] = c`
+    with no existing-key check, not a documented contract. If ambiguous
+    duplicate indices from the LLM should instead be rejected/fall back
+    (arguably the safer read of an inconsistent response), that check
+    belongs in classify.py -- this test only pins what the code does today.
+    """
     def call(**kwargs):
         return {
             "content": json.dumps({"classifications": [
@@ -347,21 +526,57 @@ def test_classify_entries_batch_malformed_indices_do_not_cross_contaminate(monke
             "model": "gpt-5.1-mini-idx",
         }
 
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
 
     results, stats = classify_entries_batch(
         [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2
     )
 
     assert len(results) == 2
-    # Entry 0: only ever sees index=0 objects (last one wins) -- never the
-    # out-of-range/negative/string-indexed data.
+    # Entry 0: only ever sees index=0 objects (last one wins, see docstring)
+    # -- never the out-of-range/negative/string-indexed data.
     assert results[0]["classification_source"] == "llm"
     assert results[0]["taxonomy_code"] == "T"
     assert results[0]["taxonomy_confidence"] == 0.99
-    # Entry 1: the string index "1" does not match int orig_idx=1, so it
-    # falls back rather than being corrupted by a wrong entry's object.
+    # Entry 1: none of index=99 (out of range), index=-1 (negative -- proven
+    # NOT to alias the last entry the way list[-1] would), or index="1"
+    # (string, not int) match int orig_idx=1, so it falls back instead of
+    # being corrupted by any of that data.
     assert results[1]["classification_source"] == "fallback"
+    assert results[1]["taxonomy_code"] != "Y"  # would mean -1 aliased entry 1
+    assert results[1]["taxonomy_code"] != "Z"  # would mean "1" aliased entry 1
+
+
+def test_classify_entries_batch_bool_and_float_indices_alias_int_lookup(monkeypatch):
+    """The string-index case above proves a non-int "index" is safely
+    rejected -- but that does NOT generalize to every non-int type. Python's
+    dict keys compare by == with matching hashes, and True == 1 and
+    0.0 == 0 both hold, so class_by_idx.get(orig_idx) resolves a key stored
+    as a bool or float exactly as it would resolve a plain int key.
+    classify.py never coerces or type-checks "index" before using it as a
+    dict key (classify.py:185-189), so this is real, reachable behavior for
+    any LLM response that emits a JSON float (or unlikely but valid JSON
+    boolean) where an int was expected -- not a hypothetical."""
+    def call(**kwargs):
+        return {
+            "content": json.dumps({"classifications": [
+                {"index": True, "code": "H", "confidence": 0.9},  # aliases int 1
+                {"index": 0.0, "code": "T", "confidence": 0.8},   # aliases int 0
+            ]}),
+            "prompt_tokens": 20, "completion_tokens": 5, "cost": 0.0005,
+            "model": "gpt-5.1-mini-alias",
+        }
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+
+    results, stats = classify_entries_batch(
+        [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2
+    )
+
+    assert results[0]["classification_source"] == "llm"
+    assert results[0]["taxonomy_code"] == "T"  # 0.0 aliased orig_idx=0
+    assert results[1]["classification_source"] == "llm"
+    assert results[1]["taxonomy_code"] == "H"  # True aliased orig_idx=1
 
 
 def test_classify_entries_batch_uses_index_not_position(monkeypatch):
@@ -379,7 +594,7 @@ def test_classify_entries_batch_uses_index_not_position(monkeypatch):
             "model": "gpt-5.1-mini-rev",
         }
 
-    monkeypatch.setattr(stage_3b, "call_llm", call)
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
 
     results, stats = classify_entries_batch(
         [_entry("Award A"), _entry("Award B")], _context(), TAXONOMY, batch_size=2

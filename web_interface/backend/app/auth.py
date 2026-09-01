@@ -14,11 +14,7 @@ from app.database import get_db
 from app.models import User
 from app.config_loader import get_config_value
 from app.ed_group_lookup import (
-    get_cached_membership,
-    set_cached_membership,
-    get_stale_membership,
     check_ed_membership,
-    ed_lookup_lock,
     EdUnavailableError,
     LDAPConfig,
 )
@@ -37,6 +33,13 @@ logger = logging.getLogger(__name__)
 
 SESSION_TTL = _CFG_SESSION_TTL
 COOKIE_NAME = "cviche_session"
+
+# The one 401 body for "we could not verify ED membership" -- named once so the
+# unreachable-directory and unconfigured-group arms cannot drift apart.
+_ED_UNVERIFIABLE_DETAIL = {
+    "error": "directory_unavailable",
+    "message": "Unable to verify group membership. Please try again later.",
+}
 
 # Known placeholder secrets shipped in templates/examples. Booting with one of
 # these means every session cookie is forgeable by anyone who has read the
@@ -278,59 +281,45 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                     detail={"error": "session_invalid",
                             "message": "Please log in again."}
                 )
-            membership = get_cached_membership(user.cwid)
-            if membership is None:
-                # Cache miss -- single-flight so N concurrent requests for the
-                # same cwid on a cold cache query LDAP once, not N times.
-                with ed_lookup_lock(user.cwid):
-                    membership = get_cached_membership(user.cwid)  # a waiting
-                    # thread may have populated it while this one waited.
-                    if membership is None:
-                        from app.config_loader import get_config
+            # check_ed_membership owns the whole cache-aside flow (live cache ->
+            # LDAP -> stale fallback). use_cache=True keeps today's behavior on
+            # this path: a re-check of an already-authorized session may ride the
+            # 5-minute live cache, and an ED outage must not evict the session.
+            # The login path (saml_routes) passes use_cache=False, so minting a
+            # NEW session always costs a fresh ED query.
+            from app.config_loader import get_config
 
-                        ed_access_group = get_config_value(db, "ed_access_group") or ""
-                        ed_admin_group = get_config_value(db, "ed_admin_group") or ""
-                        ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
-                        ldap_bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
-                        bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
-                        if not ldap_url or not ldap_bind_dn or not ed_access_group:
-                            # Same guard saml_acs() applies at login -- an
-                            # incomplete ED config can't be told apart from
-                            # "not authorized" without this, so treat it as
-                            # directory-unavailable.
-                            logger.error("ED LDAP config incomplete for per-request re-check")
-                            logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
-                            raise HTTPException(
-                                status_code=401,
-                                detail={"error": "directory_unavailable",
-                                        "message": "Unable to verify group membership. Please try again later."}
-                            )
-                        ldap_cfg = LDAPConfig(
-                            ldap_url=ldap_url, bind_dn=ldap_bind_dn,
-                            bind_password=SecretStr(bind_password),
-                        )
-                        try:
-                            membership = check_ed_membership(
-                                cwid=user.cwid,
-                                access_group=ed_access_group,
-                                admin_group=ed_admin_group,
-                                cfg=ldap_cfg,
-                            )
-                            set_cached_membership(user.cwid, membership)
-                        except EdUnavailableError:
-                            # ED unreachable -- use stale cache
-                            logger.warning("ED unavailable during per-request check for %s", user.cwid)
-                            membership = get_stale_membership(user.cwid)
-                            if membership is None:
-                                # No stale data available -- cannot verify membership
-                                logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
-                                raise HTTPException(
-                                    status_code=401,
-                                    detail={"error": "directory_unavailable",
-                                            "message": "Unable to verify group membership. Please try again later."}
-                                )
+            ed_access_group = get_config_value(db, "ed_access_group") or ""
+            ed_admin_group = get_config_value(db, "ed_admin_group") or ""
+            ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
+            ldap_bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
+            bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
+            ldap_cfg = LDAPConfig(
+                ldap_url=ldap_url, bind_dn=ldap_bind_dn,
+                bind_password=SecretStr(bind_password),
+            )
+            try:
+                membership = check_ed_membership(
+                    cwid=user.cwid,
+                    access_group=ed_access_group,
+                    admin_group=ed_admin_group,
+                    cfg=ldap_cfg,
+                    use_cache=True,
+                )
+            except EdUnavailableError:
+                # ED unreachable (or misconfigured -- EdConfigurationError is a
+                # subclass) and no usable stale answer: cannot verify membership.
+                logger.warning("ED unavailable during per-request check for %s", user.cwid)
+                logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
+                raise HTTPException(status_code=401, detail=_ED_UNVERIFIABLE_DETAIL)
+            except ValueError:
+                # No ED access group configured. Fail closed exactly as an
+                # unreachable directory does -- never a 500, never an approval.
+                logger.error("ED access group is not configured; denying %s", user.cwid)
+                logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
+                raise HTTPException(status_code=401, detail=_ED_UNVERIFIABLE_DETAIL)
 
-            if not membership["in_access_group"]:
+            if not membership.in_access_group:
                 # User removed from access group -- deny
                 logger.warning("Per-request ED check: %s no longer in access group", user.cwid)
                 logger.info(
@@ -344,7 +333,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                 )
 
             # Sync role from ED group membership
-            new_role = "admin" if membership.get("in_admin_group") else "user"
+            new_role = "admin" if membership.in_admin_group else "user"
             if user.role != new_role:
                 old_role = user.role
                 user.role = new_role

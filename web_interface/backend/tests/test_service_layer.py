@@ -442,3 +442,97 @@ class TestCsvInjectionGuard:
         assert _sanitize_csv_cell("cv.docx") == "cv.docx"
         assert _sanitize_csv_cell(42) == 42  # non-strings pass through unchanged
         assert _sanitize_csv_cell("") == ""
+
+
+# ============================================================
+# Consent Service Tests (#655 review: ConsentService.record_consent +
+# get_current_consent_document)
+# ============================================================
+
+from unittest.mock import patch
+
+from app.consent import get_current_consent_document, get_consent_text, get_consent_hash
+from app.services.consent_service import record_consent
+from app.models import Consent
+
+
+def _seed_consent_user(db, email="consent-svc@example.com"):
+    user = User(email=email, display_name="Consent Svc User", role="user", auth_method="simple")
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+class TestGetCurrentConsentDocument:
+    """#655 review: version, text, and hash resolved together as one unit,
+    instead of independent get_config_value()/get_consent_text()/get_consent_hash()
+    lookups at each call site."""
+
+    def test_returns_consistent_version_text_hash(self, db, seed_simple_mode):
+        document = get_current_consent_document(db)
+        assert document.version == "1.0"
+        assert document.text == get_consent_text()
+        assert document.hash == get_consent_hash()
+
+    def test_falls_back_to_default_version_when_unconfigured(self, db):
+        # No SystemConfig row for consent_version -- falls back to the same
+        # "1.0" default the router used before this moved.
+        document = get_current_consent_document(db)
+        assert document.version == "1.0"
+
+
+class TestRecordConsent:
+    """#655 review: ConsentService.record_consent owns the domain workflow
+    (resolve version, create audit row, mutate user, manage the transaction)
+    that used to live inline in the POST /api/consent route handler."""
+
+    def test_happy_path_creates_audit_row_and_updates_user(self, db, seed_simple_mode):
+        user = _seed_consent_user(db)
+
+        document = record_consent(
+            db=db,
+            user=user,
+            default_submission_type="own_cv",
+            ip_address="203.0.113.7",
+            user_agent="pytest-agent",
+        )
+
+        assert document.version == "1.0"
+
+        record = db.query(Consent).filter(Consent.user_id == user.id).one()
+        assert record.consent_version == "1.0"
+        assert record.consent_text_hash == document.hash
+        assert record.ip_address == "203.0.113.7"
+        assert record.user_agent == "pytest-agent"
+
+        assert user.consent_version == "1.0"
+        assert user.consent_date is not None
+        assert user.default_submission_type == "own_cv"
+
+    def test_commit_failure_rolls_back_and_reraises(self, db, seed_simple_mode):
+        user = _seed_consent_user(db)
+
+        with patch.object(db, "commit", side_effect=RuntimeError("boom")), \
+             patch.object(db, "rollback") as mock_rollback:
+            with pytest.raises(RuntimeError):
+                record_consent(
+                    db=db,
+                    user=user,
+                    default_submission_type="own_cv",
+                    ip_address="203.0.113.7",
+                    user_agent="pytest-agent",
+                )
+            mock_rollback.assert_called_once()
+
+    def test_repeat_submission_creates_a_second_audit_row(self, db, seed_simple_mode):
+        """Consent is an append-only audit table: two submissions from the same
+        user each get their own row -- not deduped or updated in place."""
+        user = _seed_consent_user(db)
+
+        record_consent(db, user, "own_cv", "203.0.113.7", "agent-1")
+        record_consent(db, user, "authorized_admin", "203.0.113.8", "agent-2")
+
+        rows = db.query(Consent).filter(Consent.user_id == user.id).all()
+        assert len(rows) == 2
+        assert user.default_submission_type == "authorized_admin"

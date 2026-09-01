@@ -18,7 +18,7 @@ from app.session_idle import get_idle_store
 from app.config_loader import get_config_value
 from app.saml_client import get_saml_client, extract_user_attrs
 from app.saml_replay import get_replay_cache, assertion_ids, replay_ttl, replay_fail_closed
-from app.ed_group_lookup import check_ed_membership, set_cached_membership, EdUnavailableError, LDAPConfig
+from app.ed_group_lookup import check_ed_membership, EdUnavailableError, LDAPConfig
 from pydantic import SecretStr
 from app.services.user_service import provision_user, normalize_email
 from app.redirect_safety import safe_relative_path
@@ -199,36 +199,49 @@ def _saml_acs_process(form: dict, db: Session):
         ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
         bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
         bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
-        if not ldap_url or not bind_dn or not ed_access_group:
-            logger.error("ED LDAP config incomplete (ED_LDAP_URL, ED_LDAP_BIND_DN, ed_access_group)")
+        if not ldap_url or not bind_dn or not ed_access_group.strip():
+            # An unset access group would otherwise reach LDAP as an empty
+            # search_base; check_ed_membership now rejects it outright, so guard
+            # here and fail closed with the same operator-visible error.
+            logger.error(
+                "ED not configured (need ED_LDAP_URL, ED_LDAP_BIND_DN, ed_access_group)"
+            )
             return RedirectResponse("/login?error=directory_unavailable", status_code=302)
 
         ldap_cfg = LDAPConfig(
             ldap_url=ldap_url, bind_dn=bind_dn, bind_password=SecretStr(bind_password)
         )
         try:
+            # use_cache=False: the login path is the stronger gate, so it reads
+            # NEITHER cache -- not the 5-minute live one, not the 30-minute
+            # stale one -- and always queries ED. A user removed from ED three
+            # minutes ago must not be able to START a new session off a warm
+            # live entry, nor off a last-known-good answer during an outage.
+            # (The per-request re-check in auth.py keeps use_cache=True.)
+            # check_ed_membership still WRITES both caches on success, so there
+            # is no set_cached_membership here and the login keeps warming the
+            # cache the per-request checks read.
             membership = check_ed_membership(
                 cwid=attrs["cwid"],
                 access_group=ed_access_group,
                 admin_group=ed_admin_group,
                 cfg=ldap_cfg,
+                use_cache=False,
             )
-            if not membership["in_access_group"]:
+            if not membership.in_access_group:
                 logger.warning("SAML ACS: user %s not in ED access group", attrs["cwid"])
                 logger.info(
                     LOGIN_FAILED,
                     extra={"cwid": attrs["cwid"], "reason": "not_authorized"},
                 )
                 return RedirectResponse("/login?error=not_authorized", status_code=302)
-            # Cache the result for per-request checks (keyed on cwid)
-            set_cached_membership(attrs["cwid"], membership)
         except EdUnavailableError:
             logger.error("ED unavailable during SAML login for %s", attrs["cwid"], exc_info=True)
             return RedirectResponse("/login?error=directory_unavailable", status_code=302)
 
     # Determine role based on ED groups (if enabled) or preserve existing
-    if ed_enabled and membership:
-        user_role = "admin" if membership.get("in_admin_group") else "user"
+    if ed_enabled and membership is not None:
+        user_role = "admin" if membership.in_admin_group else "user"
     else:
         user_role = None  # Don't override existing role when ED not enabled
 

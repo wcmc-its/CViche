@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from app.client_ip import get_client_ip
 from app.database import get_db
 from app.models import User
 from app.schemas import LoginRequest, LoginResponse, AuthConfigResponse, MeResponse, QuotaInfo
@@ -60,7 +61,7 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
             },
         )
 
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_client_ip(request) or "unknown"
 
     if not get_login_throttle().allow(client_ip):
         return JSONResponse(

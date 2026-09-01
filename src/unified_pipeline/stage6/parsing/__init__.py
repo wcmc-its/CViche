@@ -27,10 +27,12 @@ from .records import (  # noqa: F401
     _is_orphan_fragment,
 )
 from .text import (  # noqa: F401
+    ParsedActivityLine,
     _extract_last_name_from_uid,
     _extract_name_from_uid,
     _extract_year_from_text,
     _is_structural_label,
     _is_table_header_entry,
+    _parse_flattened_committee_lines,
     _parse_multi_membership_entry,
 )
