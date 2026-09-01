@@ -88,6 +88,27 @@ def test_quiet_on_genuinely_different_bodies():
     assert lint_duplicate_records(blocks) == []
 
 
+def test_fires_at_exactly_the_window_distance():
+    """Boundary control for the `<=` in the window prune (render.py:625-626).
+    The corpus's own headline firing (2068_Yount_Cv, list numbers 32 and 38)
+    sits at distance exactly DUPLICATE_RECORD_WINDOW, so an off-by-one to `<`
+    would silently stop detecting it. `test_quiet_when_the_repeat_is_beyond_
+    the_window` pins the other side of the same edge at distance 7."""
+    filler = [("p", f"{n}. filler citation entry number {n}, long enough to "
+                     f"pass the minimum body length on its own.")
+              for n in range(2, DUPLICATE_RECORD_WINDOW + 1)]
+    last = DUPLICATE_RECORD_WINDOW + 1
+    blocks = ([("p", "D. PUBLICATIONS"), ("p", f"1. {_CITATION_A}")]
+              + filler
+              + [("p", f"{last}. {_CITATION_A}")])
+    # the two occurrences really are DUPLICATE_RECORD_WINDOW enumerated
+    # blocks apart, not fewer
+    assert last - 1 == DUPLICATE_RECORD_WINDOW
+    findings = lint_duplicate_records(blocks)
+    assert len(findings) == 1
+    assert findings[0]["evidence"][0].startswith("block 1 repeats at ")
+
+
 def test_quiet_when_the_repeat_is_beyond_the_window():
     """A repeat further than DUPLICATE_RECORD_WINDOW enumerated blocks from
     its first occurrence is out of scope -- the shipped window is bounded,
@@ -217,6 +238,23 @@ def test_quiet_on_duplicated_non_enumerated_paragraph():
     assert lint_duplicate_records(blocks) == []
 
 
+def test_quiet_on_duplicated_enumerated_table_blocks():
+    """Negative control for the `kind != "p"` restriction (render.py:622).
+    `read_docx_blocks` emits ("table", <joined cell lines>) blocks whose first
+    line can itself open with a list enumerator; a grant or teaching table
+    legitimately repeated in two rendered rows is not a duplicated citation,
+    and the lint tracks paragraph blocks only. Without the kind guard these
+    same two blocks key alike inside the window and DO fire -- that is what
+    makes this a behavioural pin rather than a restatement."""
+    blocks = [
+        ("p", "D. PUBLICATIONS"),
+        ("table", f"1. {_CITATION_A}"),
+        ("p", f"2. {_CITATION_B}"),
+        ("table", f"3. {_CITATION_A}"),
+    ]
+    assert lint_duplicate_records(blocks) == []
+
+
 def test_run_doctor_dispatches_duplicate_records_and_skips_without_docx(tmp_path):
     """Dispatch wiring, both directions: fires as a real finding when the
     stage-6 docx carries a duplicate, and degrades to the standard INFO
@@ -252,9 +290,11 @@ if __name__ == "__main__":
     test_flags_same_body_at_different_list_numbers_same_section()
     test_quiet_when_the_repeat_is_under_a_different_section_heading()
     test_quiet_on_genuinely_different_bodies()
+    test_fires_at_exactly_the_window_distance()
     test_quiet_when_the_repeat_is_beyond_the_window()
     test_blank_spacer_paragraphs_are_transparent_to_the_window()
     test_docx_text_and_read_docx_blocks_smoke()
     test_quiet_on_short_duplicated_body_under_the_floor()
     test_quiet_on_duplicated_non_enumerated_paragraph()
+    test_quiet_on_duplicated_enumerated_table_blocks()
     print("OK")
