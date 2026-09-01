@@ -264,9 +264,21 @@ python3 -m pytest src/unified_pipeline/tests/ -q
 # backend suite — needs dummy env, the factory raises without it
 CVICHE_SESSION_SECRET=x DB_HOST=x DB_PORT=3306 DB_USER=x DB_PASSWORD=x DB_NAME=x \
   python3 -m pytest web_interface/backend/tests/ -q
+
+# coverage — reported, never a gate. `term-missing` lists the uncovered lines and branches.
+python3 -m pytest src/unified_pipeline/tests/ --cov=src --cov-branch --cov-report=term-missing -q
 ```
 
 A local pass is not evidence a change is done. CI is.
+
+Coverage is a number we report, not one that can fail a build — no minimum is
+enforced, deliberately, so nothing can block a corpus run for a reason
+unrelated to output correctness. The figure that means something is coverage of
+modules a live driver actually reaches, which is 55.7% of statements; the raw
+`src/unified_pipeline` figure the command prints as 26% is dominated by code no
+run executes. Two numbers, so say which one you mean: coverage.py's total line
+blends statements and branches, while "27.1%" counts statements alone. The rule
+is `CODING_STANDARDS.md` §6.10, the worklist is #704.
 
 Leave one runnable check behind for non-trivial logic. For a CLI consumed by
 another script, pin the *contract* — `scripts/doctor_one.py` and

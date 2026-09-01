@@ -140,3 +140,10 @@ k8s/overlays/*/auth_config.yaml
 k8s/overlays/*/*.pem
 k8s/overlays/*/*.key
 k8s/overlays/*/*.crt
+
+# Coverage artifacts (CODING_STANDARDS.md §6.10 -- reported, never committed)
+.coverage
+.coverage.*
+coverage.json
+coverage.xml
+htmlcov/
