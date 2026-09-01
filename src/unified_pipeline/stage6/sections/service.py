@@ -68,6 +68,17 @@ BOARD_KEYWORDS = (
     'working group', 'planning committee', 'advisory', 'moderator',
 )
 
+# Role indicators used by `_is_known_org_line`'s veto and the sibling
+# `is_role` check in `_parse_extramural_leadership_lines`, both matched with
+# `_matches_word_start` (below), not `_matches_bounded`. Promoted from a
+# local list literal (duplicated ad hoc between `_is_known_org_line`'s two
+# call sites) to a named module constant so this round's fix is directly
+# testable, matching REVIEWER_PATTERNS/BOARD_KEYWORDS above.
+EXTRAMURAL_ROLE_KEYWORDS = (
+    'member', 'chair', 'reviewer', 'liaison', 'mentor', 'committee',
+    'board', 'council', 'advisor', 'director', 'leader', 'representative',
+)
+
 
 def _matches_bounded(text_lower: str, keywords) -> bool:
     """True when any keyword/phrase in `keywords` matches `text_lower` as a
@@ -81,6 +92,52 @@ def _matches_bounded(text_lower: str, keywords) -> bool:
     both without changing which whole-word/whole-phrase hits count.
     """
     return any(re.search(rf'\b{re.escape(kw)}\b', text_lower) for kw in keywords)
+
+
+def _matches_word_start(text_lower: str, keywords) -> bool:
+    """True when `text_lower` contains a word that STARTS WITH one of
+    `keywords` -- a `\\b`-anchored prefix, with no closing `\\b` (#658
+    round 2).
+
+    Used only for `EXTRAMURAL_ROLE_KEYWORDS`, not the other keyword lists
+    `_matches_bounded` still serves. `_matches_bounded`'s whole-word
+    `\\b...\\b` fixed keyword-embedded-in-an-unrelated-word (#658), but it
+    also stopped matching `EXTRAMURAL_ROLE_KEYWORDS`' own inflected and
+    derived forms -- "member" no longer matched "members"/"membership",
+    "chair" no longer matched "chairman"/"chaired", "director" no longer
+    matched "directors"/"directorship", "mentor" no longer matched
+    "mentoring"/"mentorship", "council" no longer matched "councilor",
+    "leader" no longer matched "leaders"/"leadership". A differential probe
+    over every entry line in the corpus's stage-5d artifacts found the
+    whole-word bound dropped these forms on real leadership-table role
+    lines ("Program Chairman, ...", "Association of Directors of Medical
+    Student Education...", "Developing Leaders in Pediatric..."),
+    misreading them as organization lines.
+
+    An explicit stem list (spelling out every inflected form by hand) was
+    tried first and rejected: the corpus's real inflected/derived forms
+    turned out far more varied than the handful the issue named, and a
+    hand list kept missing new ones on each additional pass. Anchoring only
+    the word's start generalizes correctly instead, because English
+    inflection/derivation overwhelmingly adds a SUFFIX, not a prefix.
+
+    This does not regress relative to `_matches_bounded`: every whole-word
+    match is trivially also a word-start match, so switching only adds
+    matches, never removes one -- confirmed by the round-2 differential
+    probe finding 0 True-to-False flips against the currently-shipped
+    whole-word behavior. Nor does it match a keyword sitting mid-word in a
+    genuine compound where the keyword is the SUFFIX, not the prefix
+    ("subcommittee" does not start with "committee") -- the same probe
+    found `_matches_bounded` already missed those lines too, so this is not
+    a new gap. It also does not match a keyword glued to a preceding date
+    with no space ("2012Director", a stage-4 extraction artifact) -- also
+    already true of `_matches_bounded`, and out of this round's scope. And
+    it does not restore a keyword matching truly mid-word, past the word's
+    own start ("eMentorship" contains "mentor" but does not start with
+    it) -- treated as an accepted mis-file, not a regression (#658 round 2
+    PR body).
+    """
+    return any(re.search(rf'\b{re.escape(kw)}', text_lower) for kw in keywords)
 
 
 # A multi-line Q2 entry's trailing date-only lines (e.g. "2014, 2017-2020")
@@ -289,10 +346,17 @@ def _is_known_org_line(line_lower: str, role_keywords: list[str]) -> bool:
     classify as role lines, not organizations, while "American College of
     Cardiology" and "Society of Critical Care Medicine" still classify as
     organizations (#624 review).
+
+    The veto uses `_matches_word_start`, not `_matches_bounded`: see that
+    function's docstring for why (#658 round 2) -- in short, role_keywords'
+    base forms need to recognize their own inflected/derived forms
+    ("members", "chairman"/"chaired", "directors"/"directorship",
+    "mentoring"/"mentorship", "councilor", "leaders"/"leadership"), which a
+    strict whole-word match otherwise misses.
     """
     if any(name in line_lower for name in _KNOWN_ORG_NAMES):
         return True
-    if _matches_bounded(line_lower, role_keywords):
+    if _matches_word_start(line_lower, role_keywords):
         return False
     return any(
         re.search(rf'\b{re.escape(term)}\b', line_lower)
@@ -560,10 +624,6 @@ class ServiceSection:
         date_range_pattern = re.compile(r'^(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?(?:\s*,\s*\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)*)$', re.IGNORECASE)
         embedded_date_pattern = re.compile(r'\|\s*(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)\s*$', re.IGNORECASE)
 
-        # Role indicators
-        role_keywords = ['member', 'chair', 'reviewer', 'liaison', 'mentor', 'committee',
-                         'board', 'council', 'advisor', 'director', 'leader', 'representative']
-
         # First pass: categorize each line
         content_lines = []  # (text, embedded_date, is_org, is_role, original_idx)
         date_only_lines = []  # standalone dates
@@ -590,10 +650,15 @@ class ServiceSection:
                 embedded_date = embedded_match.group(1)
                 line = line[:embedded_match.start()].strip().rstrip('|').strip()
 
-            # Determine if this is an organization or a role
+            # Determine if this is an organization or a role. Uses the same
+            # _matches_word_start matcher _is_known_org_line's veto uses, so
+            # the two checks cannot disagree on a line (#658 round 2 --
+            # this check used bare substring while the veto used `\b`-bounded
+            # matching, and could each fire for different reasons on the
+            # same line).
             line_lower = line.lower()
-            is_org = _is_known_org_line(line_lower, role_keywords)
-            is_role = any(kw in line_lower for kw in role_keywords) and not is_org
+            is_org = _is_known_org_line(line_lower, EXTRAMURAL_ROLE_KEYWORDS)
+            is_role = _matches_word_start(line_lower, EXTRAMURAL_ROLE_KEYWORDS) and not is_org
 
             # Indented lines are usually sub-items (roles under an org)
             is_indented = lines[idx].startswith('   ') or lines[idx].startswith('\t')
