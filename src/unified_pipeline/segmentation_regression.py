@@ -508,26 +508,38 @@ def _load_metrics(label: str) -> dict[str, Metrics]:
 
 
 def run_compare(baseline_label: str, candidate_label: str) -> int:
+    """Diff two snapshots. Raises if they share no CVs at all; otherwise
+    fails closed on a uid present in baseline but absent from candidate --
+    reported as a MISSING row and counted toward regressions, rather than
+    silently dropped from `shared` and the run passing with 0 regressions
+    (#621; CODING_STANDARDS §5.5, "fail closed")."""
     baseline = _load_metrics(baseline_label)
     candidate = _load_metrics(candidate_label)
     shared = sorted(set(baseline) & set(candidate))
-    if not shared:
+    missing = sorted(set(baseline) - set(candidate))
+    if not shared and not missing:
         raise SegmentationRegressionError("Snapshots share no CVs — nothing to compare.")
 
-    rows: list[tuple[str, Verdict, str]] = []
+    rows: list[tuple[str, str, str]] = []
     regressions = 0
+    for uid in missing:
+        regressions += 1
+        rows.append((uid, "MISSING", "present in baseline, absent from candidate snapshot"))
     for uid in shared:
         verdict, reasons = compare_metrics(baseline[uid], candidate[uid])
         if verdict == "REGRESSION":
             regressions += 1
         rows.append((uid, verdict, "; ".join(reasons)))
+    rows.sort(key=lambda row: row[0])
 
-    width = max(len(u) for u in shared)
+    width = max(len(row[0]) for row in rows)
     lines = [f"Segmentation regression: {baseline_label} -> {candidate_label}", ""]
     for uid, verdict, detail in rows:
         lines.append(f"{uid:<{width}}  {verdict:<10}  {detail}")
     lines.append("")
-    lines.append(f"{regressions} regression(s) across {len(shared)} CVs")
+    total = len(shared) + len(missing)
+    missing_note = f" ({len(missing)} missing from candidate)" if missing else ""
+    lines.append(f"{regressions} regression(s) across {total} CVs{missing_note}")
     report = "\n".join(lines)
     print(report)
     (_snapshot_dir(candidate_label) / "REPORT.md").write_text(report + "\n", encoding="utf-8")
