@@ -31,7 +31,19 @@ def test_dict_pulls_name_like_key():
     assert _committee_cell_text({"committee_name": "Research Policy Committee", "role": "Member"}) \
         == "Research Policy Committee"
     assert _committee_cell_text({"name": "HPE Conference Committee"}) == "HPE Conference Committee"
-    assert _committee_cell_text({"unrelated": "x"}) == ""
+
+
+def test_dict_without_name_like_key_joins_string_values(): # (#555)
+    # No recognised key (committee_name/committee/activity/name/title): join
+    # the dict's string values instead of dropping it, matching
+    # `_address_cell_text`'s "never skipped" fallback.
+    assert _committee_cell_text({"unrelated": "x"}) == "x"
+    assert _committee_cell_text({"organization": "Research Committee"}) == "Research Committee"
+    assert _committee_cell_text({"organization": "Z", "role": "Chair"}) == "Z; Chair"
+    # non-string values are not stringified into the join
+    assert _committee_cell_text({"organization": "Z", "count": 3}) == "Z"
+    # nothing recognisable at all still returns ""
+    assert _committee_cell_text({"count": 3}) == ""
 
 
 def test_list_of_records_joins_names():

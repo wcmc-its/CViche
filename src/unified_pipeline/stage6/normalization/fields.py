@@ -26,7 +26,9 @@ def _committee_cell_text(value) -> str:
     multi-record entry (#208/#248 fusion), not just a string. Writing a non-str
     into a Word cell (``cell.text = <dict>``) raises deep in python-docx and
     aborts the whole document (#256). Never let that happen: pull the name-like
-    value from a dict, join a list, and stringify anything else."""
+    value from a dict, falling back to joining its other string values rather
+    than dropping an unrecognised shape (#555); join a list, and stringify
+    anything else."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -34,7 +36,8 @@ def _committee_cell_text(value) -> str:
     if isinstance(value, dict):
         return str(value.get("committee_name") or value.get("committee")
                    or value.get("activity") or value.get("name")
-                   or value.get("title") or "")
+                   or value.get("title")
+                   or "; ".join(v for v in value.values() if isinstance(v, str) and v))
     if isinstance(value, list):
         return "; ".join(t for t in (_committee_cell_text(v) for v in value) if t)
     return str(value)
