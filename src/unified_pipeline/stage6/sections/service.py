@@ -34,6 +34,23 @@ from ..normalization import _squash
 logger = logging.getLogger(__name__)
 from unified_pipeline.core.render_check import entry_lines
 
+# Taxonomy codes for Section Q: EXTRAMURAL PROFESSIONAL RESPONSIBILITIES (docs/CODING_STANDARDS.md §8.2).
+SERVICE_TAXONOMY_CODES = ('Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D')  # every code this section routes
+BOARD_SERVICE_CODE = 'Q2'               # Service on Boards and/or Committees
+JOURNAL_REVIEWING_CODE = 'Q4D'          # Journal / ad hoc reviewing
+LEADERSHIP_TAXONOMY_CODE = 'Q1'         # Leadership in Extramural Organizations
+GRANT_REVIEWING_CODE = 'Q3'             # Grant Reviewing / Study Sections
+EDITORIAL_BOARD_CODES = ('Q4B', 'Q4C')  # Editorial Board Membership roles
+
+# Q3/Q4/Q4A/Q4B/Q4C -> (WCM template section display name, header search-text candidates)
+OTHER_SERVICE_SECTION_ROUTING = {
+    GRANT_REVIEWING_CODE: ('Grant Reviewing', ['Grant Reviewing', 'Study Sections']),
+    'Q4': ('Professional Service', ['EXTRAMURAL PROFESSIONAL RESPONSIBILITIES', 'Leadership in Extramural']),
+    'Q4A': ('Editor/Co-Editor', ['Editor/Co-Editor', 'Journals/Textbooks/Books']),
+    'Q4B': ('Editorial Board', ['Editorial Board Membership', 'Editorial Activities']),
+    'Q4C': ('Editorial Board', ['Editorial Board Membership', 'Editorial Activities']),
+}
+
 # Q2 -> Q4D reroute vocabulary, split at the natural seam between specialty
 # terms and role phrases rather than a fixed-width slice of one combined
 # list (#573).
@@ -281,7 +298,7 @@ class ServiceSection:
         """
         # Collect all Q entries
         q_entries = []
-        for code in ['Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D']:
+        for code in SERVICE_TAXONOMY_CODES:
             q_entries.extend(entries_by_code.get(code, []))
 
         if not q_entries:
@@ -295,8 +312,8 @@ class ServiceSection:
         # journal coded as Q2) and multi-line entries mixing both
         # activities; the routing decision itself is _route_q2_entries, a
         # free function that touches no docx object (#624 review).
-        q2_entries = list(entries_by_code.get('Q2', []))
-        q4d_entries = list(entries_by_code.get('Q4D', []))
+        q2_entries = list(entries_by_code.get(BOARD_SERVICE_CODE, []))
+        q4d_entries = list(entries_by_code.get(JOURNAL_REVIEWING_CODE, []))
 
         rerouted_to_journal, actual_board_entries = _route_q2_entries(q2_entries)
 
@@ -728,12 +745,12 @@ class ServiceSection:
             return
 
         # Handle Q1 separately - it goes to Leadership in Extramural Organizations
-        q1_entries = [e for e in entries if e.get('taxonomy_code') == 'Q1']
+        q1_entries = [e for e in entries if e.get('taxonomy_code') == LEADERSHIP_TAXONOMY_CODE]
         if q1_entries:
             self._fill_extramural_leadership(q1_entries)
 
         # Filter out Q1 from remaining entries
-        entries = [e for e in entries if e.get('taxonomy_code') != 'Q1']
+        entries = [e for e in entries if e.get('taxonomy_code') != LEADERSHIP_TAXONOMY_CODE]
         if not entries:
             return
 
@@ -744,13 +761,7 @@ class ServiceSection:
         # (#454). Q4B (Associate/Guest Editor) and Q4C (Editorial Board
         # Member) go to Editorial Activities, not generic Professional
         # Service.
-        sections = {
-            'Q3': ('Grant Reviewing', ['Grant Reviewing', 'Study Sections']),
-            'Q4': ('Professional Service', ['EXTRAMURAL PROFESSIONAL RESPONSIBILITIES', 'Leadership in Extramural']),
-            'Q4A': ('Editor/Co-Editor', ['Editor/Co-Editor', 'Journals/Textbooks/Books']),
-            'Q4B': ('Editorial Board', ['Editorial Board Membership', 'Editorial Activities']),
-            'Q4C': ('Editorial Board', ['Editorial Board Membership', 'Editorial Activities']),
-        }
+        sections = OTHER_SERVICE_SECTION_ROUTING
 
         entries_by_section = {}
         for entry in entries:
@@ -812,7 +823,7 @@ class ServiceSection:
                     # be evicted. Gated on Q3 because no other code is
                     # known to carry the field (#466).
                     panel_name = fields.get('panel_name', '')
-                    if taxonomy_code == 'Q3' and panel_name:
+                    if taxonomy_code == GRANT_REVIEWING_CODE and panel_name:
                         if not organization:
                             organization = panel_name
                         elif _squash(panel_name) not in _squash(organization):
@@ -823,7 +834,7 @@ class ServiceSection:
                     dates = format_date_range(start_date, end_date, taxonomy_code)
 
                     # For Q4B/Q4C entries, try to parse role from raw text if missing
-                    if not role and taxonomy_code in ['Q4B', 'Q4C']:
+                    if not role and taxonomy_code in EDITORIAL_BOARD_CODES:
                         raw_text = entry.get('text', '')
                         # Pattern: "date | role | journal" or "role | journal"
                         # Match various editor/board roles

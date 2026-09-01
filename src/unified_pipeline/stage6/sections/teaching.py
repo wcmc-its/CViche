@@ -54,6 +54,17 @@ from unified_pipeline.core.render_check import entry_lines
 
 logger = logging.getLogger(__name__)
 
+# K-code to candidate header strings, tried in order (see module docstring and
+# docs/CODING_STANDARDS.md §8.2). K1-K5: didactic, clinical, administrative,
+# continuing education, and outreach teaching, respectively.
+TEACHING_SECTION_HEADERS = {
+    'K1': ['Didactic teaching', 'Didactic'],
+    'K2': ['Clinical teaching', 'bedside teaching'],
+    'K3': ['Administrative teaching', 'leadership role'],
+    'K4': ['Continuing education', 'professional education'],
+    'K5': ['outreach activities', 'Other education/outreach', 'community education or patient'],
+}
+
 
 class TeachingSection:
     """Section K writers, mixed into `WCMTemplateGenerator`."""
@@ -72,14 +83,7 @@ class TeachingSection:
         The WCM template provides the structure; Stage 5c handles per-entry formatting.
         Original CV hierarchy labels are not carried over.
         """
-        # K-code to candidate header strings, tried in order (see module docstring)
-        k_section_map = {
-            'K1': ['Didactic teaching', 'Didactic'],
-            'K2': ['Clinical teaching', 'bedside teaching'],
-            'K3': ['Administrative teaching', 'leadership role'],
-            'K4': ['Continuing education', 'professional education'],
-            'K5': ['outreach activities', 'Other education/outreach', 'community education or patient'],
-        }
+        k_section_map = TEACHING_SECTION_HEADERS
 
         # Count total entries
         total_entries = sum(len(entries_by_code.get(code, [])) for code in k_section_map.keys())

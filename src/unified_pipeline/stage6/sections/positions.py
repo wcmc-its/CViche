@@ -30,6 +30,12 @@ from ..parsing import _dates_overlap_or_match, _is_table_header_entry
 from ..resolution import _get_institution_location
 from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
 
+# Section D taxonomy codes, in template table order (docs/CODING_STANDARDS.md
+# §8.2): D1 Academic Appointments, D2 Hospital Appointments, D3 Other
+# Professional Positions.
+POSITION_TAXONOMY_CODES = ('D1', 'D2', 'D3')
+ACADEMIC_APPOINTMENT_CODE, HOSPITAL_APPOINTMENT_CODE, OTHER_POSITION_CODE = POSITION_TAXONOMY_CODES
+
 
 class PositionsSection:
     """Section D writers, mixed into `WCMTemplateGenerator`."""
@@ -252,14 +258,14 @@ class PositionsSection:
 
         Track changes are used for city/state from institution enrichment only.
         """
-        d1_entries = entries_by_code.get('D1', [])
-        d2_entries = entries_by_code.get('D2', [])
-        d3_entries = entries_by_code.get('D3', [])
+        d1_entries = entries_by_code.get(ACADEMIC_APPOINTMENT_CODE, [])
+        d2_entries = entries_by_code.get(HOSPITAL_APPOINTMENT_CODE, [])
+        d3_entries = entries_by_code.get(OTHER_POSITION_CODE, [])
 
         # Propagate institution from parent entries to blank sub-entries, then
         # reassemble appointments that were fragmented into separate title /
         # employer+dates rows (see _merge_grouped_appointments).
-        for code, entry_list in (('D1', d1_entries), ('D2', d2_entries), ('D3', d3_entries)):
+        for code, entry_list in zip(POSITION_TAXONOMY_CODES, (d1_entries, d2_entries, d3_entries)):
             self._propagate_institution_to_subentries(entry_list, verbose=self.verbose)
             merged = self._merge_grouped_appointments(entry_list, verbose=self.verbose)
             if merged is not entry_list:

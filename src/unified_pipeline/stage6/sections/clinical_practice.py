@@ -39,6 +39,11 @@ from ..parsing import _is_structural_label
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
 
+# Section L taxonomy codes (docs/CODING_STANDARDS.md §8.2): L1 Clinical
+# Practice, L2 Clinical Innovations, L3 Clinical Leadership.
+CLINICAL_TAXONOMY_CODES = ('L1', 'L2', 'L3')
+CLINICAL_PRACTICE_CODE, CLINICAL_INNOVATION_CODE, CLINICAL_LEADERSHIP_CODE = CLINICAL_TAXONOMY_CODES
+
 # Positive-match target header for the L1/L2/L3 subsection tables.
 #
 # Verified against key_files/wcm_cv_template_faculty_october_2022_final.docx
@@ -141,9 +146,9 @@ class ClinicalPracticeSection:
         each method's docstring for what it renders and how; this method only
         finds the entry lists and dispatches to them.
         """
-        l1_entries = entries_by_code.get('L1', [])
-        l2_entries = entries_by_code.get('L2', [])
-        l3_entries = entries_by_code.get('L3', [])
+        l1_entries = entries_by_code.get(CLINICAL_PRACTICE_CODE, [])
+        l2_entries = entries_by_code.get(CLINICAL_INNOVATION_CODE, [])
+        l3_entries = entries_by_code.get(CLINICAL_LEADERSHIP_CODE, [])
 
         total = len(l1_entries) + len(l2_entries) + len(l3_entries)
         if total == 0:

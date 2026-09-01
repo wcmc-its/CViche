@@ -43,6 +43,14 @@ from ..normalization import (
 from ..resolution import _get_cv_owner_name
 from ..sorting import sort_entries_reverse_chronological
 
+# M2A/M2B/M2C -> WCM template section header text, in display order
+# (docs/CODING_STANDARDS.md §8.2).
+RESEARCH_SUPPORT_SECTIONS = (
+    ('M2A', 'Current Research Funding'),
+    ('M2B', 'Past (Completed) Funding'),
+    ('M2C', 'Pending Funding'),
+)
+
 
 class ResearchSupportSection:
     """Section M2 writers, mixed into `WCMTemplateGenerator`."""
@@ -187,9 +195,10 @@ class ResearchSupportSection:
         # Map taxonomy codes to WCM template section headers
         # These must match the exact text in the official WCM template
         categories = [
-            ('M2A', 'Current Research Funding', m2a_entries),
-            ('M2B', 'Past (Completed) Funding', m2b_entries),
-            ('M2C', 'Pending Funding', m2c_entries),
+            (code, header, entries)
+            for (code, header), entries in zip(
+                RESEARCH_SUPPORT_SECTIONS, (m2a_entries, m2b_entries, m2c_entries)
+            )
         ]
 
         total_grants = sum(len(entries) for _, _, entries in categories)
