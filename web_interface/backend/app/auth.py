@@ -14,9 +14,6 @@ from app.database import get_db
 from app.models import User
 from app.config_loader import get_config_value
 from app.ed_group_lookup import (
-    get_cached_membership,
-    set_cached_membership,
-    get_stale_membership,
     check_ed_membership,
     EdUnavailableError,
     LDAPConfig,
@@ -24,11 +21,25 @@ from app.ed_group_lookup import (
 from pydantic import SecretStr
 from app.services.config_service import SESSION_TTL as _CFG_SESSION_TTL
 from app.session_idle import get_idle_store
+from app.audit_events import (
+    SESSION_EXPIRED,
+    SESSION_REVOKED,
+    ROLE_CHANGED,
+    GROUP_MEMBERSHIP_REMOVED,
+    DIRECTORY_UNAVAILABLE,
+)
 
 logger = logging.getLogger(__name__)
 
 SESSION_TTL = _CFG_SESSION_TTL
 COOKIE_NAME = "cviche_session"
+
+# The one 401 body for "we could not verify ED membership" -- named once so the
+# unreachable-directory and unconfigured-group arms cannot drift apart.
+_ED_UNVERIFIABLE_DETAIL = {
+    "error": "directory_unavailable",
+    "message": "Unable to verify group membership. Please try again later.",
+}
 
 # Known placeholder secrets shipped in templates/examples. Booting with one of
 # these means every session cookie is forgeable by anyone who has read the
@@ -47,7 +58,7 @@ _PLACEHOLDER_SECRETS = frozenset({
 _GENERATE_HINT = 'Generate one with: python -c "import secrets; print(secrets.token_hex(32))"'
 
 
-def _validate_session_secret(secret: str | None) -> str:
+def _validate_session_secret(secret: str | None, environment: str = "development") -> str:
     if not secret:
         raise RuntimeError(
             "CVICHE_SESSION_SECRET environment variable is required. "
@@ -59,14 +70,26 @@ def _validate_session_secret(secret: str | None) -> str:
             "cookies signed with it are forgeable. " + _GENERATE_HINT
         )
     if len(secret) < 32:
-        logger.warning(
-            "[SECURITY] CVICHE_SESSION_SECRET is shorter than 32 characters; "
-            "session cookies are easier to brute-force. %s", _GENERATE_HINT,
+        message = (
+            "CVICHE_SESSION_SECRET is shorter than 32 characters; session "
+            "cookies are easier to brute-force. %s" % _GENERATE_HINT
         )
+        # Same ENVIRONMENT convention main.py already uses. A hard gate
+        # everywhere could take down a live deployment whose real secret is
+        # merely short with no chance to rotate first -- so `development`
+        # (the default, e.g. a fresh local checkout) only warns; anything
+        # else fails closed rather than boot with a brute-forceable key.
+        if environment == "development":
+            logger.warning("[SECURITY] %s", message)
+        else:
+            raise RuntimeError("[SECURITY] " + message)
     return secret
 
 
-_secret = _validate_session_secret(os.environ.get("CVICHE_SESSION_SECRET"))
+_secret = _validate_session_secret(
+    os.environ.get("CVICHE_SESSION_SECRET"),
+    os.environ.get("ENVIRONMENT", "development"),
+)
 
 _serializer = URLSafeTimedSerializer(_secret)
 _secure_cookies = os.environ.get("CVICHE_SECURE_COOKIES", "true").lower() == "true"
@@ -140,32 +163,67 @@ def resolve_session_identity(payload: dict) -> tuple[int, int] | None:
     """
     sid = payload.get("sid")
     resolved = get_idle_store().resolve(sid) if sid else None
-    if resolved is not None:
-        return int(resolved["user_id"]), int(resolved.get("epoch", 0))
-    if "user_id" in payload:
-        return int(payload["user_id"]), int(payload.get("epoch", 0))
+    # A validly-signed cookie (or store record) can still carry a malformed
+    # shape. Fail closed with None rather than let a KeyError/TypeError/
+    # ValueError from a raw subscript become an unhandled 500.
+    try:
+        if resolved is not None:
+            return int(resolved["user_id"]), int(resolved.get("epoch", 0))
+        if "user_id" in payload:
+            return int(payload["user_id"]), int(payload.get("epoch", 0))
+    except (KeyError, TypeError, ValueError):
+        return None
     return None
 
 
-def _best_effort_commit(db: Session, what: str) -> bool:
-    """Commit a non-critical per-request write (last_active_at bump, role sync).
+def _is_retryable_write_conflict(exc: OperationalError) -> bool:
+    """Whether exc is the specific benign concurrent-write conflict
+    _best_effort_persist exists to swallow, not any OperationalError.
 
-    A page load fires several API calls at once, each running this dependency
-    and writing the same `users` row. On some MySQL configurations the racing
-    writers raise OperationalError 1020 ("Record has changed since last read"),
-    which would otherwise surface as a 500. These writes aren't required to
-    serve the current request, so on conflict we roll back and continue; the
-    update simply lands on a later request.
+    MySQL (prod): pymysql raises error 1020 ("Record has changed since last
+    read") as a 2-tuple (code, message) in .orig.args.
+    SQLite (tests): sqlite3 raises "database is locked" as a plain message,
+    no error code.
+    Anything else -- connection loss, a real outage -- is a different
+    problem and must not be swallowed the same way.
+    """
+    orig_args = getattr(exc.orig, "args", ())
+    if orig_args and orig_args[0] == 1020:
+        return True
+    return "database is locked" in str(exc).lower()
+
+
+def _best_effort_persist(user_id: int, what: str, **fields) -> bool:
+    """Persist a non-critical per-request field update (last_active_at bump,
+    role sync) through its own short-lived session, isolated from the
+    request's shared `db` session -- so this dependency can never commit
+    unrelated work staged elsewhere in the same request as a side effect.
+
+    A page load fires several API calls at once, each running this
+    dependency and writing the same `users` row; concurrent writers can hit
+    the retryable conflict _is_retryable_write_conflict names, which isn't
+    required to serve the current request -- on that specific conflict we
+    roll back and continue; the update simply lands on a later request. Any
+    other OperationalError (connection loss, a real outage) propagates.
 
     Returns True if committed, False if the conflict was swallowed.
     """
+    from app.database import SessionLocal  # see other SessionLocal call
+    # sites in this codebase (main.py, runs.py, ...) -- imported locally so
+    # tests that patch app.database.SessionLocal are honored at call time.
+    session = SessionLocal()
     try:
-        db.commit()
+        session.query(User).filter(User.id == user_id).update(fields)
+        session.commit()
         return True
     except OperationalError as e:
-        db.rollback()
+        session.rollback()
+        if not _is_retryable_write_conflict(e):
+            raise
         logger.warning("Skipped %s write due to concurrent DB conflict: %s", what, e)
         return False
+    finally:
+        session.close()
 
 
 def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
@@ -180,6 +238,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
 
     payload = decode_session_cookie(cookie)
     if not payload:
+        logger.info(SESSION_EXPIRED, extra={"reason": "invalid_or_expired_cookie"})
         raise HTTPException(
             status_code=401,
             detail={"error": "auth_required", "message": "Session expired. Please log in again."}
@@ -192,6 +251,7 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     # depends on is gone -- functionally the same signal as an idle timeout.
     identity = resolve_session_identity(payload)
     if identity is None:
+        logger.info(SESSION_EXPIRED, extra={"reason": "malformed_payload"})
         raise HTTPException(
             status_code=401,
             detail={"error": "session_idle",
@@ -204,6 +264,14 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     # -- cookies minted before this feature shipped -- is read as 0, so the
     # rollout itself does not force a mass re-login; the first epoch bump does.
     if resolved_epoch != get_session_epoch(db):
+        logger.info(
+            SESSION_REVOKED,
+            extra={
+                "user_id": resolved_user_id,
+                "email": payload.get("email"),
+                "reason": "epoch_mismatch",
+            },
+        )
         raise HTTPException(
             status_code=401,
             detail={"error": "auth_required", "message": "Session expired. Please log in again."}
@@ -229,6 +297,14 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
     # absolute cookie TTL. No-op / fail-open when Valkey is unset or unreachable.
     sid = payload.get("sid")
     if sid and not get_idle_store().touch(sid):
+        logger.info(
+            SESSION_EXPIRED,
+            extra={
+                "user_id": resolved_user_id,
+                "email": payload.get("email"),
+                "reason": "idle_timeout",
+            },
+        )
         raise HTTPException(
             status_code=401,
             detail={"error": "session_idle",
@@ -247,43 +323,51 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                     detail={"error": "session_invalid",
                             "message": "Please log in again."}
                 )
-            membership = get_cached_membership(user.cwid)
-            if membership is None:
-                # Cache miss -- query ED
-                from app.config_loader import get_config
+            # check_ed_membership owns the whole cache-aside flow (live cache ->
+            # LDAP -> stale fallback). use_cache=True keeps today's behavior on
+            # this path: a re-check of an already-authorized session may ride the
+            # 5-minute live cache, and an ED outage must not evict the session.
+            # The login path (saml_routes) passes use_cache=False, so minting a
+            # NEW session always costs a fresh ED query.
+            from app.config_loader import get_config
 
-                ed_access_group = get_config_value(db, "ed_access_group") or ""
-                ed_admin_group = get_config_value(db, "ed_admin_group") or ""
-                ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
-                ldap_bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
-                bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
-                ldap_cfg = LDAPConfig(
-                    ldap_url=ldap_url, bind_dn=ldap_bind_dn,
-                    bind_password=SecretStr(bind_password),
+            ed_access_group = get_config_value(db, "ed_access_group") or ""
+            ed_admin_group = get_config_value(db, "ed_admin_group") or ""
+            ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
+            ldap_bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
+            bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
+            ldap_cfg = LDAPConfig(
+                ldap_url=ldap_url, bind_dn=ldap_bind_dn,
+                bind_password=SecretStr(bind_password),
+            )
+            try:
+                membership = check_ed_membership(
+                    cwid=user.cwid,
+                    access_group=ed_access_group,
+                    admin_group=ed_admin_group,
+                    cfg=ldap_cfg,
+                    use_cache=True,
                 )
-                try:
-                    membership = check_ed_membership(
-                        cwid=user.cwid,
-                        access_group=ed_access_group,
-                        admin_group=ed_admin_group,
-                        cfg=ldap_cfg,
-                    )
-                    set_cached_membership(user.cwid, membership)
-                except EdUnavailableError:
-                    # ED unreachable -- use stale cache
-                    logger.warning("ED unavailable during per-request check for %s", user.cwid)
-                    membership = get_stale_membership(user.cwid)
-                    if membership is None:
-                        # No stale data available -- cannot verify membership
-                        raise HTTPException(
-                            status_code=401,
-                            detail={"error": "directory_unavailable",
-                                    "message": "Unable to verify group membership. Please try again later."}
-                        )
+            except EdUnavailableError:
+                # ED unreachable (or misconfigured -- EdConfigurationError is a
+                # subclass) and no usable stale answer: cannot verify membership.
+                logger.warning("ED unavailable during per-request check for %s", user.cwid)
+                logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
+                raise HTTPException(status_code=401, detail=_ED_UNVERIFIABLE_DETAIL)
+            except ValueError:
+                # No ED access group configured. Fail closed exactly as an
+                # unreachable directory does -- never a 500, never an approval.
+                logger.error("ED access group is not configured; denying %s", user.cwid)
+                logger.info(DIRECTORY_UNAVAILABLE, extra={"cwid": user.cwid})
+                raise HTTPException(status_code=401, detail=_ED_UNVERIFIABLE_DETAIL)
 
-            if not membership["in_access_group"]:
+            if not membership.in_access_group:
                 # User removed from access group -- deny
                 logger.warning("Per-request ED check: %s no longer in access group", user.cwid)
+                logger.info(
+                    GROUP_MEMBERSHIP_REMOVED,
+                    extra={"user_id": user.id, "cwid": user.cwid},
+                )
                 raise HTTPException(
                     status_code=401,
                     detail={"error": "not_authorized",
@@ -291,16 +375,21 @@ def get_current_user(request: Request, db: Session = Depends(get_db)) -> User:
                 )
 
             # Sync role from ED group membership
-            new_role = "admin" if membership.get("in_admin_group") else "user"
+            new_role = "admin" if membership.in_admin_group else "user"
             if user.role != new_role:
+                old_role = user.role
                 user.role = new_role
-                _best_effort_commit(db, "role sync")
+                _best_effort_persist(user.id, "role sync", role=new_role)
+                logger.info(
+                    ROLE_CHANGED,
+                    extra={"user_id": user.id, "old_role": old_role, "new_role": new_role},
+                )
 
     # Debounced last_active_at update (once per 60s)
     now = datetime.now()
     if not user.last_active_at or (now - user.last_active_at).total_seconds() > 60:
         user.last_active_at = now
-        _best_effort_commit(db, "last_active_at")
+        _best_effort_persist(user.id, "last_active_at", last_active_at=now)
 
     return user
 
@@ -321,6 +410,11 @@ def get_cookie_settings() -> dict:
         "samesite": "lax",
         "secure": _secure_cookies,
         "max_age": SESSION_TTL,
+        # Explicit -- the cookie is minted from both /api/auth/login and
+        # /api/saml/acs. Without an explicit path here it must match
+        # get_cookie_delete_settings()'s '/' by luck of the browser's default,
+        # or a cookie minted from one path can end up not sent to another.
+        "path": "/",
     }
 
 

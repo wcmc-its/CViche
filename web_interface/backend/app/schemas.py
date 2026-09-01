@@ -1,6 +1,6 @@
 """Pydantic schemas for API request/response validation."""
 from pydantic import BaseModel, PlainSerializer
-from typing import Optional, List, Annotated
+from typing import Optional, List, Annotated, Literal
 from datetime import datetime
 
 
@@ -262,7 +262,14 @@ class ConsentStatus(BaseModel):
 
 class ConsentSubmit(BaseModel):
     """Request for POST /api/consent."""
-    default_submission_type: str  # "own_cv" or "authorized_admin"
+    default_submission_type: Literal["own_cv", "authorized_admin"]
+
+
+class ConsentSubmitResponse(BaseModel):
+    """Response for POST /api/consent."""
+    message: str
+    consent_version: str
+    default_submission_type: str
 
 
 # ============================================================

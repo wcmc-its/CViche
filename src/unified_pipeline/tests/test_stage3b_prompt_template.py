@@ -8,6 +8,7 @@ short; these tests guard both the substitution behaviour and the
 regression this hoist was meant to fix.
 """
 import ast
+import string
 import sys
 from pathlib import Path
 
@@ -42,13 +43,48 @@ def test_template_escapes_json_braces_for_str_format():
     assert '{"classifications"' in rendered
 
 
+def test_template_has_expected_placeholders_only():
+    """Guards the str.format() contract itself: if an edit to the template
+    text accidentally introduces/removes a `{placeholder}`, classify_entries_batch's
+    .format(context_str=..., taxonomy_ref=...) call would raise (extra
+    placeholder) or silently leave a stray "{foo}" in the LLM prompt (typo'd
+    placeholder name) -- catch it here instead."""
+    formatter = string.Formatter()
+    fields = {
+        name
+        for _, name, _, _ in formatter.parse(_CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE)
+        if name
+    }
+    assert fields == {"context_str", "taxonomy_ref"}
+
+
+def test_template_preserves_literal_braces_in_substituted_values():
+    # str.format() does not re-scan substituted values for placeholders, but
+    # this pins that contract so a future switch to e.g. chained .format()
+    # calls or % formatting can't silently start mangling brace-containing
+    # context/taxonomy text.
+    rendered = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
+        context_str="Suggested: {S1: 0.8}", taxonomy_ref="{not a placeholder}"
+    )
+    assert "Suggested: {S1: 0.8}" in rendered
+    assert "{not a placeholder}" in rendered
+
+
 def test_classify_entries_batch_is_under_ratchet_line_budget():
-    module_path = _SRC / "unified_pipeline" / "stage_3b_entry_classifier.py"
+    # classify_entries_batch lives in stage3b/classify.py since the #522 split.
+    module_path = _SRC / "unified_pipeline" / "stage3b" / "classify.py"
     tree = ast.parse(module_path.read_text())
     func = next(
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "classify_entries_batch"
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef) and node.name == "classify_entries_batch"
+        ),
+        None,
+    )
+    assert func is not None, (
+        "classify_entries_batch not found in stage3b/classify.py -- "
+        "was it renamed or moved? Update this test's target if so."
     )
     span = func.end_lineno - func.lineno + 1
     assert span <= _MAX_CLASSIFY_ENTRIES_BATCH_LINES, (
@@ -64,6 +100,10 @@ def test_classify_entries_batch_actually_uses_the_hoisted_template(monkeypatch):
     function (LLM call mocked out) and assert the system message it sends
     is exactly the template rendered with the same values."""
     import unified_pipeline.stage_3b_entry_classifier as stage_3b
+    # call_llm is stubbed at the module that actually calls it: the #522 split
+    # moved every classification call site into stage3b/classify.py, so patching
+    # the facade's copy would no longer intercept anything (#496).
+    import unified_pipeline.stage3b.classify as stage3b_classify
 
     captured = {}
 
@@ -77,7 +117,7 @@ def test_classify_entries_batch_actually_uses_the_hoisted_template(monkeypatch):
             "model": "test-model",
         }
 
-    monkeypatch.setattr(stage_3b, "call_llm", fake_call_llm)
+    monkeypatch.setattr(stage3b_classify, "call_llm", fake_call_llm)
 
     context = stage_3b.TaxonomyContext()
     entries = [{"text": "Associate Professor of Medicine, 2020-present", "hierarchy": ["Positions"]}]
@@ -88,6 +128,50 @@ def test_classify_entries_batch_actually_uses_the_hoisted_template(monkeypatch):
     expected = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
         context_str=context.format_context_string(),
         taxonomy_ref="",
+    )
+    assert system_message == expected
+
+
+def test_classify_entries_batch_renders_real_taxonomy_reference(monkeypatch):
+    """The taxonomy={} case above only proves {taxonomy_ref} can render as an
+    empty string -- it would still pass even if build_taxonomy_codes_for_prompt()
+    were bypassed entirely. Exercise a taxonomy with real codes and assert the
+    system message contains the exact rendered taxonomy reference."""
+    import unified_pipeline.stage_3b_entry_classifier as stage_3b
+    import unified_pipeline.stage3b.classify as stage3b_classify
+
+    captured = {}
+
+    def fake_call_llm(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return {
+            "content": '{"classifications": []}',
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "cost": 0.0,
+            "model": "test-model",
+        }
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", fake_call_llm)
+
+    taxonomy = {
+        "codes": [
+            {"code": "S1", "label": "Original Research", "purpose": "Peer-reviewed empirical work"},
+            {"code": "H", "label": "Honors and Awards", "purpose": "One-time recognitions"},
+        ]
+    }
+    context = stage_3b.TaxonomyContext()
+    entries = [{"text": "Best Paper Award, 2021", "hierarchy": ["Honors"]}]
+
+    stage_3b.classify_entries_batch(entries, context, taxonomy=taxonomy)
+
+    system_message = next(m["content"] for m in captured["messages"] if m["role"] == "system")
+    expected_taxonomy_ref = stage_3b.build_taxonomy_codes_for_prompt(taxonomy)
+    assert "S1: Original Research" in expected_taxonomy_ref
+    assert "H: Honors and Awards" in expected_taxonomy_ref
+    expected = _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE.format(
+        context_str=context.format_context_string(),
+        taxonomy_ref=expected_taxonomy_ref,
     )
     assert system_message == expected
 

@@ -69,7 +69,7 @@ def test_the_pinned_set_is_not_silently_empty():
 def test_each_table_still_has_its_contents():
     """Immutability must not have been bought by dropping entries."""
     assert len(s6.TAXONOMY_TO_SECTION) == 41
-    assert len(formatting_dates.DATE_FORMATS) == 43  # +1: M2D added (#564)
+    assert len(formatting_dates.DATE_FORMATS) == 44  # +1: M2D (#564), +1: C3 (#573)
     assert len(s6.FALLBACK_TEMPLATES) == 2
     assert s6.TAXONOMY_TO_SECTION["A"] == "personal_data"
 

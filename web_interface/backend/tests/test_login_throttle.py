@@ -1,10 +1,9 @@
 """#342: login throttle -- distributed across pods, degrades to in-memory."""
-import inspect
 import os
+import threading
 import time
 os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
-from app.api.auth_routes import login
 from app.login_throttle import LoginThrottle
 
 
@@ -63,10 +62,35 @@ def test_valkey_error_degrades_to_local_not_open():
     assert t.allow("x") is False  # still throttled via the in-memory fallback
 
 
-def test_login_route_stays_a_coroutine():
-    # If login stops being a coroutine function, FastAPI runs it in a real
-    # thread pool and _allow_local's shared dict needs a threading.Lock (#414).
-    assert inspect.iscoroutinefunction(login)
+def test_allow_local_does_not_over_admit_under_real_concurrent_threads():
+    """#414's own reproduction, re-run against the fix instead of the guard
+    that used to keep login() async-only to avoid needing it.
+
+    login() (auth_routes.py) is a plain `def` since #656's review response,
+    so FastAPI now threadpools it -- _allow_local can genuinely be called
+    from concurrent OS threads, not serialized on one event loop. #414
+    reproduced 18/200 over-admits with real threads and no lock; this pins
+    that it can't happen now that _allow_local holds _local_lock."""
+    t = LoginThrottle(url=None, max_attempts=50, window_seconds=60)
+    n_threads = 200
+    results = [None] * n_threads
+    barrier = threading.Barrier(n_threads)
+
+    def worker(i):
+        barrier.wait()  # maximize contention: every thread starts together
+        results[i] = t.allow("10.0.0.1")
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(n_threads)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+
+    admitted = sum(1 for r in results if r is True)
+    assert admitted == t.max_attempts, (
+        f"expected exactly {t.max_attempts} admits under {n_threads} concurrent "
+        f"callers, got {admitted} -- _allow_local over-admitted"
+    )
 
 
 def test_in_memory_fallback_sweeps_lapsed_ips():
