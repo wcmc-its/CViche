@@ -28,6 +28,9 @@ from unified_pipeline.stage_6_word_template import (  # noqa: E402
     extract_sort_date,
     format_date_for_section,
 )
+import unified_pipeline.stage6.formatting.dates as _formatting_dates  # noqa: E402
+import unified_pipeline.stage6.parsing.dates as _parsing_dates  # noqa: E402
+import unified_pipeline.stage6.sorting.chronological as _sorting_chronological  # noqa: E402
 from unified_pipeline.stage6.parsing.dates import CURRENT_DATE_VALUES  # noqa: E402
 
 
@@ -204,14 +207,50 @@ class TestDatesOverlapOrMatch:
 
 # --- shared CURRENT_DATE_VALUES constant, one vocabulary across 3 modules ---
 
+# The three modules that must agree on the open-ended vocabulary.
+_CURRENT_KEYWORD_MODULES = (_formatting_dates, _sorting_chronological, _parsing_dates)
+
+# The subset whose call site produces an observable that DISTINGUISHES a
+# recognized keyword from an unrecognized string, and what it produces.
+# parsing/dates.py is deliberately absent: _month_tuple_for_overlap answers
+# (9999, 12) for an end and None for a start on BOTH branches -- a recognized
+# keyword and an unparseable string are indistinguishable there by design (its
+# fallback is "can't prove they differ"), so a sentinel probe against it would
+# pass whether or not the sentinel were in the vocabulary. Its half of the
+# sharing is pinned by the identity assert below only; see the PR description.
+_CURRENT_KEYWORD_OBSERVABLES = (
+    (_formatting_dates, lambda kw: format_date_for_section(kw, "M2A"), "Present"),
+    (_sorting_chronological,
+     lambda kw: extract_sort_date({"extracted_fields": {"end_date": kw}}), (9999, 12, 31)),
+)
+
+
 def test_current_date_values_shared_across_date_modules():
     # #553's second defect: formatting/dates.py and sorting/chronological.py
-    # used to respell ('present', 'current', 'ongoing', 'now') locally, and
-    # parsing/dates.py recognized only 'present'. All three now read the same
-    # frozenset from parsing/dates.py — this pins both the membership and
-    # that format/sort observably agree with it, so a future edit to the
-    # constant can't silently diverge from what those two call sites do.
+    # respelled ('present', 'current', 'ongoing', 'now') as their own local
+    # tuples, and parsing/dates.py recognized only 'present' -- so an
+    # end_date of "ongoing" reached _dates_overlap_or_match as a literal
+    # string while the other two modules already treated it as open-ended.
     assert CURRENT_DATE_VALUES == frozenset({"present", "current", "ongoing", "now"})
-    for keyword in CURRENT_DATE_VALUES:
-        assert format_date_for_section(keyword, "M2A") == "Present"
-        assert extract_sort_date({"extracted_fields": {"end_date": keyword}}) == (9999, 12, 31)
+    for module in _CURRENT_KEYWORD_MODULES:
+        assert module.CURRENT_DATE_VALUES is CURRENT_DATE_VALUES, (
+            f"{module.__name__} does not read parsing/dates.py's frozenset"
+        )
+
+
+@pytest.mark.parametrize("module,observe,expected", _CURRENT_KEYWORD_OBSERVABLES,
+                         ids=[m.__name__ for m, _o, _e in _CURRENT_KEYWORD_OBSERVABLES])
+def test_current_keyword_call_sites_read_the_shared_constant(monkeypatch, module, observe, expected):
+    # The membership assert above is not by itself a revert detector: restoring
+    # a module's own local ('present', 'current', 'ongoing', 'now') tuple at its
+    # call site leaves every value -- and therefore every observable -- exactly
+    # as it is today, so a test that only checks values still passes. This one
+    # extends the shared frozenset with a keyword no local copy could contain
+    # and asserts the call site honours it, which is false the moment that call
+    # site stops reading the module-level name.
+    sentinel = "definitely-not-a-real-date-keyword"
+    monkeypatch.setattr(module, "CURRENT_DATE_VALUES",
+                        CURRENT_DATE_VALUES | {sentinel}, raising=True)
+    assert observe(sentinel) == expected
+    # ...and the real vocabulary still works through the same call site.
+    assert observe("ongoing") == expected
