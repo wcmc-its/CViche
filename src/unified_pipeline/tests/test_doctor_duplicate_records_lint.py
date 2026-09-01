@@ -155,6 +155,32 @@ def test_tracked_deletion_of_a_stale_duplicate_does_not_fire(tmp_path):
     assert lint_duplicate_records(blocks) == []
 
 
+def test_tracked_insertion_of_a_citation_does_not_manufacture_a_duplicate(tmp_path):
+    """The tracked-changes acceptance case #446 itself names: the doctor's
+    reader already sees accepted text inside <w:ins> runs (#249), so a
+    citation delivered as a tracked INSERTION -- not just as plain text --
+    must read correctly and must not manufacture a spurious duplicate
+    against an unrelated neighbouring record. Built with a real docx
+    (python-docx + raw w:ins XML), and it calls the lint -- unlike
+    test_docx_text_and_read_docx_blocks_smoke above, which only pins the
+    reader primitive.
+    """
+    doc = Document()
+    doc.add_paragraph("D. PUBLICATIONS")
+    doc.add_paragraph()._p.append(parse_xml(
+        f'<w:ins {nsdecls("w")} w:id="3" w:author="editor" '
+        f'w:date="2026-01-01T00:00:00Z"><w:r><w:t>1. {_CITATION_A}</w:t>'
+        '</w:r></w:ins>'))
+    doc.add_paragraph(f"2. {_CITATION_B}")
+    docx_path = tmp_path / "tracked_ins_DUPTST_wcm.docx"
+    doc.save(docx_path)
+
+    blocks = read_docx_blocks(str(docx_path))
+    # not vacuous: the inserted citation really is readable as accepted text
+    assert blocks[1] == ("p", f"1. {_CITATION_A}")
+    assert lint_duplicate_records(blocks) == []
+
+
 def test_run_doctor_dispatches_duplicate_records_and_skips_without_docx(tmp_path):
     """Dispatch wiring, both directions: fires as a real finding when the
     stage-6 docx carries a duplicate, and degrades to the standard INFO
