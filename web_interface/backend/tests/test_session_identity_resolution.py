@@ -229,6 +229,33 @@ def test_thin_cookie_with_no_store_record_is_401_not_500(client, db, seed_simple
     assert resp.json()["detail"]["error"] == "session_invalid"
 
 
+def test_a_revoked_session_cannot_be_revived_by_embedded_fields(
+    client, db, seed_simple_mode, idle_store
+):
+    """Thread 13's headline case: the server explicitly deletes a session, and
+    the very same cookie -- which also happens to carry user_id/epoch/role --
+    is presented again. Under the old fallback it authenticated, because a
+    deleted record and an unknown one both looked like "resolve returned None".
+    """
+    from app.auth import _serializer, COOKIE_NAME, create_session_cookie, decode_session_cookie
+    user = _make_user(db)
+    sid = decode_session_cookie(create_session_cookie(user, db))["sid"]
+    idle_store.end(sid)                       # explicit server-side revocation
+
+    client.cookies.set(COOKIE_NAME, _serializer.dumps({
+        "v": 2,
+        "sid": sid,
+        "user_id": user.id,
+        "email": user.email,
+        "role": user.role,
+        "epoch": 0,
+    }))
+
+    resp = client.get("/api/auth/me")
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"] == "session_invalid"
+
+
 @pytest.mark.parametrize("stored", [
     "1",                                 # pre-#368 bare marker
     "not json",
