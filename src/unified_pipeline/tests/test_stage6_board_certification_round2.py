@@ -791,12 +791,14 @@ class TestBlankRowGuardIsUniformAcrossColumnBranches:
         )
 
     def test_whitespace_only_inputs_are_treated_as_blank(self):
-        # #663 item 8 follow-up: format_date_for_section returns an
-        # unparseable value unchanged, so a whitespace-only year_certified
-        # (e.g. '  ') reaches this function as a non-empty-but-blank
-        # string. Truthiness alone ("if not (specialty or cert_number or
-        # dates)") does not catch this -- '  ' is truthy -- so the guard
-        # must strip before testing.
+        # #663 item 8 follow-up: the date fields cannot deliver this case
+        # (format_date_for_section strips first and returns '' for
+        # whitespace), but `certifying_board` is read unstripped in
+        # _fill_board_certification, so a whitespace-only board makes
+        # has_structured_data true and reaches this function as
+        # specialty='  '. Truthiness alone ("if not (specialty or
+        # cert_number or dates)") does not catch that -- '  ' is truthy --
+        # so the guard must strip before testing.
         gen = _generator()
         doc = Document()
         table = doc.add_table(rows=1, cols=3)
