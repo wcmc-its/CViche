@@ -72,7 +72,7 @@ The standing verdict on most reviews is:
 > suggestions, not bugs. If any of them cannot be addressed now, please leave a
 > comment explaining why. I will merge the PR as is."
 
-So a review is not a gate. The friction is in how we answer it. Four rules, all
+So a review is not a gate. The friction is in how we answer it. Five rules, all
 written from complaints we actually caused:
 
 1. **Never decline without a reason.** "Declined" with no explanation drew the
@@ -100,10 +100,16 @@ written from complaints we actually caused:
    cited on each of them; a fix that spans several commits lists every one.
 4. **If the fix is localized to a file already in the PR, it goes in the PR.**
    A separate issue or PR is for genuinely cross-file work only — this decides
-   *whether* to file, ahead of rule 2's *file before you reply*. On #625, 24 of
-   the reviewer's 29 follow-up comments on 2026-08-25 were re-asking for
-   something we had deferred instead of fixing in place, e.g. *"As we
-   discussed and as mentioned in the coding standards, the change is
+   *whether* to file, ahead of rule 2's *file before you reply*. "Off-diff" is
+   not, by itself, a reason to spin a review comment into a separate issue —
+   #656 filed 8 issues for findings that mostly turned out fixable in the same
+   three files already touched (frozenset membership checks, an
+   isolated-session write, a single-flight lock, a dropped-async conversion
+   once actually checked for real `await`s inside). Only 2 of the 8 survived a
+   second look: both needed test files genuinely outside the PR's diff. On
+   #625, 24 of the reviewer's 29 follow-up comments on 2026-08-25 were
+   re-asking for something we had deferred instead of fixing in place, e.g.
+   *"As we discussed and as mentioned in the coding standards, the change is
    localized to this file. I don't think any changes outside this file are
    required. Therefore, I would insist that we fix this as part of the
    current PR."* He said "mentioned in the coding standards" — it wasn't
@@ -113,8 +119,23 @@ written from complaints we actually caused:
    so if pointing elsewhere really is right, link the exact comment URL
    (`.../issues/N#issuecomment-<id>`) and say whether it's an issue or a PR —
    on #625 our reference to #660 was correct but he searched PRs for it, and
-   #660 is an issue. The test: does the fix touch a file outside the PR? If
-   not, it goes in the PR.
+   #660 is an issue. The test is falsifiable — *does this fix touch a file
+   the PR doesn't already touch* — not a judgment call about whether the
+   finding "feels" architecturally big. When the test says yes, open a
+   **PR**, not an issue: a filed issue with no PR attached is where findings
+   go to be forgotten (see rule 2 above).
+5. **Never resolve a review thread. That is the reviewer's act.** Replying,
+   pushing the fix and then clicking *Resolved* makes the author both developer
+   and reviewer, and ends the round unilaterally — *"...marked them as resolved,
+   and then clicked 'Resolved' without assigning the PR back to me for another
+   review."* All 56 threads on #625 were closed by the author; on #641 and #624
+   every resolved thread was closed by the reviewer, which is the convention that
+   one PR broke. Hand back instead: reply, push, add the reviewer as assignee
+   **and** re-request their review (`gh pr edit <N> --add-reviewer <login>`).
+   Adding an assignee alone does not put the PR back in anyone's review queue —
+   that is the half we actually missed on #625, and it is the half that makes a
+   round look finished when it is not. Leave every thread open for the reviewer
+   to close.
 
 ### What reviews here consistently ask for
 
