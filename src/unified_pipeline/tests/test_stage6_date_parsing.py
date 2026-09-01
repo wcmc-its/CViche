@@ -285,53 +285,14 @@ class TestDatesOverlapOrMatch:
         ) is True
 
 
-# --- shared CURRENT_DATE_VALUES constant, one vocabulary across 3 modules ---
-
-# The three modules that must agree on the open-ended vocabulary.
-_CURRENT_KEYWORD_MODULES = (_formatting_dates, _sorting_chronological, _parsing_dates)
-
-# Each module's call site, and an observable that DISTINGUISHES a recognized
-# current-date keyword from an unrecognized string. parsing/dates.py qualifies
-# now that an unreadable end is "unknown" rather than open-ended: a recognized
-# keyword leaves the range open (so a strictly-earlier entry is provably
-# disjoint -> False), while any other unparseable string is unknown and takes
-# the conservative True path.
-_CURRENT_KEYWORD_OBSERVABLES = (
-    (_formatting_dates, lambda kw: format_date_for_section(kw, "M2A"), "Present"),
-    (_sorting_chronological,
-     lambda kw: extract_sort_date({"extracted_fields": {"end_date": kw}}), (9999, 12, 31)),
-    (_parsing_dates,
-     lambda kw: _dates_overlap_or_match(_entry("2020-01-01", kw),
-                                        _entry("2017-01-01", "2018-01-01")), False),
-)
+# --- the 'present'/'current' vocabulary, pinned where it lives ---
 
 
-def test_current_date_values_shared_across_date_modules():
-    # #553's second defect: formatting/dates.py and sorting/chronological.py
-    # respelled ('present', 'current', 'ongoing', 'now') as their own local
-    # tuples, and parsing/dates.py recognized only 'present' -- so an
-    # end_date of "ongoing" reached _dates_overlap_or_match as a literal
-    # string while the other two modules already treated it as open-ended.
+def test_current_date_vocabulary_is_pinned():
+    """The end-of-range keywords _parse_date_components treats as open-ended.
+
+    Pinned so a vocabulary edit is a visible, deliberate act. The formatting
+    and sorting modules keep their own literals on dev; consolidating them
+    was deliberately kept out of #553's PR (cross-file constant conversion).
+    """
     assert CURRENT_DATE_VALUES == frozenset({"present", "current", "ongoing", "now"})
-    for module in _CURRENT_KEYWORD_MODULES:
-        assert module.CURRENT_DATE_VALUES is CURRENT_DATE_VALUES, (
-            f"{module.__name__} does not read parsing/dates.py's frozenset"
-        )
-
-
-@pytest.mark.parametrize("module,observe,expected", _CURRENT_KEYWORD_OBSERVABLES,
-                         ids=[m.__name__ for m, _o, _e in _CURRENT_KEYWORD_OBSERVABLES])
-def test_current_keyword_call_sites_read_the_shared_constant(monkeypatch, module, observe, expected):
-    # The membership assert above is not by itself a revert detector: restoring
-    # a module's own local ('present', 'current', 'ongoing', 'now') tuple at its
-    # call site leaves every value -- and therefore every observable -- exactly
-    # as it is today, so a test that only checks values still passes. This one
-    # extends the shared frozenset with a keyword no local copy could contain
-    # and asserts the call site honours it, which is false the moment that call
-    # site stops reading the module-level name.
-    sentinel = "definitely-not-a-real-date-keyword"
-    monkeypatch.setattr(module, "CURRENT_DATE_VALUES",
-                        CURRENT_DATE_VALUES | {sentinel}, raising=True)
-    assert observe(sentinel) == expected
-    # ...and the real vocabulary still works through the same call site.
-    assert observe("ongoing") == expected
