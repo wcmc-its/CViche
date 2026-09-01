@@ -60,6 +60,9 @@ def _mixin_callable_owners():
     """
     owners = defaultdict(list)
     for base in WCMTemplateGenerator.__bases__:
+        # The docstring's premise, pinned: a mixin that grows a parent would
+        # carry inherited names this per-base walk cannot see.
+        assert base.__bases__ == (object,), f"{base.__name__} inherits from {base.__bases__}; extend the walk to its MRO"
         for name, value in vars(base).items():
             if name.startswith("__"):
                 continue
