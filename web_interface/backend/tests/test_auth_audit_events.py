@@ -250,6 +250,28 @@ def test_directory_unavailable_event(mock_check_ed, client, db, seed_ed_enabled,
     assert events[0].cwid == "edgone1"
 
 
+def test_directory_unavailable_event_when_access_group_unconfigured(
+    client, db, seed_ed_enabled, caplog
+):
+    """No ED access group configured -> ValueError branch, DIRECTORY_UNAVAILABLE fires."""
+    clear_cache()
+    row = db.query(SystemConfig).filter(SystemConfig.key == "ed_access_group").first()
+    row.value = json.dumps("")
+    db.commit()
+    user = _make_user(db, email="ed-unconfigured@example.com", role="user",
+                       cwid="ednogroup1", auth_method="saml")
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
+
+    with caplog.at_level(logging.INFO, logger="app.auth"):
+        resp = client.get("/api/auth/me")
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"] == "directory_unavailable"
+
+    events = _events_named(caplog, "DIRECTORY_UNAVAILABLE")
+    assert len(events) == 1
+    assert events[0].cwid == "ednogroup1"
+
+
 # ---------------------------------------------------------------------------
 # LOGIN_SUCCESS / LOGIN_FAILED -- SAML ACS handler (saml_routes.py)
 # ---------------------------------------------------------------------------
