@@ -380,11 +380,31 @@ def lint_metrics(metrics: Metrics) -> list[str]:
 
 # ---------------------------------------------------------------- snapshotting
 
+class SegmentationRegressionError(Exception):
+    """Raised by snapshot()/_load_metrics()/run_compare() on a fatal,
+    user-facing condition. The error policy belongs to the driver, not the
+    stage (CODING_STANDARDS §5.1): these functions raise, and main() is the
+    sole place that translates that into sys.exit (#616 item v). Raising
+    also makes each condition unit-testable without a SystemExit-catching
+    test (the prior sys.exit() calls made these functions harder to test in
+    isolation, per the issue)."""
+
+
+# Snapshot labels build a directory path directly (_snapshot_dir below); a
+# label containing '../' segments could otherwise walk outside gold_set/
+# (#616 item iv). CLI-only tool, so the risk is low, but the check is cheap.
+_SNAPSHOT_LABEL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def _outputs_root() -> Path:
     return Path(__file__).resolve().parent / "outputs"
 
 
 def _snapshot_dir(label: str) -> Path:
+    if not _SNAPSHOT_LABEL_RE.match(label):
+        raise ValueError(
+            f"invalid snapshot label {label!r}: must match {_SNAPSHOT_LABEL_RE.pattern}"
+        )
     return _outputs_root() / "gold_set" / f"segsnap_{label}"
 
 
@@ -410,13 +430,15 @@ def snapshot(label: str, cv_dir: str | None, uids: list[str] | None) -> Path:
 
     source = Path(cv_dir) if cv_dir else _default_cv_dir()
     if not source or not source.is_dir():
-        sys.exit("No gold CV directory found. Pass --cvs <dir of .docx files>.")
+        raise SegmentationRegressionError(
+            "No gold CV directory found. Pass --cvs <dir of .docx files>."
+        )
 
     docx_files = sorted(source.glob("*.docx"))
     if uids:
         docx_files = [f for f in docx_files if f.stem in set(uids)]
     if not docx_files:
-        sys.exit(f"No .docx files matched in {source}")
+        raise SegmentationRegressionError(f"No .docx files matched in {source}")
 
     snap = _snapshot_dir(label)
     snap.mkdir(parents=True, exist_ok=True)
@@ -432,12 +454,14 @@ def snapshot(label: str, cv_dir: str | None, uids: list[str] | None) -> Path:
         hierarchy, stats = get_cv_hierarchy_chunked(cv_path=str(docx))
         stage1a: Stage1A = {"document_uid": uid, "hierarchy": hierarchy, "meta": stats}
         stage1a_path = cv_snap / f"{uid}_segmented.json"
-        stage1a_path.write_text(json.dumps(stage1a, indent=2))
+        stage1a_path.write_text(json.dumps(stage1a, indent=2), encoding="utf-8")
         total_cost += stats.get("extraction_cost", 0) or 0
 
         _, stage1b_path = run_stage_1b(str(docx), hierarchy_json_path=str(stage1a_path))
         stage2, _ = run_stage_2(str(docx), hierarchy_json_path=str(stage1b_path))
-        (cv_snap / f"{uid}_entries.json").write_text(json.dumps(stage2, indent=2))
+        (cv_snap / f"{uid}_entries.json").write_text(
+            json.dumps(stage2, indent=2), encoding="utf-8"
+        )
         total_cost += stage2.get("total_cost", 0) or 0
 
         metrics = compute_metrics(iter_source_lines(str(docx)), stage1a, stage2)
@@ -446,7 +470,7 @@ def snapshot(label: str, cv_dir: str | None, uids: list[str] | None) -> Path:
               f"entries={metrics['entries_total']} mega={metrics['mega_entries']} "
               f"dups={metrics['duplicate_entries']} headers={metrics['headers_detected']}")
 
-    (snap / "metrics.json").write_text(json.dumps(all_metrics, indent=2))
+    (snap / "metrics.json").write_text(json.dumps(all_metrics, indent=2), encoding="utf-8")
     print(f"\nSnapshot '{label}': {len(all_metrics)} CVs, LLM cost ${total_cost:.2f}")
     print(f"Metrics: {snap / 'metrics.json'}")
     return snap
@@ -455,10 +479,32 @@ def snapshot(label: str, cv_dir: str | None, uids: list[str] | None) -> Path:
 # --------------------------------------------------------------------- report
 
 def _load_metrics(label: str) -> dict[str, Metrics]:
+    """Load one snapshot's metrics.json. Raises SegmentationRegressionError
+    if the file is missing, isn't a JSON object, or a value inside it isn't
+    shaped like a Metrics dict (#616 item ii: json.loads() is typed
+    dict[str, Metrics] but returns Any at runtime, with no shape check)."""
     path = _snapshot_dir(label) / "metrics.json"
     if not path.exists():
-        sys.exit(f"No snapshot '{label}' ({path} missing). Run: snapshot {label}")
-    return json.loads(path.read_text())
+        raise SegmentationRegressionError(
+            f"No snapshot '{label}' ({path} missing). Run: snapshot {label}"
+        )
+    raw: Any = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise SegmentationRegressionError(
+            f"{path}: expected a JSON object of {{uid: Metrics}}, got {type(raw).__name__}"
+        )
+    required_keys = Metrics.__required_keys__
+    for uid, entry in raw.items():
+        if not isinstance(entry, dict):
+            raise SegmentationRegressionError(
+                f"{path}: entry {uid!r} is a {type(entry).__name__}, not a Metrics object"
+            )
+        missing = required_keys - entry.keys()
+        if missing:
+            raise SegmentationRegressionError(
+                f"{path}: entry {uid!r} is missing Metrics keys: {sorted(missing)}"
+            )
+    return raw
 
 
 def run_compare(baseline_label: str, candidate_label: str) -> int:
@@ -466,7 +512,7 @@ def run_compare(baseline_label: str, candidate_label: str) -> int:
     candidate = _load_metrics(candidate_label)
     shared = sorted(set(baseline) & set(candidate))
     if not shared:
-        sys.exit("Snapshots share no CVs — nothing to compare.")
+        raise SegmentationRegressionError("Snapshots share no CVs — nothing to compare.")
 
     rows: list[tuple[str, Verdict, str]] = []
     regressions = 0
@@ -484,7 +530,7 @@ def run_compare(baseline_label: str, candidate_label: str) -> int:
     lines.append(f"{regressions} regression(s) across {len(shared)} CVs")
     report = "\n".join(lines)
     print(report)
-    (_snapshot_dir(candidate_label) / "REPORT.md").write_text(report + "\n")
+    (_snapshot_dir(candidate_label) / "REPORT.md").write_text(report + "\n", encoding="utf-8")
     return 1 if regressions else 0
 
 
@@ -519,13 +565,20 @@ def main() -> None:
     p_lint.add_argument("label")
 
     args = parser.parse_args()
-    if args.command == "snapshot":
-        snapshot(args.label, args.cvs, args.uids)
-        sys.exit(0)
-    if args.command == "compare":
-        sys.exit(run_compare(args.baseline, args.candidate))
-    if args.command == "lint":
-        sys.exit(run_lint(args.label))
+    # snapshot()/run_compare()/run_lint() (via _load_metrics()) raise
+    # SegmentationRegressionError on a fatal, user-facing condition; main()
+    # is the one place that translates that into a process exit
+    # (CODING_STANDARDS §5.1; #616 item v).
+    try:
+        if args.command == "snapshot":
+            snapshot(args.label, args.cvs, args.uids)
+            sys.exit(0)
+        if args.command == "compare":
+            sys.exit(run_compare(args.baseline, args.candidate))
+        if args.command == "lint":
+            sys.exit(run_lint(args.label))
+    except SegmentationRegressionError as exc:
+        sys.exit(str(exc))
 
 
 if __name__ == "__main__":
