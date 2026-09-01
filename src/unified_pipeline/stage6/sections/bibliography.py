@@ -25,7 +25,12 @@ over two different substrates:
   `w:r` elements inside a `w:ins`, because an enriched citation is rendered as a
   tracked insertion paired with a deletion of the original text, and python-docx
   cannot add a run *into* a revision element. It falls back to the plain path if
-  the XML build raises, so an enrichment can never cost the citation itself.
+  the XML build raises. That fallback is not a universal net: raw control
+  characters, the one input class known to make the XML build raise, are now
+  stripped inside the tracked-insertion writer itself (#552), so that
+  specific failure no longer reaches the fallback -- but the plain writer
+  does not sanitize, so a control character reaching it by some other route
+  would still raise there too.
 
 Author bolding targets `target_name` from `_format_citation`, falling back to
 the CV owner's last name -- taken from `cv_owner`, or recovered from the

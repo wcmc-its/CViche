@@ -240,8 +240,15 @@ def test_tracked_insertion_font_constants_track_set_font_default_changes(monkeyp
         assert reloaded.TRACKED_INSERTION_FONT_NAME == "Times New Roman"
         assert reloaded.TRACKED_INSERTION_FONT_SIZE_HALF_POINTS == "28"
     finally:
-        # Restore the real defaults for every test that runs after this one
-        # in the same process (module state is otherwise process-global).
+        # `_set_font.__defaults__` is still the mutated tuple here --
+        # pytest's monkeypatch teardown only undoes it after this test
+        # function returns, and reload derives the constants from whatever
+        # `_set_font.__defaults__` holds *right now*. Reloading first would
+        # re-derive from the still-mutated defaults and leave the module
+        # holding the wrong constants for every test that runs after this
+        # one in the same process. Undo the patch first, then reload so
+        # the derivation reads the real defaults.
+        monkeypatch.undo()
         importlib.reload(bibliography)
 
 
