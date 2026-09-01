@@ -187,7 +187,14 @@ def _entry_rendered(text, haystack: str, haystack_tokens: set) -> Optional[bool]
     pieces = _entry_pieces(text)
     if any(piece in haystack for piece in pieces):
         return True
-    verifiable = bool(pieces)
+    # Seeded False, not bool(pieces): a short label-prefixed entry ("Email:
+    # x@y.org") produces a piece but every chunk below falls under
+    # RENDER_TOKEN_MIN_COUNT long-word tokens, so the loop never runs and
+    # this used to fall through to a hard False (definitively unrendered)
+    # instead of None (too short to verify). Matches _record_rendered's
+    # sibling pattern in render.py, which never sets verifiable from pieces
+    # alone (#537).
+    verifiable = False
     for chunk in [str(text or "")] + entry_fragments(text):
         tokens = _long_word_tokens(chunk)
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
