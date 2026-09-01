@@ -13,8 +13,16 @@ from saml2.response import IncorrectlySigned
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.auth import create_session_cookie, decode_session_cookie, get_cookie_settings, get_cookie_delete_settings, COOKIE_NAME
-from app.session_idle import get_idle_store
+from app.auth import (
+    create_session_cookie,
+    decode_session_cookie,
+    get_cookie_settings,
+    get_cookie_delete_settings,
+    resolve_session_identity,
+    SessionEpochUnreadable,
+    COOKIE_NAME,
+)
+from app.session_idle import get_idle_store, SessionStoreUnavailable
 from app.config_loader import get_config_value
 from app.saml_client import get_saml_client, extract_user_attrs
 from app.saml_replay import get_replay_cache, assertion_ids, replay_ttl, replay_fail_closed
@@ -22,9 +30,21 @@ from app.ed_group_lookup import check_ed_membership, EdUnavailableError, LDAPCon
 from pydantic import SecretStr
 from app.services.user_service import provision_user, normalize_email
 from app.redirect_safety import safe_relative_path
-from app.audit_events import LOGIN_SUCCESS, LOGIN_FAILED
+from app.audit_events import (
+    LOGIN_SUCCESS,
+    LOGIN_FAILED,
+    SESSION_REVOKED,
+    SESSION_STORE_UNAVAILABLE,
+)
 
 logger = logging.getLogger(__name__)
+
+# Login-page error codes this module redirects with when a session cannot be
+# minted or revoked; LoginPage.tsx renders a message for each (#657 review,
+# threads 15/16).
+_STORE_UNAVAILABLE_REDIRECT = "/login?error=session_store_unavailable"
+_STATE_UNAVAILABLE_REDIRECT = "/login?error=session_state_unavailable"
+_REVOCATION_FAILED_REDIRECT = "/login?error=session_revocation_failed"
 router = APIRouter()
 
 # SAML binding URIs (string literals to avoid import coupling)
@@ -255,12 +275,33 @@ def _saml_acs_process(form: dict, db: Session):
         role=user_role,
     )
 
-    # Build redirect response with session cookie
+    # Mint before building the response: a session store that cannot be written
+    # (or an unreadable epoch) is a login that cannot succeed, and issuing the
+    # cookie anyway hands the user a credential no later request can resolve
+    # (#657 review, thread 16). No cookie is set on either failure path.
+    try:
+        token = create_session_cookie(user, db)
+    except SessionStoreUnavailable:
+        logger.error("Session store unavailable during SAML login for %s",
+                     attrs["cwid"], exc_info=True)
+        logger.info(
+            LOGIN_FAILED,
+            extra={"cwid": attrs["cwid"], "reason": "session_store_unavailable"},
+        )
+        logger.info(SESSION_STORE_UNAVAILABLE, extra={"reason": "start"})
+        return RedirectResponse(_STORE_UNAVAILABLE_REDIRECT, status_code=302)
+    except SessionEpochUnreadable:
+        logger.error("Session epoch unreadable during SAML login for %s",
+                     attrs["cwid"], exc_info=True)
+        logger.info(
+            LOGIN_FAILED,
+            extra={"cwid": attrs["cwid"], "reason": "session_state_unavailable"},
+        )
+        return RedirectResponse(_STATE_UNAVAILABLE_REDIRECT, status_code=302)
+
     # relay_state is already a validated, non-empty same-site path.
     response = RedirectResponse(relay_state, status_code=302)
-    token = create_session_cookie(user, db)
-    cookie_settings = get_cookie_settings()
-    response.set_cookie(value=token, **cookie_settings)
+    response.set_cookie(value=token, **get_cookie_settings())
 
     logger.info(
         LOGIN_SUCCESS,
@@ -310,13 +351,36 @@ def saml_metadata(db: Session = Depends(get_db)):
 # POST/GET /api/saml/logout -- local session logout
 # ---------------------------------------------------------------------------
 def _saml_logout(request: Request):
-    """Clear local session and redirect to login page (no IdP SLO round-trip)."""
-    # Best-effort: drop the server-side idle key so the cleared cookie can't be
-    # replayed before its absolute TTL lapses.
+    """Clear local session and redirect to login page (no IdP SLO round-trip).
+
+    Mirrors auth_routes.logout: the cookie is cleared on every path, but a
+    server-side revocation that could not be completed is reported (via the
+    login page's error code) rather than swallowed -- the session stays
+    replayable until its absolute TTL otherwise (#657 review, thread 15).
+    """
     cookie = request.cookies.get(COOKIE_NAME)
     payload = decode_session_cookie(cookie) if cookie else None
-    if payload and payload.get("sid"):
-        get_idle_store().end(payload["sid"])
+
+    try:
+        identity = resolve_session_identity(payload) if payload else None
+        if identity is not None and identity.sid:
+            get_idle_store().end(identity.sid)
+    except SessionStoreUnavailable:
+        logger.error("Session store unavailable during SAML logout", exc_info=True)
+        logger.info(SESSION_STORE_UNAVAILABLE, extra={"reason": "end"})
+        failed = RedirectResponse(_REVOCATION_FAILED_REDIRECT, status_code=302)
+        failed.delete_cookie(**get_cookie_delete_settings())
+        return failed
+
+    if identity is not None:
+        logger.info(
+            SESSION_REVOKED,
+            extra={
+                "user_id": identity.user_id,
+                "email": identity.email,
+                "reason": "user_logout",
+            },
+        )
 
     response = RedirectResponse("/login", status_code=302)
     response.delete_cookie(**get_cookie_delete_settings())

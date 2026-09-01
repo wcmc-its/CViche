@@ -9,17 +9,44 @@ from app.client_ip import get_client_ip
 from app.database import get_db
 from app.models import User
 from app.schemas import LoginRequest, LoginResponse, AuthConfigResponse, MeResponse, QuotaInfo
-from app.auth import create_session_cookie, decode_session_cookie, get_cookie_settings, get_cookie_delete_settings, get_current_user, COOKIE_NAME
-from app.session_idle import get_idle_store
+from app.auth import (
+    create_session_cookie,
+    decode_session_cookie,
+    get_cookie_settings,
+    get_cookie_delete_settings,
+    get_current_user,
+    resolve_session_identity,
+    SessionEpochUnreadable,
+    COOKIE_NAME,
+    SESSION_STORE_UNAVAILABLE_DETAIL,
+    SESSION_STATE_UNAVAILABLE_DETAIL,
+)
+from app.session_idle import get_idle_store, SessionStoreUnavailable
 from app.login_throttle import get_login_throttle
 from app.config_loader import get_config_value
 from app.rate_limiter import get_quota
 from app.services.user_service import provision_user, normalize_email
-from app.audit_events import LOGIN_SUCCESS, LOGIN_FAILED, SESSION_REVOKED
+from app.audit_events import (
+    LOGIN_SUCCESS,
+    LOGIN_FAILED,
+    SESSION_REVOKED,
+    SESSION_STORE_UNAVAILABLE,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Logout cleared the cookie on this device but could not revoke the session
+# server-side, so the same cookie may still be replayable elsewhere until its
+# absolute TTL lapses. Reported rather than swallowed (#657 review, thread 15).
+_SESSION_REVOCATION_FAILED_DETAIL = {
+    "error": "session_revocation_failed",
+    "message": (
+        "You were signed out on this device, but the server-side session could "
+        "not be revoked. Please try again."
+    ),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -112,10 +139,32 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
         role=user.role,
     )
 
+    # Mint BEFORE building the response: when the session store is enabled the
+    # cookie's identity lives server-side, so a store that cannot be written is
+    # a login that cannot succeed. Issuing the cookie anyway would hand the user
+    # a credential no later request can resolve (#657 review, thread 16).
+    try:
+        token = create_session_cookie(user, db)
+    except SessionStoreUnavailable:
+        logger.error("Session store unavailable during login for %s", user.email,
+                     exc_info=True)
+        logger.info(
+            LOGIN_FAILED,
+            extra={"email": user.email, "reason": "session_store_unavailable"},
+        )
+        logger.info(SESSION_STORE_UNAVAILABLE, extra={"reason": "start"})
+        return JSONResponse(status_code=503, content=SESSION_STORE_UNAVAILABLE_DETAIL)
+    except SessionEpochUnreadable:
+        logger.error("Session epoch unreadable during login for %s", user.email,
+                     exc_info=True)
+        logger.info(
+            LOGIN_FAILED,
+            extra={"email": user.email, "reason": "session_state_unavailable"},
+        )
+        return JSONResponse(status_code=503, content=SESSION_STATE_UNAVAILABLE_DETAIL)
+
     response = JSONResponse(content=response_data.model_dump())
-    cookie_settings = get_cookie_settings()
-    token = create_session_cookie(user, db)
-    response.set_cookie(value=token, **cookie_settings)
+    response.set_cookie(value=token, **get_cookie_settings())
 
     logger.info(
         LOGIN_SUCCESS,
@@ -135,29 +184,53 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 @router.post("/auth/logout")
 def logout(request: Request):
-    """Clear the session cookie and drop its server-side idle key."""
-    # Best-effort: delete the Valkey idle key so the session can't be revived by
-    # replaying the (now-cleared) cookie before its absolute TTL lapses.
+    """Clear the session cookie and revoke its server-side session record.
+
+    The cookie is cleared on every path, including failure: the device the user
+    pressed "log out" on is signed out regardless. What is NOT swallowed is a
+    failed server-side revocation -- that leaves the session live for anyone
+    holding a copy of the cookie, so it answers 503 and says so, rather than
+    reporting a revocation that did not happen (#657 review, thread 15).
+    """
     cookie = request.cookies.get(COOKIE_NAME)
     payload = decode_session_cookie(cookie) if cookie else None
-    if payload and payload.get("sid"):
-        get_idle_store().end(payload["sid"])
 
-    if payload:
+    try:
+        # Resolved, not read off the payload: a thin cookie carries no identity,
+        # and the store is the only place the audit line's user_id exists.
+        identity = resolve_session_identity(payload) if payload else None
+    except SessionStoreUnavailable:
+        return _logout_revocation_failed("resolve")
+
+    if identity is not None and identity.sid:
+        try:
+            get_idle_store().end(identity.sid)
+        except SessionStoreUnavailable:
+            return _logout_revocation_failed("end")
+
+    if identity is not None:
         logger.info(
             SESSION_REVOKED,
             extra={
-                # payload.get(...): logout() reads defensively regardless of
-                # cookie shape. #657 will make this the *only* option once
-                # the thin {sid}-only cookie lands; repoint through its
-                # resolve_session_identity() then instead of the raw payload.
-                "user_id": payload.get("user_id"),
-                "email": payload.get("email"),
+                # email is None for a thin cookie -- the store record holds no
+                # email, and this is an audit extra, not an identity check.
+                "user_id": identity.user_id,
+                "email": identity.email,
                 "reason": "user_logout",
             },
         )
 
     response = JSONResponse(content={"message": "Logged out."})
+    response.delete_cookie(**get_cookie_delete_settings())
+    return response
+
+
+def _logout_revocation_failed(reason: str) -> JSONResponse:
+    """503 for a logout whose server-side revocation could not be completed --
+    with the cookie cleared anyway, and no SESSION_REVOKED emitted."""
+    logger.error("Session store unavailable during logout", exc_info=True)
+    logger.info(SESSION_STORE_UNAVAILABLE, extra={"reason": reason})
+    response = JSONResponse(status_code=503, content=_SESSION_REVOCATION_FAILED_DETAIL)
     response.delete_cookie(**get_cookie_delete_settings())
     return response
 

@@ -461,3 +461,92 @@ def test_logging_out_one_session_leaves_the_other_alive(client, db, seed_simple_
     assert client.get("/api/auth/me").status_code == 401
     client.cookies.set(COOKIE_NAME, cookie_b)
     assert client.get("/api/auth/me").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Login and logout report store failures instead of minting or swallowing
+# (threads 15, 16, 19.2, 20.6)
+# ---------------------------------------------------------------------------
+
+def test_login_refuses_to_mint_when_the_store_write_fails(
+    client, db, seed_simple_mode, broken_store, caplog
+):
+    """A thin cookie whose record was never written is an unusable credential;
+    login must fail atomically rather than issue one."""
+    broken_store._client.set.side_effect = redis.exceptions.ConnectionError("valkey down")
+
+    with caplog.at_level(logging.INFO, logger="app.api.auth_routes"):
+        resp = client.post(
+            "/api/auth/login",
+            json={"email": "test@example.com", "display_name": "Test"},
+        )
+
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "session_store_unavailable"
+    assert "set-cookie" not in {k.lower() for k in resp.headers}
+
+    failures = _events_named(caplog, "LOGIN_FAILED")
+    assert len(failures) == 1
+    assert failures[0].reason == "session_store_unavailable"
+    assert not _events_named(caplog, "LOGIN_SUCCESS")
+
+    outages = _events_named(caplog, "SESSION_STORE_UNAVAILABLE")
+    assert len(outages) == 1
+    assert outages[0].reason == "start"
+
+
+def test_login_refuses_to_mint_when_the_epoch_is_unreadable(client, db, seed_simple_mode):
+    _set_epoch(db, "abc")
+
+    resp = client.post(
+        "/api/auth/login",
+        json={"email": "test@example.com", "display_name": "Test"},
+    )
+
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "session_state_unavailable"
+    assert "set-cookie" not in {k.lower() for k in resp.headers}
+
+
+def test_logout_reports_a_failed_revocation(client, db, seed_simple_mode, broken_store, caplog):
+    """The cookie is cleared either way, but a revocation that did not happen
+    is a 503 -- not a "Logged out." the user has no reason to doubt."""
+    from app.auth import _serializer, COOKIE_NAME
+    user = _make_user(db)
+    broken_store._client.get.return_value = json.dumps(
+        {"user_id": user.id, "epoch": 0, "issued_at": int(time.time())}
+    )
+    broken_store._client.delete.side_effect = redis.exceptions.ConnectionError("valkey down")
+
+    client.cookies.set(COOKIE_NAME, _serializer.dumps({"v": 2, "sid": "live-sid"}))
+    with caplog.at_level(logging.INFO, logger="app.api.auth_routes"):
+        resp = client.post("/api/auth/logout")
+
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "session_revocation_failed"
+    # The device is still signed out: the delete-cookie header is present.
+    assert 'cviche_session=""' in resp.headers["set-cookie"]
+
+    # SESSION_REVOKED must NOT fire -- nothing was revoked.
+    assert not _events_named(caplog, "SESSION_REVOKED")
+    outages = _events_named(caplog, "SESSION_STORE_UNAVAILABLE")
+    assert len(outages) == 1
+    assert outages[0].reason == "end"
+
+
+def test_logout_emits_session_revoked_with_the_resolved_user_id(
+    client, db, seed_simple_mode, idle_store, caplog
+):
+    """A thin cookie carries no user_id; the audit line takes it from the store."""
+    from app.auth import create_session_cookie, COOKIE_NAME
+    user = _make_user(db)
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
+
+    with caplog.at_level(logging.INFO, logger="app.api.auth_routes"):
+        resp = client.post("/api/auth/logout")
+
+    assert resp.status_code == 200
+    events = _events_named(caplog, "SESSION_REVOKED")
+    assert len(events) == 1
+    assert events[0].user_id == user.id
+    assert events[0].reason == "user_logout"

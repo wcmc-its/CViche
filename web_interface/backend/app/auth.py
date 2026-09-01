@@ -85,14 +85,16 @@ _NOT_AUTHORIZED_DETAIL = {
     "error": "not_authorized",
     "message": "You are no longer authorized to use CViche.",
 }
-# 503, not 401: the session may well be perfectly valid: we cannot tell. Saying
-# "log in again" would be a lie, and would also send the user at a login page
-# that cannot mint a cookie either.
-_SESSION_STORE_UNAVAILABLE_DETAIL = {
+# 503, not 401: the session may well be perfectly valid -- we cannot tell.
+# Saying "log in again" would be a lie, and would also send the user at a login
+# page that cannot mint a cookie either. Public (no leading underscore): the
+# login and SAML ACS routes answer with these too, so they are part of this
+# module's contract, not an internal detail.
+SESSION_STORE_UNAVAILABLE_DETAIL = {
     "error": "session_store_unavailable",
     "message": "Sign-in state is temporarily unavailable. Please try again.",
 }
-_SESSION_STATE_UNAVAILABLE_DETAIL = {
+SESSION_STATE_UNAVAILABLE_DETAIL = {
     "error": "session_state_unavailable",
     "message": "Sign-in state is temporarily unavailable. Please try again.",
 }
@@ -395,7 +397,7 @@ def _resolve_identity_or_reject(payload: dict) -> SessionIdentity:
         logger.error("Session store unavailable while resolving identity", exc_info=True)
         logger.info(SESSION_STORE_UNAVAILABLE, extra={"reason": "resolve"})
         raise HTTPException(
-            status_code=503, detail=_SESSION_STORE_UNAVAILABLE_DETAIL
+            status_code=503, detail=SESSION_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if identity is None:
         logger.info(SESSION_EXPIRED, extra={"reason": "unresolvable_session"})
@@ -411,7 +413,7 @@ def _enforce_session_epoch(identity: SessionIdentity, db: Session) -> None:
     except SessionEpochUnreadable as exc:
         logger.error("Session epoch is unreadable; failing closed", exc_info=True)
         raise HTTPException(
-            status_code=503, detail=_SESSION_STATE_UNAVAILABLE_DETAIL
+            status_code=503, detail=SESSION_STATE_UNAVAILABLE_DETAIL
         ) from exc
     if identity.epoch != current_epoch:
         logger.info(
@@ -451,7 +453,7 @@ def _enforce_idle_window(identity: SessionIdentity) -> None:
                      exc_info=True)
         logger.info(SESSION_STORE_UNAVAILABLE, extra={"reason": "touch"})
         raise HTTPException(
-            status_code=503, detail=_SESSION_STORE_UNAVAILABLE_DETAIL
+            status_code=503, detail=SESSION_STORE_UNAVAILABLE_DETAIL
         ) from exc
     if not still_active:
         logger.info(
