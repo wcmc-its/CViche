@@ -51,9 +51,12 @@ never "human-verified correct."
 """
 
 import json
+import logging
 import re
 import sys
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # --- band thresholds (provisional; see module docstring) --------------------
 BAND_GREEN = 85
@@ -77,15 +80,33 @@ def linear_interp(val, lo, hi, out_lo, out_hi):
 
 
 def _load_first(outputs_dir: Path, pattern: str):
-    """Load the first JSON artifact matching pattern, or None."""
+    """Load the first JSON artifact matching pattern.
+
+    Returns ``(data, reason)``. ``data`` is ``None`` when nothing usable was
+    loaded; ``reason`` then tells the two misses apart: ``None`` means no file
+    matched `pattern` at all (genuinely absent), a string means a file
+    *matched* but failed to parse -- e.g. the truncated JSON a crashed or
+    OOM-killed stage leaves mid-write (present but unreadable, #497). Mirrors
+    run_doctor._load_json's absent-vs-unreadable distinction.
+    """
     files = sorted(outputs_dir.glob(pattern))
     if not files:
-        return None
+        return None, None
     try:
         with open(files[0]) as f:
-            return json.load(f)
-    except Exception:
-        return None
+            return json.load(f), None
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+        logger.warning("quality_score could not read %s (%s)", files[0], reason)
+        return None, reason
+
+
+def _missing_or_unreadable_detail(label: str, reason) -> str:
+    """Detail-string fragment for a `_load_first` miss: names an unreadable
+    artifact distinctly from a genuinely absent one (#497)."""
+    if reason is not None:
+        return f"{label} unreadable ({reason})"
+    return f"no {label} found"
 
 
 def _load_docx(outputs_dir: Path):
@@ -194,9 +215,9 @@ _CONTACT_KEY_RE = re.compile(
 
 def score_cv_owner(outputs_dir: Path):
     """CV owner name / contact. Missing name is a hard-fail (cap=25)."""
-    data = _load_first(outputs_dir, "*_fields.json")
+    data, reason = _load_first(outputs_dir, "*_fields.json")
     if data is None:
-        return 1.0, "no fields.json found", 25
+        return 1.0, _missing_or_unreadable_detail("fields.json", reason), 25
 
     if cv_owner_name_missing(data):
         return 1.0, "cv_owner name empty; hard-fail cap=25", 25
@@ -231,9 +252,9 @@ def score_cv_owner(outputs_dir: Path):
 
 def score_t_bucket(outputs_dir: Path):
     """Share of entries in the stage_3b ``T`` catch-all ('nothing else fits')."""
-    data = _load_first(outputs_dir, "*_classified.json")
+    data, reason = _load_first(outputs_dir, "*_classified.json")
     if data is None:
-        return 1.0, "no classified.json found", None
+        return 1.0, _missing_or_unreadable_detail("classified.json", reason), None
 
     meta = data.get("meta", {}) or {}
     code_dist = meta.get("code_distribution", {}) or {}
@@ -326,9 +347,9 @@ def score_broken_format(outputs_dir: Path):
 
 def score_field_sparseness(outputs_dir: Path):
     """Entry-level field-extraction sparseness."""
-    data = _load_first(outputs_dir, "*_fields.json")
+    data, reason = _load_first(outputs_dir, "*_fields.json")
     if data is None:
-        return 1.0, "no fields.json found", None
+        return 1.0, _missing_or_unreadable_detail("fields.json", reason), None
 
     entries = data.get("entries", [])
     total = len(entries)
@@ -360,9 +381,9 @@ def score_field_sparseness(outputs_dir: Path):
 
 def score_duplicate_ratio(outputs_dir: Path):
     """Duplicate-entry ratio (de-dup / fragmentation health)."""
-    data = _load_first(outputs_dir, "*_classified.json")
+    data, reason = _load_first(outputs_dir, "*_classified.json")
     if data is None:
-        return 1.0, "no classified.json found", None
+        return 1.0, _missing_or_unreadable_detail("classified.json", reason), None
 
     meta = data.get("meta", {}) or {}
     total = meta.get("total_entries", 0) or 0
@@ -380,14 +401,15 @@ def score_duplicate_ratio(outputs_dir: Path):
     else:
         fraction = 1.0
 
-    edata = _load_first(outputs_dir, "*_entries.json")
+    edata, edata_reason = _load_first(outputs_dir, "*_entries.json")
     coverage_pct = (edata or {}).get("coverage", {}).get("coverage_percentage") if edata else None
     if coverage_pct is not None and coverage_pct > 130:
         fraction = clamp(fraction + 0.1)
 
+    entries_note = f"; {_missing_or_unreadable_detail('entries.json', edata_reason)}" if edata_reason else ""
     detail = (
         f"total_entries={total}; duplicate_entries={dup}; dup_ratio={dup_ratio:.3f}; "
-        f"entries_coverage_pct={coverage_pct}; fraction={fraction:.3f}"
+        f"entries_coverage_pct={coverage_pct}; fraction={fraction:.3f}{entries_note}"
     )
     return fraction, detail, None
 
