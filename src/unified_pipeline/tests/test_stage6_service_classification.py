@@ -24,8 +24,8 @@ Graduate Medical Education").
 
 Fix: `_is_known_org_line`'s veto and the sibling `is_role` check inside
 `_parse_extramural_leadership_lines` (service.py :~653) both now use
-`_matches_word_start` -- a `\\b`-anchored PREFIX match (start of a word
-only, no closing `\\b`) -- against `EXTRAMURAL_ROLE_KEYWORDS`, instead of
+`_matches_word_start` -- a PREFIX match anchored at a word's start only,
+with no closing bound -- against `EXTRAMURAL_ROLE_KEYWORDS`, instead of
 `_matches_bounded`'s whole-word match. An explicit stem list (hand-spelling
 every inflected form) was tried first and rejected: the corpus's real
 inflected/derived forms turned out far more varied than the handful the
@@ -41,6 +41,20 @@ behavior). The sibling `is_role` check previously used bare substring while
 fire for different reasons on the same line; both now call
 `_matches_word_start` with the same `EXTRAMURAL_ROLE_KEYWORDS`, so they
 cannot disagree.
+
+Round 3: a differential probe against the pre-#658 behavior found round 2
+still regressed two groups. `\\b` sits between a word character and a
+non-word character, so a DIGIT counts as part of the word and cannot open
+one: "2010-2012Director, ..." (6 occurrences, 1 UID) read as an
+organization. And a word-start anchor cannot reach a keyword that is a
+compound's SUFFIX: "subcommittee" (50 occurrences, 6 unique lines, 14 UIDs)
+likewise read as an organization. Fix: the left boundary becomes the
+letters-only lookbehind `(?<![A-Za-z])`, so a digit or punctuation is a
+legitimate word start and only a preceding LETTER means the keyword is
+buried mid-word; and 'subcommittee' is listed in EXTRAMURAL_ROLE_KEYWORDS
+as its own entry. Neither change reintroduces the inflection drops above or
+the "onboarding" false positive. Four residual lines are accepted and
+documented in `test_present_glued_role_titles_stay_unmatched_accepted`.
 
 Each fixture below is picked so the readings under test disagree. Controls
 alongside them prove a genuine hit still matches -- each fix narrows or
@@ -191,13 +205,82 @@ def test_matches_word_start_does_not_regress_a_whole_word_hit():
         assert _matches_word_start(line, _ROLE_KEYWORDS) is True, line
 
 
-def test_subcommittee_is_not_treated_as_a_committee_role_hit():
-    """'committee' does not start the word "subcommittee" -- word-start
-    anchoring does not match it, matching the currently-shipped whole-word
-    behavior (which also does not match it). Not a regression this round
-    introduces: the differential probe found `_matches_bounded` already
-    missed this line before this round's change (#658 round 2)."""
-    assert _matches_word_start("subcommittee", _ROLE_KEYWORDS) is False
+def test_subcommittee_lines_are_role_lines():
+    """A word-START anchor cannot reach "committee" inside "subcommittee"
+    (the keyword is the compound's SUFFIX), so round 2 stopped classifying
+    genuine subcommittee role lines as roles -- 50 line occurrences over 14
+    corpus UIDs that the pre-#658 substring code had classified as roles,
+    and that a short line would instead have set as `current_org`
+    (service.py, `_parse_extramural_leadership_lines` else branch). Round 3
+    lists 'subcommittee' in EXTRAMURAL_ROLE_KEYWORDS as its own entry
+    rather than loosening the anchor, which would re-admit arbitrary
+    mid-word collisions (#658 round 3)."""
+    assert _matches_word_start(
+        "aha hospital accreditation stroke certification subcommittee 2018-present",
+        _ROLE_KEYWORDS) is True
+    assert _matches_word_start(
+        "internal department of pediatrics subcommittee for clinical research",
+        _ROLE_KEYWORDS) is True
+    assert _is_known_org_line(
+        "lcme self study subcommittee: academic and learning environments",
+        _ROLE_KEYWORDS) is False
+
+
+def test_date_glued_role_title_is_a_role_line():
+    """Stage 4 emits a date concatenated onto the role title with no
+    separator when the source docx had them in adjacent cells
+    ("2010-2012Director, Cardiac Prep and Recovery Unit"). `\\b` sits
+    between a word character and a non-word character, so it counts the
+    digits as part of the word and refuses to open one before "director" --
+    round 2 read these as organization lines. The letters-only lookbehind
+    `(?<![A-Za-z])` treats a digit (and any punctuation) as a legitimate
+    word start; only a preceding LETTER means the keyword is buried
+    mid-word. 6 occurrences on 1 corpus UID (#658 round 3)."""
+    assert _matches_word_start(
+        "2010-2012director, cardiac prep and recovery unit", _ROLE_KEYWORDS) is True
+    assert _matches_word_start(
+        "2011-2012director, baltimore va cath lab", _ROLE_KEYWORDS) is True
+    assert _is_known_org_line(
+        "2010-2012director, cardiac prep and recovery unit", _ROLE_KEYWORDS) is False
+
+
+# --- Documented exclusions: lines this matcher deliberately does NOT match ---
+
+def test_onboarding_is_not_a_board_role_hit():
+    """The false positive #658 was filed for: "board" sitting mid-word
+    inside "onboarding" counted as a role keyword under the pre-#658
+    substring code (13 line occurrences in the corpus). "board" is
+    preceded by "n", a letter, so neither the whole-word bound nor round
+    3's letters-only lookbehind opens a word there (#658)."""
+    assert _matches_word_start("onboarding", _ROLE_KEYWORDS) is False
+
+
+def test_present_glued_role_titles_stay_unmatched_accepted():
+    """The four lines below are the complete residual of the round-3 fix:
+    each glues the keyword onto the trailing date word "present", so the
+    character before the keyword is "t" -- a LETTER -- and the letters-only
+    lookbehind correctly refuses to open a word there. Accepted, not fixed:
+
+    * "2008-presentdirector, cath lab peripheral interventions"
+    * "2012-presentdirector, university of maryland cardiac cath lab"
+    * "2014-presentreviewer, catheterization and cardiovascular interventions"
+    * "2016-presentdirector, carroll hospital center cath lab"
+
+    All four are stage-4 concatenation artifacts on a single corpus CV
+    (web08), and none of them reaches
+    `_parse_extramural_leadership_lines` (0 of the flip lines satisfy that
+    call site's Q-code / no-extracted-fields / >3-lines guard), so no
+    corpus output changes either way. The only fix would be to strip
+    trailing date words before matching, which is date-parsing
+    responsibility that does not belong in a keyword matcher and would
+    match "present" inside unrelated words in turn (#658 round 3)."""
+    for line in (
+        "2008-presentdirector, cath lab peripheral interventions",
+        "2012-presentdirector, university of maryland cardiac cath lab",
+        "2014-presentreviewer, catheterization and cardiovascular interventions",
+        "2016-presentdirector, carroll hospital center cath lab",
+    ):
+        assert _matches_word_start(line, _ROLE_KEYWORDS) is False, line
 
 
 def test_ementorship_mid_word_is_not_restored():

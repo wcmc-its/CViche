@@ -77,6 +77,13 @@ BOARD_KEYWORDS = (
 EXTRAMURAL_ROLE_KEYWORDS = (
     'member', 'chair', 'reviewer', 'liaison', 'mentor', 'committee',
     'board', 'council', 'advisor', 'director', 'leader', 'representative',
+    # 'subcommittee' is listed separately because `_matches_word_start`
+    # anchors on the word's START: "subcommittee" does not start with
+    # "committee", so the entry above cannot reach it. Real committee role
+    # lines use it ("AHA Hospital Accreditation Stroke Certification
+    # Subcommittee", "LCME Self Study Subcommittee: ...") -- 50 line
+    # occurrences over 14 corpus UIDs (#658 round 3 probe).
+    'subcommittee',
 )
 
 
@@ -95,9 +102,9 @@ def _matches_bounded(text_lower: str, keywords) -> bool:
 
 
 def _matches_word_start(text_lower: str, keywords) -> bool:
-    """True when `text_lower` contains a word that STARTS WITH one of
-    `keywords` -- a `\\b`-anchored prefix, with no closing `\\b` (#658
-    round 2).
+    """True when `text_lower` contains one of `keywords` at a WORD START --
+    a position not preceded by a letter -- with no bound on the right, so
+    the keyword may be a prefix of a longer word (#658 rounds 2 and 3).
 
     Used only for `EXTRAMURAL_ROLE_KEYWORDS`, not the other keyword lists
     `_matches_bounded` still serves. `_matches_bounded`'s whole-word
@@ -121,23 +128,37 @@ def _matches_word_start(text_lower: str, keywords) -> bool:
     the word's start generalizes correctly instead, because English
     inflection/derivation overwhelmingly adds a SUFFIX, not a prefix.
 
-    This does not regress relative to `_matches_bounded`: every whole-word
-    match is trivially also a word-start match, so switching only adds
-    matches, never removes one -- confirmed by the round-2 differential
-    probe finding 0 True-to-False flips against the currently-shipped
-    whole-word behavior. Nor does it match a keyword sitting mid-word in a
-    genuine compound where the keyword is the SUFFIX, not the prefix
-    ("subcommittee" does not start with "committee") -- the same probe
-    found `_matches_bounded` already missed those lines too, so this is not
-    a new gap. It also does not match a keyword glued to a preceding date
-    with no space ("2012Director", a stage-4 extraction artifact) -- also
-    already true of `_matches_bounded`, and out of this round's scope. And
-    it does not restore a keyword matching truly mid-word, past the word's
-    own start ("eMentorship" contains "mentor" but does not start with
-    it) -- treated as an accepted mis-file, not a regression (#658 round 2
+    The left boundary is a letters-only lookbehind, `(?<![A-Za-z])`, not
+    `\\b`. `\\b` sits between a word and a NON-word character, so it treats
+    a digit as part of the word and refuses to start one: "2010-2012" is
+    followed directly by "director" in real stage-4 extractions
+    ("2010-2012Director, Cardiac Prep and Recovery Unit") where the source
+    docx had the date and title in adjacent cells, and a `\\b` matcher
+    scored those lines as organizations. A digit -- and any punctuation --
+    is a legitimate word start for this classifier's purposes; only a
+    preceding LETTER means the keyword is buried mid-word. That is the one
+    case still rejected, deliberately: "eMentorship" contains "mentor"
+    behind a letter, so it does not match (an accepted mis-file, see the
     PR body).
+
+    Concatenation where the preceding character is itself a letter is not
+    recoverable here and is accepted: four lines on one corpus CV glue a
+    keyword onto the word "present" ("2014-presentReviewer, ...") and stay
+    unmatched, since "t" is a letter. Stripping trailing date words before
+    matching was considered and rejected as a date-parsing responsibility
+    that does not belong in a keyword matcher; none of these lines reach
+    `_parse_extramural_leadership_lines` in the corpus.
+
+    This does not regress relative to `_matches_bounded`: every whole-word
+    match is trivially also a word-start match under a strictly weaker left
+    boundary, so switching only adds matches, never removes one -- confirmed
+    by a differential probe over the corpus finding 0 True-to-False flips
+    against the currently-shipped whole-word behavior.
     """
-    return any(re.search(rf'\b{re.escape(kw)}', text_lower) for kw in keywords)
+    return any(
+        re.search(rf'(?<![A-Za-z]){re.escape(kw)}', text_lower)
+        for kw in keywords
+    )
 
 
 # A multi-line Q2 entry's trailing date-only lines (e.g. "2014, 2017-2020")
