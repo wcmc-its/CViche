@@ -614,7 +614,7 @@ def lint_duplicate_records(blocks: List[Tuple[str, str]]) -> List[Dict]:
     pairs: List[Tuple[int, int]] = []
 
     for i, (kind, text) in enumerate(blocks):
-        header = _output_section_header(text)
+        header = _output_section_header(text) if kind == "p" else None
         if header is not None:
             if header != current_section:
                 current_section = header
