@@ -88,7 +88,9 @@ async def websocket_stream(websocket: WebSocket, run_id: str):
             await websocket.accept()
             await websocket.close(code=4001, reason="Session timed out")
             return
-        resolved_user_id, resolved_epoch = identity
+        # SessionIdentity, not a tuple, since #657's review response; this
+        # whole block is being replaced by authenticate_session_cookie().
+        resolved_user_id, resolved_epoch = identity.user_id, identity.epoch
 
         # Same global revocation gate as get_current_user -- a revoked/old-epoch
         # cookie must be rejected here too or a long-lived socket would outlive
@@ -109,7 +111,7 @@ async def websocket_stream(websocket: WebSocket, run_id: str):
         # refreshing for the life of the socket, so a tab left open on a finished
         # run still idles out via the user's REST activity. Cookies without a
         # `sid` (pre-feature) bypass; no-op / fail-open when Valkey is off.
-        sid = payload.get("sid")
+        sid = identity.sid
         if sid and not get_idle_store().touch(sid):
             await websocket.accept()
             await websocket.close(code=4001, reason="Session timed out")

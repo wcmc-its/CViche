@@ -240,7 +240,7 @@ def _make_user(db):
 def test_minted_cookie_carries_sid_and_is_accepted(client, db, seed_simple_mode, idle_store):
     from app.auth import create_session_cookie, decode_session_cookie, COOKIE_NAME
     user = _make_user(db)
-    cookie = create_session_cookie(user)          # seeds the idle key
+    cookie = create_session_cookie(user, db)      # seeds the idle key
     assert decode_session_cookie(cookie).get("sid")
 
     client.cookies.set(COOKIE_NAME, cookie)
@@ -248,9 +248,18 @@ def test_minted_cookie_carries_sid_and_is_accepted(client, db, seed_simple_mode,
 
 
 def test_expired_idle_key_yields_401(client, db, seed_simple_mode, idle_store):
+    """A lapsed key is rejected as `session_invalid`, not `session_idle`.
+
+    With the store enabled the cookie is thin: the key IS the identity, so a
+    key that is gone means the session cannot be resolved at all, and identity
+    resolution rejects it before the idle refresh is ever reached. The
+    `session_idle` code now only reports the narrow race where the key vanishes
+    between resolve() and expire() -- see test_auth_audit_events.py's
+    idle_timeout test.
+    """
     from app.auth import create_session_cookie, decode_session_cookie, COOKIE_NAME
     user = _make_user(db)
-    cookie = create_session_cookie(user)
+    cookie = create_session_cookie(user, db)
     sid = decode_session_cookie(cookie)["sid"]
 
     idle_store.end(sid)                            # simulate the window lapsing
@@ -258,15 +267,21 @@ def test_expired_idle_key_yields_401(client, db, seed_simple_mode, idle_store):
 
     resp = client.get("/api/auth/me")
     assert resp.status_code == 401
-    assert resp.json()["detail"]["error"] == "session_idle"
+    assert resp.json()["detail"]["error"] == "session_invalid"
 
 
-def test_legacy_cookie_without_sid_bypasses_idle(client, db, seed_simple_mode, idle_store):
-    """A cookie minted before this feature has no `sid`; it must still work."""
+def test_legacy_cookie_without_sid_bypasses_idle(client, db, seed_simple_mode):
+    """A rich cookie minted before this feature has no `sid`; it must still
+    work, bounded only by the absolute cookie TTL.
+
+    Runs with the store DISABLED (no idle_store fixture): a store-enabled
+    deployment accepts v2 cookies only, so "no sid" is not a shape that can
+    reach this path there at all.
+    """
     from app.auth import _serializer, COOKIE_NAME
     user = _make_user(db)
     legacy = _serializer.dumps({
-        "user_id": user.id, "email": user.email,
+        "user_id": user.id, "email": user.email, "epoch": 0,
         "role": user.role, "issued_at": int(time.time()),
     })
     client.cookies.set(COOKIE_NAME, legacy)
@@ -276,7 +291,7 @@ def test_legacy_cookie_without_sid_bypasses_idle(client, db, seed_simple_mode, i
 def test_logout_deletes_idle_key(client, db, seed_simple_mode, idle_store):
     from app.auth import create_session_cookie, decode_session_cookie, COOKIE_NAME
     user = _make_user(db)
-    cookie = create_session_cookie(user)
+    cookie = create_session_cookie(user, db)
     sid = decode_session_cookie(cookie)["sid"]
 
     client.cookies.set(COOKIE_NAME, cookie)

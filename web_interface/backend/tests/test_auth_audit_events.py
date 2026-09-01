@@ -116,7 +116,7 @@ def test_login_failed_event_not_allowlisted(client, seed_simple_mode, caplog):
 
 def test_session_revoked_event_on_logout(client, db, seed_simple_mode, caplog):
     user = _make_user(db, email="logout@example.com")
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
 
     with caplog.at_level(logging.INFO, logger="app.api.auth_routes"):
         resp = client.post("/api/auth/logout")
@@ -131,7 +131,7 @@ def test_session_revoked_event_on_logout(client, db, seed_simple_mode, caplog):
 def test_session_revoked_event_on_epoch_mismatch(client, db, seed_simple_mode, caplog):
     user = _make_user(db)
     _set_epoch(db, 0)
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
     assert client.get("/api/auth/me").status_code == 200  # valid before the bump
 
     _set_epoch(db, 1)  # an admin revoked everyone
@@ -162,17 +162,32 @@ def test_session_expired_event_on_invalid_cookie(client, seed_simple_mode, caplo
 
 
 def test_session_expired_event_on_idle_timeout(client, db, seed_simple_mode, caplog):
+    """The idle window lapses between resolve() and the TTL refresh.
+
+    With a v2 cookie, resolve() already proves the key exists, so the only way
+    expire() answers False is that narrow race -- which is exactly what is
+    staged here (a client whose get() serves a record and whose expire()
+    reports the key gone). It is the one path that still emits idle_timeout;
+    a key that is simply absent is reported as an unresolvable session.
+    """
+    from app.session_idle import IdleSessionStore
     user = _make_user(db)
     _set_epoch(db, 0)
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
 
-    fake_store = MagicMock()
-    fake_store.touch.return_value = False  # sid present but idle window lapsed
-    # The cookie is rich (no store configured in tests), so identity comes from
-    # the payload; the store has no record for this sid.
-    fake_store.resolve.return_value = None
+    store = IdleSessionStore("redis://fake", 1200)
+    store._client = MagicMock()
+    store._client.get.return_value = json.dumps(
+        {"user_id": user.id, "epoch": 0, "issued_at": 1}
+    )
+    store._client.expire.return_value = 0        # key gone -> window lapsed
 
-    with patch("app.auth.get_idle_store", return_value=fake_store):
+    with patch("app.auth.get_idle_store", return_value=store):
+        client.cookies.set(
+            COOKIE_NAME,
+            URLSafeTimedSerializer("test-secret-not-for-production").dumps(
+                {"v": 2, "sid": "raced-sid"}
+            ),
+        )
         with caplog.at_level(logging.INFO, logger="app.auth"):
             resp = client.get("/api/auth/me")
     assert resp.status_code == 401
@@ -195,7 +210,7 @@ def test_role_changed_event_on_ed_recheck(mock_check_ed, client, db, seed_ed_ena
     clear_cache()
     user = _make_user(db, email="ed-role@example.com", role="user",
                        cwid="edrole1", auth_method="saml")
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
 
     mock_check_ed.return_value = MembershipResult(in_access_group=True, in_admin_group=True)
 
@@ -218,7 +233,7 @@ def test_group_membership_removed_event(mock_check_ed, client, db, seed_ed_enabl
     clear_cache()
     user = _make_user(db, email="ed-removed@example.com", role="user",
                        cwid="edremoved1", auth_method="saml")
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
 
     mock_check_ed.return_value = MembershipResult(in_access_group=False, in_admin_group=False)
 
@@ -239,7 +254,7 @@ def test_directory_unavailable_event(mock_check_ed, client, db, seed_ed_enabled,
     clear_cache()
     user = _make_user(db, email="ed-unavailable@example.com", role="user",
                        cwid="edgone1", auth_method="saml")
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
 
     mock_check_ed.side_effect = EdUnavailableError("LDAP unreachable")
 
@@ -263,7 +278,7 @@ def test_directory_unavailable_event_when_access_group_unconfigured(
     db.commit()
     user = _make_user(db, email="ed-unconfigured@example.com", role="user",
                        cwid="ednogroup1", auth_method="saml")
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
 
     with caplog.at_level(logging.INFO, logger="app.auth"):
         resp = client.get("/api/auth/me")
@@ -356,7 +371,7 @@ def test_get_current_user_rejects_malformed_payload_not_500(client, seed_simple_
     assert resp.status_code == 401
 
     events = _events_named(caplog, "SESSION_EXPIRED")
-    assert any(e.reason == "malformed_payload" for e in events)
+    assert any(e.reason == "unresolvable_session" for e in events)
 
 
 def test_get_current_user_rejects_non_numeric_epoch_not_500(client, seed_simple_mode, caplog):
@@ -377,7 +392,7 @@ def test_role_changed_event_on_ed_downgrade(mock_check_ed, client, db, seed_ed_e
     clear_cache()
     user = _make_user(db, email="ed-downgrade@example.com", role="admin",
                        cwid="eddowngrade1", auth_method="saml")
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
 
     mock_check_ed.return_value = MembershipResult(in_access_group=True, in_admin_group=False)
 
@@ -394,7 +409,7 @@ def test_role_changed_event_on_ed_downgrade(mock_check_ed, client, db, seed_ed_e
 
 def test_disabled_user_rejected(client, db, seed_simple_mode):
     user = _make_user(db, email="disabled@example.com", status="disabled")
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user, epoch=0))
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, db))
 
     resp = client.get("/api/auth/me")
     assert resp.status_code == 401

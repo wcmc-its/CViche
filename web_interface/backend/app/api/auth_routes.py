@@ -9,7 +9,7 @@ from app.client_ip import get_client_ip
 from app.database import get_db
 from app.models import User
 from app.schemas import LoginRequest, LoginResponse, AuthConfigResponse, MeResponse, QuotaInfo
-from app.auth import create_session_cookie, decode_session_cookie, get_cookie_settings, get_cookie_delete_settings, get_current_user, get_session_epoch, COOKIE_NAME
+from app.auth import create_session_cookie, decode_session_cookie, get_cookie_settings, get_cookie_delete_settings, get_current_user, COOKIE_NAME
 from app.session_idle import get_idle_store
 from app.login_throttle import get_login_throttle
 from app.config_loader import get_config_value
@@ -114,7 +114,7 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
 
     response = JSONResponse(content=response_data.model_dump())
     cookie_settings = get_cookie_settings()
-    token = create_session_cookie(user, get_session_epoch(db))
+    token = create_session_cookie(user, db)
     response.set_cookie(value=token, **cookie_settings)
 
     logger.info(

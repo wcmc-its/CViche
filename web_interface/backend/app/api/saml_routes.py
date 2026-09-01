@@ -13,7 +13,7 @@ from saml2.response import IncorrectlySigned
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.auth import create_session_cookie, decode_session_cookie, get_cookie_settings, get_cookie_delete_settings, get_session_epoch, COOKIE_NAME
+from app.auth import create_session_cookie, decode_session_cookie, get_cookie_settings, get_cookie_delete_settings, COOKIE_NAME
 from app.session_idle import get_idle_store
 from app.config_loader import get_config_value
 from app.saml_client import get_saml_client, extract_user_attrs
@@ -258,7 +258,7 @@ def _saml_acs_process(form: dict, db: Session):
     # Build redirect response with session cookie
     # relay_state is already a validated, non-empty same-site path.
     response = RedirectResponse(relay_state, status_code=302)
-    token = create_session_cookie(user, get_session_epoch(db))
+    token = create_session_cookie(user, db)
     cookie_settings = get_cookie_settings()
     response.set_cookie(value=token, **cookie_settings)
 
