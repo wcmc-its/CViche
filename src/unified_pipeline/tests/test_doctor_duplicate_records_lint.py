@@ -181,6 +181,42 @@ def test_tracked_insertion_of_a_citation_does_not_manufacture_a_duplicate(tmp_pa
     assert lint_duplicate_records(blocks) == []
 
 
+def test_quiet_on_short_duplicated_body_under_the_floor():
+    """Negative control for DUPLICATE_RECORD_MIN_CHARS: a short repeated
+    fragment ('See above.'-style) below the 20-char floor must not fire even
+    though the enumerator and section match, so a two-word aside standing
+    between two unrelated records cannot read as a duplicated record.
+    Mutation check: with DUPLICATE_RECORD_MIN_CHARS monkeypatched to 0 this
+    same fixture DOES fire -- this is what pins the floor behaviourally."""
+    short_body = "See above."  # normalized key ("see above") is 9 chars
+    blocks = [
+        ("p", "D. PUBLICATIONS"),
+        ("p", f"1. {short_body}"),
+        ("p", f"2. {_CITATION_B}"),
+        ("p", f"3. {short_body}"),
+    ]
+    assert lint_duplicate_records(blocks) == []
+
+
+def test_quiet_on_duplicated_non_enumerated_paragraph():
+    """Negative control for the 'enumerated blocks only' scope: two
+    identical PLAIN paragraphs (no list enumerator) must not fire even
+    though their bodies match exactly and clear the floor -- the lint only
+    tracks paragraphs that open with a list enumerator
+    (_PASSAGE_ENUMERATOR_RE), the same restriction lint_duplicate_passages
+    applies to its own block keys."""
+    plain_body = ("This is a plain narrative paragraph repeated verbatim, "
+                  "long enough to clear the 20-character floor on its own.")
+    blocks = [
+        ("p", "D. PUBLICATIONS"),
+        ("p", f"1. {_CITATION_A}"),
+        ("p", plain_body),
+        ("p", f"2. {_CITATION_B}"),
+        ("p", plain_body),
+    ]
+    assert lint_duplicate_records(blocks) == []
+
+
 def test_run_doctor_dispatches_duplicate_records_and_skips_without_docx(tmp_path):
     """Dispatch wiring, both directions: fires as a real finding when the
     stage-6 docx carries a duplicate, and degrades to the standard INFO
@@ -219,4 +255,6 @@ if __name__ == "__main__":
     test_quiet_when_the_repeat_is_beyond_the_window()
     test_blank_spacer_paragraphs_are_transparent_to_the_window()
     test_docx_text_and_read_docx_blocks_smoke()
+    test_quiet_on_short_duplicated_body_under_the_floor()
+    test_quiet_on_duplicated_non_enumerated_paragraph()
     print("OK")
