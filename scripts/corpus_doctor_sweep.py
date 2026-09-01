@@ -16,11 +16,15 @@ predating the input-archiving feature).
 """
 import argparse
 import json
+import logging
 import sys
+import traceback
 from collections import Counter
 from pathlib import Path
 
 from unified_pipeline.run_doctor import KNOWN_LINTS, run_doctor
+
+logger = logging.getLogger(__name__)
 
 # S3-flat suffix -> the stage_* dir run_doctor._ARTIFACTS globs (kept in sync
 # with that map; a suffix run_doctor stops reading just goes unused here).
@@ -96,25 +100,35 @@ def stage(run_dir: Path, uid: str, work: Path) -> Path:
 
 
 def sweep(corpus_dir: Path, run_ids, work: Path):
-    """Doctor each run; one bad run is reported and skipped, never aborts the rest."""
+    """Doctor each run; one bad run is reported and skipped, never aborts the rest.
+
+    Returns (reports, failures, skipped). `failures[run_id]` carries both the
+    exception message and the full traceback text -- the operator's one lead
+    into which lint raised, at which line, on which artifact -- and is also
+    logged via logger.exception so it survives in the process log even when
+    the caller does not persist --out. `skipped` lists run_ids with no staged
+    artifacts at all (a distinct, non-exceptional case from a run_doctor crash).
+    """
     reports = {}
     failures = {}
+    skipped = []
     for run_id in run_ids:
         try:
             run_dir = _resolve_run_dir(corpus_dir, run_id)
             uid = _find_uid(run_dir)
             if not uid:
-                print(f"  !! {run_id}: no artifacts found, skipping", file=sys.stderr)
+                logger.warning("%s: no artifacts found, skipping", run_id)
+                skipped.append(run_id)
                 continue
             reports[run_id] = run_doctor(stage(run_dir, uid, work), uid)
         except Exception as e:  # noqa: BLE001 - one bad run must not lose the sweep
-            print(f"  !! {run_id}: run_doctor failed: {e}", file=sys.stderr)
-            failures[run_id] = str(e)
+            logger.exception("run_doctor failed for run_id=%s", run_id)
+            failures[run_id] = {"error": str(e), "traceback": traceback.format_exc()}
     if failures:
-        print(f"\n[WARN] {len(failures)} run(s) failed and were dropped from the "
-              f"sweep: {list(failures)}. Prevalence counts are over the "
-              f"{len(reports)} that succeeded.", file=sys.stderr)
-    return reports
+        logger.warning("%d run(s) failed and were dropped from the sweep: %s. "
+                        "Prevalence counts are over the %d that succeeded.",
+                        len(failures), list(failures), len(reports))
+    return reports, failures, skipped
 
 
 # The lints run_doctor always considers (skipped ones emit a "skipped: missing"
@@ -235,10 +249,14 @@ def main(argv=None):
     work = Path(args.work) if args.work else corpus_dir / ".doctor_stage"
     work.mkdir(parents=True, exist_ok=True)
 
-    reports = sweep(corpus_dir, run_ids, work)
+    reports, failures, skipped = sweep(corpus_dir, run_ids, work)
     ranking = aggregate(reports)
     n = len(reports)
 
+    # stdout below is the human-readable ranking table -- the script's actual
+    # product (see the module docstring) -- deliberately print(), not logger:
+    # diagnostics (the warnings sweep() already logged) belong on stderr, this
+    # is the report the operator reads. Do not migrate this block to logging.
     print(f"\nDoctor sweep: {n} distinct CVs\n")
     print(f"{'lint':24s} {'CVs affected':>13s} {'(of which ERROR)':>17s} {'ran on':>8s}")
     for row in ranking:
@@ -247,10 +265,19 @@ def main(argv=None):
 
     if args.out:
         Path(args.out).write_text(json.dumps(
-            {"n_cvs": n, "ranking": ranking, "reports": reports}, indent=2))
+            {"n_cvs": n, "ranking": ranking, "reports": reports,
+             "failures": failures, "skipped": skipped}, indent=2))
         print(f"\n-> {args.out}")
+
+    # A sweep that doctored nothing is a failure, not a pass (§5.5) -- without
+    # this, every run_id failing or being skipped still printed an all-zero
+    # ranking table and exited 0.
+    if not reports:
+        return 1
     return 0
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                        format="%(levelname)s %(name)s: %(message)s")
     sys.exit(main())
