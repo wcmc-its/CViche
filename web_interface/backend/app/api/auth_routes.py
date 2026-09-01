@@ -74,6 +74,36 @@ def get_auth_config(db: Session = Depends(get_db)):
 # ---------------------------------------------------------------------------
 # POST /api/auth/login
 # ---------------------------------------------------------------------------
+def _mint_login_session(user: User, db: Session) -> tuple[str | None, JSONResponse | None]:
+    """The session cookie value for a freshly-authenticated user.
+
+    Minted BEFORE the response is built: when the session store is enabled the
+    cookie's identity lives server-side, so a store that cannot be written is a
+    login that cannot succeed. Issuing the cookie anyway would hand the user a
+    credential no later request can resolve (#657 review, thread 16). Returns
+    (None, 503 response) in that case, so no cookie is set on either failure path.
+    """
+    try:
+        return create_session_cookie(user, db), None
+    except SessionStoreUnavailable:
+        logger.error("Session store unavailable during login for %s", user.email,
+                     exc_info=True)
+        logger.info(
+            LOGIN_FAILED,
+            extra={"email": user.email, "reason": "session_store_unavailable"},
+        )
+        logger.info(SESSION_STORE_UNAVAILABLE, extra={"reason": "start"})
+        return None, JSONResponse(status_code=503, content=SESSION_STORE_UNAVAILABLE_DETAIL)
+    except SessionEpochUnreadable:
+        logger.error("Session epoch unreadable during login for %s", user.email,
+                     exc_info=True)
+        logger.info(
+            LOGIN_FAILED,
+            extra={"email": user.email, "reason": "session_state_unavailable"},
+        )
+        return None, JSONResponse(status_code=503, content=SESSION_STATE_UNAVAILABLE_DETAIL)
+
+
 @router.post("/auth/login")
 def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
     """Authenticate a user by email against the allowed_users list."""
@@ -139,29 +169,9 @@ def login(body: LoginRequest, request: Request, db: Session = Depends(get_db)):
         role=user.role,
     )
 
-    # Mint BEFORE building the response: when the session store is enabled the
-    # cookie's identity lives server-side, so a store that cannot be written is
-    # a login that cannot succeed. Issuing the cookie anyway would hand the user
-    # a credential no later request can resolve (#657 review, thread 16).
-    try:
-        token = create_session_cookie(user, db)
-    except SessionStoreUnavailable:
-        logger.error("Session store unavailable during login for %s", user.email,
-                     exc_info=True)
-        logger.info(
-            LOGIN_FAILED,
-            extra={"email": user.email, "reason": "session_store_unavailable"},
-        )
-        logger.info(SESSION_STORE_UNAVAILABLE, extra={"reason": "start"})
-        return JSONResponse(status_code=503, content=SESSION_STORE_UNAVAILABLE_DETAIL)
-    except SessionEpochUnreadable:
-        logger.error("Session epoch unreadable during login for %s", user.email,
-                     exc_info=True)
-        logger.info(
-            LOGIN_FAILED,
-            extra={"email": user.email, "reason": "session_state_unavailable"},
-        )
-        return JSONResponse(status_code=503, content=SESSION_STATE_UNAVAILABLE_DETAIL)
+    token, failure = _mint_login_session(user, db)
+    if failure is not None:
+        return failure
 
     response = JSONResponse(content=response_data.model_dump())
     response.set_cookie(value=token, **get_cookie_settings())

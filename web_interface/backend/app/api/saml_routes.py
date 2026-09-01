@@ -130,9 +130,15 @@ async def saml_acs(request: Request, db: Session = Depends(get_db)):
     return await run_in_threadpool(_saml_acs_process, dict(form), db)
 
 
-def _saml_acs_process(form: dict, db: Session):
-    """Synchronous body of saml_acs() -- SAML parse, replay/ED checks,
-    provisioning, session creation. See saml_acs's docstring."""
+def _parse_saml_assertion(
+    form: dict, db: Session
+) -> tuple[dict | None, str | None, RedirectResponse | None]:
+    """Validate the POSTed assertion and pull the user attributes out of it.
+
+    Returns (attrs, relay_state, error): exactly one of `attrs` and `error` is
+    None. Every failure arm redirects to the login page rather than raising --
+    a genuinely unexpected exception still propagates (see saml_login).
+    """
     try:
         saml_response = form.get("SAMLResponse", "")
         # CWE-601: the IdP echoes RelayState back verbatim; validate it as a
@@ -146,40 +152,23 @@ def _saml_acs_process(form: dict, db: Session):
 
         if authn_response is None:
             logger.warning("SAML ACS: authn_response is None (invalid assertion)")
-            return RedirectResponse("/login?error=auth_failed", status_code=302)
+            return None, None, RedirectResponse("/login?error=auth_failed", status_code=302)
 
-        # Replay gate: allow_unsolicited=True (required for IdP-initiated SSO)
-        # means pysaml2 never matches InResponseTo, so a captured signed
-        # response would otherwise replay until its NotOnOrAfter lapses. Each
-        # assertion ID is accepted exactly once (see app/saml_replay.py).
-        ids = assertion_ids(authn_response)
-        replay_cache = get_replay_cache()
-        if ids:
-            if not replay_cache.check_and_record(ids, replay_ttl(authn_response)):
-                # Redirect like every other ACS failure: the benign replay case
-                # is a human re-POSTing the ACS form (back button), not an attacker.
-                logger.warning("[SECURITY] SAML assertion replay rejected (ID already presented)")
-                return RedirectResponse("/login?error=auth_failed", status_code=302)
-        elif replay_fail_closed():
-            # Real pysaml2 responses always carry assertion IDs; a missing ID
-            # means replay can't be verified, so reject when configured to fail
-            # closed (prod).
-            logger.warning("[SECURITY] SAML assertion carried no ID; failing closed -- rejecting")
-            return RedirectResponse("/login?error=auth_failed", status_code=302)
-        else:
-            # No ID and failing open: only stubbed parsers land here in practice.
-            logger.warning("SAML ACS: no assertion ID extractable; replay gate skipped (fail open)")
+        replay_error = _reject_replayed_assertion(authn_response)
+        if replay_error is not None:
+            return None, None, replay_error
 
         identity = authn_response.get_identity()
         attrs = extract_user_attrs(identity)
         # email is the unique identity key; normalize once so the ED membership
         # check, its cache, and provisioning all agree on casing (#348).
         attrs["email"] = normalize_email(attrs["email"])
+        return attrs, relay_state, None
 
     except ValueError as e:
         # Missing required attribute (e.g., mail)
         logger.warning("SAML ACS: missing attributes -- %s", str(e))
-        return RedirectResponse("/login?error=missing_attributes", status_code=302)
+        return None, None, RedirectResponse("/login?error=missing_attributes", status_code=302)
     except (SigverError, CertificateError, IncorrectlySigned) as e:
         # SEC-02: signature/validation failures get the [SECURITY] prefix.
         # Narrow exception types, not string-matching str(e) -- pysaml2's
@@ -191,7 +180,7 @@ def _saml_acs_process(form: dict, db: Session):
         # signature-failure type. Together these are pysaml2's full
         # signature/cert-validation exception surface.
         logger.warning("[SECURITY] SAML signature validation failed: %s", str(e))
-        return RedirectResponse("/login?error=auth_failed", status_code=302)
+        return None, None, RedirectResponse("/login?error=auth_failed", status_code=302)
     except (RuntimeError, OSError, SAMLError, SourceNotFound) as e:
         # Same taxonomy as saml_login (get_saml_client() is the shared call
         # that can raise RuntimeError/OSError/SourceNotFound), plus
@@ -206,66 +195,137 @@ def _saml_acs_process(form: dict, db: Session):
         # redirecting -- see saml_login's comment for why (mrj4001 review,
         # PR #656 item 6 / #672).
         logger.error("SAML ACS processing failed: %s", e, exc_info=True)
+        return None, None, RedirectResponse("/login?error=auth_failed", status_code=302)
+
+
+def _reject_replayed_assertion(authn_response) -> RedirectResponse | None:
+    """Replay gate: allow_unsolicited=True (required for IdP-initiated SSO)
+    means pysaml2 never matches InResponseTo, so a captured signed response
+    would otherwise replay until its NotOnOrAfter lapses. Each assertion ID is
+    accepted exactly once (see app/saml_replay.py). Returns a redirect to
+    reject with, or None to continue."""
+    ids = assertion_ids(authn_response)
+    replay_cache = get_replay_cache()
+    if ids:
+        if not replay_cache.check_and_record(ids, replay_ttl(authn_response)):
+            # Redirect like every other ACS failure: the benign replay case
+            # is a human re-POSTing the ACS form (back button), not an attacker.
+            logger.warning("[SECURITY] SAML assertion replay rejected (ID already presented)")
+            return RedirectResponse("/login?error=auth_failed", status_code=302)
+        return None
+    if replay_fail_closed():
+        # Real pysaml2 responses always carry assertion IDs; a missing ID
+        # means replay can't be verified, so reject when configured to fail
+        # closed (prod).
+        logger.warning("[SECURITY] SAML assertion carried no ID; failing closed -- rejecting")
         return RedirectResponse("/login?error=auth_failed", status_code=302)
+    # No ID and failing open: only stubbed parsers land here in practice.
+    logger.warning("SAML ACS: no assertion ID extractable; replay gate skipped (fail open)")
+    return None
 
-    # ED group authorization check (if enabled)
-    ed_enabled = get_config_value(db, "ed_enabled")
-    membership = None
-    if ed_enabled:
-        from app.config_loader import get_config
 
-        ed_access_group = get_config_value(db, "ed_access_group") or ""
-        ed_admin_group = get_config_value(db, "ed_admin_group") or ""
-        ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
-        bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
-        bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
-        if not ldap_url or not bind_dn or not ed_access_group.strip():
-            # An unset access group would otherwise reach LDAP as an empty
-            # search_base; check_ed_membership now rejects it outright, so guard
-            # here and fail closed with the same operator-visible error.
-            logger.error(
-                "ED not configured (need ED_LDAP_URL, ED_LDAP_BIND_DN, ed_access_group)"
-            )
-            return RedirectResponse("/login?error=directory_unavailable", status_code=302)
+def _saml_role_from_ed(attrs: dict, db: Session) -> tuple[str | None, RedirectResponse | None]:
+    """The role ED says this user should have, or (None, None) when ED
+    authorization is disabled -- in which case the caller preserves whatever
+    role the user already has. Second element is a redirect when ED denies the
+    user or cannot answer."""
+    if not get_config_value(db, "ed_enabled"):
+        return None, None
 
-        ldap_cfg = LDAPConfig(
-            ldap_url=ldap_url, bind_dn=bind_dn, bind_password=SecretStr(bind_password)
+    from app.config_loader import get_config
+
+    ed_access_group = get_config_value(db, "ed_access_group") or ""
+    ed_admin_group = get_config_value(db, "ed_admin_group") or ""
+    ldap_url, source = get_config("ldap", "ED_LDAP_URL", default="")
+    bind_dn, source = get_config("ldap", "ED_LDAP_BIND_DN", default="")
+    bind_password = os.environ.get("ED_LDAP_BIND_PASSWORD", "")
+    if not ldap_url or not bind_dn or not ed_access_group.strip():
+        # An unset access group would otherwise reach LDAP as an empty
+        # search_base; check_ed_membership now rejects it outright, so guard
+        # here and fail closed with the same operator-visible error.
+        logger.error(
+            "ED not configured (need ED_LDAP_URL, ED_LDAP_BIND_DN, ed_access_group)"
         )
-        try:
-            # use_cache=False: the login path is the stronger gate, so it reads
-            # NEITHER cache -- not the 5-minute live one, not the 30-minute
-            # stale one -- and always queries ED. A user removed from ED three
-            # minutes ago must not be able to START a new session off a warm
-            # live entry, nor off a last-known-good answer during an outage.
-            # (The per-request re-check in auth.py keeps use_cache=True.)
-            # check_ed_membership still WRITES both caches on success, so there
-            # is no set_cached_membership here and the login keeps warming the
-            # cache the per-request checks read.
-            membership = check_ed_membership(
-                cwid=attrs["cwid"],
-                access_group=ed_access_group,
-                admin_group=ed_admin_group,
-                cfg=ldap_cfg,
-                use_cache=False,
-            )
-            if not membership.in_access_group:
-                logger.warning("SAML ACS: user %s not in ED access group", attrs["cwid"])
-                logger.info(
-                    LOGIN_FAILED,
-                    extra={"cwid": attrs["cwid"], "reason": "not_authorized"},
-                )
-                return RedirectResponse("/login?error=not_authorized", status_code=302)
-        except EdUnavailableError:
-            logger.error("ED unavailable during SAML login for %s", attrs["cwid"], exc_info=True)
-            return RedirectResponse("/login?error=directory_unavailable", status_code=302)
+        return None, RedirectResponse("/login?error=directory_unavailable", status_code=302)
 
-    # Determine role based on ED groups (if enabled) or preserve existing
-    if ed_enabled and membership is not None:
-        user_role = "admin" if membership.in_admin_group else "user"
-    else:
-        user_role = None  # Don't override existing role when ED not enabled
+    ldap_cfg = LDAPConfig(
+        ldap_url=ldap_url, bind_dn=bind_dn, bind_password=SecretStr(bind_password)
+    )
+    try:
+        # use_cache=False: the login path is the stronger gate, so it reads
+        # NEITHER cache -- not the 5-minute live one, not the 30-minute
+        # stale one -- and always queries ED. A user removed from ED three
+        # minutes ago must not be able to START a new session off a warm
+        # live entry, nor off a last-known-good answer during an outage.
+        # (The per-request re-check in auth.py keeps use_cache=True.)
+        # check_ed_membership still WRITES both caches on success, so there
+        # is no set_cached_membership here and the login keeps warming the
+        # cache the per-request checks read.
+        membership = check_ed_membership(
+            cwid=attrs["cwid"],
+            access_group=ed_access_group,
+            admin_group=ed_admin_group,
+            cfg=ldap_cfg,
+            use_cache=False,
+        )
+    except EdUnavailableError:
+        logger.error("ED unavailable during SAML login for %s", attrs["cwid"], exc_info=True)
+        return None, RedirectResponse("/login?error=directory_unavailable", status_code=302)
 
-    # JIT User Provisioning (upsert) -- anchored on cwid, email optional
+    if not membership.in_access_group:
+        logger.warning("SAML ACS: user %s not in ED access group", attrs["cwid"])
+        logger.info(
+            LOGIN_FAILED,
+            extra={"cwid": attrs["cwid"], "reason": "not_authorized"},
+        )
+        return None, RedirectResponse("/login?error=not_authorized", status_code=302)
+
+    return ("admin" if membership.in_admin_group else "user"), None
+
+
+def _mint_saml_session(user, db: Session, cwid: str) -> tuple[str | None, RedirectResponse | None]:
+    """The session cookie value for a freshly-authenticated SAML user.
+
+    A session store that cannot be written (or an unreadable epoch) is a login
+    that cannot succeed: issuing the cookie anyway hands the user a credential
+    no later request can resolve (#657 review, thread 16). Returns
+    (None, redirect) in that case, so no cookie is set on either failure path.
+    """
+    try:
+        return create_session_cookie(user, db), None
+    except SessionStoreUnavailable:
+        logger.error("Session store unavailable during SAML login for %s", cwid,
+                     exc_info=True)
+        logger.info(
+            LOGIN_FAILED,
+            extra={"cwid": cwid, "reason": "session_store_unavailable"},
+        )
+        logger.info(SESSION_STORE_UNAVAILABLE, extra={"reason": "start"})
+        return None, RedirectResponse(_STORE_UNAVAILABLE_REDIRECT, status_code=302)
+    except SessionEpochUnreadable:
+        logger.error("Session epoch unreadable during SAML login for %s", cwid,
+                     exc_info=True)
+        logger.info(
+            LOGIN_FAILED,
+            extra={"cwid": cwid, "reason": "session_state_unavailable"},
+        )
+        return None, RedirectResponse(_STATE_UNAVAILABLE_REDIRECT, status_code=302)
+
+
+def _saml_acs_process(form: dict, db: Session):
+    """Synchronous body of saml_acs() -- SAML parse, replay/ED checks,
+    provisioning, session creation. See saml_acs's docstring."""
+    attrs, relay_state, error = _parse_saml_assertion(form, db)
+    if error is not None:
+        return error
+
+    user_role, error = _saml_role_from_ed(attrs, db)
+    if error is not None:
+        return error
+
+    # JIT User Provisioning (upsert) -- anchored on cwid, email optional.
+    # user_role is None when ED authorization is off: don't override the
+    # existing role in that case.
     user = provision_user(
         db=db,
         cwid=attrs["cwid"],
@@ -275,29 +335,9 @@ def _saml_acs_process(form: dict, db: Session):
         role=user_role,
     )
 
-    # Mint before building the response: a session store that cannot be written
-    # (or an unreadable epoch) is a login that cannot succeed, and issuing the
-    # cookie anyway hands the user a credential no later request can resolve
-    # (#657 review, thread 16). No cookie is set on either failure path.
-    try:
-        token = create_session_cookie(user, db)
-    except SessionStoreUnavailable:
-        logger.error("Session store unavailable during SAML login for %s",
-                     attrs["cwid"], exc_info=True)
-        logger.info(
-            LOGIN_FAILED,
-            extra={"cwid": attrs["cwid"], "reason": "session_store_unavailable"},
-        )
-        logger.info(SESSION_STORE_UNAVAILABLE, extra={"reason": "start"})
-        return RedirectResponse(_STORE_UNAVAILABLE_REDIRECT, status_code=302)
-    except SessionEpochUnreadable:
-        logger.error("Session epoch unreadable during SAML login for %s",
-                     attrs["cwid"], exc_info=True)
-        logger.info(
-            LOGIN_FAILED,
-            extra={"cwid": attrs["cwid"], "reason": "session_state_unavailable"},
-        )
-        return RedirectResponse(_STATE_UNAVAILABLE_REDIRECT, status_code=302)
+    token, error = _mint_saml_session(user, db, attrs["cwid"])
+    if error is not None:
+        return error
 
     # relay_state is already a validated, non-empty same-site path.
     response = RedirectResponse(relay_state, status_code=302)
