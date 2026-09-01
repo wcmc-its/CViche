@@ -23,10 +23,12 @@ if str(_SRC) not in sys.path:
 import pytest  # noqa: E402
 
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    _dates_overlap_or_match,
     _parse_date_components,
     extract_sort_date,
     format_date_for_section,
 )
+from unified_pipeline.stage6.parsing.dates import CURRENT_DATE_VALUES  # noqa: E402
 
 
 def _sort(date_str):
@@ -103,3 +105,98 @@ def test_both_functions_use_the_shared_parser():
 ])
 def test_format_date_for_section_outputs(date_str, code, expected):
     assert format_date_for_section(date_str, code) == expected
+
+
+# --- _dates_overlap_or_match: parsed tuples, not string slices (#553) -------
+
+def _entry(start, end):
+    return {"extracted_fields": {"start_date": start, "end_date": end}}
+
+
+class TestDatesOverlapOrMatch:
+    def test_unpadded_months_that_overlap(self):
+        # A=2021-2..2021-11, B=2021-10..2021-12: they overlap in Oct-Nov, so
+        # this must be True. The old `[:7]` string slice returned False:
+        # "2021-2-01"[:7] is "2021-2-", which string-compares LESS than
+        # "2021-12" because the 5th character '2' < '1' — an artifact of the
+        # unpadded month, not the true year/month relationship.
+        a = _entry("2021-2-01", "2021-11-01")
+        b = _entry("2021-10-01", "2021-12-01")
+        assert _dates_overlap_or_match(a, b) is True
+
+    def test_unpadded_months_zero_padded_control_agrees(self):
+        # Same pair as above, zero-padded — the control that isolates the
+        # padding as the sole cause of the old defect. Padded already worked;
+        # this pins that the fix doesn't regress the padded case.
+        a = _entry("2021-02-01", "2021-11-01")
+        b = _entry("2021-10-01", "2021-12-01")
+        assert _dates_overlap_or_match(a, b) is True
+
+    def test_unpadded_disjoint_months_not_reported_as_overlapping(self):
+        # A=2021-1..2021-2, B=2021-10..2021-11: genuinely disjoint. The old
+        # code read this as an overlap (True) — the harmful direction, since
+        # it feeds a dedup decision that can drop a real, distinct entry.
+        a = _entry("2021-1-01", "2021-2-01")
+        b = _entry("2021-10-01", "2021-12-01")
+        assert _dates_overlap_or_match(a, b) is False
+
+    @pytest.mark.parametrize("keyword", sorted(CURRENT_DATE_VALUES))
+    def test_current_keyword_end_date_is_open_ended(self, keyword):
+        # Every keyword in the shared vocabulary — not just 'present' — must
+        # make the range open-ended. Before the fix, 'ongoing'/'current'/'now'
+        # reached the string comparison as literals and only came out right
+        # because every letter outranks every digit in ASCII.
+        current = _entry("2020-01-01", keyword)
+        later = _entry("2021-01-01", "2021-06-01")
+        assert _dates_overlap_or_match(current, later) is True
+
+    def test_current_keyword_is_case_insensitive(self):
+        assert _dates_overlap_or_match(
+            _entry("2020-01-01", "Present"),
+            _entry("2021-01-01", "2021-06-01"),
+        ) is True
+
+    def test_exact_match_still_true(self):
+        # Regression guard: the exact-match short circuit above the tuple
+        # comparison is untouched by this fix.
+        a = _entry("2019-06-01", "2020-01-01")
+        b = _entry("2019-06-01", "2020-01-01")
+        assert _dates_overlap_or_match(a, b) is True
+
+    def test_missing_start_date_conservatively_true(self):
+        # Regression guard: an entry with no start date at all still can't be
+        # proven distinct, so this stays True ahead of any tuple parsing.
+        assert _dates_overlap_or_match(_entry("", ""), _entry("2020-01-01", "present")) is True
+
+    def test_unparseable_end_date_falls_back_open_ended(self):
+        # An end_date that isn't a recognized keyword and doesn't parse (e.g.
+        # a stray label) can't be proven to close the range, so it is treated
+        # as open-ended rather than silently sorting as the smallest tuple.
+        assert _dates_overlap_or_match(
+            _entry("2020-01-01", "TBD"),
+            _entry("2021-01-01", "2021-06-01"),
+        ) is True
+
+    def test_year_only_range_spans_its_whole_year(self):
+        # A start with no month defaults to January, an end with no month
+        # defaults to December, so "2020"..."2020" and "2021-01"..."2021-01"
+        # are correctly read as non-overlapping (2020 ends in December,
+        # 2021-01 starts in January of the next year).
+        assert _dates_overlap_or_match(_entry("2020", "2020"), _entry("2021-01-01", "2021-01-01")) is False
+        # But "2020" does overlap a range that touches December 2020.
+        assert _dates_overlap_or_match(_entry("2020", "2020"), _entry("2020-12-01", "2021-01-01")) is True
+
+
+# --- shared CURRENT_DATE_VALUES constant, one vocabulary across 3 modules ---
+
+def test_current_date_values_shared_across_date_modules():
+    # #553's second defect: formatting/dates.py and sorting/chronological.py
+    # used to respell ('present', 'current', 'ongoing', 'now') locally, and
+    # parsing/dates.py recognized only 'present'. All three now read the same
+    # frozenset from parsing/dates.py — this pins both the membership and
+    # that format/sort observably agree with it, so a future edit to the
+    # constant can't silently diverge from what those two call sites do.
+    assert CURRENT_DATE_VALUES == frozenset({"present", "current", "ongoing", "now"})
+    for keyword in CURRENT_DATE_VALUES:
+        assert format_date_for_section(keyword, "M2A") == "Present"
+        assert extract_sort_date({"extracted_fields": {"end_date": keyword}}) == (9999, 12, 31)
