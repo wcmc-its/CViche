@@ -16,7 +16,7 @@ nothing in this file may import from either.
 """
 from types import MappingProxyType
 import re
-from typing import Dict
+from typing import Dict, Optional
 
 # Month name -> month number, for the date parser below. Includes the common
 # 3-4 letter abbreviations CVs use ("Aug", "Sept"). Distinct from _MONTH_NAMES
@@ -89,7 +89,7 @@ def _get_entry_date_range(entry: Dict) -> tuple:
 _OPEN_ENDED = (9999, 12)  # sentinel for a range with no stated (or 'present') end
 
 
-def _month_tuple_for_overlap(date_str: str, *, is_end: bool) -> tuple:
+def _month_tuple_for_overlap(date_str: str, *, is_end: bool) -> Optional[tuple]:
     """(year, month) for the overlap test in `_dates_overlap_or_match`.
 
     Uses the shared `_parse_date_components` rather than a string slice, so an
@@ -97,10 +97,23 @@ def _month_tuple_for_overlap(date_str: str, *, is_end: bool) -> tuple:
     against "2008-12" as a string (#553). A blank or current-keyword end date
     is open-ended; a start/end that fails to parse falls back open-ended too,
     matching this function's existing bias toward reporting a possible
-    duplicate rather than a false negative when it can't prove otherwise. An
-    absent month within an otherwise-parsed date (year-only, e.g. "2008")
-    defaults to December for an end date and January for a start date, so a
-    year-only range still spans its whole year for the overlap test.
+    duplicate rather than a false negative when it can't prove otherwise.
+    Returns None only for a start/blank-keyword date, since that reaches
+    `_dates_overlap_or_match`'s own unparseable-start guard instead.
+
+    An absent month within an otherwise-parsed date (year-only, e.g. "2008")
+    defaults to January for BOTH ends: `comparison_key = (year, month or 1)`,
+    exactly the form #553's own tracked review comment asked for (PR #514
+    discussion_r3721948927), not an end-defaults-to-December range. An
+    earlier version of this fix defaulted a year-only *end* date to December
+    instead, spanning it across its whole year -- that read every one of the
+    11 live cases it changed as an overlap, and all 11 were real career
+    progressions (e.g. an "Assistant Professor" role ending "2014" and a
+    "Tenured Associate Professor" role starting "2014-03"), the exact harmful
+    direction (real content flagged a possible duplicate) the issue's own
+    repro calls out. January-for-both keeps a year-only range from reaching
+    past the January it's anchored to, so it no longer collides with a
+    dated entry that starts later the same year.
     """
     s = (date_str or '').strip()
     if not s or s.lower() in CURRENT_DATE_VALUES:
@@ -108,7 +121,7 @@ def _month_tuple_for_overlap(date_str: str, *, is_end: bool) -> tuple:
     year, month, _day = _parse_date_components(s)
     if year is None:
         return _OPEN_ENDED if is_end else None
-    return (year, month if month is not None else (12 if is_end else 1))
+    return (year, month if month is not None else 1)
 
 
 def _dates_overlap_or_match(entry_a: Dict, entry_b: Dict) -> bool:

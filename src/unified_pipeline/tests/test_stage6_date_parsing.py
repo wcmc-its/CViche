@@ -177,14 +177,29 @@ class TestDatesOverlapOrMatch:
             _entry("2021-01-01", "2021-06-01"),
         ) is True
 
-    def test_year_only_range_spans_its_whole_year(self):
-        # A start with no month defaults to January, an end with no month
-        # defaults to December, so "2020"..."2020" and "2021-01"..."2021-01"
-        # are correctly read as non-overlapping (2020 ends in December,
-        # 2021-01 starts in January of the next year).
+    def test_year_only_date_defaults_to_january_on_both_ends(self):
+        # comparison_key = (year, month or 1) -- the form #553's own tracked
+        # review comment (PR #514 discussion_r3721948927) asked for -- applies
+        # the same January default whether the year-only value is a start or
+        # an end. "2020"..."2020" and "2021-01"..."2021-01" stay disjoint...
         assert _dates_overlap_or_match(_entry("2020", "2020"), _entry("2021-01-01", "2021-01-01")) is False
-        # But "2020" does overlap a range that touches December 2020.
-        assert _dates_overlap_or_match(_entry("2020", "2020"), _entry("2020-12-01", "2021-01-01")) is True
+        # ...and a year-only "2020" end no longer reaches into December: a
+        # range that only touches December 2020 is not read as overlapping
+        # it. (An earlier version of this fix defaulted a year-only end to
+        # December instead, so this pair read True -- the harmful direction,
+        # since it fed a real dedup decision.)
+        assert _dates_overlap_or_match(_entry("2020", "2020"), _entry("2020-12-01", "2021-01-01")) is False
+
+    def test_year_only_end_vs_later_dated_start_not_reported_as_overlap(self):
+        # Regression pin for the live corpus case this round's fix corrects:
+        # an "Assistant Professor" role with a year-only end ("2014") and a
+        # "Tenured Associate Professor" role starting a month into the same
+        # year ("2014-03") are a career progression, not a duplicate. With
+        # the year-only end defaulting to December this read as an overlap
+        # (2014-03 <= 2014-12); with the (year, month or 1) fix it does not.
+        earlier = _entry("2005-05-01", "2014")
+        later = _entry("2014-03-01", "2018-01-31")
+        assert _dates_overlap_or_match(earlier, later) is False
 
 
 # --- shared CURRENT_DATE_VALUES constant, one vocabulary across 3 modules ---
