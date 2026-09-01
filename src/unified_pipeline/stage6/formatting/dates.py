@@ -19,7 +19,7 @@ direction is one-way and must stay so.
 from types import MappingProxyType
 import re
 
-from ..parsing.dates import CURRENT_DATE_VALUES, _parse_date_components
+from ..parsing.dates import _parse_date_components
 
 # Date format specifications per WCM template section
 # Format codes: 'mm/yyyy', 'mm/yy', 'yyyy', 'mm/dd/yyyy'
@@ -89,7 +89,7 @@ def format_date_for_section(date_str: str, taxonomy_code: str, is_end_date: bool
     date_str = str(date_str).strip()
 
     # Handle 'present', 'current', 'ongoing' - always return as 'Present'
-    if date_str.lower() in CURRENT_DATE_VALUES:
+    if date_str.lower() in ('present', 'current', 'ongoing', 'now'):
         return 'Present'
 
     # Get required format for this taxonomy code

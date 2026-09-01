@@ -11,7 +11,7 @@ a section that raises mid-render loses the whole document.
 from collections.abc import Mapping
 from typing import Dict, List
 
-from ..parsing.dates import CURRENT_DATE_VALUES, _parse_date_components
+from ..parsing.dates import _parse_date_components
 
 def extract_sort_date(entry: Dict) -> tuple:
     """
@@ -65,7 +65,7 @@ def extract_sort_date(entry: Dict) -> tuple:
         date_str = str(date_str).strip().lower()
 
         # 'Present' or 'current' sorts first (most recent)
-        if date_str in CURRENT_DATE_VALUES:
+        if date_str in ('present', 'current', 'ongoing', 'now'):
             return (9999, 12, 31)
 
         # Shared parser (see format_date_for_section). Month/day absent from the
