@@ -311,11 +311,11 @@ class TestSingleColumnFallback:
             grid.remove(grid_col)
         gen.doc = doc
 
-        # Must not raise (the old code's implicit assumption that
-        # row.cells[0] exists would IndexError here); stats still tick.
+        # Must not raise, and must not overcount: no cell exists to write
+        # into, so `entries_inserted` must not tick either (#664 item 6).
         gen._add_leadership_row(table, "Chair", "WCM", "2018-2022")
         assert len(table.rows[-1].cells) == 0
-        assert gen.stats["entries_inserted"] == 1
+        assert gen.stats["entries_inserted"] == 0
 
 
 if __name__ == "__main__":

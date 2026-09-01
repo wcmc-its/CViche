@@ -175,7 +175,10 @@ class LeadershipSection:
             # cell rather than silently writing nothing.
             combined = ", ".join(part for part in (role, institution) if part)
             row.cells[0].text = f"{combined} - {dates}" if dates else combined
-        # num_cols == 0: no cell exists to write into; nothing to do.
+        else:
+            # num_cols == 0: no cell exists to write into; nothing to do,
+            # and nothing was inserted -- don't count it (#664 item 6).
+            return
 
         for cell in row.cells:
             for para in cell.paragraphs:

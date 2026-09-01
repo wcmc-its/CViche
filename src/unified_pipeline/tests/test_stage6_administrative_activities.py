@@ -205,6 +205,35 @@ class TestParentheticalFallbackAlreadyFixed:
         assert rows == [("Committee A", "Chair", format_date_range("2011", "2013", "P"))]
 
 
+class TestThreeLineBurstFallsBackWhenReparseYieldsNothing:
+    """The `if parsed_rows: rows.extend(...) else: <single-row fallback>`
+    restructuring (administrative_activities.py:327-332) also changed the
+    3+-line `multiline_burst` path for the case where the shared reparse
+    (`_multiline_committee_rows` -> `_parse_flattened_committee_lines`)
+    finds nothing usable -- e.g. a block of bare orphaned dates with no
+    activity text on any line. Before this PR that case fell straight
+    through to `rows.extend(self._multiline_committee_rows(lines))` with no
+    fallback, so an empty reparse silently dropped the entry
+    (`_parse_administrative_activity_rows` returned `[]`). Now every route
+    into `_multiline_committee_rows` -- including this one -- shares the
+    same fallback, so an empty reparse folds the raw text into one row
+    instead of vanishing. Benign direction (recovers text that would
+    otherwise be dropped) and zero corpus incidence, but undisclosed and
+    previously untested -- pinned here.
+    """
+
+    def test_date_only_three_line_block_falls_back_to_one_row_instead_of_vanishing(self):
+        entry = {
+            "text": "2010\n2011\n2012",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+
+        rows = _rows(entry)
+
+        assert rows == [("2010\n2011\n2012", "", "")]
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
