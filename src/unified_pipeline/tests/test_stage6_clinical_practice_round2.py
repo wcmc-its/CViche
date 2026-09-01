@@ -294,7 +294,7 @@ class TestNormalizationBoundary:
 class TestAddTableRowCentralization:
     """Thread 3850753654, item 4: one shared row/font-write helper.
 
-    `_add_table_row` replaces the row-creation/text-write/font-apply
+    `_add_clinical_table_row` replaces the row-creation/text-write/font-apply
     sequence that used to be written out three times. These pin that its
     narrower-table fallback branches (previously duplicated per-renderer)
     still behave the same after being centralized.

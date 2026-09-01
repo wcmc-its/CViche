@@ -102,7 +102,7 @@ def _clinical_header_match(first_row_cells) -> Optional[bool]:
 class ClinicalPracticeSection:
     """Section L writers, mixed into `WCMTemplateGenerator`."""
 
-    def _add_table_row(self, table, three_col: List[str], two_col: List[str], one_col: List[str]):
+    def _add_clinical_table_row(self, table, three_col: List[str], two_col: List[str], one_col: List[str]):
         """Add a row to `table`, populate it according to its actual column
         count, and apply the standard cell font to every run.
 
@@ -241,7 +241,7 @@ class ClinicalPracticeSection:
 
                     if activity or location:
                         # Typical clinical practice table: Activity/Type | Location | Dates
-                        self._add_table_row(
+                        self._add_clinical_table_row(
                             table,
                             three_col=[activity, location, dates],
                             two_col=[activity if activity else location, dates],
@@ -328,7 +328,7 @@ class ClinicalPracticeSection:
 
                     if title:
                         # Typical innovation table: Date | Title/Location | Role/Description
-                        self._add_table_row(
+                        self._add_clinical_table_row(
                             table,
                             three_col=[dates, title, f"{role}. {description}".strip('. ') if role or description else ''],
                             two_col=[dates, title],
@@ -410,7 +410,7 @@ class ClinicalPracticeSection:
 
                     if role:
                         # Typical leadership table: Year(s) | Role | Description
-                        self._add_table_row(
+                        self._add_clinical_table_row(
                             table,
                             three_col=[dates, role, f"{institution}. {description}".strip('. ') if institution or description else ''],
                             two_col=[dates, f"{role} - {institution}" if institution else role],
