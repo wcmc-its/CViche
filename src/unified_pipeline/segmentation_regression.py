@@ -390,6 +390,12 @@ class SegmentationRegressionError(Exception):
     isolation, per the issue)."""
 
 
+class SnapshotLabelError(SegmentationRegressionError, ValueError):
+    """A snapshot label that fails validation (#616 item iv). Also a ValueError
+    for callers that treat it as a bad argument, while main() translates it to a
+    clean exit like every other SegmentationRegressionError."""
+
+
 # Snapshot labels build a directory path directly (_snapshot_dir below); a
 # label containing '../' segments could otherwise walk outside gold_set/
 # (#616 item iv). CLI-only tool, so the risk is low, but the check is cheap.
@@ -402,7 +408,7 @@ def _outputs_root() -> Path:
 
 def _snapshot_dir(label: str) -> Path:
     if not _SNAPSHOT_LABEL_RE.fullmatch(label):
-        raise ValueError(
+        raise SnapshotLabelError(
             f"invalid snapshot label {label!r}: must match {_SNAPSHOT_LABEL_RE.pattern}"
         )
     return _outputs_root() / "gold_set" / f"segsnap_{label}"

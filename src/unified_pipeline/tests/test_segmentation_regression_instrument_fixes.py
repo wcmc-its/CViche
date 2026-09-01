@@ -175,7 +175,8 @@ def test_compute_metrics_missing_hierarchy_key_falls_back_to_none():
 
 def test_compute_metrics_empty_list_hierarchy_falls_back_to_none():
     """An entry with hierarchy=[] (empty list, not missing/falsy string)
-    must also fall back to "(none)" rather than raising IndexError."""
+    must also fall back to "(none)". Dev already handled this case via the
+    `or ["(none)"]` fallback; this pins it against the new isinstance guard."""
     entries = [{"element_type": "paragraph", "text": "some content", "hierarchy": []}]
     m = compute_metrics(["some content"], {"hierarchy": []}, _stage2(entries))
 
