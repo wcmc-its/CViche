@@ -102,10 +102,20 @@ class Metrics(TypedDict):
     empty_content: int
     duplicate_entries: int
     mega_entries: int
+    # max_entry_chars and per_h1_content_counts (below) are informational
+    # only: written to metrics.json for manual inspection, but neither
+    # compare_metrics() nor lint_metrics() reads them (#617). entries_total
+    # and entries_content are the same shape -- LLM segmentation can
+    # legitimately merge or split entries between runs without losing
+    # content, so an entry-count delta alone isn't a regression signal, and
+    # wiring either into comparison would need a threshold this harness does
+    # not have evidence to set. Comparison stays scoped to the loss/noise
+    # signals below it: coverage, lost lines, headers, and the three
+    # _COUNT_KEYS.
     max_entry_chars: int
     headers_detected: int
     header_titles: list[str]
-    per_h1_content_counts: dict[str, int]
+    per_h1_content_counts: dict[str, int]  # informational only -- see above
 
 
 Verdict = Literal["REGRESSION", "IMPROVED", "OK"]
@@ -268,6 +278,8 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
     header_titles: list[str] = []
     _walk_headers(stage1a.get("hierarchy"), header_titles)
 
+    # per_h1_content_counts (#617): informational only, see the Metrics
+    # TypedDict's comment -- not read by compare_metrics()/lint_metrics().
     per_h1: dict[str, int] = {}
     for e in content:
         # hierarchy is typed as list[str] (Entry) but arrives untyped off
@@ -303,7 +315,13 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
 
 def compare_metrics(baseline: Metrics, candidate: Metrics) -> tuple[Verdict, list[str]]:
     """Pure: verdict for one CV. Returns (verdict, reasons); verdict is
-    REGRESSION / IMPROVED / OK."""
+    REGRESSION / IMPROVED / OK.
+
+    Deliberately does NOT compare max_entry_chars, per_h1_content_counts,
+    entries_total, or entries_content -- they're informational-only (#617,
+    see the Metrics TypedDict). Comparison stays on the loss/noise signals:
+    coverage, lost lines, header titles, and _COUNT_KEYS.
+    """
     reasons: list[str] = []
     b_counts, c_counts = _counts(baseline), _counts(candidate)
 
