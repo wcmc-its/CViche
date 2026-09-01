@@ -23,7 +23,7 @@ Contract exercised here, after the review response:
 import json
 import logging
 import time
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import redis.exceptions
@@ -577,3 +577,94 @@ def test_logout_emits_session_revoked_with_the_resolved_user_id(
     assert len(events) == 1
     assert events[0].user_id == user.id
     assert events[0].reason == "user_logout"
+
+
+# ---------------------------------------------------------------------------
+# The SAML arms of the same two store-outage cases (threads 16, 18)
+#
+# saml_routes is a second, independent login/logout path -- it mints and clears
+# the same cookie through its own code, so the simple-auth tests above prove
+# nothing about it. Same contract on both: a login that could not register the
+# session server-side must not hand out a cookie, and a logout that could not
+# revoke server-side must say so while still clearing the device.
+# ---------------------------------------------------------------------------
+
+_SAML_IDENTITY = {
+    "urn:oid:0.9.2342.19200300.100.1.3": ["samluser@med.cornell.edu"],
+    "urn:oid:2.16.840.1.113730.3.1.241": ["SAML User"],
+    "urn:oid:1.3.6.1.4.1.5923.1.1.1.6": ["samluser@cornell.edu"],
+}
+
+
+def _mock_saml_client(identity_dict):
+    """A pysaml2 client stub that "validates" any assertion into identity_dict
+    (the same shape tests/test_auth_audit_events.py uses)."""
+    mock_client = MagicMock()
+    mock_response = MagicMock()
+    mock_response.get_identity.return_value = identity_dict
+    mock_client.parse_authn_request_response.return_value = mock_response
+    return mock_client
+
+
+@patch("app.api.saml_routes.get_saml_client")
+def test_saml_acs_refuses_to_mint_when_the_store_is_unreachable(
+    mock_get_client, client, db, seed_saml_mode, broken_store, caplog
+):
+    """A valid assertion plus an unwritable store is a login that cannot
+    succeed: issuing the cookie anyway hands the user a credential no later
+    request can resolve. The browser goes back to the login page with a
+    truthful error code, and no Set-Cookie is sent."""
+    mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+    _set_epoch(db, 0)
+    broken_store._client.set.side_effect = redis.exceptions.ConnectionError("valkey down")
+
+    with caplog.at_level(logging.INFO, logger="app.api.saml_routes"):
+        resp = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data", "RelayState": "/"},
+            follow_redirects=False,
+        )
+
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/login?error=session_store_unavailable"
+    assert "set-cookie" not in {k.lower() for k in resp.headers}
+
+    failures = _events_named(caplog, "LOGIN_FAILED")
+    assert len(failures) == 1
+    assert failures[0].reason == "session_store_unavailable"
+    # No LOGIN_SUCCESS may fire alongside it -- the login did not happen.
+    assert not _events_named(caplog, "LOGIN_SUCCESS")
+
+    outages = _events_named(caplog, "SESSION_STORE_UNAVAILABLE")
+    assert len(outages) == 1
+    assert outages[0].reason == "start"
+
+
+def test_saml_logout_reports_a_failed_revocation(
+    client, db, seed_saml_mode, broken_store, caplog
+):
+    """Mirrors the simple-auth logout arm: the device is signed out either way,
+    but a revocation that did not happen is reported (via the login page's
+    error code) instead of being swallowed -- the session stays replayable
+    until its absolute TTL otherwise."""
+    from app.auth import _serializer, COOKIE_NAME
+    user = _make_user(db, email="samluser@med.cornell.edu")
+    broken_store._client.get.return_value = json.dumps(
+        {"user_id": user.id, "epoch": 0, "issued_at": int(time.time())}
+    )
+    broken_store._client.delete.side_effect = redis.exceptions.ConnectionError("valkey down")
+
+    client.cookies.set(COOKIE_NAME, _serializer.dumps({"v": 2, "sid": "live-sid"}))
+    with caplog.at_level(logging.INFO, logger="app.api.saml_routes"):
+        resp = client.post("/api/saml/logout", follow_redirects=False)
+
+    assert resp.status_code == 302
+    assert resp.headers["location"] == "/login?error=session_revocation_failed"
+    # The device is still signed out: the delete-cookie header is present.
+    assert 'cviche_session=""' in resp.headers["set-cookie"]
+
+    # SESSION_REVOKED must NOT fire -- nothing was revoked.
+    assert not _events_named(caplog, "SESSION_REVOKED")
+    outages = _events_named(caplog, "SESSION_STORE_UNAVAILABLE")
+    assert len(outages) == 1
+    assert outages[0].reason == "end"
