@@ -89,7 +89,7 @@ def test_quiet_on_genuinely_different_bodies():
 
 
 def test_fires_at_exactly_the_window_distance():
-    """Boundary control for the `<=` in the window prune (render.py:625-626).
+    """Boundary control for the `<=` in the window prune (render.py:629-630).
     The corpus's own headline firing (2068_Yount_Cv, list numbers 32 and 38)
     sits at distance exactly DUPLICATE_RECORD_WINDOW, so an off-by-one to `<`
     would silently stop detecting it. `test_quiet_when_the_repeat_is_beyond_
@@ -239,7 +239,7 @@ def test_quiet_on_duplicated_non_enumerated_paragraph():
 
 
 def test_quiet_on_duplicated_enumerated_table_blocks():
-    """Negative control for the `kind != "p"` restriction (render.py:622).
+    """Negative control for the `kind != "p"` restriction (render.py:623).
     `read_docx_blocks` emits ("table", <joined cell lines>) blocks whose first
     line can itself open with a list enumerator; a grant or teaching table
     legitimately repeated in two rendered rows is not a duplicated citation,
