@@ -49,6 +49,11 @@ Lints, ranked by the severity of the failure class they catch:
                           appear twice in the output document — one record
                           reaching the faculty-facing docx more than once
                           (#439: C0ZGFW rendered whole teaching records twice)
+14a. duplicate_records     a single enumerated paragraph block whose
+                          normalized body repeats at a different list
+                          position within the same output section — the
+                          ONE-block shape duplicate_passages cannot see by
+                          construction (#446)
 
 Lints 14-15 are the quality-score HARD-FAIL gates and sit outside that
 ranking: they are the only ERROR-by-construction lints, because each one on
