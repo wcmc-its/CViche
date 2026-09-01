@@ -58,6 +58,22 @@ _FUNDING_SECTIONS = (
 )
 
 
+# Segment boundaries that are not themselves funding headers but still close
+# a funding section. `_output_section_header` only recognises a lettered
+# "X. " prefix or an ALL-CAPS paragraph; the M2D heading `_fill_patents`
+# writes into the template (stage_6_word_template.py's generate() calls
+# `_fill_patents` immediately after `_fill_research_support`, so M2D always
+# sits directly after M2A/B/C in render order) is Title-Case ("Patents &
+# Inventions") and matches neither, so it used to fall through and keep
+# accumulating into whichever funding bucket was still open -- the M2C
+# haystack absorbed the entire patents section on every corpus CV that had
+# one (#492). Normalised exactly like `_FUNDING_SECTIONS` titles are
+# compared (`_norm`, trailing colon stripped).
+_FUNDING_BOUNDARY_TITLES = frozenset({
+    "patents & inventions",
+})
+
+
 def _entry_status(entry: Dict) -> Optional[str]:
     status = (entry.get("extracted_fields") or {}).get("status")
     if status:
@@ -79,7 +95,7 @@ def _funding_haystacks(blocks: List[Tuple[str, str]]) -> Dict[str, Haystack]:
             if code:
                 current = code
                 continue
-            if _output_section_header(stripped):
+            if normed in _FUNDING_BOUNDARY_TITLES or _output_section_header(stripped):
                 current = None
                 continue
         if current:
