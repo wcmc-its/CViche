@@ -255,6 +255,27 @@ def test_quiet_on_duplicated_enumerated_table_blocks():
     assert lint_duplicate_records(blocks) == []
 
 
+def test_table_block_that_looks_like_a_header_does_not_reset_the_window():
+    """Pin for the `if kind == "p" else None` gate on the section-header check
+    (render.py:617), mirroring the sibling at render.py:186. A short all-caps
+    table block between two copies of the same citation must NOT read as a
+    section header and reset the match window. Without the gate this fixture
+    yields 0 findings; with it, 1 -- the discriminating case from the
+    scoped re-verification of the gate. A real paragraph header (control)
+    still resets, and the same two blocks with nothing between them still
+    fire."""
+    blocks = [
+        ("p", "D. PUBLICATIONS"),
+        ("p", f"1. {_CITATION_A}"),
+        ("table", "B. FAKE"),
+        ("p", f"2. {_CITATION_A}"),
+    ]
+    assert len(lint_duplicate_records(blocks)) == 1
+    real_header = [blocks[0], blocks[1], ("p", "E. REAL"), blocks[3]]
+    assert lint_duplicate_records(real_header) == []
+    assert len(lint_duplicate_records([blocks[0], blocks[1], blocks[3]])) == 1
+
+
 def test_run_doctor_dispatches_duplicate_records_and_skips_without_docx(tmp_path):
     """Dispatch wiring, both directions: fires as a real finding when the
     stage-6 docx carries a duplicate, and degrades to the standard INFO
