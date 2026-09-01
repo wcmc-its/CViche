@@ -347,11 +347,28 @@ class TestSamlLogin:
 
     @patch("app.api.saml_routes.get_saml_client")
     def test_login_error_redirects_to_login(self, mock_get_client, client, seed_saml_mode):
-        """GET /api/saml/login when client raises redirects to /login?error=auth_failed."""
-        mock_get_client.side_effect = Exception("config error")
+        """GET /api/saml/login when get_saml_client raises a config error (RuntimeError,
+        as it really does -- see app/saml_client.py) redirects to /login?error=auth_failed."""
+        mock_get_client.side_effect = RuntimeError("config error")
         response = client.get("/api/saml/login", follow_redirects=False)
         assert response.status_code == 302
         assert "error=auth_failed" in response.headers["location"]
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_login_unexpected_exception_propagates(self, mock_get_client, client, seed_saml_mode):
+        """GET /api/saml/login: an exception type outside the narrowed catch
+        (RuntimeError/OSError/SAMLError/CertificateError/SourceNotFound) is a
+        genuinely unexpected bug, not an operational failure -- it must NOT be
+        folded into /login?error=auth_failed. It propagates out of the route,
+        past saml_routes.py entirely, and is caught only by main.py's
+        app-wide SecurityHeadersMiddleware/global exception handler, which
+        returns the generic sanitized "internal_error" JSON response (not a
+        302, and not either of this file's own SAML-flavored error bodies) --
+        see saml_routes.py's comment, mrj4001 review PR #656 item 6 / #672."""
+        mock_get_client.side_effect = TypeError("unexpected bug, not an auth failure")
+        response = client.get("/api/saml/login", follow_redirects=False)
+        assert response.status_code == 500
+        assert response.json()["error"] == "internal_error"
 
 
 class TestSamlACS:
@@ -433,8 +450,9 @@ class TestSamlACS:
 
     @patch("app.api.saml_routes.get_saml_client")
     def test_acs_general_exception_redirects_error(self, mock_get_client, client, seed_saml_mode):
-        """POST /api/saml/acs when client raises redirects to /login?error=auth_failed."""
-        mock_get_client.side_effect = Exception("pysaml2 error")
+        """POST /api/saml/acs when get_saml_client raises a config error (RuntimeError,
+        as it really does -- see app/saml_client.py) redirects to /login?error=auth_failed."""
+        mock_get_client.side_effect = RuntimeError("pysaml2 error")
         response = client.post(
             "/api/saml/acs",
             data={"SAMLResponse": "base64data"},
@@ -442,6 +460,26 @@ class TestSamlACS:
         )
         assert response.status_code == 302
         assert "error=auth_failed" in response.headers["location"]
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_unexpected_exception_propagates(self, mock_get_client, client, seed_saml_mode):
+        """POST /api/saml/acs: an exception type outside the narrowed catch
+        (RuntimeError/OSError/SAMLError/SourceNotFound -- CertificateError is
+        already handled by the signature-specific except above it) is a
+        genuinely unexpected bug -- it must NOT be folded into
+        /login?error=auth_failed. It propagates through run_in_threadpool and
+        out of the route entirely, caught only by main.py's app-wide
+        SecurityHeadersMiddleware/global exception handler, which returns the
+        generic sanitized "internal_error" JSON response (not a 302) -- see
+        saml_routes.py's comment, mrj4001 review PR #656 item 6 / #672."""
+        mock_get_client.side_effect = TypeError("unexpected bug, not an auth failure")
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 500
+        assert response.json()["error"] == "internal_error"
 
 
 class TestSamlMetadata:
@@ -464,10 +502,28 @@ class TestSamlMetadata:
 
     @patch("app.api.saml_routes.get_saml_client")
     def test_metadata_error_returns_500(self, mock_get_client, client, seed_saml_mode):
-        """GET /api/saml/metadata when client raises returns 500."""
-        mock_get_client.side_effect = Exception("config error")
+        """GET /api/saml/metadata when get_saml_client raises a config error
+        (RuntimeError, as it really does -- see app/saml_client.py) returns 500."""
+        mock_get_client.side_effect = RuntimeError("config error")
         response = client.get("/api/saml/metadata")
         assert response.status_code == 500
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_metadata_unexpected_exception_propagates(self, mock_get_client, client, seed_saml_mode):
+        """GET /api/saml/metadata: an exception type outside the narrowed catch
+        (RuntimeError/OSError/SAMLError/CertificateError/SourceNotFound) is a
+        genuinely unexpected bug -- it must NOT be folded into the same
+        "SAML metadata not available" plain-text 500 an ops/config problem
+        gets. It propagates out of the route entirely, caught only by
+        main.py's app-wide SecurityHeadersMiddleware/global exception
+        handler, which returns a distinct, generic sanitized "internal_error"
+        JSON response -- see saml_routes.py's comment, mrj4001 review PR #656
+        item 6 / #672."""
+        mock_get_client.side_effect = TypeError("unexpected bug, not unavailability")
+        response = client.get("/api/saml/metadata")
+        assert response.status_code == 500
+        assert response.json()["error"] == "internal_error"
+        assert b"SAML metadata not available" not in response.content
 
 
 class TestSamlUserProvisioning:
