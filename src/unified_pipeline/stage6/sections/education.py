@@ -121,7 +121,7 @@ class EducationSection:
         sorted_entries = sort_entries_reverse_chronological(entries)
 
         for entry in sorted_entries:
-            fields = entry.get('extracted_fields', {})
+            fields = entry.get('extracted_fields') or {}
             raw_text = entry.get('text', '')
 
             # Degree column (not enriched)
