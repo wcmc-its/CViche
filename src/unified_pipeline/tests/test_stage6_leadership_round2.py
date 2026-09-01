@@ -20,6 +20,23 @@ pin both halves of that fix:
   and renders (the HARD SAFETY GATE "still renders" proof); and
 - a near-miss heading that the old loose fallback would have matched does
   NOT bind -- the wrong table is left untouched and nothing is inserted.
+  (`TestNearMissHeadingDoesNotBind` also stands as the regression pin for
+  #664 item 3, "generic 'Leadership' substring fallback can mismatch" --
+  that fallback was already removed by this same commit; no new code is
+  needed for item 3 in this PR, only this existing coverage.)
+
+This file also carries two later, independent fixes to the same section
+writer that landed together in one PR for review efficiency (all three
+touch `_fill_leadership`/`_add_leadership_row`, share fixtures, and are
+each too small to justify a fourth test file):
+
+- #627: a 1- or 2-line entry whose raw text still carries an unresolved
+  pipe-separated date column bypassed the shared #572 line parser the same
+  way sibling P's did (`TestUnresolvedPipeRoutesThroughSharedParser`); and
+- #664 items 2 and 6: `_find_table_after_paragraph`'s purely positional walk
+  is validated at this call site before it is mutated
+  (`TestTableShapeValidation`), and `_add_leadership_row` no longer writes
+  nothing for a 0-/1-column table (`TestSingleColumnFallback`).
 
 Run with:
 
@@ -152,6 +169,153 @@ class TestNearMissHeadingDoesNotBind:
             "test setup sanity check: the near-miss heading should still be "
             "findable by the old loose substring search"
         )
+
+
+class TestUnresolvedPipeRoutesThroughSharedParser:
+    """#627: a single-line pipe entry used to keep '| date' in the role text
+    and take the (wrong) paren date, because only 3+-line entries (or 2-line
+    entries with nothing extracted) were routed through the shared #572 line
+    parser. A 1-line entry never was, even though it can carry the same
+    pipe-separated-date-column shape a flattened source table leaves behind.
+    """
+
+    def test_single_line_pipe_entry_uses_shared_parser(self):
+        gen = _real_template_generator()
+        entry = {
+            "text": "Pediatric Education Committee (Chair 2002-present) | 1996-Present",
+            "extracted_fields": {},
+            "taxonomy_code": "O",
+        }
+
+        gen._fill_leadership([entry])
+
+        section_idx = gen._find_paragraph_exact(CANONICAL_HEADER)
+        table = gen._find_table_after_paragraph(section_idx)
+        data_rows = [tuple(cell.text for cell in row.cells) for row in table.rows[1:]]
+
+        # Mirrors what the shared parser resolves this shape to on sibling P
+        # (test_stage6_administrative_activities.py): the pipe date wins, the
+        # activity is clean, and the parenthetical role is folded back into
+        # it (O's table has no separate Role column).
+        assert data_rows == [("Pediatric Education Committee (Chair)", "", "1996-Present")]
+
+    def test_complete_extraction_with_a_pipe_is_not_rerouted(self):
+        # Regression guard on the fix above: when extraction already gave a
+        # complete role+dates record, a `|` elsewhere in the raw text must
+        # NOT send the entry through the multiline reparse -- that path
+        # cannot carry institution (#664 item 1, out of scope), so rerouting
+        # an already-complete record would silently drop real institution
+        # data that was never broken to begin with.
+        gen = _real_template_generator()
+        entry = {
+            "text": "Chair, Faculty Council | Weill Cornell Medicine | 2018-2022",
+            "extracted_fields": {
+                "leadership_role": "Chair, Faculty Council",
+                "institution": "Weill Cornell Medicine",
+                "start_date": "2018",
+                "end_date": "2022",
+            },
+            "taxonomy_code": "O",
+        }
+
+        gen._fill_leadership([entry])
+
+        section_idx = gen._find_paragraph_exact(CANONICAL_HEADER)
+        table = gen._find_table_after_paragraph(section_idx)
+        data_rows = [tuple(cell.text for cell in row.cells) for row in table.rows[1:]]
+
+        assert data_rows == [("Chair, Faculty Council", "Weill Cornell Medicine", "2018-2022")]
+
+
+class TestTableShapeValidation:
+    """#664 item 2: `_find_table_after_paragraph` is a purely positional
+    "next <w:tbl> after this paragraph" walk with no check that the table it
+    returns actually looks like Section O's own (Role(s)/Position |
+    Institution/Location | Dates). Validate at this call site before
+    `_clear_table_data` mutates whatever table was found.
+    """
+
+    def test_wrong_shaped_table_after_the_real_header_is_not_touched(self):
+        # The canonical header is present (so the header-match half of this
+        # file's earlier fix succeeds), but the table right after it is
+        # shaped like a DIFFERENT section (e.g. Activity/Committee/Role/
+        # Dates), not Section O's Role(s)/Position/Institution/Dates.
+        gen = WCMTemplateGenerator(verbose=False)
+        doc = Document()
+        heading = doc.add_paragraph()
+        run = heading.add_run(CANONICAL_HEADER)
+        run.bold = True
+        wrong_table = doc.add_table(rows=1, cols=3)
+        wrong_table.rows[0].cells[0].text = "Activity/Committee"
+        wrong_table.rows[0].cells[1].text = "Role"
+        wrong_table.rows[0].cells[2].text = "Dates"
+        sentinel = wrong_table.add_row()
+        sentinel.cells[0].text = "SENTINEL-DO-NOT-TOUCH"
+        gen.doc = doc
+
+        gen._fill_leadership([_leadership_entry()])
+
+        rows = [tuple(cell.text for cell in row.cells) for row in wrong_table.rows]
+        assert rows == [
+            ("Activity/Committee", "Role", "Dates"),
+            ("SENTINEL-DO-NOT-TOUCH", "", ""),
+        ]
+        assert gen.stats["tables_populated"] == 0
+        assert gen.stats["entries_inserted"] == 0
+
+    def test_correctly_shaped_table_still_renders(self):
+        # HARD SAFETY GATE for the same fix: the real template's table
+        # (which the exact-header test above already proves renders) must
+        # still pass this new validation, not just the near-miss guard.
+        gen, table = _fake_doc_generator(CANONICAL_HEADER)
+
+        gen._fill_leadership([_leadership_entry()])
+
+        data_rows = [tuple(cell.text for cell in row.cells) for row in table.rows[1:]]
+        assert data_rows == [("Chair, Faculty Council", "Weill Cornell Medicine", "2018-2022")]
+        assert gen.stats["tables_populated"] == 1
+        assert gen.stats["entries_inserted"] == 1
+
+
+class TestSingleColumnFallback:
+    """#664 item 6: `_add_leadership_row` only handled `num_cols >= 3` and
+    `num_cols >= 2` -- a 0- or 1-column table hit neither branch, wrote
+    nothing, and `entries_inserted` still incremented. Sibling P's
+    `_add_committee_row` already has a single-column fallback; this mirrors
+    it.
+    """
+
+    def test_one_column_table_folds_role_institution_and_dates_together(self):
+        gen = WCMTemplateGenerator(verbose=False)
+        doc = Document()
+        table = doc.add_table(rows=1, cols=1)
+        table.rows[0].cells[0].text = "Role(s)/Position"
+        gen.doc = doc
+
+        gen._add_leadership_row(table, "Chair, Faculty Council", "Weill Cornell Medicine", "2018-2022")
+
+        assert table.rows[-1].cells[0].text == "Chair, Faculty Council, Weill Cornell Medicine - 2018-2022"
+        assert gen.stats["entries_inserted"] == 1
+
+    def test_zero_column_table_writes_nothing_and_does_not_raise(self):
+        gen = WCMTemplateGenerator(verbose=False)
+        doc = Document()
+        table = doc.add_table(rows=1, cols=1)
+        # python-docx's Table.add_row() sizes the new row's cells off
+        # tblGrid's gridCol entries, not off any existing row -- stripping
+        # them is the only way to make add_row() itself produce a
+        # zero-column row, which is what `_add_leadership_row` actually
+        # calls.
+        grid = table._tbl.tblGrid
+        for grid_col in list(grid.gridCol_lst):
+            grid.remove(grid_col)
+        gen.doc = doc
+
+        # Must not raise (the old code's implicit assumption that
+        # row.cells[0] exists would IndexError here); stats still tick.
+        gen._add_leadership_row(table, "Chair", "WCM", "2018-2022")
+        assert len(table.rows[-1].cells) == 0
+        assert gen.stats["entries_inserted"] == 1
 
 
 if __name__ == "__main__":
