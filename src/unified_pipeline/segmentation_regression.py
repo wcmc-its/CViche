@@ -270,8 +270,16 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
 
     per_h1: dict[str, int] = {}
     for e in content:
-        hierarchy = e.get("hierarchy") or ["(none)"]
-        top = _norm(hierarchy[0]) or "(none)"
+        # hierarchy is typed as list[str] (Entry) but arrives untyped off
+        # json.loads at runtime; a malformed entry with hierarchy as a bare
+        # string (e.g. "Education" instead of ["Education"]) would otherwise
+        # index hierarchy[0] and silently key on its first CHARACTER ("E")
+        # instead of raising or falling back cleanly (#616 item i).
+        hierarchy = e.get("hierarchy")
+        if isinstance(hierarchy, list) and hierarchy:
+            top = _norm(hierarchy[0]) or "(none)"
+        else:
+            top = "(none)"
         per_h1[top] = per_h1.get(top, 0) + 1
 
     return {
