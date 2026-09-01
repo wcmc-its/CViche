@@ -179,6 +179,98 @@ def test_citation_insertion_preserves_tab_in_bolded_author_split():
     assert "\t" in rendered
 
 
+# --- the xml:space="preserve" guard reads the SANITIZED string ---
+#
+# Round-2 finding. All three sites assign the sanitized text but originally
+# tested the RAW text in their `startswith(' ') or endswith(' ')` guard. A
+# control character in front of a leading space (`"\x0b Smith"`) is stripped,
+# so the rendered run does begin with a space while the raw string does not --
+# the guard skipped xml:space="preserve" and Word collapsed that space,
+# gluing the run to its neighbour. Whitespace-only damage, but it is silent,
+# which is exactly what the sanitiser was added to avoid.
+
+XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+
+
+def test_insertion_preserves_space_exposed_by_stripping_a_control_char():
+    gen = _generator(emit_track_changes=True)
+    para = _blank_paragraph(gen)
+
+    gen._add_track_change_insertion(para, "\x0b Smith")
+
+    t_elem = para._p.find(qn("w:ins")).find(qn("w:r")).find(qn("w:t"))
+    assert t_elem.text == " Smith"
+    assert t_elem.get(XML_SPACE) == "preserve"
+
+
+def test_deletion_preserves_space_exposed_by_stripping_a_control_char():
+    gen = _generator(emit_track_changes=True)
+    para = _blank_paragraph(gen)
+
+    gen._add_track_change_deletion(para, "Smith \x0b")
+
+    delText_elem = para._p.find(qn("w:del")).find(qn("w:r")).find(qn("w:delText"))
+    assert delText_elem.text == "Smith "
+    assert delText_elem.get(XML_SPACE) == "preserve"
+
+
+def test_citation_insertion_preserves_space_exposed_by_stripping_a_control_char():
+    gen = _generator(emit_track_changes=True)
+    para = _blank_paragraph(gen)
+    # No target name matches, so the whole citation is one run -- the raw
+    # string starts and ends with a control character, the sanitized one with
+    # a space.
+    citation = "\x0b Doe J. A study. Journal. 2024;10(2):100-110. \x0b"
+
+    gen._add_citation_with_bold_author_as_insertion(
+        para, citation, "Nobody Q", "", author="PubMed Enrichment"
+    )
+
+    ins_elem = para._p.find(qn("w:ins"))
+    t_elems = [t for r in ins_elem.findall(qn("w:r")) for t in r.findall(qn("w:t"))]
+    assert len(t_elems) == 1
+    assert t_elems[0].text == " Doe J. A study. Journal. 2024;10(2):100-110. "
+    assert t_elems[0].get(XML_SPACE) == "preserve"
+
+
+def test_ordinary_leading_space_still_preserved_at_all_three_sites():
+    # Control arm: the guard's pre-existing behaviour for text that needs no
+    # sanitising at all must be unchanged by the reordering.
+    gen = _generator(emit_track_changes=True)
+
+    para_ins = _blank_paragraph(gen)
+    gen._add_track_change_insertion(para_ins, " Smith ")
+    t_elem = para_ins._p.find(qn("w:ins")).find(qn("w:r")).find(qn("w:t"))
+    assert t_elem.get(XML_SPACE) == "preserve"
+
+    para_del = _blank_paragraph(gen)
+    gen._add_track_change_deletion(para_del, " Smith ")
+    delText_elem = para_del._p.find(qn("w:del")).find(qn("w:r")).find(qn("w:delText"))
+    assert delText_elem.get(XML_SPACE) == "preserve"
+
+    para_cit = _blank_paragraph(gen)
+    gen._add_citation_with_bold_author_as_insertion(
+        para_cit, " Doe J. A study. Journal. 2024;1:1-2. ", "Nobody Q", ""
+    )
+    t_elems = [
+        t for r in para_cit._p.find(qn("w:ins")).findall(qn("w:r")) for t in r.findall(qn("w:t"))
+    ]
+    assert t_elems[0].get(XML_SPACE) == "preserve"
+
+
+def test_text_without_boundary_spaces_still_gets_no_xml_space_attribute():
+    # The other control arm: reordering must not start setting the attribute
+    # on runs that never needed it.
+    gen = _generator(emit_track_changes=True)
+    para = _blank_paragraph(gen)
+
+    gen._add_track_change_insertion(para, "Enrolled 12\x0b patients")
+
+    t_elem = para._p.find(qn("w:ins")).find(qn("w:r")).find(qn("w:t"))
+    assert t_elem.text == "Enrolled 12 patients"
+    assert t_elem.get(XML_SPACE) is None
+
+
 if __name__ == "__main__":
     import pytest as _pytest
 

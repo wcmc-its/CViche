@@ -375,8 +375,13 @@ class BibliographySection:
                     rPr.append(b)
                 run_elem.append(rPr)
                 t = OxmlElement('w:t')
-                t.text = self._sanitize_run_text(text)
-                if text.startswith(' ') or text.endswith(' '):
+                # The xml:space guard reads the sanitized string, not the raw
+                # one: stripping a control character can expose a leading or
+                # trailing space that the raw text did not start or end with,
+                # and without xml:space="preserve" Word collapses it.
+                clean_text = self._sanitize_run_text(text)
+                t.text = clean_text
+                if clean_text.startswith(' ') or clean_text.endswith(' '):
                     t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
                 run_elem.append(t)
                 return run_elem

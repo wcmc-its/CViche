@@ -59,6 +59,21 @@ if str(_SRC) not in sys.path:
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 import unified_pipeline.stage6.sections.bibliography as bibliography  # noqa: E402
 
+# The font-derivation test below calls `importlib.reload(bibliography)`.
+# Reload re-executes the module in its OWN namespace, so module-level
+# constants are corrected in place -- but every `class` statement binds a
+# NEW class object, while `WCMTemplateGenerator.__mro__` still holds the
+# `BibliographySection` that was mixed into it at first import. Left that
+# way, a `patch.object(bibliography.BibliographySection, ...)` or an
+# `isinstance(x, bibliography._CitationEnrichment)` in any test collected
+# after this file would silently target a class no live object uses.
+# Captured here, before any reload can run, and restored after one.
+_PRE_RELOAD_CLASSES = {
+    name: obj
+    for name, obj in vars(bibliography).items()
+    if isinstance(obj, type) and obj.__module__ == bibliography.__name__
+}
+
 
 def _generator():
     """A real generator instance, matching the pattern already used for
@@ -250,6 +265,29 @@ def test_tracked_insertion_font_constants_track_set_font_default_changes(monkeyp
         # the derivation reads the real defaults.
         monkeypatch.undo()
         importlib.reload(bibliography)
+        # Reload rebound every class in the module to a fresh object; put the
+        # originals back, so `bibliography.BibliographySection` is once again
+        # the class actually sitting in `WCMTemplateGenerator.__mro__` (see
+        # `_PRE_RELOAD_CLASSES` at the top of this file). The constants
+        # asserted above stay the freshly re-derived ones -- the reloaded
+        # code and the restored classes share one module namespace, so the
+        # methods read the corrected values either way.
+        for _name, _cls in _PRE_RELOAD_CLASSES.items():
+            setattr(bibliography, _name, _cls)
+
+
+def test_reload_left_module_classes_identical_to_the_live_ones():
+    # Runs immediately after the reload test above (pytest executes a file in
+    # definition order). Without the restore in that test's `finally`, this
+    # fails: `bibliography.BibliographySection` would be a fresh class object
+    # while every WCMTemplateGenerator instance still resolves the mixin
+    # through the pre-reload one.
+    assert bibliography.BibliographySection in WCMTemplateGenerator.__mro__
+    for name, cls in _PRE_RELOAD_CLASSES.items():
+        assert getattr(bibliography, name) is cls, name
+    # ...and the constants are the real ones again, not the mutated defaults.
+    assert bibliography.TRACKED_INSERTION_FONT_NAME == "Arial"
+    assert bibliography.TRACKED_INSERTION_FONT_SIZE_HALF_POINTS == "22"
 
 
 # --- 3850159506: no double-counted stat on a late tracked-insertion failure ---

@@ -2655,8 +2655,15 @@ Now analyze the text above:"""
             # valid XML and are preserved (test_cell_separators.py:34-37
             # pins the tab contract downstream of this text).
             t = OxmlElement('w:t')
-            t.text = self._sanitize_run_text(text)
-            if text.startswith(' ') or text.endswith(' '):
+            # Bind once and test the SANITIZED string in the xml:space guard
+            # below: a control character sitting in front of a leading space
+            # (`\x0b Smith`) is stripped, so the raw text no longer says
+            # whether the rendered run starts or ends with whitespace. Testing
+            # `text` there let Word collapse that space and glue the run to
+            # its neighbour.
+            clean_text = self._sanitize_run_text(text)
+            t.text = clean_text
+            if clean_text.startswith(' ') or clean_text.endswith(' '):
                 t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
             run_elem.append(t)
 
@@ -2715,8 +2722,11 @@ Now analyze the text above:"""
             # same lxml `.text` control-character raise as the insertion
             # path -- sanitize before assignment, preserving \t\n\r.
             delText = OxmlElement('w:delText')
-            delText.text = self._sanitize_run_text(text)
-            if text.startswith(' ') or text.endswith(' '):
+            # Same ordering as the insertion path above: the xml:space guard
+            # has to read the sanitized string, not the raw one.
+            clean_text = self._sanitize_run_text(text)
+            delText.text = clean_text
+            if clean_text.startswith(' ') or clean_text.endswith(' '):
                 delText.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
             run_elem.append(delText)
 
