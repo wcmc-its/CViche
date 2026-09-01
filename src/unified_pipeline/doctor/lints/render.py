@@ -566,3 +566,80 @@ def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
         f"{len(passages)} passage(s) of >={span} consecutive rendered blocks "
         f"appear twice — one record reached the output document more than once",
         evidence)]
+
+
+# duplicate_passages requires a run of >=2 CONSECUTIVE repeated blocks, so a
+# record occupying exactly ONE block is invisible to it by construction --
+# and that is the common shape for the most frequent duplication in the
+# corpus: a numbered citation rendered twice at different list numbers (#446).
+# This is a separate rule, not a tuning of duplicate_passages: identity here
+# is one enumerated paragraph's own normalized body, not a stretch of
+# neighbouring blocks, and it is scoped to the output SECTION a
+# consecutive-block rule never had to consider -- a CV may legitimately list
+# the same work under two different section headings ("Peer-reviewed" and
+# "Selected"), so a repeat across a section boundary is not a defect.
+#
+# Window and floor are both measured choices, not assumed ones: 6 is the
+# window #446's own detection methodology used ("within 6 citations of each
+# other"), and 20 characters is the floor the corpus probe used on the
+# normalized body so a short repeated fragment ("See above.") standing alone
+# between two unrelated records cannot count as a duplicated record.
+DUPLICATE_RECORD_WINDOW = 6
+
+
+DUPLICATE_RECORD_MIN_CHARS = 20
+
+
+DUPLICATE_RECORD_WARN_COUNT = 1
+
+
+def lint_duplicate_records(blocks: List[Tuple[str, str]]) -> List[Dict]:
+    """A single numbered/bulleted paragraph block whose normalized body
+    repeats at a different list position within DUPLICATE_RECORD_WINDOW
+    enumerated blocks of its first occurrence, in the SAME output section
+    (#446) -- the shape duplicate_passages cannot see because it requires
+    >=2 consecutive repeated blocks, and 55.2% of substantive records in the
+    corpus occupy exactly one.
+
+    Section scope is tracked with `_output_section_header`; the match state
+    is reset on every section change, so a publication legitimately listed
+    under two different headings never fires -- that is the same record two
+    sections chose to carry, not a duplicate. A blank spacer paragraph does
+    not match the enumerator prefix, so it is skipped rather than consuming a
+    window slot or breaking one, same as `lint_duplicate_passages`.
+    """
+    current_section: Optional[str] = None
+    recent: List[Tuple[str, int, int]] = []  # (key, enum_index, block_index)
+    enum_index = 0
+    pairs: List[Tuple[int, int]] = []
+
+    for i, (kind, text) in enumerate(blocks):
+        header = _output_section_header(text)
+        if header is not None:
+            if header != current_section:
+                current_section = header
+                recent = []
+            continue
+        if kind != "p" or not _PASSAGE_ENUMERATOR_RE.match(str(text or "")):
+            continue
+        enum_index += 1
+        key = _passage_key(text)
+        if len(key) < DUPLICATE_RECORD_MIN_CHARS:
+            continue
+        recent = [r for r in recent
+                  if enum_index - r[1] <= DUPLICATE_RECORD_WINDOW]
+        match = next((r for r in recent if r[0] == key), None)
+        if match is not None:
+            pairs.append((match[2], i))
+        recent.append((key, enum_index, i))
+
+    if len(pairs) < DUPLICATE_RECORD_WARN_COUNT:
+        return []
+
+    evidence = [f"block {first} repeats at {second}: "
+                f"{str(blocks[first][1])[:100]}" for first, second in pairs[:5]]
+    return [_finding(
+        "duplicate_records", "WARN",
+        f"{len(pairs)} duplicated record(s) — the same enumerated entry "
+        f"appears twice within the same output section",
+        evidence)]

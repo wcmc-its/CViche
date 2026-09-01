@@ -136,7 +136,7 @@ def test_known_lints_has_no_duplicates_and_is_not_empty():
     """Guard the guard: an empty or duplicated tuple would pass the checks above."""
     known = _module().KNOWN_LINTS
     assert len(known) == len(set(known)), f"duplicate entries in KNOWN_LINTS: {known}"
-    assert len(known) == 17, (
+    assert len(known) == 18, (
         f"KNOWN_LINTS changed size ({len(known)}, was 17). That is fine if a "
         f"lint was genuinely added or removed -- update this count and say so "
         f"in the commit message."

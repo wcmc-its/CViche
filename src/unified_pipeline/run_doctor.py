@@ -166,11 +166,15 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     _is_appendix_noise,
     _line_token_sets,
     _names_match,
+    DUPLICATE_RECORD_MIN_CHARS,
+    DUPLICATE_RECORD_WARN_COUNT,
+    DUPLICATE_RECORD_WINDOW,
     _passage_key,
     _record_lines,
     _record_rendered,
     lint_dead_sections,
     lint_duplicate_passages,
+    lint_duplicate_records,
     lint_output_hygiene,
     lint_pipe_leaks,
     lint_stage6_warnings,
@@ -244,11 +248,17 @@ KNOWN_LINTS = (
     "pipe_leaks",
     "table_shape",
     "duplicate_passages",
+    "duplicate_records",
     "owner_contact_missing",
     "pipeline_errors_present",
 )
 
 
+# duplicate_records' prevalence below was measured on the 66-uid doctor-gate
+# farm (scripts/doctor_gate.py), a DIFFERENT and smaller corpus than the one
+# every other entry in this table was measured on (#438's 73 scored runs /
+# #446's 125 rendered corpus outputs) -- the two are not comparable counts,
+# only comparable ROUGH ORDER-OF-MAGNITUDE signals for `lint_surprise`.
 LINT_PREVALENCE = {
     "output_hygiene": 0.877,
     "table_shape": 0.562,
@@ -259,6 +269,7 @@ LINT_PREVALENCE = {
     "segmentation": 0.082,
     "enrichment_failures": 0.082,
     "owner_contact_missing": 0.068,
+    "duplicate_records": 0.061,
     "pipe_leaks": 0.055,
     "unrendered_records": 0.027,
     "dead_sections": 0.027,
@@ -638,6 +649,8 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
         findings.extend(lint_table_shape(table_rows))
     if ready("duplicate_passages", stage_6_docx=blocks):
         findings.extend(lint_duplicate_passages(blocks))
+    if ready("duplicate_records", stage_6_docx=blocks):
+        findings.extend(lint_duplicate_records(blocks))
     # score_cv_owner caps at 25 for an ABSENT *_fields.json as well as an empty
     # cv_owner name, so this lint breaks the house "missing artifact -> skip"
     # convention: skipping the absent case would report the more broken run
