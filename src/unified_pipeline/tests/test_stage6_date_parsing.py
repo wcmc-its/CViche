@@ -110,42 +110,111 @@ def test_format_date_for_section_outputs(date_str, code, expected):
     assert format_date_for_section(date_str, code) == expected
 
 
-# --- _dates_overlap_or_match: parsed tuples, not string slices (#553) -------
+# --- _dates_overlap_or_match: granularity-honest comparison (#553) ---------
+#
+# The rule under test: parse each boundary to (year, month-or-None) and never
+# substitute a month nobody stated. Two ranges are disjoint only when the
+# stated data proves it -- years differ, or same year with BOTH months stated.
+# Anything else (unreadable boundary, same year with a month missing) is
+# "can't prove they differ" -> True, matching the function's own documented
+# convention for entries that lack dates.
 
 def _entry(start, end):
     return {"extracted_fields": {"start_date": start, "end_date": end}}
 
 
 class TestDatesOverlapOrMatch:
-    def test_unpadded_months_that_overlap(self):
-        # A=2021-2..2021-11, B=2021-10..2021-12: they overlap in Oct-Nov, so
-        # this must be True. The old `[:7]` string slice returned False:
-        # "2021-2-01"[:7] is "2021-2-", which string-compares LESS than
-        # "2021-12" because the 5th character '2' < '1' — an artifact of the
-        # unpadded month, not the true year/month relationship.
-        a = _entry("2021-2-01", "2021-11-01")
-        b = _entry("2021-10-01", "2021-12-01")
-        assert _dates_overlap_or_match(a, b) is True
+    # -- disjointness the data PROVES: different years -----------------------
 
-    def test_unpadded_months_zero_padded_control_agrees(self):
-        # Same pair as above, zero-padded — the control that isolates the
-        # padding as the sole cause of the old defect. Padded already worked;
-        # this pins that the fix doesn't regress the padded case.
+    def test_different_years_are_provably_disjoint(self):
+        earlier = _entry("2010-01-01", "2011-06-01")
+        later = _entry("2015-01-01", "2016-06-01")
+        assert _dates_overlap_or_match(earlier, later) is False
+
+    def test_different_years_disjoint_in_the_other_argument_order(self):
+        # The proof must not depend on which entry is passed first: the
+        # function tests both directions (A ends before B, B ends before A).
+        earlier = _entry("2010-01-01", "2011-06-01")
+        later = _entry("2015-01-01", "2016-06-01")
+        assert _dates_overlap_or_match(later, earlier) is False
+
+    def test_different_years_that_actually_overlap_stay_true(self):
+        assert _dates_overlap_or_match(
+            _entry("2010-01-01", "2016-01-01"),
+            _entry("2015-01-01", "2020-01-01"),
+        ) is True
+
+    # -- disjointness the data PROVES: same year, both months stated ---------
+
+    def test_same_year_both_months_stated_is_decidable(self):
+        a = _entry("2021-01-01", "2021-02-01")
+        b = _entry("2021-10-01", "2021-12-01")
+        assert _dates_overlap_or_match(a, b) is False
+
+    def test_same_year_both_months_stated_overlapping_is_true(self):
         a = _entry("2021-02-01", "2021-11-01")
         b = _entry("2021-10-01", "2021-12-01")
         assert _dates_overlap_or_match(a, b) is True
 
-    def test_unpadded_disjoint_months_not_reported_as_overlapping(self):
-        # A=2021-1..2021-2, B=2021-10..2021-11: genuinely disjoint. The old
-        # code read this as an overlap (True) — the harmful direction, since
-        # it feeds a dedup decision that can drop a real, distinct entry.
-        a = _entry("2021-1-01", "2021-2-01")
-        b = _entry("2021-10-01", "2021-12-01")
-        assert _dates_overlap_or_match(a, b) is False
+    # -- no proof available -> conservative True -----------------------------
+
+    def test_same_year_missing_month_on_one_side_cannot_be_proven_disjoint(self):
+        # The live corpus shape (Opresko): an "Assistant Professor" role ending
+        # a year-only "2014" against a "Tenured Associate Professor" role
+        # starting "2014-03". Nothing in the CV says which month 2014 ended, so
+        # nothing proves the two are disjoint -- True, and the content gates
+        # behind this call (_drop_is_safe) decide whether anything is dropped.
+        # An implementation that imputes a month (December OR January) answers
+        # False here off data the CV never contained.
+        earlier = _entry("2005-05-01", "2014")
+        later = _entry("2014-03-01", "2018-01-31")
+        assert _dates_overlap_or_match(earlier, later) is True
+
+    def test_same_year_missing_month_on_the_other_side_too(self):
+        assert _dates_overlap_or_match(
+            _entry("2014-03-01", "2018-01-31"),
+            _entry("2005-05-01", "2014"),
+        ) is True
+
+    def test_year_only_versus_year_only_in_the_same_year_is_true(self):
+        # Neither boundary carries a month, so the same year is the whole of
+        # what is known: unprovable either way.
+        assert _dates_overlap_or_match(_entry("2020", "2020"),
+                                       _entry("2020", "2021")) is True
+
+    def test_year_only_versus_year_only_in_different_years_is_still_decidable(self):
+        # Losing the imputed month must not lose the year-level proof.
+        assert _dates_overlap_or_match(_entry("2018", "2019"),
+                                       _entry("2021", "2022")) is False
+
+    def test_missing_start_date_conservatively_true(self):
+        # Regression guard: an entry with no start date at all still can't be
+        # proven distinct, so this stays True ahead of any boundary parsing.
+        assert _dates_overlap_or_match(_entry("", ""),
+                                       _entry("2020-01-01", "present")) is True
+
+    def test_unparseable_end_is_unknown_not_open_ended(self):
+        # A non-blank end that doesn't parse and isn't a current-date keyword
+        # is UNKNOWN, and is treated exactly like a missing one: conservative
+        # True. Treating it as open-ended instead would answer False here (B
+        # provably ends before A starts) -- an undisclosed behaviour change,
+        # and a guess about data the CV does not contain.
+        assert _dates_overlap_or_match(
+            _entry("2020-01-01", "TBD"),
+            _entry("2018-01-01", "2019-01-01"),
+        ) is True
+
+    def test_unparseable_start_is_unknown_too(self):
+        assert _dates_overlap_or_match(
+            _entry("see below", "2019-01-01"),
+            _entry("2021-01-01", "2022-01-01"),
+        ) is True
+
+    # -- open-ended ends -----------------------------------------------------
 
     @pytest.mark.parametrize("keyword", sorted(CURRENT_DATE_VALUES))
     def test_current_keyword_end_date_is_open_ended(self, keyword):
-        # Every keyword in the shared vocabulary — not just 'present' — must
+        # Every keyword in the shared vocabulary -- not just 'present' -- must
         # make the range open-ended. Before the fix, 'ongoing'/'current'/'now'
         # reached the string comparison as literals and only came out right
         # because every letter outranks every digit in ASCII.
@@ -159,50 +228,61 @@ class TestDatesOverlapOrMatch:
             _entry("2021-01-01", "2021-06-01"),
         ) is True
 
+    def test_open_ended_end_does_not_reach_backwards(self):
+        # 'present' opens the range forwards only: an entry that provably
+        # closed before this one started is still disjoint.
+        assert _dates_overlap_or_match(
+            _entry("2020-01-01", "present"),
+            _entry("2017-01-01", "2018-01-01"),
+        ) is False
+
+    # -- fast path -----------------------------------------------------------
+
     def test_exact_match_still_true(self):
-        # Regression guard: the exact-match short circuit above the tuple
+        # Regression guard: the exact-string short circuit above the boundary
         # comparison is untouched by this fix.
         a = _entry("2019-06-01", "2020-01-01")
         b = _entry("2019-06-01", "2020-01-01")
         assert _dates_overlap_or_match(a, b) is True
 
-    def test_missing_start_date_conservatively_true(self):
-        # Regression guard: an entry with no start date at all still can't be
-        # proven distinct, so this stays True ahead of any tuple parsing.
-        assert _dates_overlap_or_match(_entry("", ""), _entry("2020-01-01", "present")) is True
+    def test_exact_match_wins_even_when_the_boundaries_are_unparseable(self):
+        a = _entry("whenever", "whenever")
+        b = _entry("whenever", "whenever")
+        assert _dates_overlap_or_match(a, b) is True
 
-    def test_unparseable_end_date_falls_back_open_ended(self):
-        # An end_date that isn't a recognized keyword and doesn't parse (e.g.
-        # a stray label) can't be proven to close the range, so it is treated
-        # as open-ended rather than silently sorting as the smallest tuple.
+    # -- #553's stated trigger: the unpadded-month shape ---------------------
+    #
+    # Census over the 66-CV corpus' stage-4 artifacts found ZERO values in the
+    # YYYY-M / YYYY-M-D / M/YYYY shapes (2052 padded, 2882 year-only, 1147
+    # month-name/keyword, 27 other), so these two cases are not reproducible
+    # from corpus data. They are pinned anyway because the issue names them and
+    # because parsing (rather than slicing) the string is what makes them work.
+
+    def test_unpadded_disjoint_months_are_provably_disjoint(self):
+        # A=2021-1..2021-2, B=2021-10..2021-12: genuinely disjoint, both
+        # months stated. The old `[:7]` string slice read this as an overlap
+        # (True) -- "2021-1-01"[:7] is "2021-1-", which string-compares LESS
+        # than "2021-12" because '1' < '2' at the 6th character.
+        a = _entry("2021-1-01", "2021-2-01")
+        b = _entry("2021-10-01", "2021-12-01")
+        assert _dates_overlap_or_match(a, b) is False
+
+    def test_unpadded_overlapping_months_are_true(self):
+        a = _entry("2021-2-01", "2021-11-01")
+        b = _entry("2021-10-01", "2021-12-01")
+        assert _dates_overlap_or_match(a, b) is True
+
+    def test_unpadded_zero_padded_control_agrees(self):
+        # The control that isolates padding as the sole variable: the padded
+        # spelling of the pair above must give the same answers.
         assert _dates_overlap_or_match(
-            _entry("2020-01-01", "TBD"),
-            _entry("2021-01-01", "2021-06-01"),
+            _entry("2021-01-01", "2021-02-01"),
+            _entry("2021-10-01", "2021-12-01"),
+        ) is False
+        assert _dates_overlap_or_match(
+            _entry("2021-02-01", "2021-11-01"),
+            _entry("2021-10-01", "2021-12-01"),
         ) is True
-
-    def test_year_only_date_defaults_to_january_on_both_ends(self):
-        # comparison_key = (year, month or 1) -- the form #553's own tracked
-        # review comment (PR #514 discussion_r3721948927) asked for -- applies
-        # the same January default whether the year-only value is a start or
-        # an end. "2020"..."2020" and "2021-01"..."2021-01" stay disjoint...
-        assert _dates_overlap_or_match(_entry("2020", "2020"), _entry("2021-01-01", "2021-01-01")) is False
-        # ...and a year-only "2020" end no longer reaches into December: a
-        # range that only touches December 2020 is not read as overlapping
-        # it. (An earlier version of this fix defaulted a year-only end to
-        # December instead, so this pair read True -- the harmful direction,
-        # since it fed a real dedup decision.)
-        assert _dates_overlap_or_match(_entry("2020", "2020"), _entry("2020-12-01", "2021-01-01")) is False
-
-    def test_year_only_end_vs_later_dated_start_not_reported_as_overlap(self):
-        # Regression pin for the live corpus case this round's fix corrects:
-        # an "Assistant Professor" role with a year-only end ("2014") and a
-        # "Tenured Associate Professor" role starting a month into the same
-        # year ("2014-03") are a career progression, not a duplicate. With
-        # the year-only end defaulting to December this read as an overlap
-        # (2014-03 <= 2014-12); with the (year, month or 1) fix it does not.
-        earlier = _entry("2005-05-01", "2014")
-        later = _entry("2014-03-01", "2018-01-31")
-        assert _dates_overlap_or_match(earlier, later) is False
 
 
 # --- shared CURRENT_DATE_VALUES constant, one vocabulary across 3 modules ---
@@ -210,18 +290,19 @@ class TestDatesOverlapOrMatch:
 # The three modules that must agree on the open-ended vocabulary.
 _CURRENT_KEYWORD_MODULES = (_formatting_dates, _sorting_chronological, _parsing_dates)
 
-# The subset whose call site produces an observable that DISTINGUISHES a
-# recognized keyword from an unrecognized string, and what it produces.
-# parsing/dates.py is deliberately absent: _month_tuple_for_overlap answers
-# (9999, 12) for an end and None for a start on BOTH branches -- a recognized
-# keyword and an unparseable string are indistinguishable there by design (its
-# fallback is "can't prove they differ"), so a sentinel probe against it would
-# pass whether or not the sentinel were in the vocabulary. Its half of the
-# sharing is pinned by the identity assert below only; see the PR description.
+# Each module's call site, and an observable that DISTINGUISHES a recognized
+# current-date keyword from an unrecognized string. parsing/dates.py qualifies
+# now that an unreadable end is "unknown" rather than open-ended: a recognized
+# keyword leaves the range open (so a strictly-earlier entry is provably
+# disjoint -> False), while any other unparseable string is unknown and takes
+# the conservative True path.
 _CURRENT_KEYWORD_OBSERVABLES = (
     (_formatting_dates, lambda kw: format_date_for_section(kw, "M2A"), "Present"),
     (_sorting_chronological,
      lambda kw: extract_sort_date({"extracted_fields": {"end_date": kw}}), (9999, 12, 31)),
+    (_parsing_dates,
+     lambda kw: _dates_overlap_or_match(_entry("2020-01-01", kw),
+                                        _entry("2017-01-01", "2018-01-01")), False),
 )
 
 

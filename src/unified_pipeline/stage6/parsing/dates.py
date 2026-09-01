@@ -16,7 +16,7 @@ nothing in this file may import from either.
 """
 from types import MappingProxyType
 import re
-from typing import Dict, Optional
+from typing import Dict
 
 # Month name -> month number, for the date parser below. Includes the common
 # 3-4 letter abbreviations CVs use ("Aug", "Sept"). Distinct from _MONTH_NAMES
@@ -86,67 +86,78 @@ def _get_entry_date_range(entry: Dict) -> tuple:
     return (fields.get('start_date', '') or '', fields.get('end_date', '') or '')
 
 
-_OPEN_ENDED = (9999, 12)  # sentinel for a range with no stated (or 'present') end
+# Sentinel for a range whose end is absent or a current-date keyword: it has no
+# upper bound, so nothing can be proven to start after it ends.
+_OPEN_ENDED = object()
 
 
-def _month_tuple_for_overlap(date_str: str, *, is_end: bool) -> Optional[tuple]:
-    """(year, month) for the overlap test in `_dates_overlap_or_match`.
+def _overlap_boundary(date_str: str, *, is_end: bool):
+    """One range boundary for `_dates_overlap_or_match`, at the granularity the
+    CV actually states: `(year, month-or-None)`, `_OPEN_ENDED`, or None.
 
-    Uses the shared `_parse_date_components` rather than a string slice, so an
-    unpadded month ("2008-7") parses to (2008, 7) instead of sorting wrong
-    against "2008-12" as a string (#553). A blank or current-keyword end date
-    is open-ended; a start/end that fails to parse falls back open-ended too,
-    matching this function's existing bias toward reporting a possible
-    duplicate rather than a false negative when it can't prove otherwise.
-    Returns None only for a start/blank-keyword date, since that reaches
-    `_dates_overlap_or_match`'s own unparseable-start guard instead.
-
-    An absent month within an otherwise-parsed date (year-only, e.g. "2008")
-    defaults to January for BOTH ends: `comparison_key = (year, month or 1)`,
-    exactly the form #553's own tracked review comment asked for (PR #514
-    discussion_r3721948927), not an end-defaults-to-December range. An
-    earlier version of this fix defaulted a year-only *end* date to December
-    instead, spanning it across its whole year -- that read every one of the
-    11 live cases it changed as an overlap, and all 11 were real career
-    progressions (e.g. an "Assistant Professor" role ending "2014" and a
-    "Tenured Associate Professor" role starting "2014-03"), the exact harmful
-    direction (real content flagged a possible duplicate) the issue's own
-    repro calls out. January-for-both keeps a year-only range from reaching
-    past the January it's anchored to, so it no longer collides with a
-    dated entry that starts later the same year.
+    An end that is blank or a current-date keyword is `_OPEN_ENDED`. Anything
+    else that does not parse to at least a year is None -- unknown, NOT
+    open-ended: a boundary we cannot read is a boundary we cannot reason from.
+    A stated year with no stated month keeps `month=None` rather than being
+    filled in; see `_dates_overlap_or_match` for why nothing is imputed.
     """
     s = (date_str or '').strip()
-    if not s or s.lower() in CURRENT_DATE_VALUES:
-        return _OPEN_ENDED if is_end else None
+    if is_end and (not s or s.lower() in CURRENT_DATE_VALUES):
+        return _OPEN_ENDED
     year, month, _day = _parse_date_components(s)
     if year is None:
-        return _OPEN_ENDED if is_end else None
-    return (year, month if month is not None else 1)
+        return None
+    return (year, month)
+
+
+def _ends_strictly_before(end, start) -> bool:
+    """True only when the stated data PROVES `end` precedes `start`.
+
+    Decidable when the years differ, or when the years are equal and both
+    months are stated. Equal years with a month missing on either side is not
+    decidable at the granularity available, so it is not a proof.
+    """
+    if end is _OPEN_ENDED:
+        return False
+    end_year, end_month = end
+    start_year, start_month = start
+    if end_year != start_year:
+        return end_year < start_year
+    return (end_month is not None and start_month is not None
+            and end_month < start_month)
 
 
 def _dates_overlap_or_match(entry_a: Dict, entry_b: Dict) -> bool:
-    """Return True if two entries have the same or overlapping date ranges.
+    """Return True if two entries have the same, overlapping, or unprovably
+    distinct date ranges -- the dedup path's "these could be the same thing".
 
     Used to distinguish true duplicates (same thing listed twice) from career
     progressions (different roles at the same institution in different periods).
     If either entry lacks dates, we conservatively return True (assume possible dup).
+
+    The comparison is granularity-honest (#553): each boundary is read at the
+    precision the CV states -- (year, month) when a month is given, (year, None)
+    when it is not -- and two ranges are called disjoint only when the stated
+    data proves it, never by imputing a month nobody wrote. Where no proof is
+    available (an unreadable boundary, or the same year with a month missing on
+    either side) this returns True, the same "can't prove they differ" answer
+    the missing-date guard above already gives; the decision to actually drop an
+    entry stays with the content gates behind this one (`_drop_is_safe`).
     """
     start_a, end_a = _get_entry_date_range(entry_a)
     start_b, end_b = _get_entry_date_range(entry_b)
-    # If either lacks dates, can't prove they're different — allow dedup
+    # If either lacks dates, can't prove they're different -- allow dedup
     if not start_a or not start_b:
         return True
     # Exact match (most common for true duplicates)
     if start_a == start_b and end_a == end_b:
         return True
-    # Overlap test on parsed (year, month) tuples, not string slices (#553):
-    # "2008-7"[:7] == "2008-7" compares wrong against a zero-padded "2008-12"
-    # because the slice never reaches the month digits it needs.
-    sa = _month_tuple_for_overlap(start_a, is_end=False)
-    sb = _month_tuple_for_overlap(start_b, is_end=False)
-    if sa is None or sb is None:
-        return True  # unparseable start — can't prove they differ, allow dedup
-    ea = _month_tuple_for_overlap(end_a, is_end=True)
-    eb = _month_tuple_for_overlap(end_b, is_end=True)
-    # Overlap test: A.start <= B.end AND B.start <= A.end
-    return sa <= eb and sb <= ea
+    boundaries = (_overlap_boundary(start_a, is_end=False),
+                  _overlap_boundary(start_b, is_end=False),
+                  _overlap_boundary(end_a, is_end=True),
+                  _overlap_boundary(end_b, is_end=True))
+    if any(b is None for b in boundaries):
+        return True  # a boundary we can't read -- can't prove they differ
+    start_a_b, start_b_b, end_a_b, end_b_b = boundaries
+    return not (_ends_strictly_before(end_a_b, start_b_b)
+                or _ends_strictly_before(end_b_b, start_a_b))
