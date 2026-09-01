@@ -367,7 +367,8 @@ RENDER_ROUTED_CODES = frozenset({
     'S0',  # Researcher Profiles section
     'B1',  # Education - Academic Degrees
     'B2',  # Education - Other Educational Experiences
-    'C', 'C1', 'C2',  # Postdoctoral Training (C is generic, C1/C2 are sub-types)
+    'C', 'C1', 'C2', 'C3',  # Postdoctoral Training (C generic; C1 postdoc
+                            # research, C2 residency, C3 fellowship -- #573)
     'D1', 'D2', 'D3',  # Professional Positions
     'F1', 'F2',  # Licensure and Board Certification
     'H',   # Honors and Awards
@@ -2453,7 +2454,7 @@ Now analyze the text above:"""
         # Skip for K-codes (teaching entries) since they have free-form content like director names
         # that aren't separate extraction fields, and skip if Stage 5c has already formatted the entry
         taxonomy_code = entry.get('taxonomy_code', '')
-        fields = entry.get('extracted_fields', {})
+        fields = entry.get('extracted_fields') or {}
         is_k_code = taxonomy_code.startswith('K')
         has_formatted_text = fields.get('formatted_text') or fields.get('formatting_source') == 'stage_5c_llm'
 
@@ -2496,7 +2497,7 @@ Now analyze the text above:"""
                 })
 
         # Comments in extracted_fields
-        fields = entry.get('extracted_fields', {})
+        fields = entry.get('extracted_fields') or {}
         if fields.get('comment'):
             comments_to_add.append({
                 'text': fields['comment'],

@@ -15,8 +15,11 @@ Names keep their leading underscore deliberately. Renaming and relocating in the
 same change means a failure cannot be attributed to either; the rename is a
 separate, mechanical follow-up.
 """
+import logging
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
+
+logger = logging.getLogger(__name__)
 
 def _extract_name_from_uid(uid: str) -> str:
     """Extract formatted name from document UID."""
@@ -231,3 +234,155 @@ def _parse_multi_membership_entry(lines: List[str]) -> List[Tuple[str, str, str]
             memberships.append((mem_type, org, date))
 
     return memberships
+
+
+class ParsedActivityLine(NamedTuple):
+    """One row parsed out of a flattened committee/leadership source table.
+
+    `activity` is the line with any role/date parenthetical stripped out,
+    `roles` holds the parenthetical titles in source order, and `dates` is the
+    range the line carried -- or was paired with from the orphaned-date pool.
+    """
+    activity: str
+    roles: tuple[str, ...]
+    dates: str
+
+
+# Column-header labels that survive table flattening as their own lines.
+_COMMITTEE_HEADER_LABELS = ('dates', 'role', 'committee', 'institution')
+# A line that is nothing but a year or a year range ("1999", "1999-2010").
+_DATE_ONLY_LINE = re.compile(r'^(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)$', re.IGNORECASE)
+# A year or a year range at the end of a line ("Committee    1999-2010").
+_TRAILING_DATE = re.compile(r'(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)\s*$', re.IGNORECASE)
+# Parenthetical role+date: "(Chair 1999-2010)" or "(Vice Chair 2006-2008 )".
+_PAREN_ROLE_DATE = re.compile(r'\(([^)]*?)(\d{4})\s*[-–]\s*(\d{4}|present)\s*\)', re.IGNORECASE)
+
+
+def _parse_flattened_committee_lines(lines: List[str]) -> List[ParsedActivityLine]:
+    """Parse committee/leadership lines flattened out of a source table.
+
+    The single line parser behind section O's `_add_multiline_leadership_rows`
+    and section P's `_add_multiline_committee_rows` (#572 -- P was a drifted
+    copy that dropped dates for three of these shapes). Handles what a source
+    table looks like once its column structure is gone:
+
+    - "Committee Name (Chair 1999-2010)" -- parenthetical role+date
+    - "Committee Name | 1999-2010" -- pipe-separated date column
+    - "Committee Name    1999-2010" -- trailing date
+    - "1999-2010" -- a date whose activity is on another line
+
+    The last shape feeds `dates_pool`: when column 1 and column 2 of a source
+    table arrive as separate runs of lines, the dates are orphaned and are
+    matched back to date-less items by position, forward, because both columns
+    come from the same table and are therefore in the same order -- *when*
+    the two runs are the same length. If extraction drops or inserts a line
+    (an extra header, a split row) the counts disagree and position no
+    longer proves the two runs still line up; pairing anyway would put a
+    real date on the wrong activity, which is worse than no date at all
+    because a wrong date looks exactly as confident as a right one once it's
+    in the document. So the forward pairing only runs when the counts match;
+    otherwise the affected items stay dateless (review thread 3843817401 /
+    #665) and a warning is logged naming the mismatch.
+
+    A line carrying several parentheticals ("(Vice Chair 2006-2008) (Chair
+    2008-2010)") is one role held under changing titles, so it becomes one
+    item: the latest date range, with every title collected into `roles`.
+    """
+    items: List[ParsedActivityLine] = []
+    dates_pool: List[str] = []
+
+    for line in lines:
+        # entry_lines() already strips every line at both call sites, but this
+        # is a shared pure-parsing function (#625 review) -- don't depend on
+        # that; normalize here too so a header label survives incidental
+        # whitespace regardless of caller.
+        line = line.strip()
+        if not line or line.lower() in _COMMITTEE_HEADER_LABELS:
+            continue
+
+        # Handle pipe separator from table column extraction
+        # e.g., "Committee (Chair 2002-present) | 1996-Present"
+        if '|' in line:
+            parts = [p.strip() for p in line.split('|') if p.strip()]
+            if len(parts) >= 2 and _TRAILING_DATE.match(parts[-1]):
+                # Last part is a date, rest is the activity
+                activity = ' | '.join(parts[:-1])
+                pipe_date = parts[-1]
+                # Also extract any parenthetical role+date from the activity
+                paren_match = _PAREN_ROLE_DATE.search(activity)
+                if paren_match:
+                    role_text = paren_match.group(1).strip().rstrip(',')
+                    clean_activity = _PAREN_ROLE_DATE.sub('', activity).strip()
+                    roles = (role_text,) if role_text else ()
+                else:
+                    clean_activity = activity
+                    roles = ()
+                items.append(ParsedActivityLine(clean_activity, roles, pipe_date))
+                continue
+            elif len(parts) == 1:
+                line = parts[0]
+            # else fall through to normal processing
+
+        # Check if this is a date-only line
+        if _DATE_ONLY_LINE.match(line):
+            dates_pool.append(line)
+            continue
+
+        # Check for parenthetical role+date: "Committee (Chair 1999-2010)"
+        paren_matches = list(_PAREN_ROLE_DATE.finditer(line))
+        if paren_matches:
+            clean_activity = _PAREN_ROLE_DATE.sub('', line).strip()
+            if len(paren_matches) > 1:
+                # Multiple parentheticals on the same line: latest date range,
+                # every named title kept
+                last = paren_matches[-1]
+                item_date = f"{last.group(2)}-{last.group(3)}"
+                roles = tuple(m.group(1).strip().rstrip(',')
+                              for m in paren_matches if m.group(1).strip())
+            else:
+                match = paren_matches[0]
+                item_date = f"{match.group(2)}-{match.group(3)}"
+                role_text = match.group(1).strip().rstrip(',')
+                roles = (role_text,) if role_text else ()
+            items.append(ParsedActivityLine(clean_activity, roles, item_date))
+            continue
+
+        # Check if line has embedded date at the end (not in parentheses)
+        date_match = _TRAILING_DATE.search(line)
+        if date_match:
+            item_text = line[:date_match.start()].strip()
+            item_date = date_match.group(1)
+            if item_text:
+                items.append(ParsedActivityLine(item_text, (), item_date))
+            else:
+                # Just a date with no text - add to pool
+                dates_pool.append(item_date)
+            continue
+
+        # Plain text line - no date found
+        items.append(ParsedActivityLine(line, (), ''))
+
+    # Match dates_pool to items without dates using forward mapping. Both
+    # items and dates come from the same source table (column 1 -> items,
+    # column 2 -> dates), and are always in the same order -- but only when
+    # the two runs are the same length is that order still provable. Pair
+    # positionally only on a matching count; on a mismatch, leave the
+    # dateless items dateless rather than shift a real date onto the wrong
+    # activity (review thread 3843817401 / #665). A dateless item renders
+    # with a blank Dates cell -- a visible gap, not a silent wrong answer.
+    undated_count = sum(1 for item in items if not item.dates)
+    if dates_pool and undated_count == len(dates_pool):
+        date_idx = 0
+        for i, item in enumerate(items):
+            if not item.dates:
+                items[i] = item._replace(dates=dates_pool[date_idx])
+                date_idx += 1
+    elif dates_pool:
+        logger.warning(
+            "committee/leadership date alignment: %d orphaned date(s) but "
+            "%d undated activity line(s) -- counts disagree, leaving dates "
+            "unassigned instead of pairing positionally",
+            len(dates_pool), undated_count,
+        )
+
+    return items

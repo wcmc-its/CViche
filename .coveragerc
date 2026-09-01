@@ -1,0 +1,11 @@
+# Coverage is reported, never gated -- CODING_STANDARDS.md §6.10.
+# No fail_under here on purpose: a coverage threshold must never be able to
+# fail a build, because the 100-CV corpus run is the real acceptance evidence
+# and nothing unrelated to output correctness should be able to stop it.
+[run]
+branch = True
+omit =
+    # A test file's own coverage is ~100% by construction and only inflates the
+    # total: measuring it reported 35% where the production figure is 27%.
+    */tests/*
+    */__pycache__/*

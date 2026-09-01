@@ -1,6 +1,7 @@
 """Consent text management and version integrity checking."""
 import hashlib
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -11,6 +12,8 @@ from app.config_loader import get_config_value
 logger = logging.getLogger(__name__)
 
 CONSENT_TEXT_PATH = Path(__file__).parent.parent / "consent_text.md"
+
+DEFAULT_CONSENT_VERSION = "1.0"
 
 # Module-level cache: populated on startup, used by endpoints
 _consent_text: str | None = None
@@ -38,6 +41,38 @@ def get_consent_hash() -> str:
     if _consent_text_hash is None:
         load_consent_text()
     return _consent_text_hash  # type: ignore[return-value]
+
+
+@dataclass(frozen=True)
+class ConsentDocument:
+    """The current consent document: version, text, and hash, resolved together.
+
+    Callers that need any of these values go through
+    get_current_consent_document() instead of looking each one up
+    independently, which is what previously let version and hash lookups at
+    a call site drift out of step with each other. Structured as one
+    immutable value so a consistency check (e.g. confirming `hash` is
+    actually the hash of `text`) can be added inside
+    get_current_consent_document() later without changing any caller.
+    """
+    version: str
+    text: str
+    hash: str
+
+
+def get_current_consent_document(db: Session) -> ConsentDocument:
+    """Resolve the current consent version, text, and hash as one unit.
+
+    Single place responsible for resolving these three values -- replaces
+    independently calling get_config_value(db, "consent_version"),
+    get_consent_text(), and get_consent_hash() at each call site.
+    """
+    version = str(get_config_value(db, "consent_version") or DEFAULT_CONSENT_VERSION)
+    return ConsentDocument(
+        version=version,
+        text=get_consent_text(),
+        hash=get_consent_hash(),
+    )
 
 
 def check_consent_integrity(db: Session) -> None:

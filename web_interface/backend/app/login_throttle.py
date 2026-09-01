@@ -40,6 +40,7 @@ class LoginThrottle:
         self._client = None
         self._lock = threading.Lock()
         self._local: dict[str, list[float]] = defaultdict(list)
+        self._local_lock = threading.Lock()
         self._last_sweep = 0.0
 
     @classmethod
@@ -81,29 +82,32 @@ class LoginThrottle:
 
     def _allow_local(self, ip: str) -> bool:
         """Per-process sliding-window fallback (the original in-memory limiter)."""
-        # ponytail: unsynchronized by design -- login is an async def with no
-        # await and uvicorn runs single-worker, so this never sees two threads
-        # (#414: 200 concurrent POSTs -> 1 thread ident; reproduces with real OS
-        # threads, 18/200 over-admit). Add a threading.Lock if login becomes a
-        # sync def, workers > 1, or this is ever called from a background task
-        # or asyncio.to_thread.
-        now = time.time()
-        # Bound the dict: an IP seen once is otherwise retained for the life of
-        # the process, and client_ip comes from a client-supplied XFF header.
-        # Sweep at most once per window so this stays O(n) per window, not per call.
-        # ponytail: growth within a single window is still unbounded; set
-        # CVICHE_REDIS_URL to get the TTL-backed path instead.
-        if now - self._last_sweep >= self.window:
-            self._last_sweep = now
-            self._local = defaultdict(
-                list,
-                {k: v for k, v in self._local.items() if v and now - v[-1] < self.window},
-            )
-        self._local[ip] = [ts for ts in self._local[ip] if now - ts < self.window]
-        if len(self._local[ip]) >= self.max_attempts:
-            return False
-        self._local[ip].append(now)
-        return True
+        # Locked: login() (auth_routes.py) became a plain `def` in #656's
+        # review response, so FastAPI now threadpools it -- real concurrent
+        # OS threads can call this, unlike when it was an async def with no
+        # await (#414: 200 concurrent POSTs -> 1 thread ident under the old
+        # shape; reproduces with real OS threads, 18/200 over-admit
+        # unsynchronized). This is exactly the upgrade this shortcut's own
+        # comment named in advance.
+        with self._local_lock:
+            now = time.time()
+            # Bound the dict: an IP seen once is otherwise retained for the
+            # life of the process, and client_ip comes from a
+            # client-supplied XFF header. Sweep at most once per window so
+            # this stays O(n) per window, not per call.
+            # ponytail: growth within a single window is still unbounded;
+            # set CVICHE_REDIS_URL to get the TTL-backed path instead.
+            if now - self._last_sweep >= self.window:
+                self._last_sweep = now
+                self._local = defaultdict(
+                    list,
+                    {k: v for k, v in self._local.items() if v and now - v[-1] < self.window},
+                )
+            self._local[ip] = [ts for ts in self._local[ip] if now - ts < self.window]
+            if len(self._local[ip]) >= self.max_attempts:
+                return False
+            self._local[ip].append(now)
+            return True
 
 
 _throttle: "LoginThrottle | None" = None

@@ -43,7 +43,7 @@ CViche is a web application for converting CVs into the WCM (Weill Cornell Medic
 
 **Frontend:** React 18 + TypeScript + Vite + Tailwind CSS. Single-page application with client-side routing.
 
-**Backend:** Python 3.11 + FastAPI + SQLAlchemy + Alembic. Runs the pipeline orchestrator, exposes REST and WebSocket APIs, manages auth and sessions.
+**Backend:** Python 3.14 + FastAPI + SQLAlchemy + Alembic. Runs the pipeline orchestrator, exposes REST and WebSocket APIs, manages auth and sessions.
 
 **Database:** MariaDB (utf8mb4). Manages users, runs, steps, feedback, consent audit trail, LLM usage tracking, and system configuration. Alembic handles all schema migrations.
 

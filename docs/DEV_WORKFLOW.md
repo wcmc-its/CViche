@@ -72,7 +72,7 @@ The standing verdict on most reviews is:
 > suggestions, not bugs. If any of them cannot be addressed now, please leave a
 > comment explaining why. I will merge the PR as is."
 
-So a review is not a gate. The friction is in how we answer it. Two rules, both
+So a review is not a gate. The friction is in how we answer it. Five rules, all
 written from complaints we actually caused:
 
 1. **Never decline without a reason.** "Declined" with no explanation drew the
@@ -84,6 +84,58 @@ written from complaints we actually caused:
    that does not in fact cover the comment is the same failure with extra steps —
    *"I don't see this issue included in #494"* (#503). Open the issue, then paste
    its number.
+3. **Every reply that claims a fix cites the commit that made it.** The
+   reviewer asked for this outright on #624 (2026-08-24) — *"There are 150+
+   comments on this PR#624, and it is becoming difficult to cross-check
+   multiple commit hashes to confirm whether each issue has actually been
+   fixed. Please ask Claude to provide the commit hash for every code fix it
+   makes in this PR, for each corresponding review comment."* — and had to
+   repeat it the next day: *"My ask was please add the commit hash to each
+   code review comment. It is difficult to determine where each fix was made
+   when the comments are present but the corresponding commit IDs are
+   missing."* On #625, of the 58 replies we posted, only 10 named an actual
+   commit; the rest claimed a fix without saying where it landed. This is not
+   bookkeeping — the commit hash is what lets one person cross-check a
+   150-comment review at all. One commit that covers several comments gets
+   cited on each of them; a fix that spans several commits lists every one.
+4. **If the fix is localized to a file already in the PR, it goes in the PR.**
+   A separate issue or PR is for genuinely cross-file work only — this decides
+   *whether* to file, ahead of rule 2's *file before you reply*. "Off-diff" is
+   not, by itself, a reason to spin a review comment into a separate issue —
+   #656 filed 8 issues for findings that mostly turned out fixable in the same
+   three files already touched (frozenset membership checks, an
+   isolated-session write, a single-flight lock, a dropped-async conversion
+   once actually checked for real `await`s inside). Only 2 of the 8 survived a
+   second look: both needed test files genuinely outside the PR's diff. On
+   #625, 24 of the reviewer's 29 follow-up comments on 2026-08-25 were
+   re-asking for something we had deferred instead of fixing in place, e.g.
+   *"As we discussed and as mentioned in the coding standards, the change is
+   localized to this file. I don't think any changes outside this file are
+   required. Therefore, I would insist that we fix this as part of the
+   current PR."* He said "mentioned in the coding standards" — it wasn't
+   written down anywhere, which is the actual cost of not having this rule.
+   The same round, 5 of those 29 comments said he could not find what we had
+   pointed him at; an unfindable pointer costs the same round as no pointer,
+   so if pointing elsewhere really is right, link the exact comment URL
+   (`.../issues/N#issuecomment-<id>`) and say whether it's an issue or a PR —
+   on #625 our reference to #660 was correct but he searched PRs for it, and
+   #660 is an issue. The test is falsifiable — *does this fix touch a file
+   the PR doesn't already touch* — not a judgment call about whether the
+   finding "feels" architecturally big. When the test says yes, open a
+   **PR**, not an issue: a filed issue with no PR attached is where findings
+   go to be forgotten (see rule 2 above).
+5. **Never resolve a review thread. That is the reviewer's act.** Replying,
+   pushing the fix and then clicking *Resolved* makes the author both developer
+   and reviewer, and ends the round unilaterally — *"...marked them as resolved,
+   and then clicked 'Resolved' without assigning the PR back to me for another
+   review."* All 56 threads on #625 were closed by the author; on #641 and #624
+   every resolved thread was closed by the reviewer, which is the convention that
+   one PR broke. Hand back instead: reply, push, add the reviewer as assignee
+   **and** re-request their review (`gh pr edit <N> --add-reviewer <login>`).
+   Adding an assignee alone does not put the PR back in anyone's review queue —
+   that is the half we actually missed on #625, and it is the half that makes a
+   round look finished when it is not. Leave every thread open for the reviewer
+   to close.
 
 ### What reviews here consistently ask for
 
@@ -103,9 +155,32 @@ cheaper than answering them one comment at a time:
 Those five standing issues absorb roughly 60% of everything written in review, so
 a comment that maps onto one of them belongs there rather than in a new issue.
 
-Nobody asks for tests in review. Testability appears only as an argument for
-splitting a function, never as a standalone request — which means test coverage
-is ours to decide, not something a reviewer will catch.
+**Tests are asked for in review now.** This document used to say the opposite,
+in as many words: testability appeared only as an argument for splitting a
+function, never as a standalone request, so coverage was ours to decide. That
+claim was drawn from the sample in the table above, which ends at #535. It does
+not hold today, whatever the exact PR it stopped holding on. On #644 (opened
+2026-08-14), mrj4001 opened seven review threads that are nothing but
+enumerated positive/negative test cases, one thread per function — 119 named
+cases across `_build_taxonomy_ref_for_batch`, `_classify_one_batch`,
+`classify_entries_batch`, `group_entries_by_hierarchy`,
+`validate_t_classifications`, `reconnect_fragments` and `detect_duplicates` —
+then followed up on six of the seven asking, in substance, the same thing:
+*"I don't see all of the requested test case changes covered in the code
+review comment. Could you please point me to where each of them has been
+implemented?"* #625 asked the same way, function-by-function: *"Please test
+the emit_track_changes == False branch and the XML-construction exception
+fallback. Both are explicit production paths in
+_add_citation_with_bold_author_as_insertion(), and neither is currently
+covered."* Test coverage is asked for in review now, in exactly this shape: an
+enumerated case list per function, checked case by case against what actually
+shipped.
+
+Practical consequence: for a new or substantially rewritten function that
+validates input or handles errors, enumerate its positive and negative cases
+in the PR description and name the test that covers each. That is the form
+review takes anyway — doing it up front is cheaper than reconstructing the
+list one reply at a time. The rule is `CODING_STANDARDS.md` §6.9.
 
 ## Merging
 
@@ -210,9 +285,21 @@ python3 -m pytest src/unified_pipeline/tests/ -q
 # backend suite — needs dummy env, the factory raises without it
 CVICHE_SESSION_SECRET=x DB_HOST=x DB_PORT=3306 DB_USER=x DB_PASSWORD=x DB_NAME=x \
   python3 -m pytest web_interface/backend/tests/ -q
+
+# coverage — reported, never a gate. `term-missing` lists the uncovered lines and branches.
+python3 -m pytest src/unified_pipeline/tests/ --cov=src --cov-branch --cov-report=term-missing -q
 ```
 
 A local pass is not evidence a change is done. CI is.
+
+Coverage is a number we report, not one that can fail a build — no minimum is
+enforced, deliberately, so nothing can block a corpus run for a reason
+unrelated to output correctness. The figure that means something is coverage of
+modules a live driver actually reaches, which is 55.7% of statements; the raw
+`src/unified_pipeline` figure the command prints as 26% is dominated by code no
+run executes. Two numbers, so say which one you mean: coverage.py's total line
+blends statements and branches, while "27.1%" counts statements alone. The rule
+is `CODING_STANDARDS.md` §6.10, the worklist is #704.
 
 Leave one runnable check behind for non-trivial logic. For a CLI consumed by
 another script, pin the *contract* — `scripts/doctor_one.py` and

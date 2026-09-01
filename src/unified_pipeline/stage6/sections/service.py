@@ -51,6 +51,238 @@ OTHER_SERVICE_SECTION_ROUTING = {
     'Q4C': ('Editorial Board', ['Editorial Board Membership', 'Editorial Activities']),
 }
 
+# Q2 -> Q4D reroute vocabulary, split at the natural seam between specialty
+# terms and role phrases rather than a fixed-width slice of one combined
+# list (#573).
+JOURNAL_SPECIALTY_KEYWORDS = (
+    'journal', 'j.', 'j ', 'pediatrics', 'lancet', 'jama',
+    'perinatology', 'neonatology', 'oncology', 'cardiology', 'neurology',
+)
+JOURNAL_ROLE_PHRASES = ('editorial board', 'ad hoc reviewer', 'manuscript review')
+REVIEWER_PATTERNS = (
+    'abstract reviewer', 'reviewer for', 'manuscript reviewer',
+    'peer reviewer', 'ad hoc reviewer',
+)
+BOARD_KEYWORDS = (
+    'committee', 'board member', 'panel member', 'council', 'task force',
+    'working group', 'planning committee', 'advisory', 'moderator',
+)
+# A multi-line Q2 entry's trailing date-only lines (e.g. "2014, 2017-2020")
+# describe the line before them; nothing else should be treated as a
+# continuation (#573 review).
+_DATE_ONLY_LINE_RE = re.compile(
+    r'^\d{4}(?:\s*[-–,]\s*(?:\d{4}|present|current))*\s*$', re.IGNORECASE)
+
+# Role titles recognized when Stage 4 merges a committee name into the role
+# field (e.g. role="Chair, Ultrasound Committee") and it needs splitting
+# back apart. Used only by `_fill_service_boards`. Single source of truth
+# for base titles -- `_is_board_role_title` below extends it to qualified
+# and chair-variant phrasing without duplicating any of these strings.
+BOARD_ROLE_TITLES = (
+    'chair', 'co-chair', 'deputy chair', 'vice chair', 'member',
+    'secretary', 'treasurer', 'president', 'vice president', 'director',
+    'advisor', 'liaison', 'representative', 'reviewer', 'editor', 'delegate',
+)
+
+# "Chair" variants BOARD_ROLE_TITLES spells only as "chair"/"co-chair"/
+# "deputy chair"/"vice chair"; recognized directly so a Stage-4 role of
+# "Chairperson, Ultrasound Committee" still splits (#624 review).
+_CHAIR_TITLE_VARIANTS = ('chairperson', 'chairman', 'chairwoman')
+
+# Qualifiers Stage 4 sometimes prefixes onto a board role title (e.g.
+# role="Past President, XYZ Committee"). Recognized only as an exact
+# "<qualifier> <base title>" two-word phrase -- whole-phrase matching, not
+# a startswith/substring heuristic, so a phrase like "membership
+# committee" that merely shares a substring with a base title is never
+# mistaken for one (#624 review).
+_ROLE_QUALIFIERS = (
+    'past', 'interim', 'acting', 'honorary', 'deputy', 'vice', 'co',
+    'associate', 'assistant',
+)
+
+
+def _is_board_role_title(role_word: str) -> bool:
+    """True when `role_word` (already stripped/lowercased) is a board role
+    title Stage 4 may have merged a committee name onto.
+
+    Recognizes an exact `BOARD_ROLE_TITLES` entry, a chair variant
+    (`_CHAIR_TITLE_VARIANTS`), or an exact `<qualifier> <base title>`
+    two-word phrase built from `_ROLE_QUALIFIERS` -- whole-phrase equality
+    checks only, never startswith/substring, so "membership committee" is
+    not mistaken for a role title (#624 review).
+    """
+    if role_word in BOARD_ROLE_TITLES or role_word in _CHAIR_TITLE_VARIANTS:
+        return True
+    parts = role_word.split(' ', 1)
+    if len(parts) == 2:
+        qualifier, base = parts
+        if qualifier in _ROLE_QUALIFIERS and (
+                base in BOARD_ROLE_TITLES or base in _CHAIR_TITLE_VARIANTS):
+            return True
+    return False
+
+
+def _split_q2_lines(lines: list[str]) -> tuple[list[str], list[str]]:
+    """Split one multi-line Q2 entry's lines into journal and board lines.
+
+    A bare date-only continuation line extends the *previous* line rather
+    than starting a new board-defaulted entry, so a stray date does not end
+    up in the board entry when the line it describes was rerouted to
+    journal reviewing. Gated on actually looking like a date: an
+    unclassified content line (neither pattern list matches it) still
+    starts its own board_lines item rather than being silently absorbed
+    into whatever line happened to precede it (#573 review).
+    """
+    journal_lines: list[str] = []
+    board_lines: list[str] = []
+    last_group: list[str] | None = None
+
+    for line in lines:
+        line_lower = line.lower()
+        is_reviewer_line = any(p in line_lower for p in REVIEWER_PATTERNS)
+        is_board_line = any(kw in line_lower for kw in BOARD_KEYWORDS)
+
+        if (not is_reviewer_line and not is_board_line and last_group
+                and _DATE_ONLY_LINE_RE.match(line)):
+            last_group[-1] = f"{last_group[-1]} {line}"
+            continue
+
+        if is_reviewer_line and not is_board_line:
+            journal_lines.append(line)
+            last_group = journal_lines
+        else:
+            board_lines.append(line)
+            last_group = board_lines
+
+    return journal_lines, board_lines
+
+
+def _is_q2_journal_reviewer(text_lower: str, role: str, committee: str,
+                            org: str) -> bool:
+    """True when a single-line Q2 entry is really journal reviewing.
+
+    BOARD_KEYWORDS vetoes the reroute even when a journal signal also
+    matches, so an entry naming both a journal and a committee stays a
+    board entry.
+    """
+    is_journal_reviewer = (
+        (role == 'reviewer' and any(kw in text_lower for kw in JOURNAL_SPECIALTY_KEYWORDS)) or
+        any(kw in text_lower for kw in JOURNAL_ROLE_PHRASES) or
+        any(p in text_lower for p in REVIEWER_PATTERNS) or
+        (role == 'reviewer' and 'j ' in committee) or
+        (role == 'reviewer' and 'journal' in org)
+    )
+    is_board_entry = any(kw in text_lower for kw in BOARD_KEYWORDS)
+    return is_journal_reviewer and not is_board_entry
+
+
+def _route_q2_entries(q2_entries: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Reroute Q2 entries that are really journal reviewing to Q4D.
+
+    Handles misclassified single-line entries (a journal "Reviewer" role
+    coded as Q2) and multi-line entries mixing both activities, split line
+    by line via `_split_q2_lines`. Takes plain entry dicts, no docx object
+    and no `self` access, so the routing decision is testable without a
+    document (#624 review).
+    """
+    rerouted_to_journal: list[dict] = []
+    actual_board_entries: list[dict] = []
+
+    for entry in q2_entries:
+        text = entry.get('text', '')
+        text_lower = text.lower()
+        fields = entry.get('extracted_fields', {}) or {}
+        role = (fields.get('role', '') or '').lower()
+        committee = (fields.get('committee_name', '') or '').lower()
+        org = (fields.get('organization', '') or '').lower()
+
+        lines = entry_lines(text)
+        if len(lines) > 1:
+            journal_lines, board_lines = _split_q2_lines(lines)
+
+            # Each journal line becomes its own synthetic entry, carrying
+            # forward only the parent entry's date fields, not its identity
+            # fields (organization/committee_name/role/journal_name) -- a
+            # fused multi-line entry can mix several unrelated activities
+            # under ONE set of extracted_fields (corpus CV HU4DXA), so an
+            # identity field belongs only to the line it was extracted
+            # from. _fill_journal_reviewing already parses a missing
+            # journal name from each line's own raw text.
+            date_fields = {k: v for k, v in fields.items()
+                           if k in ('start_date', 'end_date', 'year')}
+            for jline in journal_lines:
+                rerouted_to_journal.append({
+                    'text': jline,
+                    'taxonomy_code': 'Q4D',
+                    'rerouted_from_q2': True,
+                    'extracted_fields': dict(date_fields),
+                })
+
+            # The remaining lines become a board entry, as a new dict
+            # rather than a mutation of the shared original -- the same
+            # entry object also lives in the flattened all_entries list the
+            # orchestrator builds from entries_by_code (#573 review).
+            if board_lines:
+                actual_board_entries.append(
+                    {**entry, 'text': '\n'.join(board_lines)})
+        else:
+            if _is_q2_journal_reviewer(text_lower, role, committee, org):
+                # As a copy, not a mutation of the shared original.
+                rerouted_to_journal.append(
+                    {**entry, 'taxonomy_code': 'Q4D', 'rerouted_from_q2': True})
+            else:
+                actual_board_entries.append(entry)
+
+    return rerouted_to_journal, actual_board_entries
+
+
+# Specific, multi-word organization names/acronyms used by
+# `_parse_extramural_leadership_lines`. Matched as a plain substring
+# anywhere in the line -- safe because each is specific enough that no
+# plausible role phrase contains it.
+_KNOWN_ORG_NAMES = (
+    'association of pediatric program directors', 'appd',
+    'american academy of pediatrics', 'aap',
+    'academic pediatric association', 'apa',
+    'pediatric academic society', 'pas',
+    'national board of medical examiners', 'nbme',
+    'american medical association', 'ama',
+    'american board of pediatrics', 'abp',
+    'acgme', 'lenox hill',
+)
+
+# Generic organization terms that also occur inside role phrases ("Board
+# Member", "Committee Chair"). Matched as a whole word/phrase, and only
+# when the line does not also carry role vocabulary -- otherwise a role
+# line that names its own kind of body ("Board Member") reads as an
+# organization instead of the role it is (#624 review).
+_GENERIC_ORG_TERMS = (
+    'american college', 'society', 'association', 'academy', 'board',
+    'institute',
+)
+
+
+def _is_known_org_line(line_lower: str, role_keywords: list[str]) -> bool:
+    """True when a leadership-table line names a known organization.
+
+    Two tiers: a `_KNOWN_ORG_NAMES` entry matches unconditionally as a
+    substring, since it is specific enough not to collide with role
+    phrasing. A `_GENERIC_ORG_TERMS` entry matches only as a whole
+    word/phrase, and is vetoed entirely when the line also matches
+    `role_keywords` -- so "Board Member" and "Member, Board of Directors"
+    classify as role lines, not organizations, while "American College of
+    Cardiology" and "Society of Critical Care Medicine" still classify as
+    organizations (#624 review).
+    """
+    if any(name in line_lower for name in _KNOWN_ORG_NAMES):
+        return True
+    if any(kw in line_lower for kw in role_keywords):
+        return False
+    return any(
+        re.search(rf'\b{re.escape(term)}\b', line_lower)
+        for term in _GENERIC_ORG_TERMS
+    )
+
 
 class ServiceSection:
     """Section Q writers, mixed into `WCMTemplateGenerator`."""
@@ -75,84 +307,15 @@ class ServiceSection:
         if self.verbose:
             print(f"Filling Service Activities ({len(q_entries)} entries)...")
 
-        # Reroute Q2 entries that are actually journal reviewing to Q4D
-        # This handles misclassified entries where "Reviewer" role for a journal was coded as Q2
-        # Also handles multi-line entries that contain mixed activities
+        # Reroute Q2 entries that are actually journal reviewing to Q4D.
+        # Handles misclassified single-line entries ("Reviewer" role for a
+        # journal coded as Q2) and multi-line entries mixing both
+        # activities; the routing decision itself is _route_q2_entries, a
+        # free function that touches no docx object (#624 review).
         q2_entries = list(entries_by_code.get(BOARD_SERVICE_CODE, []))
         q4d_entries = list(entries_by_code.get(JOURNAL_REVIEWING_CODE, []))
 
-        journal_keywords = ['journal', 'j.', 'j ', 'pediatrics', 'lancet', 'jama',
-                           'perinatology', 'neonatology', 'oncology', 'cardiology', 'neurology',
-                           'editorial board', 'ad hoc reviewer', 'manuscript review']
-        reviewer_patterns = ['abstract reviewer', 'reviewer for', 'manuscript reviewer',
-                            'peer reviewer', 'ad hoc reviewer']
-        board_keywords = ['committee', 'board member', 'panel member', 'council', 'task force',
-                         'working group', 'planning committee', 'advisory', 'moderator']
-
-        rerouted_to_journal = []
-        actual_board_entries = []
-
-        for entry in q2_entries:
-            text = entry.get('text', '')
-            text_lower = text.lower()
-            fields = entry.get('extracted_fields', {}) or {}
-            role = (fields.get('role', '') or '').lower()
-            committee = (fields.get('committee_name', '') or '').lower()
-            org = (fields.get('organization', '') or '').lower()
-
-            # Check if this is a multi-line entry with mixed activities
-            lines = entry_lines(text)
-            if len(lines) > 1:
-                # Split into journal reviewing and board entries
-                journal_lines = []
-                board_lines = []
-
-                for line in lines:
-                    line_lower = line.lower()
-                    is_reviewer_line = any(p in line_lower for p in reviewer_patterns)
-                    is_board_line = any(kw in line_lower for kw in board_keywords)
-
-                    if is_reviewer_line and not is_board_line:
-                        journal_lines.append(line)
-                    else:
-                        board_lines.append(line)
-
-                # Create separate entries for journal reviewing lines
-                for jline in journal_lines:
-                    new_entry = {
-                        'text': jline,
-                        'taxonomy_code': 'Q4D',
-                        'rerouted_from_q2': True,
-                        'extracted_fields': {'organization': jline}
-                    }
-                    rerouted_to_journal.append(new_entry)
-
-                # Keep remaining lines as board entry (if any)
-                if board_lines:
-                    # Update the original entry to only contain board lines
-                    entry['text'] = '\n'.join(board_lines)
-                    actual_board_entries.append(entry)
-
-            else:
-                # Single-line entry - classify based on content
-                is_journal_reviewer = (
-                    (role == 'reviewer' and any(kw in text_lower for kw in journal_keywords[:10])) or
-                    any(kw in text_lower for kw in ['editorial board', 'ad hoc reviewer', 'manuscript review']) or
-                    any(p in text_lower for p in reviewer_patterns) or
-                    (role == 'reviewer' and 'j ' in committee) or
-                    (role == 'reviewer' and 'journal' in org)
-                )
-
-                # Check if this is clearly a board/committee entry
-                is_board_entry = any(kw in text_lower for kw in board_keywords)
-
-                if is_journal_reviewer and not is_board_entry:
-                    # This looks like journal reviewing, reroute to Q4D
-                    entry['taxonomy_code'] = 'Q4D'
-                    entry['rerouted_from_q2'] = True
-                    rerouted_to_journal.append(entry)
-                else:
-                    actual_board_entries.append(entry)
+        rerouted_to_journal, actual_board_entries = _route_q2_entries(q2_entries)
 
         if rerouted_to_journal and self.verbose:
             print(f"  Rerouted {len(rerouted_to_journal)} Q2 entries/lines to Journal Reviewing")
@@ -189,8 +352,9 @@ class ServiceSection:
         # Find the Service on Boards section
         service_idx = self._find_paragraph_with_text("Service on Boards")
         if service_idx is None:
-            if self.verbose:
-                print(f"  Warning: Could not find section for Service on Boards")
+            logger.warning(
+                "Service on Boards: section not found in template; "
+                "%d entries not rendered", len(entries))
             return
 
         # Find Regional, National, and International subsection tables
@@ -215,8 +379,9 @@ class ServiceSection:
                 tables_by_scope['National'] = table
 
         if not tables_by_scope:
-            if self.verbose:
-                print(f"  Warning: Could not find any table for Service on Boards")
+            logger.warning(
+                "Service on Boards: no Regional/National/International table "
+                "found in template; %d entries not rendered", len(entries))
             return
 
         # Clear tables and mark as populated
@@ -241,9 +406,15 @@ class ServiceSection:
             if not scope_entries:
                 continue
 
-            # Find the table for this scope (fall back to National)
+            # Fall back to the National table when this scope has none of
+            # its own -- but only if a National table was actually found;
+            # if that's also missing, the entries have nowhere to go.
             table = tables_by_scope.get(scope) or tables_by_scope.get('National')
             if not table:
+                logger.warning(
+                    "Service on Boards: no %s or National table found; "
+                    "%d %s entries not rendered",
+                    scope, len(scope_entries), scope)
                 continue
 
             sorted_entries = sort_entries_reverse_chronological(scope_entries)
@@ -261,11 +432,11 @@ class ServiceSection:
                 if not committee and ', ' in role:
                     role_parts = role.split(', ', 1)
                     role_word = role_parts[0].strip().lower()
-                    # Only split if the first part looks like a role title
-                    if role_word in ('chair', 'co-chair', 'deputy chair', 'vice chair',
-                                     'member', 'secretary', 'treasurer', 'president',
-                                     'vice president', 'director', 'advisor', 'liaison',
-                                     'representative', 'reviewer', 'editor', 'delegate'):
+                    # Only split if the first part looks like a role title,
+                    # including a qualified or chair-variant title Stage 4
+                    # sometimes writes ("Past President", "Chairperson") --
+                    # whole-phrase matching only (#624 review).
+                    if _is_board_role_title(role_word):
                         role = role_parts[0].strip()
                         committee = role_parts[1].strip()
 
@@ -370,27 +541,12 @@ class ServiceSection:
         """
 
         # Patterns for date detection
-        year_only_pattern = re.compile(r'^(\d{4})\s*$')
         date_range_pattern = re.compile(r'^(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?(?:\s*,\s*\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)*)$', re.IGNORECASE)
         embedded_date_pattern = re.compile(r'\|\s*(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)\s*$', re.IGNORECASE)
-        trailing_date_pattern = re.compile(r'(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)\s*$', re.IGNORECASE)
 
         # Role indicators
         role_keywords = ['member', 'chair', 'reviewer', 'liaison', 'mentor', 'committee',
                          'board', 'council', 'advisor', 'director', 'leader', 'representative']
-
-        # Known organizations for context
-        known_orgs = [
-            'Association of Pediatric Program Directors', 'APPD',
-            'American Academy of Pediatrics', 'AAP',
-            'Academic Pediatric Association', 'APA',
-            'Pediatric Academic Society', 'PAS',
-            'National Board of Medical Examiners', 'NBME',
-            'American Medical Association', 'AMA',
-            'American Board of Pediatrics', 'ABP',
-            'ACGME', 'Lenox Hill', 'American College',
-            'Society', 'Association', 'Academy', 'Board', 'Institute'
-        ]
 
         # First pass: categorize each line
         content_lines = []  # (text, embedded_date, is_org, is_role, original_idx)
@@ -420,7 +576,7 @@ class ServiceSection:
 
             # Determine if this is an organization or a role
             line_lower = line.lower()
-            is_org = any(org.lower() in line_lower for org in known_orgs)
+            is_org = _is_known_org_line(line_lower, role_keywords)
             is_role = any(kw in line_lower for kw in role_keywords) and not is_org
 
             # Indented lines are usually sub-items (roles under an org)
@@ -532,14 +688,16 @@ class ServiceSection:
             section_idx = self._find_paragraph_with_text("Ad hoc Reviewing")
 
         if section_idx is None:
-            if self.verbose:
-                print(f"  Warning: Could not find Journal Reviewing section")
+            logger.warning(
+                "Journal Reviewing: section not found in template; "
+                "%d entries not rendered", len(filtered_entries))
             return
 
         table = self._find_table_after_paragraph(section_idx)
         if not table:
-            if self.verbose:
-                print(f"  Warning: Could not find Journal Reviewing table")
+            logger.warning(
+                "Journal Reviewing: table not found in template; "
+                "%d entries not rendered", len(filtered_entries))
             return
 
         _clear_table_data(table, keep_header=True)
@@ -596,17 +754,13 @@ class ServiceSection:
         if not entries:
             return
 
-        # Group by section
-        # Q4B = Associate/Guest Editor roles, Q4C = Editorial Board Member
-        # These should go to Editorial Activities section, not generic Professional Service
-        # Q4A is Editor-in-Chief / Senior Editor / Co-Editor (stage_3b:807), i.e.
-        # editorial -- not extramural leadership. It used to share Q1's anchor,
-        # and 'EXTRAMURAL PROFESSIONAL RESPONSIBILITIES' resolves to the
-        # top-level Q header whose first following table is the Leadership table
-        # Q1 had just filled. The clear below then wiped it: 0 of 76 Q1
-        # organizations reached their table on the 10 corpus CVs carrying both,
-        # and 39 entries on 6 CVs vanished from the document entirely (#454).
-        # 'Editor/Co-Editor' is Q4A's own template table and was previously dead.
+        # Group by section. Q4A (Editor-in-Chief/Senior Editor/Co-Editor) is
+        # editorial, not extramural leadership: it routes to its own
+        # 'Editor/Co-Editor' table and must never resolve to
+        # 'EXTRAMURAL PROFESSIONAL RESPONSIBILITIES', which is Q1's anchor
+        # (#454). Q4B (Associate/Guest Editor) and Q4C (Editorial Board
+        # Member) go to Editorial Activities, not generic Professional
+        # Service.
         sections = OTHER_SERVICE_SECTION_ROUTING
 
         entries_by_section = {}
@@ -662,22 +816,12 @@ class ServiceSection:
                                     fields.get('agency', '') or
                                     fields.get('journal_name', ''))
 
-                    # Q3 keeps the study-section name in 'panel_name', which no
-                    # code here ever read: every Grant Reviewing row rendered as
-                    # a bare agency ("Reviewer | NIH | 2018-2020") and the
-                    # identifier -- the entire content of the line -- was
-                    # dropped. 279 of the corpus's Q3 entries across 35 CVs
-                    # carry one, and 190 of those appear nowhere in the output
-                    # document (#466).
-                    #
-                    # Appended, deliberately, rather than promoted into the
-                    # chain above: agency and panel_name are BOTH populated on
-                    # 286 of 380 corpus Q3 entries, so preferring panel_name
-                    # would evict the agency on 269 of them and trade one
-                    # omission for another. Gated on Q3 because that is the only
-                    # code measured to carry the field -- panel_name is absent
-                    # from all 309 Q1, 24 Q4A, 105 Q4B and 157 Q4C entries, so
-                    # today the gate is a no-op that pins the intent.
+                    # Q3 carries the study-section name in 'panel_name'.
+                    # Append it to the agency/organization chain above --
+                    # never promote it over agency, which is populated
+                    # alongside panel_name on most Q3 entries and must not
+                    # be evicted. Gated on Q3 because no other code is
+                    # known to carry the field (#466).
                     panel_name = fields.get('panel_name', '')
                     if taxonomy_code == GRANT_REVIEWING_CODE and panel_name:
                         if not organization:
