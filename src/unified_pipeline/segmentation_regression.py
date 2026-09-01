@@ -41,6 +41,7 @@ import argparse
 import json
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
@@ -156,8 +157,20 @@ def iter_source_lines(docx_path: str) -> list[str]:
     from unified_pipeline.core.docx_structure_extractor import get_paragraph_text
 
     lines: list[str] = []
+    # python-docx returns the same underlying cell (_tc element) for every grid
+    # position a vMerge/hMerge spans, so an unguarded walk counts a merged
+    # cell's paragraphs once per spanned row/column. Mirror the identity guard
+    # at core/docx_structure_extractor.py's seen_cells handling (~line 642):
+    # identity is the cell's _tc element, not the _Cell wrapper (a fresh
+    # wrapper is constructed on every access, so wrapper identity never
+    # matches). One set shared by the top-level loop and the recursive calls
+    # below covers both entry points into walk_cell (#615 item 1).
+    seen_cells: set = set()
 
     def walk_cell(cell):
+        if cell._tc in seen_cells:
+            return
+        seen_cells.add(cell._tc)
         for para in cell.paragraphs:
             text = get_paragraph_text(para, tab_char='\t')
             if text.strip():
@@ -293,9 +306,15 @@ def compare_metrics(baseline: Metrics, candidate: Metrics) -> tuple[Verdict, lis
     newly_lost = [l for l in candidate["lost_lines"] if _norm(l) not in lost_before]
     if newly_lost:
         reasons.append(f"{len(newly_lost)} newly lost line(s), e.g. '{newly_lost[0][:60]}'")
-    if candidate["headers_detected"] < baseline["headers_detected"]:
-        gone = set(baseline["header_titles"]) - set(candidate["header_titles"])
-        sample = next(iter(gone), "?")
+    # Diffed unconditionally (not gated on a headers_detected count drop):
+    # a same-count header REPLACEMENT -- one title swapped for another --
+    # is invisible if this only runs when the count falls (#615 item 2).
+    # Counter (multiset), not set: a title duplicated in baseline that loses
+    # one copy is invisible to a set diff even though headers_detected (the
+    # full list length) already reflects the loss (#615 item 3).
+    gone_counter = Counter(baseline["header_titles"]) - Counter(candidate["header_titles"])
+    if gone_counter:
+        sample = next(iter(gone_counter), "?")
         reasons.append(
             f"headers {baseline['headers_detected']} -> {candidate['headers_detected']}"
             f" (lost e.g. '{sample[:40]}')"
