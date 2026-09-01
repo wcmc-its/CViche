@@ -12,8 +12,10 @@ These four are about the extracted record; the render lints are about the page.
 a 3b classification survived -- the finding is about the classification.
 
 The thirteen constants, regexes and helpers below them are used by nothing else
-in `run_doctor.py`, so they move together and stop being module-global. Bodies
-are unmodified; `run_doctor` re-exports every name it exported before.
+in `run_doctor.py`, so they move together and stop being module-global.
+`run_doctor` re-exports every name it exported before; `_entry_rendered` and
+`_funding_haystacks` have since been fixed in place (#537, #492) -- see their
+docstrings and comments for what changed.
 """
 import re
 from typing import Dict, List, Optional, Tuple
