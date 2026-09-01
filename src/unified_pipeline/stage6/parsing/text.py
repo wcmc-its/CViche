@@ -21,10 +21,18 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
+# The document-uid convention this module parses: an optional "CV_" prefix,
+# then underscore-separated name/year parts (e.g. "CV_2015_Wende",
+# "Wende_John"). `removeprefix` strips only a leading match; a bare
+# `.replace('CV_', '')` would also eat "CV_" occurring mid-string in a name
+# part, which `removeprefix` cannot do.
+_UID_PREFIX = 'CV_'
+
+
 def _extract_name_from_uid(uid: str) -> str:
     """Extract formatted name from document UID."""
     # Remove year prefix (e.g., "2015_Wende" -> "Wende")
-    parts = uid.replace('CV_', '').split('_')
+    parts = uid.removeprefix(_UID_PREFIX).split('_')
 
     # Filter out year
     parts = [p for p in parts if not p.isdigit() and len(p) > 2]
@@ -40,7 +48,7 @@ def _extract_name_from_uid(uid: str) -> str:
 def _extract_last_name_from_uid(uid: str) -> str:
     """Extract last name from document UID for author matching."""
     # Remove year prefix (e.g., "2015_Wende" -> "Wende")
-    parts = uid.replace('CV_', '').split('_')
+    parts = uid.removeprefix(_UID_PREFIX).split('_')
 
     # Filter out years and very short parts
     parts = [p for p in parts if not p.isdigit() and len(p) > 2]
@@ -48,9 +56,29 @@ def _extract_last_name_from_uid(uid: str) -> str:
     if parts:
         # Last part is typically the last name
         last_name = parts[-1]
-        # Handle cases like "Albrechtjs" -> "Albrecht" (initials appended)
+        # Handle cases like "Albrechtjs" -> "Albrecht" (initials appended).
+        #
+        # #665 item 1 flags this as unsound: `suffix.islower() or
+        # suffix.isupper()` matches the tail of almost any Title Case word,
+        # so no case-based rule can tell "appended initials" apart from
+        # "the end of an ordinary surname" (its own stated conclusion).
+        # Deliberately left in place rather than "fixed" by deletion: this
+        # exact case is corpus-real (uid "2003_Albrechtjs_Cv") and the
+        # owner's real surname genuinely is "Albrecht" -- confirmed by
+        # "Albrecht JS"/"Albrecht J" as the cited author in every one of
+        # that CV's own bibliography entries. `bibliography.py:176` uses
+        # this function's return value to decide which citation author to
+        # bold as the CV owner, so removing the strip does not fix a false
+        # positive here -- render_gate_compare over the full 66-CV corpus
+        # showed it silently drops bold-highlighting from 10 real citations
+        # in that document, with zero corresponding case in-corpus where
+        # the strip was itself the bug. No signal available inside this
+        # function (case pattern, part count, the filtered-out non-name
+        # parts) distinguishes the two cases; a real fix belongs at the
+        # call site (matching both the raw and stripped candidates against
+        # actual citation text) rather than a blind guess made here. See
+        # PR body for the corpus evidence in full; #665 item 1 stays open.
         if len(last_name) > 5:
-            # Check if last 2-3 chars look like initials
             for suffix_len in [2, 3]:
                 suffix = last_name[-suffix_len:]
                 if suffix.islower() or suffix.isupper():
@@ -122,8 +150,13 @@ def _is_table_header_entry(text: str, header_keywords: List[str], threshold: int
     # If text is very short, it might be header-like
     # But only if it matches header patterns
     if len(text_lower) < 100:
-        # Count how many header keywords appear
-        keyword_count = sum(1 for kw in header_keywords if kw.lower() in text_lower)
+        # Count how many header keywords appear as whole words -- a substring
+        # test would match "date" inside "candidate" or "organization" inside
+        # "Organization of Medical Education", both real content, not headers.
+        keyword_count = sum(
+            1 for kw in header_keywords
+            if re.search(rf'\b{re.escape(kw.lower())}\b', text_lower)
+        )
 
         # Check for common header patterns
         header_patterns = [
@@ -145,7 +178,10 @@ def _is_table_header_entry(text: str, header_keywords: List[str], threshold: int
             parts = re.split(r'[\t|]', text_lower)
             # If all parts are short and most match header keywords, it's a header
             if all(len(p.strip()) < 30 for p in parts if p.strip()):
-                parts_matching = sum(1 for p in parts if any(kw in p for kw in header_keywords))
+                parts_matching = sum(
+                    1 for p in parts
+                    if any(re.search(rf'\b{re.escape(kw.lower())}\b', p) for kw in header_keywords)
+                )
                 if parts_matching >= len(parts) * 0.5:
                     return True
 
@@ -161,22 +197,32 @@ def _is_structural_label(entry: Dict) -> bool:
     in the WCM output — the WCM template provides its own structure.
 
     Checks:
-    1. All-caps text longer than 3 characters (section headers)
+    1. All-caps text longer than 3 characters, corroborated against the
+       entry's own hierarchy labels (section headers)
     2. Entry text that exactly matches one of its own hierarchy labels
     """
     text = (entry.get('text', '') or '').strip()
     if not text:
         return True
 
-    # All-caps text (section headers like "CLINICAL PRACTICE ACTIVITIES")
-    if text == text.upper() and len(text) > 3 and not any(c.isdigit() for c in text):
-        return True
+    text_lower = text.lower()
+    hierarchy = entry.get('hierarchy', []) or []
 
     # Text that exactly matches one of its hierarchy labels
-    hierarchy = entry.get('hierarchy', [])
     for label in hierarchy:
-        if text.strip().lower() == label.strip().lower():
+        if text_lower == label.strip().lower():
             return True
+
+    # All-caps text (section headers like "CLINICAL PRACTICE ACTIVITIES").
+    # Case alone can't tell a header from legitimate all-caps content (a
+    # name, "USA", an org name written in caps) -- require the text to echo
+    # one of the entry's own hierarchy labels before treating it as a header
+    # rather than dropping every long all-caps run unconditionally.
+    if text == text.upper() and len(text) > 3 and not any(c.isdigit() for c in text):
+        for label in hierarchy:
+            label_lower = label.strip().lower()
+            if label_lower and (label_lower in text_lower or text_lower in label_lower):
+                return True
 
     return False
 
