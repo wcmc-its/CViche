@@ -28,9 +28,7 @@ from unified_pipeline.stage_6_word_template import (  # noqa: E402
     extract_sort_date,
     format_date_for_section,
 )
-import unified_pipeline.stage6.formatting.dates as _formatting_dates  # noqa: E402
 import unified_pipeline.stage6.parsing.dates as _parsing_dates  # noqa: E402
-import unified_pipeline.stage6.sorting.chronological as _sorting_chronological  # noqa: E402
 from unified_pipeline.stage6.parsing.dates import CURRENT_DATE_VALUES  # noqa: E402
 
 
