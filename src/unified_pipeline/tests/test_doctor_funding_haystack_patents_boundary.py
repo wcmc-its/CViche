@@ -54,6 +54,30 @@ def test_patents_heading_closes_the_m2c_haystack():
     assert "vectors" not in m2c.tokens
 
 
+def test_non_boundary_paragraph_keeps_segment_open():
+    # Guards against an over-broad fix that closes a segment on ANY
+    # unrecognised "p" block rather than just the named boundary titles: a
+    # plain non-heading paragraph (the kind of placeholder text stage 6
+    # writes into an empty M2C, e.g. "Please summarize as for current
+    # projects...") must stay part of the open funding segment, not get
+    # dropped the way it would if `current` were reset on every "p" that
+    # fails the `_FUNDING_SECTIONS` title match.
+    placeholder_line = "Please summarize as for current projects, including sponsor."
+    blocks = [
+        ("p", "Pending Funding"),
+        ("p", placeholder_line),
+        ("table", _GRANT_LINE),
+        ("p", "Patents & Inventions"),
+        ("table", _PATENT_LINE),
+    ]
+    haystacks = _funding_haystacks(blocks)
+    m2c = haystacks["M2C"]
+
+    assert "pleasesummarizeasforcurrentprojects" in m2c.text.lower()
+    assert "pendingr01grant" in m2c.text.lower()
+    assert "modifiedviralvectors" not in m2c.text.lower()
+
+
 def test_m2a_to_m2b_transition_still_works():
     # The existing header-title boundary (an in-set funding title) must keep
     # working unchanged -- this fix only ADDS a boundary set, it must not
