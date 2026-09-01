@@ -288,7 +288,7 @@ CV parsing - AI project/
 ## How to Run
 
 ### Prerequisites
-- Python 3.9+
+- Python 3.14 (matches the backend image, `python:3.14-slim`)
 - OpenAI API key set as `OPENAI_API_KEY` environment variable
 - Dependencies: `pip install openai python-docx tiktoken requests lxml`
 - Optional: `NCBI_API_KEY` for faster PubMed lookups in Stage 5

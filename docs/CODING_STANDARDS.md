@@ -331,12 +331,6 @@ Every `except` branch that isn't a bare re-raise, and every plausibility predica
 *Why:* this is §5.3's own gap, generalized and confirmed still open. Neither stage-6 LLM fallback it names — `_classify_geographic_scope`'s `except: return 'National'` or `_reclassify_entry_segments`'s `except: return None` — has a test that drives its `except` branch and asserts anything about the fallback's own behaviour; the one test that does trip `_reclassify_entry_segments`'s exception path (`test_stage6_unrendered_recovery.py`) does so as a side effect of testing dedup, and asserts nothing about the reclassify outcome. Under `render_gate.py`, whose LLM stub makes every call raise, this isn't a coverage gap so much as an inversion: the fallback path is the *only* path a corpus render gate run ever exercises, so a green gate is silently certifying the degraded pipeline, never the intended one. #640 already tracks the same class scoped to `llm_client.py`'s own exception paths; this extends it to stage 6's, tracked separately at #652 with the exact two functions and file:line. A fixture proving a predicate's failure arm actually fires — the 5,000-character no-line-break paragraph, the hallucinated taxonomy code — is worth more than the rule describing it, because it's the only thing that would have caught either gap directly instead of by inspection.
 *Check:* an AST/coverage cross-reference between `except` blocks (and §5.10's predicate-failure arms) and which lines a test suite actually exercises. Real engineering, not a one-liner. Not implemented yet — no script does this cross-reference; see §9.
 
-**6.9 A validation or error-handling function's decision branches are enumerated, and each has a named test. [gate — check pending]**
-This is not a coverage percentage. Nobody has to hit 100% of lines or branches. The bar is that the author states, in the PR description, the positive and negative cases a new or substantially rewritten validation/error-handling function has to get right — malformed input, a boundary value, an exception path, a fallback taken — and names the test that drives each one, so a reviewer can check the list against the diff without re-deriving it from the implementation.
-This sits next to two rules that sound similar and aren't: §6.2 asks whether the suite would notice the function's deletion; §6.8 asks whether every `except`/predicate-failure arm is actually driven by a test. Neither says anything about whether a reviewer can *verify* that coverage without reading the whole suite and reconstructing the branch list themselves — that's what this rule owns. §6.2 is deletion-sensitivity, §6.8 is exhaustiveness of recourse paths, §6.9 is reviewability: the case list has to be written down, not just true.
-*Why:* on #644 (opened 2026-08-14), mrj4001 opened seven review threads — nothing but enumerated positive/negative test cases, one per function (`_build_taxonomy_ref_for_batch`, `_classify_one_batch`, `classify_entries_batch`, `group_entries_by_hierarchy`, `validate_t_classifications`, `reconnect_fragments`, `detect_duplicates`), 119 cases in total — and then followed up on six of the seven with the same question, near-verbatim each time: "I don't see all of the requested test case changes covered in the code review comment. Could you please point me to where each of them has been implemented?" because the case list existed only in his own comment, not anywhere the author had to answer against directly. #625 raised the identical kind of ask, naming specific untested branches (`emit_track_changes == False`, an XML-construction exception fallback in `_add_citation_with_bold_author_as_insertion()`) rather than a percentage. `DEV_WORKFLOW.md` used to say nobody asks for tests in review; that stopped being true on these two PRs, and this rule is what closes the gap between the working agreement and what review now actually does.
-*Check:* the reviewer's own proposed command is the shape of the missing check — he offered it as "something like" `python3 -m pytest src/unified_pipeline/tests/test_stage3b*.py --cov=src/unified_pipeline/stage3b --cov=src/unified_pipeline/stage_3b_entry_classifier --cov-branch --cov-report=term-missing` — cross-referencing that output against the case list an author wrote in the PR description. `pytest-cov` is not a dependency of this repo today (no `pytest-cov` pin in `requirements.txt` or `web_interface/backend/requirements-dev.txt`, and no `pyproject.toml`), so the command does not run here yet, and no script performs the cross-reference. Until `pytest-cov` is added and that cross-reference is written, the author's half of this rule still stands on its own: write the case list in the PR description, name the test for each case.
-
 ## 7. Contracts and configuration
 
 **7.1 Nothing parses another process's stdout. [ratchet]**
@@ -373,6 +367,11 @@ Every model change lands with its Alembic migration in the same PR. Every migrat
 **7.8 A log line has a purpose, and its level states it. [judgement] — preventive, no incident yet.**
 §7.1 says what a log line can't be (a wire protocol); §4.7 says what it can't contain. This says what one is *for*: **ERROR** means a person should act; **WARNING** means degradation someone will need to find later — and per §5.3 the artifact, not the log, is the durable record of that; **INFO** marks run lifecycle; **DEBUG** is free. Anything WARNING or above carries the run id — in a process running three concurrent pipelines, a log line that can't be attributed to a run is noise at best and misattribution at worst.
 *Why:* no incident named. The nearest miss is §4.2's — `Log` rows written against the wrong run — fixed as a state bug; the fix only stays fixed if run-attribution is a stated obligation rather than an accident of the current code. Level choice isn't mechanically checkable, which is why this is `[judgement]` rather than a fourth marker; the run-id half is closer to checkable and could split out as its own narrow gate later if it proves worth enforcing on its own.
+
+**7.9 The runtime version is defined once, by the image tag. [gate]**
+`FROM python:X.Y-slim` in `web_interface/backend/Dockerfile` is the definition. Every other place that states the version — the `setup-python` pins in `ci.yml` and `deps-audit.yml`, the prerequisites bullet in a README — restates that number and must agree with it. Today that number is **3.14**. Moving it is a deliberate PR that changes the tag first and everything that echoes it in the same commit.
+*Why:* §1.5's one-definition failure, in prose. The version has moved twice — `af2cef4` (`python:3.11-slim` → `python:3.13-slim`) and `8bc3750` (→ `python:3.14-slim`) — and both commits correctly carried the Dockerfile, both workflow pins and `requirements.txt` together, so the executable copies never drifted. The five prose copies did: `README.md`, `docs/PIPELINE_README.md`, `docs/TECHNICAL_README.md`, `web_interface/README.md` and `web_interface/TECHNICAL_README.md` were still claiming 3.9, 3.10 or 3.11 against a 3.14 image more than five weeks after the last bump. The cost isn't a broken build — nothing executable read them — it's that a contributor who reads a prerequisites bullet argues for the wrong runtime, which is the incident (2026-08-21): a working session spent disputing the project's Python version on the strength of a stale README, against a `dev` tree that is uniformly 3.14 in every place a machine looks.
+*Check:* `scripts/check_standards.py` reads the version out of the backend Dockerfile and flags every `python-version:` in `.github/workflows/` and every "Python X.Y" in a Markdown file that disagrees with it. 0 today. The scan is deliberately literal: prose that has to name a superseded version for history writes the bare number, without the word "Python" in front of it — there is no waiver comment for Markdown, since §3.7's `# standards-waiver:` form is a heading here.
 
 ## 8. Types and literals
 
@@ -414,13 +413,17 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 1.3 peers do not import peers | 0 | 0 | ✓ |
 | 1.4 core does not import the web backend | 0 | 1 | ✗ |
 | 2.1 no `db.query(` in `api/` | falling | 34 | ratchet |
-| 3.x oversized-function debt (excess lines) | falling | 5679 | ratchet |
+| 3.x oversized-function debt (excess lines) | falling | 5644 | ratchet |
 | 3.7 no metaprogramming | 0 | 0 (1 waived) | ~ |
 | 3.7 dynamic attribute access (non-literal) | falling | 8 | ratchet |
-| 5.4 bare swallows (`except Exception: pass`) | falling | 6 | ratchet |
+| 5.4 bare swallows (`except Exception: pass`) | falling | 4 | ratchet |
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
+| 7.9 restated Python version != the build image | 0 | 0 | ✓ |
 
 <!-- check_standards:auto:end -->
+
+
+
 
 
 
@@ -466,7 +469,6 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 6.4 contract tests on cross-process output | all | met for `doctor_one`, `score_one`; absent for the stage `print()` wire | ~ |
 | 6.5 corpus coverage disclosed | practised | not practised | ✗ |
 | 6.8 every recourse path is tested | all | 0 of 2 named stage-6 fallback paths (`_classify_geographic_scope`, `_reclassify_entry_segments`) have a test driving the `except` branch and asserting the fallback's own behaviour; tracked at #652 | ✗ |
-| 6.9 validation/error function's branches enumerated in the PR, each with a named test | practised | new rule this round, earned by #644/#625; not yet practised on a merged PR, and `pytest-cov` isn't installed so the reviewer's own cross-check command doesn't run here yet | ✗ |
 | 7.2 one config source per consumer | 2 | 9 mechanisms; root `config.yaml` still has 0 readers; the "should match config.yaml" comment moved to `stage6/resolution/institution.py:39` | ✗ |
 | 7.3 produced field rendered or declared | registry exists | no registry (`grep -rl DELIBERATELY_UNRENDERED\|FIELD_REGISTRY` — 0 hits). The worked example no longer holds as stated: `grant_number` is now read and rendered into Award Source (`stage6/sections/research_support.py:346-351`) — fixed as a one-off `.get()` addition, not via a registry, so the next unnamed field drops exactly as silently | ✗ |
 | 7.5 secrets never committed to a config file | 0 findings | no scanner wired into CI yet — not verified either way | ✗ |
@@ -476,7 +478,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 
 Item 1 of §8.3 has no row here, the same as its siblings §8.1 and §8.2: this table (per its own scope note above) covers `[gate]`/`[ratchet]`/`[gate — check pending]` rules; a plain `[judgement]` rule is tracked in its PR description, not measured here.
 
-Of 42 rows across both tables: **9 met, 7 partial, 21 not met**, plus 5 rows that are `[ratchet]` rather than pass/fail — 2.1, 3.2a, 3.7's dynamic-attribute row, 5.4 and 7.1, all falling or holding since their baselines. None of this is the underlying pipeline getting safer; it's the measurement catching up to what was already true or already decided.
+Of 42 rows across both tables: **10 met, 7 partial, 20 not met**, plus 5 rows that are `[ratchet]` rather than pass/fail — 2.1, 3.2a, 3.7's dynamic-attribute row, 5.4 and 7.1, all falling or holding since their baselines. None of this is the underlying pipeline getting safer; it's the measurement catching up to what was already true or already decided.
 
 **Reading this honestly, again.** If only three things are done next, they should be:
 

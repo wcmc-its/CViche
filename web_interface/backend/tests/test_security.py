@@ -106,6 +106,20 @@ class TestSessionSecret:
             assert _validate_session_secret(secret) == secret
         assert not [r for r in caplog.records if "[SECURITY]" in r.getMessage()]
 
+    def test_short_secret_fails_closed_outside_development(self):
+        """Same weak secret that only warns in `development` must refuse to
+        boot anywhere else -- a live deployment shouldn't run brute-forceable
+        session cookies just because nobody rotated the default."""
+        from app.auth import _validate_session_secret
+        for env in ("production", "staging", "anything-not-development"):
+            with pytest.raises(RuntimeError, match="shorter than 32"):
+                _validate_session_secret("short-but-real", env)
+
+    def test_strong_secret_accepted_in_production(self):
+        from app.auth import _validate_session_secret
+        secret = "f" * 64
+        assert _validate_session_secret(secret, "production") == secret
+
 
 class TestSamlSignature:
     """SEC-02: SAML assertions require valid IdP signatures."""
@@ -153,11 +167,18 @@ class TestSamlSignature:
                 f"want_assertions_signed should be True, got {sp_config['want_assertions_signed']}"
 
     def test_signature_failure_logs_security_warning(self, client, db, seed_saml_mode, caplog):
-        """Signature validation failure at ACS logs WARNING with [SECURITY] prefix."""
+        """Signature validation failure at ACS logs WARNING with [SECURITY] prefix.
+
+        Raises the real pysaml2 exception type (#656 review response,
+        2026-08-19: saml_acs() now catches specific pysaml2 exception types
+        instead of string-matching str(e), so a stand-in generic Exception
+        with matching text no longer exercises this path -- the real type
+        does)."""
+        from saml2.sigver import SignatureError
         # Simulate a SAML response that triggers a signature error
         with patch("app.api.saml_routes.get_saml_client") as mock_client:
             mock_client.return_value.parse_authn_request_response.side_effect = \
-                Exception("Signature verification failed")
+                SignatureError("Signature verification failed")
 
             with caplog.at_level(logging.WARNING):
                 response = client.post(
@@ -179,10 +200,21 @@ class TestSamlSignature:
                 f"Expected [SECURITY] WARNING log for signature failure. Got logs: {[r.getMessage() for r in caplog.records]}"
 
     def test_non_signature_error_logs_at_error_level(self, client, db, seed_saml_mode, caplog):
-        """Non-signature exceptions at ACS still log at ERROR level (not WARNING)."""
+        """Non-signature exceptions at ACS still log at ERROR level (not WARNING).
+
+        Raises a real, non-signature pysaml2 exception type (PR #656 review
+        item 6 / #672: saml_acs()'s final except now catches
+        RuntimeError/OSError/SAMLError/SourceNotFound instead of bare
+        Exception, so a stand-in generic Exception no longer exercises this
+        path -- a genuinely unexpected exception type now propagates instead,
+        see test_acs_unexpected_exception_propagates in test_saml_sp.py).
+        StatusError is pysaml2's own exception for an IdP-reported error
+        SAML Status -- a real, expected non-signature failure, and a
+        saml2.SAMLError subclass."""
+        from saml2.response import StatusError
         with patch("app.api.saml_routes.get_saml_client") as mock_client:
             mock_client.return_value.parse_authn_request_response.side_effect = \
-                Exception("Some other pysaml2 failure")
+                StatusError("Some other pysaml2 failure")
 
             with caplog.at_level(logging.DEBUG):
                 response = client.post(
