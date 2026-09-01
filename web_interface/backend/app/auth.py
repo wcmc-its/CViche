@@ -166,12 +166,12 @@ def resolve_session_identity(payload: dict) -> tuple[int, int] | None:
     # A validly-signed cookie (or store record) can still carry a malformed
     # shape. Fail closed with None rather than let a KeyError/TypeError/
     # ValueError from a raw subscript become an unhandled 500.
+    if resolved is not None:
+        return resolved.user_id, resolved.epoch
     try:
-        if resolved is not None:
-            return int(resolved["user_id"]), int(resolved.get("epoch", 0))
         if "user_id" in payload:
             return int(payload["user_id"]), int(payload.get("epoch", 0))
-    except (KeyError, TypeError, ValueError):
+    except (TypeError, ValueError):
         return None
     return None
 

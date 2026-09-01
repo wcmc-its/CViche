@@ -6,7 +6,10 @@ Contract:
     refreshes it. A reachable-but-absent key (idle-expired or logged out) is
     rejected with 401 `session_idle`. Logout deletes the key.
   - Cookies without a `sid` (minted before this feature) bypass the check.
-  - Disabled (no URL) or unreachable Valkey -> fail open (touch() == True).
+  - Disabled (no URL) -> fail open (touch() == True); the store is a no-op.
+  - Configured but unreachable Valkey -> FAIL CLOSED: every method raises
+    SessionStoreUnavailable (PR #657 review, threads 10/13-18). An outage is
+    not evidence that a session is still valid.
 
 The store tests use fakeredis for real TTL/expire semantics; the integration
 tests drive the auth dependency through the TestClient with a fake-backed store.
@@ -15,9 +18,29 @@ import time
 from unittest.mock import MagicMock
 
 import pytest
+import redis.exceptions
 
 import app.session_idle as session_idle
-from app.session_idle import IdleSessionStore
+from app.session_idle import (
+    IdleSessionStore,
+    SessionRecord,
+    SessionStoreUnavailable,
+)
+
+# A key set to expire in 1 ms has certainly lapsed by the time a bounded poll
+# of this length gives up -- deterministic where a flat time.sleep(1.1) was
+# merely slow and CI-flaky (PR #657 review, thread 20.7).
+_EXPIRY_POLL_SECONDS = 0.05
+
+
+def _unreachable_store(**side_effects):
+    """A store whose client raises a Redis transport error for the named ops."""
+    store = IdleSessionStore("redis://fake", 1200)
+    client = MagicMock()
+    for op, exc in side_effects.items():
+        getattr(client, op).side_effect = exc
+    store._client = client
+    return store
 
 
 def _fake_store(ttl=1200):
@@ -50,9 +73,22 @@ def test_touch_without_start_is_expired():
 
 
 def test_touch_after_expiry_is_rejected():
-    store = _fake_store(ttl=1)
+    """A lapsed key reads as expired, not as an outage.
+
+    Driven by a 1 ms pexpire and a bounded poll rather than a flat
+    time.sleep(ttl + margin): the assertion is about expire() answering False
+    for a gone key, not about wall-clock duration.
+    """
+    store = _fake_store(ttl=1200)
     store.start("s1", user_id=1, epoch=0)
-    time.sleep(1.1)
+    key = "cviche:session:idle:s1"
+    store._client.pexpire(key, 1)
+
+    # Poll the key directly, never through touch() -- touch() would slide the
+    # window back to the full TTL and the key would never lapse.
+    deadline = time.monotonic() + _EXPIRY_POLL_SECONDS
+    while store._client.exists(key) and time.monotonic() < deadline:
+        time.sleep(0.001)
     assert store.touch("s1") is False
 
 
@@ -72,22 +108,96 @@ def test_end_deletes_key():
     assert store.touch("s1") is False
 
 
-def test_touch_fails_open_when_redis_errors():
-    store = IdleSessionStore("redis://fake", 1200)
-    client = MagicMock()
-    client.expire.side_effect = ConnectionError("valkey down")
-    store._client = client
-    assert store.touch("s1") is True      # unreachable -> fail open, not 401
+# --- store outages fail CLOSED (PR #657 review, threads 10/13-18) ------------
+
+def test_touch_raises_when_redis_errors():
+    """A refused connection is not evidence the idle window is still open."""
+    store = _unreachable_store(expire=redis.exceptions.ConnectionError("valkey down"))
+    with pytest.raises(SessionStoreUnavailable):
+        store.touch("s1")
 
 
-def test_touch_fails_open_on_timeout():
-    """A hung/partitioned Valkey surfaces as TimeoutError once socket_timeout is
-    set; it must fail open exactly like a refused connection, not block or 401."""
-    store = IdleSessionStore("redis://fake", 1200)
-    client = MagicMock()
-    client.expire.side_effect = TimeoutError("valkey hung")
-    store._client = client
-    assert store.touch("s1") is True
+def test_touch_raises_on_timeout():
+    """A hung/partitioned Valkey surfaces as redis TimeoutError once
+    socket_timeout is set; it must fail closed exactly like a refused
+    connection, not silently extend the session."""
+    store = _unreachable_store(expire=redis.exceptions.TimeoutError("valkey hung"))
+    with pytest.raises(SessionStoreUnavailable):
+        store.touch("s1")
+
+
+def test_start_raises_when_redis_errors():
+    """Login must not mint a thin cookie whose record was never written."""
+    store = _unreachable_store(set=redis.exceptions.ConnectionError("valkey down"))
+    with pytest.raises(SessionStoreUnavailable):
+        store.start("s1", user_id=1, epoch=0)
+
+
+def test_resolve_raises_when_redis_errors():
+    """An outage must be distinguishable from "no such session"."""
+    store = _unreachable_store(get=redis.exceptions.ConnectionError("valkey down"))
+    with pytest.raises(SessionStoreUnavailable):
+        store.resolve("s1")
+
+
+def test_end_raises_when_redis_errors():
+    """Logout must be able to report that revocation did not happen."""
+    store = _unreachable_store(delete=redis.exceptions.ConnectionError("valkey down"))
+    with pytest.raises(SessionStoreUnavailable):
+        store.end("s1")
+
+
+def test_store_errors_do_not_swallow_programming_errors():
+    """Only the Redis hierarchy is caught: a TypeError from a bad call site
+    must surface as itself, not be relabelled an infrastructure outage
+    (threads 17/18)."""
+    store = _unreachable_store(expire=TypeError("bad argument"))
+    with pytest.raises(TypeError):
+        store.touch("s1")
+
+
+# --- resolve() record parsing ------------------------------------------------
+
+def test_resolve_returns_typed_record():
+    store = _fake_store()
+    store.start("s1", user_id=42, epoch=7)
+    record = store.resolve("s1")
+    assert isinstance(record, SessionRecord)
+    assert (record.user_id, record.epoch) == (42, 7)
+    assert record.issued_at > 0
+
+
+def test_resolve_missing_key_is_none():
+    assert _fake_store().resolve("never-seen") is None
+
+
+@pytest.mark.parametrize("stored", [
+    "1",                              # pre-#368 bare marker
+    "not json at all",
+    '"a bare string"',
+    "[]",
+    '{"epoch": 1}',                   # no user_id
+    '{"user_id": 1}',                 # no epoch
+    '{"user_id": "abc", "epoch": 0}',
+    '{"user_id": null, "epoch": 0}',
+    '{"user_id": 1.5, "epoch": 0}',
+    '{"user_id": true, "epoch": 0}',  # bool is an int subclass -- must not pass
+    '{"user_id": 1, "epoch": "x"}',
+    '{"user_id": 1, "epoch": true}',
+])
+def test_resolve_malformed_record_is_none_not_an_exception(stored):
+    """A malformed value is an authentication failure, never a 500: no
+    TypeError/ValueError escapes the parse (thread 20.2)."""
+    store = _fake_store()
+    store._client.set("cviche:session:idle:bad", stored, ex=1200)
+    assert store.resolve("bad") is None
+
+
+def test_disabled_store_resolve_and_end_are_noops():
+    store = IdleSessionStore("", 1200)
+    assert store.resolve("s1") is None
+    store.end("s1")               # must not raise
+    store.start("s1", user_id=1, epoch=0)
 
 
 def test_client_is_built_with_socket_timeouts(monkeypatch):
