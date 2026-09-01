@@ -70,14 +70,25 @@ def _extract_last_name_from_uid(uid: str) -> str:
         # this function's return value to decide which citation author to
         # bold as the CV owner, so removing the strip does not fix a false
         # positive here -- render_gate_compare over the full 66-CV corpus
-        # showed it silently drops bold-highlighting from 10 real citations
-        # in that document, with zero corresponding case in-corpus where
-        # the strip was itself the bug. No signal available inside this
-        # function (case pattern, part count, the filtered-out non-name
-        # parts) distinguishes the two cases; a real fix belongs at the
-        # call site (matching both the raw and stripped candidates against
-        # actual citation text) rather than a blind guess made here. See
-        # PR body for the corpus evidence in full; #665 item 1 stays open.
+        # showed it silently drops bold-highlighting from 12 of the 98
+        # paragraphs in that document's bibliography citing "Albrecht": the
+        # 12 formatted as bare "Albrecht J"/"Albrecht JS" (which the
+        # stripped "Albrechtjs" no longer matches), not the other 86, whose
+        # bolding must key off something else (full-name or first-name
+        # matching) unaffected by this function's return value. 12 matches
+        # what commit 6935094's body and PR_BODY.md already said; this
+        # comment (and the test docstring) previously said 10, an error
+        # caught in review and corrected here after re-running the
+        # python-docx run-level bold diff directly (ref arm vs a probe
+        # render with this strip disabled) rather than trusting either
+        # number. With zero corresponding case in-corpus where the strip
+        # was itself the bug, no signal available inside this function
+        # (case pattern, part count, the filtered-out non-name parts)
+        # distinguishes the two cases; a real
+        # fix belongs at the call site (matching both the raw and stripped
+        # candidates against actual citation text) rather than a blind guess
+        # made here. See PR body for the corpus evidence in full; #665 item
+        # 1 stays open.
         if len(last_name) > 5:
             for suffix_len in [2, 3]:
                 suffix = last_name[-suffix_len:]
@@ -153,9 +164,15 @@ def _is_table_header_entry(text: str, header_keywords: List[str], threshold: int
         # Count how many header keywords appear as whole words -- a substring
         # test would match "date" inside "candidate" or "organization" inside
         # "Organization of Medical Education", both real content, not headers.
+        # A trailing optional "s" keeps this matching a plural header word
+        # ("Dates" for keyword "date") the same way `header_patterns` below
+        # already does via `dates?` -- without it, a bare `\bdate\b` regexp
+        # stops matching "Dates" entirely (word-boundary matching removes
+        # the plural along with the "candidate" false positive it was meant
+        # to fix).
         keyword_count = sum(
             1 for kw in header_keywords
-            if re.search(rf'\b{re.escape(kw.lower())}\b', text_lower)
+            if re.search(rf'\b{re.escape(kw.lower())}s?\b', text_lower)
         )
 
         # Check for common header patterns
@@ -180,7 +197,10 @@ def _is_table_header_entry(text: str, header_keywords: List[str], threshold: int
             if all(len(p.strip()) < 30 for p in parts if p.strip()):
                 parts_matching = sum(
                     1 for p in parts
-                    if any(re.search(rf'\b{re.escape(kw.lower())}\b', p) for kw in header_keywords)
+                    # Same trailing optional "s" as the keyword-count path
+                    # above, so a plural column header ("Dates") still
+                    # matches keyword "date".
+                    if any(re.search(rf'\b{re.escape(kw.lower())}s?\b', p) for kw in header_keywords)
                 )
                 if parts_matching >= len(parts) * 0.5:
                     return True
@@ -197,8 +217,9 @@ def _is_structural_label(entry: Dict) -> bool:
     in the WCM output — the WCM template provides its own structure.
 
     Checks:
-    1. All-caps text longer than 3 characters, corroborated against the
-       entry's own hierarchy labels (section headers)
+    1. All-caps text longer than 3 characters, corroborated by either the
+       entry's own hierarchy labels (section headers) or a stage-4
+       extraction that found no substantive fields for it at all
     2. Entry text that exactly matches one of its own hierarchy labels
     """
     text = (entry.get('text', '') or '').strip()
@@ -215,14 +236,34 @@ def _is_structural_label(entry: Dict) -> bool:
 
     # All-caps text (section headers like "CLINICAL PRACTICE ACTIVITIES").
     # Case alone can't tell a header from legitimate all-caps content (a
-    # name, "USA", an org name written in caps) -- require the text to echo
-    # one of the entry's own hierarchy labels before treating it as a header
-    # rather than dropping every long all-caps run unconditionally.
+    # name, "USA", an org name written in caps) -- require corroborating
+    # evidence before treating it as a header rather than dropping every
+    # long all-caps run unconditionally.
     if text == text.upper() and len(text) > 3 and not any(c.isdigit() for c in text):
+        # Signal 1: the text echoes one of the entry's own hierarchy labels.
         for label in hierarchy:
             label_lower = label.strip().lower()
             if label_lower and (label_lower in text_lower or text_lower in label_lower):
                 return True
+
+        # Signal 2: stage 4 attempted extraction on this entry and came back
+        # with nothing -- every field it looked for is null. A hierarchy-echo
+        # match alone misses a real corpus case: a stray section-header
+        # string (e.g. "CLINICAL PRACTICE ACTIVITIES") extracted as an entry
+        # *under a different section's hierarchy* than its own (a stage 2/3
+        # misclassification -- see `hierarchy_mismatch_flag` on such
+        # entries), which by construction never echoes the hierarchy it was
+        # filed under. It also never carries any real field value, since
+        # there was never any content to extract. Genuine all-caps content
+        # (a name, an org) that reaches this function always has at least
+        # one populated field or is missing `extracted_fields` altogether
+        # (untested/synthetic callers) -- neither case trips this signal.
+        # `extracted_fields` must be present and non-None to count: an
+        # absent key means extraction was never attempted for this entry,
+        # which is not evidence of "nothing to extract".
+        fields = entry.get('extracted_fields')
+        if isinstance(fields, dict) and fields and not any(fields.values()):
+            return True
 
     return False
 
