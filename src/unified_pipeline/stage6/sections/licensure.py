@@ -337,18 +337,19 @@ class LicensureSection:
         unannotated: no module under `stage6/` imports `docx`, and annotating
         it would be the first one to.
         """
+        num_cols = len(table.columns)
+        if num_cols < 2:
+            return False
+
         row = table.add_row()
-        num_cols = len(row.cells)
         if num_cols >= 4:
             row.cells[0].text = record.state or ''
             row.cells[1].text = record.number or ''
             row.cells[2].text = record.issue_date or ''
             row.cells[3].text = record.last_registration_date or ''
-        elif num_cols >= 2:
+        else:
             row.cells[0].text = record.state or ''
             row.cells[1].text = record.number or ''
-        else:
-            return False
 
         for cell in row.cells:
             for para in cell.paragraphs:
