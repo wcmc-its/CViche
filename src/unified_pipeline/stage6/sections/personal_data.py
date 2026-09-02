@@ -23,6 +23,7 @@ almost nothing about a CV's contact block is structured. The work is in order:
 This is the only section writer that reads the source document directly, which
 is why `Document` and `Path` are imported here and nowhere else in this package.
 """
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -38,6 +39,8 @@ except ImportError as exc:
 from ..formatting import _set_cell_text, _set_font
 from ..normalization import _address_cell_text, _from_pii_fragment, _labels_its_own_address_slots, _labels_its_own_phone_slots, _phone_cell_text, _pii_fragments
 from ..parsing import _extract_name_from_uid
+
+logger = logging.getLogger(__name__)
 
 
 class PersonalDataSection:
@@ -232,20 +235,31 @@ class PersonalDataSection:
         phone = office_phone
         address = office_address
 
-        # If still no email, search all entries for email patterns
+        # If still no email, search all entries for email patterns.
+        #
+        # Found while fixing #550: this loop's result feeds the same `email`
+        # local the write-back below now actually uses, and it applied no PII
+        # filter -- unlike the per-entry classification loop above (:126-132),
+        # which blocks exactly this shape. Before the write-back existed, a
+        # match here was discarded like everything else the fallback found, so
+        # the gap was latent; test_email_regex_fallback_does_not_harvest_from_a_pii_fragment
+        # already pins the no-leak behaviour for the per-entry path and caught
+        # this one live the moment the write-back started reading `email`.
         if not email and all_entries:
             for entry in all_entries:
                 text = entry.get('text', '')
+                entry_pii_fragments = _pii_fragments(text)
                 # Look for email pattern
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', text)
-                if email_match:
+                if email_match and not _from_pii_fragment(email_match.group(0), entry_pii_fragments):
                     email = email_match.group(0)
                     break
 
                 # Also check extracted fields
                 fields = entry.get('extracted_fields', {}) or {}
-                email = fields.get('email') or fields.get('primary_email')
-                if email:
+                candidate = fields.get('email') or fields.get('primary_email')
+                if candidate and not _from_pii_fragment(candidate, entry_pii_fragments):
+                    email = candidate
                     break
 
         # Fallback: read personal data from original Word document
@@ -335,8 +349,34 @@ class PersonalDataSection:
                                 print(f"  Found email from paragraph: {email}")
                             break
             except Exception as e:
-                if self.verbose:
-                    print(f"  Warning: Could not read original document for personal data: {e}")
+                # Ungated -- was verbose-only, so a parsing failure on this
+                # fallback (which wraps the whole recovery: three tables plus
+                # the paragraph scan) left no trace at all outside a verbose
+                # run (#550). exc_info=True keeps the traceback out of the
+                # message string itself, which is what a downstream reader
+                # would otherwise be tempted to regex (#7.1 -- print() is a
+                # parsed contract; a logger record is not).
+                logger.warning(
+                    "Could not read original document for personal data "
+                    "fallback (uid=%s, path=%s): %s",
+                    document_uid, original_doc_path, e, exc_info=True,
+                )
+                self.stats['personal_data_fallback_failed'] = (
+                    self.stats.get('personal_data_fallback_failed', 0) + 1
+                )
+
+        # Write back the fallback's recovered values before the table fill
+        # below reads them (#550). The fallback above stores into the
+        # legacy-named `email`/`phone`/`address` locals, not into
+        # `work_email`/`office_phone`/`office_address`, which is what the
+        # PERSONAL DATA table fill actually reads (:391-428 below) -- so
+        # without this, everything the fallback recovers is discarded.
+        # `x = x or recovered` only fills an EMPTY slot: an entry already
+        # classified above from the A entries is never overwritten by a
+        # weaker fallback read.
+        work_email = work_email or email
+        office_phone = office_phone or phone
+        office_address = office_address or address
 
         # Fallback to document_uid for name
         if not name:
