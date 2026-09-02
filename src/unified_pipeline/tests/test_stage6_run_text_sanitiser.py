@@ -430,7 +430,7 @@ def test_plain_writer_sanitises_control_characters_and_keeps_bold(citation, targ
 def test_insertion_writer_with_track_changes_disabled_sanitises_via_plain_path():
     # emit_track_changes=False routes `_add_citation_with_bold_author_as_
     # insertion` straight into `_add_citation_with_bold_author` (bibliography
-    # .py:346-348) -- the same route the fallback `except` block takes.
+    # .py:367-369) -- the same route the fallback `except` block takes.
     gen = _generator(emit_track_changes=False)
     para = _blank_paragraph(gen)
     citation = "Doe J\x0b, Smith A. A study. Journal. 2024;10(2):100-110."
