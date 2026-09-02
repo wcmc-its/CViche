@@ -22,7 +22,9 @@ or "Role" as a title when the source CV had a table header there. All three are
 reached only from this module.
 """
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
+
+from unified_pipeline.core.render_check import entry_fragments
 
 from ..formatting import _clear_table_data, format_date_range
 from ..normalization import _get_cleaned_institution_name
@@ -35,6 +37,71 @@ from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
 # Professional Positions.
 POSITION_TAXONOMY_CODES = ('D1', 'D2', 'D3')
 ACADEMIC_APPOINTMENT_CODE, HOSPITAL_APPOINTMENT_CODE, OTHER_POSITION_CODE = POSITION_TAXONOMY_CODES
+
+# #476: glyphs that mark a tab-joined child fragment as its own
+# career-progression row (a title promoted/re-titled within the same
+# appointment -- see _tab_joined_child_fragments below).
+_CHILD_BULLET_GLYPHS = ('•', '-', '–', '*')
+
+# A child fragment's own date range, e.g. "07/2002 - 06/2003" or
+# "2002 - present" -- loose enough to accept the en/em dash the corpus uses
+# interchangeably with a hyphen, strict enough that ordinary prose never
+# matches (#476 measurement: the only farm entries with a tab followed by a
+# bullet glyph are already this exact shape).
+_CHILD_DATE_RANGE_RE = re.compile(
+    r'^(\d{1,2}/\d{4}|\d{4})\s*[-–—]\s*'
+    r'(\d{1,2}/\d{4}|\d{4}|present|current|ongoing)$',
+    re.IGNORECASE,
+)
+
+
+def _split_child_date_range(fragment: str) -> Optional[Tuple[str, str]]:
+    """(start, end) raw date strings out of a child fragment, or None when
+    the fragment isn't shaped like a date range."""
+    m = _CHILD_DATE_RANGE_RE.match(fragment.strip())
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _tab_joined_child_fragments(text: str) -> List[Tuple[str, Tuple[str, str]]]:
+    """Bullet-prefixed child appointments tab-joined onto a D1/D2/D3 entry's
+    header row (#476) -- e.g. the -DAZFA D2 entry "...| 07/2002 - 12/2006\t*
+    Attending Physician | 07/2002 - 06/2003\t* Attending Physician &
+    Assistant Director | 06/2003 - 12/2006", which today renders only the
+    header (positions.py is not an `entry_lines` call site; this is the
+    tab-recovery path the issue names).
+
+    `entry_fragments` flattens the whole text through '\\n', then '|', then
+    '\\t' -- so a child's bullet-prefixed title and its own date range end up
+    as ADJACENT fragments in the flat list even though the pipe split (which
+    runs before the tab split) cuts across the tab boundary between the
+    header's date field and the child's title. Scanning for a bullet-glyph
+    fragment immediately followed by a date-range fragment recovers exactly
+    the child unit, without re-deriving the tab/pipe nesting by hand.
+
+    Gated on a literal tab in the raw text (not just the bullet+date shape)
+    to keep this from ever firing on an entry that stage 4 already split
+    into its own separate D-code records (MNZ7IA/ZZLKMA render the same
+    Borman source as three such records, each with a bullet still in its raw
+    text but no tab) -- the caller's duplicate-of-the-parent check is a
+    second, independent guard for that case, not the only one.
+    """
+    if '\t' not in text:
+        return []
+    frags = entry_fragments(text)
+    children = []
+    i = 0
+    while i < len(frags) - 1:
+        frag = frags[i].strip()
+        if frag[:1] in _CHILD_BULLET_GLYPHS:
+            date_range = _split_child_date_range(frags[i + 1])
+            if date_range:
+                title = frag[1:].strip()
+                if title:
+                    children.append((title, date_range))
+                i += 2
+                continue
+        i += 1
+    return children
 
 
 class PositionsSection:
@@ -440,3 +507,31 @@ class PositionsSection:
             [title_content, institution_content, dates_content],
             entry=entry
             )
+
+        self._add_tab_joined_child_position_rows(
+            table, original_text, institution_content, taxonomy_code,
+            title.strip().lower(), dates)
+
+    def _add_tab_joined_child_position_rows(self, table, original_text: str,
+                                             institution_content: List[Tuple],
+                                             taxonomy_code: str,
+                                             parent_title_lower: str,
+                                             parent_dates: str) -> None:
+        """Emit one additional row per tab-joined child fragment (#476) found
+        in ``original_text``, immediately after the parent row this entry
+        already added. Institution/location are inherited verbatim from the
+        parent row's own cell content -- these are the same appointment, just
+        a later title within it. Never emits a child whose (title, dates)
+        exactly match the parent's own -- a guard `_tab_joined_child_
+        fragments` itself does not need to make, since a bullet-prefixed
+        fragment that stage 4 already promoted to its own entry (MNZ7IA,
+        ZZLKMA) reaches here as that entry's OWN header, not as a child."""
+        for child_title, (child_start, child_end) in _tab_joined_child_fragments(original_text):
+            child_dates = format_date_range(child_start, child_end, taxonomy_code)
+            if child_title.lower() == parent_title_lower and child_dates == parent_dates:
+                continue
+            self._add_table_row_with_mixed_content(
+                table,
+                [[(child_title, False, "")], institution_content, [(child_dates, False, "")]],
+                entry=None
+                )
