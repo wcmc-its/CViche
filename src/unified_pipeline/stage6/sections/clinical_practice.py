@@ -37,7 +37,31 @@ from ..formatting import (
 from ..normalization import _committee_cell_text
 from ..parsing import _is_structural_label
 from ..sorting import sort_entries_reverse_chronological
-from unified_pipeline.core.render_check import entry_lines
+
+
+def _bullet_parts(text: str) -> List[str]:
+    """Stripped, non-empty parts of a clinical-practice bullet-fallback text
+    (#476), split on '\\n' and '\\t' -- deliberately NOT '|'.
+
+    '|' is this file's own column separator, used at every table-fill branch
+    above (`:236`, `:322`, `:405`) to pull Title/Location/Dates apart as
+    fields of ONE entry, never as a signal of separate entries -- splitting
+    on it here, inside the shared bullet writer all three subsections share,
+    would turn a single "Role | Institution | Dates" bullet into three wrong
+    ones. Tab is safe to add: L1 and L2's own callers (`:264`, `:347`)
+    already weld every tab in `bullet_text` away before calling this
+    function (`.replace('\\t', ' - ', 1).replace('\\t', ' ')`), so this never
+    fires for them; only L3's rare all-raw fallback (role, institution AND
+    dates all empty) can still pass a text with an unwelded tab, and a tab
+    there marks a genuinely separate item exactly the way '\\n' already does.
+    """
+    parts = []
+    for line in str(text or "").split("\n"):
+        for cell in line.split("\t"):
+            cell = cell.strip()
+            if cell:
+                parts.append(cell)
+    return parts
 
 # Section L taxonomy codes (docs/CODING_STANDARDS.md §8.2): L1 Clinical
 # Practice, L2 Clinical Innovations, L3 Clinical Leadership.
@@ -477,7 +501,7 @@ class ClinicalPracticeSection:
         Returns:
             Number of bullets inserted
         """
-        lines = entry_lines(text)
+        lines = _bullet_parts(text)
         if not lines:
             return 0
 
