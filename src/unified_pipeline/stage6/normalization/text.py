@@ -252,7 +252,10 @@ def _deduplicate_repeated_content(text: str, separator: str = '|') -> str:
         separator: The separator between repeated segments (default: '|')
 
     Returns:
-        Deduplicated text with only the first unique segment
+        The first segment, but ONLY when every segment is an exact repeat of
+        it (a merged cell repeating itself). Anything less -- including two
+        segments that simply don't match -- is meaningfully different
+        content and is returned unchanged, untruncated (#561).
     """
     if not text or separator not in text:
         return text
@@ -261,7 +264,7 @@ def _deduplicate_repeated_content(text: str, separator: str = '|') -> str:
     if len(parts) <= 1:
         return text
 
-    # Check if all parts are similar (using first part as reference)
+    # Check if all parts are identical (using first part as reference)
     first_part = parts[0]
 
     # Normalize for comparison (lowercase, remove extra whitespace)
@@ -273,8 +276,17 @@ def _deduplicate_repeated_content(text: str, separator: str = '|') -> str:
     # Count how many parts match the first
     matching_count = sum(1 for p in parts if normalize(p) == first_normalized)
 
-    # If most parts are identical, return just the first one
-    if matching_count >= len(parts) * 0.5:
+    # Collapse only when EVERY segment is identical -- the merged-cell
+    # pathology this function exists for. `matching_count >= len(parts) *
+    # 0.5` was a tautology at len(parts) == 2 (matching_count always counts
+    # the reference segment against itself, so 1 >= 1.0 unconditionally),
+    # truncating any two-segment title to its first half regardless of
+    # whether the segments matched at all (#561).
+    if matching_count == len(parts):
+        logger.debug(
+            "_deduplicate_repeated_content: collapsed %d identical segments "
+            "to %r", len(parts), first_part,
+        )
         return first_part
 
     # Otherwise return original (parts are meaningfully different)
