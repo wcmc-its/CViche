@@ -232,6 +232,14 @@ class AdministrativeActivitiesSection:
 
             record = _CommitteeRecord.from_raw(fields)
             activity, role = record.activity, record.role
+            # What extraction actually produced, kept apart from `activity`
+            # itself: the parenthetical fallback below overwrites `activity`
+            # with the stripped raw text (including any second line) when
+            # extraction gave none, which hid line 2 from the reroute check
+            # further down (review thread 3915848371 item 2). Routing must
+            # look at what extraction produced, not at the fallback's
+            # rewrite.
+            extracted_activity = activity
             dates = format_date_range(record.start_date, record.end_date, taxonomy_code) or ''
 
             # #660 item 1: extraction alone already produced a complete
@@ -319,7 +327,7 @@ class AdministrativeActivitiesSection:
             #     contain a `|`.
             has_unresolved_pipe = not structured_complete and '|' in original_text
             multiline_burst = not structured_complete and len(lines) >= 3
-            if multiline_burst or (len(lines) > 1 and not activity) or has_unresolved_pipe:
+            if multiline_burst or (len(lines) > 1 and not extracted_activity) or has_unresolved_pipe:
                 parsed_rows = self._multiline_committee_rows(lines)
             else:
                 parsed_rows = []

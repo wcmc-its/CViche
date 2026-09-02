@@ -218,31 +218,36 @@ class TestTwoLineNonPipeEmptyExtractionBoundary:
     Two shapes, distinguished by what extraction gave `activity`:
 
     - A2b below: extraction already populated `activity` (just not
-      `dates`). `(len(lines) > 1 and not activity)` is False from the
-      start (activity was never empty), so this never reaches the
-      reparse route -- the parenthetical fallback (administrative_activities.py:262-300)
-      fills `dates`/`role` from line 1's parenthetical instead, and the
-      single-row fallback (line 330-332) writes it as one row. Matches the
-      #660-item-1 FACTS note: "a 2-line entry whose extraction has
-      `activity` but no `dates` is NOT reparsed".
+      `dates`). `(len(lines) > 1 and not extracted_activity)` is False
+      from the start (extraction's `activity` was never empty), so this
+      never reaches the reparse route -- the parenthetical fallback
+      (administrative_activities.py:262-300) fills `dates`/`role` from
+      line 1's parenthetical instead, and the single-row fallback (line
+      330-332) writes it as one row. Matches the #660-item-1 FACTS note:
+      "a 2-line entry whose extraction has `activity` but no `dates` is
+      NOT reparsed".
 
-    - A2 below: extraction is fully empty. Contrary to what the FACTS note
-      and PR #714's own T1-item-2 review comment both assume ("a two-line
-      entry with incomplete extraction and parenthetical activity/date
-      information ... reparsed"), this does NOT reparse either. The
-      parenthetical fallback runs first (`if not dates`, line 262) and,
-      because `activity` is falsy, executes
+    - A2 below: extraction is fully empty. Before the round-2 fix, this
+      did NOT reparse either, even though PR #714's own T1-item-2 review
+      comment expected it to: the parenthetical fallback ran first
+      (`if not dates`, line 262) and, because extraction's `activity` was
+      falsy, executed
       `_PARENTHETICAL_WITH_YEAR_RE.sub('', activity or original_text)`
       against the WHOLE original_text (both lines) -- stripping only the
       matched parenthetical and leaving the raw newline and line 2 stuck
-      inside the single resulting `activity` string. By the time the
-      routing check at line 322 runs, `activity` is no longer empty, so
-      `(len(lines) > 1 and not activity)` is False and the shared #572
-      reparse never fires. A second committee genuinely present on line 2
-      would have its own role/dates silently dropped (see
-      test_two_committees_are_collapsed_and_the_second_ones_dates_are_lost
-      below) -- pinned as real, current behavior; not fixed here (test-only
-      ticket). Flagged in the PR body for review round 1.
+      inside the resulting `activity` string. The routing check at line
+      322 then tested that same rewritten `activity`, which was no longer
+      empty, so `(len(lines) > 1 and not activity)` was False and the
+      shared #572 reparse never fired -- a second committee genuinely
+      present on line 2 had its own role/dates silently dropped.
+
+      The fix (review thread 3915848371 item 2) captures what extraction
+      actually produced as `extracted_activity` before the fallback
+      touches `activity`, and routes on that instead. The parenthetical
+      fallback still runs and still rewrites `activity` (needed so the
+      single-row fallback below has something to write), but the routing
+      check at line 322 no longer sees that rewrite, so it correctly
+      still sees "extraction gave nothing" and reparses.
     """
 
     def test_activity_present_no_dates_takes_the_parenthetical_fallback(self):
@@ -257,7 +262,7 @@ class TestTwoLineNonPipeEmptyExtractionBoundary:
         expected_dates = format_date_range("2005", "2010", "P")
         assert rows == [("Curriculum Committee", "Chair", expected_dates)]
 
-    def test_empty_extraction_with_a_leading_parenthetical_is_not_reparsed(self):
+    def test_empty_extraction_with_a_leading_parenthetical_is_reparsed(self):
         entry = {
             "text": "Curriculum Committee (Chair 2005-2010)\nsecond line",
             "extracted_fields": {},
@@ -266,19 +271,24 @@ class TestTwoLineNonPipeEmptyExtractionBoundary:
 
         rows = _rows(entry)
 
-        # Actual behavior (see class docstring): the parenthetical fallback
-        # intercepts this before the reparse-routing check ever sees an
-        # empty `activity`, so it is NOT reparsed -- contrary to the T1
-        # item 2 review comment's stated expectation for this shape.
+        # Fixed behavior (see class docstring): routing now looks at
+        # `extracted_activity` (empty here), not at the parenthetical
+        # fallback's rewrite of `activity`, so the shared #572 reparse
+        # fires. Line 1 resolves through the parenthetical-role-date shape
+        # the shared parser also understands; line 2 has no role/dates of
+        # its own.
         expected_dates = format_date_range("2005", "2010", "P")
-        assert rows == [("Curriculum Committee\nsecond line", "Chair", expected_dates)]
+        assert rows == [
+            ("Curriculum Committee", "Chair", expected_dates),
+            ("second line", "", ""),
+        ]
 
-    def test_two_committees_are_collapsed_and_the_second_ones_dates_are_lost(self):
-        # Sharper demonstration of the same gap: when line 2 is itself a
+    def test_two_committees_on_two_lines_each_keep_their_own_role_and_dates(self):
+        # Sharper demonstration of the same fix: when line 2 is itself a
         # genuine second committee with its own parenthetical role+date,
-        # the fallback still only reads the FIRST parenthetical match in
-        # the whole text, so Committee B's role and dates are dropped
-        # entirely rather than reparsed into a second row.
+        # each line now becomes its own row instead of the fallback
+        # collapsing both lines into one and dropping Committee B's role
+        # and dates entirely.
         entry = {
             "text": "Committee A (Chair 2005-2010)\nCommittee B (Member 2011-2015)",
             "extracted_fields": {},
@@ -287,8 +297,32 @@ class TestTwoLineNonPipeEmptyExtractionBoundary:
 
         rows = _rows(entry)
 
-        expected_dates = format_date_range("2005", "2010", "P")
-        assert rows == [("Committee A\nCommittee B", "Chair", expected_dates)]
+        expected_dates_a = format_date_range("2005", "2010", "P")
+        expected_dates_b = format_date_range("2011", "2015", "P")
+        assert rows == [
+            ("Committee A", "Chair", expected_dates_a),
+            ("Committee B", "Member", expected_dates_b),
+        ]
+
+    def test_two_line_empty_extraction_without_parenthetical_is_reparsed(self):
+        # Same `not extracted_activity` routing clause, but with no
+        # parenthetical anywhere in the text -- so this pin does not
+        # depend on the parenthetical-fallback interaction the two tests
+        # above exercise. Each line is "Name    YYYY-YYYY" (a trailing
+        # date with no role), a shape `_parse_flattened_committee_lines`
+        # also resolves directly.
+        entry = {
+            "text": "Committee A    2005-2010\nCommittee B    2011-2015",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+
+        rows = _rows(entry)
+
+        assert rows == [
+            ("Committee A", "", "2005-2010"),
+            ("Committee B", "", "2011-2015"),
+        ]
 
 
 class TestParentheticalFallbackAlreadyFixed:
