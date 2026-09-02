@@ -102,8 +102,10 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> List[str]:
 
     Residual, disclosed rather than guessed at: a two-column "Award |
     Organization" join for which stage 4 extracted no granting body has two
-    award-looking parts and no year, and still splits. Nothing in the farm has
-    that shape and inventing a third rule for it would be untested.
+    award-looking parts and no year, and still splits here -- with no rendered
+    effect: `_fill_honors` emits zero rows for that text on this branch and on
+    origin/dev alike. Nothing in the farm has that shape and inventing a third
+    rule for it would be untested.
     """
     lines = entry_lines(text)
     if len(lines) != 1 or '\t' in lines[0]:
