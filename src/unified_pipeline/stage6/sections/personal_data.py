@@ -22,6 +22,37 @@ almost nothing about a CV's contact block is structured. The work is in order:
 
 This is the only section writer that reads the source document directly, which
 is why `Document` and `Path` are imported here and nowhere else in this package.
+
+Step 3 does not run on a live CV today, and the code around it says otherwise.
+`stage_6_word_template.py:272` and `:709` both assert "the server always
+passes original_doc_path"; neither is true on this ref. `run_stage6()` takes
+no `original_doc_path` parameter at all and calls
+`generator.generate(input_path, output_path)`
+(`stage_6_word_template.py:2918-2961`), and both pipeline drivers go through
+it -- `run_full_pipeline.py:994` and
+`web_interface/backend/app/pipeline/orchestrator.py:1370-1377`. The only
+callers that pass `original_doc_path` anywhere in the repo are
+`scripts/render_gate.py --source-dir` and this package's own tests, and
+`SAMPLE_CV_DIR` auto-discovery (`stage_6_word_template.py:709-718`) resolves
+for no farm uid in a fresh worktree. So of the two feeds into the recovered
+`email` that step 5 below writes back (#550), only one is live: the
+all-entries JSON scan, which needs no source document. Step 3's table and
+paragraph scans are measurable by the render gate and unreachable in
+production until `run_stage6` forwards the path -- which is
+`stage_6_word_template.py`'s change, not this module's.
+
+5. Write the recovered values back into the slots step 4 reads. Steps 2 and 3
+   store into two different sets of names -- `work_email`/`office_phone`/
+   `office_address` for the entry classifier, the legacy `email`/`phone`/
+   `address` for the recovery -- and before #550 nothing bridged them, so
+   every value step 3 recovered was computed and discarded. `x = x or
+   recovered` fills an empty slot only. The operand order there is
+   unobservable rather than merely untested: `email`/`phone`/`address` are
+   initialised FROM the three slots and only ever reassigned under an
+   `if not <name>` guard, so a recovered value and an extracted one can never
+   both be present at the write-back. What a test can pin is that invariant
+   holding, which is what the negative control in
+   `tests/test_stage6_personal_data_fallback_writeback.py` does.
 """
 import logging
 import re

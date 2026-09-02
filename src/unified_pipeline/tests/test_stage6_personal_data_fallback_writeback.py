@@ -28,6 +28,23 @@ for Office address / Work email / Office telephone is the fallback.
 Negative control: the same fixture, but the A-entries already carry a work
 email / office phone / office address of their own; those must survive
 untouched, and the fixture's different values must not appear anywhere.
+
+What that negative control does and does not pin, stated plainly because a
+blind verifier read it as stronger than it is: it CANNOT distinguish
+``work_email = work_email or email`` from ``work_email = email or
+work_email``. The operand order there is unobservable by construction, not
+merely untested -- ``email``/``phone``/``address`` are initialised from
+``work_email``/``office_phone``/``office_address`` ("Legacy variable names",
+``personal_data.py:250-252`` on this ref) and are only ever reassigned under
+an ``if not <name>`` guard, so the two operands are either equal or exactly
+one of them is empty. The negative control pins the invariant that makes
+that true -- if a future edit drops one of those guards, an extracted value
+starts losing to a recovered one and this test fails. A fourth test
+(``..._per_field``) pins that the three assignments are independent: one
+slot filled from the entries and two from the document is a real corpus
+shape, and a wholesale "assign all three from the fallback" write-back would
+pass the all-empty and all-full cases while failing it.
+
 Third test: a fallback parse failure (unparseable "original_doc_path") is no
 longer silent -- it increments the new stats counter, and is no longer
 gated behind ``verbose``.
@@ -154,6 +171,67 @@ def test_extracted_contact_fields_are_not_overwritten_by_recovered_ones(tmp_path
         assert leaked not in json.dumps(rows), (
             f"recovered value {leaked!r} overwrote an already-extracted field"
         )
+
+
+def test_write_back_is_per_field_not_wholesale(tmp_path):
+    """One slot classified from the entries, two recovered from the document.
+
+    The all-empty (positive control) and all-populated (negative control)
+    cases are both passed by a wrong write-back that assigns the three slots
+    together -- ``work_email, office_phone, office_address = email, phone,
+    address``, or a single ``if not work_email:`` guarding all three. This
+    mixed case is the one that separates them, and it is the common corpus
+    shape: 2054_Opresko_Cv's entries supply nothing while its source table
+    supplies address/phone/email, but a CV whose entries yield an email and
+    whose address only exists in the source table needs BOTH halves.
+    """
+    source = tmp_path / "source.docx"
+    _make_source_docx(source)  # plo4@pitt.edu / 412-623-7764 / 5117 Centre Avenue
+
+    rows, _gen = _render(
+        tmp_path,
+        entries=[_a("Work email: extracted@example.com",
+                    {"email": "extracted@example.com"})],
+        original_doc_path=str(source),
+    )
+
+    # The one extracted slot wins ...
+    assert rows.get("work email:") == "extracted@example.com", (
+        "the entry-classified work email lost to the document's -- the "
+        "write-back is overwriting a populated slot (#550)"
+    )
+    assert rows.get("personal email:", "") == "", (
+        "the document's email was routed into Personal email instead of "
+        "being dropped -- a recovered value must fill an empty slot, not "
+        "find a different one to occupy (#550)"
+    )
+    # ... and the two empty ones are still filled from the document.
+    assert "5117 Centre Avenue" in rows.get("office address:", ""), (
+        "Office address stayed empty even though only Work email was "
+        "extracted -- the three write-backs are not independent (#550)"
+    )
+    assert "412-623-7764" in rows.get("office telephone:", ""), (
+        "Office telephone stayed empty even though only Work email was "
+        "extracted -- the three write-backs are not independent (#550)"
+    )
+
+    # Recorded, not endorsed: the business-address block parser strips an
+    # embedded "Phone:" line only while `phone` is still empty and an
+    # embedded "E-mail:" line only while `email` is still empty
+    # (personal_data.py:312 and :321 -- byte-identical to origin/dev, this
+    # PR does not touch either line). So in exactly this mixed shape the
+    # address cell keeps the source table's E-mail line as an address line,
+    # while the Phone line is correctly lifted out. It is a pre-existing
+    # heuristic quirk that the #550 write-back makes visible for the first
+    # time, no corpus uid exhibits it today (the render gate's three CHANGED
+    # uids all have empty contact slots), and fixing the parser is outside
+    # this issue's scope -- but it must not become silent again, so it is
+    # pinned here and disclosed in the PR body rather than asserted away.
+    assert "E-mail:" in rows.get("office address:", ""), (
+        "the address block's embedded E-mail line is no longer riding along "
+        "into Office address -- if that was fixed deliberately, delete this "
+        "assertion and the matching PR-body/#550 disclosure with it"
+    )
 
 
 # --------------------------------------------------------------------------
