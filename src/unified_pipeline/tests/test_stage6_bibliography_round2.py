@@ -484,7 +484,7 @@ def test_section_entry_count_logs_info_via_project_logger_not_print(caplog, caps
 
 
 def test_plain_mode_renders_citation_without_ins_and_keeps_author_bold():
-    # T1.1: the non-tracked branch at bibliography.py:346-348 falls through to
+    # T1.1: the non-tracked branch at bibliography.py:367-369 falls through to
     # _add_citation_with_bold_author -- proven here directly, on the real
     # WCM template, rather than only inferred from the tracked path's tests.
     gen = WCMTemplateGenerator(verbose=False, emit_track_changes=False)
@@ -639,7 +639,7 @@ def test_enrichment_field_text_coercion(value, expected):
 
 # --- T1 item 5: all nine S1-S9 header contracts ---
 
-# Copied verbatim from bibliography.py:197-206 as the contract under test --
+# Copied verbatim from bibliography.py:199-208 as the contract under test --
 # a change to either copy without the other is exactly the drift this test
 # exists to catch.
 _SECTION_HEADERS = {
