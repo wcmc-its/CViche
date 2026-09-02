@@ -12,7 +12,8 @@ only the first membership.
 more than one part unchanged) by adding '|' as a boundary when the whole
 entry is one line. Migrating this call site to `entry_fragments` outright
 (tab included) was tried and reverted after reading the actual render-gate
-diff: 038WKA and 9 near-duplicate "Jonathan Nahmias" uids carry a single
+diff: 038WKA and 11 near-duplicate "Jonathan Nahmias" uids (12 total) carry
+a single
 membership with three tab-separated fields ("Member of the American
 Psychiatric Association\\tFebruary 2018 - Present\\tI have attended and
 presented..."); `_parse_multi_membership_entry`'s classifier needs a
