@@ -312,7 +312,7 @@ _PRESENT_MARKER_PATTERN = re.compile(r'\b(?:presents?|ongoing|current(?:ly)?)\b'
 #: "YYYY—YYYY", or "YYYY to YYYY". More than one match in an entry's text
 #: means the text is ambiguous about which range belongs to this entry (#556).
 CLOSED_DATE_RANGE_PATTERN = re.compile(
-    r'(\d{4})(?:\s*[-–—]\s*|\s+to\s+)(\d{4})',
+    r'(?<!\d)(\d{4})(?:\s*[-–—]\s*|\s+to\s+)(\d{4})(?!\d)',
     re.IGNORECASE,
 )
 

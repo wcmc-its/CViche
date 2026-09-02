@@ -211,6 +211,58 @@ def test_condition_implausible_range_blocks_repair():
     assert reformatted == {}
 
 
+def test_condition_reversed_range_in_bounds_blocks_repair():
+    # Both halves are in-bounds calendar years, but reversed (start > end) --
+    # the `start_year <= end_year` half of the plausibility check, not the
+    # bounds half, is what blocks this one.
+    fields = {"start_date": None, "end_date": None}
+    text = "Fellowship 2020-2018"
+
+    updated, reformatted = apply_regex_post_processing(text, fields, "D1")
+
+    assert updated["end_date"] is None
+    assert reformatted == {}
+
+
+def test_condition_ordered_but_out_of_bounds_range_blocks_repair():
+    # Both halves are correctly ordered, but fall below _MIN_PLAUSIBLE_YEAR --
+    # the bounds half of the plausibility check, not the ordering half, is
+    # what blocks this one.
+    fields = {"start_date": None, "end_date": None}
+    text = "Historical appointment 1850-1860"
+
+    updated, reformatted = apply_regex_post_processing(text, fields, "D1")
+
+    assert updated["end_date"] is None
+    assert reformatted == {}
+
+
+def test_condition_ongoing_marker_blocks_repair():
+    # The parametrized present-marker cases above never exercise the bare
+    # "ongoing" alternative in _PRESENT_MARKER_PATTERN itself.
+    fields = {"start_date": "2020", "end_date": None}
+    text = "2020-2022, ongoing"
+
+    updated, reformatted = apply_regex_post_processing(text, fields, "D1")
+
+    assert updated["end_date"] is None
+    assert reformatted == {}
+
+
+def test_condition_digit_glued_identifier_blocks_repair():
+    # "HL001950-2020" (a grant-number shape) is not a date range: the digits
+    # immediately preceding the hyphen are glued to more digits on their
+    # left, so CLOSED_DATE_RANGE_PATTERN's digit-boundary guards
+    # ((?<!\d) / (?!\d)) must keep this from matching as "1950-2020" at all.
+    fields = {"start_date": None, "end_date": None}
+    text = "Grant HL001950-2020 renewal"
+
+    updated, reformatted = apply_regex_post_processing(text, fields, "M2A")
+
+    assert updated["end_date"] is None
+    assert reformatted == {}
+
+
 # --- drift guard: DATE_RANGE_TAXONOMY_CODES vs. the live schema -----------
 
 def test_date_range_taxonomy_codes_matches_schema_derived_codes():
