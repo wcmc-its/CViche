@@ -77,7 +77,7 @@ class PatentsSection:
         last_element = self.doc.paragraphs[section_idx]._element
 
         for i, entry in enumerate(sorted_entries):
-            fields = entry.get('extracted_fields', {})
+            fields = entry.get('extracted_fields') or {}
 
             title = fields.get('title', '')
             patent_number = fields.get('patent_number', '')

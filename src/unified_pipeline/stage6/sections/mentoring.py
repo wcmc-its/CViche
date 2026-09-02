@@ -87,7 +87,7 @@ class MentoringSection:
         # Rationale: If there's no end date, the displayed duration would show "-present"
         entries_to_move = []
         for entry in n3b_entries:
-            fields = entry.get('extracted_fields', {})
+            fields = entry.get('extracted_fields') or {}
             end_date = str(fields.get('end_date', '') or '').strip()
             start_date = str(fields.get('start_date', '') or '').strip()
 
@@ -158,7 +158,7 @@ class MentoringSection:
             # Create tables for each current mentee (in REVERSE order so final order is correct)
             # Each table is inserted right after the header, pushing earlier ones down
             for entry in reversed(n3a_entries):
-                fields = entry.get('extracted_fields', {})
+                fields = entry.get('extracted_fields') or {}
                 self._create_mentee_table_with_spacing(fields, current_mentees_idx, entry)
                 self.stats['tables_populated'] += 1
                 self.stats['entries_inserted'] += 1
@@ -179,7 +179,7 @@ class MentoringSection:
 
                 # Create tables for each past mentee (in REVERSE order so final order is correct)
                 for entry in reversed(n3b_entries):
-                    fields = entry.get('extracted_fields', {})
+                    fields = entry.get('extracted_fields') or {}
                     self._create_mentee_table_with_spacing(fields, past_mentees_idx, entry)
                     self.stats['tables_populated'] += 1
                     self.stats['entries_inserted'] += 1
