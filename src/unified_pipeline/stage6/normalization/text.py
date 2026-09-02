@@ -13,8 +13,37 @@ sibling `fields.py` handles the case where the input is not text yet.
 Names keep their leading underscore for now. Renaming and relocating in one
 change would make a failure impossible to attribute to either.
 """
+import logging
 import re
 from typing import Dict, Optional
+
+logger = logging.getLogger(__name__)
+
+# Name suffixes that belong to the surname immediately before them, never to
+# an initials slot of their own: "Smith, John, Jr., Brown" is one author with
+# a suffix, not two authors named "Jr." and "Brown" (#560).
+_AUTHOR_SUFFIX_RE = re.compile(r'^(?:Jr|Sr|II|III|IV)\.?$', re.I)
+
+
+def _looks_like_initials(token: str) -> bool:
+    """Whether a comma-split token could be an initials group.
+
+    A single alphabetic character of any case or script is always an
+    initial -- "Kelly, r" and "Kelly, Å" both occur in the corpus (#560),
+    and a lone letter has no other plausible reading. 2-4 characters must
+    still be uppercase (as before widening): initials are conventionally
+    written that way, and a short mixed-case word ("Scot", "Li", "Wei") is
+    at least as likely to be a real given name as an initials group -- the
+    old ASCII-only `[A-Z]{1,4}` was doing useful work there and only needed
+    widening for the single-character case. Hyphenated initials ("R-Y")
+    follow the same rule per side.
+    """
+    t = token.rstrip('.').replace(' ', '')
+    if not t:
+        return False
+    if re.match(r'^[^\W\d_](-[^\W\d_])+$', t):
+        return t.replace('-', '').isupper()
+    return t.isalpha() and (len(t) == 1 or (len(t) <= 4 and t.isupper()))
 
 
 def _normalize_author_names(authors: str) -> str:
@@ -24,11 +53,21 @@ def _normalize_author_names(authors: str) -> str:
     Handles formats like:
     - "Kelly, R, Pirog, R" -> "Kelly R, Pirog R" (LastName, Initial pairs)
     - "Smith JA, Jones MB" -> "Smith JA, Jones MB" (already Vancouver)
-    - "Smith, John A., Jones, Mary B." -> "Smith JA, Jones MB"
+    - "Smith, John A., Jones, Mary B." -> "Smith, John A, Jones, Mary B"
+      (full given names aren't initials -- the pair detector correctly
+      declines this shape; abbreviating "John A" to "JA" is not attempted)
 
     Fixes common issues:
     - Double commas: "Watson, K.,," -> "Watson K"
     - Trailing punctuation
+
+    Never drops a token (#560). Previously, a comma-split token the pair
+    detector or the fallback below couldn't place -- an initials group, a
+    name suffix, a bare 1-2 character fragment -- was silently discarded.
+    Because a single missing comma anywhere in the list is enough to make
+    the pair detector decline the whole string, that one discard rule was
+    stripping every later author's initials from citations that had them.
+    Such a token now merges into the author immediately before it instead.
     """
     if not authors:
         return ''
@@ -49,15 +88,16 @@ def _normalize_author_names(authors: str) -> str:
     # First, check if this looks like alternating "Name, Initial" pairs
     parts = [p.strip() for p in authors.split(',') if p.strip()]
 
-    # Try to detect the pattern: alternating surnames and initials
-    # Initials are 1-4 uppercase letters (possibly space-separated like "P L" or hyphenated like "R-Y")
+    # Try to detect the pattern: alternating surnames and initials. A
+    # recognised suffix in the initials slot doesn't have to look like
+    # initials itself -- it belongs to the surname before it (#560).
     looks_like_pairs = True
     if len(parts) >= 2:
         for i in range(1, len(parts), 2):
-            # Every odd index should be initials (1-4 uppercase letters, possibly with spaces/hyphens)
-            part = parts[i].rstrip('.').replace(' ', '')
-            # Match: "AB", "ABC", "A-B", "R-Y", etc.
-            if not re.match(r'^[A-Z]{1,4}$', part) and not re.match(r'^[A-Z](-[A-Z])+$', part):
+            part = parts[i]
+            if _AUTHOR_SUFFIX_RE.match(part.rstrip('.')):
+                continue
+            if not _looks_like_initials(part):
                 looks_like_pairs = False
                 break
 
@@ -65,35 +105,59 @@ def _normalize_author_names(authors: str) -> str:
         # Combine pairs: ["Kelly", "R", "Pirog", "R"] -> ["Kelly R", "Pirog R"]
         cleaned_authors = []
         i = 0
-        while i < len(parts) - 1:
+        while i < len(parts):
             surname = parts[i].strip().rstrip('.,')
+
+            if i + 1 >= len(parts):
+                # A trailing element with no initials to pair with is still
+                # a name -- emit it rather than drop it (#560).
+                if surname:
+                    cleaned_authors.append(surname)
+                i += 1
+                continue
+
             initials = parts[i + 1].strip().rstrip('.,')
+
+            if _AUTHOR_SUFFIX_RE.match(initials.rstrip('.')):
+                # The slot after this surname is a suffix, not an initials
+                # group for a *following* pair -- attach it here.
+                cleaned_authors.append(f"{surname} {initials.rstrip('.')}")
+                i += 2
+                continue
+
             # Normalize spaced initials: "P L" -> "PL"
-            initials_normalized = initials.replace(' ', '')
+            initials_normalized = initials.replace(' ', '').upper()
 
             # Skip if surname looks like just initials
             if len(surname) <= 2 and surname.isupper():
                 i += 1
                 continue
 
-            # Handle multi-part surnames like "García Polanco"
-            # Check if next "initial" is actually part of surname
-            if i + 2 < len(parts):
-                next_part = parts[i + 2].strip().rstrip('.,')
-                if len(initials_normalized) > 4 or not initials_normalized.isupper():
-                    # This might be a multi-part name
-                    surname = f"{surname} {initials}"
-                    initials_normalized = next_part.replace(' ', '')
-                    i += 1
-
             cleaned_authors.append(f"{surname} {initials_normalized}")
             i += 2
 
         return ', '.join(cleaned_authors)
 
-    # Fall back to simpler processing for other formats
+    # Fall back to simpler processing for other formats. The pair detector
+    # rejected this input -- one missing comma anywhere in the list is
+    # enough (#560) -- so comma position can no longer be trusted to mean
+    # "surname, initials" across the whole string. A token that looks like
+    # just initials, a suffix, or a bare 1-2 character fragment merges into
+    # the author immediately before it -- but only when that author is
+    # still "open": a bare name with no initials of its own yet, the exact
+    # shape a stray comma produces ("Konopasek, L" split by one comma that
+    # shouldn't be there). An author that already has its own initials
+    # ("Sanguino SM") is not reopened by a later fragment, and a fragment
+    # with nothing open to attach to is an unattributable orphan -- dropped,
+    # same as before, because there is no author here to charge it to.
+    logger.debug(
+        "_normalize_author_names: pair detector rejected %r (%d comma-"
+        "separated tokens); using non-destructive fallback",
+        authors, len(parts),
+    )
     cleaned_authors = []
     has_et_al = False
+    merge_target_open = False
 
     for author in parts:
         author_stripped = author.strip()
@@ -103,12 +167,18 @@ def _normalize_author_names(authors: str) -> str:
             has_et_al = True
             continue
 
-        # Skip entries that are just initials (like "MR." or "UM.")
-        if re.match(r'^[A-Z]{1,3}\.?$', author_stripped):
-            continue
+        # Look like just initials ("MR", "um"), a recognised suffix ("Jr"),
+        # or a bare 1-2 character fragment: not a standalone author.
+        is_initials_group = bool(re.match(r'^[A-Z]{1,3}\.?$', author_stripped))
+        is_suffix = bool(_AUTHOR_SUFFIX_RE.match(author_stripped.rstrip('.')))
+        is_short_fragment = len(author_stripped) <= 2
 
-        # Skip entries that look incomplete (just 1-2 chars)
-        if len(author_stripped) <= 2:
+        if is_initials_group or is_suffix or is_short_fragment:
+            if merge_target_open:
+                merged = author_stripped.rstrip('.,')
+                if merged:
+                    cleaned_authors[-1] = f"{cleaned_authors[-1]} {merged}"
+                merge_target_open = False
             continue
 
         # Clean up individual author formatting
@@ -120,6 +190,10 @@ def _normalize_author_names(authors: str) -> str:
 
         if author:
             cleaned_authors.append(author)
+            # "Open" for exactly one merge iff this author is a bare token
+            # (no internal space) -- one that already reads "Surname XY"
+            # is complete and shouldn't absorb a later stray fragment too.
+            merge_target_open = ' ' not in author
 
     result = ', '.join(cleaned_authors)
     if has_et_al:

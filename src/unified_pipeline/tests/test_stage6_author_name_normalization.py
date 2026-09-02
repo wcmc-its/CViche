@@ -1,0 +1,166 @@
+"""Regression tests for #560: `_normalize_author_names` silently deleted
+authors and initials instead of keeping them.
+
+`_normalize_author_names` (`stage6/normalization/text.py`) has exactly one
+caller, `_format_citation` (`stage6/formatting/values.py:17`), reached via
+`authors = fields.get('authors', '')` -> `_normalize_author_names(authors)`
+whenever `formatting_source != 'stage_5d_llm'`. These tests assert through
+that wire, not just the helper, since that is the only path that reaches
+the rendered page.
+
+The pair detector (`^[A-Z]{1,4}$` / `^[A-Z](-[A-Z])+$`, ASCII-uppercase
+only) rejects a "Surname, Initials" list the instant one element doesn't
+fit that shape -- a lowercase or non-ASCII single initial, a full given
+name, a name suffix, or one missing comma anywhere in the list. Before this
+fix, the fallback path that runs next then discarded every comma-split
+token it didn't recognise as a standalone name (an initials group, a
+suffix, a bare 1-2 character fragment) instead of keeping it. Because one
+missing comma anywhere in the list is enough to reject the whole string,
+that discard rule was capable of stripping every later author's initials
+from a citation, not just the one malformed entry -- reproduced live in the
+delivered document (W0MTVW / HU4DXA, "24. Sanguino SM, Konopasek, Raszka,
+Bostwick, Smith...").
+
+Run with:
+
+    python3 -m pytest src/unified_pipeline/tests/test_stage6_author_name_normalization.py -p no:cacheprovider
+"""
+
+import sys
+from pathlib import Path
+
+_SRC = Path(__file__).resolve().parents[2]
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from unified_pipeline.stage6.formatting.values import _format_citation  # noqa: E402
+
+
+def _cite(authors: str) -> str:
+    """The rendered citation string for a minimal publication entry whose
+    only variable is the raw `authors` field -- the wire `_format_citation`
+    actually walks, not a direct call into the normalizer."""
+    entry = {
+        'extracted_fields': {'authors': authors, 'title': 'A Study'},
+        'enrichment_data': {},
+        'enriched_fields': [],
+    }
+    citation, _target_name, _enriched = _format_citation(entry, 1)
+    return citation
+
+
+# --------------------------------------------------------------------------
+# The 8 reproduction lines from #560, plus the docstring's own broken third
+# example. None may drop a letter that was present in the input authors
+# string (allowing for punctuation/case normalization); the live #560
+# defect is deletion, not reformatting.
+# --------------------------------------------------------------------------
+
+def test_correct_pairs_are_unaffected():
+    """The one reproduction line #560 itself marks '(correct)' must stay
+    exactly as it was -- a regression guard on the pairs branch."""
+    assert _cite('Chen, IY, Gheysens, O, Ray, S, Wang, Q') == (
+        '1. Chen IY, Gheysens O, Ray S, Wang Q. A Study.'
+    )
+
+
+def test_one_missing_comma_no_longer_strips_every_later_initial():
+    """The amplification case: 'Wen S' written without its comma flips the
+    pair detector's parity for the WHOLE list, not just that one author.
+    Before the fix every initial after it was deleted."""
+    assert _cite('Chen, IY, Gheysens, O, Wen S, Wang, Q') == (
+        '1. Chen IY, Gheysens O, Wen S, Wang Q. A Study.'
+    )
+
+
+def test_trailing_initials_group_is_kept_not_dropped():
+    citation = _cite('Garcia, Maria, Lopez, AB')
+    assert 'AB' in citation
+    assert citation == '1. Garcia, Maria, Lopez AB. A Study.'
+
+
+def test_suffix_and_trailing_initials_both_kept():
+    citation = _cite('Smith, John, Jr., Brown, AB')
+    assert 'AB' in citation
+    assert 'Jr' in citation
+    assert citation == '1. Smith, John Jr, Brown AB. A Study.'
+
+
+def test_two_character_given_name_is_not_deleted():
+    """'Li' is a real 2-character given name, not an initials fragment to
+    discard -- the old <=2-character skip could not tell the difference."""
+    citation = _cite('Chen, Li, Wang, Wei')
+    assert 'Li' in citation
+    assert citation == '1. Chen Li, Wang, Wei. A Study.'
+
+
+def test_single_lowercase_initial_is_recognised():
+    assert _cite('Kelly, r') == '1. Kelly R. A Study.'
+
+
+def test_single_non_ascii_initial_is_recognised():
+    assert _cite('Kelly, Å') == '1. Kelly Å. A Study.'
+
+
+def test_trailing_odd_author_is_emitted_not_dropped():
+    """The pairs branch's old `while i < len(parts) - 1` bound silently
+    dropped a trailing unpaired author entirely."""
+    citation = _cite('Kelly, R, Pirog')
+    assert 'Pirog' in citation
+    assert citation == '1. Kelly R, Pirog. A Study.'
+
+
+def test_docstrings_own_broken_example_is_pinned_as_it_actually_behaves():
+    """The docstring promised 'Smith, John A., Jones, Mary B.' ->
+    'Smith JA, Jones MB'; on dev it actually produces 'Smith, John A,
+    Jones, Mary B' (full given names are not initials, so the pair
+    detector correctly declines this shape). This pins the true,
+    non-destructive behaviour -- nothing is deleted -- not the promise."""
+    assert _cite('Smith, John A., Jones, Mary B.') == (
+        '1. Smith, John A, Jones, Mary B. A Study.'
+    )
+
+
+# --------------------------------------------------------------------------
+# The exact farm defect (W0MTVW / HU4DXA)
+# --------------------------------------------------------------------------
+
+def test_farm_defect_sanguino_citation_regains_its_initials():
+    """The live corpus defect: 'Sanguino SM' is already a complete
+    "Surname Initials" unit, which throws off the pair detector's parity
+    for the rest of a perfectly regular surname/initials list."""
+    authors = 'Sanguino SM, Konopasek, L, Raszka, WV, Bostwick, S, Smith, S'
+    assert _cite(authors) == (
+        '1. Sanguino SM, Konopasek L, Raszka WV, Bostwick S, Smith S. A Study.'
+    )
+
+
+# --------------------------------------------------------------------------
+# Pre-existing behaviour that must not regress
+# --------------------------------------------------------------------------
+
+def test_double_comma_cleanup_still_works():
+    assert _cite('Watson, K.,,') == '1. Watson K. A Study.'
+
+
+def test_et_al_is_still_recognised():
+    assert _cite('Smith, JA, et al') == '1. Smith JA, et al. A Study.'
+
+
+def test_already_vancouver_form_is_unchanged():
+    assert _cite('Smith JA, Jones MB') == '1. Smith JA, Jones MB. A Study.'
+
+
+def test_stage_5d_llm_entries_bypass_normalization_entirely():
+    """formatting_source == 'stage_5d_llm' returns the LLM-formatted
+    citation untouched -- #560 cannot reach roughly 2417 of the farm's
+    3341 publication entries because of this branch, mentioned here so the
+    scope of the fix above is not overstated."""
+    entry = {
+        'extracted_fields': {
+            'formatted_citation': 'Smith, J, Random-garbage-XYZ. Some Title.',
+            'formatting_source': 'stage_5d_llm',
+        },
+    }
+    citation, _target, _enriched = _format_citation(entry, 3)
+    assert citation == '3. Smith, J, Random-garbage-XYZ. Some Title.'
