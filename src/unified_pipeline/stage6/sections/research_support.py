@@ -290,12 +290,20 @@ class ResearchSupportSection:
         role = fields.get('pi_role') or fields.get('role', '') or fields.get('description', '')
         start_date = fields.get('start_date', '') or fields.get('date', '')
         end_date = fields.get('end_date', '')
+        grant_number = (fields.get('grant_number') or '').strip()
 
         has_title = bool(title and len(title.strip()) > 10)
         # For clinical trials: if we have a title and a date, that's substantive enough
         has_substantive_info = bool((agency and (role or start_date or end_date)) or (title and start_date))
+        # A grant identified only by its number is still identifiable now that #478/#479
+        # render grant_number in Award Source (see below) -- but require a second
+        # corroborating field (agency, dates, role, or effort) so a bare fragment with
+        # no number at all, or a number with nothing else, still gets rejected (#486).
+        has_grant_number_info = bool(
+            grant_number and (agency or role or start_date or end_date or fields.get('percent_effort'))
+        )
 
-        if not has_title and not has_substantive_info:
+        if not has_title and not has_substantive_info and not has_grant_number_info:
             # This is likely a header like "Funding: National Cancer Institute" - skip it
             if self.verbose:
                 text = entry.get('text', '')[:50] if entry else ''
@@ -355,7 +363,7 @@ class ResearchSupportSection:
         # but the Award Source label itself reads "(funding agency ...; type of grant)",
         # so the identifier belongs there. Without this, stage 4 extracts grant_number
         # and no renderer ever consumes it: 528 of 537 corpus values reached no render.
-        grant_number = (fields.get('grant_number') or '').strip()
+        # (grant_number itself was already extracted above, for the sparsity guard.)
         if grant_number and grant_number.casefold() not in f"{agency} {title}".casefold():
             agency = f"{agency} ({grant_number})" if agency else grant_number
 
