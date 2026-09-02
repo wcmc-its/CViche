@@ -21,7 +21,7 @@ def _format_citation(entry: Dict, num: int) -> Tuple[str, Optional[str], List[st
     Returns:
         (citation_text, target_name, enriched_fields) tuple
     """
-    fields = entry.get('extracted_fields', {})
+    fields = entry.get('extracted_fields') or {}
     enrichment = entry.get('enrichment_data', {})
     enriched_fields = entry.get('enriched_fields', [])  # Track which fields were enriched
 
