@@ -221,7 +221,7 @@ class TestTwoLineNonPipeEmptyExtractionBoundary:
       `dates`). `(len(lines) > 1 and not extracted_activity)` is False
       from the start (extraction's `activity` was never empty), so this
       never reaches the reparse route -- the parenthetical fallback
-      (administrative_activities.py:269-306) fills `dates`/`role` from
+      (administrative_activities.py:270-308) fills `dates`/`role` from
       line 1's parenthetical instead, and the single-row fallback (line
       337-340) writes it as one row. Matches the #660-item-1 FACTS note:
       "a 2-line entry whose extraction has `activity` but no `dates` is
