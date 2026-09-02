@@ -31,8 +31,6 @@ Run with:
 """
 
 from unified_pipeline.stage6.formatting.values import (
-    _CITATION_STOPWORDS,
-    _CITATION_TOKEN_MIN_LEN,
     _append_missing_stage5d_values,
     _format_citation,
     _value_referenced,
@@ -359,7 +357,18 @@ def test_stage5d_editors_matching_only_on_a_stopword_are_appended():
 def test_citation_stopwords_are_all_at_or_above_the_length_floor():
     """A stop word shorter than `_CITATION_TOKEN_MIN_LEN` would be dead
     weight -- the floor already drops it -- so the two constants are pinned
-    together rather than drifting apart silently."""
+    together rather than drifting apart silently.
+
+    The two constants are imported here rather than at module scope on
+    purpose: a mutation check that swaps this module's source for a baseline
+    without them must fail on the *behaviour* tests above, not on a
+    collection-time ImportError that hides which assertions would have run.
+    """
+    from unified_pipeline.stage6.formatting.values import (
+        _CITATION_STOPWORDS,
+        _CITATION_TOKEN_MIN_LEN,
+    )
+
     assert all(len(w) >= _CITATION_TOKEN_MIN_LEN for w in _CITATION_STOPWORDS)
     assert _CITATION_STOPWORDS == frozenset(w.casefold() for w in _CITATION_STOPWORDS)
 
