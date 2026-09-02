@@ -418,6 +418,47 @@ _PII_FIELD_KEY_RE = re.compile(r"""^(?:.*_)?(?:
 _PII_FRAGMENT_SPLIT_RE = re.compile(r"[\n\t|]|\s{3,}")
 
 
+# Colon-less companion to _PII_LABEL_RE (#532). A colon-less label like
+# "Date of Birth - 01/01/1990", "DOB\t01/01/1990" or "SSN  123-45-6789" is
+# invisible to _PII_LABEL_RE and to the split above, which never separates
+# "label" from "value" without one of \n \t | or 3+ spaces between them --
+# and a dash is none of those. The label text alone is NOT enough signal to
+# deny without a colon: relaxing the terminator to accept '-' is exactly
+# what _PII_LABEL_RE's own tests (test_deny_predicate_requires_a_colon_
+# terminator) exist to block, because it swallows real CV content that
+# merely starts with a listed word ("Children's Oncology Group - Emeritus",
+# "Born - Digital: A Study of Youth Media Practices"). So here the VALUE has
+# to carry the signal too: stem, then a non-colon separator (tab, dash/en-
+# dash/em-dash, or 2+ spaces), then a date- or SSN-shaped value. A neutral
+# word after the stem ("Digital", "Emeritus") never matches, because it
+# isn't date- or SSN-shaped -- only the label+value pair together denies.
+#
+# Scoped to date-of-birth and SSN only. A colon-less "place of birth"
+# companion is declined here: unlike a date or an SSN, a place name has no
+# comparably distinctive shape to require, so it would either miss most
+# real cases or risk matching ordinary prose after one of these stems --
+# see #532.
+_PII_LABEL_VALUE_RE = re.compile(r"""
+    (?: date \s* of \s* birth
+      | birth \s*-? \s* date
+      | birthdate
+      | born
+      | d\.?o\.?b\.?
+      | social \s* security (?: \s* (?: number | no\.? ) )?
+      | ssn
+    )
+    \s* (?: [-–—] \s* | \t \s* | \s{2,} )
+    (?: \d{1,2} [/-] \d{1,2} [/-] \d{2,4}
+      | \d{3} -? \d{2} -? \d{4}
+      | (?: jan(?:uary)? | feb(?:ruary)? | mar(?:ch)? | apr(?:il)? | may
+          | jun(?:e)? | jul(?:y)? | aug(?:ust)? | sep(?:tember)? | oct(?:ober)?
+          | nov(?:ember)? | dec(?:ember)?
+        ) \s+ \d{1,2} , \s* \d{4}
+      | \d{4}
+    )
+""", re.X | re.I)
+
+
 def _squash(text) -> str:
     """Whitespace-FREE normalization for verbatim containment checks."""
     return re.sub(r"\s+", "", str(text or "")).lower()
@@ -425,8 +466,11 @@ def _squash(text) -> str:
 
 def _pii_fragments(text: Optional[str]) -> List[str]:
     """The fragments of an entry that carry protected personal data."""
-    return [f for f in _PII_FRAGMENT_SPLIT_RE.split(str(text or ""))
-            if _PII_LABEL_RE.match(f)]
+    text = str(text or "")
+    colon_fragments = [f for f in _PII_FRAGMENT_SPLIT_RE.split(text)
+                        if _PII_LABEL_RE.match(f)]
+    colonless_fragments = [m.group(0) for m in _PII_LABEL_VALUE_RE.finditer(text)]
+    return colon_fragments + colonless_fragments
 
 
 def _from_pii_fragment(value, pii_fragments: List[str]) -> bool:
