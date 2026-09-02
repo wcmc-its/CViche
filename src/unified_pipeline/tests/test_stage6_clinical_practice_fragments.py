@@ -20,7 +20,7 @@ Reachability, read from the actual call graph rather than assumed: none of
 the three fallback callers can currently hand this function a raw,
 un-welded tab.
  - L1 and L2 (`:291`, `:371`) weld every tab in `bullet_text` away before
-   calling it (`.replace('\\t', ' - ', 1).replace('\\t', ' ')`).
+   calling it (`.replace('\\t', ' — ', 1).replace('\\t', ' ')`).
  - L3 (`_fill_clinical_practice_l3`) looked like the exception -- its
    fallback keeps raw `original_text` when `role` can't be derived -- but
    `original_text = entry.get('text', '').strip()` runs first, which strips

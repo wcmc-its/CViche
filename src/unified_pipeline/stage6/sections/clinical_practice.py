@@ -50,7 +50,7 @@ def _bullet_parts(text: str) -> List[str]:
     would turn a single "Role | Institution | Dates" bullet into three wrong
     ones. Tab is safe to add: L1 and L2's own callers (`:291`, `:371`)
     already weld every tab in `bullet_text` away before calling this
-    function (`.replace('\\t', ' - ', 1).replace('\\t', ' ')`), so this never
+    function (`.replace('\\t', ' — ', 1).replace('\\t', ' ')`), so this never
     fires for them; only L3's rare all-raw fallback (role, institution AND
     dates all empty) can still pass a text with an unwelded tab, and a tab
     there marks a genuinely separate item exactly the way '\\n' already does.
