@@ -287,6 +287,103 @@ IDENTIFIER_TAXONOMY_CODES = ('R', 'N4')   # non-'S' codes that also carry PMID/P
 ORCID_TAXONOMY_CODES = ('A', 'S0')        # profile-section codes that carry an ORCID
 GRANT_EFFORT_TAXONOMY_PREFIX = 'M2'       # grant entries where percent-effort/FTE applies
 
+#: Codes whose active field schema (schemas.get_active_schemas()) declares
+#: BOTH start_date and end_date, so a dropped end can safely be restored from
+#: the entry's own text (#556). Hand-kept, not a live lookup: coercion.py may
+#: not import stage4.schemas (module boundary, stage4/__init__.py -- schemas,
+#: coercion and owner_name import nothing from each other), so this mirrors
+#: IDENTIFIER_TAXONOMY_CODES/ORCID_TAXONOMY_CODES above rather than calling
+#: get_field_schema(). Computed from get_active_schemas() on origin/dev @
+#: 2109c5b (2026-09-01); re-derive if a listed code's declared fields change,
+#: or a code gains both dates.
+DATE_RANGE_TAXONOMY_CODES = (
+    'B2', 'C', 'D1', 'D2', 'D3', 'I', 'K1', 'K2', 'K3', 'L1', 'L3',
+    'M2', 'M2A', 'M2B', 'M4A_DEPRECATED', 'M4B', 'N1', 'N2', 'N3', 'N3B',
+    'O', 'P', 'Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D',
+)
+
+#: A present/ongoing marker anywhere in the entry text blocks the date-range
+#: repair below -- reuses the vocabulary normalize_dates already recognises
+#: (pattern 2 above) plus "presents"/"currently", both traced to real
+#: "-Present" renders during the #556 investigation.
+_PRESENT_MARKER_PATTERN = re.compile(r'\b(?:presents?|ongoing|current(?:ly)?)\b', re.IGNORECASE)
+
+#: A single unambiguous closed 4-digit year range: "YYYY-YYYY", "YYYY–YYYY",
+#: "YYYY—YYYY", or "YYYY to YYYY". More than one match in an entry's text
+#: means the text is ambiguous about which range belongs to this entry (#556).
+CLOSED_DATE_RANGE_PATTERN = re.compile(
+    r'(\d{4})(?:\s*[-–—]\s*|\s+to\s+)(\d{4})',
+    re.IGNORECASE,
+)
+
+
+def reconcile_date_range(
+    original_text: str, updated: dict[str, Any], reformatted: dict[str, Any]
+) -> None:
+    """Restore a closed date range's end_date when the LLM dropped it (#556).
+
+    The caller (`apply_regex_post_processing`) has already confirmed the
+    entry's taxonomy code declares both start_date and end_date. Beyond that
+    this only repairs when ALL of the following hold:
+
+    - `end_date` is empty. A populated end_date, even a wrong one, is left
+      alone -- this repairs a *dropped* end, not a wrong one.
+    - `original_text` has no present/ongoing/current marker anywhere. An
+      entry that is genuinely ongoing must keep rendering "-Present";
+      `formatting/dates.py:149-153` is correct given that input and is not
+      touched by this function.
+    - `original_text` contains exactly one closed 4-digit year range. More
+      than one match means the text is ambiguous about which range applies
+      to this entry, so it is left untouched.
+
+    When `start_date` is already set and disagrees with the range's start
+    year, the repair is skipped entirely (both fields left as extracted)
+    rather than partially applied: overwriting a value the model already
+    committed to is a bigger step than filling in one it left blank, and
+    skipping leaves an honest trail -- no `reformatted_fields` entry, so no
+    false report of a repair -- instead of silently substituting a third,
+    unreviewed value. Concretely, this means the FSMB case from #556 (source
+    text "2025-2026" extracted as `start_date=2026, end_date=None`, i.e. the
+    model took the range's *end* as the start) is not repaired here; only
+    the shape where `start_date` is missing or already agrees with the text
+    is.
+
+    Args:
+        original_text: Original CV entry text.
+        updated: Extracted fields for the entry, mutated in place.
+        reformatted: Reformatted-value tracking dict, mutated in place.
+    """
+    if updated.get('end_date'):
+        return
+    if not original_text:
+        return
+    if _PRESENT_MARKER_PATTERN.search(original_text):
+        return
+
+    matches = CLOSED_DATE_RANGE_PATTERN.findall(original_text)
+    if len(matches) != 1:
+        return
+
+    range_start, range_end = matches[0]
+    existing_start = updated.get('start_date')
+    if existing_start and str(existing_start).strip() != range_start:
+        return
+
+    original_end = updated.get('end_date')
+    updated['end_date'] = range_end
+    reformatted['end_date'] = {
+        'original': original_end,
+        'reformatted': range_end,
+        'reason': 'Restored end_date from a single closed date range in source text',
+    }
+    if not existing_start:
+        updated['start_date'] = range_start
+        reformatted['start_date'] = {
+            'original': existing_start,
+            'reformatted': range_start,
+            'reason': 'Restored start_date from a single closed date range in source text',
+        }
+
 
 def _normalize_pmid(original_text: str, updated: dict[str, Any], reformatted: dict[str, Any]) -> None:
     """Extract a PMID from the source text if the LLM didn't already fill it in."""
@@ -448,10 +545,10 @@ def apply_regex_post_processing(
     Apply regex patterns to catch identifiers missed by LLM extraction.
 
     Also tracks reformatted values for transparency. Each distinct concern
-    (identifiers, DOI, ORCID, author formatting, title cleanup, grant effort)
-    is a small helper above; this function is the orchestrator that decides,
-    per taxonomy code, which ones apply, in the same order as before the
-    split.
+    (identifiers, DOI, ORCID, author formatting, title cleanup, grant effort,
+    date-range reconciliation) is a small helper above; this function is the
+    orchestrator that decides, per taxonomy code, which ones apply, in the
+    same order as before the split.
 
     Args:
         original_text: Original CV entry text
@@ -486,5 +583,10 @@ def apply_regex_post_processing(
     # Extract percent effort/FTE for grant entries
     if taxonomy_code.startswith(GRANT_EFFORT_TAXONOMY_PREFIX):
         _normalize_grant_effort(original_text, updated, reformatted)
+
+    # Restore a dropped end_date when the schema declares both dates and the
+    # source text unambiguously carries the closed range (#556)
+    if taxonomy_code in DATE_RANGE_TAXONOMY_CODES:
+        reconcile_date_range(original_text, updated, reformatted)
 
     return updated, reformatted
