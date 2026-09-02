@@ -55,10 +55,10 @@ from unified_pipeline.core.render_check import entry_fragments, entry_lines
 
 def _fragment_parts(text: str) -> List[str]:
     """Stripped, non-empty fragments of Stage 5c's own formatted text
-    (#476), for the `elif formatted_text:` branch below (line ~172) only.
+    (#476), for the `elif formatted_text:` branch below (line ~199) only.
 
     Not the same call as the `original_lines = entry_lines(original_text)`
-    check a few lines above (line ~149) -- that one reads raw `original_text`
+    check a few lines above (line ~176) -- that one reads raw `original_text`
     to decide whether Stage 5c fused multiple distinct source entries into
     one formatted blob, and switching IT to `entry_fragments` was tried and
     reverted: 495 farm K entries are a single teaching record whose raw text
