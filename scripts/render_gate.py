@@ -192,6 +192,11 @@ def main(argv=None):
                 # Every other uid keeps calling run_stage6() unchanged, so
                 # the flag stays provably inert wherever it resolves no
                 # docx (#550).
+                #
+                # Re-unify this with run_stage6() once it grows an
+                # original_doc_path parameter -- this direct construction
+                # should not need to keep tracking run_stage6's defaults by
+                # hand.
                 generator = s6.WCMTemplateGenerator(verbose=False)
                 generator.generate(str(src), str(dest), original_doc_path=str(source_path))
             else:
