@@ -6,6 +6,7 @@ import importlib
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+from sqlalchemy.orm import object_session
 
 
 @pytest.fixture(autouse=True)
@@ -267,7 +268,9 @@ class TestPathTraversal:
     def _auth_cookie(self, client, user):
         """Set a valid session cookie on the test client."""
         from app.auth import create_session_cookie, COOKIE_NAME
-        cookie_value = create_session_cookie(user)
+        # create_session_cookie reads the current epoch from a DB session;
+        # `user` was just committed on the test's session, so borrow that one.
+        cookie_value = create_session_cookie(user, object_session(user))
         client.cookies.set(COOKIE_NAME, cookie_value)
 
     def test_absolute_path_rejected(self, client, db, seed_simple_mode):
@@ -631,7 +634,7 @@ class TestUploadValidation:
         db.add(user)
         db.commit()
         db.refresh(user)
-        cookie_value = create_session_cookie(user)
+        cookie_value = create_session_cookie(user, db)
         client.cookies.set(COOKIE_NAME, cookie_value)
         return user
 

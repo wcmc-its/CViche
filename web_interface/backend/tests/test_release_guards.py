@@ -21,6 +21,7 @@ from app.models import Run, Step, User
 from app.pipeline import concurrency
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.services.run_service import reconcile_stale_runs
+from sqlalchemy.orm import object_session
 
 DOCX_MIME = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 
@@ -40,7 +41,9 @@ def _make_user(db, email="user@example.com", role="user", **kwargs):
 
 def _auth_cookie(client, user):
     from app.auth import create_session_cookie, COOKIE_NAME
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user))
+    # create_session_cookie reads the current epoch from a DB session;
+    # `user` was just committed on the test's session, so borrow that one.
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, object_session(user)))
 
 
 def _docx_bytes(text: str) -> bytes:

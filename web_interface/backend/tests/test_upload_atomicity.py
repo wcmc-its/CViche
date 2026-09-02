@@ -16,6 +16,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.models import User, Run
+from sqlalchemy.orm import object_session
 
 
 def _make_user(db):
@@ -34,7 +35,9 @@ def _make_user(db):
 
 def _auth(client, user):
     from app.auth import create_session_cookie, COOKIE_NAME
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user))
+    # create_session_cookie reads the current epoch from a DB session;
+    # `user` was just committed on the test's session, so borrow that one.
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, object_session(user)))
 
 
 def _bypass_file_validation(tmp_path):
