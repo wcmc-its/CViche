@@ -72,30 +72,45 @@ def clamp(val, lo=0.0, hi=1.0):
 
 
 def linear_interp(val, lo, hi, out_lo, out_hi):
-    """Map val from [lo, hi] -> [out_lo, out_hi] linearly."""
+    """Map val from [lo, hi] -> [out_lo, out_hi] linearly, clamped to the
+    output range regardless of direction (out_lo may be > out_hi) -- a caller
+    passing a val outside [lo, hi] gets a bounded result, not an extrapolated
+    one (#724 review)."""
     if hi == lo:
         return out_lo
     t = (val - lo) / (hi - lo)
-    return out_lo + t * (out_hi - out_lo)
+    result = out_lo + t * (out_hi - out_lo)
+    return clamp(result, min(out_lo, out_hi), max(out_lo, out_hi))
 
 
 def _load_first(outputs_dir: Path, pattern: str):
     """Load the first JSON artifact matching pattern.
 
     Returns ``(data, reason)``. ``data`` is ``None`` when nothing usable was
-    loaded; ``reason`` then tells the two misses apart: ``None`` means no file
-    matched `pattern` at all (genuinely absent), a string means a file
-    *matched* but failed to parse -- e.g. the truncated JSON a crashed or
-    OOM-killed stage leaves mid-write (present but unreadable, #497). Mirrors
+    loaded; ``reason`` then tells the misses apart: ``None`` means no file
+    matched `pattern` at all (genuinely absent); a string starting with
+    "ambiguous:" means more than one file matched and none was loaded --
+    both live callers (quality_score_service.py, per-run S3 key filter into a
+    fresh temp dir; scripts/score_one.py, per-uid glob into a fresh temp dir)
+    build a directory holding at most one file per pattern, so this guards
+    against a mis-pointed directory rather than a path either caller
+    exercises (#724 review); any other string means a file *matched* but
+    failed to parse -- e.g. the truncated JSON a crashed or OOM-killed stage
+    leaves mid-write (present but unreadable, #497). Mirrors
     run_doctor._load_json's absent-vs-unreadable distinction.
     """
     files = sorted(outputs_dir.glob(pattern))
     if not files:
         return None, None
+    if len(files) > 1:
+        names = ", ".join(f.name for f in files)
+        reason = f"ambiguous: {len(files)} files match {pattern} ({names})"
+        logger.warning("quality_score found multiple candidates for %s: %s", pattern, names)
+        return None, reason
     try:
         with open(files[0]) as f:
             return json.load(f), None
-    except Exception as e:
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
         reason = f"{type(e).__name__}: {e}"
         logger.warning("quality_score could not read %s (%s)", files[0], reason)
         return None, reason
@@ -157,6 +172,20 @@ def iter_error_fields(obj, path=""):
     return results
 
 
+def _invalid_metadata_result(context: str, invariant: str, **values) -> tuple:
+    """Shared (fraction, detail, cap) for a stage-metadata invariant
+    violation (#724 review items 10/11): worst-case fraction rather than
+    computing a ratio from numbers that cannot be trusted (e.g. negative
+    counts, or duplicate_entries exceeding total_entries). Farm: 0 of 66
+    classified.json files violate either invariant, so this never fires on
+    real output today.
+    """
+    values_str = ", ".join(f"{k}={v}" for k, v in values.items())
+    detail = f"invalid metadata: {invariant} ({values_str})"
+    logger.warning("quality_score %s: %s", context, detail)
+    return 1.0, detail, None
+
+
 def cv_owner_name_missing(fields_data) -> bool:
     """True when a fields.json ``cv_owner`` block carries no usable name --
     the condition behind score_cv_owner's hard-fail cap of 25."""
@@ -172,15 +201,30 @@ def cv_owner_name_missing(fields_data) -> bool:
 # ---------------------------------------------------------------------------
 
 def score_pipeline_errors(outputs_dir: Path):
-    """Pipeline / API errors. Fatal patterns are a hard-fail (cap=40)."""
+    """Pipeline / API errors. Fatal patterns are a hard-fail (cap=40).
+
+    An unreadable stage JSON is itself a pipeline-health signal (#724 review
+    item 1) -- a truncated/corrupt artifact is exactly the shape a crashed or
+    OOM-killed stage leaves behind -- so it is recorded as a synthetic
+    non-fatal error entry rather than silently skipped. It is not fatal by
+    itself; FATAL_ERROR_PATTERN still decides that from the parse-error text.
+    """
     nonnull_errors = 0
     fatal_locations = []
+    unreadable_files = []
 
     for json_file in sorted(outputs_dir.glob("*.json")):
         try:
             with open(json_file) as f:
                 data = json.load(f)
-        except Exception:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+            reason = str(e)
+            logger.warning("quality_score could not read %s (%s)", json_file, reason)
+            path = f"{json_file.name}: unreadable"
+            unreadable_files.append(path)
+            nonnull_errors += 1
+            if FATAL_ERROR_PATTERN.search(reason):
+                fatal_locations.append(f"{path}: {reason!r}")
             continue
         for path, val in iter_error_fields(data, json_file.name):
             nonnull_errors += 1
@@ -194,6 +238,8 @@ def score_pipeline_errors(outputs_dir: Path):
         f"nonnull_error_fields={nonnull_errors}; fatal_pattern={'YES' if fatal_hit else 'NO'}; "
         f"fatal_locations={fatal_locations[:3]}"
     )
+    if unreadable_files:
+        detail += f"; unreadable_files={unreadable_files[:3]}"
     return fraction, detail, hard_fail_cap
 
 
@@ -258,6 +304,17 @@ def score_t_bucket(outputs_dir: Path):
 
     meta = data.get("meta", {}) or {}
     code_dist = meta.get("code_distribution", {}) or {}
+    total_entries_meta = meta.get("total_entries")
+    if total_entries_meta is not None and total_entries_meta < 0:
+        return _invalid_metadata_result(
+            "t_bucket", "total_entries < 0", total_entries=total_entries_meta)
+    if "code_distribution" in meta and total_entries_meta is not None:
+        code_dist_sum = sum(code_dist.values())
+        if code_dist_sum != total_entries_meta:
+            return _invalid_metadata_result(
+                "t_bucket", "sum(code_distribution) != total_entries",
+                code_distribution_sum=code_dist_sum, total_entries=total_entries_meta)
+
     total = sum(code_dist.values()) or meta.get("total_entries", 1) or 1
     t_count = code_dist.get("T", 0)
     t_ratio = t_count / total
@@ -388,6 +445,16 @@ def score_duplicate_ratio(outputs_dir: Path):
     meta = data.get("meta", {}) or {}
     total = meta.get("total_entries", 0) or 0
     dup = meta.get("duplicate_entries", 0) or 0
+    if total < 0:
+        return _invalid_metadata_result(
+            "duplicate_ratio", "total_entries < 0", total_entries=total)
+    if dup < 0:
+        return _invalid_metadata_result(
+            "duplicate_ratio", "duplicate_entries < 0", duplicate_entries=dup)
+    if dup > total:
+        return _invalid_metadata_result(
+            "duplicate_ratio", "duplicate_entries > total_entries",
+            duplicate_entries=dup, total_entries=total)
     if total == 0:
         return 0.0, "total_entries=0", None
 
@@ -489,6 +556,13 @@ def score_run(run_output_dir, run_id: str = None) -> dict:
     }
 
 
+#: The only modes quality_gate accepts. A typo (e.g. "blok") must fail
+#: closed, not silently fall through to advisory (#724 review item 3) --
+#: this is the single caller's only gate mode value, currently hardcoded to
+#: "block" (quality_score.py:_main), never config- or env-driven.
+VALID_GATE_MODES = frozenset({"off", "advisory", "block"})
+
+
 def quality_gate(run_output_dir, run_id: str = None, mode: str = "advisory") -> dict:
     """
     Run the scorer and return a gate verdict.
@@ -498,10 +572,18 @@ def quality_gate(run_output_dir, run_id: str = None, mode: str = "advisory") -> 
       "advisory" -> compute verdict but never block (default)
       "block"    -> RED runs fail the gate (gate_passed=False)
 
+    Raises ValueError for any other mode -- validated before scoring runs, so
+    a misconfigured caller fails fast instead of silently defaulting to
+    advisory (#724 review item 3).
+
     Returns the score_run() dict augmented with 'verdict' and 'gate_passed'.
     Callers decide what to do with gate_passed; this function never raises on a
     low score.
     """
+    if mode not in VALID_GATE_MODES:
+        raise ValueError(
+            f"invalid quality_gate mode: {mode!r}; must be one of {sorted(VALID_GATE_MODES)}")
+
     result = score_run(run_output_dir, run_id)
     score = result["totalScore"]
     if score >= BAND_GREEN:
