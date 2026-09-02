@@ -71,6 +71,9 @@ test here takes plain strings and returns a plain value.
 import sys
 from pathlib import Path
 
+import pytest
+from docx import Document
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -82,6 +85,7 @@ from unified_pipeline.stage6.sections.service import (  # noqa: E402
     _matches_word_start,
     _split_q2_lines,
 )
+from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 # The real production constant -- imported, not hand-copied, so a future
 # edit to EXTRAMURAL_ROLE_KEYWORDS can't silently drift from what these
@@ -292,3 +296,173 @@ def test_ementorship_mid_word_is_not_restored():
     body): a word-start rule cannot recognize a keyword buried mid-word
     without also re-admitting arbitrary substring collisions."""
     assert _matches_word_start("ementorship", _ROLE_KEYWORDS) is False
+
+
+# ---------------------------------------------------------------------------
+# Round 4 (#658 round 4 review): the unbounded-right-edge matcher rounds 2-3
+# shipped let ANY word beginning with a role stem count as a role indicator,
+# not just its real inflected/derived forms -- "Board Members Inc." and
+# "Directory of Physicians" both name organizations, not roles, but
+# "board"/"director" happen to be their opening substring. Fixed by bounding
+# the right edge to an explicit, corpus-derived `_ROLE_STEM_SUFFIXES` list
+# instead of leaving it open.
+
+
+@pytest.mark.parametrize("line", [
+    "boardwalk foundation",
+    "leaderboard analytics",
+    "chairlift operators",
+    "boardroom",
+])
+def test_word_beginning_with_a_stem_is_not_a_role_line(line):
+    """None of these organization/activity-shaped phrases end in a form
+    `_ROLE_STEM_SUFFIXES` lists, so the stem's presence at the word's start
+    is not enough on its own -- this is the reviewer's motivating concern
+    for round 4 (#658 round 4 review, T1)."""
+    assert _matches_word_start(line, _ROLE_KEYWORDS) is False, line
+    assert _is_known_org_line(line, _ROLE_KEYWORDS) is False, line
+
+
+def test_directory_is_an_accepted_false_positive_of_the_y_suffix():
+    """'director' + the 'y' suffix produces "directory", an unrelated
+    English word -- an unavoidable side effect of admitting 'y' at all,
+    which round 4 does specifically so 'advisor' + 'y' reaches "advisory"
+    (187 corpus occurrences, the single largest non-bare form in the
+    corpus probe -- see service.py's `_ROLE_STEM_SUFFIXES` comment). No
+    corpus line contains "directory" or any other 'y'-suffixed collision
+    that is not also a genuine role form (#658 round 4 probe, 15,079
+    entry lines), so this is pinned as an accepted synthetic mis-file, the
+    same status `test_ementorship_mid_word_is_not_restored` documents for
+    a different edge above -- not a regression to fix, because doing so
+    would require either dropping 'y' (losing "advisory") or a
+    per-keyword suffix list (rejected in the docstring above: a hand list
+    keeps missing real forms)."""
+    assert _matches_word_start("directory services", _ROLE_KEYWORDS) is True
+
+
+@pytest.mark.parametrize("line", [
+    "program chairman",
+    "physician advisory group",
+    "directorate, school of x",
+    "chaired the y",
+    "mentorship program",
+    "2010-2012director, unit",
+    "2009-10member, committee",
+])
+def test_corpus_derived_suffix_forms_are_still_role_lines(line):
+    """Positive controls for the same round-4 change: every corpus-derived
+    `_ROLE_STEM_SUFFIXES` form -- including "advisory" ('advisor' + 'y')
+    and "directorate" ('director' + 'ate'), the two forms a round-3-style
+    hand list would have missed -- still matches (#658 round 4 review,
+    T1/T3)."""
+    assert _matches_word_start(line, _ROLE_KEYWORDS) is True, line
+
+
+def test_board_of_directors_is_still_vetoed_as_a_role_line():
+    """Control, restated for round 4: "Board of Directors"-style lines are
+    vetoed as role lines (not read as an organization) by design since
+    #624 --
+    `test_member_board_of_directors_is_a_role_line`
+    (test_stage6_classification_literals.py) pins the same outcome against
+    a hand-copied whole-word keyword list; this asserts it again against
+    the real, round-4 `EXTRAMURAL_ROLE_KEYWORDS`/`_matches_word_start`."""
+    assert _is_known_org_line("board of directors", _ROLE_KEYWORDS) is False
+
+
+@pytest.mark.parametrize("line", [
+    "caféboard",
+    "comitémember",
+    "αmember",  # Greek alpha + "member"
+])
+def test_non_ascii_letter_still_blocks_a_match(line):
+    """The left boundary, `(?<![^\\W\\d_])`, must reject a Unicode letter
+    immediately before the keyword the same way it rejects an ASCII one --
+    an earlier round's `(?<![A-Za-z])` boundary was ASCII-only and would
+    have let a keyword preceded by "é" or "α" match as though it were at a
+    genuine word start (#658 round 4 review, T2)."""
+    assert _matches_word_start(line, _ROLE_KEYWORDS) is False, line
+
+
+@pytest.mark.parametrize("line", [
+    "café member",
+    "comité, member",
+])
+def test_non_ascii_word_followed_by_a_genuine_role_word_still_matches(line):
+    """Control: a keyword that starts its OWN word still matches when a
+    Unicode word merely precedes it with a normal word boundary (a space or
+    punctuation) in between (#658 round 4 review, T2)."""
+    assert _matches_word_start(line, _ROLE_KEYWORDS) is True, line
+
+
+def _leadership_table(gen):
+    return gen.doc.add_table(rows=1, cols=3)
+
+
+def _leadership_rows(table):
+    return [[c.text for c in row.cells] for row in table.rows[1:]]
+
+
+def test_parse_extramural_leadership_lines_classifies_an_indented_role_by_the_matcher():
+    """Caller-level control: the indented variant of the fixture below, in
+    which `_parse_extramural_leadership_lines`'s own indentation override
+    (not the matcher) forces the line to a role."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    table = _leadership_table(gen)
+
+    gen._parse_extramural_leadership_lines(
+        table,
+        ["American Heart Association",
+         "   Program Chairman, Annual Meeting | 2015-2017"])
+
+    assert _leadership_rows(table) == [
+        ["American Heart Association", "Program Chairman, Annual Meeting",
+         "2015-2017"]]
+
+
+def test_parse_extramural_leadership_lines_classifies_a_role_by_the_matcher_alone():
+    """Caller-level test for #658 round 4 review T6 item 1: the NON-indented
+    variant, where nothing but `_matches_word_start` recognizing "chairman"
+    decides the line is a role rather than a second organization line. A
+    mutation replacing the `is_role` call site's matcher with
+    `_matches_bounded` (whole-word only) fails this test: "chairman" is not
+    the whole word "chair", so the line would no longer be classified as a
+    role and the row would not merge with its organization."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    table = _leadership_table(gen)
+
+    gen._parse_extramural_leadership_lines(
+        table,
+        ["American Heart Association",
+         "Program Chairman, Annual Meeting | 2015-2017"])
+
+    assert _leadership_rows(table) == [
+        ["American Heart Association", "Program Chairman, Annual Meeting",
+         "2015-2017"]]
+
+
+def test_parse_extramural_leadership_lines_subcommittee_decides_the_role_line():
+    """Caller-level test for #658 round 4 review T6 item 2: neither line is
+    indented and neither names a `_KNOWN_ORG_NAMES`/`_GENERIC_ORG_TERMS`
+    hit, so only the 'subcommittee' entry in `EXTRAMURAL_ROLE_KEYWORDS`
+    recognizing the second line as a role -- not an organization line
+    itself -- makes it merge with the first. Removing 'subcommittee' from
+    `EXTRAMURAL_ROLE_KEYWORDS` fails this test: the second line would then
+    match neither `_is_known_org_line` nor the role check, and (being under
+    50 characters) would be read as a second, unrelated organization line
+    instead of merging with the first."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    table = _leadership_table(gen)
+
+    gen._parse_extramural_leadership_lines(
+        table,
+        ["American Academy of Pediatrics",
+         "AHA Hospital Accreditation Stroke Certification Subcommittee | "
+         "2018-present"])
+
+    assert _leadership_rows(table) == [
+        ["American Academy of Pediatrics",
+         "AHA Hospital Accreditation Stroke Certification Subcommittee",
+         "2018-present"]]
