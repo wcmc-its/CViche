@@ -418,17 +418,42 @@ def score_sparse_tables(outputs_dir: Path):
     return fraction, detail, None
 
 
-def _count_raw_tab_cells(tables) -> int:
+def _count_raw_tab_cells(tables, _depth: int = 0, _seen_tc=None) -> int:
     """Raw-tab paragraphs inside every cell of `tables`, nested tables one
-    level deep via `cell.tables` (#724 follow-up review, D7')."""
+    level deep via `cell.tables` (#724 follow-up review, D7'); the recursion
+    is bounded by `_depth` so a table nested inside a table nested inside a
+    table is not walked a third level down, matching this docstring.
+
+    A cell merged across columns (gridSpan) is repeated once per spanned
+    column in `row.cells` -- python-docx does not collapse it -- so counting
+    every `row.cells` entry would count one physical cell's tab once per
+    spanned column. Dedupe by the underlying `w:tc` element so each physical
+    cell is visited once (#724 second follow-up review, F3).
+
+    The dedupe set holds the `cell._tc` elements themselves, not `id(...)`
+    of them: `id()` alone is a memory address, and without a live reference
+    keeping the element's temporary python-docx wrapper alive, a later,
+    unrelated cell's wrapper can be allocated at the same freed address and
+    collide -- confirmed against a real farm docx, where an `id()`-only set
+    silently dropped a genuine tab-containing cell as a false "already seen"
+    duplicate. Storing the element itself in the set keeps it alive for the
+    whole walk, so identity stays meaningful.
+    """
+    if _seen_tc is None:
+        _seen_tc = set()
     count = 0
     for table in tables:
         for row in table.rows:
             for cell in row.cells:
+                tc = cell._tc
+                if tc in _seen_tc:
+                    continue
+                _seen_tc.add(tc)
                 for p in cell.paragraphs:
                     if "\t" in p.text:
                         count += 1
-                count += _count_raw_tab_cells(cell.tables)
+                if _depth < 1:
+                    count += _count_raw_tab_cells(cell.tables, _depth + 1, _seen_tc)
     return count
 
 

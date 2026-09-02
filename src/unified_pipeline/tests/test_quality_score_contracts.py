@@ -425,6 +425,19 @@ def test_broken_format_raw_tab_in_table_cell_detected(tmp_path):
     assert "raw_tab_cells=1" in detail, detail
 
 
+def test_broken_format_raw_tab_gridspan_merged_cell_counted_once(tmp_path):
+    """F3 (#724 second follow-up review): row.cells repeats a gridSpan-merged
+    cell once per spanned column, so counting every row.cells entry would
+    count a single merged cell's raw tab 3 times for a 3-column merge.
+    Dedupe by the underlying w:tc element identity so it counts once."""
+    doc = _make_docx(tables=[[["a\tb", "mid", "end"], ["x", "y", "z"]]])
+    table = doc.tables[0]
+    table.rows[0].cells[0].merge(table.rows[0].cells[2])
+    doc.save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_cells=1" in detail, detail
+
+
 def test_broken_format_prompt_echo_in_paragraph(tmp_path):
     _make_docx(["Please list here your publications"]).save(tmp_path / "out.docx")
     fraction, detail, cap = score_broken_format(tmp_path)
@@ -516,6 +529,7 @@ def test_edge_malformed_json_mixed_with_valid_json(tmp_path):
     assert "nonnull_error_fields=2" in detail, detail
     assert "BBB_classified.json" in detail, detail
     assert cap is None
+    assert fraction == pytest.approx(2 / 3), detail
 
 
 def test_edge_multiple_json_files_for_same_pattern(tmp_path):
@@ -623,3 +637,4 @@ def test_edge_cv_owner_whitespace_only_names(tmp_path):
     fraction, detail, cap = score_cv_owner(tmp_path)
     assert cap == 25
     assert fraction == 1.0
+    assert detail == "cv_owner name empty; hard-fail cap=25", detail
