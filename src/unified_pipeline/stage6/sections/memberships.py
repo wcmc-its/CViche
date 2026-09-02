@@ -52,6 +52,32 @@ from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
 
 
+def _entry_parts(text: str) -> List[str]:
+    """Parts of a memberships entry (#476), scoped to exactly the
+    newline-blind case: a text with no literal newline at all keeps
+    `entry_lines`'s own single opaque part today, even when it is really a
+    "Type1 | Org1 | Date1 | Type2 | Org2 | Date2" fused entry that
+    `_parse_multi_membership_entry`'s own '|' handling (parsing/text.py:209)
+    could otherwise see as more than one membership.
+
+    A genuinely multi-line entry (entry_lines already returns >1 part) is
+    returned UNCHANGED. Reading the farm's own newline-blind uids proved
+    this matters: 2071_Zuschlag_Cv's "2009-2012\\t\\tStudent Osteopathic
+    Surgical Association\\t\\t\\n\\n2009-2012\\t\\tFlorida Osteopathic Medical
+    Association" already has 2 lines by newline alone, each carrying its own
+    unsplit tabs; running the multi-membership parser on that produces two
+    "organizations" that are really unparsed tab-laden blobs (date prefix and
+    literal tab baked into the org cell, dates column empty) -- worse than
+    today's single clean row. This fix is narrower than that entry's real
+    bug (a genuine 2-record fusion the #221 recovery pass papers over with an
+    Appendix bullet); it isn't newline-blind and isn't this issue's to fix.
+    """
+    lines = entry_lines(text)
+    if len(lines) != 1:
+        return lines
+    return [p.strip() for p in lines[0].split('|') if p.strip()]
+
+
 class MembershipsSection:
     """Section I writers, mixed into `WCMTemplateGenerator`."""
 
@@ -110,20 +136,29 @@ class MembershipsSection:
                     print(f"  Skipping header entry: '{original_text[:50]}...'")
                 continue
 
-            # Check if this entry contains multiple memberships (newline-separated)
-            # Pattern: "Member\nElected Member | Org1\nOrg2 | date1\ndate2"
-            lines = entry_lines(original_text)
+            # Check if this entry contains multiple memberships (newline- or,
+            # for a fully blind entry, '|'-separated -- see _entry_parts,
+            # #476). Pattern: "Member\nElected Member | Org1\nOrg2 |
+            # date1\ndate2", or fully blind: "Type1 | Org1 | Date1 | Type2 |
+            # Org2 | Date2".
+            parts = _entry_parts(original_text)
 
-            # Detect multi-membership pattern: multiple organization names or membership types
-            if len(lines) > 2:
-                # Try to parse multiple memberships
-                memberships = _parse_multi_membership_entry(lines)
-                if memberships:
-                    for mem_type, org, dates in memberships:
-                        org_text = f"{mem_type}, {org}" if mem_type and mem_type.lower() not in org.lower() else org
-                        self._add_table_row(table, [org_text, dates], entry=entry)
-                        self.stats['entries_inserted'] += 1
-                    continue
+            # Detect multi-membership pattern: multiple organization names or
+            # membership types. Gate on the PARSED result too, not just the
+            # raw part count: a single membership whose fields happen to
+            # split into exactly three parts ("Fellow | American Academy of
+            # Pediatrics | 1/1997-present", farm entries on 1FRABQ and
+            # others) crosses the >2 threshold but must still resolve to one
+            # membership, not be misread as several.
+            # `_parse_multi_membership_entry` already does its own '|'
+            # splitting and keyword/date classification per part.
+            memberships = _parse_multi_membership_entry(parts) if len(parts) > 2 else []
+            if len(memberships) > 1:
+                for mem_type, org, dates in memberships:
+                    org_text = f"{mem_type}, {org}" if mem_type and mem_type.lower() not in org.lower() else org
+                    self._add_table_row(table, [org_text, dates], entry=entry)
+                    self.stats['entries_inserted'] += 1
+                continue
 
             # Single membership - use extracted fields
             organization = fields.get('organization', '')
