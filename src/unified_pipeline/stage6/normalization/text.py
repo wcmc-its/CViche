@@ -484,15 +484,29 @@ _PII_FRAGMENT_SPLIT_RE = re.compile(r"[\n\t|]|\s{3,}")
 # real cases or risk matching ordinary prose after one of these stems --
 # see #532.
 #
-# The leading \b matters: without it "born"/"ssn" match INSIDE a longer
-# word, so "University of Michigan-Dearborn – 2015" or "Osborn - 2012"
-# (surname/institution substrings followed by a dash and a year, which
-# happens to be exactly the value shape this predicate looks for) were
-# false-denied -- the same #473 false-positive class this predicate exists
-# not to reintroduce. \b is ASCII word-boundary only, which is fine here:
-# every stem alternative is plain ASCII.
+# The separator set is #532's own list -- tab, dash, 2+ spaces. A SINGLE
+# space is deliberately not in it, so "SSN 123-45-6789" and "Date of Birth
+# 01/01/1990" are a known, disclosed residual rather than a silent one
+# (pinned in test_stage6_pii_colonless_labels.py). A single space is the
+# ordinary word separator of running prose, so admitting it widens the
+# predicate over every sentence that contains one of these stems; that is a
+# deny widening worth its own false-positive measurement over the corpus,
+# not a rider on this one.
+#
+# The leading lookbehind matters: without it "born"/"ssn" match INSIDE a
+# longer word, so "University of Michigan-Dearborn – 2015" or "Osborn -
+# 2012" (surname/institution substrings followed by a dash and a year,
+# which happens to be exactly the value shape this predicate looks for)
+# were false-denied -- the same #473 false-positive class this predicate
+# exists not to reintroduce. A plain \b is not enough, because a hyphen is
+# a non-word character and therefore IS a word boundary: "Foreign-born –
+# 2015" and "US-born  1990" (a demographic or biographical compound next to
+# a CV date column) still matched on the "born" half. The lookbehind
+# rejects a preceding hyphen or dash as well as a preceding word
+# character. It is ASCII-plus-dashes only, which is fine here: every stem
+# alternative is plain ASCII.
 _PII_LABEL_VALUE_RE = re.compile(r"""
-    \b
+    (?<![\w\-–—])
     (?: date \s* of \s* birth
       | birth \s*-? \s* date
       | birthdate

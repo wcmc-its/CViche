@@ -139,3 +139,32 @@ def test_existing_colon_terminated_labels_are_still_caught():
         "D.O.B.: 1/1/1970",
     ]:
         assert _pii_fragments(pii), f"missed {pii!r}"
+
+
+def test_hyphen_compound_stem_is_not_denied():
+    """Round-2 regression: `\\b` is not enough of a boundary, because a
+    hyphen is itself a word boundary -- "Foreign-born – 2015" and "US-born
+    1990" (a demographic term beside a CV date column) matched on the
+    "born" half and, via `_pii_fragments`, redacted the whole entry in the
+    appendix. The lookbehind now rejects a preceding hyphen or dash too."""
+    for keeper in [
+        "Foreign-born – 2015",
+        "US-born  1990",
+        "Native-born\t2001",
+        "Foreign–born – 2015",
+    ]:
+        assert not _pii_fragments(keeper), f"false positive on {keeper!r}"
+
+
+def test_disclosed_gap_single_space_separator_is_not_caught():
+    """Judgement call (#532): the separator set is the issue's own list --
+    tab, dash, 2+ spaces. A single space is deliberately not in it, so
+    "SSN 123-45-6789" is a residual leak; pinned here so the boundary of
+    the predicate is disclosed rather than silent. Widening to a single
+    space is a deny widening over every sentence containing one of these
+    stems and needs its own corpus false-positive measurement."""
+    for residual in [
+        "SSN 123-45-6789",
+        "Date of Birth 01/01/1990",
+    ]:
+        assert not _pii_fragments(residual)
