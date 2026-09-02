@@ -34,7 +34,7 @@ def _committee_cell_text(value) -> str:
     multi-record entry (#208/#248 fusion), not just a string. Writing a non-str
     into a Word cell (``cell.text = <dict>``) raises deep in python-docx and
     aborts the whole document (#256). Never let that happen: pull the name-like
-    value from a dict, falling back to joining its other string values rather
+    value from a dict, falling back to joining its other values rather
     than dropping an unrecognised shape (#555); join a list, and stringify
     anything else. The recognised-key value and the fallback values are
     recursed, not str()-ed, so a nested dict or list never renders its Python
