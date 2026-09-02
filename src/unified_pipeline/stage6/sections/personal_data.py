@@ -13,10 +13,11 @@ almost nothing about a CV's contact block is structured. The work is in order:
    `_labels_its_own_address_slots` instead, which is #442: a dict naming home
    and office was previously forced whole into whichever slot the raw text
    happened to label.
-3. Re-open the ORIGINAL .docx when fields are still missing. Contact data
-   frequently lives in a source table ("NAME: | Patricia Opresko") that entry
-   extraction never turned into entries, and business-address cells embed
-   Phone/Fax/E-mail lines that have to be pulled back out line by line.
+3. Re-open the ORIGINAL .docx when fields are still missing, in
+   `_recover_contact_fields_from_docx`. Contact data frequently lives in a
+   source table ("NAME: | Patricia Opresko") that entry extraction never
+   turned into entries, and business-address cells embed Phone/Fax/E-mail
+   lines that have to be pulled back out line by line.
 4. Fill the template's PERSONAL DATA table, located by its "Work email:" cell
    rather than by index.
 
@@ -58,7 +59,7 @@ import logging
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, NamedTuple
 
 try:
     from docx import Document
@@ -72,6 +73,20 @@ from ..normalization import _address_cell_text, _from_pii_fragment, _labels_its_
 from ..parsing import _extract_name_from_uid
 
 logger = logging.getLogger(__name__)
+
+
+class _RecoveredContact(NamedTuple):
+    """What `_recover_contact_fields_from_docx` found, or was given (#550).
+
+    Five values in one return rather than five positional results a caller
+    can silently transpose; `name_is_complete` rides along because the name
+    recovery and the contact recovery read the same table rows.
+    """
+    name: str | None
+    name_is_complete: bool
+    email: str | None
+    phone: str | None
+    address: str | None
 
 
 class PersonalDataSection:
@@ -293,8 +308,118 @@ class PersonalDataSection:
                     email = candidate
                     break
 
-        # Fallback: read personal data from original Word document
-        # This handles cases where personal data is in tables (e.g., NAME: | Patricia Opresko)
+        # Fallback: read personal data from original Word document.
+        # This handles cases where personal data is in tables
+        # (e.g., NAME: | Patricia Opresko). The scan itself lives in
+        # `_recover_contact_fields_from_docx` below; it returns the values it
+        # was given, unchanged, when there is no readable source document.
+        name, name_is_complete, email, phone, address = (
+            self._recover_contact_fields_from_docx(
+                original_doc_path, document_uid,
+                name, name_is_complete, email, phone, address))
+
+        # Write back the fallback's recovered values before the table fill
+        # below reads them (#550). The fallback above stores into the
+        # legacy-named `email`/`phone`/`address` locals, not into
+        # `work_email`/`office_phone`/`office_address`, which is what the
+        # PERSONAL DATA table fill at the end of this function reads -- so
+        # without this, everything the fallback recovers is discarded.
+        # `x = x or recovered` only fills an EMPTY slot: an entry already
+        # classified above from the A entries is never overwritten by a
+        # weaker fallback read.
+        #
+        # A recovered `email` that is already `personal_email` must not also
+        # duplicate into work_email (#550 round 1, XLYVYA_sample_vasquez_cv):
+        # its sole address is routed to personal_email by the per-entry loop
+        # above because that entry's text contains the "Personal Data"
+        # section header, not because the person actually gave two
+        # addresses. Every recovery path that feeds `email` -- the
+        # all-entries JSON scan above, and this fallback's table/paragraph
+        # scan -- rediscovers that same address, and without this guard the
+        # write-back below renders it twice.
+        if email and email == personal_email:
+            email = None
+        work_email = work_email or email
+        office_phone = office_phone or phone
+        office_address = office_address or address
+
+        # Fallback to document_uid for name
+        if not name:
+            name = _extract_name_from_uid(document_uid)
+
+        # Find and fill Name field
+        name_idx = self._find_paragraph_with_text("Name:")
+        if name_idx is not None:
+            para = self.doc.paragraphs[name_idx]
+            para.clear()
+            run = para.add_run(f"Name: {name}")
+            _set_font(run, bold=True)
+
+        # Fill Date of preparation with today's date
+        date_idx = self._find_paragraph_with_text("Date of preparation")
+        if date_idx is not None:
+            para = self.doc.paragraphs[date_idx]
+            para.clear()
+            today = datetime.now().strftime("%B %-d, %Y")  # e.g., "February 1, 2026"
+            run = para.add_run(f"Date of preparation: {today}")
+            _set_font(run)
+
+        # Fill email, phone, and address in the PERSONAL DATA table (Table 1)
+        # Table 1 structure: Office address, Office telephone, Work email, Home address, Cell phone, Personal email
+        personal_data_table = self._find_table_with_cell_text("Work email:")
+        if personal_data_table is not None:
+            for row in personal_data_table.rows:
+                cell_text = row.cells[0].text.strip().lower()
+
+                # Office address
+                if office_address and 'office address' in cell_text:
+                    formatted_address = office_address.replace('\t', '\n').replace('; ', '\n').replace(';', '\n')
+                    _set_cell_text(row.cells[1], formatted_address)
+                    self.stats['entries_inserted'] += 1
+
+                # Office telephone
+                if office_phone and 'office telephone' in cell_text:
+                    _set_cell_text(row.cells[1], office_phone)
+                    self.stats['entries_inserted'] += 1
+
+                # Work email
+                if work_email and 'work email' in cell_text:
+                    _set_cell_text(row.cells[1], work_email)
+                    self.stats['entries_inserted'] += 1
+
+                # Home address
+                if home_address and 'home address' in cell_text:
+                    formatted_address = home_address.replace('\t', '\n').replace('; ', '\n').replace(';', '\n')
+                    _set_cell_text(row.cells[1], formatted_address)
+                    self.stats['entries_inserted'] += 1
+
+                # Cell phone
+                if cell_phone and 'cell phone' in cell_text:
+                    _set_cell_text(row.cells[1], cell_phone)
+                    self.stats['entries_inserted'] += 1
+
+                # Personal email
+                if personal_email and 'personal email' in cell_text:
+                    _set_cell_text(row.cells[1], personal_email)
+                    self.stats['entries_inserted'] += 1
+
+    def _recover_contact_fields_from_docx(self, original_doc_path, document_uid,
+                                          name, name_is_complete, email, phone,
+                                          address):
+        """Re-open the ORIGINAL .docx and recover contact fields still missing.
+
+        Step 3 of the module docstring, lifted out of `_fill_personal_data`
+        verbatim so that function's length does not rise (§3): the body below
+        is the same statements at the same indentation, and the values flow in
+        and out as arguments instead of as enclosing locals. Each recovery is
+        guarded by `if not <field>`, so nothing already found by the entry
+        classifier is overwritten here, and a path that is absent or
+        unreadable returns every argument unchanged.
+
+        `original_doc_path` reaches this method only from
+        `scripts/render_gate.py --source-dir` and this package's tests today
+        -- see the module docstring for why no live driver passes one.
+        """
         if original_doc_path and Path(original_doc_path).exists():
             try:
                 original_doc = Document(original_doc_path)
@@ -411,87 +536,4 @@ class PersonalDataSection:
                     self.stats.get('personal_data_fallback_failed', 0) + 1
                 )
 
-        # Write back the fallback's recovered values before the table fill
-        # below reads them (#550). The fallback above stores into the
-        # legacy-named `email`/`phone`/`address` locals, not into
-        # `work_email`/`office_phone`/`office_address`, which is what the
-        # PERSONAL DATA table fill actually reads (:431-466 below) -- so
-        # without this, everything the fallback recovers is discarded.
-        # `x = x or recovered` only fills an EMPTY slot: an entry already
-        # classified above from the A entries is never overwritten by a
-        # weaker fallback read.
-        #
-        # A recovered `email` that is already `personal_email` must not also
-        # duplicate into work_email (#550 round 1, XLYVYA_sample_vasquez_cv):
-        # its sole address is routed to personal_email by the per-entry loop
-        # above because that entry's text contains the "Personal Data"
-        # section header, not because the person actually gave two
-        # addresses. Every recovery path that feeds `email` -- the
-        # all-entries JSON scan above, and this fallback's table/paragraph
-        # scan -- rediscovers that same address, and without this guard the
-        # write-back below renders it twice.
-        if email and email == personal_email:
-            email = None
-        work_email = work_email or email
-        office_phone = office_phone or phone
-        office_address = office_address or address
-
-        # Fallback to document_uid for name
-        if not name:
-            name = _extract_name_from_uid(document_uid)
-
-        # Find and fill Name field
-        name_idx = self._find_paragraph_with_text("Name:")
-        if name_idx is not None:
-            para = self.doc.paragraphs[name_idx]
-            para.clear()
-            run = para.add_run(f"Name: {name}")
-            _set_font(run, bold=True)
-
-        # Fill Date of preparation with today's date
-        date_idx = self._find_paragraph_with_text("Date of preparation")
-        if date_idx is not None:
-            para = self.doc.paragraphs[date_idx]
-            para.clear()
-            today = datetime.now().strftime("%B %-d, %Y")  # e.g., "February 1, 2026"
-            run = para.add_run(f"Date of preparation: {today}")
-            _set_font(run)
-
-        # Fill email, phone, and address in the PERSONAL DATA table (Table 1)
-        # Table 1 structure: Office address, Office telephone, Work email, Home address, Cell phone, Personal email
-        personal_data_table = self._find_table_with_cell_text("Work email:")
-        if personal_data_table is not None:
-            for row in personal_data_table.rows:
-                cell_text = row.cells[0].text.strip().lower()
-
-                # Office address
-                if office_address and 'office address' in cell_text:
-                    formatted_address = office_address.replace('\t', '\n').replace('; ', '\n').replace(';', '\n')
-                    _set_cell_text(row.cells[1], formatted_address)
-                    self.stats['entries_inserted'] += 1
-
-                # Office telephone
-                if office_phone and 'office telephone' in cell_text:
-                    _set_cell_text(row.cells[1], office_phone)
-                    self.stats['entries_inserted'] += 1
-
-                # Work email
-                if work_email and 'work email' in cell_text:
-                    _set_cell_text(row.cells[1], work_email)
-                    self.stats['entries_inserted'] += 1
-
-                # Home address
-                if home_address and 'home address' in cell_text:
-                    formatted_address = home_address.replace('\t', '\n').replace('; ', '\n').replace(';', '\n')
-                    _set_cell_text(row.cells[1], formatted_address)
-                    self.stats['entries_inserted'] += 1
-
-                # Cell phone
-                if cell_phone and 'cell phone' in cell_text:
-                    _set_cell_text(row.cells[1], cell_phone)
-                    self.stats['entries_inserted'] += 1
-
-                # Personal email
-                if personal_email and 'personal email' in cell_text:
-                    _set_cell_text(row.cells[1], personal_email)
-                    self.stats['entries_inserted'] += 1
+        return _RecoveredContact(name, name_is_complete, email, phone, address)
