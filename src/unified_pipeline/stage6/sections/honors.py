@@ -34,6 +34,46 @@ from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
 
 
+def _entry_parts(text: str) -> List[str]:
+    """Non-empty parts of an honors entry (#476), scoped to exactly the
+    newline-blind case entry_lines already names as its own blind spot: a
+    text with no literal newline at all, where entry_lines returns the whole
+    thing as a single opaque part.
+
+    A genuinely multi-line entry (entry_lines already returns >1 part) is
+    returned UNCHANGED -- its existing per-part tab/pipe handling below stays
+    exactly as today. Reading the farm's changed uids proved this matters:
+    2054_Opresko_Cv's "1994 | American Chemical Society Award,\\nLehigh Valley
+    Chapter of ACS" already has 2 lines by newline alone, and additionally
+    splitting line 0's '|' collides with the existing (separate, pre-existing)
+    "DATE | AWARD" mislabeling in the loop below, adding a spurious duplicate
+    row that isn't this issue's to fix.
+
+    For the single-line, tab-free case, '|' is added as a boundary -- the
+    corpus's other unambiguous "Award Name | Year" separator (module
+    docstring, existing `'|' in line` branch) -- but a line carrying a tab is
+    still returned whole, untouched by '|' too. 293 of the farm's
+    newline-blind H entries carry a tab, and reading them shows why: 038WKA's
+    "Award Name\\tDate\\tDescription" is one award with three tab-separated
+    fields, correctly rejoined today by the per-part loop's "does the last
+    tab part look like a year" check; 2082_Dr_Scot's is a mid-sentence
+    line-wrap artifact ("...NISOD) Award for\\tTeaching Excellence.
+    Valencia..." ) that pre-splitting tears in half, verified to produce three
+    garbled rows instead of the one correct one `award_name` already
+    carries. And 2068_Yount_Cv's single blind entry has BOTH a tab and a '|'
+    ("2022\\tWorld's Best ... Ranking | Research.com"): splitting on '|' first
+    hands the tab-rejoin branch a part with no leading year to isolate,
+    which is what makes it emit a spurious "Research.com" row instead of
+    correctly falling back to the clean extracted fields. Excluding any
+    tab-bearing line from the '|' split avoids all three at once by leaving
+    every one of them exactly as `entry_lines` already had it.
+    """
+    lines = entry_lines(text)
+    if len(lines) != 1 or '\t' in lines[0]:
+        return lines
+    return [p.strip() for p in lines[0].split('|') if p.strip()]
+
+
 class HonorsSection:
     """Section H writers, mixed into `WCMTemplateGenerator`."""
 
@@ -119,7 +159,7 @@ class HonorsSection:
 
             # Check if this entry contains multiple awards (newline-separated)
             # This happens when multiple honors were merged during extraction
-            lines = entry_lines(original_text)
+            lines = _entry_parts(original_text)  # #476: '\n' and '|' boundaries; see _entry_parts
 
             # Separate award lines from year lines
             # Years are typically 4-digit numbers or ranges like "2017-2020"
