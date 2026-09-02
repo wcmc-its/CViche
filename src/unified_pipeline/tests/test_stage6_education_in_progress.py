@@ -596,3 +596,26 @@ class TestMalformedEducationEntries:
         message = warnings[0].getMessage()
         assert "1" in message  # index of the malformed entry
         assert "str" in message  # its type
+
+    def test_non_string_location_renders_without_raising(self):
+        """`_get_institution_location`'s fallback path returns
+        `extracted_fields.location` as-is (`stage6/resolution/institution.py`),
+        so a non-string `location` (an `int` here) used to raise
+        `AttributeError` at `location.split(',')`. `_field_text` on the
+        returned location coerces it first. Per D1 (stringify, don't drop),
+        the institution cell reads "X, 5" rather than dropping the location."""
+        gen = _generator()
+        entries = [{
+            "text": "MD",
+            "extracted_fields": {
+                "degree": "MD",
+                "institution": "X",
+                "year": "2010",
+                "location": 5,
+            },
+        }]
+        gen._fill_education(entries)  # must not raise
+        row = _first_data_row(gen)
+
+        assert row.cells[0].text == "MD"
+        assert row.cells[1].text == "X, 5"

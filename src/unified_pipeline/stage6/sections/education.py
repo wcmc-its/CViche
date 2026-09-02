@@ -193,6 +193,7 @@ class EducationSection:
 
             # Location from enrichment
             location, location_is_enriched = _get_institution_location(entry)
+            location = _field_text(location)
 
             # Dates - format according to B1 requirements (mm/yyyy-mm/yyyy)
             # Field extraction may use three different structures:
