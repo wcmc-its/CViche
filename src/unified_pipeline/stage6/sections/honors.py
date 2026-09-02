@@ -25,7 +25,7 @@ Three of these -- `_fill_honors`, `_extract_organization_from_award` and
 the MRO, which is what that guard checks.
 """
 import re
-from typing import Dict, List, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from ..normalization import _strip_org_tail
@@ -34,7 +34,18 @@ from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
 
 
-def _entry_parts(text: str) -> List[str]:
+# A '|' part that is nothing but a year or a year range is a date column, not
+# an award. `_fill_honors` classifies parts with exactly this shape below, and
+# `_entry_parts` has to agree with it, so the pattern is compiled once here and
+# shared rather than written out twice (docs/CODING_STANDARDS.md §8.2).
+_YEAR_ONLY_RE = re.compile(
+    r'^(\d{4}(?:\s*-\s*\d{4})?|\d{4}(?:\s*-\s*present)?)$', re.IGNORECASE)
+
+# Below this many award-looking parts the entry is not a multi-award list.
+_MIN_AWARDS_FOR_SPLIT = 2
+
+
+def _entry_parts(text: str, column_values: Sequence[str] = ()) -> List[str]:
     """Non-empty parts of an honors entry (#476), scoped to exactly the
     newline-blind case entry_lines already names as its own blind spot: a
     text with no literal newline at all, where entry_lines returns the whole
@@ -67,11 +78,46 @@ def _entry_parts(text: str) -> List[str]:
     correctly falling back to the clean extracted fields. Excluding any
     tab-bearing line from the '|' split avoids all three at once by leaving
     every one of them exactly as `entry_lines` already had it.
+
+    Splitting on '|' unconditionally was wrong in one direction the farm
+    cannot show, and this is the guard for it: the pipeline's own table-cell
+    join writes ONE award as "Award | Organization | Year", and splitting that
+    re-emitted the organization as a second, empty award row (a row `dev` does
+    not produce). `column_values` are the column cells stage 4 already
+    extracted for this entry -- its granting body and its date -- and a part
+    they already name is a column, not an award. What survives that filter,
+    plus the bare-year parts, decides:
+
+    - fewer than `_MIN_AWARDS_FOR_SPLIT` award-looking parts: not a list of
+      awards, return `lines` unchanged (`dev`'s exact behaviour);
+    - bare years present but not one per award: the pipes are column
+      separators, not record separators -- "Award | Organization | Year" has
+      two award-looking parts and one year, so it fails here even when stage 4
+      extracted nothing to filter with. Return `lines` unchanged.
+    - otherwise (each award carries its own year, or none of them do): the
+      pipes separate records, so the split stands.
+
+    Note what is returned on the split path: `parts`, the WHOLE split, never
+    the filtered `awards` list -- the filters decide, they never drop text.
+
+    Residual, disclosed rather than guessed at: a two-column "Award |
+    Organization" join for which stage 4 extracted no granting body has two
+    award-looking parts and no year, and still splits. Nothing in the farm has
+    that shape and inventing a third rule for it would be untested.
     """
     lines = entry_lines(text)
     if len(lines) != 1 or '\t' in lines[0]:
         return lines
-    return [p.strip() for p in lines[0].split('|') if p.strip()]
+    parts = [p.strip() for p in lines[0].split('|') if p.strip()]
+    claimed = {v.strip().lower() for v in column_values if v and v.strip()}
+    years = [p for p in parts if _YEAR_ONLY_RE.match(p)]
+    awards = [p for p in parts
+              if not _YEAR_ONLY_RE.match(p) and p.lower() not in claimed]
+    if len(awards) < _MIN_AWARDS_FOR_SPLIT:
+        return lines
+    if years and len(years) != len(awards):
+        return lines
+    return parts
 
 
 class HonorsSection:
@@ -159,11 +205,14 @@ class HonorsSection:
 
             # Check if this entry contains multiple awards (newline-separated)
             # This happens when multiple honors were merged during extraction
-            lines = _entry_parts(original_text)  # #476: '\n' and '|' boundaries; see _entry_parts
+            # #476: '\n' and '|' boundaries; the extracted column cells are
+            # passed so a single award's own "Award | Organization | Year"
+            # cell join is not mistaken for two awards -- see _entry_parts.
+            lines = _entry_parts(original_text, (granting_body, date))
 
             # Separate award lines from year lines
             # Years are typically 4-digit numbers or ranges like "2017-2020"
-            year_pattern = re.compile(r'^(\d{4}(?:\s*-\s*\d{4})?|\d{4}(?:\s*-\s*present)?)$', re.IGNORECASE)
+            year_pattern = _YEAR_ONLY_RE
 
             # Header patterns to skip (tab-separated column headers from source CV tables)
             header_keywords = {'name of award', 'date awarded', 'organization', 'granting body', 'honor', 'year'}

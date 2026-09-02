@@ -28,6 +28,16 @@ extracted fields' own single-award path -- this fix changes nothing for
 them, hence CHANGED 0 in the render gate); the positive control below is a
 synthetic fixture pinning the behaviour for when the farm does grow one.
 
+The same emptiness of the farm hid a regression in the first cut of this
+fix, which is why the last three tests exist: the pipeline's own table-cell
+join writes ONE award as "Award | Organization | Year", and splitting every
+'|' re-emitted the organization as a second, empty award row that origin/dev
+never produced. `_entry_parts` now filters out the parts stage 4 already
+extracted as column cells and requires the bare years to pair one-to-one
+with the awards, so a column tuple is returned whole. The third test is the
+counterweight: the two-award, two-year entry the fix exists for must still
+split.
+
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_honors_fragments.py -p no:cacheprovider
@@ -138,9 +148,10 @@ def test_negative_control_single_award_unchanged():
 
 def test_negative_control_farm_pipe_blind_year_first_shape_unchanged():
     """2054_Opresko_Cv's actual shape: a single-line 'YEAR | Award, Org'
-    entry. `_entry_parts` DOES split it ('|', no tab), but the multi-award
-    branch's own award_name-substring check still routes it back to the
-    clean extracted fields, so the rendered row is identical to today's."""
+    entry. One bare year and one award-looking part survive `_entry_parts`'
+    column filter, which is one award -- below the two a multi-award list
+    needs -- so the entry is returned whole and renders from the clean
+    extracted fields exactly as it does on dev."""
     entry = {
         "text": "1991 | Freshman Chemistry Achievement Award, CRC Press",
         "extracted_fields": {
@@ -154,6 +165,48 @@ def test_negative_control_farm_pipe_blind_year_first_shape_unchanged():
     assert rows[0][0] == "Freshman Chemistry Achievement Award"
     assert rows[0][1] == "CRC Press"
     assert rows[0][2] == "1991"
+
+
+# --- regression: the pipeline's own three-column cell join ------------------
+
+# "Award | Organization | Year" is how the pipeline's own table-cell join
+# writes ONE award. Splitting it re-emitted the organization as a second,
+# empty award row. Both variants below render exactly one row on origin/dev.
+COLUMN_JOIN_TEXT = "Best Teaching Award | Purdue University | 2020"
+
+
+def test_column_join_with_fields_is_not_split_into_two_awards():
+    entry = {
+        "text": COLUMN_JOIN_TEXT,
+        "extracted_fields": {
+            "award_name": "Best Teaching Award",
+            "granting_body": "Purdue University",
+            "date": "2020",
+        },
+    }
+    assert _entry_parts(COLUMN_JOIN_TEXT, ("Purdue University", "2020")) == [
+        COLUMN_JOIN_TEXT]
+    rows = _render_honors([entry])
+    assert rows == [["Best Teaching Award", "Purdue University", "2020"]], rows
+
+
+def test_column_join_without_fields_is_not_split_into_two_awards():
+    """The year-balance half of the guard, with nothing extracted to filter
+    with: two award-looking parts and a single bare year is a column tuple,
+    not two awards that each carry a year."""
+    assert _entry_parts(COLUMN_JOIN_TEXT) == [COLUMN_JOIN_TEXT]
+    rows = _render_honors([{"text": COLUMN_JOIN_TEXT, "extracted_fields": {}}])
+    assert len(rows) == 1, rows
+    assert "Purdue University" not in [r[0] for r in rows[1:]]
+
+
+def test_pipe_blind_multi_award_split_survives_the_guard():
+    """The guard must not swallow the case the fix exists for: two awards
+    that each carry their own year still split."""
+    text = "Best Teaching Award | 2020 | Excellence in Mentorship Award | 2018"
+    assert _entry_parts(text, ("", "")) == [
+        "Best Teaching Award", "2020",
+        "Excellence in Mentorship Award", "2018"]
 
 
 if __name__ == "__main__":
