@@ -74,7 +74,7 @@ def test_patents_reposition_failure_logs_warning(caplog):
         [r.message for r in warnings],)
     message = warnings[0].getMessage()
     assert 'Patents' in message
-    assert '1' in message  # entry 1 of 1
+    assert 'entry 1 of 1' in message
 
     # Fallback behaviour unchanged: content still lands in the document.
     assert len(gen.doc.tables) == 1
@@ -106,7 +106,7 @@ def test_postdoc_missing_heading_logs_warning(caplog):
         [r.message for r in warnings],)
     message = warnings[0].getMessage()
     assert 'Postdoctoral Training' in message
-    assert '1' in message  # 1 entry not rendered
+    assert '1 entries not rendered' in message
     assert len(gen.doc.tables) == 0
 
 
@@ -132,4 +132,4 @@ def test_postdoc_missing_table_logs_warning(caplog):
         [r.message for r in warnings],)
     message = warnings[0].getMessage()
     assert 'Postdoctoral Training' in message
-    assert '1' in message  # 1 entry not rendered
+    assert '1 entries not rendered' in message
