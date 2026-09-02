@@ -11,7 +11,8 @@ local corpus read recorded in the PR body (0 real 'candidate' hits across 175
 B1 entries; the sole 'present' hit is a literal "2022-Present" date-range
 value, not degree-status prose).
 
-Two levels of test:
+Two levels of test, plus a third added for review round 1 (PR #712) for the
+#659 malformed-input regression:
 
 - `TestDegreeIsInProgressWordBoundary` calls `_degree_is_in_progress`
   directly with the issue's own six example lines (verbatim from the issue
@@ -24,11 +25,16 @@ Two levels of test:
   reverting the source fix flips both entries to "Expected", which is the
   render-level signal the corpus render-gate A/B would need to see this
   section move at all (#547 blind-spots).
+- `TestMalformedEducationEntries` regression-tests #659: a `degree: None` or
+  `institution: None` field (real on the 66-CV farm) and a non-mapping
+  `extracted_fields` or entry no longer abort the Stage 6 render (review
+  thread 3914946593).
 
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_education_in_progress.py -p no:cacheprovider
 """
+import logging
 import sys
 from pathlib import Path
 
@@ -54,6 +60,16 @@ def _education_rows(gen):
     table = gen._find_table_after_paragraph(edu_idx)
     assert table is not None
     return [tuple(cell.text for cell in row.cells) for row in table.rows[1:]]
+
+
+def _first_data_row(gen):
+    """The first data row (row index 1) of the Education table."""
+    edu_idx = gen._find_paragraph_with_text("EDUCATION")
+    assert edu_idx is not None
+    table = gen._find_table_after_paragraph(edu_idx)
+    assert table is not None
+    assert len(table.rows) > 1, "no data row was rendered"
+    return table.rows[1]
 
 
 class TestDegreeIsInProgressWordBoundary:
@@ -168,3 +184,67 @@ class TestEducationTableRenderPositiveControl:
         # ... but the conferred MD -- previously flipped by the bare
         # 'present' substring inside "presented" -- prints a plain year.
         assert by_degree["MD"][3] == "2009"
+
+
+
+class TestMalformedEducationEntries:
+    """#659 (review thread 3914946593): stage 4 emits an explicit ``None``
+    for a missing degree/institution rather than omitting the key -- real on
+    ten and five entries respectively across the 66-CV farm -- and a truthy
+    non-mapping `extracted_fields` or entry must degrade gracefully instead
+    of aborting the whole Stage 6 render."""
+
+    def test_degree_none_with_major_renders_using_the_major(self):
+        gen = _generator()
+        entries = [{
+            "text": "Biology",
+            "extracted_fields": {
+                "degree": None,
+                "major": "Biology",
+                "institution": "Ohio State University",
+            },
+        }]
+        gen._fill_education(entries)  # must not raise
+        row = _first_data_row(gen)
+
+        assert row.cells[0].text == "Biology"
+
+    def test_institution_none_with_a_degree_renders(self):
+        gen = _generator()
+        entries = [{
+            "text": "MD",
+            "extracted_fields": {"degree": "MD", "institution": None},
+        }]
+        gen._fill_education(entries)  # must not raise
+        row = _first_data_row(gen)
+
+        assert row.cells[0].text == "MD"
+        assert row.cells[1].text == ""
+
+    def test_extracted_fields_as_a_list_is_treated_as_no_fields(self):
+        gen = _generator()
+        entries = [{"text": "some prose", "extracted_fields": ["not", "a", "dict"]}]
+        gen._fill_education(entries)  # must not raise
+
+        assert _education_rows(gen) == []
+
+    def test_entry_that_is_not_a_mapping_is_skipped_and_logged(self, caplog):
+        gen = _generator()
+        entries = [
+            {
+                "text": "MD",
+                "extracted_fields": {"degree": "MD", "institution": "Ohio State University"},
+            },
+            "not a mapping at all",
+        ]
+        with caplog.at_level(logging.WARNING):
+            gen._fill_education(entries)  # must not raise
+
+        rows = _education_rows(gen)
+        assert [row[0] for row in rows] == ["MD"]
+
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert "1" in message  # index of the malformed entry
+        assert "str" in message  # its type

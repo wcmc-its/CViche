@@ -44,10 +44,23 @@ noun-collision problem in practice.
 `_degree_is_in_progress` is pinned on the class surface by
 `tests/test_stage6_import_surface.py` -- the suite calls it on an instance. The
 mixin keeps it resolving through the MRO, which is what that guard checks.
+
+Stage 4 emits an explicit ``None`` for a missing degree/institution/major
+rather than omitting the key (#659). `degree: None` with a `major` present
+used to raise `TypeError` at `major not in degree`, and the farm has ten such
+entries; five more carry `institution: None`. `_field_text` coerces every raw
+field to a string at the point it is read so no non-str value -- `None` or
+otherwise -- reaches a `.lower()` or an `in` test. A truthy non-dict
+`extracted_fields` (a stray list) is guarded the same way `extracted_fields`
+already is throughout stage6 (`isinstance(..., Mapping)`), and a whole entry
+that is not a mapping at all is skipped with a warning rather than crashing
+on `entry.get(...)`.
 """
+import logging
 import re
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from ..formatting import (
     _clear_table_data,
@@ -58,6 +71,25 @@ from ..normalization import _get_cleaned_institution_name
 from ..parsing import _extract_year_from_text
 from ..resolution import _get_institution_location
 from ..sorting import sort_entries_reverse_chronological
+
+logger = logging.getLogger(__name__)
+
+
+def _field_text(value: Any) -> str:
+    """Coerce one raw stage-4 education field to plain text.
+
+    Stage 4 sets `degree`/`major`/`institution` to an explicit ``None``
+    rather than omitting the key when a field wasn't extracted, so
+    `dict.get(key, '')`'s own default never fires for those entries. This
+    covers that case, plus the general one -- a field that came back as
+    something other than a string. Never raises -- stringifying an
+    unexpected shape keeps the entry rendering instead of aborting the whole
+    Stage 6 render (#659)."""
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value
+    return str(value)
 
 
 class EducationSection:
@@ -117,21 +149,37 @@ class EducationSection:
         _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
+        # A malformed entry (not even a mapping) can't reach entry.get(...)
+        # below or in sort_entries_reverse_chronological's own sort key, so
+        # it's filtered out here rather than inside the loop (#659).
+        mapping_entries = []
+        for idx, entry in enumerate(entries):
+            if isinstance(entry, Mapping):
+                mapping_entries.append(entry)
+            else:
+                logger.warning(
+                    "Skipping education entry %d: expected a mapping, got %s",
+                    idx, type(entry).__name__,
+                )
+
         # Sort entries reverse chronologically (most recent first)
-        sorted_entries = sort_entries_reverse_chronological(entries)
+        sorted_entries = sort_entries_reverse_chronological(mapping_entries)
 
         for entry in sorted_entries:
-            fields = entry.get('extracted_fields') or {}
-            raw_text = entry.get('text', '')
+            # A truthy non-dict extracted_fields (a stray list) must not
+            # reach .get() below.
+            raw_fields = entry.get('extracted_fields')
+            fields = raw_fields if isinstance(raw_fields, Mapping) else {}
+            raw_text = _field_text(entry.get('text', ''))
 
             # Degree column (not enriched)
-            degree = fields.get('degree', '')
-            major = fields.get('major') or fields.get('field_of_study', '')
+            degree = _field_text(fields.get('degree', ''))
+            major = _field_text(fields.get('major')) or _field_text(fields.get('field_of_study', ''))
             if major and major not in degree:
                 degree = f"{degree}, {major}" if degree else major
 
             # Institution - use cleaned_name from enrichment if available
-            institution = fields.get('institution', '')
+            institution = _field_text(fields.get('institution', ''))
             if institution and institution.lower() == 'none':
                 institution = ''
             cleaned = _get_cleaned_institution_name(entry)
