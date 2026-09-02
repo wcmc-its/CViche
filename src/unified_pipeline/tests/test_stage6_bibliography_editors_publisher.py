@@ -278,6 +278,15 @@ def test_value_referenced_ignores_short_tokens_and_empty_value():
     assert _value_referenced('', 'anything') is False
 
 
+def test_value_referenced_ignores_short_tokens_even_when_the_token_itself_is_present():
+    # Pins _CITATION_TOKEN_MIN_LEN itself, not just the no-overlap case above:
+    # "NY" (2 chars) appears verbatim, as a whole word, in the haystack --
+    # if the significance floor were lowered (or removed), this would flip
+    # to True. It must stay False because "NY" alone is too short to mean
+    # anything on its own (an initial, a state abbreviation, etc.).
+    assert _value_referenced('NY', 'Published in New York, NY.') is False
+
+
 def test_append_missing_stage5d_values_appends_both_when_both_absent():
     fields = {'editors': 'Totally Different Names', 'publisher': 'Totally Different Press'}
 
