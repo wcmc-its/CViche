@@ -460,7 +460,16 @@ _PII_FRAGMENT_SPLIT_RE = re.compile(r"[\n\t|]|\s{3,}")
 # comparably distinctive shape to require, so it would either miss most
 # real cases or risk matching ordinary prose after one of these stems --
 # see #532.
+#
+# The leading \b matters: without it "born"/"ssn" match INSIDE a longer
+# word, so "University of Michigan-Dearborn – 2015" or "Osborn - 2012"
+# (surname/institution substrings followed by a dash and a year, which
+# happens to be exactly the value shape this predicate looks for) were
+# false-denied -- the same #473 false-positive class this predicate exists
+# not to reintroduce. \b is ASCII word-boundary only, which is fine here:
+# every stem alternative is plain ASCII.
 _PII_LABEL_VALUE_RE = re.compile(r"""
+    \b
     (?: date \s* of \s* birth
       | birth \s*-? \s* date
       | birthdate

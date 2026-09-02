@@ -112,6 +112,23 @@ def test_473_negative_controls_stay_undenied():
         assert not _pii_fragments(keeper), f"false positive on {keeper!r}"
 
 
+def test_stem_as_word_fragment_is_not_denied():
+    """Round-1 regression: `_PII_LABEL_VALUE_RE` had no word boundary
+    before the stem group, so 'born'/'ssn' matched INSIDE a longer word
+    when followed by a dash/tab/2-space + date-or-SSN-shaped value --
+    'Michigan-Dearborn – 2015' and 'Osborn - 2012' are plausible CV
+    substrings (an institution name, a co-author's surname) that must not
+    be mistaken for a date-of-birth label."""
+    for keeper in [
+        "Education\tUniversity of Michigan-Dearborn – 2015",
+        "Osborn - 2012",
+        "Sanborn – 1998",
+        "Firstborn – 2001",
+        "Assn  2019",
+    ]:
+        assert not _pii_fragments(keeper), f"false positive on {keeper!r}"
+
+
 def test_existing_colon_terminated_labels_are_still_caught():
     """The original #473 predicate is untouched -- this is a companion,
     not a replacement."""
