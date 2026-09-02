@@ -75,6 +75,9 @@ def test_patents_reposition_failure_logs_warning(caplog):
     message = warnings[0].getMessage()
     assert 'Patents' in message
     assert 'entry 1 of 1' in message
+    # exc_info=True on the warning call -- the caught ValueError must reach
+    # the log, not just its message text.
+    assert warnings[0].exc_info is not None
 
     # Fallback behaviour unchanged: content still lands in the document.
     assert len(gen.doc.tables) == 1

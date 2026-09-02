@@ -171,7 +171,8 @@ class PatentsSection:
                 logger.warning(
                     "Patents & Inventions: table reposition failed for "
                     "entry %d of %d; table left at document end instead of "
-                    "under the section heading", i + 1, len(sorted_entries))
+                    "under the section heading", i + 1, len(sorted_entries),
+                    exc_info=True)
                 self.stats['tables_misplaced'] = self.stats.get('tables_misplaced', 0) + 1
 
             self.stats['entries_inserted'] += 1
