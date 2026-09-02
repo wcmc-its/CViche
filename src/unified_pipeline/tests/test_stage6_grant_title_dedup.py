@@ -87,3 +87,16 @@ def test_no_separator_present_returns_input_unchanged():
 
 def test_empty_string_returns_empty_string():
     assert _deduplicate_repeated_content('') == ''
+
+
+# --------------------------------------------------------------------------
+# Round-2 review response: the tests above did not distinguish the rule the
+# fix actually applies (`matching_count == len(parts)`) from the "strict
+# majority" alternative the issue also mentions (`> len(parts) * 0.5`) --
+# every case above passes under both. A 3-of-4 case separates them: strict
+# majority would collapse it and lose the distinct fourth segment.
+# --------------------------------------------------------------------------
+
+def test_three_of_four_identical_does_not_collapse():
+    text = 'A | A | A | B'
+    assert _deduplicate_repeated_content(text) == text
