@@ -49,6 +49,7 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
 from docx import Document
 from docx.oxml.ns import qn
 
@@ -275,13 +276,15 @@ def test_tracked_insertion_font_constants_track_set_font_default_changes(monkeyp
         for _name, _cls in _PRE_RELOAD_CLASSES.items():
             setattr(bibliography, _name, _cls)
 
-
-def test_reload_left_module_classes_identical_to_the_live_ones():
-    # Runs immediately after the reload test above (pytest executes a file in
-    # definition order). Without the restore in that test's `finally`, this
-    # fails: `bibliography.BibliographySection` would be a fresh class object
-    # while every WCMTemplateGenerator instance still resolves the mixin
-    # through the pre-reload one.
+    # T2.5 (PR #711 review, thread T2 item 5): this used to be a second,
+    # standalone test (`test_reload_left_module_classes_identical_to_the_live_ones`)
+    # that only passed because pytest happened to run it immediately after this
+    # one in file-definition order -- it depended on the `finally` block above
+    # having already run. Folded in here so the restore it checks is verified
+    # in the same test that performs the restore, with no cross-test ordering
+    # assumption. `_PRE_RELOAD_CLASSES` stays module-level (not moved into this
+    # test) because the reload above executes at import time relative to any
+    # other test in this file that might also touch `bibliography`.
     assert bibliography.BibliographySection in WCMTemplateGenerator.__mro__
     for name, cls in _PRE_RELOAD_CLASSES.items():
         assert getattr(bibliography, name) is cls, name
@@ -477,6 +480,328 @@ def test_section_entry_count_logs_info_via_project_logger_not_print(caplog, caps
     assert gen.stats["entries_inserted"] == 2
 
 
+# --- PR #711 review, thread T1 item 1: emit_track_changes=False is untested ---
+
+
+def test_plain_mode_renders_citation_without_ins_and_keeps_author_bold():
+    # T1.1: the non-tracked branch at bibliography.py:346-348 falls through to
+    # _add_citation_with_bold_author -- proven here directly, on the real
+    # WCM template, rather than only inferred from the tracked path's tests.
+    gen = WCMTemplateGenerator(verbose=False, emit_track_changes=False)
+    gen.doc = Document(gen.template_path)
+    para = gen.doc.paragraphs[0].insert_paragraph_before("")
+    citation = "1. Doe J, Smith A, Lee K. Great study. Journal Name. 2024;10(2):100-110."
+
+    gen._add_citation_with_bold_author_as_insertion(para, citation, "Smith A", "")
+
+    assert para._p.find(qn("w:ins")) is None
+    assert para.text == citation
+    for run in para.runs:
+        if run.text == "Smith A":
+            assert run.bold is True
+        else:
+            assert run.bold is not True
+    assert any(run.text == "Smith A" and run.bold is True for run in para.runs)
+    assert gen.stats["track_changes_added"] == 0
+
+
+# --- T1 item 2: _citation_author_split direct coverage + writer parity ---
+#
+# test_stage6_renderer_pair_convergence.py:460-486 already covers target-name
+# precedence, owner fallback + punctuation strip, no-match, substring-not-word,
+# and hyphenated surname. These add the dimensions that file does not: which
+# initials shapes the regex actually matches, case-insensitive owner matching,
+# owner-fallback-only-when-target-absent, no-owner/no-target -> no match, and
+# the "Wende, M" comma form the docstring claims matches but the regex (per
+# the lead's finding, common ticket item) cannot -- pinned here, not changed.
+
+_SPLIT_CITATION = "Wende ME, Smith J. A study of things. J Things. 2023;1:1-9."
+
+
+@pytest.mark.parametrize(
+    "citation, target_name, owner, expected",
+    [
+        # Initials variants the regex does match.
+        (
+            "Wende ME, Smith J. A study of things. J Things. 2023;1:1-9.",
+            None, "wende",
+            ("", "Wende ME", ", Smith J. A study of things. J Things. 2023;1:1-9."),
+        ),
+        (
+            "Wende M., Smith J. A study of things. J Things. 2023;1:1-9.",
+            None, "wende",
+            ("", "Wende M", "., Smith J. A study of things. J Things. 2023;1:1-9."),
+        ),
+        (
+            "Wende M, Smith J. A study of things. J Things. 2023;1:1-9.",
+            None, "wende",
+            ("", "Wende M", ", Smith J. A study of things. J Things. 2023;1:1-9."),
+        ),
+        # Case-insensitive owner match: mixed-case citation, upper-case owner.
+        (
+            "WENDE ME, Smith J. A study of things. J Things. 2023;1:1-9.",
+            None, "wende",
+            ("", "WENDE ME", ", Smith J. A study of things. J Things. 2023;1:1-9."),
+        ),
+        # Owner fallback used only because target_name is absent from the
+        # citation -- present as an argument, but not a substring of it.
+        (
+            _SPLIT_CITATION, "Nobody Q", "wende",
+            ("", "Wende ME", ", Smith J. A study of things. J Things. 2023;1:1-9."),
+        ),
+        # Empty owner + no target -> no match at all.
+        (
+            "No matching author here at all.", None, "",
+            ("No matching author here at all.", "", ""),
+        ),
+        # The docstring's claimed "Wende, M" comma form: the regex
+        # (`\bWende\s*[A-Z]{0,3}\.?\b`) cannot match across a comma, so it
+        # matches only the bare surname "Wende" and stops there -- pinning
+        # the actual behaviour, not the docstring's claim.
+        (
+            "Wende, M, Smith J. A study of things. J Things. 2023;1:1-9.",
+            None, "wende",
+            ("", "Wende", ", M, Smith J. A study of things. J Things. 2023;1:1-9."),
+        ),
+    ],
+)
+def test_citation_author_split_additional_dimensions(citation, target_name, owner, expected):
+    assert bibliography._citation_author_split(citation, target_name, owner) == expected
+
+
+def test_plain_and_tracked_writers_bold_the_same_substring_through_the_shared_split():
+    # Parity test (T1.2): the same citation through both writers must bold
+    # the identical substring -- proving the "one home for the rule" claim
+    # in bibliography.py's module docstring, not just each writer separately.
+    gen = _generator()
+    citation = _SPLIT_CITATION
+
+    para_plain = gen.doc.paragraphs[0].insert_paragraph_before("")
+    gen._add_citation_with_bold_author(para_plain, citation, None, "Wende")
+    plain_bold_text = "".join(r.text for r in para_plain.runs if r.bold)
+
+    gen2 = WCMTemplateGenerator(verbose=False, emit_track_changes=True)
+    gen2.doc = Document(gen2.template_path)
+    para_tracked = gen2.doc.paragraphs[0].insert_paragraph_before("")
+    gen2._add_citation_with_bold_author_as_insertion(para_tracked, citation, None, "Wende")
+    ins_elem = para_tracked._p.find(qn("w:ins"))
+    assert ins_elem is not None
+    tracked_bold_text = "".join(
+        (r.find(qn("w:t")).text or "")
+        for r in ins_elem.findall(qn("w:r"))
+        if r.find(qn("w:rPr")) is not None and r.find(qn("w:rPr")).find(qn("w:b")) is not None
+    )
+
+    assert plain_bold_text == tracked_bold_text == "Wende ME"
+
+
+# --- T1 item 3: _CitationEnrichment.from_raw non-mapping fallback ---
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [None, [], ["x"], "text", 0, 1.5, True, ("a",), {"a"}],
+)
+def test_citation_enrichment_from_raw_non_mapping_returns_empty_record(raw):
+    assert bibliography._CitationEnrichment.from_raw(raw) == bibliography._CitationEnrichment()
+
+
+def test_citation_enrichment_from_raw_coerces_non_string_field_values():
+    # A mapping with all three keys present, but none of them a string --
+    # from_raw must route each through _enrichment_field_text rather than
+    # assume the mapping already holds strings.
+    raw = {"enrichment_status": 1, "enrichment_source": None, "text": ["a"]}
+    record = bibliography._CitationEnrichment.from_raw(raw)
+    assert record.enrichment_status == "1"
+    assert record.enrichment_source == ""
+    assert record.text == "['a']"
+
+
+# --- T1 item 4: _enrichment_field_text coercion contract ---
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        (None, ""),
+        ("abc", "abc"),
+        ("", ""),
+        (7, "7"),
+        (2.5, "2.5"),
+        ({"a": 1}, "{'a': 1}"),
+        ([1, 2], "[1, 2]"),
+        (True, "True"),
+    ],
+)
+def test_enrichment_field_text_coercion(value, expected):
+    assert bibliography._enrichment_field_text(value) == expected
+
+
+# --- T1 item 5: all nine S1-S9 header contracts ---
+
+# Copied verbatim from bibliography.py:197-206 as the contract under test --
+# a change to either copy without the other is exactly the drift this test
+# exists to catch.
+_SECTION_HEADERS = {
+    'S1': 'Peer-reviewed Research Articles:',
+    'S2': 'Reviews and Editorials:',
+    'S3': 'Books:',
+    'S4': 'Chapters:',
+    'S5': 'Non-peer-reviewed Research Publications:',
+    'S6': 'Case Reports',
+    'S7': 'In review',
+    'S8': 'Abstracts',
+    'S9': 'Other (media, podcasts, etc.):',
+}
+
+
+@pytest.mark.parametrize("code, header_text", sorted(_SECTION_HEADERS.items()))
+def test_each_section_code_inserts_under_its_official_header(code, header_text, caplog):
+    # All nine headers are present in the real WCM template (checked while
+    # writing this test by walking gen.doc.paragraphs for each header_text
+    # in _SECTION_HEADERS) -- so every code below takes the "found" branch,
+    # never the caplog warning fallback.
+    gen = _generator()
+    entry = _citation_entry(f"Author {code}. A study. J. 2024;1:1-2.", f"Author {code}", 2024)
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage6.sections.bibliography"):
+        gen._fill_bibliography({code: [entry]}, cv_owner={}, document_uid="")
+
+    header_idx = gen._find_paragraph_with_text(header_text)
+    if header_idx is None:
+        assert any(
+            "Could not find section header" in record.message and header_text in record.message
+            for record in caplog.records
+        )
+        return
+
+    citation_para = gen.doc.paragraphs[header_idx + 2]
+    assert citation_para.text.startswith("1. ")
+    assert citation_para.text == f"1. Author {code}. A study. J. 2024;1:1-2."
+
+
+# --- T1 item 6: numbering restarts across multiple subsections ---
+
+
+def test_numbering_restarts_at_one_in_every_subsection():
+    gen = _generator()
+    entries = {
+        "S1": [
+            _citation_entry("A. Study one.", "A", 2020),
+            _citation_entry("B. Study two.", "B", 2021),
+            _citation_entry("C. Study three.", "C", 2022),
+        ],
+        "S2": [
+            _citation_entry("D. Study four.", "D", 2020),
+            _citation_entry("E. Study five.", "E", 2021),
+        ],
+        "S3": [
+            _citation_entry("F. Study six.", "F", 2020),
+        ],
+    }
+
+    gen._fill_bibliography(entries, cv_owner={}, document_uid="")
+
+    s1_idx = gen._find_paragraph_with_text(_SECTION_HEADERS["S1"])
+    s2_idx = gen._find_paragraph_with_text(_SECTION_HEADERS["S2"])
+    s3_idx = gen._find_paragraph_with_text(_SECTION_HEADERS["S3"])
+    assert None not in (s1_idx, s2_idx, s3_idx)
+
+    # S1: three entries, reverse-chronological -> numbered 1., 2., 3.
+    s1_texts = [gen.doc.paragraphs[s1_idx + i].text for i in (2, 3, 4)]
+    assert [t.split(".", 1)[0] + "." for t in s1_texts] == ["1.", "2.", "3."]
+    assert s1_texts[0].startswith("1. C.")
+    assert s1_texts[1].startswith("2. B.")
+    assert s1_texts[2].startswith("3. A.")
+
+    # S2: two entries -> restarts at 1., 2. (not 4., 5.)
+    s2_texts = [gen.doc.paragraphs[s2_idx + i].text for i in (2, 3)]
+    assert [t.split(".", 1)[0] + "." for t in s2_texts] == ["1.", "2."]
+    assert s2_texts[0].startswith("1. E.")
+    assert s2_texts[1].startswith("2. D.")
+
+    # S3: one entry -> restarts at 1. (not 6.)
+    s3_text = gen.doc.paragraphs[s3_idx + 2].text
+    assert s3_text.startswith("1. F.")
+
+
+# --- T1 item 7: fused stage-5d entry integration through _fill_bibliography ---
+
+
+def test_fused_entry_renders_as_separate_numbered_citations():
+    # Shape as in test_stage6_fused_citations.py:33-47: one stage-5d entry
+    # whose formatted_citation joins three citations with "\n\n".
+    fused = {
+        "extracted_fields": {
+            "formatted_citation": (
+                "Alpha B. First study. Journal One. 2025;1:1-2.\n"
+                "\n"
+                "Delta E. Second study. Journal Two. 2024;2:3-4.\n"
+                "\n"
+                "Eta G. Third study. Journal Three. 2023;3:5-6."
+            ),
+            "formatting_source": "stage_5d_llm",
+            "target_name": None,
+            "year": 2025,
+        },
+    }
+    gen = _generator()
+
+    gen._fill_bibliography({"S1": [fused]}, cv_owner={}, document_uid="")
+
+    header_idx = gen._find_paragraph_with_text(_SECTION_HEADERS["S1"])
+    following = gen.doc.paragraphs[header_idx + 1: header_idx + 5]
+    texts = [p.text for p in following]
+
+    assert texts[1] == "1. Alpha B. First study. Journal One. 2025;1:1-2."
+    assert texts[2] == "2. Delta E. Second study. Journal Two. 2024;2:3-4."
+    assert texts[3] == "3. Eta G. Third study. Journal Three. 2023;3:5-6."
+    for p in following:
+        assert "\n" not in p.text
+        assert p._p.find(qn("w:br")) is None
+    assert gen.stats["entries_inserted"] == 3
+
+
+# --- T1 item 8: enrichment integration renders both w:del and w:ins ---
+
+
+def test_enrichment_integration_renders_deletion_and_bold_insertion():
+    entry = {
+        "extracted_fields": {
+            "formatted_citation": "Doe J, Smith A. An enriched study. Journal X. 2024;1(1):1-2.",
+            "formatting_source": "stage_5d_llm",
+            "target_name": "Smith A",
+            "year": 2024,
+        },
+        "enrichment_status": "enriched",
+        "text": "Doe J, Smith A. Original unenriched citation.",
+        "enrichment_source": "pubmed",
+    }
+    gen = WCMTemplateGenerator(verbose=False, emit_track_changes=True)
+    gen.doc = Document(gen.template_path)
+
+    gen._fill_bibliography({"S1": [entry]}, cv_owner={}, document_uid="")
+
+    header_idx = gen._find_paragraph_with_text(_SECTION_HEADERS["S1"])
+    para = gen.doc.paragraphs[header_idx + 2]
+
+    del_elem = para._p.find(qn("w:del"))
+    ins_elem = para._p.find(qn("w:ins"))
+    assert del_elem is not None
+    assert ins_elem is not None
+
+    del_text = "".join(t.text or "" for t in del_elem.findall(".//" + qn("w:delText")))
+    assert del_text == "Doe J, Smith A. Original unenriched citation."
+
+    ins_text = "".join(t.text or "" for t in ins_elem.findall(".//" + qn("w:t")))
+    assert ins_text == "1. Doe J, Smith A. An enriched study. Journal X. 2024;1(1):1-2."
+
+    bold_run = next(
+        r for r in ins_elem.findall(qn("w:r"))
+        if r.find(qn("w:rPr")) is not None and r.find(qn("w:rPr")).find(qn("w:b")) is not None
+    )
+    assert bold_run.find(qn("w:t")).text == "Smith A"
+
+
 if __name__ == "__main__":
-    import pytest
     raise SystemExit(pytest.main([__file__, "-q", "-p", "no:cacheprovider"]))
