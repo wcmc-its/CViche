@@ -656,24 +656,17 @@ _SECTION_HEADERS = {
 
 
 @pytest.mark.parametrize("code, header_text", sorted(_SECTION_HEADERS.items()))
-def test_each_section_code_inserts_under_its_official_header(code, header_text, caplog):
+def test_each_section_code_inserts_under_its_official_header(code, header_text):
     # All nine headers are present in the real WCM template (checked while
     # writing this test by walking gen.doc.paragraphs for each header_text
-    # in _SECTION_HEADERS) -- so every code below takes the "found" branch,
-    # never the caplog warning fallback.
+    # in _SECTION_HEADERS) -- so every code below takes the "found" branch.
     gen = _generator()
     entry = _citation_entry(f"Author {code}. A study. J. 2024;1:1-2.", f"Author {code}", 2024)
 
-    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage6.sections.bibliography"):
-        gen._fill_bibliography({code: [entry]}, cv_owner={}, document_uid="")
+    gen._fill_bibliography({code: [entry]}, cv_owner={}, document_uid="")
 
     header_idx = gen._find_paragraph_with_text(header_text)
-    if header_idx is None:
-        assert any(
-            "Could not find section header" in record.message and header_text in record.message
-            for record in caplog.records
-        )
-        return
+    assert header_idx is not None
 
     citation_para = gen.doc.paragraphs[header_idx + 2]
     assert citation_para.text.startswith("1. ")
