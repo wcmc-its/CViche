@@ -123,3 +123,32 @@ def test_narrative_with_no_identifier_still_rejected():
     entry = {"text": "Sponsored by: Microvention.\tFunding: $492,560",
              "taxonomy_code": "M2A", "extracted_fields": fields}
     assert _generator()._create_grant_table(fields, "M2A", entry) is None
+
+
+# --- #659: an explicit-None extracted_fields no longer raises -------------------
+
+def test_none_extracted_fields_does_not_raise_through_the_section_filler():
+    # Reproduces on dev today as AttributeError: 'NoneType' object has no
+    # attribute 'get', via research_support.py:135/168/192/237's bare
+    # entry.get('extracted_fields', {}) -- {} is the *default*, only used when
+    # the key is absent; an explicit None value passes straight through.
+    gen = _generator()
+    for _, header in (
+        ("M2A", "Current Research Funding"),
+        ("M2B", "Past (Completed) Funding"),
+        ("M2C", "Pending Funding"),
+    ):
+        gen.doc.add_paragraph(header)
+
+    entries_by_code = {
+        "M2A": [{"text": "Grant with no extracted fields at all",
+                  "taxonomy_code": "M2A", "extracted_fields": None}],
+        "M2B": [],
+        "M2C": [],
+    }
+
+    # Must not raise. The entry has no grant_number/title/agency once its
+    # extracted_fields resolves to {}, so it is correctly rejected by
+    # _create_grant_table and no table is added -- the point of this test is
+    # the absence of an exception, not the table count.
+    gen._fill_research_support(entries_by_code)

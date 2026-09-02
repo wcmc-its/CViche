@@ -132,7 +132,7 @@ class ResearchSupportSection:
         # Apply extracted percent effort to matching grants
         def apply_effort_to_grants(entries):
             for entry in entries:
-                fields = entry.get('extracted_fields', {})
+                fields = entry.get('extracted_fields') or {}
                 title = (fields.get('title', '') or '').lower().strip()
                 if title and not fields.get('percent_effort'):
                     # Try to find matching effort in lookup
@@ -165,7 +165,7 @@ class ResearchSupportSection:
         # Check each M2A entry for past end dates
         entries_to_move = []
         for entry in m2a_entries:
-            fields = entry.get('extracted_fields', {})
+            fields = entry.get('extracted_fields') or {}
             end_date = fields.get('end_date', '')
 
             # Parse end date to check if it's in the past
@@ -189,7 +189,7 @@ class ResearchSupportSection:
             m2b_entries.append(entry)
 
             if self.verbose:
-                title = entry.get('extracted_fields', {}).get('title') or 'Unknown'
+                title = (entry.get('extracted_fields') or {}).get('title') or 'Unknown'
                 print(f"  Reclassified to M2B: '{title[:40]}...' (ended {end_year})")
 
         # Map taxonomy codes to WCM template section headers
@@ -234,7 +234,7 @@ class ResearchSupportSection:
             last_element = self.doc.paragraphs[section_idx]._element
 
             for i, entry in enumerate(sorted_entries):
-                fields = entry.get('extracted_fields', {})
+                fields = entry.get('extracted_fields') or {}
 
                 # Create grant table - pass the element to insert after and owner name
                 grant_table = self._create_grant_table(fields, code, entry, insert_after_element=last_element, owner_name=owner_name)
