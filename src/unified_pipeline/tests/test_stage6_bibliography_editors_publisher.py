@@ -31,6 +31,8 @@ Run with:
 """
 
 from unified_pipeline.stage6.formatting.values import (
+    _CITATION_STOPWORDS,
+    _CITATION_TOKEN_MIN_LEN,
     _append_missing_stage5d_values,
     _format_citation,
     _value_referenced,
@@ -299,3 +301,85 @@ def test_append_missing_stage5d_values_appends_both_when_both_absent():
         'Smith J. A Chapter. 2021. Totally Different Names, eds. '
         'Totally Different Press.'
     )
+
+
+# ---------------------------------------------------------------------------
+# #481: stop words -- a token long enough to clear the floor but meaningless
+# ---------------------------------------------------------------------------
+
+def test_value_referenced_false_when_only_a_stopword_overlaps():
+    """The length floor alone let "and" (3 chars) carry a match, so any
+    two-name editors string read as already present in any citation whose
+    text contained the word "and". Only `_CITATION_STOPWORDS` makes this
+    False -- with the set emptied it flips back to True."""
+    assert _value_referenced(
+        'A. Smith and B. Jones',
+        'Doe J. Diet and exercise. In: Book. 2020.',
+    ) is False
+
+
+def test_value_referenced_false_when_only_editorial_boilerplate_overlaps():
+    """Same shape for the editorial boilerplate the module comment always
+    claimed was excluded: len("eds") == 3, so it cleared the floor, and an
+    "X (eds.)" value matched every citation carrying an "eds." clause."""
+    assert _value_referenced(
+        'Smith A (eds.)',
+        'Doe J. Chapter. In: Brown B, eds. Book. 2020.',
+    ) is False
+
+
+def test_value_referenced_still_true_when_a_real_token_sits_beside_a_stopword():
+    """The stop list must not make the test blind: "Arts" still matches even
+    though "the" no longer does. Guards against a stop list so broad that a
+    genuinely-present publisher gets appended a second time."""
+    assert _value_referenced(
+        'University of the Arts',
+        'Doe J. A short history of the Arts. 2020.',
+    ) is True
+
+
+def test_stage5d_editors_matching_only_on_a_stopword_are_appended():
+    """The wire case, not just the helper: an editors value whose only
+    overlap with the LLM's citation is the word "and" must still be treated
+    as missing and appended. This is the entry shape #481 exists for."""
+    fields = {
+        'editors': 'M. Moaddel and M. Gelfand',
+        'formatted_citation': 'Yount K. Family and modernity. In: Book. 2008.',
+        'formatting_source': 'stage_5d_llm',
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 8)
+
+    assert citation == (
+        '8. Yount K. Family and modernity. In: Book. 2008. '
+        'M. Moaddel and M. Gelfand, eds.'
+    )
+
+
+def test_citation_stopwords_are_all_at_or_above_the_length_floor():
+    """A stop word shorter than `_CITATION_TOKEN_MIN_LEN` would be dead
+    weight -- the floor already drops it -- so the two constants are pinned
+    together rather than drifting apart silently."""
+    assert all(len(w) >= _CITATION_TOKEN_MIN_LEN for w in _CITATION_STOPWORDS)
+    assert _CITATION_STOPWORDS == frozenset(w.casefold() for w in _CITATION_STOPWORDS)
+
+
+# ---------------------------------------------------------------------------
+# #481: a non-string stage-4 value must not reach the safety net's regex
+# ---------------------------------------------------------------------------
+
+def test_stage5d_non_string_editors_value_is_skipped_not_rendered():
+    """Stage 4 is raw LLM-shaped JSON with no schema enforcement, so
+    `editors` can arrive as a list. `_value_referenced` would raise TypeError
+    on it (`re.findall` over a list); the safety net skips a non-string value
+    instead, leaving the citation exactly as stage 5d wrote it."""
+    fields = {
+        'editors': ['Smith A', 'Jones B'],
+        'publisher': 'Acme Press',
+        'formatted_citation': 'Doe J. A Chapter. In: Book. Acme Press; 2020.',
+        'formatting_source': 'stage_5d_llm',
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 10)
+
+    assert citation == '10. Doe J. A Chapter. In: Book. Acme Press; 2020.'

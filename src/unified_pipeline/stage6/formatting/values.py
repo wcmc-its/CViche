@@ -18,21 +18,42 @@ from ..normalization import _normalize_author_names
 # once any of its own significant words shows up there -- not the whole
 # value verbatim -- so a reworded-but-present publisher/editors ("Springer"
 # for "Springer-Verlag, NY") isn't appended a second time. Below this length
-# a token (an initial, "of", "eds") is too common to mean anything on its own.
+# a token (an initial, "of", "NY") is too common to mean anything on its own.
 _CITATION_TOKEN_MIN_LEN = 3
+# Tokens that clear the length floor and still identify nothing: English
+# function words plus the editorial boilerplate a citation carries anyway.
+# The floor alone was not enough -- len("and") and len("eds") are both 3, so
+# "A. Smith and B. Jones" read as already present in any citation whose text
+# contained the word "and" anywhere, and the editors half of the safety net
+# below could never fire (found reviewing this fix, #481). Shorter function
+# words ("of", "in", "an") need no entry here; the floor already drops them.
+_CITATION_STOPWORDS = frozenset({
+    'and', 'the', 'for', 'with', 'from', 'that', 'this',
+    'eds', 'edited', 'editor', 'editors', 'edition', 'chief',
+    'vol', 'volume', 'page', 'pages', 'published', 'publisher',
+})
 _CITATION_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
 
 
 def _value_referenced(value: str, citation_text: str) -> bool:
     """Whole-word, casefolded overlap test (#481) between a candidate value
-    (a publisher or editors string) and an already-formatted citation."""
+    (a publisher or editors string) and an already-formatted citation.
+
+    A token counts only if it clears `_CITATION_TOKEN_MIN_LEN` *and* is not a
+    stop word. A value left with no significant token of its own reads as
+    absent, so the caller appends it rather than trusting a match on a word
+    ("and", "eds") that appears in citations regardless of this value.
+    """
     if not value:
         return False
     haystack = citation_text.casefold()
-    tokens = [t for t in _CITATION_TOKEN_RE.findall(value) if len(t) >= _CITATION_TOKEN_MIN_LEN]
+    tokens = [
+        t for t in (raw.casefold() for raw in _CITATION_TOKEN_RE.findall(value))
+        if len(t) >= _CITATION_TOKEN_MIN_LEN and t not in _CITATION_STOPWORDS
+    ]
     if not tokens:
         return False
-    return any(re.search(rf"\b{re.escape(t.casefold())}\b", haystack) for t in tokens)
+    return any(re.search(rf"\b{re.escape(t)}\b", haystack) for t in tokens)
 
 
 def _append_missing_stage5d_values(formatted_citation: str, fields: Dict) -> str:
@@ -44,14 +65,16 @@ def _append_missing_stage5d_values(formatted_citation: str, fields: Dict) -> str
     when its own prompt extracted them, so a book/chapter citation the LLM
     formatted without one of those values has no later stage that can add it.
     Append whichever of the two `extracted_fields` actually carries and the
-    LLM's own text does not already reference.
+    LLM's own text does not already reference. A non-string value is skipped:
+    stage 4 is raw LLM-shaped JSON, so `editors` can arrive as a list, and
+    neither crashing the render nor writing a repr into a citation is wanted.
     """
     additions = []
     editors = fields.get('editors')
-    if editors and not _value_referenced(editors, formatted_citation):
+    if isinstance(editors, str) and editors and not _value_referenced(editors, formatted_citation):
         additions.append(f"{editors}, eds.")
     publisher = fields.get('publisher')
-    if publisher and not _value_referenced(publisher, formatted_citation):
+    if isinstance(publisher, str) and publisher and not _value_referenced(publisher, formatted_citation):
         additions.append(f"{publisher}.")
     if not additions:
         return formatted_citation
