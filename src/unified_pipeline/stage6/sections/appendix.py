@@ -36,6 +36,7 @@ from ...core.template_boilerplate import (
 )
 from ..formatting import _set_font
 from ..normalization import _clean_inline_tabs
+from ..render_check import _is_column_header_row
 
 
 class AppendixSection:
@@ -51,15 +52,21 @@ class AppendixSection:
             return
 
         # Layer 3 backstop: drop WCM-template instruction boilerplate, source-CV
-        # furniture (title lines, date stamps — #213), and empty entries that
-        # slipped through to the unmapped pile so they do not pollute the
-        # Appendix. Precision-biased: real CV content is never dropped.
+        # furniture (title lines, date stamps — #213), empty entries, and table
+        # column-header rows (#424) that slipped through to the unmapped pile so
+        # they do not pollute the Appendix. A T-coded header row ("Title |
+        # Institution/Location | Dates", "1. NAME:") is not content -- it is the
+        # header of a table the reader emits as a data row -- and would
+        # otherwise reach the appendix as a spurious numbered line, shifting the
+        # numbering of genuine entries after it. Precision-biased: real CV
+        # content is never dropped.
         _pre_filter = len(unmapped_entries)
         unmapped_entries = [
             e for e in unmapped_entries
             if e.get("text", "").strip()
             and not is_template_instruction(e.get("text", ""))
             and not is_source_boilerplate(e.get("text", ""))
+            and not _is_column_header_row(e.get("text", ""))
         ]
 
         # Render each surviving entry once, collapsing the readers' internal cell
