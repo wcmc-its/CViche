@@ -29,6 +29,15 @@ into exactly three parts ("Fellow | American Academy of Pediatrics |
 uids) crosses the >2 part-count threshold but must still resolve to one
 membership.
 
+That stricter gate applies ONLY to entries this fix newly splits. Applied to
+every entry it also silently changed a path #476 never touched: an
+already-multi-line entry that parses to exactly one membership rendered the
+parsed row before #476 and would have fallen through to the extracted-fields
+row instead. No farm entry has that shape, so no gate could see it; the
+`len(lines) > 2` half of the call site's condition preserves it, and
+`test_multiline_single_membership_still_renders_the_parsed_row` pins it
+against the measured dev output.
+
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_memberships_fragments.py -p no:cacheprovider
@@ -150,6 +159,27 @@ def test_negative_control_farm_pipe_blind_three_field_single_membership_unchange
     rows = _render_memberships([entry])
     assert len(rows) == 1
     assert rows[0][0] == "American Academy of Pediatrics"
+
+
+def test_multiline_single_membership_still_renders_the_parsed_row():
+    """An already-multi-line entry that `_parse_multi_membership_entry`
+    resolves to exactly ONE membership is a path #476 must not touch: it is
+    not newline-blind, so the parsed-count gate added for the blind case must
+    not reach it. Measured on origin/dev this renders the PARSED row
+    ('Fellow, American Academy of Pediatrics' / '1997-present'), not the
+    extracted-fields row ('American Academy of Pediatrics' / '1997-Present')
+    -- the extracted fields here deliberately differ from the parse so the
+    two paths are distinguishable in the assertion."""
+    entry = {
+        "text": "Fellow\nAmerican Academy of Pediatrics\n1997-present",
+        "extracted_fields": {
+            "organization": "American Academy of Pediatrics",
+            "start_date": "1997-01-01",
+            "end_date": "present",
+        },
+    }
+    rows = _render_memberships([entry])
+    assert rows == [["Fellow, American Academy of Pediatrics", "1997-present"]], rows
 
 
 if __name__ == "__main__":

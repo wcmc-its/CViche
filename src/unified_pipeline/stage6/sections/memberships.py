@@ -141,19 +141,31 @@ class MembershipsSection:
             # #476). Pattern: "Member\nElected Member | Org1\nOrg2 |
             # date1\ndate2", or fully blind: "Type1 | Org1 | Date1 | Type2 |
             # Org2 | Date2".
+            lines = entry_lines(original_text)
             parts = _entry_parts(original_text)
 
             # Detect multi-membership pattern: multiple organization names or
-            # membership types. Gate on the PARSED result too, not just the
-            # raw part count: a single membership whose fields happen to
-            # split into exactly three parts ("Fellow | American Academy of
-            # Pediatrics | 1/1997-present", farm entries on 1FRABQ and
-            # others) crosses the >2 threshold but must still resolve to one
-            # membership, not be misread as several.
-            # `_parse_multi_membership_entry` already does its own '|'
-            # splitting and keyword/date classification per part.
+            # membership types. `_parse_multi_membership_entry` already does
+            # its own '|' splitting and keyword/date classification per part.
+            #
+            # Two gates, and which one applies depends on whether this entry
+            # is one #476 newly splits:
+            #
+            #  - already multi-line (`len(lines) > 2`): unchanged from before
+            #    #476 -- any parse result at all renders, including a
+            #    single-membership one. `parts` IS `lines` here, so this is
+            #    byte-for-byte the old `if len(lines) > 2: ... if memberships:`
+            #    behaviour, deliberately preserved rather than folded into
+            #    the stricter gate below.
+            #  - newly split by '|' out of one blind line: gate on the PARSED
+            #    COUNT, not just the raw part count. A single membership whose
+            #    fields happen to split into exactly three parts ("Fellow |
+            #    American Academy of Pediatrics | 1/1997-present", farm
+            #    entries on 1FRABQ and others) crosses the >2 threshold but
+            #    must still resolve to one membership, not be misread as
+            #    several.
             memberships = _parse_multi_membership_entry(parts) if len(parts) > 2 else []
-            if len(memberships) > 1:
+            if len(memberships) > 1 or (memberships and len(lines) > 2):
                 for mem_type, org, dates in memberships:
                     org_text = f"{mem_type}, {org}" if mem_type and mem_type.lower() not in org.lower() else org
                     self._add_table_row(table, [org_text, dates], entry=entry)
