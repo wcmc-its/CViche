@@ -323,21 +323,15 @@ def test_word_beginning_with_a_stem_is_not_a_role_line(line):
     assert _is_known_org_line(line, _ROLE_KEYWORDS) is False, line
 
 
-def test_directory_is_an_accepted_false_positive_of_the_y_suffix():
-    """'director' + the 'y' suffix produces "directory", an unrelated
-    English word -- an unavoidable side effect of admitting 'y' at all,
-    which round 4 does specifically so 'advisor' + 'y' reaches "advisory"
-    (187 corpus occurrences, the single largest non-bare form in the
-    corpus probe -- see service.py's `_ROLE_STEM_SUFFIXES` comment). No
-    corpus line contains "directory" or any other 'y'-suffixed collision
-    that is not also a genuine role form (#658 round 4 probe, 15,079
-    entry lines), so this is pinned as an accepted synthetic mis-file, the
-    same status `test_ementorship_mid_word_is_not_restored` documents for
-    a different edge above -- not a regression to fix, because doing so
-    would require either dropping 'y' (losing "advisory") or a
-    per-keyword suffix list (rejected in the docstring above: a hand list
-    keeps missing real forms)."""
-    assert _matches_word_start("directory services", _ROLE_KEYWORDS) is True
+def test_directory_is_not_a_role_line():
+    """'director' + 'y' would produce "directory", an unrelated English
+    word, if 'y' were in `_ROLE_STEM_SUFFIXES` -- which is exactly why 'y'
+    and 'ate' are NOT in that list. "advisory" and "directorate" are
+    instead listed as their own `EXTRAMURAL_ROLE_KEYWORDS` stems, so
+    "director"'s suffix set stays narrow and "directory" does not match
+    (#658 round 4 review, T1)."""
+    assert _matches_word_start("directory services", _ROLE_KEYWORDS) is False
+    assert _is_known_org_line("directory services", _ROLE_KEYWORDS) is False
 
 
 @pytest.mark.parametrize("line", [
@@ -351,10 +345,12 @@ def test_directory_is_an_accepted_false_positive_of_the_y_suffix():
 ])
 def test_corpus_derived_suffix_forms_are_still_role_lines(line):
     """Positive controls for the same round-4 change: every corpus-derived
-    `_ROLE_STEM_SUFFIXES` form -- including "advisory" ('advisor' + 'y')
-    and "directorate" ('director' + 'ate'), the two forms a round-3-style
-    hand list would have missed -- still matches (#658 round 4 review,
-    T1/T3)."""
+    role form still matches, whether via a `_ROLE_STEM_SUFFIXES` suffix
+    ("chairman", "mentorship program", the digit-glued forms) or via
+    "advisory"/"directorate" now matching as their own
+    `EXTRAMURAL_ROLE_KEYWORDS` stems rather than a 'y'/'ate' suffix (the
+    two forms a round-3-style hand list would have missed) (#658 round 4
+    review, T1/T3)."""
     assert _matches_word_start(line, _ROLE_KEYWORDS) is True, line
 
 

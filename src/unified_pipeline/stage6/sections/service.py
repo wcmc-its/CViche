@@ -83,22 +83,35 @@ BOARD_KEYWORDS = (
 EXTRAMURAL_ROLE_KEYWORDS = (
     'member', 'chair', 'reviewer', 'liaison', 'mentor', 'committee',
     'board', 'council', 'advisor', 'director', 'leader', 'representative',
-    # 'subcommittee' is listed separately because `_matches_word_start`
-    # anchors on the word's START: "subcommittee" does not start with
-    # "committee", so the entry above cannot reach it. Real committee role
-    # lines use it ("AHA Hospital Accreditation Stroke Certification
-    # Subcommittee", "LCME Self Study Subcommittee: ...") -- 50 line
-    # occurrences over 14 corpus UIDs (#658 round 3 probe).
-    'subcommittee',
+    # These three are listed as their own stems because `_matches_word_start`
+    # cannot reach them any other way. 'subcommittee' does not start with
+    # "committee" -- the matcher anchors on the word's START, so the entry
+    # above cannot reach it; real committee role lines use it ("AHA Hospital
+    # Accreditation Stroke Certification Subcommittee", "LCME Self Study
+    # Subcommittee: ...") -- 50 line occurrences over 14 corpus UIDs (#658
+    # round 3 probe). 'advisory' and 'directorate' are DERIVED forms
+    # (`advisor` + `y`, `director` + `ate`) that `_ROLE_STEM_SUFFIXES`
+    # cannot reach either: admitting 'y'/'ate' as suffixes there would also
+    # turn "director" into the unrelated word "directory" (#658 round 4
+    # review, T1). So each derived word the suffix rule cannot reach
+    # without that side effect is listed here as its own stem instead:
+    # advisory (187 corpus lines), directorate (2 lines) (#658 round 4
+    # probe, 15,079 entry lines).
+    'subcommittee', 'advisory', 'directorate',
 )
 
 # The inflected and derived forms a role stem may take, and nothing else:
 # every form observed on the 66-CV corpus (#658 round 4 probe, 15,079 entry
 # lines) is here, so "boardwalk", "leaderboard" or "directory" cannot match
-# while "chairman", "directors", "advisory", "mentorship" still do.
+# while "chairman", "directors", "mentorship" still do. 'y' and 'ate' are
+# deliberately absent: admitting them would reach "advisory" and
+# "directorate" but would also let "director" + 'y' match the unrelated
+# word "directory" -- so those two derived forms are instead listed as
+# their own EXTRAMURAL_ROLE_KEYWORDS entries above (#658 round 4 review,
+# T1).
 _ROLE_STEM_SUFFIXES = ('s', 'es', 'ed', 'ing', 'ship', 'ships', 'man', 'men',
                        'woman', 'women', 'person', 'persons', 'people',
-                       'or', 'ors', 'lor', 'lors', 'ate', 'y')
+                       'or', 'ors', 'lor', 'lors')
 
 
 def _matches_bounded(text_lower: str, keywords) -> bool:
@@ -143,12 +156,15 @@ def _matches_word_start(text_lower: str, keywords) -> bool:
     "boardwalk", "leaderboard" and "directory" read as role indicators,
     which they are not (#658 round 4 review). Corpus-deriving the suffix
     list instead of hand-guessing it matters because a hand list keeps
-    missing real forms: "advisory" (`advisor` + `y`, 187 corpus
-    occurrences) and "directorate" (`director` + `ate`, 2 occurrences)
-    are both real leadership-table role words a round-3-style hand list
-    would have missed, and both are covered here because the list comes
-    from a direct probe over all 15,079 corpus entry lines rather than
-    from guessing likely endings.
+    missing real forms -- but not every real form belongs in
+    `_ROLE_STEM_SUFFIXES` itself: "advisory" (`advisor` + `y`, 187 corpus
+    occurrences) and "directorate" (`director` + `ate`, 2 occurrences) are
+    both real leadership-table role words a round-3-style hand list would
+    have missed, yet admitting 'y' and 'ate' as suffixes here would also
+    let "director" + 'y' match "directory", an unrelated word with no
+    corpus role reading. Both are instead listed as their own
+    `EXTRAMURAL_ROLE_KEYWORDS` stems (see that constant's comment), so they
+    still match without opening the suffix list to that collision.
 
     The left boundary, `(?<![^\\W\\d_])`, means "not preceded by a Unicode
     letter" -- equivalently, "not preceded by a `\\w` character that is not
