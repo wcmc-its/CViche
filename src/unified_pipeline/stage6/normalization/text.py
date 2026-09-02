@@ -61,13 +61,22 @@ def _normalize_author_names(authors: str) -> str:
     - Double commas: "Watson, K.,," -> "Watson K"
     - Trailing punctuation
 
-    Never drops a token (#560). Previously, a comma-split token the pair
-    detector or the fallback below couldn't place -- an initials group, a
-    name suffix, a bare 1-2 character fragment -- was silently discarded.
-    Because a single missing comma anywhere in the list is enough to make
-    the pair detector decline the whole string, that one discard rule was
-    stripping every later author's initials from citations that had them.
-    Such a token now merges into the author immediately before it instead.
+    Never drops a token that names or belongs to a real author (#560).
+    Previously, a comma-split token the pair detector or the fallback below
+    couldn't place -- an initials group, a name suffix, a bare 1-2 character
+    fragment -- was silently discarded, and that test was case-blind: a
+    short *surname* ("Li", "Wu", "Ma", "Ye") was discarded exactly like a
+    short initials fragment. Because a single missing comma anywhere in the
+    list is enough to make the pair detector decline the whole string, that
+    one discard rule was stripping every later author's initials from
+    citations that had them, or dropping short-surnamed authors outright.
+    Such a token now merges into the author immediately before it, or, if
+    it is not initials-shaped (not ALL-CAPS) and there is no open author to
+    merge into, is kept as its own standalone author. The one remaining
+    exception -- an ALL-CAPS initials/suffix fragment with no open author
+    at all to attach to -- is an unattributable orphan with no name to
+    invent; see the fallback branch below for why that one case still
+    drops.
     """
     if not authors:
         return ''
@@ -142,14 +151,18 @@ def _normalize_author_names(authors: str) -> str:
     # rejected this input -- one missing comma anywhere in the list is
     # enough (#560) -- so comma position can no longer be trusted to mean
     # "surname, initials" across the whole string. A token that looks like
-    # just initials, a suffix, or a bare 1-2 character fragment merges into
-    # the author immediately before it -- but only when that author is
-    # still "open": a bare name with no initials of its own yet, the exact
-    # shape a stray comma produces ("Konopasek, L" split by one comma that
-    # shouldn't be there). An author that already has its own initials
-    # ("Sanguino SM") is not reopened by a later fragment, and a fragment
-    # with nothing open to attach to is an unattributable orphan -- dropped,
-    # same as before, because there is no author here to charge it to.
+    # just initials, a suffix, or a bare 1-2 character ALL-CAPS fragment
+    # merges into the author immediately before it -- but only when that
+    # author is still "open": a bare name with no initials of its own yet,
+    # the exact shape a stray comma produces ("Konopasek, L" split by one
+    # comma that shouldn't be there). An author that already has its own
+    # initials ("Sanguino SM") is not reopened by a later fragment, and a
+    # fragment with nothing open to attach to is an unattributable orphan
+    # -- dropped, same as before, because there is no author here to charge
+    # it to. A mixed-case or lowercase 1-2 character token is not treated
+    # as a fragment at all -- it is at least as likely to be a real short
+    # surname ("Li", "Wu", "Ma", "Ye") as an initials group, so it is kept
+    # as its own standalone author instead (#560).
     logger.debug(
         "_normalize_author_names: pair detector rejected %r (%d comma-"
         "separated tokens); using non-destructive fallback",
@@ -167,11 +180,20 @@ def _normalize_author_names(authors: str) -> str:
             has_et_al = True
             continue
 
-        # Look like just initials ("MR", "um"), a recognised suffix ("Jr"),
-        # or a bare 1-2 character fragment: not a standalone author.
+        # Look like just initials ("MR"), a recognised suffix ("Jr"), or a
+        # bare 1-2 character ALL-CAPS fragment ("SM"): not a standalone
+        # author. A mixed-case or lowercase 1-2 character token ("Li",
+        # "Wu", "Ma", "Ye") is at least as likely to be a real short
+        # surname as an initials fragment -- only an ALL-CAPS shape is
+        # initials-shaped here, matching `_looks_like_initials` and the
+        # pairs branch above (#560: the old case-blind `len(...) <= 2`
+        # dropped every author whose surname happened to be short and had
+        # no still-open predecessor to merge into, e.g. "Li, Wu, Ma, Ye").
         is_initials_group = bool(re.match(r'^[A-Z]{1,3}\.?$', author_stripped))
         is_suffix = bool(_AUTHOR_SUFFIX_RE.match(author_stripped.rstrip('.')))
-        is_short_fragment = len(author_stripped) <= 2
+        is_short_fragment = (
+            len(author_stripped) <= 2 and author_stripped.isupper()
+        )
 
         if is_initials_group or is_suffix or is_short_fragment:
             if merge_target_open:

@@ -86,12 +86,34 @@ def test_suffix_and_trailing_initials_both_kept():
     assert citation == '1. Smith, John Jr, Brown AB. A Study.'
 
 
-def test_two_character_given_name_is_not_deleted():
-    """'Li' is a real 2-character given name, not an initials fragment to
-    discard -- the old <=2-character skip could not tell the difference."""
+def test_two_character_surname_is_not_deleted():
+    """'Li' is a real 2-character surname (as are 'Wang', 'Wei' here), not
+    an initials fragment to discard -- the old case-blind <=2-character
+    skip could not tell a short surname from a short initials group and
+    dropped both alike. Round-1 fix: only an ALL-CAPS 1-2 character token
+    is initials-shaped; a mixed-case one is kept as its own author, merged
+    or standalone exactly as `_looks_like_initials` already treats it
+    everywhere else in this function."""
     citation = _cite('Chen, Li, Wang, Wei')
     assert 'Li' in citation
-    assert citation == '1. Chen Li, Wang, Wei. A Study.'
+    assert citation == '1. Chen, Li, Wang, Wei. A Study.'
+
+
+def test_run_of_short_surnames_with_no_open_predecessor_is_not_deleted():
+    """Round-1 regression (#560 fallback path): consecutive short,
+    mixed-case surnames with nothing 'open' to merge into -- each one was
+    a case-blind <=2-character 'fragment' and got silently dropped one
+    after another, emptying the whole citation. None may be lost."""
+    assert _cite('Li, Wu, Ma, Ye') == '1. Li, Wu, Ma, Ye. A Study.'
+
+
+def test_short_surname_next_to_a_real_initials_pair_is_not_deleted():
+    """Mix of a genuine stray-comma 'Surname, Initial' pair (merges, as
+    intended) and short surnames with nothing open to merge into (kept
+    standalone, not dropped) -- the exact shape of the round-1 finding."""
+    assert _cite('Wu, J, Li, X, Chen, Ming') == (
+        '1. Wu J, Li X, Chen, Ming. A Study.'
+    )
 
 
 def test_single_lowercase_initial_is_recognised():
@@ -143,12 +165,23 @@ def test_double_comma_cleanup_still_works():
     assert _cite('Watson, K.,,') == '1. Watson K. A Study.'
 
 
-def test_et_al_is_still_recognised():
-    assert _cite('Smith, JA, et al') == '1. Smith JA, et al. A Study.'
-
-
 def test_already_vancouver_form_is_unchanged():
     assert _cite('Smith JA, Jones MB') == '1. Smith JA, Jones MB. A Study.'
+
+
+# --------------------------------------------------------------------------
+# Fixed behaviour, not pre-existing: on origin/dev the pairs branch's old
+# `while i < len(parts) - 1` bound (see test_trailing_odd_author_is_kept_
+# not_dropped above) silently dropped a trailing unpaired element -- and
+# "et al" is exactly that shape once "Smith, JA, et al" is comma-split into
+# ["Smith", "JA", "et al"] (3 parts, an odd trailing element). Verified by
+# mutation: this test FAILS against origin/dev's text.py (dev emits
+# '1. Smith JA. A Study.', silently dropping the "et al" marker) and PASSES
+# against this branch's fix.
+# --------------------------------------------------------------------------
+
+def test_et_al_is_still_recognised():
+    assert _cite('Smith, JA, et al') == '1. Smith JA, et al. A Study.'
 
 
 def test_stage_5d_llm_entries_bypass_normalization_entirely():
