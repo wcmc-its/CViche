@@ -50,7 +50,34 @@ from ..formatting import normalize_iso_dates_in_text
 from ..normalization import _strip_markdown_for_word
 from ..parsing import _is_orphan_fragment, _is_structural_label
 from ..sorting import sort_entries_reverse_chronological
-from unified_pipeline.core.render_check import entry_lines
+from unified_pipeline.core.render_check import entry_fragments, entry_lines
+
+
+def _fragment_parts(text: str) -> List[str]:
+    """Stripped, non-empty fragments of Stage 5c's own formatted text
+    (#476), for the `elif formatted_text:` branch below (line ~172) only.
+
+    Not the same call as the `original_lines = entry_lines(original_text)`
+    check a few lines above (line ~149) -- that one reads raw `original_text`
+    to decide whether Stage 5c fused multiple distinct source entries into
+    one formatted blob, and switching IT to `entry_fragments` was tried and
+    reverted: 495 farm K entries are a single teaching record whose raw text
+    happens to be tab/pipe-joined ("Title\\tDate\\tDescription"), which Stage
+    5c already reformats correctly into one well-structured bullet (with its
+    own markdown sub-bullets) -- entry_fragments would make every one of
+    those 495 look like a multi-item entry and replace that good bullet with
+    several raw, unformatted fragment bullets instead. The two checks are
+    not compared to each other (independent `if`/`elif` branches on
+    different variables), so switching one and not the other is safe; see
+    the module's own analysis in the accompanying test file.
+
+    This helper's own call site only runs when `original_text` is EMPTY --
+    there's nothing to compare against, so the "did 5c over-combine"
+    question doesn't apply. `formatted_text` is Stage 5c's own LLM prose and
+    essentially never carries a raw tab/pipe, so this is a low-risk, mostly
+    dormant migration to entry_fragments (0 farm entries reach this branch
+    with either text)."""
+    return [f.strip() for f in entry_fragments(text) if f.strip()]
 
 logger = logging.getLogger(__name__)
 
@@ -169,7 +196,7 @@ class TeachingSection:
 
         elif formatted_text:
             new_text = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
-            lines = entry_lines(new_text)
+            lines = _fragment_parts(new_text)  # #476: see _fragment_parts
             combined_text = '. '.join(lines) if len(lines) > 1 else (lines[0] if lines else '')
             self._insert_bulleted_entry(
                 insert_idx, combined_text, entry,
