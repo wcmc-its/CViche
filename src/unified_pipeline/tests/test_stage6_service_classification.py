@@ -301,9 +301,12 @@ def test_ementorship_mid_word_is_not_restored():
 # ---------------------------------------------------------------------------
 # Round 4 (#658 round 4 review): the unbounded-right-edge matcher rounds 2-3
 # shipped let ANY word beginning with a role stem count as a role indicator,
-# not just its real inflected/derived forms -- "Board Members Inc." and
+# not just its real inflected/derived forms -- "Boardwalk Foundation" and
 # "Directory of Physicians" both name organizations, not roles, but
-# "board"/"director" happen to be their opening substring. Fixed by bounding
+# "board"/"director" happen to be their opening letters. ("Board Members
+# Inc." is NOT that case: bare "board" is a whole-word stem, so such a line
+# is vetoed as a role line by #624's design under every matcher version.)
+# Fixed by bounding
 # the right edge to an explicit, corpus-derived `_ROLE_STEM_SUFFIXES` list
 # instead of leaving it open.
 
