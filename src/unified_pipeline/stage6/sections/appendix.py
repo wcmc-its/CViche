@@ -7,7 +7,7 @@ classification miss costs the reader a scroll instead of costing them the
 content, and its formatting deliberately mirrors S. BIBLIOGRAPHY so it reads as
 part of the document.
 
-Three filters run before anything is written, and all three are
+Four filters run before anything is written. The first three are
 precision-biased -- an entry that is merely suspicious survives:
 
 - empty text, WCM template instructions, and source-CV furniture (title pages,
@@ -17,6 +17,17 @@ precision-biased -- an entry that is merely suspicious survives:
 - entries that render to nothing once the readers' cell separators are collapsed
   by `_clean_inline_tabs`. A blank template table row ("|  |  |") is non-empty as
   raw text and empty on the page.
+- table column-header rows that reached the unmapped pile T-coded (#424):
+  `_is_column_header_row` (`..render_check`) flags a row as a header when at
+  least half its words are column-label vocabulary (title, institution, role,
+  name, date, ...), catching shapes like "Year: Degree | Discipline |
+  Institution/Location" and bare "NAME:" before they reach the appendix as a
+  spurious numbered line and shift the numbering of the genuine entries after
+  it. Unlike the first three, this one is not strictly precision-biased: a
+  short entry made up entirely of column-label words (e.g. a two-word
+  "Committee Chair" T-coded row) can trip the same vocabulary-majority
+  heuristic and be dropped, a known false-positive class the 66-CV corpus
+  does not currently exercise.
 
 What was dropped is reported ONCE, as a single Word comment on the introductory
 paragraph, rather than per entry -- the dropped blocks are boilerplate, and N
@@ -58,8 +69,10 @@ class AppendixSection:
         # Institution/Location | Dates", "1. NAME:") is not content -- it is the
         # header of a table the reader emits as a data row -- and would
         # otherwise reach the appendix as a spurious numbered line, shifting the
-        # numbering of genuine entries after it. Precision-biased: real CV
-        # content is never dropped.
+        # numbering of genuine entries after it. The first three checks are
+        # precision-biased; the header-row check can misclassify a short,
+        # all-vocabulary phrase as a header and drop it (see the module
+        # docstring).
         _pre_filter = len(unmapped_entries)
         unmapped_entries = [
             e for e in unmapped_entries
