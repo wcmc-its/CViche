@@ -66,7 +66,7 @@ def test_month_precision_is_preserved_within_a_year():
     ("2019", (2019, None, None)),
     ("March 2020", (2020, 3, None)),
     ("Mar. 2020", (2020, 3, None)),
-    ("Foobar 2021", (2021, None, None)),   # unknown month name -> year only
+    ("Foobar 2021", (None, None, None)),   # unknown month name -> unreadable (#711)
     ("", (None, None, None)),
     ("garbage", (None, None, None)),
 ])
@@ -74,14 +74,116 @@ def test_parse_date_components(date_str, expected):
     assert _parse_date_components(date_str) == expected
 
 
+# --- #711 review round 1: unknown month token vs. season token --------------
+#
+# T1.1/T2.5: an unknown alphabetic token used to fall back to the same
+# (year, None, None) a season token gets, making "Foo 2021" indistinguishable
+# from a legitimate year-only "2021". A season names a real year with an
+# unstated month; an unknown token names neither and is dropped entirely.
+
+@pytest.mark.parametrize("date_str", ["Foo 2021", "Blah 2021", "Unknown 2024"])
+def test_unknown_month_token_is_unreadable(date_str):
+    assert _parse_date_components(date_str) == (None, None, None)
+
+
+@pytest.mark.parametrize("date_str, expected", [
+    ("Fall 2016", (2016, None, None)),
+    ("Spring 2020", (2020, None, None)),
+    ("autumn 2019", (2019, None, None)),
+])
+def test_season_token_keeps_the_year(date_str, expected):
+    assert _parse_date_components(date_str) == expected
+
+
+@pytest.mark.parametrize("date_str, expected", [
+    ("March 2020", (2020, 3, None)),
+    ("Sept. 2019", (2019, 9, None)),
+    ("Jun 2024", (2024, 6, None)),
+])
+def test_known_month_token_still_parses(date_str, expected):
+    assert _parse_date_components(date_str) == expected
+
+
+# --- #711 review round 1: anchoring (T1.2/T2.1) ------------------------------
+#
+# Every complete-date pattern is re.fullmatch now: a string that carries a
+# valid date plus trailing text -- extra digits, garbage, or (the corpus
+# shapes below) a list or a range packed into one field -- is not a single
+# date, and parses to nothing rather than being read as its first token.
+
+@pytest.mark.parametrize("date_str", [
+    "2021-06-30foo",
+    "2021-05-15 garbage",
+    "2021-13",
+    "02/2021x",
+])
+def test_anchoring_rejects_valid_prefix_plus_trailing_text(date_str):
+    assert _parse_date_components(date_str) == (None, None, None)
+
+
+@pytest.mark.parametrize("date_str", [
+    # Corpus shapes (scout716) that previously parsed as their first date
+    # under `re.match` -- a list or a range in one field, not a single date.
+    "february 2022, july 2022 and july 2023",
+    "march 2021, march 2022, march 2023, and march 2024",
+    "2023-06-29-30",
+    "2006-07-14 to 2006-07-16",
+    "2006-05-18 to 2006-05-20; 2006-02-09",
+])
+def test_anchoring_rejects_corpus_list_and_range_shapes(date_str):
+    assert _parse_date_components(date_str) == (None, None, None)
+
+
+# --- #711 review round 1: calendar validity (T1.3/T2.2) ---------------------
+
+@pytest.mark.parametrize("date_str", [
+    "2021-13-40",   # month out of range
+    "99/2021",      # MM/YYYY with an impossible month
+    "2021-00-10",   # month 0
+])
+def test_calendar_invalid_month_is_unreadable(date_str):
+    assert _parse_date_components(date_str) == (None, None, None)
+
+
+@pytest.mark.parametrize("date_str, expected", [
+    ("02/31/2021", (2021, 2, None)),   # valid month, impossible day
+    ("2024-04-31", (2024, 4, None)),   # corpus case (scout716): April has 30 days
+])
+def test_calendar_invalid_day_degrades_to_month_precision(date_str, expected):
+    assert _parse_date_components(date_str) == expected
+
+
+def test_calendar_leap_year_day_is_kept():
+    assert _parse_date_components("2024-02-29") == (2024, 2, 29)
+
+
+def test_calendar_non_leap_year_day_degrades_to_month():
+    assert _parse_date_components("2023-02-29") == (2023, 2, None)
+
+
 def test_both_functions_use_the_shared_parser():
-    # format (rendering) and extract_sort_date (sorting) must agree on the year
-    # and month a string yields -- that is the whole point of sharing the parser.
+    # format_date_for_section (rendering), extract_sort_date (sorting), and
+    # _parse_date_components itself must all agree on what a string yields --
+    # that is the whole point of sharing the parser (#711 T2.4: this test's
+    # name already claimed to check this and did not -- it only compared
+    # _parse_date_components against extract_sort_date, so a duplicate parser
+    # inside format_date_for_section's own path could have drifted silently).
     for date_str in ("Aug. 2021", "March 2020", "05/2019", "2019-05-15"):
         year, month, _ = _parse_date_components(date_str)
         sort_year, sort_month, _ = _sort(date_str)
         assert sort_year == year
         assert sort_month == (month if month is not None else 1)
+        # format_date_for_section (yyyy-format code) surfaces the same parsed
+        # year the other two agreed on.
+        formatted = format_date_for_section(date_str, "H")
+        assert formatted == str(year)
+
+    # An unparsed string (#711 D2/D1) is returned as written by the formatter,
+    # exactly as it sorts last rather than acquiring a fabricated date.
+    unparsed = "february 2022, july 2022 and july 2023"
+    assert _parse_date_components(unparsed) == (None, None, None)
+    assert format_date_for_section(unparsed, "H") == unparsed
+    assert _sort(unparsed) == (0, 0, 0)
 
 
 # --- format_date_for_section output unchanged for common cases --------------
@@ -281,6 +383,74 @@ class TestDatesOverlapOrMatch:
             _entry("2021-02-01", "2021-11-01"),
             _entry("2021-10-01", "2021-12-01"),
         ) is True
+
+    # -- #711 review round 1: inverted own-range (T2.3) ----------------------
+    #
+    # A malformed extraction where an entry's own end is stated before its own
+    # start proves nothing about either entry -- conservative True, same as an
+    # unreadable boundary, rather than letting the cross-check "prove" a
+    # disjointness the CV never actually stated.
+
+    def test_inverted_own_range_is_conservatively_true(self):
+        # Before #711's D4, the cross-check alone (ignoring that A's own range
+        # is inverted) already answered False here: B's end (2016) is before
+        # A's start (2020), regardless of A's own malformed range. D4 catches
+        # A's inversion first and returns True instead.
+        a = _entry("2020-06", "2019-01")   # inverted: end before start
+        b = _entry("2015", "2016")
+        assert _dates_overlap_or_match(a, b) is True
+        assert _dates_overlap_or_match(b, a) is True
+
+    def test_non_inverted_control_is_unaffected(self):
+        # Same shape, A's own range corrected (start before end): D4 must not
+        # fire, and the two remain provably disjoint.
+        a = _entry("2019-01", "2020-06")
+        b = _entry("2015", "2016")
+        assert _dates_overlap_or_match(a, b) is False
+
+
+# --- #711 review round 1: _overlap_boundary coerces non-string input --------
+
+
+def test_overlap_boundary_non_string_start_does_not_raise():
+    # 12345 stringifies to "12345", a 5-digit string that matches no date
+    # shape: unreadable, same as any other unparseable boundary -- the
+    # assertion here is that coercing an int does not raise, not that it
+    # produces a date.
+    assert _parsing_dates._overlap_boundary(12345, is_end=False) is None
+
+
+def test_overlap_boundary_none_end_does_not_raise():
+    assert _parsing_dates._overlap_boundary(None, is_end=True) is _parsing_dates._OPEN_ENDED
+
+
+# --- #711 review round 1: sorting/rendering consumers see the new behaviour -
+
+
+def test_extract_sort_date_sees_season_at_year_level():
+    # "Fall 2016" now parses to (2016, None, None): the sort key falls back
+    # to month=1 the same way any other year-only date does.
+    assert _sort("Fall 2016") == (2016, 1, 1)
+
+
+def test_extract_sort_date_sees_unparsed_list_shape_sort_last():
+    # A corpus list-in-one-field string no longer acquires a false date from
+    # its first token; it is unreadable and sorts last, like any other
+    # unparseable value.
+    assert _sort("february 2022, july 2022 and july 2023") == (0, 0, 0)
+
+
+def test_format_date_for_section_sees_season_at_year_level():
+    # DATE_FORMATS['H'] is 'yyyy': a season keeps its year and renders it,
+    # same as any other year-only date.
+    assert format_date_for_section("Fall 2016", "H") == "2016"
+
+
+def test_format_date_for_section_sees_unparsed_list_shape_as_written():
+    # An unparsed string is returned exactly as written, never truncated to
+    # its first token.
+    literal = "february 2022, july 2022 and july 2023"
+    assert format_date_for_section(literal, "H") == literal
 
 
 # --- the 'present'/'current' vocabulary, pinned where it lives ---

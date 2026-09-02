@@ -14,6 +14,7 @@ it out. Deciding how a date should *look* on the page is `formatting/dates.py`;
 deciding what order records go in is `sorting/`. Both import from here, so
 nothing in this file may import from either.
 """
+import datetime
 from types import MappingProxyType
 import re
 from typing import Dict
@@ -28,6 +29,13 @@ _MONTH_NAME_TO_NUM = MappingProxyType({
     'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'jun': 6, 'jul': 7, 'aug': 8,
     'sep': 9, 'sept': 9, 'oct': 10, 'nov': 11, 'dec': 12,
 })
+
+# Season names a CV states in place of a month ("Fall 2016"): the year is
+# real, the month is not stated, distinct from an unknown token that names
+# neither (#711 review round 1 -- an unknown alphabetic token used to fall
+# back to the same (year, None, None) a season gets, making "Foo 2021" and
+# "Fall 2016" indistinguishable).
+_SEASON_TOKENS = frozenset({'spring', 'summer', 'fall', 'autumn', 'winter'})
 
 # The keywords that mean "still ongoing" wherever a CV omits an end date.
 # Single source of truth, shared by formatting/dates.py (rendering) and
@@ -49,35 +57,70 @@ def _parse_date_components(date_str: str):
     sort copy lacked the '\\.?' in the month-name pattern, so "Aug. 2021" /
     "Sept. 2019" failed every branch and the entry sorted to the bottom of its
     section while still rendering its date correctly (issue #266).
+
+    Every pattern below is `re.fullmatch`, not `re.match` (#711 review round
+    1): a list or a range packed into one field -- "february 2022, july 2022
+    and july 2023", "2006-07-14 to 2006-07-16" -- is not a single date, and is
+    left to render/sort as the literal text it is rather than being read as
+    its first date.
+
+    A shape that parses is also calendar-checked, not just digit-shaped: an
+    impossible day (2024-04-31) degrades to (year, month, None) since the
+    month is still trustworthy, and an impossible month (2021-13) drops the
+    whole date, since nothing about it can be.
     """
     s = str(date_str or '').strip()
     if not s:
         return (None, None, None)
     # YYYY-MM-DD / YYYY/MM/DD
-    m = re.match(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', s)
+    m = re.fullmatch(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', s)
     if m:
-        return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        return _validate_full_date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
     # MM/DD/YYYY / MM-DD-YYYY
-    m = re.match(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', s)
+    m = re.fullmatch(r'(\d{1,2})[-/](\d{1,2})[-/](\d{4})', s)
     if m:
-        return (int(m.group(3)), int(m.group(1)), int(m.group(2)))
+        return _validate_full_date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
     # YYYY-MM / YYYY/MM (disjoint from MM/YYYY below: 4-digit lead vs 4-digit tail)
-    m = re.match(r'(\d{4})[-/](\d{1,2})$', s)
+    m = re.fullmatch(r'(\d{4})[-/](\d{1,2})', s)
     if m:
-        return (int(m.group(1)), int(m.group(2)), None)
+        year, month = int(m.group(1)), int(m.group(2))
+        return (year, month, None) if 1 <= month <= 12 else (None, None, None)
     # MM/YYYY / MM-YYYY
-    m = re.match(r'(\d{1,2})[-/](\d{4})', s)
+    m = re.fullmatch(r'(\d{1,2})[-/](\d{4})', s)
     if m:
-        return (int(m.group(2)), int(m.group(1)), None)
+        year, month = int(m.group(2)), int(m.group(1))
+        return (year, month, None) if 1 <= month <= 12 else (None, None, None)
     # Just YYYY
-    m = re.match(r'^(\d{4})$', s)
+    m = re.fullmatch(r'(\d{4})', s)
     if m:
         return (int(m.group(1)), None, None)
-    # Month YYYY -- "August 2021", "Aug 2021", "Aug. 2021", "Sept. 2019"
-    m = re.match(r'([a-zA-Z]+)\.?\s*(\d{4})', s)
+    # Month YYYY -- "August 2021", "Aug 2021", "Aug. 2021", "Sept. 2019",
+    # or a season ("Fall 2016": year kept, month left unstated).
+    m = re.fullmatch(r'([a-zA-Z]+)\.?\s*(\d{4})', s)
     if m:
-        return (int(m.group(2)), _MONTH_NAME_TO_NUM.get(m.group(1).lower()), None)
+        token = m.group(1).lower()
+        year = int(m.group(2))
+        if token in _MONTH_NAME_TO_NUM:
+            return (year, _MONTH_NAME_TO_NUM[token], None)
+        if token in _SEASON_TOKENS:
+            return (year, None, None)
+        return (None, None, None)
     return (None, None, None)
+
+
+def _validate_full_date(year: int, month: int, day: int):
+    """Calendar-check a full y/m/d triple parsed off a complete-date pattern.
+
+    An invalid day (2024-04-31, a non-leap 2023-02-29) degrades to
+    (year, month, None): the month is still stated and valid even though the
+    day is not. An invalid month drops the whole date -- nothing about it can
+    be trusted once the month itself is impossible.
+    """
+    try:
+        datetime.date(year, month, day)
+    except ValueError:
+        return (year, month, None) if 1 <= month <= 12 else (None, None, None)
+    return (year, month, day)
 
 
 def _get_entry_date_range(entry: Dict) -> tuple:
@@ -101,7 +144,11 @@ def _overlap_boundary(date_str: str, *, is_end: bool):
     A stated year with no stated month keeps `month=None` rather than being
     filled in; see `_dates_overlap_or_match` for why nothing is imputed.
     """
-    s = (date_str or '').strip()
+    # str()-coerced the same way _parse_date_components coerces its own input
+    # (#711 review round 1): the two entry paths must treat a malformed,
+    # non-string extracted value identically rather than one stringifying and
+    # the other calling .strip() on it directly.
+    s = str(date_str or '').strip()
     if is_end and (not s or s.lower() in CURRENT_DATE_VALUES):
         return _OPEN_ENDED
     year, month, _day = _parse_date_components(s)
@@ -142,7 +189,9 @@ def _dates_overlap_or_match(entry_a: Dict, entry_b: Dict) -> bool:
     available (an unreadable boundary, or the same year with a month missing on
     either side) this returns True, the same "can't prove they differ" answer
     the missing-date guard above already gives; the decision to actually drop an
-    entry stays with the content gates behind this one (`_drop_is_safe`).
+    entry stays with the content gates behind this one (`_drop_is_safe`). An
+    entry whose OWN end is stated before its own start (#711) is malformed
+    extraction, not a real range, and is treated the same conservative way.
     """
     start_a, end_a = _get_entry_date_range(entry_a)
     start_b, end_b = _get_entry_date_range(entry_b)
@@ -159,5 +208,13 @@ def _dates_overlap_or_match(entry_a: Dict, entry_b: Dict) -> bool:
     if any(b is None for b in boundaries):
         return True  # a boundary we can't read -- can't prove they differ
     start_a_b, start_b_b, end_a_b, end_b_b = boundaries
+    # An inverted range (an entry's own end stated before its own start)
+    # proves nothing about either entry -- it is malformed extraction, not
+    # data (#711 review round 1). Conservative True, same as an unreadable
+    # boundary above, rather than letting the malformed range "prove" a
+    # disjointness the CV never stated.
+    if (_ends_strictly_before(end_a_b, start_a_b)
+            or _ends_strictly_before(end_b_b, start_b_b)):
+        return True
     return not (_ends_strictly_before(end_a_b, start_b_b)
                 or _ends_strictly_before(end_b_b, start_a_b))
