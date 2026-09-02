@@ -149,10 +149,14 @@ def _load_docx(outputs_dir: Path):
 # ---------------------------------------------------------------------------
 
 #: Error text that means a stage broke, not that one lookup came back empty.
+#: The trailing \b\w+(?:Error|Exception)\b alternation was added for #724: the
+#: farm has 8 ValidationException hits (T2.5) that the original three named
+#: patterns (NameError/UnboundLocalError/KeyError) missed entirely; those
+#: three are now subsumed by the general alternation and kept implicitly.
 FATAL_ERROR_PATTERN = re.compile(
     r"name '\w+' is not defined"
     r"|Traceback \(most recent call last\)"
-    r"|NameError:|UnboundLocalError:|KeyError:",
+    r"|\b\w+(?:Error|Exception)\b",
     re.IGNORECASE,
 )
 
@@ -350,7 +354,11 @@ def score_sparse_tables(outputs_dir: Path):
     tables = doc.tables
     total_tables = len(tables)
     if total_tables == 0:
-        return 0.0, "no tables in docx", None
+        # Not perfect quality (#724 review item 6): the WCM template always
+        # renders tables, so a docx with none is not our template's output --
+        # worst-case fraction, not a false GREEN. Farm: 0 of 66 rendered docx
+        # have zero tables, so this never fires on real output today.
+        return 1.0, "no tables in docx (template always renders tables)", None
 
     total_cells = empty_cells = sparse_count = 0
     for tbl in tables:

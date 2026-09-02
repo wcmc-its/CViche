@@ -22,6 +22,7 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline import quality_score as qs  # noqa: E402
 from unified_pipeline.quality_score import (  # noqa: E402
+    FATAL_ERROR_PATTERN,
     VALID_GATE_MODES,
     _load_first,
     linear_interp,
@@ -29,8 +30,27 @@ from unified_pipeline.quality_score import (  # noqa: E402
     score_cv_owner,
     score_duplicate_ratio,
     score_pipeline_errors,
+    score_sparse_tables,
     score_t_bucket,
 )
+
+docx = pytest.importorskip("docx")
+from docx import Document  # noqa: E402
+
+
+def _make_docx(paragraph_texts=(), tables=()):
+    """tables: list of list-of-rows-of-cell-text, e.g. [[["a", "b"], ["", ""]]]."""
+    doc = Document()
+    for text in paragraph_texts:
+        doc.add_paragraph(text)
+    for rows in tables:
+        n_rows = len(rows)
+        n_cols = len(rows[0]) if rows else 0
+        tbl = doc.add_table(rows=n_rows, cols=n_cols)
+        for r, row_texts in enumerate(rows):
+            for c, cell_text in enumerate(row_texts):
+                tbl.cell(r, c).text = cell_text
+    return doc
 
 
 def _truncate(dir_path: Path, name: str) -> Path:
@@ -129,6 +149,59 @@ def test_band_for_boundaries():
     assert band_for(85) == "GREEN (ship)"
     assert band_for(60) == "YELLOW (human cleanup needed)"
     assert band_for(59) == "RED (re-run / do-not-deliver)"
+
+
+# --------------------------------------------------------------------- D5
+# FATAL_ERROR_PATTERN widened for ValidationException etc (#724 review T2.5)
+# --------------------------------------------------------------------- D5
+
+
+@pytest.mark.parametrize("text", [
+    "ValidationException: field required",
+    "TypeError: unsupported operand",
+    "AttributeError: 'NoneType' object has no attribute 'x'",
+    # Pre-existing branches must keep matching.
+    "name 'response' is not defined",
+    "Traceback (most recent call last):",
+    "NameError: name 'x' is not defined",
+])
+def test_fatal_error_pattern_matches_exception_type_names(text):
+    assert FATAL_ERROR_PATTERN.search(text), text
+
+
+def test_fatal_error_pattern_does_not_match_benign_text():
+    assert not FATAL_ERROR_PATTERN.search("optional field unavailable")
+
+
+def test_score_pipeline_errors_validation_exception_is_fatal(tmp_path):
+    _write_json(tmp_path, "ABC_classified.json",
+               {"meta": {"stats": {"t_validation": {
+                   "error": "ValidationException: entries malformed"}}}})
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert fraction == 1.0
+    assert cap == 40
+    assert "fatal_pattern=YES" in detail
+
+
+# --------------------------------------------------------------------- D6
+# score_sparse_tables: zero tables is worst-case, not perfect (#724 T2.6)
+# --------------------------------------------------------------------- D6
+
+
+def test_sparse_tables_zero_tables_is_worst_case(tmp_path):
+    _make_docx(["some prose, no tables at all"]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_sparse_tables(tmp_path)
+    assert fraction == 1.0
+    assert detail == "no tables in docx (template always renders tables)"
+    assert cap is None
+
+
+def test_sparse_tables_nonzero_tables_still_scored_normally(tmp_path):
+    """Regression: a docx WITH tables must not be affected by the D6 change."""
+    _make_docx(tables=[[["Alice", "PI"], ["Bob", "Co-I"]]]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_sparse_tables(tmp_path)
+    assert fraction == 0.0
+    assert "total_tables=1" in detail
 
 
 # --------------------------------------------------------------------- D10
