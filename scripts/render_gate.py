@@ -19,6 +19,19 @@ are try/except guarded, so raising is safe.
 Companion: render_gate_compare.py, which reads two out_dirs (or one twice, as a
 determinism control) and is the thing that actually passes or fails.
 
+--source-dir DIR points this at the directory holding <uid>*.docx (e.g.
+data/sample_cvs/word/) so stage 6's personal-data fallback (#550) can recover
+contact fields from the original document, the way a live run does. Without
+it -- the default -- this gate could not see that path at all: SAMPLE_CV_DIR
+auto-discovery (stage_6_word_template.py:709-718) resolves for none of the
+farm uids in a fresh worktree, so every render took the fallback's
+"no original doc" branch and #550 was corpus-unprovable. Omitting the flag,
+or passing it for a uid with no matching docx, renders identically to
+today -- opt-in, and a missing docx is a one-line notice in the index, not
+an error. Mirrors doctor_gate.py's --source-dir: same fail-closed
+non-directory check, same _uid_owns boundary rule (a shorter uid must not
+match a longer uid's file).
+
 Fixes two defects found in an earlier, uncommitted version of this script
 (docs/analysis/HANDOFF-wave1-completion-2026-08-11.md, issue #584):
 
@@ -62,10 +75,18 @@ def _parse_args(argv):
     group.add_argument("uids", nargs="*", default=[], help="uids to render (default: all)")
     group.add_argument("--uids-file", type=Path, default=None,
                         help="file with one uid per line, instead of positional uids")
+    parser.add_argument("--source-dir", type=Path, default=None,
+                        help="directory holding <uid>*.docx (see docstring)")
     args = parser.parse_args(argv)
     if not (args.arm_outputs / "stage_4_field_extraction").is_dir():
         parser.error(f"no stage_4_field_extraction under {args.arm_outputs} -- point this at "
                      f"a stage-output tree, not a repo root")
+    if args.source_dir is not None and not args.source_dir.is_dir():
+        # Fail closed (CODING_STANDARDS 5.5), same as doctor_gate.py's
+        # identical check: a typo'd --source-dir must not silently render
+        # as if the flag were omitted -- omitting it is a documented,
+        # intentional mode; a bad path is not.
+        parser.error(f"--source-dir is not a directory: {args.source_dir}")
     return args
 
 
@@ -82,7 +103,7 @@ def _atomic_write_json(path: Path, obj) -> None:
 
 def main(argv=None):
     args = _parse_args(argv)
-    arm_outputs, out = args.arm_outputs, args.out
+    arm_outputs, out, source_dir = args.arm_outputs, args.out, args.source_dir
     only = ({line.strip() for line in args.uids_file.read_text(encoding="utf-8").splitlines() if line.strip()}
             if args.uids_file else set(args.uids))
 
@@ -92,6 +113,7 @@ def main(argv=None):
     out.mkdir(parents=True)
 
     import unified_pipeline.stage_6_word_template as s6
+    from unified_pipeline.run_doctor import _uid_owns
 
     def _no_llm(*a, **kw):
         raise RuntimeError("render_gate: LLM disabled for determinism")
@@ -121,16 +143,48 @@ def main(argv=None):
             results[uid] = {"error": "no input artifact"}
             continue
         dest = out / f"{uid}_wcm.docx"
+
+        source_path = None
+        if source_dir is not None:
+            # _uid_owns, not a bare prefix match -- glob(f"{uid}*") also
+            # matches a LONGER uid that starts with this one (same boundary
+            # bug doctor_gate.py guards against; see run_doctor.py's
+            # docstring on _uid_owns for the 2026-07-15 sweep it caused).
+            hits = sorted(p for p in source_dir.glob(f"{uid}*.docx") if _uid_owns(p.name, uid))
+            source_path = hits[0] if hits else None
+
         try:
-            s6.run_stage6(input_path=str(src), output_path=str(dest), verbose=False)
+            if source_path is not None:
+                # run_stage6() itself does not forward original_doc_path to
+                # generate() -- its call is generator.generate(input_path,
+                # output_path), no third argument
+                # (stage_6_word_template.py:2961) -- so a uid with a
+                # resolved source docx calls WCMTemplateGenerator directly,
+                # with the same construction run_stage6 uses, instead of
+                # editing that forwarding, which lives in
+                # stage_6_word_template.py (#711's file, not this one).
+                # Every other uid keeps calling run_stage6() unchanged, so
+                # the flag stays provably inert wherever it resolves no
+                # docx (#550).
+                generator = s6.WCMTemplateGenerator(verbose=False)
+                generator.generate(str(src), str(dest), original_doc_path=str(source_path))
+            else:
+                s6.run_stage6(input_path=str(src), output_path=str(dest), verbose=False)
             # A renderer that returns without raising and without writing the
             # output file is not a successful render -- "no exception" is not
             # "rendered" (review on #589, same fail-closed guarantee this
             # module's docstring claims for defect 1).
             if not dest.is_file():
-                results[uid] = {"error": "run_stage6 returned without writing an output file"}
+                results[uid] = {"error": "render returned without writing an output file"}
             else:
                 results[uid] = {"input": src.name}
+                if source_dir is not None:
+                    # One-line notice either way -- which docx (if any)
+                    # backed the fallback write-back for this uid, so a uid
+                    # with no matching source docx (web08 today) is visible
+                    # in the index instead of silently rendering as if
+                    # --source-dir had been omitted (#550).
+                    results[uid]["source_docx"] = source_path.name if source_path else "not found"
         except Exception as exc:
             results[uid] = {"error": f"{type(exc).__name__}: {exc}",
                             "tb": traceback.format_exc()[-800:]}
