@@ -99,7 +99,12 @@ def test_degree_table_header_row_dropped_from_appendix(tmp_path, capsys):
          "hierarchy": ["Education"], "element_idx_start": 1},
     ]
     text, printed = _render(tmp_path, entries, capsys)
-    assert "1. Year: Degree | Discipline | Institution/Location" not in text
+    # The raw pipe-joined form never reaches the document -- _clean_inline_tabs
+    # collapses " | " to " — " before anything is written, so a literal-pipe
+    # assertion here would be vacuous. Assert the actual rendered em-dash form
+    # is absent, and that no trace of the header row's words survives at all.
+    assert "1. Year: Degree — Discipline — Institution/Location" not in text
+    assert "Year: Degree" not in text
     assert "T. APPENDIX" not in text, "no other unmapped entries -- appendix should be empty"
     assert "Filtered 1 boilerplate/empty entries from Appendix" in printed
 

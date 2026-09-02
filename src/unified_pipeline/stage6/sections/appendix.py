@@ -24,10 +24,10 @@ precision-biased -- an entry that is merely suspicious survives:
   Institution/Location" and bare "NAME:" before they reach the appendix as a
   spurious numbered line and shift the numbering of the genuine entries after
   it. Unlike the first three, this one is not strictly precision-biased: a
-  short entry made up entirely of column-label words (e.g. a two-word
-  "Committee Chair" T-coded row) can trip the same vocabulary-majority
-  heuristic and be dropped, a known false-positive class the 66-CV corpus
-  does not currently exercise.
+  short entry at least half of whose words (digits count as words) are
+  column-label vocabulary (e.g. a two-word "Committee Chair" T-coded row)
+  can trip the same vocabulary-majority heuristic and be dropped, a known
+  false-positive class the 66-CV corpus does not currently exercise.
 
 What was dropped is reported ONCE, as a single Word comment on the introductory
 paragraph, rather than per entry -- the dropped blocks are boilerplate, and N
@@ -70,8 +70,9 @@ class AppendixSection:
         # header of a table the reader emits as a data row -- and would
         # otherwise reach the appendix as a spurious numbered line, shifting the
         # numbering of genuine entries after it. The first three checks are
-        # precision-biased; the header-row check can misclassify a short,
-        # all-vocabulary phrase as a header and drop it (see the module
+        # precision-biased; the header-row check can misclassify a short phrase
+        # at least half of whose words (digits count as words) are
+        # column-label vocabulary as a header and drop it (see the module
         # docstring).
         _pre_filter = len(unmapped_entries)
         unmapped_entries = [
