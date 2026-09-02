@@ -1,7 +1,7 @@
 """Regression tests for #550: the original-.docx personal-data fallback
 
 recovers ``email``/``phone``/``address`` from the source document
-(``personal_data.py:254-339`` on this ref) and then discards them -- the
+(``personal_data.py:267-381`` on this ref) and then discards them -- the
 PERSONAL DATA table fill reads only ``work_email``/``office_phone``/
 ``office_address``, and the fallback never wrote back into those names. AST
 dataflow in the issue: last *store* to the three slot names is before the
@@ -9,8 +9,14 @@ fallback runs; last *load* of the fallback's own ``email``/``phone``/
 ``address`` locals is inside it. No write-back existed on either name.
 
 Fix is the three ``x = x or recovered`` assignments immediately before the
-table fill (``personal_data.py:357-367`` on this ref) -- an empty slot only,
-never an overwrite of a value already classified from the entries.
+table fill (``personal_data.py:404-406`` on this ref) -- an empty slot only,
+never an overwrite of a value already classified from the entries. Round 1
+(a blind verifier's findings) added a fourth guard right above those three
+assignments: a recovered ``email`` that already equals ``personal_email`` is
+dropped rather than written into ``work_email`` too, and a merged-cell-aware
+label/value read in the table scan (``personal_data.py:274-289``) so a
+gridSpan label ("Professional Address:" spanning two columns) is not
+mistaken for its own value.
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_personal_data_fallback_writeback.py -p no:cacheprovider
 
@@ -153,6 +159,68 @@ def test_extracted_contact_fields_are_not_overwritten_by_recovered_ones(tmp_path
 # --------------------------------------------------------------------------
 # the logging half -- ungated, and counted.
 # --------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
+# round 1 (blind verifier): a recovered email that is already personal_email
+# must not also duplicate into work_email.
+# --------------------------------------------------------------------------
+
+def test_recovered_email_matching_personal_email_is_not_duplicated_into_work_email(tmp_path):
+    source = tmp_path / "source.docx"
+    doc = Document()
+    doc.add_paragraph("Curriculum Vitae")
+    doc.add_paragraph("Personal Data")
+    doc.add_paragraph("Email: shared@med.cornell.edu")
+    doc.save(str(source))
+
+    # The only A entry names its own text "Personal Data" (the section
+    # header), so the per-entry classifier routes its email to
+    # personal_email, not work_email -- the XLYVYA_sample_vasquez_cv shape.
+    rows, _gen = _render(
+        tmp_path,
+        entries=[
+            _a("Curriculum Vitae\tPersonal Data\tJane Doe\t"
+               "Email: shared@med.cornell.edu",
+               {"institutional_email": "shared@med.cornell.edu"}),
+        ],
+        original_doc_path=str(source),
+    )
+
+    assert rows.get("personal email:") == "shared@med.cornell.edu"
+    assert rows.get("work email:", "") == "", (
+        "the fallback's paragraph scan recovered the same address already "
+        "routed to personal_email and duplicated it into work_email (#550 "
+        "round 1, XLYVYA_sample_vasquez_cv)"
+    )
+
+
+# --------------------------------------------------------------------------
+# round 1 (blind verifier): a gridSpan-merged label cell must not be read as
+# its own value.
+# --------------------------------------------------------------------------
+
+def test_recovered_address_survives_a_gridspan_merged_label_cell(tmp_path):
+    source = tmp_path / "source.docx"
+    doc = Document()
+    table = doc.add_table(rows=1, cols=3)
+    table.rows[0].cells[0].text = "Professional Address:"
+    # python-docx returns the SAME cell object for every column a merge
+    # spans -- row.cells[0] and row.cells[1] are now identical, exactly the
+    # NSUJZG_2027_Eil_Robert shape (label merged across columns 0-1, value
+    # in column 2).
+    table.rows[0].cells[0].merge(table.rows[0].cells[1])
+    table.rows[0].cells[2].text = "2720 S Moody Ave KCRB 2006, Portland, OR 97201"
+    doc.save(str(source))
+
+    rows, _gen = _render(tmp_path, entries=[], original_doc_path=str(source))
+
+    assert rows.get("office address:", "") != "professional address:", (
+        "the merged label cell was read as its own value -- the Office "
+        "address row now shows the bare label instead of the address "
+        "(#550 round 1, NSUJZG_2027_Eil_Robert)"
+    )
+    assert "2720 S Moody Ave" in rows.get("office address:", "")
+
 
 def test_fallback_parse_failure_is_logged_and_counted_not_silent(tmp_path, caplog):
     unparseable = tmp_path / "not_actually_a_docx.docx"
