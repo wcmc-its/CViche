@@ -316,6 +316,16 @@ CLOSED_DATE_RANGE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+#: Plausible calendar-year bounds for a range CLOSED_DATE_RANGE_PATTERN
+#: matched (#556 round-1 finding 1). The pattern's digit-pair shape also
+#: matches non-date content that happens to sit next to a hyphen -- a course
+#: code ("MSELCT 5130-1020"), a catalog number, a zip+4, a dollar range --
+#: and without this check such a pair would be "repaired" into a rendered
+#: date. CVs in this corpus span the 20th century to a few years out; the
+#: bounds are widened generously to avoid rejecting a real historical entry.
+_MIN_PLAUSIBLE_YEAR = 1900
+_MAX_PLAUSIBLE_YEAR = 2100
+
 
 def reconcile_date_range(
     original_text: str, updated: dict[str, Any], reformatted: dict[str, Any]
@@ -335,6 +345,12 @@ def reconcile_date_range(
     - `original_text` contains exactly one closed 4-digit year range. More
       than one match means the text is ambiguous about which range applies
       to this entry, so it is left untouched.
+    - the matched range is a plausible calendar-year span: both halves fall
+      within `_MIN_PLAUSIBLE_YEAR`..`_MAX_PLAUSIBLE_YEAR` and start <= end.
+      `CLOSED_DATE_RANGE_PATTERN` matches any two 4-digit numbers joined by a
+      hyphen/dash/"to", not only years -- a course code ("MSELCT 5130-1020"),
+      catalog number, zip+4, or dollar range would otherwise be "repaired"
+      into a rendered date (#556 round-1 finding 1).
 
     When `start_date` is already set and disagrees with the range's start
     year, the repair is skipped entirely (both fields left as extracted)
@@ -346,7 +362,12 @@ def reconcile_date_range(
     text "2025-2026" extracted as `start_date=2026, end_date=None`, i.e. the
     model took the range's *end* as the start) is not repaired here; only
     the shape where `start_date` is missing or already agrees with the text
-    is.
+    is. "Agrees" is an exact string comparison against the matched 4-digit
+    year (`str(existing_start).strip() != range_start`), not a year-only
+    comparison, so a month-qualified `start_date` such as "Sep 2018" also
+    reads as disagreement against text "2018-2020" and blocks the repair --
+    conservative (fails closed) rather than a defect, disclosed per #556
+    round-1 finding 5.
 
     Args:
         original_text: Original CV entry text.
@@ -365,6 +386,10 @@ def reconcile_date_range(
         return
 
     range_start, range_end = matches[0]
+    start_year, end_year = int(range_start), int(range_end)
+    if not (_MIN_PLAUSIBLE_YEAR <= start_year <= end_year <= _MAX_PLAUSIBLE_YEAR):
+        return
+
     existing_start = updated.get('start_date')
     if existing_start and str(existing_start).strip() != range_start:
         return

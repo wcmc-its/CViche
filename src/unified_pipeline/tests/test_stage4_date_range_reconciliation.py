@@ -131,7 +131,7 @@ def test_condition_no_range_at_all_blocks_repair():
 @pytest.mark.parametrize(
     "marker_text",
     [
-        "2020-2022, currently ongoing effort",
+        "2020-2022, currently the acting chair",
         "2020-2022 to present",
         "2020-2022, this role is current",
         "2020-2022, presents continuing work",
@@ -194,3 +194,39 @@ def test_reconcile_date_range_empty_text_is_a_no_op():
 
     assert updated == {"start_date": None, "end_date": None}
     assert reformatted == {}
+
+
+# --- condition 5: the matched range must be a plausible calendar-year span -
+
+def test_condition_implausible_range_blocks_repair():
+    # A course code shaped like "NNNN-NNNN" (the real gated shape from
+    # 2054_Opresko_Cv's K3 entries, round-1 finding 1) is not a year range;
+    # start > end and both fall outside the plausible bounds.
+    fields = {"start_date": None, "end_date": None}
+    text = "Completed MSELCT 5130-1020, no dates listed"
+
+    updated, reformatted = apply_regex_post_processing(text, fields, "K3")
+
+    assert updated["end_date"] is None
+    assert reformatted == {}
+
+
+# --- drift guard: DATE_RANGE_TAXONOMY_CODES vs. the live schema -----------
+
+def test_date_range_taxonomy_codes_matches_schema_derived_codes():
+    # DATE_RANGE_TAXONOMY_CODES is hand-kept (coercion.py may not import
+    # schemas.py -- see the constant's own docstring), so nothing enforces
+    # it stays in sync with schemas.get_active_schemas() as codes are added,
+    # removed, or have their declared fields changed. This test may import
+    # both modules even though coercion.py itself cannot (#556 round-1
+    # finding 4).
+    from unified_pipeline.stage4 import schemas
+
+    active = schemas.get_active_schemas()
+    schema_derived = {
+        code
+        for code, schema in active.items()
+        if "start_date" in schema.get("fields", []) and "end_date" in schema.get("fields", [])
+    }
+
+    assert set(DATE_RANGE_TAXONOMY_CODES) == schema_derived
