@@ -221,22 +221,22 @@ class TestTwoLineNonPipeEmptyExtractionBoundary:
       `dates`). `(len(lines) > 1 and not extracted_activity)` is False
       from the start (extraction's `activity` was never empty), so this
       never reaches the reparse route -- the parenthetical fallback
-      (administrative_activities.py:262-300) fills `dates`/`role` from
+      (administrative_activities.py:269-306) fills `dates`/`role` from
       line 1's parenthetical instead, and the single-row fallback (line
-      330-332) writes it as one row. Matches the #660-item-1 FACTS note:
+      337-340) writes it as one row. Matches the #660-item-1 FACTS note:
       "a 2-line entry whose extraction has `activity` but no `dates` is
       NOT reparsed".
 
     - A2 below: extraction is fully empty. Before the round-2 fix, this
       did NOT reparse either, even though PR #714's own T1-item-2 review
       comment expected it to: the parenthetical fallback ran first
-      (`if not dates`, line 262) and, because extraction's `activity` was
+      (`if not dates`, line 270) and, because extraction's `activity` was
       falsy, executed
       `_PARENTHETICAL_WITH_YEAR_RE.sub('', activity or original_text)`
       against the WHOLE original_text (both lines) -- stripping only the
       matched parenthetical and leaving the raw newline and line 2 stuck
       inside the resulting `activity` string. The routing check at line
-      322 then tested that same rewritten `activity`, which was no longer
+      330 then tested that same rewritten `activity`, which was no longer
       empty, so `(len(lines) > 1 and not activity)` was False and the
       shared #572 reparse never fired -- a second committee genuinely
       present on line 2 had its own role/dates silently dropped.
@@ -246,7 +246,7 @@ class TestTwoLineNonPipeEmptyExtractionBoundary:
       touches `activity`, and routes on that instead. The parenthetical
       fallback still runs and still rewrites `activity` (needed so the
       single-row fallback below has something to write), but the routing
-      check at line 322 no longer sees that rewrite, so it correctly
+      check at line 330 no longer sees that rewrite, so it correctly
       still sees "extraction gave nothing" and reparses.
     """
 
@@ -364,7 +364,7 @@ class TestParentheticalFallbackAlreadyFixed:
 
 class TestThreeLineBurstFallsBackWhenReparseYieldsNothing:
     """The `if parsed_rows: rows.extend(...) else: <single-row fallback>`
-    restructuring (administrative_activities.py:327-332) also changed the
+    restructuring (administrative_activities.py:335-340) also changed the
     3+-line `multiline_burst` path for the case where the shared reparse
     (`_multiline_committee_rows` -> `_parse_flattened_committee_lines`)
     finds nothing usable -- e.g. a block of bare orphaned dates with no

@@ -232,6 +232,17 @@ class TestUnresolvedPipeRoutesThroughSharedParser:
         # 2-line unresolved-pipe entries, but until now only the 1-line
         # form was pinned here. Mirrors sibling P's own two-line pipe test
         # (test_stage6_administrative_activities.py) shape-for-shape.
+        #
+        # Round 2 (PR #714, verifier mutant M4): extraction is fully empty
+        # here (`role` is ''), so this entry is actually routed by the
+        # OLDER `elif len(lines) > 1 and not role` branch at
+        # leadership.py:142, which runs before the `#627` unresolved-pipe
+        # branch at :145 ever gets a chance -- deleting :145 does not fail
+        # this test. It still stands as the two-line pipe-shape pin for
+        # the shared parser's output; the #627 branch at :145 itself is
+        # pinned by test_two_line_pipe_entry_with_role_extracted_but_no_dates_uses_shared_parser
+        # below, whose shape (role extracted, no dates) is the one that
+        # actually reaches :145.
         gen = _real_template_generator()
         entry = {
             "text": "Curriculum Committee (Chair 2005-2010) | 2004-2011\nSecond unrelated line",
@@ -248,6 +259,31 @@ class TestUnresolvedPipeRoutesThroughSharedParser:
         expected_dates = format_date_range("2004", "2011", "O")
         assert data_rows == [
             ("Curriculum Committee (Chair)", "", expected_dates),
+            ("Second unrelated line", "", ""),
+        ]
+
+    def test_two_line_pipe_entry_with_role_extracted_but_no_dates_uses_shared_parser(self):
+        # Round 2 (PR #714, verifier mutant M4): the shape that actually
+        # reaches the #627 branch at leadership.py:145 -- extraction gave
+        # a role (so the older `elif len(lines) > 1 and not role` branch
+        # at :142 does not fire first) but no dates, and the raw text
+        # still carries an unresolved pipe-separated date column.
+        gen = _real_template_generator()
+        entry = {
+            "text": "Chair, Faculty Council | 2004-2011\nSecond unrelated line",
+            "extracted_fields": {"leadership_role": "Chair, Faculty Council"},
+            "taxonomy_code": "O",
+        }
+
+        gen._fill_leadership([entry])
+
+        section_idx = gen._find_paragraph_exact(CANONICAL_HEADER)
+        table = gen._find_table_after_paragraph(section_idx)
+        data_rows = [tuple(cell.text for cell in row.cells) for row in table.rows[1:]]
+
+        expected_dates = format_date_range("2004", "2011", "O")
+        assert data_rows == [
+            ("Chair, Faculty Council", "", expected_dates),
             ("Second unrelated line", "", ""),
         ]
 
