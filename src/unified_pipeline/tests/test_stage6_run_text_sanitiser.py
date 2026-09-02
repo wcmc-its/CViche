@@ -501,6 +501,53 @@ def test_citation_insertion_sanitises_each_run_segment(citation, target_name):
     assert bold_text == target_name.replace("\x0b", "")
 
 
+# --- #711 T2.3 round 2: pre-split sanitise keeps both writers in sync ---
+
+
+def test_plain_and_tracked_writers_bold_the_same_name_when_the_target_carries_a_control_character():
+    # The control character sits inside target_name itself, not just inside
+    # the citation's copy of it. Sanitising only the citation before the
+    # split (and leaving target_name raw) would make `in` fail to match --
+    # `_citation_author_split` falls through to "no match", and the plain
+    # writer bolds nothing while the tracked writer (which sanitised each
+    # run segment after the split) still bolds "Smith A". Sanitising
+    # target_name too, before the split, on both writers, keeps them
+    # in sync (#552 round 2).
+    citation = "1. Doe J, Smi\x0bth A. A study. Journal. 2024;1:1-2."
+    target_name = "Smi\x0bth A"
+    clean_citation = citation.replace("\x0b", "")
+
+    plain_gen = _generator()
+    plain_para = _blank_paragraph(plain_gen)
+    plain_gen._add_citation_with_bold_author(plain_para, citation, target_name, "")
+
+    plain_bold_run = next(r for r in plain_para.runs if r.bold)
+    assert plain_bold_run.text == "Smith A"
+    assert "".join(r.text for r in plain_para.runs) == clean_citation
+
+    tracked_gen = _generator(emit_track_changes=True)
+    tracked_para = _blank_paragraph(tracked_gen)
+    tracked_gen._add_citation_with_bold_author_as_insertion(
+        tracked_para, citation, target_name, "", author="PubMed Enrichment"
+    )
+
+    ins_elem = tracked_para._p.find(qn("w:ins"))
+    assert ins_elem is not None
+    t_texts = []
+    bold_text = None
+    for r in ins_elem.findall(qn("w:r")):
+        rPr = r.find(qn("w:rPr"))
+        is_bold = rPr is not None and rPr.find(qn("w:b")) is not None
+        t = r.find(qn("w:t"))
+        text = t.text or ""
+        t_texts.append(text)
+        if is_bold:
+            bold_text = text
+
+    assert bold_text == "Smith A"
+    assert "".join(t_texts) == clean_citation
+
+
 if __name__ == "__main__":
     import pytest as _pytest
 

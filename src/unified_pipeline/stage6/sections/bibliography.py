@@ -148,7 +148,8 @@ def _citation_author_split(citation: str, target_name: Optional[str],
 
     Prefers `target_name` when it appears verbatim in the citation; otherwise
     falls back to finding `cv_owner_last_name` with trailing initials, e.g.
-    "Wende ME", "Wende, M", "Wende M.".
+    "Wende ME", "Wende M", "Wende M.". The comma form ("Wende, M") is not
+    matched, pinned by test_citation_author_split_additional_dimensions.
 
     Returns `(before, name_to_bold, after)`. When nothing matches,
     `name_to_bold` is '' and the whole citation is in `before`.
@@ -315,7 +316,12 @@ class BibliographySection:
         # range (#552). This writer is also the tracked writer's
         # `emit_track_changes=False` path and its exception fallback, so an
         # unsanitised control character here would still abort the citation.
+        # Sanitise before the split, on both writers, so a control character in
+        # the citation or the target name cannot make the plain and tracked
+        # paths bold different text (#552 round 2).
         citation = self._sanitize_run_text(citation)
+        if target_name:
+            target_name = self._sanitize_run_text(target_name)
 
         before, name_to_bold, after = _citation_author_split(
             citation, target_name, cv_owner_last_name)
@@ -349,6 +355,13 @@ class BibliographySection:
         This creates proper Word track change structure with w:ins element,
         and includes bold formatting for the target author within the insertion.
         """
+        # Sanitise before the split, on both writers, so a control character in
+        # the citation or the target name cannot make the plain and tracked
+        # paths bold different text (#552 round 2).
+        citation = self._sanitize_run_text(citation)
+        if target_name:
+            target_name = self._sanitize_run_text(target_name)
+
         # Issue #153: when track changes are disabled, render the citation as a
         # plain (non-tracked) paragraph with the target author bolded.
         if not self.emit_track_changes:
