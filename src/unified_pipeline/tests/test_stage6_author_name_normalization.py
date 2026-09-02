@@ -197,3 +197,76 @@ def test_stage_5d_llm_entries_bypass_normalization_entirely():
     }
     citation, _target, _enriched = _format_citation(entry, 3)
     assert citation == '3. Smith, J, Random-garbage-XYZ. Some Title.'
+
+
+# --------------------------------------------------------------------------
+# Round-2 review response. The fallback's orphan branch still DROPPED an
+# ALL-CAPS fragment that had no "open" preceding author to merge into, so
+# the issue's "nothing on this path should ever reduce the token count" bar
+# was not actually met -- and it was live on the farm (2015_Wende, entry 5).
+# The same fragment shape was already emitted standalone by the pairs
+# branch's trailing-element case, so the two branches also disagreed.
+# --------------------------------------------------------------------------
+
+def test_orphan_initials_fragment_with_no_open_predecessor_is_kept():
+    """The live farm string (2015_Wende, entry 5). "Shariati H" already
+    carries its own initials, so it is not an open merge target; the "F"
+    that follows it therefore had nothing to attach to and was dropped --
+    a deleted token in a delivered document, which is the whole of #560.
+    It is now emitted as its own element instead."""
+    authors = (
+        'Kaczynski AT, Wende ME, Schipperijn J, Hughey SM, Stowe, EW, '
+        'Hipp, JA, Shariati H, F, MJ. K'
+    )
+    citation = _cite(authors)
+    assert ', F,' in citation
+    assert citation == (
+        '1. Kaczynski AT, Wende ME, Schipperijn J, Hughey SM, Stowe EW, '
+        'Hipp JA, Shariati H, F, MJ. K. A Study.'
+    )
+
+
+def test_fallback_token_count_is_never_reduced():
+    """The property the issue asks for, asserted directly on the fallback
+    path: an ALL-CAPS fragment after an author that already has its own
+    initials used to vanish."""
+    assert _cite('Smith, JA, MB') == '1. Smith JA, MB. A Study.'
+
+
+def test_fallback_logs_the_token_count_before_and_after():
+    """#560 asks for a diagnostic recording the input and the token count
+    "before and after" -- the after count is the number that would have
+    made the dropped token visible in a log. Round 1 logged the before
+    count only."""
+    import logging
+    caplog_logger = logging.getLogger(
+        'unified_pipeline.stage6.normalization.text'
+    )
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    handler = _Capture()
+    previous_level = caplog_logger.level
+    caplog_logger.addHandler(handler)
+    caplog_logger.setLevel(logging.DEBUG)
+    try:
+        _cite('Li, Wu, Ma, Ye')
+    finally:
+        caplog_logger.removeHandler(handler)
+        caplog_logger.setLevel(previous_level)
+
+    assert any('4 tokens in, 4 out' in m for m in records), records
+
+
+def test_surname_in_a_shifted_initials_slot_is_not_upper_cased():
+    """The pairs branch's `len(surname) <= 2 and surname.isupper()` skip
+    advances by one, which shifts the loop off the parity the detector
+    validated -- a real surname can then land in the initials slot and was
+    rendered in capitals ("Smith" -> "SMITH"). Upper-casing is now applied
+    only to a token that is itself initials-shaped."""
+    citation = _cite('AB, A-B, Smith, AB')
+    assert 'SMITH' not in citation
+    assert citation == '1. A-B Smith, AB. A Study.'

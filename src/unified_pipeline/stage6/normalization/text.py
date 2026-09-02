@@ -70,13 +70,13 @@ def _normalize_author_names(authors: str) -> str:
     list is enough to make the pair detector decline the whole string, that
     one discard rule was stripping every later author's initials from
     citations that had them, or dropping short-surnamed authors outright.
-    Such a token now merges into the author immediately before it, or, if
-    it is not initials-shaped (not ALL-CAPS) and there is no open author to
-    merge into, is kept as its own standalone author. The one remaining
-    exception -- an ALL-CAPS initials/suffix fragment with no open author
-    at all to attach to -- is an unattributable orphan with no name to
-    invent; see the fallback branch below for why that one case still
-    drops.
+    Such a token now merges into the author immediately before it, and when
+    there is no open author to merge into it is emitted as its own element
+    instead. Neither branch reduces the token count any more: an orphan
+    fragment is unattributable, but the answer to "which author does this
+    belong to?" being unknown is not a reason to delete the fragment, and
+    the pairs branch above already emits a trailing unpaired element the
+    same way.
     """
     if not authors:
         return ''
@@ -134,8 +134,16 @@ def _normalize_author_names(authors: str) -> str:
                 i += 2
                 continue
 
-            # Normalize spaced initials: "P L" -> "PL"
-            initials_normalized = initials.replace(' ', '').upper()
+            # Normalize spaced initials: "P L" -> "PL". Upper-case only a
+            # token that is actually initials-shaped. The `len(surname) <= 2`
+            # skip below advances by one, which shifts this loop off the
+            # parity the detector validated, so a real surname can land in
+            # the initials slot ("AB, A-B, Smith, AB" puts "Smith" here) --
+            # and rendering it as "SMITH" would be a new corruption of a
+            # name this function is supposed to leave alone (#560).
+            initials_normalized = initials.replace(' ', '')
+            if _looks_like_initials(initials_normalized):
+                initials_normalized = initials_normalized.upper()
 
             # Skip if surname looks like just initials
             if len(surname) <= 2 and surname.isupper():
@@ -156,10 +164,10 @@ def _normalize_author_names(authors: str) -> str:
     # author is still "open": a bare name with no initials of its own yet,
     # the exact shape a stray comma produces ("Konopasek, L" split by one
     # comma that shouldn't be there). An author that already has its own
-    # initials ("Sanguino SM") is not reopened by a later fragment, and a
-    # fragment with nothing open to attach to is an unattributable orphan
-    # -- dropped, same as before, because there is no author here to charge
-    # it to. A mixed-case or lowercase 1-2 character token is not treated
+    # initials ("Sanguino SM") is not reopened by a later fragment; a
+    # fragment with nothing open to attach to is emitted as its own element
+    # rather than dropped, so the token count never falls (#560).
+    # A mixed-case or lowercase 1-2 character token is not treated
     # as a fragment at all -- it is at least as likely to be a real short
     # surname ("Li", "Wu", "Ma", "Ye") as an initials group, so it is kept
     # as its own standalone author instead (#560).
@@ -196,11 +204,19 @@ def _normalize_author_names(authors: str) -> str:
         )
 
         if is_initials_group or is_suffix or is_short_fragment:
-            if merge_target_open:
-                merged = author_stripped.rstrip('.,')
-                if merged:
-                    cleaned_authors[-1] = f"{cleaned_authors[-1]} {merged}"
-                merge_target_open = False
+            fragment = author_stripped.rstrip('.,')
+            if fragment:
+                if merge_target_open:
+                    cleaned_authors[-1] = f"{cleaned_authors[-1]} {fragment}"
+                else:
+                    # Nothing open to charge this fragment to. Keep it as its
+                    # own element: it is unattributable, not absent, and the
+                    # live case is a source string that already reads
+                    # "... Shariati H, F, MJ. K" -- dropping the "F" is the
+                    # deletion #560 is about, and there is no author here it
+                    # can be merged onto without inventing an attribution.
+                    cleaned_authors.append(fragment)
+            merge_target_open = False
             continue
 
         # Clean up individual author formatting
@@ -220,6 +236,13 @@ def _normalize_author_names(authors: str) -> str:
     result = ', '.join(cleaned_authors)
     if has_et_al:
         result += ', et al.'
+    # The issue asks for the token count before AND after: the count is the
+    # only thing that makes this bug visible in a log, and it is the "after"
+    # number that would have shown the old fallback deleting a token (#560).
+    logger.debug(
+        "_normalize_author_names: fallback emitted %r (%d tokens in, %d out)",
+        result, len(parts), len(cleaned_authors) + (1 if has_et_al else 0),
+    )
     return result
 
 
