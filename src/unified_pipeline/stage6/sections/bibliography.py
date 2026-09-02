@@ -25,12 +25,12 @@ over two different substrates:
   `w:r` elements inside a `w:ins`, because an enriched citation is rendered as a
   tracked insertion paired with a deletion of the original text, and python-docx
   cannot add a run *into* a revision element. It falls back to the plain path if
-  the XML build raises. That fallback is not a universal net: raw control
-  characters, the one input class known to make the XML build raise, are now
-  stripped inside the tracked-insertion writer itself (#552), so that
-  specific failure no longer reaches the fallback -- but the plain writer
-  does not sanitize, so a control character reaching it by some other route
-  would still raise there too.
+  the XML build raises. Raw control characters, the one input class known to
+  make the XML build raise, are stripped inside the tracked-insertion writer
+  itself (#552) -- and the plain writer now sanitizes too (#711), so all
+  four run-text writes (the two here plus stage_6_word_template.py's
+  `_add_track_change_insertion` / `_add_track_change_deletion`) reject the
+  same input class the same way instead of raising.
 
 Author bolding targets `target_name` from `_format_citation`, falling back to
 the CV owner's last name -- taken from `cv_owner`, or recovered from the
@@ -177,12 +177,13 @@ class BibliographySection:
         """Strip the control characters lxml's `.text` setter rejects from
         one run's text, before it reaches a raw `w:t`/`w:delText` element.
 
-        The one sanitiser for stage 6's three run-text writes (#552) --
+        The one sanitiser for stage 6's four run-text writes (#552, #711) --
         `WCMTemplateGenerator._add_track_change_insertion` and
         `_add_track_change_deletion` in stage_6_word_template.py reach this
         through the mixin (`self._sanitize_run_text`); this module's own
-        `create_run_element`, below, calls it directly. `\\t`, `\\n` and
-        `\\r` are valid XML and are left untouched.
+        `create_run_element`, below, and `_add_citation_with_bold_author`
+        call it directly. `\\t`, `\\n` and `\\r` are valid XML and are left
+        untouched.
         """
         return _CONTROL_CHAR_PATTERN.sub('', text)
 
@@ -308,6 +309,13 @@ class BibliographySection:
         If target_name is not found, falls back to searching for cv_owner_last_name.
         """
         para.clear()
+
+        # python-docx's `add_run`/`Run.text` reaches the same lxml `.text`
+        # setter the raw-XML writers use and raises on the same control-code
+        # range (#552). This writer is also the tracked writer's
+        # `emit_track_changes=False` path and its exception fallback, so an
+        # unsanitised control character here would still abort the citation.
+        citation = self._sanitize_run_text(citation)
 
         before, name_to_bold, after = _citation_author_split(
             citation, target_name, cv_owner_last_name)
