@@ -21,16 +21,29 @@ determinism control) and is the thing that actually passes or fails.
 
 --source-dir DIR points this at the directory holding <uid>*.docx (e.g.
 data/sample_cvs/word/) so stage 6's personal-data fallback (#550) can recover
-contact fields from the original document, the way a live run does. Without
-it -- the default -- this gate could not see that path at all: SAMPLE_CV_DIR
-auto-discovery (stage_6_word_template.py:709-718) resolves for none of the
-farm uids in a fresh worktree, so every render took the fallback's
-"no original doc" branch and #550 was corpus-unprovable. Omitting the flag,
-or passing it for a uid with no matching docx, renders identically to
-today -- opt-in, and a missing docx is a one-line notice in the index, not
-an error. Mirrors doctor_gate.py's --source-dir: same fail-closed
-non-directory check, same _uid_owns boundary rule (a shorter uid must not
-match a longer uid's file).
+contact fields from the original document. Without it -- the default -- this
+gate could not see that path at all: SAMPLE_CV_DIR auto-discovery
+(stage_6_word_template.py:709-718) resolves for none of the farm uids in a
+fresh worktree, so every render took the fallback's "no original doc" branch
+and #550 was corpus-unprovable. Omitting the flag, or passing it for a uid
+with no matching docx, renders identically to today -- opt-in, and a missing
+docx is a one-line notice in the index, not an error. Mirrors
+doctor_gate.py's --source-dir: same fail-closed non-directory check, same
+_uid_owns boundary rule (a shorter uid must not match a longer uid's file).
+
+What this flag is NOT is a reproduction of a live run, and saying so
+plainly matters because the fallback's own comments claim the opposite
+(stage_6_word_template.py:272 and :709 both assert "the server always
+passes original_doc_path"; both are false on this ref). No production
+driver reaches that fallback at all: run_stage6() has no original_doc_path
+parameter and calls generator.generate(input_path, output_path)
+(stage_6_word_template.py:2918-2961), and both drivers go through
+run_stage6 -- run_full_pipeline.py:994 and
+web_interface/backend/app/pipeline/orchestrator.py:1370-1377. So this gate
+and stage 6's own unit tests are the only callers passing
+original_doc_path anywhere in the repo. Until run_stage6 forwards it, a
+delta this flag surfaces is a delta the corpus can measure but a real CV
+render still cannot produce.
 
 Fixes two defects found in an earlier, uncommitted version of this script
 (docs/analysis/HANDOFF-wave1-completion-2026-08-11.md, issue #584):
@@ -101,6 +114,27 @@ def _atomic_write_json(path: Path, obj) -> None:
         raise
 
 
+def _resolve_source_docx(source_dir, uid):
+    """The one <uid>*.docx under `source_dir` that belongs to `uid`, or None.
+
+    Module level and not inlined in main() so it can be self-tested without a
+    corpus (scripts/test_render_doctor_gates.py) -- the resolver is the only
+    part of --source-dir with a rule that can be got subtly wrong, and a
+    wrong resolution is silent: it renders another CV's contact block into
+    this CV's Personal Data table rather than raising.
+
+    _uid_owns, not a bare prefix match -- glob(f"{uid}*") also matches a
+    LONGER uid that starts with this one (the same boundary bug
+    doctor_gate.py guards against; see run_doctor.py's docstring on
+    _uid_owns for the 2026-07-15 sweep where 3 of 25 CVs were diagnosed
+    entirely against another CV's artifacts).
+    """
+    from unified_pipeline.run_doctor import _uid_owns
+
+    hits = sorted(p for p in source_dir.glob(f"{uid}*.docx") if _uid_owns(p.name, uid))
+    return hits[0] if hits else None
+
+
 def main(argv=None):
     args = _parse_args(argv)
     arm_outputs, out, source_dir = args.arm_outputs, args.out, args.source_dir
@@ -113,7 +147,6 @@ def main(argv=None):
     out.mkdir(parents=True)
 
     import unified_pipeline.stage_6_word_template as s6
-    from unified_pipeline.run_doctor import _uid_owns
 
     def _no_llm(*a, **kw):
         raise RuntimeError("render_gate: LLM disabled for determinism")
@@ -144,14 +177,7 @@ def main(argv=None):
             continue
         dest = out / f"{uid}_wcm.docx"
 
-        source_path = None
-        if source_dir is not None:
-            # _uid_owns, not a bare prefix match -- glob(f"{uid}*") also
-            # matches a LONGER uid that starts with this one (same boundary
-            # bug doctor_gate.py guards against; see run_doctor.py's
-            # docstring on _uid_owns for the 2026-07-15 sweep it caused).
-            hits = sorted(p for p in source_dir.glob(f"{uid}*.docx") if _uid_owns(p.name, uid))
-            source_path = hits[0] if hits else None
+        source_path = _resolve_source_docx(source_dir, uid) if source_dir is not None else None
 
         try:
             if source_path is not None:

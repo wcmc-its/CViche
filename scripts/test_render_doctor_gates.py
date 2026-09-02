@@ -7,11 +7,17 @@ doctor_gate_compare.py -- the parts cheap enough to pin without a corpus.
 The controls that actually prove these gates work (determinism holds, a real
 mutation is caught, a crashed render/doctor run is refused rather than
 compared) need a corpus and are logged in
-docs/guides/render-doctor-gates.md instead -- see issue #584. This file only
-covers the two regressions found while building that: the date/timestamp
-masking not accidentally masking real content, and the work-dir path
-normaliser silently failing on a relative path.
+docs/guides/render-doctor-gates.md instead -- see issue #584. This file
+covers the regressions found while building that (the date/timestamp masking
+not accidentally masking real content, and the work-dir path normaliser
+silently failing on a relative path), and render_gate.py's own two pieces of
+non-obvious pure logic: the LLM-disable monkeypatch below, and --source-dir's
+uid-to-docx resolver (#550), whose failure mode is silent -- a wrong
+resolution renders ANOTHER CV's contact block into this CV's Personal Data
+table rather than raising.
 """
+import contextlib
+import io
 import json
 import os
 import sys
@@ -27,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import doctor_gate_compare as dgc  # noqa: E402
+import render_gate as rg  # noqa: E402
 import render_gate_compare as rgc  # noqa: E402
 
 from docx import Document  # noqa: E402
@@ -221,6 +228,81 @@ def test_render_gate_llm_monkeypatch_still_intercepts_stage6():
         s6.call_llm = original
 
 
+def test_render_gate_source_dir_resolver_respects_uid_boundaries():
+    """A shorter uid must not claim a longer uid's docx (#550).
+
+    glob("web05*.docx") also matches web050_cv.docx, and sorted() puts '0'
+    (0x30) before '_' (0x5F), so a bare prefix match hands web05 the WRONG
+    CV's source document -- the same shape as the 2026-07-15 doctor sweep
+    that diagnosed 3 of 25 CVs against another CV's artifacts. Here the
+    consequence is worse than a bad diagnosis: web050's name, office
+    address, telephone and work email would render into web05's output.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "web05_cv.docx").write_text("")
+        (d / "web050_cv.docx").write_text("")
+
+        assert rg._resolve_source_docx(d, "web05").name == "web05_cv.docx", (
+            "uid web05 resolved to a longer uid's docx -- the _uid_owns "
+            "boundary rule is not being applied")
+        assert rg._resolve_source_docx(d, "web050").name == "web050_cv.docx"
+
+
+def test_render_gate_source_dir_resolver_returns_none_for_an_uncovered_uid():
+    # 65 of the farm's 66 uids have a source docx; web08 has none. That uid
+    # must resolve to None so main() falls back to the unmodified
+    # run_stage6() call and records "not found" in the index -- not an
+    # error, and not a silent render against someone else's document.
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "web09_cv.docx").write_text("")
+        assert rg._resolve_source_docx(d, "web08") is None
+
+
+def test_render_gate_source_dir_resolver_ignores_non_docx_files():
+    # The glob is *.docx: a sidecar with the same uid stem (the farm's own
+    # per-uid JSON artifacts sit beside CVs in some layouts) is not a source
+    # document and must not be handed to python-docx.
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "web05_entries.json").write_text("{}")
+        assert rg._resolve_source_docx(d, "web05") is None
+
+
+def test_render_gate_rejects_a_non_directory_source_dir():
+    """Fail closed (CODING_STANDARDS 5.5): a typo'd --source-dir must not
+    silently render as if the flag were omitted. Omitting it is a
+    documented, intentional mode; a bad path is not -- and the two produce
+    identical output, so a silent fallback would make an entire gate arm
+    quietly meaningless."""
+    with tempfile.TemporaryDirectory() as tmp:
+        arm = Path(tmp) / "arm"
+        (arm / "stage_4_field_extraction").mkdir(parents=True)
+        out = Path(tmp) / "out"
+
+        # Sanity: the same argv WITHOUT the flag parses, so the failure
+        # below is attributable to --source-dir and not to the arm layout.
+        ok = rg._parse_args([str(arm), str(out)])
+        assert ok.source_dir is None, "--source-dir must default to off (opt-in)"
+
+        # A FILE is not a directory either -- is_dir(), not exists().
+        afile = Path(tmp) / "a_file.docx"
+        afile.write_text("")
+
+        for bad, why in ((Path(tmp) / "nope", "a non-existent"), (afile, "a file")):
+            # argparse writes usage to stderr before raising; swallow it so
+            # this file's own output stays the single "ok" line its runner
+            # (CI's pipeline-tests job) reads.
+            with contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    rg._parse_args([str(arm), str(out), "--source-dir", str(bad)])
+                except SystemExit as e:
+                    assert e.code == 2, f"argparse parser.error exits 2, got {e.code}"
+                else:
+                    raise AssertionError(f"{why} --source-dir was accepted")
+
+
 if __name__ == "__main__":
     test_fingerprint_masks_render_timestamp_but_not_real_content()
     test_check_render_failures_trips_on_either_arm()
@@ -232,4 +314,8 @@ if __name__ == "__main__":
     test_doctor_failure_guard_trips_on_malformed_failed_value()
     test_doctor_compare_identical_count_uses_uid_intersection()
     test_render_gate_llm_monkeypatch_still_intercepts_stage6()
+    test_render_gate_source_dir_resolver_respects_uid_boundaries()
+    test_render_gate_source_dir_resolver_returns_none_for_an_uncovered_uid()
+    test_render_gate_source_dir_resolver_ignores_non_docx_files()
+    test_render_gate_rejects_a_non_directory_source_dir()
     print("ok")
