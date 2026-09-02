@@ -44,11 +44,11 @@ def _bullet_parts(text: str) -> List[str]:
     (#476), split on '\\n' and '\\t' -- deliberately NOT '|'.
 
     '|' is this file's own column separator, used at every table-fill branch
-    above (`:236`, `:322`, `:405`) to pull Title/Location/Dates apart as
+    below (`:258`, `:351`, `:431`) to pull Title/Location/Dates apart as
     fields of ONE entry, never as a signal of separate entries -- splitting
     on it here, inside the shared bullet writer all three subsections share,
     would turn a single "Role | Institution | Dates" bullet into three wrong
-    ones. Tab is safe to add: L1 and L2's own callers (`:264`, `:347`)
+    ones. Tab is safe to add: L1 and L2's own callers (`:291`, `:371`)
     already weld every tab in `bullet_text` away before calling this
     function (`.replace('\\t', ' - ', 1).replace('\\t', ' ')`), so this never
     fires for them; only L3's rare all-raw fallback (role, institution AND

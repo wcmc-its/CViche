@@ -7,7 +7,7 @@ fallback shared by all three L1/L2/L3 subsections -- was one of the ten
 had multiple lines, each becomes its own bullet") extends naturally to a
 tab-joined blind entry, but this file also uses '|' throughout as a COLUMN
 separator within one entry (`_fill_clinical_practice_l1/l2/l3`'s own
-`.split('|')` calls at lines 236, 322, 405 pull Title/Institution/Dates
+`.split('|')` calls at lines 258, 351, 431 pull Title/Institution/Dates
 apart as fields of ONE row, never as separate items) -- so unlike positions,
 honors and memberships, '|' must stay OUT of this call site's split, or a
 single "Role | Institution | Dates" bullet would be torn into three wrong
@@ -19,7 +19,7 @@ are bullet boundaries, '|' is not.
 Reachability, read from the actual call graph rather than assumed: none of
 the three fallback callers can currently hand this function a raw,
 un-welded tab.
- - L1 and L2 (`:264`, `:347`) weld every tab in `bullet_text` away before
+ - L1 and L2 (`:291`, `:371`) weld every tab in `bullet_text` away before
    calling it (`.replace('\\t', ' - ', 1).replace('\\t', ' ')`).
  - L3 (`_fill_clinical_practice_l3`) looked like the exception -- its
    fallback keeps raw `original_text` when `role` can't be derived -- but
