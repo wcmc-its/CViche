@@ -158,7 +158,14 @@ def test_band_for_boundaries():
 
 
 # --------------------------------------------------------------------- D5
-# FATAL_ERROR_PATTERN widened for ValidationException etc (#724 review T2.5)
+# FATAL_ERROR_PATTERN widened for ValidationException etc (#724 review T2.5),
+# then made case-sensitive on the exception-name branch plus an explicit
+# API-envelope branch (follow-up review, D5'): the original case-insensitive
+# `\b\w+(?:Error|Exception)\b` matched ordinary prose ending in "...error"
+# case-insensitively, including the OpenAI API's own
+# `'type': 'invalid_request_error'` envelope text on farm uid L7IAKW -- a
+# real stage failure, but caught by accident of the broad heuristic rather
+# than by an actual exception type name.
 # --------------------------------------------------------------------- D5
 
 
@@ -166,12 +173,36 @@ def test_band_for_boundaries():
     "ValidationException: field required",
     "TypeError: unsupported operand",
     "AttributeError: 'NoneType' object has no attribute 'x'",
+    "KeyError: 'x'",
     # Pre-existing branches must keep matching.
     "name 'response' is not defined",
     "Traceback (most recent call last):",
     "NameError: name 'x' is not defined",
 ])
 def test_fatal_error_pattern_matches_exception_type_names(text):
+    assert FATAL_ERROR_PATTERN.search(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "the war on terror",
+    "terror",
+    "keyerror",  # lowercase -- not a capitalized exception type name
+])
+def test_fatal_error_pattern_case_sensitive_exception_branch_ignores_prose(text):
+    """D5': the exception-name branch is case-sensitive so lowercase prose
+    ending in "...error"/"...exception" (or containing "error"/"terror" as
+    a substring) is not mistaken for an exception type name."""
+    assert not FATAL_ERROR_PATTERN.search(text), text
+
+
+@pytest.mark.parametrize("text", [
+    "'type': 'invalid_request_error'",
+    "Error code: 400",
+])
+def test_fatal_error_pattern_matches_api_envelope(text):
+    """D5': explicit, still case-insensitive branch for the OpenAI API
+    envelope shape that farm uid L7IAKW actually hit -- kept fatal by name,
+    not by accident of the broad exception-name heuristic."""
     assert FATAL_ERROR_PATTERN.search(text), text
 
 
@@ -183,6 +214,19 @@ def test_score_pipeline_errors_validation_exception_is_fatal(tmp_path):
     _write_json(tmp_path, "ABC_classified.json",
                {"meta": {"stats": {"t_validation": {
                    "error": "ValidationException: entries malformed"}}}})
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert fraction == 1.0
+    assert cap == 40
+    assert "fatal_pattern=YES" in detail
+
+
+def test_score_pipeline_errors_api_envelope_error_is_fatal(tmp_path):
+    """D5': the farm's actual L7IAKW shape -- an OpenAI 400 recorded as
+    meta.stats.t_validation.error -- stays fatal via the explicit
+    API-envelope branch, not the case-sensitive exception-name branch."""
+    _write_json(tmp_path, "ABC_classified.json",
+               {"meta": {"stats": {"t_validation": {
+                   "error": "{'error': {'type': 'invalid_request_error'}}"}}}})
     fraction, detail, cap = score_pipeline_errors(tmp_path)
     assert fraction == 1.0
     assert cap == 40
@@ -348,15 +392,16 @@ def test_duplicate_ratio_breakpoints(tmp_path, dup, total, expected):
 
 
 # --------------------------------------------------------------------- D15
-# score_broken_format: real DOCX fixtures (#724 T2.7, T3.3)
+# score_broken_format: real DOCX fixtures (#724 T2.7, T3.3; D7' follow-up)
 #
-# D7 (the table-cell scan) was NOT applied: a farm probe showed it moves 66
-# of 66 uids, almost entirely from the WCM template's own label/instruction
-# text sitting in unfilled or label cells, not echoed-into-content defects --
-# over the ticket's 20-uid stop threshold. The two "in a table cell" cases
-# below therefore pin the CURRENT blind spot (not detected) rather than
-# asserting detection, so a future landing of the cell scan shows up here as
-# an intentional test change, not a silent regression.
+# D7' (follow-up review, 2026-09-02): the raw-tab check now scans table
+# cells too (nested one level), confirmed against the pristine WCM template
+# to add no false positives (only one incidental, unreachable template tab).
+# The prompt-echo check stays paragraph-only by deliberate design: every
+# INSTRUCTION_MARKERS hit checked against the pristine template's own table
+# cells is the template's own label/instruction text (see module docstring
+# for the per-marker template locations), so scanning cells for echoes would
+# false-positive on all 66 farm docx, not catch a real defect.
 # --------------------------------------------------------------------- D15
 
 
@@ -366,11 +411,11 @@ def test_broken_format_raw_tab_in_paragraph(tmp_path):
     assert "raw_tab_paragraphs=1" in detail
 
 
-def test_broken_format_raw_tab_in_table_cell_not_detected(tmp_path):
-    """Pins the blind spot: D7 (cell scan) was deferred, see module note."""
+def test_broken_format_raw_tab_in_table_cell_detected(tmp_path):
+    """D7': the cell walk now catches a raw tab inside a table cell."""
     _make_docx(tables=[[["has\ta tab", "clean"]]]).save(tmp_path / "out.docx")
     fraction, detail, cap = score_broken_format(tmp_path)
-    assert "raw_tab_paragraphs=0" in detail, detail
+    assert "raw_tab_cells=1" in detail, detail
 
 
 def test_broken_format_prompt_echo_in_paragraph(tmp_path):
@@ -380,7 +425,9 @@ def test_broken_format_prompt_echo_in_paragraph(tmp_path):
 
 
 def test_broken_format_prompt_echo_in_table_cell_not_detected(tmp_path):
-    """Pins the blind spot: D7 (cell scan) was deferred, see module note."""
+    """Deliberate exclusion, not a blind spot: the echo check stays
+    paragraph-only because these markers are the template's own cell text
+    (module docstring cites the exact template locations)."""
     _make_docx(tables=[[["please choose one", "clean"]]]).save(tmp_path / "out.docx")
     fraction, detail, cap = score_broken_format(tmp_path)
     assert "echo_paragraphs=0" in detail, detail

@@ -158,14 +158,28 @@ def _load_docx(outputs_dir: Path):
 # ---------------------------------------------------------------------------
 
 #: Error text that means a stage broke, not that one lookup came back empty.
-#: The trailing \b\w+(?:Error|Exception)\b alternation was added for #724: the
-#: farm has 8 ValidationException hits (T2.5) that the original three named
-#: patterns (NameError/UnboundLocalError/KeyError) missed entirely; those
-#: three are now subsumed by the general alternation and kept implicitly.
+#: The exception-type-name alternation was added for #724 (T2.5: the farm has
+#: 8 ValidationException hits the original three named patterns --
+#: NameError/UnboundLocalError/KeyError -- missed entirely; those three are
+#: now subsumed by the general alternation and kept implicitly). It was
+#: first written case-insensitive (`\b\w+(?:Error|Exception)\b`) but that
+#: matched ordinary prose containing a trailing "...error"/"...exception"
+#: substring case-insensitively -- on the farm it fired on the OpenAI API's
+#: own `'type': 'invalid_request_error'` envelope text inside
+#: meta.stats.t_validation.error (uid L7IAKW), a real stage failure but not
+#: an exception *type name*. Follow-up review (2026-09-02) made the
+#: exception-name branch case-sensitive (`(?-i:...)`, requiring a capital
+#: first letter and exact-case Error/Exception) so lowercase prose like "the
+#: war on terror" or a lowercase "keyerror" no longer matches it, and added
+#: an explicit, still case-insensitive, API-envelope branch so the
+#: genuine L7IAKW failure (an OpenAI 400) stays fatal by name rather than by
+#: accident of the broad heuristic.
 FATAL_ERROR_PATTERN = re.compile(
     r"name '\w+' is not defined"
     r"|Traceback \(most recent call last\)"
-    r"|\b\w+(?:Error|Exception)\b",
+    r"|(?-i:\b[A-Z]\w*(?:Error|Exception)\b)"
+    r"|invalid_request_error"
+    r"|Error code: \d{3}",
     re.IGNORECASE,
 )
 
@@ -404,22 +418,52 @@ def score_sparse_tables(outputs_dir: Path):
     return fraction, detail, None
 
 
+def _count_raw_tab_cells(tables) -> int:
+    """Raw-tab paragraphs inside every cell of `tables`, nested tables one
+    level deep via `cell.tables` (#724 follow-up review, D7')."""
+    count = 0
+    for table in tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for p in cell.paragraphs:
+                    if "\t" in p.text:
+                        count += 1
+                count += _count_raw_tab_cells(cell.tables)
+    return count
+
+
 def score_broken_format(outputs_dir: Path):
     """Raw-tab and prompt-echo (template instruction) artifacts in the docx.
 
-    Scans body paragraphs only. #724 review item 7 asked for a table-cell
-    scan too (raw tabs / prompt echoes invisible inside cells); a probe of
-    the 66-CV farm confirmed the blind spot is real (10 CVs have a raw tab in
-    a cell) but also showed that scanning cells moves 66 of 66 farm uids --
-    almost entirely from the WCM template's own row-label and instruction
-    text sitting in unfilled/label cells ("(optional)", "Dates (yyyy-yyyy)",
-    "Type of Supervision (research, clinical, teaching, leadership)", and a
-    boilerplate "If yes, please provide Visa type..." question), not
-    echoed-into-content defects. That is over the 20-uid stop threshold, so
-    the cell scan is deferred pending a decision on whether template
-    placeholder text left in an unfilled cell should count against the
-    score; see the PR discussion for the per-marker breakdown. Tracked
-    separately rather than shipped in this PR.
+    Two different scans, two different scopes, on purpose:
+
+    - Prompt-echo (``INSTRUCTION_MARKERS``) scans body paragraphs ONLY. A
+      #724 follow-up review probe confirmed every marker this pattern
+      checks ("please", "yyyy-yyyy", "(optional)", "(Research, clinical")
+      occurs verbatim in the pristine WCM template's own table cells --
+      table 1 row 7 col 0 "If yes, please provide Visa type (Examples: J-1,
+      H-1B, E-3, TN, etc.):", table 9 rows 0-1 col 0 "DEA number:
+      (optional)" / "NPI number: (optional)", table 13 row 0 col 1 "Date
+      (yyyy-yyyy)" (and the same label repeated in tables 19-29), table
+      17/18 row 5 col 0 "Type of Supervision (research, clinical, teaching,
+      leadership)" -- confirmed against
+      `key_files/wcm_cv_template_faculty_october_2022_final.docx` directly,
+      independent of any rendered CV. Scanning cells for these markers would
+      therefore false-positive on the template's own label text in every
+      one of the 66 farm docx (66/66), not catch an echoed-into-content
+      defect, so the instruction-marker check stays paragraph-only and is
+      deliberately never applied to cells.
+    - The raw-tab check DOES scan every paragraph of every table cell
+      (nested tables one level deep), in addition to body paragraphs. A raw
+      ``\\t`` is not template boilerplate the way the instruction markers
+      are -- the pristine template contains exactly one incidental tab (an
+      unrelated static "Project title:" label row that is not reachable
+      from rendered CV content) versus the instruction markers' dozens of
+      legitimate hits -- so a tab inside a cell is still a meaningful signal
+      of a raw-formatting artifact leaking into the docx.
+
+    Headers and footers are not scanned either way: stage 6 never writes to
+    them.
     """
     doc, reason = _load_docx(outputs_dir)
     if doc is None:
@@ -429,16 +473,22 @@ def score_broken_format(outputs_dir: Path):
         r"(please|delete the others|list here|choose one|bedside|e\.g\.,|yyyy-yyyy|\(optional\)|\(Research, clinical)",
         re.IGNORECASE,
     )
-    raw_tab_count = echo_count = 0
+    raw_tab_paragraphs = echo_count = 0
     for p in doc.paragraphs:
         text = p.text
         if "\t" in text:
-            raw_tab_count += 1
+            raw_tab_paragraphs += 1
         if INSTRUCTION_MARKERS.search(text):
             echo_count += 1
 
-    fraction = clamp(0.6 * (raw_tab_count / 20) + 0.4 * (echo_count / 15))
-    detail = f"raw_tab_paragraphs={raw_tab_count}; echo_paragraphs={echo_count}; fraction={fraction:.3f}"
+    raw_tab_cells = _count_raw_tab_cells(doc.tables)
+    total_raw_tab = raw_tab_paragraphs + raw_tab_cells
+
+    fraction = clamp(0.6 * (total_raw_tab / 20) + 0.4 * (echo_count / 15))
+    detail = (
+        f"raw_tab_paragraphs={raw_tab_paragraphs}; raw_tab_cells={raw_tab_cells}; "
+        f"echo_paragraphs={echo_count}; fraction={fraction:.3f}"
+    )
     return fraction, detail, None
 
 
