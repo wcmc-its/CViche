@@ -32,7 +32,7 @@ _MONTH_NAME_TO_NUM = MappingProxyType({
 
 # Season names a CV states in place of a month ("Fall 2016"): the year is
 # real, the month is not stated, distinct from an unknown token that names
-# neither (#711 review round 1 -- an unknown alphabetic token used to fall
+# neither (#716 review round 1 -- an unknown alphabetic token used to fall
 # back to the same (year, None, None) a season gets, making "Foo 2021" and
 # "Fall 2016" indistinguishable).
 _SEASON_TOKENS = frozenset({'spring', 'summer', 'fall', 'autumn', 'winter'})
@@ -58,7 +58,7 @@ def _parse_date_components(date_str: str):
     "Sept. 2019" failed every branch and the entry sorted to the bottom of its
     section while still rendering its date correctly (issue #266).
 
-    Every pattern below is `re.fullmatch`, not `re.match` (#711 review round
+    Every pattern below is `re.fullmatch`, not `re.match` (#716 review round
     1): a list or a range packed into one field -- "february 2022, july 2022
     and july 2023", "2006-07-14 to 2006-07-16" -- is not a single date, and is
     left to render/sort as the literal text it is rather than being read as
@@ -145,7 +145,7 @@ def _overlap_boundary(date_str: str, *, is_end: bool):
     filled in; see `_dates_overlap_or_match` for why nothing is imputed.
     """
     # str()-coerced the same way _parse_date_components coerces its own input
-    # (#711 review round 1): the two entry paths must treat a malformed,
+    # (#716 review round 1): the two entry paths must treat a malformed,
     # non-string extracted value identically rather than one stringifying and
     # the other calling .strip() on it directly.
     s = str(date_str or '').strip()
@@ -190,7 +190,7 @@ def _dates_overlap_or_match(entry_a: Dict, entry_b: Dict) -> bool:
     either side) this returns True, the same "can't prove they differ" answer
     the missing-date guard above already gives; the decision to actually drop an
     entry stays with the content gates behind this one (`_drop_is_safe`). An
-    entry whose OWN end is stated before its own start (#711) is malformed
+    entry whose OWN end is stated before its own start (#716) is malformed
     extraction, not a real range, and is treated the same conservative way.
     """
     start_a, end_a = _get_entry_date_range(entry_a)
@@ -210,7 +210,7 @@ def _dates_overlap_or_match(entry_a: Dict, entry_b: Dict) -> bool:
     start_a_b, start_b_b, end_a_b, end_b_b = boundaries
     # An inverted range (an entry's own end stated before its own start)
     # proves nothing about either entry -- it is malformed extraction, not
-    # data (#711 review round 1). Conservative True, same as an unreadable
+    # data (#716 review round 1). Conservative True, same as an unreadable
     # boundary above, rather than letting the malformed range "prove" a
     # disjointness the CV never stated.
     if (_ends_strictly_before(end_a_b, start_a_b)

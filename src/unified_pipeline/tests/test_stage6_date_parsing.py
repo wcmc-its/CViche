@@ -66,7 +66,7 @@ def test_month_precision_is_preserved_within_a_year():
     ("2019", (2019, None, None)),
     ("March 2020", (2020, 3, None)),
     ("Mar. 2020", (2020, 3, None)),
-    ("Foobar 2021", (None, None, None)),   # unknown month name -> unreadable (#711)
+    ("Foobar 2021", (None, None, None)),   # unknown month name -> unreadable (#716)
     ("", (None, None, None)),
     ("garbage", (None, None, None)),
 ])
@@ -74,7 +74,7 @@ def test_parse_date_components(date_str, expected):
     assert _parse_date_components(date_str) == expected
 
 
-# --- #711 review round 1: unknown month token vs. season token --------------
+# --- #716 review round 1: unknown month token vs. season token --------------
 #
 # T1.1/T2.5: an unknown alphabetic token used to fall back to the same
 # (year, None, None) a season token gets, making "Foo 2021" indistinguishable
@@ -104,7 +104,7 @@ def test_known_month_token_still_parses(date_str, expected):
     assert _parse_date_components(date_str) == expected
 
 
-# --- #711 review round 1: anchoring (T1.2/T2.1) ------------------------------
+# --- #716 review round 1: anchoring (T1.2/T2.1) ------------------------------
 #
 # Every complete-date pattern is re.fullmatch now: a string that carries a
 # valid date plus trailing text -- extra digits, garbage, or (the corpus
@@ -134,7 +134,7 @@ def test_anchoring_rejects_corpus_list_and_range_shapes(date_str):
     assert _parse_date_components(date_str) == (None, None, None)
 
 
-# --- #711 review round 1: calendar validity (T1.3/T2.2) ---------------------
+# --- #716 review round 1: calendar validity (T1.3/T2.2) ---------------------
 
 @pytest.mark.parametrize("date_str", [
     "2021-13-40",   # month out of range
@@ -164,7 +164,7 @@ def test_calendar_non_leap_year_day_degrades_to_month():
 def test_both_functions_use_the_shared_parser():
     # format_date_for_section (rendering), extract_sort_date (sorting), and
     # _parse_date_components itself must all agree on what a string yields --
-    # that is the whole point of sharing the parser (#711 T2.4: this test's
+    # that is the whole point of sharing the parser (#716 T2.4: this test's
     # name already claimed to check this and did not -- it only compared
     # _parse_date_components against extract_sort_date, so a duplicate parser
     # inside format_date_for_section's own path could have drifted silently).
@@ -178,7 +178,7 @@ def test_both_functions_use_the_shared_parser():
         formatted = format_date_for_section(date_str, "H")
         assert formatted == str(year)
 
-    # An unparsed string (#711 D2/D1) is returned as written by the formatter,
+    # An unparsed string (#716 D2/D1) is returned as written by the formatter,
     # exactly as it sorts last rather than acquiring a fabricated date.
     unparsed = "february 2022, july 2022 and july 2023"
     assert _parse_date_components(unparsed) == (None, None, None)
@@ -384,7 +384,7 @@ class TestDatesOverlapOrMatch:
             _entry("2021-10-01", "2021-12-01"),
         ) is True
 
-    # -- #711 review round 1: inverted own-range (T2.3) ----------------------
+    # -- #716 review round 1: inverted own-range (T2.3) ----------------------
     #
     # A malformed extraction where an entry's own end is stated before its own
     # start proves nothing about either entry -- conservative True, same as an
@@ -392,7 +392,7 @@ class TestDatesOverlapOrMatch:
     # disjointness the CV never actually stated.
 
     def test_inverted_own_range_is_conservatively_true(self):
-        # Before #711's D4, the cross-check alone (ignoring that A's own range
+        # Before #716's D4, the cross-check alone (ignoring that A's own range
         # is inverted) already answered False here: B's end (2016) is before
         # A's start (2020), regardless of A's own malformed range. D4 catches
         # A's inversion first and returns True instead.
@@ -409,7 +409,7 @@ class TestDatesOverlapOrMatch:
         assert _dates_overlap_or_match(a, b) is False
 
 
-# --- #711 review round 1: _overlap_boundary coerces non-string input --------
+# --- #716 review round 1: _overlap_boundary coerces non-string input --------
 
 
 def test_overlap_boundary_non_string_start_does_not_raise():
@@ -424,7 +424,7 @@ def test_overlap_boundary_none_end_does_not_raise():
     assert _parsing_dates._overlap_boundary(None, is_end=True) is _parsing_dates._OPEN_ENDED
 
 
-# --- #711 review round 1: sorting/rendering consumers see the new behaviour -
+# --- #716 review round 1: sorting/rendering consumers see the new behaviour -
 
 
 def test_extract_sort_date_sees_season_at_year_level():
