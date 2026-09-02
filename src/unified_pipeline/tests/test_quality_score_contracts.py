@@ -1,12 +1,14 @@
 """Regression guard for the PR #724 review round: contract tests for
 quality_score.py's ambiguous-artifact guard, pipeline-error accounting, gate
-mode validation, metadata-invariant validation, the narrowed _load_first
-exception handling, and linear_interp's clamp.
+mode validation, the widened fatal-error pattern, metadata-invariant
+validation, the narrowed _load_first exception handling, linear_interp's
+clamp, and the boundary / edge-case sweep the review asked for (T3 items
+1-5).
 
     python3 -m pytest src/unified_pipeline/tests/test_quality_score_contracts.py -p no:cacheprovider
 
 Self-contained: no DB, no network, no PII. All artifacts are synthetic tmp
-files.
+files and python-docx-built fixtures.
 """
 
 import json
@@ -24,12 +26,17 @@ from unified_pipeline import quality_score as qs  # noqa: E402
 from unified_pipeline.quality_score import (  # noqa: E402
     FATAL_ERROR_PATTERN,
     VALID_GATE_MODES,
+    _load_docx,
     _load_first,
+    band_for,
     linear_interp,
     quality_gate,
+    score_broken_format,
     score_cv_owner,
     score_duplicate_ratio,
+    score_field_sparseness,
     score_pipeline_errors,
+    score_run,
     score_sparse_tables,
     score_t_bucket,
 )
@@ -145,7 +152,6 @@ def test_quality_gate_accepts_every_valid_mode(tmp_path, mode):
 
 
 def test_band_for_boundaries():
-    from unified_pipeline.quality_score import band_for
     assert band_for(85) == "GREEN (ship)"
     assert band_for(60) == "YELLOW (human cleanup needed)"
     assert band_for(59) == "RED (re-run / do-not-deliver)"
@@ -296,3 +302,255 @@ def test_linear_interp_clamps_reversed_output_range():
     must still be [min, max] of the two, not [out_lo, out_hi] literally."""
     assert linear_interp(-5.0, 0.0, 1.0, 10.0, 0.0) == 10.0
     assert linear_interp(5.0, 0.0, 1.0, 10.0, 0.0) == 0.0
+
+
+# --------------------------------------------------------------------- D13
+# T-bucket and duplicate-ratio breakpoint boundaries (#724 review T3.1)
+# --------------------------------------------------------------------- D13
+
+
+@pytest.mark.parametrize("t_count,total,expected", [
+    (3, 100, 0.0),                                     # 0.03 -> 0
+    (4, 100, 0.08),                                     # just above 0.03
+    (8, 100, 0.4),                                      # 0.08 -> 0.4
+    (9, 100, 0.4 + (1 / 7) * 0.4),                      # just above 0.08
+    (15, 100, 0.8),                                     # 0.15 -> 0.8
+    (16, 100, 1.0),                                     # just above 0.15 -> 1
+])
+def test_t_bucket_breakpoints(tmp_path, t_count, total, expected):
+    code_distribution = {"A": total - t_count, "T": t_count}
+    _write_json(tmp_path, "X_classified.json", _classified(code_distribution=code_distribution))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert fraction == pytest.approx(expected, abs=1e-9), detail
+
+
+@pytest.mark.parametrize("dup,total,expected", [
+    (10, 100, 0.0),                                     # 0.10 -> 0
+    (11, 100, 0.02),                                     # just above 0.10
+    (30, 100, 0.4),                                      # 0.30 -> 0.4
+    (31, 100, 0.42),                                     # just above 0.30
+    (50, 100, 0.8),                                      # 0.50 -> 0.8
+    (51, 100, 1.0),                                      # just above 0.50 -> 1
+])
+def test_duplicate_ratio_breakpoints(tmp_path, dup, total, expected):
+    _write_json(tmp_path, "X_classified.json",
+               _classified(total_entries=total, duplicate_entries=dup))
+    fraction, detail, cap = score_duplicate_ratio(tmp_path)
+    assert fraction == pytest.approx(expected, abs=1e-9), detail
+
+
+# D14 (T3.2): duplicate_entries > total_entries, duplicate_entries < 0,
+# total_entries < 0, and total_entries != sum(code_distribution.values())
+# are covered by the D10 tests above (test_duplicate_ratio_negative_*,
+# test_duplicate_ratio_duplicate_exceeds_total,
+# test_t_bucket_negative_total_entries,
+# test_t_bucket_code_distribution_disagrees_with_total_entries).
+
+
+# --------------------------------------------------------------------- D15
+# score_broken_format: real DOCX fixtures (#724 T2.7, T3.3)
+#
+# D7 (the table-cell scan) was NOT applied: a farm probe showed it moves 66
+# of 66 uids, almost entirely from the WCM template's own label/instruction
+# text sitting in unfilled or label cells, not echoed-into-content defects --
+# over the ticket's 20-uid stop threshold. The two "in a table cell" cases
+# below therefore pin the CURRENT blind spot (not detected) rather than
+# asserting detection, so a future landing of the cell scan shows up here as
+# an intentional test change, not a silent regression.
+# --------------------------------------------------------------------- D15
+
+
+def test_broken_format_raw_tab_in_paragraph(tmp_path):
+    _make_docx(["a paragraph with a\traw tab"]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=1" in detail
+
+
+def test_broken_format_raw_tab_in_table_cell_not_detected(tmp_path):
+    """Pins the blind spot: D7 (cell scan) was deferred, see module note."""
+    _make_docx(tables=[[["has\ta tab", "clean"]]]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_paragraphs=0" in detail, detail
+
+
+def test_broken_format_prompt_echo_in_paragraph(tmp_path):
+    _make_docx(["Please list here your publications"]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "echo_paragraphs=1" in detail, detail
+
+
+def test_broken_format_prompt_echo_in_table_cell_not_detected(tmp_path):
+    """Pins the blind spot: D7 (cell scan) was deferred, see module note."""
+    _make_docx(tables=[[["please choose one", "clean"]]]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "echo_paragraphs=0" in detail, detail
+
+
+def test_broken_format_legitimate_please_sentence_still_matches(tmp_path):
+    """D8: no pattern change -- pins the current (intentionally broad) match
+    rather than silently narrowing it. Farm sample (T2.8): 19 of 20 sampled
+    'please' hits were true prompt-echo positives; the one false positive was
+    'bedside' (a citation title), not 'please'. This sentence is legitimate
+    academic prose and still matches -- expected, not a bug to fix here."""
+    _make_docx(["Please note the patient responded well to treatment."]).save(
+        tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "echo_paragraphs=1" in detail, detail
+
+
+# --------------------------------------------------------------------- D16
+# _load_docx: absent / corrupt / ambiguous (#724 review T3.4)
+# --------------------------------------------------------------------- D16
+
+
+def test_load_docx_no_docx(tmp_path):
+    doc, reason = _load_docx(tmp_path)
+    assert doc is None
+    assert reason == "no docx found"
+
+
+def test_load_docx_corrupt_docx(tmp_path):
+    (tmp_path / "broken.docx").write_bytes(b"not a real docx, just garbage bytes")
+    doc, reason = _load_docx(tmp_path)
+    assert doc is None
+    assert reason.startswith("docx open error:"), reason
+
+
+def test_load_docx_multiple_docx_ambiguous(tmp_path):
+    _make_docx(["hello"]).save(tmp_path / "A.docx")
+    _make_docx(["world"]).save(tmp_path / "B.docx")
+    doc, reason = _load_docx(tmp_path)
+    assert doc is None
+    assert reason.startswith("ambiguous: 2 files match *.docx"), reason
+    assert "A.docx" in reason and "B.docx" in reason
+
+
+# --------------------------------------------------------------------- D17
+# T3.5 edge-case sweep
+# --------------------------------------------------------------------- D17
+
+
+def test_edge_empty_output_directory(tmp_path):
+    """An existing but completely empty output directory: every dimension
+    falls to its own 'absent' case; the cv_owner hard-fail cap (25) wins."""
+    result = score_run(tmp_path)
+    assert result["totalScore"] == 25
+    assert result["band"].startswith("RED")
+    assert result["hard_fail_caps_applied"] == [25]
+
+
+def test_edge_nonexistent_directory_raises(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        score_run(tmp_path / "does_not_exist_at_all")
+
+
+def test_edge_run_id_none_derives_from_first_json(tmp_path):
+    _write_json(tmp_path, "XYZ123_fields.json", {"cv_owner": {}})
+    result = score_run(tmp_path, run_id=None)
+    assert result["run_id"] == "XYZ123"
+
+
+def test_edge_run_id_none_unknown_when_no_json_files(tmp_path):
+    result = score_run(tmp_path, run_id=None)
+    assert result["run_id"] == "UNKNOWN"
+
+
+def test_edge_malformed_json_mixed_with_valid_json(tmp_path):
+    _write_json(tmp_path, "AAA_entries.json", {"nested": {"error": "stage timeout"}})
+    _truncate(tmp_path, "BBB_classified.json")
+    fraction, detail, cap = score_pipeline_errors(tmp_path)
+    assert "nonnull_error_fields=2" in detail, detail
+    assert "BBB_classified.json" in detail, detail
+    assert cap is None
+
+
+def test_edge_multiple_json_files_for_same_pattern(tmp_path):
+    (tmp_path / "AAA_classified.json").write_text('{"meta": {}}')
+    (tmp_path / "BBB_classified.json").write_text('{"meta": {}}')
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert fraction == 1.0
+    assert "unreadable" in detail and "ambiguous" in detail
+
+
+def test_edge_empty_entries_list(tmp_path):
+    _write_json(tmp_path, "X_fields.json", {"entries": []})
+    fraction, detail, cap = score_field_sparseness(tmp_path)
+    assert fraction == 1.0
+    assert detail == "no entries"
+
+
+def test_edge_empty_code_distribution_no_total_entries(tmp_path):
+    _write_json(tmp_path, "X_classified.json", _classified(code_distribution={}))
+    fraction, detail, cap = score_t_bucket(tmp_path)
+    assert "invalid metadata" not in detail
+    assert fraction == 0.0
+    assert "T_count=0; total=1" in detail
+
+
+def test_edge_zero_tables(tmp_path):
+    _make_docx(["prose only"]).save(tmp_path / "out.docx")
+    fraction, _, _ = score_sparse_tables(tmp_path)
+    assert fraction == 1.0
+
+
+def test_edge_all_empty_tables(tmp_path):
+    _make_docx(tables=[[["", ""], ["", ""]], [["", ""], ["", ""]]]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_sparse_tables(tmp_path)
+    assert fraction == 1.0
+    assert "sparse_tables=2" in detail
+
+
+def test_edge_completely_populated_tables(tmp_path):
+    _make_docx(tables=[[["Alice", "PI"], ["Bob", "Co-I"]]]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_sparse_tables(tmp_path)
+    assert fraction == 0.0
+    assert "empty_cells=0/4" in detail
+
+
+def test_edge_100_percent_duplicate_entries(tmp_path):
+    _write_json(tmp_path, "X_classified.json", _classified(total_entries=10, duplicate_entries=10))
+    fraction, _, _ = score_duplicate_ratio(tmp_path)
+    assert fraction == 1.0
+
+
+def test_edge_0_percent_duplicate_entries(tmp_path):
+    _write_json(tmp_path, "X_classified.json", _classified(total_entries=10, duplicate_entries=0))
+    fraction, _, _ = score_duplicate_ratio(tmp_path)
+    assert fraction == 0.0
+
+
+def test_edge_missing_cv_owner_key(tmp_path):
+    _write_json(tmp_path, "X_fields.json", {"entries": []})
+    fraction, detail, cap = score_cv_owner(tmp_path)
+    assert fraction == 1.0
+    assert cap == 25
+    assert detail == "cv_owner name empty; hard-fail cap=25"
+
+
+def test_edge_cv_owner_first_name_only(tmp_path):
+    _write_json(tmp_path, "X_fields.json", {"cv_owner": {"first_name": "Jane"}})
+    fraction, detail, cap = score_cv_owner(tmp_path)
+    assert cap == 25
+    assert fraction == 1.0
+
+
+def test_edge_cv_owner_last_name_only(tmp_path):
+    _write_json(tmp_path, "X_fields.json", {"cv_owner": {"last_name": "Public"}})
+    fraction, detail, cap = score_cv_owner(tmp_path)
+    assert cap == 25
+    assert fraction == 1.0
+
+
+def test_edge_cv_owner_full_name_only_escapes_hard_fail(tmp_path):
+    _write_json(tmp_path, "X_fields.json", {"cv_owner": {"full_name": "Jane Q. Public"}})
+    fraction, detail, cap = score_cv_owner(tmp_path)
+    assert cap is None, detail
+    assert "full_name='Jane Q. Public'" in detail
+
+
+def test_edge_cv_owner_whitespace_only_names(tmp_path):
+    _write_json(tmp_path, "X_fields.json",
+               {"cv_owner": {"full_name": "   ", "first_name": " ", "last_name": "\t"}})
+    fraction, detail, cap = score_cv_owner(tmp_path)
+    assert cap == 25
+    assert fraction == 1.0

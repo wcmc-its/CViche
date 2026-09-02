@@ -125,7 +125,11 @@ def _missing_or_unreadable_detail(label: str, reason) -> str:
 
 
 def _load_docx(outputs_dir: Path):
-    """Return (Document, reason). Document is None if unavailable."""
+    """Return (Document, reason). Document is None if unavailable.
+
+    Mirrors _load_first's ambiguous-match guard (#724 review): more than one
+    *.docx in the directory is not loaded rather than silently picking one.
+    """
     try:
         from docx import Document
     except ImportError:
@@ -133,9 +137,14 @@ def _load_docx(outputs_dir: Path):
     docx_files = sorted(outputs_dir.glob("*.docx"))
     if not docx_files:
         return None, "no docx found"
+    if len(docx_files) > 1:
+        names = ", ".join(f.name for f in docx_files)
+        reason = f"ambiguous: {len(docx_files)} files match *.docx ({names})"
+        logger.warning("quality_score found multiple docx candidates: %s", names)
+        return None, reason
     try:
         return Document(docx_files[0]), None
-    except Exception as e:  # pragma: no cover - corrupt docx
+    except Exception as e:
         return None, f"docx open error: {e}"
 
 
@@ -162,7 +171,15 @@ FATAL_ERROR_PATTERN = re.compile(
 
 
 def iter_error_fields(obj, path=""):
-    """(dotted path, value) for every non-null ``error`` field anywhere in obj."""
+    """(dotted path, value) for every non-null ``error`` field anywhere in obj.
+
+    Every non-null ``error`` key counts, with no allowlist for "benign"
+    metadata: scouted against the 66-CV farm (#724 review item 4), all 51
+    non-null error fields found are real stage errors (validation failures,
+    fragment_reconnection errors, ValidationException) -- no schema in this
+    pipeline emits an ``error`` key for anything else. If a stage ever adds
+    one, an allowlist belongs here, keyed on the dotted path's stage prefix.
+    """
     results = []
     if isinstance(obj, dict):
         for k, v in obj.items():
@@ -388,7 +405,22 @@ def score_sparse_tables(outputs_dir: Path):
 
 
 def score_broken_format(outputs_dir: Path):
-    """Raw-tab and prompt-echo (template instruction) artifacts in the docx."""
+    """Raw-tab and prompt-echo (template instruction) artifacts in the docx.
+
+    Scans body paragraphs only. #724 review item 7 asked for a table-cell
+    scan too (raw tabs / prompt echoes invisible inside cells); a probe of
+    the 66-CV farm confirmed the blind spot is real (10 CVs have a raw tab in
+    a cell) but also showed that scanning cells moves 66 of 66 farm uids --
+    almost entirely from the WCM template's own row-label and instruction
+    text sitting in unfilled/label cells ("(optional)", "Dates (yyyy-yyyy)",
+    "Type of Supervision (research, clinical, teaching, leadership)", and a
+    boilerplate "If yes, please provide Visa type..." question), not
+    echoed-into-content defects. That is over the 20-uid stop threshold, so
+    the cell scan is deferred pending a decision on whether template
+    placeholder text left in an unfilled cell should count against the
+    score; see the PR discussion for the per-marker breakdown. Tracked
+    separately rather than shipped in this PR.
+    """
     doc, reason = _load_docx(outputs_dir)
     if doc is None:
         return 0.5, reason, None
@@ -411,7 +443,15 @@ def score_broken_format(outputs_dir: Path):
 
 
 def score_field_sparseness(outputs_dir: Path):
-    """Entry-level field-extraction sparseness."""
+    """Entry-level field-extraction sparseness.
+
+    Deliberate double-signal, not an accident (#724 review item 9):
+    ``success_rate`` measures the extractor (how many entries the extraction
+    call reported success on), while allnull_or_zero measures the entries
+    (how many carry no usable fields regardless of what the extractor
+    claimed). An entry that fails both is meant to weigh on both terms --
+    that is the calibration, not a double-count of one failure.
+    """
     data, reason = _load_first(outputs_dir, "*_fields.json")
     if data is None:
         return 1.0, _missing_or_unreadable_detail("fields.json", reason), None
