@@ -32,7 +32,7 @@ _CITATION_STOPWORDS = frozenset({
     'eds', 'edited', 'editor', 'editors', 'edition', 'chief',
     'vol', 'volume', 'page', 'pages', 'published', 'publisher',
 })
-_CITATION_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+_CITATION_TOKEN_RE = re.compile(r"[^\W_]+")
 
 
 def _value_referenced(value: str, citation_text: str) -> bool:

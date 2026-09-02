@@ -233,6 +233,23 @@ def test_stage5d_entry_with_publisher_already_present_is_untouched():
     assert citation == expected
 
 
+def test_stage5d_entry_with_non_ascii_publisher_already_present_is_untouched():
+    """A publisher whose only significant token is non-ASCII ("Müller") must
+    still count as already present -- the old `[A-Za-z0-9]+` token regex
+    could not match the "ü", so the token test always failed and the
+    already-present publisher was appended a second time
+    ("... Müller; 2020. Müller.")."""
+    fields = {
+        'publisher': 'Müller',
+        'formatted_citation': 'Smith J. A Chapter. In: Müller; 2020.',
+        'formatting_source': 'stage_5d_llm',
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 6)
+
+    assert citation == '6. Smith J. A Chapter. In: Müller; 2020.'
+
+
 def test_stage5d_entry_with_reworded_publisher_is_not_duplicated():
     """A publisher reworded rather than dropped ("Springer" standing in for
     "Springer-Verlag, NY") must still count as present -- this is what the
