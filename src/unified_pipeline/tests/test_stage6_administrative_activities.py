@@ -96,6 +96,31 @@ class TestCompleteStructuredRecordSurvivesMultilineText:
         assert rows[1][0] == "Committee B"
         assert rows[2][0] == "Committee C"
 
+    def test_single_line_no_pipe_complete_record_is_not_reparsed(self):
+        # Review round 1 (PR #714, thread 3915848371 item 1): the existing
+        # complete-record coverage above always combines completeness with a
+        # 3-line text, so it primarily guards `len(lines) <= 3`, not the
+        # "no pipe at all" shape. Use a raw text with its OWN different
+        # parenthetical role+date, so a reparse (or the parenthetical
+        # fallback) would be observable if either ran: reparsing would
+        # produce role "Member" / dates from 1990-1995 instead of the
+        # structured Chair/2015-2020 record.
+        entry = {
+            "text": "Curriculum Committee (Member 1990-1995)",
+            "extracted_fields": {
+                "committee_name": "Curriculum Committee",
+                "role": "Chair",
+                "start_date": "2015",
+                "end_date": "2020",
+            },
+            "taxonomy_code": "P",
+        }
+
+        rows = _rows(entry)
+
+        expected_dates = format_date_range("2015", "2020", "P")
+        assert rows == [("Curriculum Committee", "Chair", expected_dates)]
+
 
 class TestUnresolvedPipeRoutesThroughSharedParser:
     """#627: a 1- or 2-line pipe entry now routes through the same shared
@@ -166,6 +191,104 @@ class TestUnresolvedPipeRoutesThroughSharedParser:
         expected_dates = format_date_range("2010", "present", "P")
         assert expected_dates.endswith("Present")
         assert rows == [("Committee A", "", expected_dates)]
+
+    def test_basic_pipe_activity_date_form_uses_shared_parser(self):
+        # Review round 1 (PR #714, thread 3915848371 item 3): the existing
+        # pipe coverage above always combines the pipe date with a
+        # parenthetical role, so it never independently proves the plain
+        # "Activity | date" shape (no parenthetical anywhere) resolves
+        # correctly on its own.
+        entry = {
+            "text": "Quality Improvement Committee | 1996-Present",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+
+        rows = _rows(entry)
+
+        expected_dates = format_date_range("1996", "Present", "P")
+        assert rows == [("Quality Improvement Committee", "", expected_dates)]
+
+
+class TestTwoLineNonPipeEmptyExtractionBoundary:
+    """Review round 1 (PR #714, thread 3915848371 item 2): a 2-line,
+    non-pipe entry with incomplete extraction and a parenthetical
+    role+date on line 1.
+
+    Two shapes, distinguished by what extraction gave `activity`:
+
+    - A2b below: extraction already populated `activity` (just not
+      `dates`). `(len(lines) > 1 and not activity)` is False from the
+      start (activity was never empty), so this never reaches the
+      reparse route -- the parenthetical fallback (administrative_activities.py:262-300)
+      fills `dates`/`role` from line 1's parenthetical instead, and the
+      single-row fallback (line 330-332) writes it as one row. Matches the
+      #660-item-1 FACTS note: "a 2-line entry whose extraction has
+      `activity` but no `dates` is NOT reparsed".
+
+    - A2 below: extraction is fully empty. Contrary to what the FACTS note
+      and PR #714's own T1-item-2 review comment both assume ("a two-line
+      entry with incomplete extraction and parenthetical activity/date
+      information ... reparsed"), this does NOT reparse either. The
+      parenthetical fallback runs first (`if not dates`, line 262) and,
+      because `activity` is falsy, executes
+      `_PARENTHETICAL_WITH_YEAR_RE.sub('', activity or original_text)`
+      against the WHOLE original_text (both lines) -- stripping only the
+      matched parenthetical and leaving the raw newline and line 2 stuck
+      inside the single resulting `activity` string. By the time the
+      routing check at line 322 runs, `activity` is no longer empty, so
+      `(len(lines) > 1 and not activity)` is False and the shared #572
+      reparse never fires. A second committee genuinely present on line 2
+      would have its own role/dates silently dropped (see
+      test_two_committees_are_collapsed_and_the_second_ones_dates_are_lost
+      below) -- pinned as real, current behavior; not fixed here (test-only
+      ticket). Flagged in the PR body for review round 1.
+    """
+
+    def test_activity_present_no_dates_takes_the_parenthetical_fallback(self):
+        entry = {
+            "text": "Curriculum Committee (Chair 2005-2010)\nsecond line",
+            "extracted_fields": {"committee_name": "Curriculum Committee"},
+            "taxonomy_code": "P",
+        }
+
+        rows = _rows(entry)
+
+        expected_dates = format_date_range("2005", "2010", "P")
+        assert rows == [("Curriculum Committee", "Chair", expected_dates)]
+
+    def test_empty_extraction_with_a_leading_parenthetical_is_not_reparsed(self):
+        entry = {
+            "text": "Curriculum Committee (Chair 2005-2010)\nsecond line",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+
+        rows = _rows(entry)
+
+        # Actual behavior (see class docstring): the parenthetical fallback
+        # intercepts this before the reparse-routing check ever sees an
+        # empty `activity`, so it is NOT reparsed -- contrary to the T1
+        # item 2 review comment's stated expectation for this shape.
+        expected_dates = format_date_range("2005", "2010", "P")
+        assert rows == [("Curriculum Committee\nsecond line", "Chair", expected_dates)]
+
+    def test_two_committees_are_collapsed_and_the_second_ones_dates_are_lost(self):
+        # Sharper demonstration of the same gap: when line 2 is itself a
+        # genuine second committee with its own parenthetical role+date,
+        # the fallback still only reads the FIRST parenthetical match in
+        # the whole text, so Committee B's role and dates are dropped
+        # entirely rather than reparsed into a second row.
+        entry = {
+            "text": "Committee A (Chair 2005-2010)\nCommittee B (Member 2011-2015)",
+            "extracted_fields": {},
+            "taxonomy_code": "P",
+        }
+
+        rows = _rows(entry)
+
+        expected_dates = format_date_range("2005", "2010", "P")
+        assert rows == [("Committee A\nCommittee B", "Chair", expected_dates)]
 
 
 class TestParentheticalFallbackAlreadyFixed:

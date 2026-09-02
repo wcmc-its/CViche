@@ -226,6 +226,31 @@ class TestUnresolvedPipeRoutesThroughSharedParser:
 
         assert data_rows == [("Chair, Faculty Council", "Weill Cornell Medicine", "2018-2022")]
 
+    def test_two_line_pipe_entry_uses_shared_parser(self):
+        # Review round 1 (PR #714, thread 3915867445): the implementation
+        # comment above (#627) explicitly claims coverage for both 1- and
+        # 2-line unresolved-pipe entries, but until now only the 1-line
+        # form was pinned here. Mirrors sibling P's own two-line pipe test
+        # (test_stage6_administrative_activities.py) shape-for-shape.
+        gen = _real_template_generator()
+        entry = {
+            "text": "Curriculum Committee (Chair 2005-2010) | 2004-2011\nSecond unrelated line",
+            "extracted_fields": {},
+            "taxonomy_code": "O",
+        }
+
+        gen._fill_leadership([entry])
+
+        section_idx = gen._find_paragraph_exact(CANONICAL_HEADER)
+        table = gen._find_table_after_paragraph(section_idx)
+        data_rows = [tuple(cell.text for cell in row.cells) for row in table.rows[1:]]
+
+        expected_dates = format_date_range("2004", "2011", "O")
+        assert data_rows == [
+            ("Curriculum Committee (Chair)", "", expected_dates),
+            ("Second unrelated line", "", ""),
+        ]
+
 
 class TestTableShapeValidation:
     """#664 item 2: `_find_table_after_paragraph` is a purely positional
