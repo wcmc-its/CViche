@@ -272,8 +272,23 @@ class PersonalDataSection:
                 for table in original_doc.tables[:3]:  # Only check first 3 tables
                     for row in table.rows:
                         if len(row.cells) >= 2:
-                            label = row.cells[0].text.strip().lower()
-                            value = row.cells[1].text.strip()
+                            label_cell = row.cells[0]
+                            label = label_cell.text.strip().lower()
+                            # A gridSpan label cell repeats itself across
+                            # row.cells: python-docx hands back the SAME cell
+                            # object for every column a merge spans, so
+                            # cells[1] can equal cells[0] instead of holding
+                            # the value. NSUJZG_2027_Eil_Robert's "Professional
+                            # Address:" row is exactly this (label merged
+                            # across columns 0-1, value in column 2) -- read
+                            # past however many duplicate cells the merge
+                            # produced to the first one that actually differs.
+                            value_cell = row.cells[1]
+                            for candidate_cell in row.cells[1:]:
+                                if candidate_cell.text.strip() != label_cell.text.strip():
+                                    value_cell = candidate_cell
+                                    break
+                            value = value_cell.text.strip()
 
                             # Extract name if not yet found (or only have last name)
                             if not name_is_complete and 'name' in label and ':' in label:
@@ -369,11 +384,23 @@ class PersonalDataSection:
         # below reads them (#550). The fallback above stores into the
         # legacy-named `email`/`phone`/`address` locals, not into
         # `work_email`/`office_phone`/`office_address`, which is what the
-        # PERSONAL DATA table fill actually reads (:391-428 below) -- so
+        # PERSONAL DATA table fill actually reads (:431-466 below) -- so
         # without this, everything the fallback recovers is discarded.
         # `x = x or recovered` only fills an EMPTY slot: an entry already
         # classified above from the A entries is never overwritten by a
         # weaker fallback read.
+        #
+        # A recovered `email` that is already `personal_email` must not also
+        # duplicate into work_email (#550 round 1, XLYVYA_sample_vasquez_cv):
+        # its sole address is routed to personal_email by the per-entry loop
+        # above because that entry's text contains the "Personal Data"
+        # section header, not because the person actually gave two
+        # addresses. Every recovery path that feeds `email` -- the
+        # all-entries JSON scan above, and this fallback's table/paragraph
+        # scan -- rediscovers that same address, and without this guard the
+        # write-back below renders it twice.
+        if email and email == personal_email:
+            email = None
         work_email = work_email or email
         office_phone = office_phone or phone
         office_address = office_address or address
