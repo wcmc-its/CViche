@@ -1,7 +1,7 @@
 """Regression tests for #550: the original-.docx personal-data fallback
 
 recovers ``email``/``phone``/``address`` from the source document
-(``personal_data.py:267-381`` on this ref) and then discards them -- the
+(``personal_data.py:423-521``, in ``_recover_contact_fields_from_docx`` on this ref) and then discards them -- the
 PERSONAL DATA table fill reads only ``work_email``/``office_phone``/
 ``office_address``, and the fallback never wrote back into those names. AST
 dataflow in the issue: last *store* to the three slot names is before the
@@ -9,12 +9,12 @@ fallback runs; last *load* of the fallback's own ``email``/``phone``/
 ``address`` locals is inside it. No write-back existed on either name.
 
 Fix is the three ``x = x or recovered`` assignments immediately before the
-table fill (``personal_data.py:404-406`` on this ref) -- an empty slot only,
+table fill (``personal_data.py:342-344`` on this ref) -- an empty slot only,
 never an overwrite of a value already classified from the entries. Round 1
 (a blind verifier's findings) added a fourth guard right above those three
 assignments: a recovered ``email`` that already equals ``personal_email`` is
 dropped rather than written into ``work_email`` too, and a merged-cell-aware
-label/value read in the table scan (``personal_data.py:274-289``) so a
+label/value read in the table scan (``personal_data.py:431-447``) so a
 gridSpan label ("Professional Address:" spanning two columns) is not
 mistaken for its own value.
 
@@ -35,7 +35,7 @@ blind verifier read it as stronger than it is: it CANNOT distinguish
 work_email``. The operand order there is unobservable by construction, not
 merely untested -- ``email``/``phone``/``address`` are initialised from
 ``work_email``/``office_phone``/``office_address`` ("Legacy variable names",
-``personal_data.py:250-252`` on this ref) and are only ever reassigned under
+``personal_data.py:280-282`` on this ref) and are only ever reassigned under
 an ``if not <name>`` guard, so the two operands are either equal or exactly
 one of them is empty. The negative control pins the invariant that makes
 that true -- if a future edit drops one of those guards, an extracted value
@@ -218,7 +218,7 @@ def test_write_back_is_per_field_not_wholesale(tmp_path):
     # Recorded, not endorsed: the business-address block parser strips an
     # embedded "Phone:" line only while `phone` is still empty and an
     # embedded "E-mail:" line only while `email` is still empty
-    # (personal_data.py:312 and :321 -- byte-identical to origin/dev, this
+    # (personal_data.py:468 and :477 -- byte-identical to origin/dev, this
     # PR does not touch either line). So in exactly this mixed shape the
     # address cell keeps the source table's E-mail line as an address line,
     # while the Phone line is correctly lifted out. It is a pre-existing
