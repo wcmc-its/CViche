@@ -152,3 +152,34 @@ def test_none_extracted_fields_does_not_raise_through_the_section_filler():
     # _create_grant_table and no table is added -- the point of this test is
     # the absence of an exception, not the table count.
     gen._fill_research_support(entries_by_code)
+
+
+def test_verbose_reclassification_message_exercises_the_192_read(capsys):
+    # research_support.py:192 -- (entry.get('extracted_fields') or {}).get('title') --
+    # sits inside `if self.verbose:`, so the test above (gen.verbose = False) never
+    # executes it at all. It is also structurally unreachable with extracted_fields =
+    # None: an M2A entry only reaches this reclassification loop once it has a real
+    # end_date, and :168's own `entry.get('extracted_fields') or {}` means end_date can
+    # only be non-empty when extracted_fields was already a real dict, not None -- so no
+    # input can make :192 see a None value in practice. This test instead closes the
+    # "never executed at all" gap: verbose=True plus a real M2A entry with a past
+    # end_date drives the line's ordinary, non-None path.
+    gen = _generator()
+    gen.verbose = True
+    # The reclassification also attaches a comment noting the move (see
+    # _add_entry_comments); the minimal _generator() fixture has no
+    # `emit_comments` attribute, which _add_word_comment reads unconditionally.
+    gen.emit_comments = False
+    for header in ("Current Research Funding", "Past (Completed) Funding", "Pending Funding"):
+        gen.doc.add_paragraph(header)
+
+    entries_by_code = {
+        "M2A": [{"text": "Old grant, already ended", "taxonomy_code": "M2A",
+                  "extracted_fields": {"title": "Old Project", "end_date": "06/2020"}}],
+        "M2B": [],
+        "M2C": [],
+    }
+
+    gen._fill_research_support(entries_by_code)  # must not raise
+    out = capsys.readouterr().out
+    assert "Reclassified to M2B: 'Old Project" in out
