@@ -1,11 +1,11 @@
 """Review-round-1 contract tests for `unified_pipeline/doctor/lints/extraction.py`
-(PR #723, threads on commit comments 3916403496 and 3916473829, items D1-D8).
+(PR #723, review threads 3916403496 and 3916473829).
 
-T1 item 1 ("`lint_dedup_drops` returns strings, not findings") is wrong on the
-facts -- extraction.py's `return [_finding(...)]` has always returned a
-one-element `list[dict]` (blamed to 5eb47a4, 2026-07-07, before the #493
-module split); `test_lint_dedup_drops_returns_structured_findings` below pins
-the shape anyway since the reviewer asked for it regardless.
+T1 item 1 ("`lint_dedup_drops` returns strings, not findings"): the return
+is one `_finding(...)` call with `suspect[:6]` as its evidence argument, so it
+has always returned a one-element `list[dict]` (blamed to 5eb47a4, 2026-07-07,
+before the #493 module split); `test_lint_dedup_drops_returns_structured_findings`
+below pins the shape so a future edit cannot change it silently.
 
 T1 item 2 / T2 item 1 (`_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES` is a second,
 hand-maintained routing source of truth): accepted as a real but pre-existing
@@ -254,7 +254,8 @@ def test_entry_rendered_single_long_word_is_unverifiable():
     "('email', 'mckenna') and is recognized as rendered ONLY via "
     "containment, never via the token-overlap fallback. Telling apart "
     "short-generic-boilerplate from short-label-value text needs a "
-    "different signal than a token-count floor; out of scope for this PR."
+    "different signal than a token-count floor; filed as #744, which names "
+    "this test as its acceptance criterion."
 ))
 def test_entry_rendered_false_positive_on_shared_institutional_boilerplate():
     entry_text = "Department of Medicine"
