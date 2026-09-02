@@ -144,11 +144,18 @@ def test_quality_gate_rejects_invalid_mode(tmp_path):
         quality_gate(tmp_path, mode="blok")
 
 
-@pytest.mark.parametrize("mode", sorted(VALID_GATE_MODES))
-def test_quality_gate_accepts_every_valid_mode(tmp_path, mode):
-    # Directory is empty; only asserting the mode itself does not raise.
+@pytest.mark.parametrize("mode,expected_gate_passed", [
+    ("off", True),
+    ("advisory", True),
+    ("block", False),
+])
+def test_quality_gate_accepts_every_valid_mode(tmp_path, mode, expected_gate_passed):
+    """F4: an empty output directory scores 25 (RED, below BAND_YELLOW), so
+    it fails the block threshold -- asserts gate_passed per mode, not just
+    that the mode itself doesn't raise."""
     result = quality_gate(tmp_path, mode=mode)
     assert result["gate_mode"] == mode
+    assert result["gate_passed"] == expected_gate_passed, result
 
 
 def test_band_for_boundaries():
@@ -536,8 +543,9 @@ def test_edge_empty_code_distribution_no_total_entries(tmp_path):
 
 def test_edge_zero_tables(tmp_path):
     _make_docx(["prose only"]).save(tmp_path / "out.docx")
-    fraction, _, _ = score_sparse_tables(tmp_path)
+    fraction, reason, _ = score_sparse_tables(tmp_path)
     assert fraction == 1.0
+    assert reason == "no tables in docx (template always renders tables)", reason
 
 
 def test_edge_all_empty_tables(tmp_path):
@@ -556,14 +564,22 @@ def test_edge_completely_populated_tables(tmp_path):
 
 def test_edge_100_percent_duplicate_entries(tmp_path):
     _write_json(tmp_path, "X_classified.json", _classified(total_entries=10, duplicate_entries=10))
-    fraction, _, _ = score_duplicate_ratio(tmp_path)
+    fraction, reason, _ = score_duplicate_ratio(tmp_path)
     assert fraction == 1.0
+    assert reason == (
+        "total_entries=10; duplicate_entries=10; dup_ratio=1.000; "
+        "entries_coverage_pct=None; fraction=1.000"
+    ), reason
 
 
 def test_edge_0_percent_duplicate_entries(tmp_path):
     _write_json(tmp_path, "X_classified.json", _classified(total_entries=10, duplicate_entries=0))
-    fraction, _, _ = score_duplicate_ratio(tmp_path)
+    fraction, reason, _ = score_duplicate_ratio(tmp_path)
     assert fraction == 0.0
+    assert reason == (
+        "total_entries=10; duplicate_entries=0; dup_ratio=0.000; "
+        "entries_coverage_pct=None; fraction=0.000"
+    ), reason
 
 
 def test_edge_missing_cv_owner_key(tmp_path):
@@ -575,10 +591,14 @@ def test_edge_missing_cv_owner_key(tmp_path):
 
 
 def test_edge_cv_owner_first_name_only(tmp_path):
+    """CONCERN (F4/D17): first_name alone still hard-fails (cap=25) even
+    though a real first name was extracted -- pinned as current behaviour,
+    arguable, not changed here (out of the D1-D12/D5'/D7' write set)."""
     _write_json(tmp_path, "X_fields.json", {"cv_owner": {"first_name": "Jane"}})
     fraction, detail, cap = score_cv_owner(tmp_path)
     assert cap == 25
     assert fraction == 1.0
+    assert detail == "cv_owner name empty; hard-fail cap=25", detail
 
 
 def test_edge_cv_owner_last_name_only(tmp_path):
@@ -586,6 +606,7 @@ def test_edge_cv_owner_last_name_only(tmp_path):
     fraction, detail, cap = score_cv_owner(tmp_path)
     assert cap == 25
     assert fraction == 1.0
+    assert detail == "cv_owner name empty; hard-fail cap=25", detail
 
 
 def test_edge_cv_owner_full_name_only_escapes_hard_fail(tmp_path):
@@ -593,6 +614,7 @@ def test_edge_cv_owner_full_name_only_escapes_hard_fail(tmp_path):
     fraction, detail, cap = score_cv_owner(tmp_path)
     assert cap is None, detail
     assert "full_name='Jane Q. Public'" in detail
+    assert fraction == 1.0, detail
 
 
 def test_edge_cv_owner_whitespace_only_names(tmp_path):
