@@ -227,10 +227,14 @@ def test_orphan_initials_fragment_with_no_open_predecessor_is_kept():
 
 
 def test_fallback_token_count_is_never_reduced():
-    """The property the issue asks for, asserted directly on the fallback
-    path: an ALL-CAPS fragment after an author that already has its own
-    initials used to vanish."""
-    assert _cite('Smith, JA, MB') == '1. Smith JA, MB. A Study.'
+    """The property the issue asks for, on the fallback path specifically:
+    "Carlos" in the initials slot makes the pair detector decline the whole
+    string, so this runs through the fallback, where "MB" follows an author
+    that already carries its own initials ("Smith JA") and therefore had
+    nothing open to merge into. It used to vanish."""
+    assert _cite('Smith JA, MB, Ramirez, Carlos') == (
+        '1. Smith JA, MB, Ramirez, Carlos. A Study.'
+    )
 
 
 def test_fallback_logs_the_token_count_before_and_after():
