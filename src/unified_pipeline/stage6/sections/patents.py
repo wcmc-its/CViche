@@ -24,6 +24,7 @@ with sparse partial records fairly often, and a table of nothing but a filing
 date is noise. A `narrative` shorter than ten characters is dropped for the same
 reason.
 """
+import logging
 from typing import Dict, List
 
 from ..formatting import (
@@ -33,6 +34,8 @@ from ..formatting import (
     format_date_for_section,
 )
 from ..sorting import sort_entries_reverse_chronological
+
+logger = logging.getLogger(__name__)
 
 
 class PatentsSection:
@@ -157,10 +160,20 @@ class PatentsSection:
             try:
                 elem_idx = body_elements.index(last_element)
                 body.insert(elem_idx + 1, table._tbl)
+                self.stats['tables_populated'] += 1
             except (ValueError, IndexError):
-                pass
+                # last_element is no longer in the body list, so the table
+                # stays wherever add_table put it (the end of the document)
+                # instead of under the "Patents & Inventions" heading -- the
+                # content is not lost, only misplaced (#547). Counted
+                # separately from tables_populated so the stat keeps meaning
+                # "landed where it should have".
+                logger.warning(
+                    "Patents & Inventions: table reposition failed for "
+                    "entry %d of %d; table left at document end instead of "
+                    "under the section heading", i + 1, len(sorted_entries))
+                self.stats['tables_misplaced'] = self.stats.get('tables_misplaced', 0) + 1
 
-            self.stats['tables_populated'] += 1
             self.stats['entries_inserted'] += 1
             last_element = table._tbl
 
