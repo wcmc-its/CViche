@@ -20,8 +20,10 @@ Two independent gaps, four cases:
 2. The stage-5d path's safety net: append an extracted publisher/editors the
    LLM's own formatted text does not already reference, using a whole-word
    casefolded token test so a reworded-but-present value isn't duplicated.
-3. `extracted_fields` explicit `None` (#659, one of ten sites; this is
-   `values.py:24` only -- the other nine are sibling PRs).
+3. `extracted_fields` explicit `None` (#659, one of eleven sites the issue
+   names; this is the `_format_citation` site -- `values.py:24` as it stands
+   on `origin/dev` -- only. The other ten, all under `stage6/sections/`, are
+   sibling PRs in this wave.)
 
 Run with:
 
@@ -48,9 +50,10 @@ def _entry(fields, enrichment=None, enriched=None):
 # ---------------------------------------------------------------------------
 
 def test_format_citation_none_extracted_fields_does_not_raise():
-    """Positive control (#659): raises AttributeError on dev (values.py:24
-    was `entry.get('extracted_fields', {})`, which returns None -- not the
-    default -- when the key is present and explicitly None)."""
+    """Positive control (#659): raises AttributeError on dev (on `origin/dev`
+    this line is `values.py:24`, `entry.get('extracted_fields', {})`, which
+    returns None -- not the default -- when the key is present and explicitly
+    None)."""
     entry = {'extracted_fields': None, 'enrichment_data': {}, 'enriched_fields': []}
 
     citation, target_name, enriched_fields = _format_citation(entry, 1)

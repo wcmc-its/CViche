@@ -38,12 +38,13 @@ def _value_referenced(value: str, citation_text: str) -> bool:
 def _append_missing_stage5d_values(formatted_citation: str, fields: Dict) -> str:
     """Deterministic safety net for the stage-5d LLM path (#481).
 
-    Stage 5d's copy-back list (`stage_5d_citation_formatter.py:355`) never
-    writes `editors`/`publisher` back onto the entry even when its own prompt
-    extracted them, so a book/chapter citation the LLM formatted without one
-    of those values has no later stage that can add it. Append whichever of
-    the two `extracted_fields` actually carries and the LLM's own text does
-    not already reference.
+    Stage 5d's copy-back loop -- the `for field in [...]` list of names it
+    writes back onto `entry['extracted_fields']` in
+    `stage_5d_citation_formatter.py` -- omits `editors` and `publisher` even
+    when its own prompt extracted them, so a book/chapter citation the LLM
+    formatted without one of those values has no later stage that can add it.
+    Append whichever of the two `extracted_fields` actually carries and the
+    LLM's own text does not already reference.
     """
     additions = []
     editors = fields.get('editors')
