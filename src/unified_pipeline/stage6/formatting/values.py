@@ -14,6 +14,49 @@ from typing import Dict, List, Optional, Tuple
 
 from ..normalization import _normalize_author_names
 
+# #481: a value is treated as already present in an LLM-formatted citation
+# once any of its own significant words shows up there -- not the whole
+# value verbatim -- so a reworded-but-present publisher/editors ("Springer"
+# for "Springer-Verlag, NY") isn't appended a second time. Below this length
+# a token (an initial, "of", "eds") is too common to mean anything on its own.
+_CITATION_TOKEN_MIN_LEN = 3
+_CITATION_TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def _value_referenced(value: str, citation_text: str) -> bool:
+    """Whole-word, casefolded overlap test (#481) between a candidate value
+    (a publisher or editors string) and an already-formatted citation."""
+    if not value:
+        return False
+    haystack = citation_text.casefold()
+    tokens = [t for t in _CITATION_TOKEN_RE.findall(value) if len(t) >= _CITATION_TOKEN_MIN_LEN]
+    if not tokens:
+        return False
+    return any(re.search(rf"\b{re.escape(t.casefold())}\b", haystack) for t in tokens)
+
+
+def _append_missing_stage5d_values(formatted_citation: str, fields: Dict) -> str:
+    """Deterministic safety net for the stage-5d LLM path (#481).
+
+    Stage 5d's copy-back list (`stage_5d_citation_formatter.py:355`) never
+    writes `editors`/`publisher` back onto the entry even when its own prompt
+    extracted them, so a book/chapter citation the LLM formatted without one
+    of those values has no later stage that can add it. Append whichever of
+    the two `extracted_fields` actually carries and the LLM's own text does
+    not already reference.
+    """
+    additions = []
+    editors = fields.get('editors')
+    if editors and not _value_referenced(editors, formatted_citation):
+        additions.append(f"{editors}, eds.")
+    publisher = fields.get('publisher')
+    if publisher and not _value_referenced(publisher, formatted_citation):
+        additions.append(f"{publisher}.")
+    if not additions:
+        return formatted_citation
+    return f"{formatted_citation} " + " ".join(additions)
+
+
 def _format_citation(entry: Dict, num: int) -> Tuple[str, Optional[str], List[str]]:
     """
     Format a publication entry as Vancouver-style citation.
@@ -28,7 +71,9 @@ def _format_citation(entry: Dict, num: int) -> Tuple[str, Optional[str], List[st
     # Check if Stage 5d provided a pre-formatted citation (for non-enriched entries)
     formatted_citation = fields.get('formatted_citation', '')
     if formatted_citation and fields.get('formatting_source') == 'stage_5d_llm':
-        # Use the LLM-formatted citation directly
+        # Use the LLM-formatted citation directly, topped up with any
+        # extracted editors/publisher the LLM's own text dropped (#481).
+        formatted_citation = _append_missing_stage5d_values(formatted_citation, fields)
         citation = f"{num}. {formatted_citation}"
         target_name = fields.get('target_name')
         return citation, target_name, enriched_fields
@@ -51,30 +96,46 @@ def _format_citation(entry: Dict, num: int) -> Tuple[str, Optional[str], List[st
     # Journal or Book title - prefer enriched
     journal = enrichment.get('pubmed_journal') or fields.get('journal', '')
     book_title = fields.get('book_title', '')
+    editors = fields.get('editors', '')
+    publisher = fields.get('publisher', '')
     if journal:
         parts.append(journal + ".")
     elif book_title:
-        # For book chapters (S4), use "In: Book Title"
-        parts.append(f"In: {book_title}.")
+        # For book chapters (S4), use "In: Editors, eds. Book Title." (#481)
+        if editors:
+            parts.append(f"In: {editors}, eds. {book_title}.")
+        else:
+            parts.append(f"In: {book_title}.")
 
-    # Year;Volume(Issue):Pages
+    # Year;Volume(Issue):Pages -- or, for a book/chapter (S3/S4) with a
+    # publisher and no journal, "Publisher; Year:Pages." (#481). S3/S4 never
+    # carry volume/issue, so the two trailer shapes don't collide.
     year = str(fields.get('year', ''))
     volume = enrichment.get('pubmed_volume') or fields.get('volume', '')
     issue = enrichment.get('pubmed_issue') or fields.get('issue', '')
     pages = enrichment.get('pubmed_pages') or fields.get('pages', '')
 
-    cit_parts = []
-    if year:
-        cit_parts.append(year)
-    if volume:
-        cit_parts.append(f";{volume}")
-    if issue:
-        cit_parts.append(f"({issue})")
-    if pages:
-        cit_parts.append(f":{pages}")
+    if publisher and not journal:
+        trailer = publisher
+        year_pages = year
+        if pages:
+            year_pages = f"{year_pages}:{pages}" if year_pages else pages
+        if year_pages:
+            trailer = f"{trailer}; {year_pages}"
+        parts.append(trailer + ".")
+    else:
+        cit_parts = []
+        if year:
+            cit_parts.append(year)
+        if volume:
+            cit_parts.append(f";{volume}")
+        if issue:
+            cit_parts.append(f"({issue})")
+        if pages:
+            cit_parts.append(f":{pages}")
 
-    if cit_parts:
-        parts.append("".join(cit_parts) + ".")
+        if cit_parts:
+            parts.append("".join(cit_parts) + ".")
 
     # Identifiers - separated by periods
     ids = []
