@@ -222,9 +222,19 @@ def lint_dead_sections(stage2: Dict,
             continue
         if current is None:
             continue
-        current[2] += sum(1 for line in str(text).split("\n")
-                          if len(_norm(line)) >= SUBSTANTIVE_LINE_CHARS
-                          and not is_template_instruction(line))
+        # A table cell carries a name, a year, an amount -- short by design.
+        # SUBSTANTIVE_LINE_CHARS is calibrated for prose paragraphs and would
+        # read a real table's own rows as empty (#446 review T1.4); any
+        # non-blank table line counts as rendered content on its own, while
+        # a paragraph line still needs the length floor.
+        for line in str(text).split("\n"):
+            if is_template_instruction(line):
+                continue
+            if kind == "table":
+                if _norm(line):
+                    current[2] += 1
+            elif len(_norm(line)) >= SUBSTANTIVE_LINE_CHARS:
+                current[2] += 1
 
     findings = []
     for h1, n_lines in sorted(per_h1.items()):
