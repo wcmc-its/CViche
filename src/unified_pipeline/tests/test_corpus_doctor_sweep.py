@@ -135,7 +135,7 @@ def test_sweep_records_failure_when_source_docx_candidates_are_ambiguous(tmp_pat
     (input_dir / f"{uid}_v2.docx").write_text("b", encoding="utf-8")
     work = tmp_path / "work"
 
-    reports, failures, skipped = cli.sweep(corpus, ["amb1"], work)
+    reports, failures, skipped, duplicates = cli.sweep(corpus, ["amb1"], work)
 
     assert reports == {}
     assert skipped == []
@@ -177,7 +177,7 @@ def test_sweep_records_failure_for_a_run_id_escaping_corpus_dir(tmp_path):
     corpus.mkdir()
     work = tmp_path / "work"
 
-    reports, failures, skipped = cli.sweep(corpus, ["../x"], work)
+    reports, failures, skipped, duplicates = cli.sweep(corpus, ["../x"], work)
 
     assert reports == {}
     assert skipped == []
@@ -220,6 +220,26 @@ def test_aggregate_raises_on_unknown_lint():
         raise AssertionError("expected MalformedFindingError")
 
 
+def test_sweep_records_a_second_run_for_the_same_uid_as_a_duplicate(tmp_path, monkeypatch):
+    """T2.2: two run_ids sharing a uid must produce one report, first run
+    wins, and the second is listed under duplicates -- never double counted.
+    """
+    cli = _load_cli()
+    corpus = tmp_path / "corpus"
+    _make_run(corpus, "run1", "aaa111")
+    _make_run(corpus, "run2", "aaa111")
+    work = tmp_path / "work"
+
+    monkeypatch.setattr(cli, "run_doctor", lambda root, uid: {"findings": []})
+
+    reports, failures, skipped, duplicates = cli.sweep(corpus, ["run1", "run2"], work)
+
+    assert set(reports) == {"run1"}
+    assert failures == {}
+    assert skipped == []
+    assert duplicates == {"run2": {"uid": "aaa111", "first_run_id": "run1"}}
+
+
 def test_sweep_failure_carries_traceback_and_good_run_still_reported(tmp_path, monkeypatch):
     """Positive control: on dev, `sweep()` returns one bare dict, not a 3-tuple,
     so `reports, failures, skipped = sweep(...)` raises ValueError immediately
@@ -240,7 +260,7 @@ def test_sweep_failure_carries_traceback_and_good_run_still_reported(tmp_path, m
 
     monkeypatch.setattr(cli, "run_doctor", fake_run_doctor)
 
-    reports, failures, skipped = cli.sweep(corpus, ["good1", "bad1"], work)
+    reports, failures, skipped, duplicates = cli.sweep(corpus, ["good1", "bad1"], work)
 
     assert "good1" in reports, "the good run's report must still be produced"
     assert skipped == []

@@ -13,6 +13,12 @@ distinct CV (pick reps with scripts/corpus_distinct_cvs.py first) so the
 aggregate counts distinct CVs, not runs. The source docx is staged into the run
 root so the segmentation/missed_headers lints run (they skip only for runs
 predating the input-archiving feature).
+
+Duplicate-uid policy: this script does not trust the caller to have actually
+picked one run per distinct CV -- `sweep()` tracks uid -> run_id itself.
+First run wins; a later run_id for a uid already reported is recorded under
+`duplicates`, never added to `reports`, and never double-counted by
+`aggregate()`.
 """
 import argparse
 import json
@@ -205,16 +211,27 @@ def _resolve_run_root(corpus_dir: Path, run_id: str) -> Path:
 def sweep(corpus_dir: Path, run_ids, work: Path):
     """Doctor each run; one bad run is reported and skipped, never aborts the rest.
 
-    Returns (reports, failures, skipped). `failures[run_id]` carries both the
-    exception message and the full traceback text -- the operator's one lead
-    into which lint raised, at which line, on which artifact -- and is also
-    logged via logger.exception so it survives in the process log even when
-    the caller does not persist --out. `skipped` lists run_ids with no staged
-    artifacts at all (a distinct, non-exceptional case from a run_doctor crash).
+    Returns (reports, failures, skipped, duplicates). `failures[run_id]`
+    carries both the exception message and the full traceback text -- the
+    operator's one lead into which lint raised, at which line, on which
+    artifact -- and is also logged via logger.exception so it survives in
+    the process log even when the caller does not persist --out. `skipped`
+    lists run_ids with no staged artifacts at all (a distinct, non-exceptional
+    case from a run_doctor crash).
+
+    Duplicate-uid policy (T2.2): the caller contract (module docstring) is
+    ONE run per distinct CV, but nothing previously enforced it -- two
+    run_ids for the same uid would both land in `reports`, keyed separately,
+    and `aggregate()` would double-count that CV's findings. First run wins:
+    `duplicates[run_id] = {"uid": ..., "first_run_id": ...}` for every later
+    run_id sharing an already-reported uid; it is never added to `reports`
+    and never reaches `aggregate()`.
     """
     reports = {}
     failures = {}
     skipped = []
+    duplicates = {}
+    run_id_by_uid = {}
     for run_id in run_ids:
         try:
             run_root = _resolve_run_root(corpus_dir, run_id)
@@ -223,7 +240,14 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
                 logger.warning("%s: no artifacts found, skipping", run_id)
                 skipped.append(run_id)
                 continue
+            if uid in run_id_by_uid:
+                first_run_id = run_id_by_uid[uid]
+                logger.warning("%s: uid=%s already reported by run_id=%s, "
+                                "skipping duplicate", run_id, uid, first_run_id)
+                duplicates[run_id] = {"uid": uid, "first_run_id": first_run_id}
+                continue
             reports[run_id] = run_doctor(stage(run_root, uid, work), uid)
+            run_id_by_uid[uid] = run_id
         except Exception as e:  # noqa: BLE001 - one bad run must not lose the sweep
             logger.exception("run_doctor failed for run_id=%s", run_id)
             failures[run_id] = {"error": str(e), "traceback": traceback.format_exc()}
@@ -231,7 +255,7 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
         logger.warning("%d run(s) failed and were dropped from the sweep: %s. "
                         "Prevalence counts are over the %d that succeeded.",
                         len(failures), list(failures), len(reports))
-    return reports, failures, skipped
+    return reports, failures, skipped, duplicates
 
 
 # The lints run_doctor always considers (skipped ones emit a "skipped: missing"
@@ -379,7 +403,7 @@ def main(argv=None):
     work = Path(args.work) if args.work else corpus_dir / ".doctor_stage"
     work.mkdir(parents=True, exist_ok=True)
 
-    reports, failures, skipped = sweep(corpus_dir, run_ids, work)
+    reports, failures, skipped, duplicates = sweep(corpus_dir, run_ids, work)
     ranking = aggregate(reports)
     n = len(reports)
 
@@ -396,7 +420,8 @@ def main(argv=None):
     if args.out:
         Path(args.out).write_text(json.dumps(
             {"n_cvs": n, "ranking": ranking, "reports": reports,
-             "failures": failures, "skipped": skipped}, indent=2))
+             "failures": failures, "skipped": skipped,
+             "duplicates": duplicates}, indent=2))
         print(f"\n-> {args.out}")
 
     # A sweep that doctored nothing is a failure, not a pass (§5.5) -- without
