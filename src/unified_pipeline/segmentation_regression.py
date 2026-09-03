@@ -39,11 +39,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import sys
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, TypedDict
+
+logger = logging.getLogger(__name__)
 
 # Substantive-line threshold: shorter lines ("2016", "PhD", bare bullets)
 # match by accident and only add noise to the coverage metric.
@@ -116,6 +120,53 @@ class Metrics(TypedDict):
     headers_detected: int
     header_titles: list[str]
     per_h1_content_counts: dict[str, int]  # informational only -- see above
+
+
+def _is_int_count(value: Any) -> bool:
+    """a non-negative-shaped int (bool excluded -- bool is an int subclass
+    and would otherwise silently pass)"""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_coverage_pct(value: Any) -> bool:
+    """a number (int/float, not bool) in [0, 100]"""
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 100
+
+
+def _is_str_list(value: Any) -> bool:
+    """a list of str"""
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _is_str_int_dict(value: Any) -> bool:
+    """a dict of str -> int count"""
+    return isinstance(value, dict) and all(
+        isinstance(k, str) and _is_int_count(v) for k, v in value.items()
+    )
+
+
+# One checker per Metrics field, keyed by field name so this mapping and the
+# TypedDict cannot drift apart (#T2.2) -- pinned by
+# test_metrics_field_checkers_cover_every_required_key. _load_metrics() uses
+# this to validate the FULL persisted shape, not just key presence: a
+# corrupted or hand-edited metrics.json (a count as a string, a coverage
+# value out of [0, 100], a list field holding a non-list) previously passed
+# and failed later with an unrelated TypeError.
+_METRICS_FIELD_CHECKERS: dict[str, Callable[[Any], bool]] = {
+    "source_lines": _is_int_count,
+    "substantive_lines": _is_int_count,
+    "text_coverage_pct": _is_coverage_pct,
+    "lost_lines": _is_str_list,
+    "entries_total": _is_int_count,
+    "entries_content": _is_int_count,
+    "empty_content": _is_int_count,
+    "duplicate_entries": _is_int_count,
+    "mega_entries": _is_int_count,
+    "max_entry_chars": _is_int_count,
+    "headers_detected": _is_int_count,
+    "header_titles": _is_str_list,
+    "per_h1_content_counts": _is_str_int_dict,
+}
 
 
 Verdict = Literal["REGRESSION", "IMPROVED", "OK"]
@@ -510,6 +561,12 @@ def _load_metrics(label: str) -> dict[str, Metrics]:
             raise SegmentationRegressionError(
                 f"{path}: entry {uid!r} is missing Metrics keys: {sorted(missing)}"
             )
+        for field, checker in _METRICS_FIELD_CHECKERS.items():
+            if not checker(entry[field]):
+                raise SegmentationRegressionError(
+                    f"{path}: entry {uid!r} field {field!r} must be "
+                    f"{checker.__doc__}, got {entry[field]!r}"
+                )
     return raw
 
 
