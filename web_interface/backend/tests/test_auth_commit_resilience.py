@@ -122,3 +122,27 @@ def test_best_effort_persist_reraises_unrelated_operational_error(db, monkeypatc
     monkeypatch.setattr("app.database.SessionLocal", lambda: _ExplodingSession())
     with pytest.raises(OperationalError):
         _best_effort_persist(user.id, "role sync", role="admin")
+
+
+def test_bump_last_active_does_not_dirty_the_request_session(client, db):
+    """The bump is persisted through _best_effort_persist's own session; the
+    request session's User instance must NOT be left dirty, or the route's
+    later db.commit() re-issues the same UPDATE from a snapshot older than
+    that side commit and MariaDB (innodb_snapshot_isolation=ON) rejects it
+    with 1020 -- the 2026-09-03 prod regression on POST /run/{id}/feedback."""
+    from datetime import datetime, timedelta
+    from sqlalchemy import inspect
+    from app.auth import _bump_last_active
+
+    user = _make_user(db)
+    user.last_active_at = datetime.now() - timedelta(minutes=5)
+    db.commit()
+
+    _bump_last_active(user)
+
+    assert user not in db.dirty
+    assert not inspect(user).modified
+    assert (datetime.now() - user.last_active_at).total_seconds() < 5
+    # and the write really landed, via the side session
+    db.expire_all()
+    assert (datetime.now() - db.query(User).get(user.id).last_active_at).total_seconds() < 5
