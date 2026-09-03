@@ -228,15 +228,20 @@ def test_dead_sections_counts_a_non_blank_table_cell_as_content():
 
 def test_table_shape_col_resolves_an_ambiguous_header_pair():
     """T1.7: regression test for the explicit ordered-alias-tuple col()
-    rewrite. An ambiguous header pair ('organization name', 'name of
-    award') must map name -> 'name of award' (index 1) and org ->
-    'organization name' (index 0) -- proven here by putting the blob
-    defect in the SECOND column: it only fires if name_i correctly
-    resolved to index 1, not 0."""
+    rewrite, discriminating against the OLD substring rule it replaced --
+    not just re-proving a case the old rule already got right. The old
+    rule's name_i = col("award", "honor") matched the FIRST column
+    containing 'award' as a bare substring, so a 'date awarded (yyyy)'
+    column (which contains 'award' inside 'awarded') stole the name role
+    away from the real 'name of award' column whenever it was listed
+    first. Word-boundary matching on the multi-word alias 'name of award'
+    does not fall for it: 'awarded' has no word boundary after 'award'.
+    Proven by putting the blob defect in the THIRD column -- it only fires
+    if name_i correctly resolved there, not to the date column."""
     from unified_pipeline.doctor.lints.render import lint_table_shape
     tables = [[
-        ["organization name", "name of award"],
-        ["Cardiology Society of America", "X" * 200],
+        ["date awarded (yyyy)", "organization", "name of award"],
+        ["2020", "Cardiology Society of America", "X" * 200],
     ]]
     findings = lint_table_shape(tables)
     assert len(findings) == 1
