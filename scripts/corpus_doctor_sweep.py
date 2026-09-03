@@ -23,7 +23,7 @@ import traceback
 from collections import Counter
 from pathlib import Path
 
-from unified_pipeline.run_doctor import KNOWN_LINTS, run_doctor
+from unified_pipeline.run_doctor import KNOWN_LINTS, _uid_owns, run_doctor
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +74,35 @@ def _relink(link: Path, src: Path) -> None:
     """
     link.unlink(missing_ok=True)
     link.symlink_to(src.resolve())
+
+
+class AmbiguousSourceDocxError(Exception):
+    """More than one file in a candidate dir passes `_uid_owns` for a uid,
+    and none is named exactly `<uid>.docx`."""
+
+
+def _find_source_docx(cand_dir: Path, uid: str):
+    """The uid's original-upload docx in `cand_dir`, or `None` if absent.
+
+    Prefers the canonical `<uid>.docx` name; otherwise the sole candidate
+    that passes `run_doctor._uid_owns` (the same prefix-boundary guard that
+    closed the traced 2026-07-15 misattribution -- `web05` must not match
+    `web050_...`). More than one such candidate is never resolved silently
+    (T1.3/T2.7): raise so `sweep()` records the run as a failure naming
+    every candidate, instead of picking `sorted(cands)[0]` and staging the
+    wrong CV without any error.
+    """
+    exact = cand_dir / f"{uid}.docx"
+    if exact.is_file():
+        return exact
+    cands = sorted(p for p in cand_dir.glob(f"{uid}*.docx")
+                    if not p.name.endswith("_wcm.docx") and _uid_owns(p.name, uid))
+    if len(cands) > 1:
+        raise AmbiguousSourceDocxError(
+            f"uid={uid!r} in {cand_dir}: {len(cands)} candidate source docx "
+            f"files and none is named exactly {uid}.docx: "
+            f"{[p.name for p in cands]}")
+    return cands[0] if cands else None
 
 
 class StagingRootNotOwnedError(Exception):
@@ -132,10 +161,9 @@ def stage(run_root: Path, uid: str, work: Path) -> Path:
     for cand_dir in (run_root / "input", outputs_dir):
         if not cand_dir.is_dir():
             continue
-        cands = [p for p in sorted(cand_dir.glob(f"{uid}*.docx"))
-                 if not p.name.endswith("_wcm.docx")]
-        if cands:
-            _relink(root / cands[0].name, cands[0])
+        src = _find_source_docx(cand_dir, uid)
+        if src:
+            _relink(root / src.name, src)
             break
     return root
 

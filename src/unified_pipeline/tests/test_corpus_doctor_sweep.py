@@ -95,6 +95,56 @@ def test_stage_finds_source_docx_under_flat_layout_input_dir(tmp_path):
     assert staged_source.resolve() == (input_dir / f"{uid}.docx").resolve()
 
 
+def test_stage_prefers_exact_uid_docx_and_rejects_a_prefix_decoy(tmp_path):
+    """T1.3: `web05` must not resolve to `web050.docx` -- the traced
+    2026-07-15 misattribution. With only the decoy present, no source is
+    staged; with the canonical `web05.docx` also present, that one wins.
+    """
+    cli = _load_cli()
+    uid = "web05"
+    run_root = tmp_path / "corpus" / "run1"
+    input_dir = run_root / "input"
+    input_dir.mkdir(parents=True)
+    (run_root / f"{uid}_fields.json").write_text("{}", encoding="utf-8")
+    (input_dir / "web050.docx").write_text("decoy", encoding="utf-8")
+    work = tmp_path / "work"
+
+    root = cli.stage(run_root, uid, work)
+    assert list(root.glob("*.docx")) == [], (
+        "the web050 prefix-decoy must not be staged as web05's source at all")
+
+    (input_dir / f"{uid}.docx").write_text("real", encoding="utf-8")
+    root2 = cli.stage(run_root, uid, work)
+    staged = root2 / f"{uid}.docx"
+    assert staged.is_symlink()
+    assert staged.resolve() == (input_dir / f"{uid}.docx").resolve()
+
+
+def test_sweep_records_failure_when_source_docx_candidates_are_ambiguous(tmp_path, monkeypatch):
+    """T1.3/T2.7: two files both pass `_uid_owns` for the same uid and
+    neither is the canonical name -- sweep() must record a failure naming
+    the candidates, never pick one silently.
+    """
+    cli = _load_cli()
+    corpus = tmp_path / "corpus"
+    uid = "aaa111"
+    _make_run(corpus, "amb1", uid)
+    input_dir = corpus / "amb1" / "input"
+    input_dir.mkdir(parents=True)
+    (input_dir / f"{uid}_v1.docx").write_text("a", encoding="utf-8")
+    (input_dir / f"{uid}_v2.docx").write_text("b", encoding="utf-8")
+    work = tmp_path / "work"
+
+    reports, failures, skipped = cli.sweep(corpus, ["amb1"], work)
+
+    assert reports == {}
+    assert skipped == []
+    assert "amb1" in failures
+    assert "AmbiguousSourceDocxError" in failures["amb1"]["traceback"]
+    assert f"{uid}_v1.docx" in failures["amb1"]["error"]
+    assert f"{uid}_v2.docx" in failures["amb1"]["error"]
+
+
 def test_sweep_failure_carries_traceback_and_good_run_still_reported(tmp_path, monkeypatch):
     """Positive control: on dev, `sweep()` returns one bare dict, not a 3-tuple,
     so `reports, failures, skipped = sweep(...)` raises ValueError immediately
