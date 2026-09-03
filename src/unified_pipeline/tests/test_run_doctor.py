@@ -837,6 +837,40 @@ def test_duplicate_passages_flags_a_repeated_block_run():
     assert "2 passage(s)" in thrice[0]["message"]
 
 
+def test_duplicate_passages_cross_stretch_scan_distance_not_double_counted():
+    """`distances` is built globally from every repeated window in the
+    document (#446 review, fb73705 rework): stretch A repeats 3 times, 6
+    blocks apart, earning scan distance 6. Separately, stretch B repeats
+    once, 12 blocks apart, earning scan distance 12. Because A's first and
+    third occurrences also happen to sit 12 blocks apart, the distance-12
+    scan re-pairs them -- a match already charged via the two distance-6
+    pairs. The fix must count A's 3x repeat as 2 (not 3) and B's 1x repeat
+    as 1, for 3 total, and no evidence line's 'repeat at' block range may
+    appear twice."""
+    stretch_a = [("p", "• AAA Alpha item — 2001"),
+                 ("p", "• AAA Beta item — 2001"),
+                 ("p", "• AAA Gamma item — 2001")]
+    filler_1 = [("p", "• Filler One Uno"), ("p", "• Filler One Dos"),
+                ("p", "• Filler One Tres")]
+    filler_2 = [("p", "• Filler Two Uno"), ("p", "• Filler Two Dos"),
+                ("p", "• Filler Two Tres")]
+    filler_3 = [("p", "• Filler Three Uno"), ("p", "• Filler Three Dos"),
+                ("p", "• Filler Three Tres")]
+    filler_4 = [("p", f"• Filler Four {n}") for n in range(1, 10)]
+    stretch_b = [("p", "• BBB Uno item — 2002"),
+                 ("p", "• BBB Dos item — 2002"),
+                 ("p", "• BBB Tres item — 2002")]
+
+    blocks = (stretch_a + filler_1 + stretch_a + filler_2 + stretch_a
+              + filler_3 + stretch_b + filler_4 + stretch_b)
+    findings = lint_duplicate_passages(blocks)
+    assert len(findings) == 1
+    assert "3 passage(s)" in findings[0]["message"]
+    repeat_ranges = [e.split("repeat at ")[1].split(":")[0]
+                      for e in findings[0]["evidence"]]
+    assert len(repeat_ranges) == len(set(repeat_ranges))
+
+
 def test_duplicate_passages_quiet_when_only_the_adjacent_date_differs():
     """The mode both earlier attempts fired on: one course taught at nine
     venues renders nine records whose first three bullets are IDENTICAL and
