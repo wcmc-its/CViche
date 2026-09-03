@@ -23,7 +23,7 @@ import traceback
 from collections import Counter
 from pathlib import Path
 
-from unified_pipeline.run_doctor import KNOWN_LINTS, _uid_owns, run_doctor
+from unified_pipeline.run_doctor import KNOWN_LINTS, SEVERITY_ORDER, _uid_owns, run_doctor
 
 logger = logging.getLogger(__name__)
 
@@ -247,14 +247,41 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
 ALL_LINTS = list(KNOWN_LINTS)
 
 
+class MalformedFindingError(Exception):
+    """A report's finding is missing a required field, or a field's value
+    isn't in the registry it's supposed to come from."""
+
+
+def _validate_finding(run_id: str, f: dict) -> None:
+    """Fail loudly (T1.8/T2.6/T2.10) on a finding aggregate() cannot trust:
+    a required key absent, an unregistered severity, or a lint name outside
+    ALL_LINTS -- rather than either raising an opaque KeyError deeper in
+    aggregate() or silently mis-ranking/dropping the finding.
+    """
+    for field in ("lint", "severity", "message"):
+        if field not in f:
+            raise MalformedFindingError(
+                f"run_id={run_id!r}: finding missing required field "
+                f"{field!r}: {f}")
+    if f["severity"] not in SEVERITY_ORDER:
+        raise MalformedFindingError(
+            f"run_id={run_id!r}: field=severity value={f['severity']!r} "
+            f"not in SEVERITY_ORDER={SEVERITY_ORDER}")
+    if f["lint"] not in ALL_LINTS:
+        raise MalformedFindingError(
+            f"run_id={run_id!r}: field=lint value={f['lint']!r} not in "
+            f"ALL_LINTS")
+
+
 def aggregate(reports):
     """Per lint: how many distinct reps have a real (>=WARN) finding, and ERROR."""
     warn = Counter()
     error = Counter()
     ran = Counter()  # reps where the lint actually ran (input present, not skipped)
-    for rep in reports.values():
+    for run_id, rep in reports.items():
         seen_warn, seen_err, skipped = set(), set(), set()
         for f in rep["findings"]:
+            _validate_finding(run_id, f)
             lint, sev = f["lint"], f["severity"]
             if sev == "INFO" and "skipped: missing" in f["message"]:
                 skipped.add(lint)

@@ -185,6 +185,41 @@ def test_sweep_records_failure_for_a_run_id_escaping_corpus_dir(tmp_path):
     assert "RunIdEscapesCorpusError" in failures["../x"]["traceback"]
 
 
+def test_aggregate_raises_on_missing_required_field():
+    cli = _load_cli()
+    reports = {"r1": {"findings": [{"lint": "pipe_leaks", "severity": "WARN"}]}}
+    try:
+        cli.aggregate(reports)
+    except cli.MalformedFindingError as e:
+        assert "r1" in str(e) and "message" in str(e)
+    else:
+        raise AssertionError("expected MalformedFindingError")
+
+
+def test_aggregate_raises_on_unknown_severity():
+    cli = _load_cli()
+    reports = {"r1": {"findings": [
+        {"lint": "pipe_leaks", "severity": "CRITICAL", "message": "x"}]}}
+    try:
+        cli.aggregate(reports)
+    except cli.MalformedFindingError as e:
+        assert "r1" in str(e) and "CRITICAL" in str(e)
+    else:
+        raise AssertionError("expected MalformedFindingError")
+
+
+def test_aggregate_raises_on_unknown_lint():
+    cli = _load_cli()
+    reports = {"r1": {"findings": [
+        {"lint": "not_a_real_lint", "severity": "WARN", "message": "x"}]}}
+    try:
+        cli.aggregate(reports)
+    except cli.MalformedFindingError as e:
+        assert "r1" in str(e) and "not_a_real_lint" in str(e)
+    else:
+        raise AssertionError("expected MalformedFindingError")
+
+
 def test_sweep_failure_carries_traceback_and_good_run_still_reported(tmp_path, monkeypatch):
     """Positive control: on dev, `sweep()` returns one bare dict, not a 3-tuple,
     so `reports, failures, skipped = sweep(...)` raises ValueError immediately
