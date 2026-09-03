@@ -304,18 +304,3 @@ def test_run_doctor_dispatches_duplicate_records_and_skips_without_docx(tmp_path
     assert len(skipped) == 1
     assert skipped[0]["severity"] == "INFO"
     assert "skipped" in skipped[0]["message"]
-
-
-if __name__ == "__main__":
-    test_thresholds_are_pinned()
-    test_flags_same_body_at_different_list_numbers_same_section()
-    test_quiet_when_the_repeat_is_under_a_different_section_heading()
-    test_quiet_on_genuinely_different_bodies()
-    test_fires_at_exactly_the_window_distance()
-    test_quiet_when_the_repeat_is_beyond_the_window()
-    test_blank_spacer_paragraphs_are_transparent_to_the_window()
-    test_docx_text_and_read_docx_blocks_smoke()
-    test_quiet_on_short_duplicated_body_under_the_floor()
-    test_quiet_on_duplicated_non_enumerated_paragraph()
-    test_quiet_on_duplicated_enumerated_table_blocks()
-    print("OK")
