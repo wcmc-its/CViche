@@ -17,6 +17,8 @@ Run with:
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -28,6 +30,7 @@ from docx.oxml.ns import nsdecls  # noqa: E402
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
     DUPLICATE_RECORD_MIN_CHARS,
     DUPLICATE_RECORD_WINDOW,
+    lint_duplicate_passages,
     lint_duplicate_records,
 )
 from unified_pipeline.run_doctor import _docx_text, read_docx_blocks, run_doctor  # noqa: E402
@@ -88,6 +91,108 @@ def test_quiet_on_genuinely_different_bodies():
     assert lint_duplicate_records(blocks) == []
 
 
+def test_flags_when_enumerator_and_punctuation_differ_between_occurrences():
+    """T4.6 is the parametrized enumerator-style coverage; this is T4.3
+    (normalized-body coverage): every existing positive control in this
+    file repeats the SAME byte-identical string. Here the two occurrences
+    differ in both their list enumerator ('1. ' vs '7) ') and their
+    internal punctuation (periods/semicolons vs commas/colons/exclamation),
+    which _passage_key strips and folds respectively -- so they still key
+    identically and still fire."""
+    body_a = ("1. Smith J, Doe K. A study of duplication. Journal of "
+              "Testing. 2020;12(3):45-50.")
+    body_b = ("7) Smith J; Doe K: A study of duplication! Journal of "
+              "Testing, 2020:12(3):45-50.")
+    blocks = [
+        ("p", "D. PUBLICATIONS"),
+        ("p", body_a),
+        ("p", f"2. {_CITATION_B}"),
+        ("p", body_b),
+    ]
+    findings = lint_duplicate_records(blocks)
+    assert len(findings) == 1
+
+
+def test_three_occurrences_count_as_two_duplicate_pairs():
+    """T4.4: three occurrences of the same body within the window produce
+    2 pairs, not 3 or 1 -- every new occurrence is compared against the
+    earliest still-in-window match, so a chain of 3 occurrences is 2 links.
+    lint_duplicate_records' own pairing semantics are untouched by this
+    review (only tests were added here, per the review's own MUST NOT)."""
+    blocks = [
+        ("p", "D. PUBLICATIONS"),
+        ("p", f"1. {_CITATION_A}"),
+        ("p", f"2. {_CITATION_B}"),
+        ("p", f"3. {_CITATION_A}"),
+        ("p", f"4. {_CITATION_A}"),
+    ]
+    findings = lint_duplicate_records(blocks)
+    assert len(findings) == 1
+    assert "2 duplicated record(s)" in findings[0]["message"]
+    assert len(findings[0]["evidence"]) == 2
+
+
+@pytest.mark.parametrize("enumerator", ["1. ", "12) ", "• ", "- ", "* "])
+def test_recognizes_every_supported_enumerator_style(enumerator):
+    """T4.6: every enumerator form list allowed by _PASSAGE_ENUMERATOR_RE
+    (numeric with '.' or ')', four bullet glyphs, or a dash before
+    whitespace) must be tracked -- every other test in this file uses only
+    the numeric '1. ' style."""
+    blocks = [
+        ("p", "D. PUBLICATIONS"),
+        ("p", f"{enumerator}{_CITATION_A}"),
+        ("p", f"2. {_CITATION_B}"),
+        ("p", f"{enumerator}{_CITATION_A}"),
+    ]
+    findings = lint_duplicate_records(blocks)
+    assert len(findings) == 1
+
+
+def test_flags_a_unicode_citation_repeated():
+    """T4.11: _CITATION_A/_CITATION_B are pure ASCII in every other test in
+    this file; a citation with non-ASCII names/characters must be tracked
+    the same way -- _passage_key's normalization is Unicode-agnostic
+    (casefold + whitespace collapse + punctuation fold), not ASCII-only."""
+    citation = ("Müller Ø, Nguyễn T. 中文 title on "
+                "duplication in rendered CV documents. 2021;3(2):10-20.")
+    blocks = [
+        ("p", "D. PUBLICATIONS"),
+        ("p", f"1. {citation}"),
+        ("p", f"2. {_CITATION_B}"),
+        ("p", f"3. {citation}"),
+    ]
+    findings = lint_duplicate_records(blocks)
+    assert len(findings) == 1
+
+
+def test_duplicate_records_and_duplicate_passages_do_not_double_fire():
+    """T4.10: the two lints are scoped to disjoint shapes -- a >=2-block
+    repeated record is duplicate_passages' shape and duplicate_records'
+    single-block rule (`kind != "p"` aside, it still only tracks ONE
+    enumerated paragraph's own body, not a stretch of neighbouring blocks)
+    cannot see it; a single-block repeat is invisible to duplicate_passages
+    by construction (DUPLICATE_PASSAGE_MIN_BLOCKS=2) and is
+    duplicate_records' own reason to exist (#446)."""
+    two_block_record = [
+        ("p", "Grand Rounds Lecture, Weill Cornell Medicine"),
+        ("p", "2019"),
+    ]
+    spacer = ("p", "Unrelated single filler line of narrative text here")
+    two_block_blocks = ([("p", "K. TEACHING")] + two_block_record
+                         + [spacer] + two_block_record)
+    assert len(lint_duplicate_passages(two_block_blocks)) == 1
+    assert lint_duplicate_records(two_block_blocks) == []
+
+    one_block_blocks = [
+        ("p", "D. PUBLICATIONS"),
+        ("p", f"1. {_CITATION_A}"),
+        ("p", f"2. {_CITATION_B}"),
+        ("p", f"3. {_CITATION_A}"),
+    ]
+    assert lint_duplicate_passages(one_block_blocks) == []
+    assert len(lint_duplicate_records(one_block_blocks)) == 1
+
+
 def test_quiet_when_the_repeat_is_the_same_prose_with_different_dates():
     """T1.2 (#446 review): normalized-text equality alone is not proof of
     duplication -- a legitimately repeated activity described identically
@@ -123,7 +228,6 @@ def test_duplicate_passages_merges_a_stretch_repeated_three_times():
     dedicated test file for duplicate_passages, and test_run_doctor.py,
     which owns the existing duplicate_passages tests, is out of scope for
     this round."""
-    from unified_pipeline.doctor.lints.render import lint_duplicate_passages
     record = [("p", "Grand Rounds Lecture"),
               ("p", "Weill Cornell Medicine"),
               ("p", "2019")]
@@ -144,8 +248,9 @@ def test_duplicate_passages_merges_a_stretch_repeated_three_times():
 
 
 def test_fires_at_exactly_the_window_distance():
-    """Boundary control for the `<=` in the window prune (render.py:629-630).
-    The corpus's own headline firing (2068_Yount_Cv, list numbers 32 and 38)
+    """Boundary control for the `<=` comparison that prunes `recent` against
+    DUPLICATE_RECORD_WINDOW. The corpus's own headline firing (2068_Yount_Cv,
+    list numbers 32 and 38)
     sits at distance exactly DUPLICATE_RECORD_WINDOW, so an off-by-one to `<`
     would silently stop detecting it. `test_quiet_when_the_repeat_is_beyond_
     the_window` pins the other side of the same edge at distance 7."""
@@ -257,6 +362,34 @@ def test_tracked_insertion_of_a_citation_does_not_manufacture_a_duplicate(tmp_pa
     assert lint_duplicate_records(blocks) == []
 
 
+def test_mixed_tracked_insertion_and_deletion_in_one_document(tmp_path):
+    """T4.7: the two tracked-change tests above exercise insertion and
+    deletion SEPARATELY, each in its own document. This combines both in
+    one document -- an editor who deleted a stale duplicate and inserted
+    its replacement via track-changes in the same edit session -- so the
+    reader must resolve <w:ins>/<w:del> correctly when both appear
+    together, not just each in isolation."""
+    doc = Document()
+    doc.add_paragraph("D. PUBLICATIONS")
+    doc.add_paragraph(f"1. {_CITATION_A}")
+    doc.add_paragraph()._p.append(parse_xml(
+        f'<w:del {nsdecls("w")} w:id="4" w:author="editor" '
+        f'w:date="2026-01-01T00:00:00Z"><w:r><w:delText>2. {_CITATION_A}'
+        '</w:delText></w:r></w:del>'))
+    doc.add_paragraph()._p.append(parse_xml(
+        f'<w:ins {nsdecls("w")} w:id="5" w:author="editor" '
+        f'w:date="2026-01-01T00:00:00Z"><w:r><w:t>2. {_CITATION_B}</w:t>'
+        '</w:r></w:ins>'))
+    docx_path = tmp_path / "tracked_mixed_DUPTST_wcm.docx"
+    doc.save(docx_path)
+
+    blocks = read_docx_blocks(str(docx_path))
+    assert blocks[1] == ("p", f"1. {_CITATION_A}")
+    assert blocks[2] == ("p", "")
+    assert blocks[3] == ("p", f"2. {_CITATION_B}")
+    assert lint_duplicate_records(blocks) == []
+
+
 def test_quiet_on_short_duplicated_body_under_the_floor():
     """Negative control for DUPLICATE_RECORD_MIN_CHARS: a short repeated
     fragment ('See above.'-style) below the 20-char floor must not fire even
@@ -294,7 +427,9 @@ def test_quiet_on_duplicated_non_enumerated_paragraph():
 
 
 def test_quiet_on_duplicated_enumerated_table_blocks():
-    """Negative control for the `kind != "p"` restriction (render.py:623).
+    """Negative control for the paragraph-only guard before the enumerator
+    check (`kind != "p"` short-circuits before `_PASSAGE_ENUMERATOR_RE` is
+    even tried against a table block).
     `read_docx_blocks` emits ("table", <joined cell lines>) blocks whose first
     line can itself open with a list enumerator; a grant or teaching table
     legitimately repeated in two rendered rows is not a duplicated citation,
@@ -311,8 +446,9 @@ def test_quiet_on_duplicated_enumerated_table_blocks():
 
 
 def test_table_block_that_looks_like_a_header_does_not_reset_the_window():
-    """Pin for the `if kind == "p" else None` gate on the section-header check
-    (render.py:617), mirroring the sibling at render.py:186. A short all-caps
+    """Pin for the `if kind == "p" else None` gate on the section-header
+    check, mirroring the same non-paragraph-blocks-cannot-be-headers gate in
+    lint_dead_sections. A short all-caps
     table block between two copies of the same citation must NOT read as a
     section header and reset the match window. Without the gate this fixture
     yields 0 findings; with it, 1 -- the discriminating case from the
@@ -331,11 +467,32 @@ def test_table_block_that_looks_like_a_header_does_not_reset_the_window():
     assert len(lint_duplicate_records([blocks[0], blocks[1], blocks[3]])) == 1
 
 
+def test_run_doctor_reports_corrupt_stage6_docx_and_skips_duplicate_records(tmp_path):
+    """T4.2: a present-but-unparseable stage-6 docx must surface as ERROR
+    'unreadable', mirroring test_run_doctor.py's own pattern for a corrupt
+    source docx -- not the benign INFO 'skipped: missing'.
+    duplicate_records reads stage_6_docx=blocks exactly like every other
+    blocks-driven lint, so a broken docx degrades it the same way."""
+    root = tmp_path / "outputs"
+    out_dir = root / "stage_6_wcm_documents"
+    out_dir.mkdir(parents=True)
+    (out_dir / "CORRUPT_cv_wcm.docx").write_bytes(b"not a real docx, just bytes")
+
+    payload = run_doctor(root, "CORRUPT")
+    finding = next(f for f in payload["findings"]
+                   if f["lint"] == "duplicate_records")
+    assert finding["severity"] == "ERROR"
+    assert "unreadable" in finding["message"]
+    assert "stage_6_docx" in finding["message"]
+    assert payload["worst_severity"] == "ERROR"
+
+
 def test_run_doctor_dispatches_duplicate_records_and_skips_without_docx(tmp_path):
     """Dispatch wiring, both directions: fires as a real finding when the
     stage-6 docx carries a duplicate, and degrades to the standard INFO
     'skipped: missing stage_6_docx' finding -- never a crash or silence --
-    when there is no docx to read."""
+    when there is no docx to read. T4.5 extends the fired-path assertions
+    to the report's counts/worst_severity, not just the one finding."""
     root = tmp_path / "outputs"
     doc = Document()
     doc.add_paragraph("D. PUBLICATIONS")
@@ -350,6 +507,8 @@ def test_run_doctor_dispatches_duplicate_records_and_skips_without_docx(tmp_path
     fired = [f for f in payload["findings"] if f["lint"] == "duplicate_records"]
     assert len(fired) == 1
     assert fired[0]["severity"] == "WARN"
+    assert payload["counts"]["WARN"] >= 1
+    assert payload["worst_severity"] in ("WARN", "ERROR")
 
     empty_root = tmp_path / "empty"
     empty_root.mkdir()
@@ -359,3 +518,5 @@ def test_run_doctor_dispatches_duplicate_records_and_skips_without_docx(tmp_path
     assert len(skipped) == 1
     assert skipped[0]["severity"] == "INFO"
     assert "skipped" in skipped[0]["message"]
+    assert empty_payload["counts"]["WARN"] == 0
+    assert empty_payload["worst_severity"] == "INFO"
