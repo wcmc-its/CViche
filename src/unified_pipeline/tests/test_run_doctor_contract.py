@@ -41,6 +41,14 @@ if str(_SRC) not in sys.path:
 _RUN_DOCTOR_PY = _SRC / "unified_pipeline" / "run_doctor.py"
 _LINTS_DIR = _SRC / "unified_pipeline" / "doctor" / "lints"
 
+# test_run_doctor.py's own fixture helpers (_build_clean_run, _UID) are
+# reused by import below rather than copied, per the review's own
+# instruction -- this file already imports run_doctor by adding _SRC to
+# sys.path the same way, so the tests directory gets the same treatment.
+_TESTS_DIR = _SRC / "unified_pipeline" / "tests"
+if str(_TESTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TESTS_DIR))
+
 
 def _module():
     return importlib.import_module("unified_pipeline.run_doctor")
@@ -230,6 +238,130 @@ def test_the_surface_list_is_not_silently_empty():
         "the pinned run_doctor import surface changed size -- if that is "
         "intentional, update the count and say why in the commit message"
     )
+
+
+# --- contract 3: review round 1 gaps on #725 ---------------------------------
+
+def test_known_lints_literal_expected_order():
+    """T5.9: `test_known_lints_is_in_dispatch_order` above proves KNOWN_LINTS
+    agrees with an AST-DERIVED dispatch order -- both sides are
+    implementation-derived, so a synchronized reorder of both would pass
+    silently even though corpus_doctor_sweep.py ranks ties by this index.
+    This is the one independent, hand-written expectation: a reorder here
+    fails even when the AST-derived side was reordered to match."""
+    assert tuple(_module().KNOWN_LINTS) == (
+        "segmentation", "missed_headers", "bucket_status", "under_extraction",
+        "classified_unrendered", "taxonomy_code_coverage", "output_hygiene",
+        "dead_sections", "unrendered_records", "enrichment_failures",
+        "stage6_render_warnings", "dedup_drops", "pipe_leaks", "table_shape",
+        "duplicate_passages", "duplicate_records", "owner_contact_missing",
+        "pipeline_errors_present",
+    )
+
+
+def test_find_artifact_returns_none_when_stage_directory_is_missing(tmp_path):
+    """T5.2: `_find_artifact` globs `root / spec.stage_dir`; when that
+    directory does not exist at all (not just empty), it must return None
+    rather than raising or misreading an unrelated directory."""
+    mod = _module()
+    assert mod._find_artifact(tmp_path, "ABC", "stage_2") is None
+
+
+def test_find_source_falls_back_to_uploads(tmp_path):
+    """T5.3a: a source docx placed directly under root is preferred, but
+    `_find_source` falls back to `root / uploads` -- the web backend's own
+    upload location -- when nothing matches at the root."""
+    mod = _module()
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    expected = uploads / "ABC.docx"
+    expected.touch()
+    assert mod._find_source(tmp_path, "ABC") == expected
+
+
+def test_find_source_excludes_wcm_docx(tmp_path):
+    """T5.3b: the rendered deliverable (`*_wcm.docx`) must never be picked up
+    as the SOURCE document -- they share a uid prefix and live in the same
+    tree for some run layouts."""
+    mod = _module()
+    (tmp_path / "ABC_wcm.docx").touch()
+    assert mod._find_source(tmp_path, "ABC") is None
+
+
+def test_run_doctor_reports_corrupt_stage2_as_unreadable_not_missing(tmp_path):
+    """T5.4: a present-but-unparseable stage_2 artifact must surface the
+    segmentation lint as ERROR with 'unreadable' in the message, not the
+    benign INFO 'skipped: missing stage_2' -- the same missing-vs-unreadable
+    distinction test_run_doctor.py already proves for stage_4 (line ~1131),
+    pinned here for stage_2/segmentation specifically."""
+    root = tmp_path / "outputs"
+    stage = root / "stage_2_entry_extraction"
+    stage.mkdir(parents=True)
+    (stage / "ABC_entries.json").write_text("{not valid json")
+
+    payload = _module().run_doctor(root, "ABC")
+    seg = [f for f in payload["findings"] if f["lint"] == "segmentation"]
+    assert any(f["severity"] == "ERROR" and "unreadable" in f["message"]
+               for f in seg), seg
+
+
+def test_ready_reports_missing_input_as_info():
+    """T5.5a: a direct unit test of `_ready()`, not just its effect proven
+    end-to-end through `run_doctor()` -- a genuinely absent input is INFO
+    'skipped: missing <name>'."""
+    mod = _module()
+    findings = []
+    assert mod._ready("example", unreadable={}, findings=findings,
+                       stage_2=None) is False
+    assert findings[0]["severity"] == "INFO"
+    assert "missing stage_2" in findings[0]["message"]
+
+
+def test_ready_reports_unreadable_input_as_error():
+    """T5.5b: the other half of the same direct unit test -- an input the
+    loader recorded as broken (present but unparseable) is ERROR 'skipped:
+    unreadable <name> (...)', never the benign 'missing'."""
+    mod = _module()
+    findings = []
+    assert mod._ready("example", unreadable={"stage_2": "JSONDecodeError"},
+                       findings=findings, stage_2=None) is False
+    assert findings[0]["severity"] == "ERROR"
+    assert "unreadable stage_2" in findings[0]["message"]
+
+
+def test_pipeline_errors_present_dispatches_from_a_real_partial_run(tmp_path):
+    """T5.7: `lint_pipeline_errors` is already unit-proven against a hand-
+    built dict missing two of three stage artifacts, but `run_doctor()`'s
+    OWN dispatch -- building `scored_artifacts` from real files on disk --
+    was untested. A clean run with stage_2 and stage_4 deleted and a fatal
+    pattern written into stage_3b must still fire pipeline_errors_present,
+    proving the dispatch really does scan whatever subset landed rather
+    than requiring all three."""
+    from test_run_doctor import _UID, _build_clean_run  # noqa: E402 (path set above)
+    root = _build_clean_run(tmp_path)
+    (root / "stage_2_entry_extraction" / f"{_UID}_cv_entries.json").unlink()
+    (root / "stage_4_field_extraction" / f"{_UID}_cv_fields.json").unlink()
+    classified = (root / "stage_3b_classified_entries"
+                  / f"{_UID}_cv_classified.json")
+    import json
+    data = json.loads(classified.read_text())
+    data["entries"][0]["error"] = "NameError: name 'response' is not defined"
+    classified.write_text(json.dumps(data))
+
+    payload = _module().run_doctor(root, _UID)
+    gate = next(f for f in payload["findings"]
+                if f["lint"] == "pipeline_errors_present")
+    assert gate["severity"] == "ERROR"
+
+
+def test_run_doctor_report_shape_and_values(tmp_path):
+    """T5.8: the report-shape test in test_run_doctor.py already asserts the
+    KEY SET; this asserts the VALUES of document_uid/root and the counts
+    key set, which nothing currently checks."""
+    payload = _module().run_doctor(tmp_path, "SHAPE1")
+    assert payload["document_uid"] == "SHAPE1"
+    assert payload["root"] == str(tmp_path)
+    assert set(payload["counts"]) == {"ERROR", "WARN", "INFO"}
 
 
 def test_ten_of_the_surface_is_private():
