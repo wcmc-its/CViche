@@ -272,7 +272,11 @@ def test_sweep_failure_carries_traceback_and_good_run_still_reported(tmp_path, m
         "must be a real stack trace, not just the message repeated")
 
 
-def test_main_exits_zero_when_at_least_one_report_succeeds(tmp_path, monkeypatch):
+def test_main_returns_nonzero_on_partial_failure_by_default(tmp_path, monkeypatch):
+    """T2.4: main() used to return 0 whenever at least one run succeeded,
+    even with other requested runs failed -- CI could report success on an
+    incomplete corpus. Fail closed by default now.
+    """
     cli = _load_cli()
     corpus = tmp_path / "corpus"
     _make_run(corpus, "good1", "aaa111")
@@ -285,7 +289,23 @@ def test_main_exits_zero_when_at_least_one_report_succeeds(tmp_path, monkeypatch
 
     monkeypatch.setattr(cli, "run_doctor", fake_run_doctor)
 
-    assert cli.main([str(corpus), "good1,bad1"]) == 0
+    assert cli.main([str(corpus), "good1,bad1"]) != 0
+
+
+def test_main_exits_zero_on_partial_failure_with_allow_partial(tmp_path, monkeypatch):
+    cli = _load_cli()
+    corpus = tmp_path / "corpus"
+    _make_run(corpus, "good1", "aaa111")
+    _make_run(corpus, "bad1", "bbb222")
+
+    def fake_run_doctor(root, uid):
+        if uid == "bbb222":
+            raise ValueError("boom")
+        return {"findings": []}
+
+    monkeypatch.setattr(cli, "run_doctor", fake_run_doctor)
+
+    assert cli.main([str(corpus), "good1,bad1", "--allow-partial"]) == 0
 
 
 def test_main_returns_nonzero_when_every_run_fails_or_is_skipped(tmp_path, monkeypatch):
@@ -318,7 +338,8 @@ def test_out_payload_contains_failures_and_skipped(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cli, "run_doctor", fake_run_doctor)
 
-    assert cli.main([str(corpus), "good1,bad1,skip1", "--out", str(out)]) == 0
+    assert cli.main([str(corpus), "good1,bad1,skip1", "--out", str(out),
+                      "--allow-partial"]) == 0
     payload = json.loads(out.read_text(encoding="utf-8"))
 
     assert "failures" in payload and "bad1" in payload["failures"]
@@ -348,7 +369,7 @@ def test_diagnostics_go_through_the_logger_not_bare_stderr_prints(tmp_path, monk
     monkeypatch.setattr(cli, "run_doctor", fake_run_doctor)
 
     with caplog.at_level(logging.WARNING):
-        rc = cli.main([str(corpus), "good1,bad1,skip1"])
+        rc = cli.main([str(corpus), "good1,bad1,skip1", "--allow-partial"])
     assert rc == 0
 
     captured = capsys.readouterr()

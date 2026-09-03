@@ -382,6 +382,10 @@ def main(argv=None):
     ap.add_argument("run_ids", nargs="?", help="comma-separated representative run_ids")
     ap.add_argument("--work", default=None, help="staging dir (default: <corpus_dir>/.doctor_stage)")
     ap.add_argument("--out", default=None, help="write full JSON report here")
+    ap.add_argument("--allow-partial", action="store_true",
+                     help="exit 0 if at least one run produced a report, even "
+                          "though others failed, were skipped, or were duplicates "
+                          "(default: any incomplete run exits 1)")
     args = ap.parse_args(argv)
     if args.selftest:
         return _selftest()
@@ -428,6 +432,13 @@ def main(argv=None):
     # this, every run_id failing or being skipped still printed an all-zero
     # ranking table and exited 0.
     if not reports:
+        return 1
+    # Fail closed by default (T2.4): any requested run that failed, was
+    # skipped, or was a duplicate means the sweep is incomplete, so CI
+    # should not report success on it. --allow-partial opts back into the
+    # old "at least one report" tolerance for a deliberately partial corpus.
+    incomplete = bool(failures) or bool(skipped) or bool(duplicates)
+    if incomplete and not args.allow_partial:
         return 1
     return 0
 
