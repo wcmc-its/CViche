@@ -731,11 +731,13 @@ def test_compute_metrics_repeated_line_not_covered_by_single_occurrence():
 
 
 def test_compute_metrics_single_occurrence_line_still_covered():
-    """Control for the test above: a line that is not below the substantive
-    length threshold and matches the entry exactly is still covered."""
-    source = ["John Smith"]
-    entries = [{"text": "John Smith", "element_type": "paragraph"}]
+    """Control for the test above: a substantive-length line whose tokens
+    each occur at least as often in the entry is covered. The word order
+    differs so the squashed-substring shortcut cannot match and the token
+    multiset comparison is what decides."""
+    source = ["Smith John Memorial Lecture Award"]
+    entries = [{"text": "John Smith Memorial Lecture Award 2019", "element_type": "paragraph"}]
     m = compute_metrics(source, {"hierarchy": []}, _stage2(entries))
 
-    assert "John Smith" not in m["lost_lines"]
+    assert m["lost_lines"] == []
     assert m["text_coverage_pct"] == 100.0
