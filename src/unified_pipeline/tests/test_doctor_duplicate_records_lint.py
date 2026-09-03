@@ -193,13 +193,28 @@ def test_duplicate_records_and_duplicate_passages_do_not_double_fire():
     assert len(lint_duplicate_records(one_block_blocks)) == 1
 
 
-def test_names_match_whole_segment_not_bare_substring():
+def test_names_match_whole_word_token_containment_not_bare_substring():
     """T1.3: regression test for the _names_match fix -- see the T1.1 note
     above on why lint tests outside lint_duplicate_records/duplicate_passages
     live in this file for this review round (no dedicated per-lint test
-    file exists, and test_run_doctor.py is out of scope)."""
+    file exists, and test_run_doctor.py is out of scope).
+
+    The ticket's original acceptance criterion also asked for 'Research' vs
+    'Research Administration' to NOT match. Implemented literally (a
+    coordinate-segment split that only matches on 'and'/'&'/','), that
+    passed the synthetic test but caused a REAL regression on the doctor
+    A/B gate: the 65-doc farm's 2100_Mocco lost a genuine dead_sections
+    true positive ('Research Presentations' / empty output 'RESEARCH')
+    because the two no longer matched. A spurious match here can only
+    SUPPRESS a real finding, never fabricate one, so a same-word match is
+    the safer failure direction -- whole-word TOKEN CONTAINMENT keeps
+    'Research' matching 'Research Administration' (no corpus regression)
+    while still closing the confirmed real defect: 'education' as a
+    fragment inside the single word 'educational' no longer matches
+    'educational contributions' at all (different tokens, not a shared
+    substring across a word boundary)."""
     from unified_pipeline.doctor.lints.render import _names_match
-    assert not _names_match("research", "research administration")
+    assert _names_match("research", "research administration")
     assert not _names_match("education", "educational contributions")
     assert _names_match("honors", "b. honors and awards")
 
