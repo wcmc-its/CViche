@@ -496,6 +496,49 @@ def _passage_key(text) -> str:
     return " ".join(_PASSAGE_PUNCT_RE.sub(" ", _norm("\n".join(lines))).split())
 
 
+def _merge_duplicate_stretches(
+        passages: List[Tuple[int, int, int]],
+        keyed: List[Tuple[int, str]]) -> List[List[Tuple[int, int]]]:
+    """Canonicalise pairwise (first, second) index-space matches into one
+    group per distinct duplicated stretch (#446 review T1.1).
+
+    A block sequence repeated 3+ times matches at more than one scan
+    distance -- occurrence 1 vs 2, 2 vs 3, and possibly more -- and each of
+    those pairwise matches was previously appended to `passages`
+    independently, double-counting the same underlying duplication and
+    repeating the middle occurrence's block range across two evidence
+    entries. Union-find on the real document block-index RANGE (not the
+    index-space position) merges any pairs that share an occurrence into one
+    group, so a chain of N occurrences becomes one group of N ranges instead
+    of N-1 separate findings.
+    """
+    def block_range(pos: int, length: int) -> Tuple[int, int]:
+        return (keyed[pos][0], keyed[pos + length - 1][0])
+
+    parent: Dict[Tuple[int, int], Tuple[int, int]] = {}
+
+    def find(node: Tuple[int, int]) -> Tuple[int, int]:
+        parent.setdefault(node, node)
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(a: Tuple[int, int], b: Tuple[int, int]) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for first, second, length in passages:
+        union(block_range(first, length), block_range(second, length))
+
+    groups: Dict[Tuple[int, int], set] = {}
+    for first, second, length in passages:
+        frange, srange = block_range(first, length), block_range(second, length)
+        groups.setdefault(find(frange), set()).update((frange, srange))
+    return [sorted(ranges) for ranges in groups.values()]
+
+
 def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
     """Stretches of DUPLICATE_PASSAGE_MIN_BLOCKS+ consecutive rendered blocks
     that appear twice in the output document — one source record reaching the
@@ -550,20 +593,25 @@ def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
                     and any(_YEAR_RE.search(keys[t]) for t in range(i, j + 1))):
                 passages.append((i, i + distance, j - i + 1))
             i = j + 1
-    if len(passages) < DUPLICATE_PASSAGE_WARN_COUNT:
+
+    groups = _merge_duplicate_stretches(passages, keyed)
+    if len(groups) < DUPLICATE_PASSAGE_WARN_COUNT:
         return []
 
     evidence = []
     # Document order, not scan-distance order: the block numbers in a report a
     # human reads should ascend, and the [:5] cap should keep the first five.
-    for first, second, length in sorted(passages)[:5]:
+    # One evidence line per GROUP, not per pair, so a 3+-occurrence stretch
+    # does not repeat its middle occurrence's block range across two lines.
+    for ranges in sorted(groups)[:5]:
+        first_range, later = ranges[0], ranges[1:]
         evidence.append(
-            f"blocks {keyed[first][0]}-{keyed[first + length - 1][0]} repeat "
-            f"at {keyed[second][0]}-{keyed[second + length - 1][0]}: "
-            f"{str(blocks[keyed[first][0]][1])[:100]}")
+            f"blocks {first_range[0]}-{first_range[1]} repeat at "
+            + ", ".join(f"{s}-{e}" for s, e in later)
+            + f": {str(blocks[first_range[0]][1])[:100]}")
     return [_finding(
         "duplicate_passages", "WARN",
-        f"{len(passages)} passage(s) of >={span} consecutive rendered blocks "
+        f"{len(groups)} passage(s) of >={span} consecutive rendered blocks "
         f"appear twice — one record reached the output document more than once",
         evidence)]
 
