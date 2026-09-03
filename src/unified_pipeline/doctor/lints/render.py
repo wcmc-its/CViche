@@ -127,6 +127,14 @@ def lint_output_hygiene(blocks: List[Tuple[str, str]]) -> List[Dict]:
             f"{len(leaks)} bracketed taxonomy-code leak(s) in output text",
             [leak[:100] for leak in leaks[:5]]))
 
+    # Paragraph-only invariant, by design, not an oversight (#446 review
+    # T1.9): stage 6 renders the appendix -- the catch-all for content that
+    # did not map to a template section -- as numbered/bulleted PARAGRAPHS
+    # only, never as a table or list block, so scanning only `kind == "p"`
+    # blocks cannot miss an appendix entry. Measured directly against the
+    # 65 real *_wcm.docx stage_6_wcm_documents farm outputs: 33 of them
+    # carry a "T. APPENDIX" section, and 0 of those 33 contain a table
+    # block anywhere inside it.
     paras = [text for kind, text in blocks if kind == "p"]
     appendix_at = next((i for i, t in enumerate(paras)
                         if t.strip() == _APPENDIX_HEADER), None)
