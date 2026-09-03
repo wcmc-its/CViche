@@ -337,7 +337,6 @@ def _feedback(**overrides):
         overall_accuracy=None,
         overall_usefulness=4,
         likelihood_to_recommend=4,
-        biggest_issue=None,
     )
     base.update(overrides)
     return SimpleNamespace(**base)
@@ -366,17 +365,21 @@ def test_feedback_payload_omits_optional_fields_when_absent(monkeypatch):
 
     assert "Submitted by" not in facts
     assert "Overall accuracy" not in facts
-    assert "Biggest issue" not in facts
 
 
-def test_feedback_payload_truncates_long_biggest_issue(monkeypatch):
+def test_feedback_payload_never_includes_free_text_fields(monkeypatch):
+    """biggest_issue/issue_locations are reviewer-typed free text that can name
+    a person or quote CV content -- never put it on the card, even when set."""
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    feedback = _feedback(
+        biggest_issue="Jane Smith's grant dates were wrong",
+        issue_locations=["section M"],
+    )
 
-    facts = _facts(notifications.build_feedback_payload(
-        _feedback(biggest_issue="x" * 250), _run()))
+    payload = notifications.build_feedback_payload(feedback, _run())
 
-    assert len(facts["Biggest issue"]) == 201  # 200 chars + ellipsis
-    assert facts["Biggest issue"].endswith("…")
+    assert "Biggest issue" not in _facts(payload)
+    assert "Jane Smith" not in str(payload)
 
 
 @pytest.mark.parametrize("recommend,color", [

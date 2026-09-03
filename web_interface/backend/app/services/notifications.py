@@ -253,9 +253,15 @@ def build_teams_payload(run, score=None, submitter=None, doctor=None) -> dict:
 def build_feedback_payload(feedback, run, submitter=None) -> dict:
     """Build the Teams card for a user-submitted run feedback survey.
 
+    Only ratings and category picks go on the card -- never a reviewer's
+    free-text answer (biggest_issue, issue_locations). Those can name a
+    specific person or quote CV content, and this posts to an external Teams
+    webhook outside the app's access controls; open the run in-app to read
+    them.
+
     Args:
         feedback: the Feedback ORM object (reviewer_role, overall_usefulness,
-            likelihood_to_recommend, overall_accuracy, biggest_issue).
+            likelihood_to_recommend, overall_accuracy).
         run: the Run ORM object the feedback was submitted against.
         submitter: display name/email of who submitted the feedback, or None
             to omit.
@@ -279,10 +285,6 @@ def build_feedback_payload(feedback, run, submitter=None) -> dict:
     accuracy = getattr(feedback, "overall_accuracy", None)
     if accuracy is not None:
         facts.append({"name": "Overall accuracy", "value": f"{accuracy}/10"})
-    biggest_issue = getattr(feedback, "biggest_issue", None)
-    if biggest_issue:
-        text = str(biggest_issue).strip()
-        facts.append({"name": "Biggest issue", "value": text[:200] + ("…" if len(text) > 200 else "")})
 
     # A low recommend score is the signal worth a red card; a high one is a
     # green nod. 3 (neutral) falls through to the default color.
