@@ -476,14 +476,72 @@ def _default_cv_dir() -> Path | None:
     return candidates[-1] if candidates else None
 
 
-def snapshot(label: str, cv_dir: str | None, uids: list[str] | None) -> Path:
-    """Run stages 1a -> 1b -> 2 on each gold CV and record outputs + metrics.
-    Costs real LLM calls (~$0.25/CV)."""
+class SnapshotResult(TypedDict):
+    """One CV's outcome from _snapshot_cv(): either metrics (error is None)
+    or an error (metrics is None) -- never both, never neither."""
+    uid: str
+    metrics: Metrics | None
+    error: str | None
+    cost: float
+
+
+def _snapshot_cv(docx_path: Path, snap_dir: Path) -> SnapshotResult:
+    """Run stages 1a -> 1b -> 2 on ONE gold CV, persist its artifacts under
+    snap_dir, and compute its metrics (#T2.1). Any Exception during that
+    work is caught and returned as SnapshotResult['error'] rather than
+    propagated, so one CV's failure doesn't take the whole snapshot's
+    already-computed metrics down with it -- snapshot() is what isolates
+    per-CV failures and keeps going; see its docstring. No retry/resume: a
+    failed CV is simply reported, not automatically re-attempted -- out of
+    scope for this fix."""
     from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
         get_cv_hierarchy_chunked,
     )
     from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
     from unified_pipeline.stage_2_entry_extraction import run_stage_2
+
+    uid = docx_path.stem
+    cv_snap = snap_dir / uid
+    cv_snap.mkdir(exist_ok=True)
+    cost = 0.0
+    try:
+        hierarchy, stats = get_cv_hierarchy_chunked(cv_path=str(docx_path))
+        stage1a: Stage1A = {"document_uid": uid, "hierarchy": hierarchy, "meta": stats}
+        stage1a_path = cv_snap / f"{uid}_segmented.json"
+        stage1a_path.write_text(json.dumps(stage1a, indent=2), encoding="utf-8")
+        cost += stats.get("extraction_cost", 0) or 0
+
+        _, stage1b_path = run_stage_1b(str(docx_path), hierarchy_json_path=str(stage1a_path))
+        stage2, _ = run_stage_2(str(docx_path), hierarchy_json_path=str(stage1b_path))
+        (cv_snap / f"{uid}_entries.json").write_text(
+            json.dumps(stage2, indent=2), encoding="utf-8"
+        )
+        cost += stage2.get("total_cost", 0) or 0
+
+        metrics = compute_metrics(iter_source_lines(str(docx_path)), stage1a, stage2)
+    except Exception as exc:
+        logger.exception("snapshot: %s failed", uid)
+        return {"uid": uid, "metrics": None, "error": str(exc), "cost": cost}
+    return {"uid": uid, "metrics": metrics, "error": None, "cost": cost}
+
+
+def snapshot(label: str, cv_dir: str | None, uids: list[str] | None) -> Path:
+    """Run stages 1a -> 1b -> 2 on each gold CV and record outputs + metrics.
+    Costs real LLM calls (~$0.25/CV).
+
+    Fault isolation (#T2.1): each CV runs through _snapshot_cv(), which
+    catches its own exceptions. metrics.json is written for every CV that
+    succeeded even if others failed, and if ANY CV failed this still raises
+    SegmentationRegressionError AFTER writing, naming the failed uids, so
+    main() exits nonzero (fail closed, CODING_STANDARDS §5.5) without losing
+    what was already computed. No retry/resume -- out of scope.
+    """
+    snap = _snapshot_dir(label)
+    if (snap / "metrics.json").exists():
+        raise SnapshotLabelError(
+            f"Snapshot '{label}' already exists ({snap / 'metrics.json'}). "
+            "Choose a new label or delete the directory."
+        )
 
     source = Path(cv_dir) if cv_dir else _default_cv_dir()
     if not source or not source.is_dir():
@@ -497,32 +555,22 @@ def snapshot(label: str, cv_dir: str | None, uids: list[str] | None) -> Path:
     if not docx_files:
         raise SegmentationRegressionError(f"No .docx files matched in {source}")
 
-    snap = _snapshot_dir(label)
     snap.mkdir(parents=True, exist_ok=True)
     all_metrics: dict[str, Metrics] = {}
     total_cost = 0.0
+    failed_uids: list[str] = []
 
     for docx in docx_files:
-        uid = docx.stem
-        print(f"\n=== {uid} ===")
-        cv_snap = snap / uid
-        cv_snap.mkdir(exist_ok=True)
-
-        hierarchy, stats = get_cv_hierarchy_chunked(cv_path=str(docx))
-        stage1a: Stage1A = {"document_uid": uid, "hierarchy": hierarchy, "meta": stats}
-        stage1a_path = cv_snap / f"{uid}_segmented.json"
-        stage1a_path.write_text(json.dumps(stage1a, indent=2), encoding="utf-8")
-        total_cost += stats.get("extraction_cost", 0) or 0
-
-        _, stage1b_path = run_stage_1b(str(docx), hierarchy_json_path=str(stage1a_path))
-        stage2, _ = run_stage_2(str(docx), hierarchy_json_path=str(stage1b_path))
-        (cv_snap / f"{uid}_entries.json").write_text(
-            json.dumps(stage2, indent=2), encoding="utf-8"
-        )
-        total_cost += stage2.get("total_cost", 0) or 0
-
-        metrics = compute_metrics(iter_source_lines(str(docx)), stage1a, stage2)
-        all_metrics[uid] = metrics
+        print(f"\n=== {docx.stem} ===")
+        result = _snapshot_cv(docx, snap)
+        total_cost += result["cost"]
+        if result["error"] is not None:
+            failed_uids.append(result["uid"])
+            print(f"  FAILED: {result['error']}")
+            continue
+        metrics = result["metrics"]
+        assert metrics is not None, "SnapshotResult: error is None but metrics is also None"
+        all_metrics[result["uid"]] = metrics
         print(f"  coverage={metrics['text_coverage_pct']}% "
               f"entries={metrics['entries_total']} mega={metrics['mega_entries']} "
               f"dups={metrics['duplicate_entries']} headers={metrics['headers_detected']}")
@@ -530,6 +578,11 @@ def snapshot(label: str, cv_dir: str | None, uids: list[str] | None) -> Path:
     (snap / "metrics.json").write_text(json.dumps(all_metrics, indent=2), encoding="utf-8")
     print(f"\nSnapshot '{label}': {len(all_metrics)} CVs, LLM cost ${total_cost:.2f}")
     print(f"Metrics: {snap / 'metrics.json'}")
+
+    if failed_uids:
+        raise SegmentationRegressionError(
+            f"Snapshot '{label}': {len(failed_uids)} CV(s) failed: {', '.join(failed_uids)}"
+        )
     return snap
 
 
