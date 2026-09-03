@@ -12,7 +12,7 @@ module, so they move together and stop being module-global.
 Bodies are unmodified. `run_doctor` re-exports every name it exported before.
 """
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.template_boilerplate import (
@@ -171,7 +171,7 @@ _NAME_LABEL_RE = re.compile(r"^[A-Za-z0-9]{1,3}[.)]\s+")
 _NAME_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
-def _name_tokens(text: str) -> set:
+def _name_tokens(text: str) -> Set[str]:
     stripped = _NAME_LABEL_RE.sub("", _norm(text))
     return {tok for tok in _NAME_TOKEN_RE.findall(stripped) if len(tok) > 1}
 
