@@ -425,6 +425,35 @@ _US_STATE_ABBREVS = {
     "WI", "WY", "DC"}
 
 
+# Explicit ordered alias tuples per honors-table column role, matched on
+# word boundaries (#446 review T1.7): unrestricted substring matching
+# returned the first COLUMN containing any key, with no precedence between
+# roles, so a compound header could in principle map two roles to the same
+# column. The fixed stage-6 header ('name of award', 'organization',
+# 'date awarded (yyyy)') matches identically under either rule -- these are
+# for header variation defense-in-depth, not a live corpus fix (0/65 farm
+# honors tables use a header other than the fixed one).
+_AWARD_NAME_ALIASES = ("name of award", "award", "honor")
+
+
+_AWARD_ORG_ALIASES = ("organization", "granting")
+
+
+_AWARD_DATE_ALIASES = ("date awarded", "date", "yyyy", "year")
+
+
+def _alias_col(header: List[str], aliases: Tuple[str, ...]) -> Optional[int]:
+    """First header column whose text contains one of `aliases` as a whole
+    word/phrase, in alias order -- the first alias that matches ANY column
+    wins, same first-match precedence as the substring rule it replaces."""
+    for alias in aliases:
+        pattern = re.compile(rf"\b{re.escape(alias)}\b")
+        for idx, h in enumerate(header):
+            if pattern.search(h):
+                return idx
+    return None
+
+
 def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
     """Honors-like tables whose rows are mis-shaped (#229): the stage-6
     multi-award fallback puts citation blobs in the name cell, leaks state
@@ -440,26 +469,27 @@ def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
         if "name of award" not in header_all and "date awarded" not in header_all:
             continue
 
-        def col(*keys):
-            for idx, h in enumerate(header):
-                if any(k in h for k in keys):
-                    return idx
-            return None
-
-        name_i = col("award", "honor")
-        org_i = col("organization", "granting")
-        date_i = col("date", "yyyy", "year")
+        name_i = _alias_col(header, _AWARD_NAME_ALIASES)
+        org_i = _alias_col(header, _AWARD_ORG_ALIASES)
+        date_i = _alias_col(header, _AWARD_DATE_ALIASES)
         if name_i is None:
             continue
-        rows = [r for r in tbl[1:] if any(r)]
         defective_rows = set()
         defects: List[str] = []
+        non_blank_rows = 0
 
         def flag(rn, msg):
             defective_rows.add(rn)
             defects.append(f"row {rn}: {msg}")
 
-        for rn, row in enumerate(rows, start=1):
+        # Enumerate the ORIGINAL rows -- not a pre-filtered blanks-removed
+        # list -- so a defect's reported row number is the actual source
+        # table row, not its position after blank rows above it were
+        # dropped (#446 review T1.8).
+        for rn, row in enumerate(tbl[1:], start=1):
+            if not any(row):
+                continue
+            non_blank_rows += 1
             name = row[name_i] if name_i < len(row) else ""
             org = row[org_i] if org_i is not None and org_i < len(row) else ""
             date = row[date_i] if date_i is not None and date_i < len(row) else ""
@@ -477,12 +507,13 @@ def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
             # norm; half the table is not. Threshold on either the share of
             # rows or the absolute defect count, so a short table with two bad
             # rows out of three still warns (#438).
-            ratio = len(defective_rows) / len(rows) if rows else 0.0
+            ratio = (len(defective_rows) / non_blank_rows
+                     if non_blank_rows else 0.0)
             findings.append(_finding(
                 "table_shape",
                 "WARN" if (ratio >= TABLE_SHAPE_WARN_ROW_RATIO
                            or len(defects) >= TABLE_SHAPE_WARN_DEFECTS) else "INFO",
-                f"honors table: {len(defective_rows)}/{len(rows)} row(s) "
+                f"honors table: {len(defective_rows)}/{non_blank_rows} row(s) "
                 f"malformed ({len(defects)} defect(s)) — #229",
                 defects[:6]))
     return findings
