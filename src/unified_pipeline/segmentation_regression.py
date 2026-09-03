@@ -193,9 +193,11 @@ def _norm(text: str) -> str:
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
-def _tokens(text: str) -> set[str]:
-    """Word/number token set for the coverage check (see compute_metrics)."""
-    return set(_TOKEN_RE.findall(_norm(text)))
+def _tokens(text: str) -> Counter[str]:
+    """Word/number token MULTISET for the coverage check (see
+    compute_metrics). A set would collapse repeated tokens, so a source line
+    repeating an entry's words would read as covered (#T2.3)."""
+    return Counter(_TOKEN_RE.findall(_norm(text)))
 
 
 def _squash(text: str) -> str:

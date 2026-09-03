@@ -709,3 +709,30 @@ def test_iter_source_lines_nested_table_inside_merged_cell_yields_once(tmp_path)
 
     lines = iter_source_lines(str(path))
     assert lines.count("nested content") == 1
+
+
+# ------------------------------------------------------------- round 3: T2.3
+# _tokens() must respect token MULTIPLICITY, not just membership: a source
+# line repeating an entry's words is not actually covered by that entry.
+
+def test_compute_metrics_repeated_line_not_covered_by_single_occurrence():
+    """A set-based _tokens() would call this line covered ({john, smith}
+    is a subset of {john, smith}) even though two thirds of it is missing
+    from the entry. A Counter must reject it (#T2.3)."""
+    source = ["John Smith John Smith John Smith"]
+    entries = [{"text": "John Smith", "element_type": "paragraph"}]
+    m = compute_metrics(source, {"hierarchy": []}, _stage2(entries))
+
+    assert "John Smith John Smith John Smith" in m["lost_lines"]
+    assert m["text_coverage_pct"] == 0.0
+
+
+def test_compute_metrics_single_occurrence_line_still_covered():
+    """Control for the test above: a line that is not below the substantive
+    length threshold and matches the entry exactly is still covered."""
+    source = ["John Smith"]
+    entries = [{"text": "John Smith", "element_type": "paragraph"}]
+    m = compute_metrics(source, {"hierarchy": []}, _stage2(entries))
+
+    assert "John Smith" not in m["lost_lines"]
+    assert m["text_coverage_pct"] == 100.0
