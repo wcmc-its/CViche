@@ -40,24 +40,25 @@ SUFFIX_DIR = {
 }
 
 
-def _find_uid(run_dir: Path):
+def _find_uid(outputs_dir: Path):
     """The artifact prefix for this run (the `_fields.json` stem, else `_wcm`)."""
-    for f in run_dir.glob("*_fields.json"):
+    for f in outputs_dir.glob("*_fields.json"):
         return f.name[: -len("_fields.json")]
-    for f in run_dir.glob("*_wcm.docx"):
+    for f in outputs_dir.glob("*_wcm.docx"):
         return f.name[: -len("_wcm.docx")]
     return None
 
 
-def _resolve_run_dir(corpus_dir: Path, run_id: str) -> Path:
-    """The dir holding this run's artifacts, tolerating an already-flat layout.
+def _resolve_outputs_dir(run_root: Path) -> Path:
+    """The dir holding this run's per-uid artifacts, tolerating an
+    already-flat layout.
 
-    `<corpus>/<run>/outputs` when present, else `<corpus>/<run>`. Returns the
+    `<run_root>/outputs` when present, else `run_root` itself. Returns the
     flat path even when it doesn't exist so the caller's `_find_uid is None`
     branch reports the run uniformly (this never raises).
     """
-    nested = corpus_dir / run_id / "outputs"
-    return nested if nested.is_dir() else corpus_dir / run_id
+    nested = run_root / "outputs"
+    return nested if nested.is_dir() else run_root
 
 
 def _relink(link: Path, src: Path) -> None:
@@ -100,19 +101,26 @@ def _clear_staged_root(root: Path) -> None:
     shutil.rmtree(root)
 
 
-def stage(run_dir: Path, uid: str, work: Path) -> Path:
+def stage(run_root: Path, uid: str, work: Path) -> Path:
     """Symlink the flat outputs into `<work>/<uid>/stage_*/` and return the root.
+
+    `run_root` is `<corpus>/<run_id>` -- both the outputs dir (nested or
+    flat, see `_resolve_outputs_dir`) and the archived-source `input/` dir
+    are derived from it here, once, so a flat-layout run's source docx is
+    looked up at `<run_root>/input`, not `<run_root>.parent/input`
+    (T1.2/T2.7's ask).
 
     Rebuilt from scratch on every call (see `_clear_staged_root`) so a suffix
     absent from THIS run's outputs never leaves behind a symlink staged by an
     earlier run for the same uid.
     """
+    outputs_dir = _resolve_outputs_dir(run_root)
     root = work / uid
     if root.exists():
         _clear_staged_root(root)
     root.mkdir(parents=True, exist_ok=True)
     for suffix, stagedir in SUFFIX_DIR.items():
-        src = run_dir / f"{uid}{suffix}"
+        src = outputs_dir / f"{uid}{suffix}"
         if not src.exists():
             continue
         d = root / stagedir
@@ -121,7 +129,7 @@ def stage(run_dir: Path, uid: str, work: Path) -> Path:
     # Source docx: the original upload is durably archived at runs/<id>/input/
     # (since 2026-06-02, commit 8358c0b). Symlink it into root so _find_source
     # picks it up and the segmentation/missed_headers lints (1-2) can run.
-    for cand_dir in (run_dir.parent / "input", run_dir):
+    for cand_dir in (run_root / "input", outputs_dir):
         if not cand_dir.is_dir():
             continue
         cands = [p for p in sorted(cand_dir.glob(f"{uid}*.docx"))
@@ -147,13 +155,13 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
     skipped = []
     for run_id in run_ids:
         try:
-            run_dir = _resolve_run_dir(corpus_dir, run_id)
-            uid = _find_uid(run_dir)
+            run_root = corpus_dir / run_id
+            uid = _find_uid(_resolve_outputs_dir(run_root))
             if not uid:
                 logger.warning("%s: no artifacts found, skipping", run_id)
                 skipped.append(run_id)
                 continue
-            reports[run_id] = run_doctor(stage(run_dir, uid, work), uid)
+            reports[run_id] = run_doctor(stage(run_root, uid, work), uid)
         except Exception as e:  # noqa: BLE001 - one bad run must not lose the sweep
             logger.exception("run_doctor failed for run_id=%s", run_id)
             failures[run_id] = {"error": str(e), "traceback": traceback.format_exc()}
@@ -229,17 +237,17 @@ def _selftest():
     assert rank["segmentation"]["cvs_affected"] == 0
     assert aggregate(reports)[0]["lint"] == "pipe_leaks", "ranked first by affected count"
 
-    # #7: _resolve_run_dir tolerates both the nested (outputs/) and flat layout,
-    # and never raises on an absent run (returns the flat path for the caller's
-    # _find_uid-is-None branch to report).
+    # #7: _resolve_outputs_dir tolerates both the nested (outputs/) and flat
+    # layout, and never raises on an absent run (returns the flat path for
+    # the caller's _find_uid-is-None branch to report).
     import tempfile
     with tempfile.TemporaryDirectory() as td:
         corpus = Path(td)
         (corpus / "nested" / "outputs").mkdir(parents=True)
         (corpus / "flat").mkdir()
-        assert _resolve_run_dir(corpus, "nested") == corpus / "nested" / "outputs"
-        assert _resolve_run_dir(corpus, "flat") == corpus / "flat"
-        assert _resolve_run_dir(corpus, "absent") == corpus / "absent"
+        assert _resolve_outputs_dir(corpus / "nested") == corpus / "nested" / "outputs"
+        assert _resolve_outputs_dir(corpus / "flat") == corpus / "flat"
+        assert _resolve_outputs_dir(corpus / "absent") == corpus / "absent"
 
     # #4: ALL_LINTS is now imported from run_doctor rather than hand-kept, so
     # it cannot drift. The name-prefix count that used to live here is gone --

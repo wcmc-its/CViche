@@ -73,6 +73,28 @@ def test_stage_prunes_symlinks_a_prior_run_left_for_the_same_uid(tmp_path):
         run2 / f"{uid}_fields.json").resolve()
 
 
+def test_stage_finds_source_docx_under_flat_layout_input_dir(tmp_path):
+    """T1.2/T2.7: a flat-layout run (no outputs/ subdir) still has its source
+    docx at <run_root>/input/<uid>.docx, a sibling of the jsons themselves,
+    not <corpus>/input.
+    """
+    cli = _load_cli()
+    uid = "aaa111"
+    run_root = tmp_path / "corpus" / "run1"
+    run_root.mkdir(parents=True)
+    (run_root / f"{uid}_fields.json").write_text("{}", encoding="utf-8")
+    input_dir = run_root / "input"
+    input_dir.mkdir()
+    (input_dir / f"{uid}.docx").write_text("source", encoding="utf-8")
+    work = tmp_path / "work"
+
+    root = cli.stage(run_root, uid, work)
+
+    staged_source = root / f"{uid}.docx"
+    assert staged_source.is_symlink(), "source docx must be staged for a flat-layout run"
+    assert staged_source.resolve() == (input_dir / f"{uid}.docx").resolve()
+
+
 def test_sweep_failure_carries_traceback_and_good_run_still_reported(tmp_path, monkeypatch):
     """Positive control: on dev, `sweep()` returns one bare dict, not a 3-tuple,
     so `reports, failures, skipped = sweep(...)` raises ValueError immediately
