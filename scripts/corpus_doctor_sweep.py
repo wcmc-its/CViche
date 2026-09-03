@@ -40,13 +40,28 @@ SUFFIX_DIR = {
 }
 
 
+class MultipleUidsInRunError(Exception):
+    """A run directory's artifacts name more than one distinct uid."""
+
+
 def _find_uid(outputs_dir: Path):
-    """The artifact prefix for this run (the `_fields.json` stem, else `_wcm`)."""
-    for f in outputs_dir.glob("*_fields.json"):
-        return f.name[: -len("_fields.json")]
-    for f in outputs_dir.glob("*_wcm.docx"):
-        return f.name[: -len("_wcm.docx")]
-    return None
+    """The uid whose artifacts populate `outputs_dir`, or `None` if empty.
+
+    Searched over every registered `SUFFIX_DIR` suffix (T1.4/T2.7), not just
+    `_fields.json`/`_wcm.docx` -- a run that crashed before stage 4 legitimately
+    has only an earlier-stage artifact (e.g. `_segmented.json`), and the old
+    two-suffix search reported that run as having no uid at all. Raises if the
+    directory's files name more than one uid: a malformed or partially synced
+    run must never have `sweep()` silently pick one.
+    """
+    uids = {f.name[: -len(suffix)]
+            for suffix in SUFFIX_DIR
+            for f in outputs_dir.glob(f"*{suffix}")}
+    if len(uids) > 1:
+        raise MultipleUidsInRunError(
+            f"{outputs_dir}: {len(uids)} distinct uids present, expected one: "
+            f"{sorted(uids)}")
+    return next(iter(uids), None)
 
 
 def _resolve_outputs_dir(run_root: Path) -> Path:

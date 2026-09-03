@@ -145,6 +145,31 @@ def test_sweep_records_failure_when_source_docx_candidates_are_ambiguous(tmp_pat
     assert f"{uid}_v2.docx" in failures["amb1"]["error"]
 
 
+def test_find_uid_is_found_via_an_early_stage_only_suffix(tmp_path):
+    """T1.4/T2.7: a run that crashed before stage 4 has only
+    `_segmented.json` -- _find_uid must not report it as empty.
+    """
+    cli = _load_cli()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "aaa111_segmented.json").write_text("{}", encoding="utf-8")
+    assert cli._find_uid(outputs) == "aaa111"
+
+
+def test_find_uid_rejects_a_run_dir_naming_two_uids(tmp_path):
+    cli = _load_cli()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "aaa111_segmented.json").write_text("{}", encoding="utf-8")
+    (outputs / "bbb222_fields.json").write_text("{}", encoding="utf-8")
+    try:
+        cli._find_uid(outputs)
+    except cli.MultipleUidsInRunError as e:
+        assert "aaa111" in str(e) and "bbb222" in str(e)
+    else:
+        raise AssertionError("expected MultipleUidsInRunError")
+
+
 def test_sweep_failure_carries_traceback_and_good_run_still_reported(tmp_path, monkeypatch):
     """Positive control: on dev, `sweep()` returns one bare dict, not a 3-tuple,
     so `reports, failures, skipped = sweep(...)` raises ValueError immediately
