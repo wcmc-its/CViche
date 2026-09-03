@@ -193,6 +193,72 @@ def test_duplicate_records_and_duplicate_passages_do_not_double_fire():
     assert len(lint_duplicate_records(one_block_blocks)) == 1
 
 
+def test_names_match_whole_segment_not_bare_substring():
+    """T1.3: regression test for the _names_match fix -- see the T1.1 note
+    above on why lint tests outside lint_duplicate_records/duplicate_passages
+    live in this file for this review round (no dedicated per-lint test
+    file exists, and test_run_doctor.py is out of scope)."""
+    from unified_pipeline.doctor.lints.render import _names_match
+    assert not _names_match("research", "research administration")
+    assert not _names_match("education", "educational contributions")
+    assert _names_match("honors", "b. honors and awards")
+
+
+def test_dead_sections_counts_a_non_blank_table_cell_as_content():
+    """T1.4: the scout's exact repro -- a section rendered entirely as a
+    table with short (but real) cell text must not read as dead, while a
+    table with only blank cells still does."""
+    from unified_pipeline.doctor.lints.render import lint_dead_sections
+    stage2 = {"entries": [
+        {"element_type": "entry", "hierarchy": ["Honors"],
+         "text": "Received the ACS Award for outstanding service in 2019."},
+        {"element_type": "entry", "hierarchy": ["Honors"],
+         "text": "Received the NIH Merit Award for research excellence."},
+        {"element_type": "entry", "hierarchy": ["Honors"],
+         "text": "Named Teacher of the Year by the department in 2020."},
+    ]}
+    filled = [("p", "B. HONORS"), ("table", "ACS Award\n2019\nNIH Award\n2021")]
+    assert lint_dead_sections(stage2, filled) == []
+
+    blank_table = [("p", "B. HONORS"), ("table", "   \n  \n")]
+    findings = lint_dead_sections(stage2, blank_table)
+    assert len(findings) == 1
+    assert findings[0]["severity"] == "WARN"
+
+
+def test_table_shape_col_resolves_an_ambiguous_header_pair():
+    """T1.7: regression test for the explicit ordered-alias-tuple col()
+    rewrite. An ambiguous header pair ('organization name', 'name of
+    award') must map name -> 'name of award' (index 1) and org ->
+    'organization name' (index 0) -- proven here by putting the blob
+    defect in the SECOND column: it only fires if name_i correctly
+    resolved to index 1, not 0."""
+    from unified_pipeline.doctor.lints.render import lint_table_shape
+    tables = [[
+        ["organization name", "name of award"],
+        ["Cardiology Society of America", "X" * 200],
+    ]]
+    findings = lint_table_shape(tables)
+    assert len(findings) == 1
+    assert "name-cell blob" in findings[0]["evidence"][0]
+
+
+def test_table_shape_row_index_survives_a_blank_row_above_it():
+    """T1.8: regression test for enumerating original rows -- a blank row 2
+    must not shift the reported row number of the defective row 3 down to
+    'row 2'."""
+    from unified_pipeline.doctor.lints.render import lint_table_shape
+    tables = [[
+        ["name of award", "organization", "date awarded (yyyy)"],
+        ["Fine Row", "Society", "2020"],
+        ["", "", ""],
+        ["X" * 200, "Society", "2021"],
+    ]]
+    findings = lint_table_shape(tables)
+    assert len(findings) == 1
+    assert findings[0]["evidence"][0].startswith("row 3:")
+
+
 def test_quiet_when_the_repeat_is_the_same_prose_with_different_dates():
     """T1.2 (#446 review): normalized-text equality alone is not proof of
     duplication -- a legitimately repeated activity described identically
