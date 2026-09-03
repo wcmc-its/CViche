@@ -88,6 +88,61 @@ def test_quiet_on_genuinely_different_bodies():
     assert lint_duplicate_records(blocks) == []
 
 
+def test_quiet_when_the_repeat_is_the_same_prose_with_different_dates():
+    """T1.2 (#446 review): normalized-text equality alone is not proof of
+    duplication -- a legitimately repeated activity described identically
+    on two different occasions differs in exactly its embedded date, which
+    IS part of the normalized body _passage_key compares. Two records
+    differing only in year therefore key differently and never fire, with
+    no change to lint_duplicate_records' thresholds or semantics (the
+    review accepted them as-is; only this negative control was requested).
+    No corpus counter-example was found on the 65-doc farm -- all 4 real
+    firings there are genuine duplicated citations."""
+    body_2019 = "Visiting lecture on curriculum design, awarded 2019."
+    body_2022 = "Visiting lecture on curriculum design, awarded 2022."
+    blocks = [
+        ("p", "D. PUBLICATIONS"),
+        ("p", f"1. {body_2019}"),
+        ("p", f"2. {body_2022}"),
+    ]
+    assert lint_duplicate_records(blocks) == []
+
+
+def test_duplicate_passages_merges_a_stretch_repeated_three_times():
+    """T1.1 (#446 review): a block sequence repeated 3+ times previously
+    produced one pairwise (first, second) match per adjacent occurrence
+    pair, so 3 occurrences reported 2 separate findings that shared the
+    middle occurrence's block range across two evidence lines. Merging
+    matches by real block-index range collapses this to ONE finding
+    covering the whole duplicated stretch, with one evidence line naming
+    every repeat rather than one line per pair.
+
+    This is a regression test for lint_duplicate_passages (#439), a
+    DIFFERENT lint from lint_duplicate_records (#446) this file otherwise
+    tests -- it lives here because this review round's write set has no
+    dedicated test file for duplicate_passages, and test_run_doctor.py,
+    which owns the existing duplicate_passages tests, is out of scope for
+    this round."""
+    from unified_pipeline.doctor.lints.render import lint_duplicate_passages
+    record = [("p", "Grand Rounds Lecture"),
+              ("p", "Weill Cornell Medicine"),
+              ("p", "2019")]
+    spacer_a = ("p", "Journal Club, unrelated topic content here")
+    spacer_b = ("p", "Case Conference, another unrelated topic here")
+    blocks = ([("p", "K. TEACHING")] + record
+              + [spacer_a] + record
+              + [spacer_b] + record)
+    findings = lint_duplicate_passages(blocks)
+    assert len(findings) == 1
+    assert "1 passage(s)" in findings[0]["message"]
+    evidence = findings[0]["evidence"]
+    # ONE evidence line, not one per pair -- block range 5-7 (the middle
+    # occurrence) does not appear in two separate lines.
+    assert len(evidence) == 1
+    assert evidence[0].count("repeat at") == 1
+    assert evidence[0].startswith("blocks 1-3 repeat at 5-7, 9-11:")
+
+
 def test_fires_at_exactly_the_window_distance():
     """Boundary control for the `<=` in the window prune (render.py:629-630).
     The corpus's own headline firing (2068_Yount_Cv, list numbers 32 and 38)
