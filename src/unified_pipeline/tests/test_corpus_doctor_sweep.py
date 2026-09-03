@@ -170,6 +170,21 @@ def test_find_uid_rejects_a_run_dir_naming_two_uids(tmp_path):
         raise AssertionError("expected MultipleUidsInRunError")
 
 
+def test_sweep_records_failure_for_a_run_id_escaping_corpus_dir(tmp_path):
+    """T1.5: run_id "../x" must not resolve outside corpus_dir."""
+    cli = _load_cli()
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    work = tmp_path / "work"
+
+    reports, failures, skipped = cli.sweep(corpus, ["../x"], work)
+
+    assert reports == {}
+    assert skipped == []
+    assert "../x" in failures
+    assert "RunIdEscapesCorpusError" in failures["../x"]["traceback"]
+
+
 def test_sweep_failure_carries_traceback_and_good_run_still_reported(tmp_path, monkeypatch):
     """Positive control: on dev, `sweep()` returns one bare dict, not a 3-tuple,
     so `reports, failures, skipped = sweep(...)` raises ValueError immediately

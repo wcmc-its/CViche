@@ -183,6 +183,25 @@ def stage(run_root: Path, uid: str, work: Path) -> Path:
     return root
 
 
+class RunIdEscapesCorpusError(Exception):
+    """`run_id` resolves outside `corpus_dir` (e.g. contains `..`)."""
+
+
+def _resolve_run_root(corpus_dir: Path, run_id: str) -> Path:
+    """`corpus_dir / run_id`, refusing a `run_id` that would resolve outside
+    `corpus_dir` (T1.5) -- e.g. `run_id="../other-directory"`.
+    """
+    root = corpus_dir / run_id
+    resolved = root.resolve()
+    try:
+        resolved.relative_to(corpus_dir.resolve())
+    except ValueError as e:
+        raise RunIdEscapesCorpusError(
+            f"run_id={run_id!r} resolves outside corpus_dir={corpus_dir}: "
+            f"{resolved}") from e
+    return root
+
+
 def sweep(corpus_dir: Path, run_ids, work: Path):
     """Doctor each run; one bad run is reported and skipped, never aborts the rest.
 
@@ -198,7 +217,7 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
     skipped = []
     for run_id in run_ids:
         try:
-            run_root = corpus_dir / run_id
+            run_root = _resolve_run_root(corpus_dir, run_id)
             uid = _find_uid(_resolve_outputs_dir(run_root))
             if not uid:
                 logger.warning("%s: no artifacts found, skipping", run_id)
