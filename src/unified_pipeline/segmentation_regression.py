@@ -628,12 +628,16 @@ def run_compare(baseline_label: str, candidate_label: str) -> int:
     fails closed on a uid present in baseline but absent from candidate --
     reported as a MISSING row and counted toward regressions, rather than
     silently dropped from `shared` and the run passing with 0 regressions
-    (#621; CODING_STANDARDS §5.5, "fail closed")."""
+    (#621; CODING_STANDARDS §5.5, "fail closed"). A uid present ONLY in the
+    candidate is reported as an informational NEW row (mirroring MISSING's
+    style) and is neither a regression nor an error -- a newly added CV
+    cannot regress against nothing (#T2.5)."""
     baseline = _load_metrics(baseline_label)
     candidate = _load_metrics(candidate_label)
     shared = sorted(set(baseline) & set(candidate))
     missing = sorted(set(baseline) - set(candidate))
-    if not shared and not missing:
+    new = sorted(set(candidate) - set(baseline))
+    if not shared and not missing and not new:
         raise SegmentationRegressionError("Snapshots share no CVs — nothing to compare.")
 
     rows: list[tuple[str, str, str]] = []
@@ -641,6 +645,8 @@ def run_compare(baseline_label: str, candidate_label: str) -> int:
     for uid in missing:
         regressions += 1
         rows.append((uid, "MISSING", "present in baseline, absent from candidate snapshot"))
+    for uid in new:
+        rows.append((uid, "NEW", "present in candidate, absent from baseline snapshot"))
     for uid in shared:
         verdict, reasons = compare_metrics(baseline[uid], candidate[uid])
         if verdict == "REGRESSION":
@@ -653,9 +659,10 @@ def run_compare(baseline_label: str, candidate_label: str) -> int:
     for uid, label, detail in rows:
         lines.append(f"{uid:<{width}}  {label:<10}  {detail}")
     lines.append("")
-    total = len(shared) + len(missing)
+    total = len(shared) + len(missing) + len(new)
     missing_note = f" ({len(missing)} missing from candidate)" if missing else ""
-    lines.append(f"{regressions} regression(s) across {total} CVs{missing_note}")
+    new_note = f" ({len(new)} new in candidate)" if new else ""
+    lines.append(f"{regressions} regression(s) across {total} CVs{missing_note}{new_note}")
     report = "\n".join(lines)
     print(report)
     (_snapshot_dir(candidate_label) / "REPORT.md").write_text(report + "\n", encoding="utf-8")
