@@ -299,39 +299,34 @@ def test_quiet_when_the_repeat_is_the_same_prose_with_different_dates():
     assert lint_duplicate_records(blocks) == []
 
 
-def test_fires_at_exactly_the_window_distance():
+@pytest.mark.parametrize("offset, expect_finding", [
+    (-1, True),   # WINDOW-1: well inside the window, fires
+    (0, True),    # WINDOW: the `<=` boundary itself, fires
+    (1, False),   # WINDOW+1: one past the boundary, quiet
+])
+def test_window_boundary(offset, expect_finding):
     """Boundary control for the `<=` comparison that prunes `recent` against
-    DUPLICATE_RECORD_WINDOW. The corpus's own headline firing (2068_Yount_Cv,
-    list numbers 32 and 38)
-    sits at distance exactly DUPLICATE_RECORD_WINDOW, so an off-by-one to `<`
-    would silently stop detecting it. `test_quiet_when_the_repeat_is_beyond_
-    the_window` pins the other side of the same edge at distance 7."""
+    DUPLICATE_RECORD_WINDOW (T4.12, #446 review). The corpus's own headline
+    firing (2068_Yount_Cv, list numbers 32 and 38) sits at distance exactly
+    DUPLICATE_RECORD_WINDOW, so an off-by-one to `<` would silently stop
+    detecting it; one past the window must stay quiet, since the shipped
+    window is bounded, not global-within-section."""
+    distance = DUPLICATE_RECORD_WINDOW + offset
     filler = [("p", f"{n}. filler citation entry number {n}, long enough to "
                      f"pass the minimum body length on its own.")
-              for n in range(2, DUPLICATE_RECORD_WINDOW + 1)]
-    last = DUPLICATE_RECORD_WINDOW + 1
+              for n in range(2, distance + 1)]
+    last = distance + 1
     blocks = ([("p", "D. PUBLICATIONS"), ("p", f"1. {_CITATION_A}")]
               + filler
               + [("p", f"{last}. {_CITATION_A}")])
-    # the two occurrences really are DUPLICATE_RECORD_WINDOW enumerated
-    # blocks apart, not fewer
-    assert last - 1 == DUPLICATE_RECORD_WINDOW
+    # the two occurrences really are `distance` enumerated blocks apart
+    assert last - 1 == distance
     findings = lint_duplicate_records(blocks)
-    assert len(findings) == 1
-    assert findings[0]["evidence"][0].startswith("block 1 repeats at ")
-
-
-def test_quiet_when_the_repeat_is_beyond_the_window():
-    """A repeat further than DUPLICATE_RECORD_WINDOW enumerated blocks from
-    its first occurrence is out of scope -- the shipped window is bounded,
-    not global-within-section."""
-    filler = [("p", f"{n}. filler citation entry number {n}, long enough to "
-                     f"pass the minimum body length on its own.")
-              for n in range(2, 2 + DUPLICATE_RECORD_WINDOW)]
-    blocks = ([("p", "D. PUBLICATIONS"), ("p", f"1. {_CITATION_A}")]
-              + filler
-              + [("p", f"{2 + DUPLICATE_RECORD_WINDOW}. {_CITATION_A}")])
-    assert lint_duplicate_records(blocks) == []
+    if expect_finding:
+        assert len(findings) == 1
+        assert findings[0]["evidence"][0].startswith("block 1 repeats at ")
+    else:
+        assert findings == []
 
 
 def test_blank_spacer_paragraphs_are_transparent_to_the_window():
