@@ -44,6 +44,35 @@ def _make_skipped_run(corpus_dir: Path, run_id: str) -> None:
     (corpus_dir / run_id / "outputs").mkdir(parents=True)
 
 
+def test_stage_prunes_symlinks_a_prior_run_left_for_the_same_uid(tmp_path):
+    """T1.1/T2.1: `work/<uid>` persists across invocations. Stage uid `aaa111`
+    from a run that has `_entries.json`, then stage it again from a run that
+    doesn't -- the second call must not leave the first run's `_entries.json`
+    symlink behind.
+    """
+    cli = _load_cli()
+    corpus = tmp_path / "corpus"
+    work = tmp_path / "work"
+    uid = "aaa111"
+
+    run1 = corpus / "run1" / "outputs"
+    run1.mkdir(parents=True)
+    (run1 / f"{uid}_fields.json").write_text("{}", encoding="utf-8")
+    (run1 / f"{uid}_entries.json").write_text("{}", encoding="utf-8")
+    cli.stage(run1, uid, work)
+    assert (work / uid / "stage_2_entry_extraction" / f"{uid}_entries.json").exists()
+
+    run2 = corpus / "run2" / "outputs"
+    run2.mkdir(parents=True)
+    (run2 / f"{uid}_fields.json").write_text("{}", encoding="utf-8")
+    cli.stage(run2, uid, work)
+
+    assert not (work / uid / "stage_2_entry_extraction").exists(), (
+        "run2 has no _entries.json -- the stale symlink from run1 must be gone")
+    assert (work / uid / "stage_4_field_extraction" / f"{uid}_fields.json").resolve() == (
+        run2 / f"{uid}_fields.json").resolve()
+
+
 def test_sweep_failure_carries_traceback_and_good_run_still_reported(tmp_path, monkeypatch):
     """Positive control: on dev, `sweep()` returns one bare dict, not a 3-tuple,
     so `reports, failures, skipped = sweep(...)` raises ValueError immediately

@@ -17,6 +17,7 @@ predating the input-archiving feature).
 import argparse
 import json
 import logging
+import shutil
 import sys
 import traceback
 from collections import Counter
@@ -74,9 +75,41 @@ def _relink(link: Path, src: Path) -> None:
     link.symlink_to(src.resolve())
 
 
+class StagingRootNotOwnedError(Exception):
+    """`work/<uid>` contains an entry this script did not create as a symlink."""
+
+
+def _clear_staged_root(root: Path) -> None:
+    """Remove `root`, refusing if anything under it isn't a symlink or a plain
+    directory this function's own layout created.
+
+    `work` persists across invocations (`.doctor_stage`), so without this a
+    stale symlink from an earlier sweep of a DIFFERENT run for the same uid
+    can outlive the current run's stage() call and get linted as if it
+    belonged to it (T1.1/T2.1). Everything `stage()` writes under `root` is
+    either a directory it made or a symlink it created -- a plain file here
+    means something else wrote into this tree, so refuse rather than delete
+    it silently.
+    """
+    for entry in root.rglob("*"):
+        if entry.is_symlink() or entry.is_dir():
+            continue
+        raise StagingRootNotOwnedError(
+            f"{root}: refusing to remove {entry} -- not a symlink or a "
+            "directory, not something this script staged")
+    shutil.rmtree(root)
+
+
 def stage(run_dir: Path, uid: str, work: Path) -> Path:
-    """Symlink the flat outputs into `<work>/<uid>/stage_*/` and return the root."""
+    """Symlink the flat outputs into `<work>/<uid>/stage_*/` and return the root.
+
+    Rebuilt from scratch on every call (see `_clear_staged_root`) so a suffix
+    absent from THIS run's outputs never leaves behind a symlink staged by an
+    earlier run for the same uid.
+    """
     root = work / uid
+    if root.exists():
+        _clear_staged_root(root)
     root.mkdir(parents=True, exist_ok=True)
     for suffix, stagedir in SUFFIX_DIR.items():
         src = run_dir / f"{uid}{suffix}"
