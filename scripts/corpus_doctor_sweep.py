@@ -331,55 +331,11 @@ def aggregate(reports):
     ]
 
 
-def _selftest():
-    # rep A: pipe_leaks WARN + segmentation skipped. rep B: pipe_leaks ERROR, nothing skipped.
-    reports = {
-        "A": {"findings": [
-            {"lint": "pipe_leaks", "severity": "WARN", "message": "x"},
-            {"lint": "segmentation", "severity": "INFO", "message": "skipped: missing source"},
-        ]},
-        "B": {"findings": [
-            {"lint": "pipe_leaks", "severity": "ERROR", "message": "y"},
-        ]},
-    }
-    rank = {r["lint"]: r for r in aggregate(reports)}
-    assert rank["pipe_leaks"]["cvs_affected"] == 2, "both reps have a >=WARN pipe_leaks finding"
-    assert rank["pipe_leaks"]["cvs_error"] == 1, "only rep B is ERROR"
-    assert rank["pipe_leaks"]["cvs_ran"] == 2, "pipe_leaks ran on both (never skipped)"
-    assert rank["segmentation"]["cvs_ran"] == 1, "segmentation skipped on A, ran (clean) on B"
-    assert rank["segmentation"]["cvs_affected"] == 0
-    assert aggregate(reports)[0]["lint"] == "pipe_leaks", "ranked first by affected count"
-
-    # #7: _resolve_outputs_dir tolerates both the nested (outputs/) and flat
-    # layout, and never raises on an absent run (returns the flat path for
-    # the caller's _find_uid-is-None branch to report).
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        corpus = Path(td)
-        (corpus / "nested" / "outputs").mkdir(parents=True)
-        (corpus / "flat").mkdir()
-        assert _resolve_outputs_dir(corpus / "nested") == corpus / "nested" / "outputs"
-        assert _resolve_outputs_dir(corpus / "flat") == corpus / "flat"
-        assert _resolve_outputs_dir(corpus / "absent") == corpus / "absent"
-
-    # #4: ALL_LINTS is now imported from run_doctor rather than hand-kept, so
-    # it cannot drift. The name-prefix count that used to live here is gone --
-    # it over-counted lint_surprise (a ranking helper, not a rule) and had been
-    # failing on dev ever since. What the registry itself must match is checked
-    # by test_run_doctor_contract.py, which runs in CI; --selftest does not.
-    assert ALL_LINTS == list(KNOWN_LINTS), "ALL_LINTS diverged from KNOWN_LINTS"
-    assert len(set(ALL_LINTS)) == len(ALL_LINTS), "ALL_LINTS has duplicates"
-
-    print("selftest OK")
-    return 0
-
-
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("corpus_dir", nargs="?")
-    ap.add_argument("run_ids", nargs="?", help="comma-separated representative run_ids")
+    ap.add_argument("corpus_dir")
+    ap.add_argument("run_ids", help="comma-separated representative run_ids")
     ap.add_argument("--work", default=None, help="staging dir (default: <corpus_dir>/.doctor_stage)")
     ap.add_argument("--out", default=None, help="write full JSON report here")
     ap.add_argument("--allow-partial", action="store_true",
@@ -387,12 +343,6 @@ def main(argv=None):
                           "though others failed, were skipped, or were duplicates "
                           "(default: any incomplete run exits 1)")
     args = ap.parse_args(argv)
-    if args.selftest:
-        return _selftest()
-    if not args.corpus_dir:
-        ap.error("corpus_dir is required (or use --selftest)")
-    if not args.run_ids:  # nargs="?" -> None; .split() would crash without this
-        ap.error("run_ids is required (or use --selftest)")
 
     corpus_dir = Path(args.corpus_dir)
     run_ids = [r.strip() for r in args.run_ids.split(",") if r.strip()]

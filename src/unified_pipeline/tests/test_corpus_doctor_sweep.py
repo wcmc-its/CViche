@@ -95,6 +95,37 @@ def test_stage_finds_source_docx_under_flat_layout_input_dir(tmp_path):
     assert staged_source.resolve() == (input_dir / f"{uid}.docx").resolve()
 
 
+def test_stage_links_every_suffix_and_the_source_docx(tmp_path):
+    """T2.3/T2.9: the central integration point between the S3-flat corpus
+    and run_doctor -- one call to stage() covering every registered
+    SUFFIX_DIR suffix plus the archived source docx, asserting every
+    expected destination exists and points at the right file. None of the
+    other tests in this file exercise stage()'s full suffix loop.
+    """
+    cli = _load_cli()
+    uid = "aaa111"
+    run_root = tmp_path / "corpus" / "run1"
+    outputs = run_root / "outputs"
+    outputs.mkdir(parents=True)
+    for suffix in cli.SUFFIX_DIR:
+        (outputs / f"{uid}{suffix}").write_text(f"content for {suffix}", encoding="utf-8")
+    input_dir = run_root / "input"
+    input_dir.mkdir()
+    (input_dir / f"{uid}.docx").write_text("source", encoding="utf-8")
+    work = tmp_path / "work"
+
+    root = cli.stage(run_root, uid, work)
+
+    for suffix, stagedir in cli.SUFFIX_DIR.items():
+        dest = root / stagedir / f"{uid}{suffix}"
+        assert dest.is_symlink(), f"missing staged link for suffix {suffix!r}"
+        assert dest.resolve() == (outputs / f"{uid}{suffix}").resolve()
+
+    source_link = root / f"{uid}.docx"
+    assert source_link.is_symlink()
+    assert source_link.resolve() == (input_dir / f"{uid}.docx").resolve()
+
+
 def test_stage_prefers_exact_uid_docx_and_rejects_a_prefix_decoy(tmp_path):
     """T1.3: `web05` must not resolve to `web050.docx` -- the traced
     2026-07-15 misattribution. With only the decoy present, no source is
@@ -218,6 +249,40 @@ def test_aggregate_raises_on_unknown_lint():
         assert "r1" in str(e) and "not_a_real_lint" in str(e)
     else:
         raise AssertionError("expected MalformedFindingError")
+
+
+def test_aggregate_ranks_by_affected_count_and_tracks_skip_vs_ran():
+    """Ported from the deleted _selftest (T2.9): rep A has a pipe_leaks WARN
+    and a skipped segmentation; rep B has a pipe_leaks ERROR and nothing
+    skipped.
+    """
+    cli = _load_cli()
+    reports = {
+        "A": {"findings": [
+            {"lint": "pipe_leaks", "severity": "WARN", "message": "x"},
+            {"lint": "segmentation", "severity": "INFO", "message": "skipped: missing source"},
+        ]},
+        "B": {"findings": [
+            {"lint": "pipe_leaks", "severity": "ERROR", "message": "y"},
+        ]},
+    }
+    rank = {r["lint"]: r for r in cli.aggregate(reports)}
+    assert rank["pipe_leaks"]["cvs_affected"] == 2, "both reps have a >=WARN pipe_leaks finding"
+    assert rank["pipe_leaks"]["cvs_error"] == 1, "only rep B is ERROR"
+    assert rank["pipe_leaks"]["cvs_ran"] == 2, "pipe_leaks ran on both (never skipped)"
+    assert rank["segmentation"]["cvs_ran"] == 1, "segmentation skipped on A, ran (clean) on B"
+    assert rank["segmentation"]["cvs_affected"] == 0
+    assert cli.aggregate(reports)[0]["lint"] == "pipe_leaks", "ranked first by affected count"
+
+
+def test_resolve_outputs_dir_tolerates_nested_and_flat_layouts_and_never_raises(tmp_path):
+    """Ported from the deleted _selftest (T2.9)."""
+    cli = _load_cli()
+    (tmp_path / "nested" / "outputs").mkdir(parents=True)
+    (tmp_path / "flat").mkdir()
+    assert cli._resolve_outputs_dir(tmp_path / "nested") == tmp_path / "nested" / "outputs"
+    assert cli._resolve_outputs_dir(tmp_path / "flat") == tmp_path / "flat"
+    assert cli._resolve_outputs_dir(tmp_path / "absent") == tmp_path / "absent"
 
 
 def test_sweep_records_a_second_run_for_the_same_uid_as_a_duplicate(tmp_path, monkeypatch):
