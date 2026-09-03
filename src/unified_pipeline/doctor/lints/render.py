@@ -155,13 +155,45 @@ def lint_output_hygiene(blocks: List[Tuple[str, str]]) -> List[Dict]:
     return findings
 
 
+# A leading list-label ("B. ", "3) ") on one side only, stripped before
+# splitting into coordinate segments.
+_NAME_LABEL_RE = re.compile(r"^[A-Za-z0-9]{1,3}[.)]\s+")
+
+
+# Coordinated section titles ("Honors and Awards", "Grants & Contracts",
+# "Teaching, Mentoring, and Advising") name more than one topic; split on the
+# coordinating word/punctuation so a name matching ANY ONE coordinate topic
+# still counts as belonging to the section.
+_NAME_SPLIT_RE = re.compile(r"\s*(?:,|&|\band\b)\s*")
+
+
+def _name_segments(text: str) -> set:
+    stripped = _NAME_LABEL_RE.sub("", _norm(text))
+    return {seg for seg in (s.strip() for s in _NAME_SPLIT_RE.split(stripped))
+            if seg}
+
+
 def _names_match(a: str, b: str) -> bool:
+    """Whole-name or whole-coordinate-segment match (#446 review T1.3), not a
+    bare 6-char substring: the old rule let 'education' collide with
+    'educational contributions' (confirmed live on the farm) and, worse,
+    would let 'Research' collide with 'Research Administration' -- two
+    genuinely different sections that happen to share a word. Splitting each
+    name on its own coordinating words ('and', '&', ',') and requiring a
+    WHOLE segment to match lets 'Honors' match 'B. Honors and Awards' (one
+    of its two coordinate topics) without letting 'Research' match inside
+    the unrelated compound 'Research Administration' (which has no
+    coordinating word to split on, so it stays one indivisible segment).
+
+    A spurious match here can only SUPPRESS a real dead_sections finding
+    (the wrongly-matched section still has to be found EMPTY to fire), never
+    fabricate one against unrelated content -- so tightening this closes a
+    false-negative (silence) risk, not a false-positive one."""
     if not a or not b:
         return False
     if a == b:
         return True
-    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
-    return len(shorter) >= 6 and shorter in longer
+    return bool(_name_segments(a) & _name_segments(b))
 
 
 def lint_dead_sections(stage2: Dict,
