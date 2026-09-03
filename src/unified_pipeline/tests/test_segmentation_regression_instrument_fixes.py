@@ -24,12 +24,15 @@ from unified_pipeline import segmentation_regression as segreg  # noqa: E402
 from unified_pipeline.segmentation_regression import (  # noqa: E402
     Metrics,
     SegmentationRegressionError,
+    SnapshotLabelError,
     _load_metrics,
     _snapshot_dir,
     compare_metrics,
     compute_metrics,
     iter_source_lines,
+    lint_metrics,
     run_compare,
+    run_lint,
 )
 
 
@@ -443,3 +446,266 @@ def test_run_compare_no_shared_and_no_missing_still_raises(tmp_path, monkeypatch
 
     with pytest.raises(SegmentationRegressionError, match="share no CVs"):
         run_compare("base", "cand")
+
+
+# ------------------------------------------------------------- round 2: T1.1c
+# lint_metrics(): one test per branch/threshold, plus the clean case.
+
+def test_lint_metrics_clean_case_flags_nothing():
+    m = _metrics(text_coverage_pct=100.0, lost_lines=[], mega_entries=0,
+                 duplicate_entries=0, empty_content=0)
+    assert lint_metrics(m) == []
+
+
+def test_lint_metrics_flags_low_coverage_with_sample():
+    m = _metrics(text_coverage_pct=80.0, lost_lines=["a lost line here"])
+    flags = lint_metrics(m)
+    assert any("coverage 80.0%" in f and "a lost line here" in f for f in flags)
+
+
+def test_lint_metrics_flags_mega_entries():
+    m = _metrics(mega_entries=2)
+    flags = lint_metrics(m)
+    assert "mega_entries=2" in flags
+
+
+def test_lint_metrics_flags_duplicate_entries():
+    m = _metrics(duplicate_entries=3)
+    flags = lint_metrics(m)
+    assert "duplicate_entries=3" in flags
+
+
+def test_lint_metrics_flags_empty_content():
+    m = _metrics(empty_content=1)
+    flags = lint_metrics(m)
+    assert "empty_content=1" in flags
+
+
+# ------------------------------------------------------------- round 2: T1.1e
+# run_lint(): happy path (0) and failing path (nonzero), against a fabricated
+# snapshot dir under tmp_path with _outputs_root monkeypatched.
+
+def test_run_lint_clean_snapshot_returns_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
+    snap = _snapshot_dir("clean")
+    snap.mkdir(parents=True)
+    (snap / "metrics.json").write_text(json.dumps({"uid1": _metrics()}), encoding="utf-8")
+
+    assert run_lint("clean") == 0
+
+
+def test_run_lint_flagged_snapshot_returns_nonzero(tmp_path, monkeypatch):
+    monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
+    snap = _snapshot_dir("dirty")
+    snap.mkdir(parents=True)
+    payload = {"uid1": _metrics(text_coverage_pct=50.0, lost_lines=["x"])}
+    (snap / "metrics.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    assert run_lint("dirty") != 0
+
+
+# ------------------------------------------------------------- round 2: T2.1
+# snapshot() split into _snapshot_cv()/SnapshotResult (#T2.1). These tests
+# monkeypatch the three pipeline-stage functions at their SOURCE modules
+# (not on segreg) because _snapshot_cv imports them locally, fresh, on every
+# call -- patching the source module's attribute is what a fresh `from X
+# import Y` picks up.
+
+def _patch_snapshot_stages(monkeypatch, hierarchy_fails_for: str | None = None):
+    def fake_hierarchy(cv_path):
+        if hierarchy_fails_for and hierarchy_fails_for in cv_path:
+            raise RuntimeError(f"boom on {cv_path}")
+        return [], {"extraction_cost": 0.0}
+
+    monkeypatch.setattr(
+        "unified_pipeline.segmentation.chunked_chat_hierarchy_extractor.get_cv_hierarchy_chunked",
+        fake_hierarchy,
+    )
+    monkeypatch.setattr(
+        "unified_pipeline.stage_1b_hierarchy_mapper.run_stage_1b",
+        lambda docx_path, hierarchy_json_path=None: (None, "unused_stage1b.json"),
+    )
+    monkeypatch.setattr(
+        "unified_pipeline.stage_2_entry_extraction.run_stage_2",
+        lambda docx_path, hierarchy_json_path=None: ({"entries": [], "total_cost": 0.0}, None),
+    )
+
+
+def _make_fake_cv_dir(tmp_path, stems):
+    cv_dir = tmp_path / "cvs"
+    cv_dir.mkdir()
+    for stem in stems:
+        Document().save(cv_dir / f"{stem}.docx")
+    return cv_dir
+
+
+def test_snapshot_happy_path_writes_metrics_for_both_cvs(tmp_path, monkeypatch):
+    monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
+    _patch_snapshot_stages(monkeypatch)
+    cv_dir = _make_fake_cv_dir(tmp_path, ["uid1", "uid2"])
+
+    result = segreg.snapshot("happy", str(cv_dir), None)
+
+    metrics = json.loads((result / "metrics.json").read_text(encoding="utf-8"))
+    assert set(metrics) == {"uid1", "uid2"}
+
+
+def test_snapshot_isolates_one_cv_failure_and_still_writes_the_rest(tmp_path, monkeypatch):
+    """A per-CV exception (caught inside _snapshot_cv) must not lose metrics
+    already computed for OTHER CVs: metrics.json still gets the surviving
+    uid, and SegmentationRegressionError names the failed one (#T2.1)."""
+    monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
+    _patch_snapshot_stages(monkeypatch, hierarchy_fails_for="bad")
+    cv_dir = _make_fake_cv_dir(tmp_path, ["good", "bad"])
+
+    with pytest.raises(SegmentationRegressionError, match="bad"):
+        segreg.snapshot("iso", str(cv_dir), None)
+
+    metrics = json.loads((_snapshot_dir("iso") / "metrics.json").read_text(encoding="utf-8"))
+    assert "good" in metrics
+    assert "bad" not in metrics
+
+
+# ------------------------------------------------------------- round 2: T1.1g
+# --uids filtering: made cheap to drive by the same stage-function fakes D2
+# introduces.
+
+def test_snapshot_uids_filters_to_exactly_those_stems(tmp_path, monkeypatch):
+    monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
+    _patch_snapshot_stages(monkeypatch)
+    cv_dir = _make_fake_cv_dir(tmp_path, ["uid1", "uid2", "uid3"])
+
+    result = segreg.snapshot("subset", str(cv_dir), ["uid1", "uid3"])
+
+    metrics = json.loads((result / "metrics.json").read_text(encoding="utf-8"))
+    assert set(metrics) == {"uid1", "uid3"}
+
+
+# ------------------------------------------------------------- round 2: T2.2
+# _load_metrics() full schema validation (#T2.2): one test per violated
+# category, plus the mapping/TypedDict drift guard, plus a happy path (the
+# pre-existing test_load_metrics_accepts_well_formed_snapshot above already
+# covers the happy path against the new, stricter checks).
+
+def test_metrics_field_checkers_cover_every_required_key():
+    assert set(segreg._METRICS_FIELD_CHECKERS) == Metrics.__required_keys__
+
+
+def test_load_metrics_rejects_wrong_type_count_field(tmp_path, monkeypatch):
+    monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
+    snap = _snapshot_dir("badcount")
+    snap.mkdir(parents=True)
+    payload = {"uid1": {**_metrics(), "mega_entries": "not-an-int"}}
+    (snap / "metrics.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SegmentationRegressionError, match="mega_entries"):
+        _load_metrics("badcount")
+
+
+def test_load_metrics_rejects_bool_for_count_field(tmp_path, monkeypatch):
+    """bool is an int subclass -- must be rejected explicitly, not accepted
+    because isinstance(True, int) is True."""
+    monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
+    snap = _snapshot_dir("boolcount")
+    snap.mkdir(parents=True)
+    payload = {"uid1": {**_metrics(), "duplicate_entries": True}}
+    (snap / "metrics.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SegmentationRegressionError, match="duplicate_entries"):
+        _load_metrics("boolcount")
+
+
+def test_load_metrics_rejects_out_of_range_coverage(tmp_path, monkeypatch):
+    monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
+    snap = _snapshot_dir("badcoverage")
+    snap.mkdir(parents=True)
+    payload = {"uid1": {**_metrics(), "text_coverage_pct": 150.5}}
+    (snap / "metrics.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SegmentationRegressionError, match="text_coverage_pct"):
+        _load_metrics("badcoverage")
+
+
+def test_load_metrics_rejects_non_list_list_field(tmp_path, monkeypatch):
+    monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
+    snap = _snapshot_dir("badlist")
+    snap.mkdir(parents=True)
+    payload = {"uid1": {**_metrics(), "lost_lines": "not-a-list"}}
+    (snap / "metrics.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(SegmentationRegressionError, match="lost_lines"):
+        _load_metrics("badlist")
+
+
+# ------------------------------------------------------------- round 2: T2.4
+# snapshot() refuses to reuse a label whose metrics.json already exists.
+
+def test_snapshot_refuses_to_reuse_existing_label(tmp_path, monkeypatch):
+    monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
+    snap = _snapshot_dir("taken")
+    snap.mkdir(parents=True)
+    original = json.dumps({"uid0": _metrics()})
+    (snap / "metrics.json").write_text(original, encoding="utf-8")
+
+    with pytest.raises(SnapshotLabelError, match="already exists"):
+        segreg.snapshot("taken", None, None)
+
+    assert (snap / "metrics.json").read_text(encoding="utf-8") == original
+
+
+# ------------------------------------------------------------- round 2: T2.5
+# run_compare(): a candidate-only uid is an informational NEW row, not a
+# regression and not an error.
+
+def test_run_compare_candidate_only_uid_reported_as_new(tmp_path, monkeypatch):
+    monkeypatch.setattr(segreg, "_outputs_root", lambda: tmp_path)
+    baseline_dir = _snapshot_dir("base")
+    candidate_dir = _snapshot_dir("cand")
+    baseline_dir.mkdir(parents=True)
+    candidate_dir.mkdir(parents=True)
+
+    baseline_metrics = {"uid1": _metrics()}
+    candidate_metrics = {"uid1": _metrics(), "uid2": _metrics()}
+    (baseline_dir / "metrics.json").write_text(json.dumps(baseline_metrics), encoding="utf-8")
+    (candidate_dir / "metrics.json").write_text(json.dumps(candidate_metrics), encoding="utf-8")
+
+    exit_code = run_compare("base", "cand")
+
+    assert exit_code == 0
+    report = (candidate_dir / "REPORT.md").read_text(encoding="utf-8")
+    assert "uid2" in report
+    assert "NEW" in report
+
+
+# ------------------------------------------------------------- round 2: T2.6
+# merged-cell coverage: horizontal (gridSpan) merge, and a nested table
+# inside a merged cell. The existing vMerge (vertical) test above is kept.
+
+def test_iter_source_lines_dedupes_horizontally_merged_cell(tmp_path):
+    """A 1x2 table with cell(0,0) merged into cell(0,1) (gridSpan) must
+    report the merged cell's text ONCE -- the same _tc-identity dedupe as
+    the vertical-merge case, mirrored for a horizontal span."""
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "merged row text"
+    table.cell(0, 0).merge(table.cell(0, 1))
+    path = tmp_path / "hmerge.docx"
+    doc.save(path)
+
+    lines = iter_source_lines(str(path))
+    assert lines.count("merged row text") == 1
+
+
+def test_iter_source_lines_nested_table_inside_merged_cell_yields_once(tmp_path):
+    """A nested table inside a gridSpan-merged cell must have its own lines
+    counted once, not once per spanned grid position of its parent cell."""
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+    merged = table.cell(0, 0).merge(table.cell(0, 1))
+    nested = merged.add_table(rows=1, cols=1)
+    nested.cell(0, 0).text = "nested content"
+    path = tmp_path / "nested_merge.docx"
+    doc.save(path)
+
+    lines = iter_source_lines(str(path))
+    assert lines.count("nested content") == 1
