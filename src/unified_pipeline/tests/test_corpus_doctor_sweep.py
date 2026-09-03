@@ -348,6 +348,26 @@ def test_out_payload_contains_failures_and_skipped(tmp_path, monkeypatch):
     assert "skipped" in payload and payload["skipped"] == ["skip1"]
 
 
+def test_out_payload_is_written_as_utf8_with_literal_non_ascii(tmp_path, monkeypatch):
+    """T2.8: write_text must use encoding="utf-8" explicitly, and the JSON
+    itself must carry non-ASCII text literally (ensure_ascii=False), not
+    \\uXXXX-escaped.
+    """
+    cli = _load_cli()
+    corpus = tmp_path / "corpus"
+    _make_run(corpus, "good1", "aaa111")
+    out = tmp_path / "sweep.json"
+
+    monkeypatch.setattr(cli, "run_doctor",
+                         lambda root, uid: {"findings": [], "note": "café"})
+
+    assert cli.main([str(corpus), "good1", "--out", str(out)]) == 0
+
+    raw = out.read_bytes()
+    assert "café".encode("utf-8") in raw, "non-ASCII must be written as literal UTF-8 bytes"
+    assert b"\\u" not in raw, "ensure_ascii=False means no \\uXXXX escaping"
+
+
 def test_diagnostics_go_through_the_logger_not_bare_stderr_prints(tmp_path, monkeypatch, capsys, caplog):
     """The old `print(..., file=sys.stderr)` sites at :107/:114-117 must be
     gone: nothing reaches the process's stderr stream directly any more (the

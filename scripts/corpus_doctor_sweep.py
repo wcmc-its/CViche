@@ -425,7 +425,8 @@ def main(argv=None):
         Path(args.out).write_text(json.dumps(
             {"n_cvs": n, "ranking": ranking, "reports": reports,
              "failures": failures, "skipped": skipped,
-             "duplicates": duplicates}, indent=2))
+             "duplicates": duplicates}, indent=2, ensure_ascii=False),
+            encoding="utf-8")
         print(f"\n-> {args.out}")
 
     # A sweep that doctored nothing is a failure, not a pass (§5.5) -- without
