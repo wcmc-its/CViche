@@ -615,6 +615,17 @@ def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
     distances = {b - a for positions in windows.values() if len(positions) > 1
                  for a, b in zip(positions, positions[1:])}
 
+    # `distances` is built globally across every repeated window in the
+    # document, so a distance earned by one stretch can also happen to match
+    # a DIFFERENT stretch's own occurrences (e.g. stretch A repeats at
+    # positions 0, 6, 12 -- earning distance 6 -- while an unrelated stretch B
+    # repeats at distance 12 elsewhere; the distance-12 scan then re-pairs
+    # A's occurrence at 0 with its own occurrence at 12, which distance 6
+    # already charged via the 0-6 and 6-12 pairs). Track each match's SECOND
+    # occurrence range in index space and skip a match that overlaps a range
+    # already charged, so each redundant copy is counted once regardless of
+    # how many distances re-derive it (#446 review, fb73705 rework).
+    charged_second_ranges: List[Tuple[int, int]] = []
     passages: List[Tuple[int, int, int]] = []
     for distance in sorted(distances):
         i = 0
@@ -627,9 +638,13 @@ def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
             j = i
             while j + 1 < n - distance and keys[j + 1] == keys[j + 1 + distance]:
                 j += 1
+            second_range = (i + distance, i + distance + (j - i + 1) - 1)
             if (j - i + 1 >= span
-                    and any(_YEAR_RE.search(keys[t]) for t in range(i, j + 1))):
+                    and any(_YEAR_RE.search(keys[t]) for t in range(i, j + 1))
+                    and not any(s <= second_range[1] and second_range[0] <= e
+                                for s, e in charged_second_ranges)):
                 passages.append((i, i + distance, j - i + 1))
+                charged_second_ranges.append(second_range)
             i = j + 1
     if len(passages) < DUPLICATE_PASSAGE_WARN_COUNT:
         return []
