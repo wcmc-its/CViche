@@ -589,6 +589,9 @@ def test_snapshot_uids_filters_to_exactly_those_stems(tmp_path, monkeypatch):
 
 def test_metrics_field_checkers_cover_every_required_key():
     assert set(segreg._METRICS_FIELD_CHECKERS) == Metrics.__required_keys__
+    for checker, description in segreg._METRICS_FIELD_CHECKERS.values():
+        assert callable(checker)
+        assert isinstance(description, str) and description
 
 
 def test_load_metrics_rejects_wrong_type_count_field(tmp_path, monkeypatch):

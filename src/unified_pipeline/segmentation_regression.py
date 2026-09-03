@@ -123,49 +123,47 @@ class Metrics(TypedDict):
 
 
 def _is_int_count(value: Any) -> bool:
-    """a non-negative-shaped int (bool excluded -- bool is an int subclass
-    and would otherwise silently pass)"""
+    # bool is an int subclass and would otherwise silently pass.
     return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _is_coverage_pct(value: Any) -> bool:
-    """a number (int/float, not bool) in [0, 100]"""
     return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 100
 
 
 def _is_str_list(value: Any) -> bool:
-    """a list of str"""
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
 def _is_str_int_dict(value: Any) -> bool:
-    """a dict of str -> int count"""
     return isinstance(value, dict) and all(
         isinstance(k, str) and _is_int_count(v) for k, v in value.items()
     )
 
 
-# One checker per Metrics field, keyed by field name so this mapping and the
-# TypedDict cannot drift apart (#T2.2) -- pinned by
+# One (checker, description) pair per Metrics field, keyed by field name so
+# this mapping and the TypedDict cannot drift apart (#T2.2) -- pinned by
 # test_metrics_field_checkers_cover_every_required_key. _load_metrics() uses
 # this to validate the FULL persisted shape, not just key presence: a
 # corrupted or hand-edited metrics.json (a count as a string, a coverage
 # value out of [0, 100], a list field holding a non-list) previously passed
-# and failed later with an unrelated TypeError.
-_METRICS_FIELD_CHECKERS: dict[str, Callable[[Any], bool]] = {
-    "source_lines": _is_int_count,
-    "substantive_lines": _is_int_count,
-    "text_coverage_pct": _is_coverage_pct,
-    "lost_lines": _is_str_list,
-    "entries_total": _is_int_count,
-    "entries_content": _is_int_count,
-    "empty_content": _is_int_count,
-    "duplicate_entries": _is_int_count,
-    "mega_entries": _is_int_count,
-    "max_entry_chars": _is_int_count,
-    "headers_detected": _is_int_count,
-    "header_titles": _is_str_list,
-    "per_h1_content_counts": _is_str_int_dict,
+# and failed later with an unrelated TypeError. The description is a plain
+# string, not the checker's __doc__ -- docstrings are stripped under -OO,
+# which would blank the error message (#T2.2 follow-up).
+_METRICS_FIELD_CHECKERS: dict[str, tuple[Callable[[Any], bool], str]] = {
+    "source_lines": (_is_int_count, "an int count"),
+    "substantive_lines": (_is_int_count, "an int count"),
+    "text_coverage_pct": (_is_coverage_pct, "a number in [0, 100]"),
+    "lost_lines": (_is_str_list, "a list of str"),
+    "entries_total": (_is_int_count, "an int count"),
+    "entries_content": (_is_int_count, "an int count"),
+    "empty_content": (_is_int_count, "an int count"),
+    "duplicate_entries": (_is_int_count, "an int count"),
+    "mega_entries": (_is_int_count, "an int count"),
+    "max_entry_chars": (_is_int_count, "an int count"),
+    "headers_detected": (_is_int_count, "an int count"),
+    "header_titles": (_is_str_list, "a list of str"),
+    "per_h1_content_counts": (_is_str_int_dict, "a dict of str to int"),
 }
 
 
@@ -571,7 +569,10 @@ def snapshot(label: str, cv_dir: str | None, uids: list[str] | None) -> Path:
             print(f"  FAILED: {result['error']}")
             continue
         metrics = result["metrics"]
-        assert metrics is not None, "SnapshotResult: error is None but metrics is also None"
+        if metrics is None:
+            raise SegmentationRegressionError(
+                f"{result['uid']}: _snapshot_cv returned neither metrics nor error"
+            )
         all_metrics[result["uid"]] = metrics
         print(f"  coverage={metrics['text_coverage_pct']}% "
               f"entries={metrics['entries_total']} mega={metrics['mega_entries']} "
@@ -616,11 +617,11 @@ def _load_metrics(label: str) -> dict[str, Metrics]:
             raise SegmentationRegressionError(
                 f"{path}: entry {uid!r} is missing Metrics keys: {sorted(missing)}"
             )
-        for field, checker in _METRICS_FIELD_CHECKERS.items():
+        for field, (checker, description) in _METRICS_FIELD_CHECKERS.items():
             if not checker(entry[field]):
                 raise SegmentationRegressionError(
                     f"{path}: entry {uid!r} field {field!r} must be "
-                    f"{checker.__doc__}, got {entry[field]!r}"
+                    f"{description}, got {entry[field]!r}"
                 )
     return raw
 
