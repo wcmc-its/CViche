@@ -14,32 +14,15 @@ def _strip_markdown_for_word(text: str, preserve_newlines: bool = False) -> str:
     r"""Strip the SUPPORTED markdown subset from stage-5c text for a Word run.
 
     The name says "markdown"; the contract is narrower on purpose. The input
-    is not arbitrary markdown, it is the small set of markers stage 5c
-    emits, and everything outside that set is passed through as written --
-    the safe direction, since an unrecognised construct then renders as
-    literal characters instead of having content cut out of it.
+    is not arbitrary markdown, it is the small set of markers stage 5c emits
+    -- `**bold**`, a "- " list prefix and the `Notes:` marker after it -- and
+    everything outside that set is passed through as written, the safe
+    direction: an unrecognised construct then renders as literal characters
+    instead of having content cut out of it. Lines are stripped, blank lines
+    dropped, and the rest rejoined with "; " or with newlines.
 
-    Stripped:
-    - `**bold**` markers, anywhere in a line ("**Course:** X" -> "Course: X")
-    - a `- ` list prefix at the start of a line (after that line is
-      stripped, so an indented sub-bullet is flattened to the same level,
-      not preserved as one), and stage 5c's `Notes:` structural marker
-      immediately after it
-    - leading/trailing whitespace on every line, and empty lines
-    Lines are then rejoined with "; " -- or with newlines when
-    `preserve_newlines` is set.
-
-    Deliberately NOT handled, and passed through unchanged:
-    - links, `[text](url)`
-    - emphasis, `*text*` and `_text_`
-    - inline code, `` `x` ``, and fenced code blocks
-    - escapes: `\*\*not bold\*\*` keeps its backslashes and its asterisks
-    - ATX headers, `# Header`. The previous docstring claimed these were
-      stripped; the implementation has never touched them.
-    - ordered list markers, `1. item`
-    - a bullet written `-item`, with no space after the dash
-
-    Pinned as a contract by
+    The whole subset, and every construct deliberately left alone, is pinned
+    as a contract by
     `src/unified_pipeline/tests/test_stage6_markdown_subset_contract.py`.
 
     Args:
