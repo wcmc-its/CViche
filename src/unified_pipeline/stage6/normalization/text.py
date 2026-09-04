@@ -15,7 +15,7 @@ change would make a failure impossible to attribute to either.
 """
 import logging
 import re
-from typing import Dict, Optional
+from typing import TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +246,32 @@ def _normalize_author_names(authors: str) -> str:
     return result
 
 
-def _get_cleaned_institution_name(entry: Dict) -> Optional[str]:
+class InstitutionEnrichment(TypedDict, total=False):
+    """The stage 5b `institution_enrichment` fields stage 6 reads.
+
+    `total=False` is the shape, not a convenience: stage 5b writes whichever
+    of these its LLM returned and both keys are routinely absent or empty
+    (an empty `cleaned_name` next to a correct `official_name` is the case
+    the fallback below exists for). Documentation for the reader and for
+    mypy -- a TypedDict is erased at runtime, so the `or {}` guard in
+    `_get_cleaned_institution_name` stays load-bearing (#559).
+    """
+    cleaned_name: str
+    official_name: str
+
+
+class InstitutionEnrichmentEntry(TypedDict, total=False):
+    """A stage-4/5 entry insofar as `_get_cleaned_institution_name` reads it.
+
+    Entries carry many more keys than this; only the one this function
+    touches is named, so the annotation stays honest about what is actually
+    required. The value may be present and explicitly None (#559).
+    """
+    institution_enrichment: InstitutionEnrichment | None
+
+
+def _get_cleaned_institution_name(
+        entry: InstitutionEnrichmentEntry) -> str | None:
     """Get cleaned institution name from enrichment data if available.
 
     When Stage 5b LLM enrichment provides a cleaned_name (institution name with
@@ -532,7 +557,7 @@ def _squash(text) -> str:
     return re.sub(r"\s+", "", str(text or "")).lower()
 
 
-def _pii_fragments(text: Optional[str]) -> List[str]:
+def _pii_fragments(text: str | None) -> list[str]:
     """The fragments of an entry that carry protected personal data."""
     text = str(text or "")
     colon_fragments = [f for f in _PII_FRAGMENT_SPLIT_RE.split(text)
@@ -541,7 +566,7 @@ def _pii_fragments(text: Optional[str]) -> List[str]:
     return colon_fragments + colonless_fragments
 
 
-def _from_pii_fragment(value, pii_fragments: List[str]) -> bool:
+def _from_pii_fragment(value, pii_fragments: list[str]) -> bool:
     """Whether an extracted value's text was taken out of a PII fragment.
 
     Deny by value PROVENANCE, not by entry. Dropping a whole entry that
