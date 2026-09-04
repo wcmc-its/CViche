@@ -99,31 +99,51 @@ def _clean_inline_tabs(text: str) -> str:
       tab renders ragged against Word's default tab stops, so the first becomes
       ": " (label: value) and any further tabs become " — ".
 
-    UPSTREAM CONTRACT -- what every caller has already decided before it
-    gets here. This is the residual-text path: the routing that sends a
-    table-shaped record to a real Word table runs first, and only what that
-    routing declined reaches this function. The six call sites, each read
-    before being written down here:
+    UPSTREAM CONTRACT -- what each caller has already decided before it gets
+    here. It is not one contract but two, and neither is "a row can never
+    arrive". The six call sites, each re-read against its own callers:
 
-    - ``stage_6_word_template.py:1137`` ``_insert_bulleted_entry`` -- one
-      entry rendered as a single bullet paragraph.
+    - ``stage_6_word_template.py:1137`` ``_insert_bulleted_entry`` -- a
+      shared bullet helper with eight callers in three sections, so the
+      contract is the section's, not the helper's. ``teaching.py`` (six of
+      the eight) renders every entry as a bullet because the WCM template
+      has no teaching table to route to. ``clinical_practice.py:487`` (via
+      ``_insert_multiline_as_bullets``) and ``passthrough.py:279`` are the
+      other kind: an explicit fallback taken only when the section's table
+      was not found in the template or failed its header validation.
     - ``stage_6_word_template.py:2084`` ``_insert_reconsidered_segment`` --
-      one LLM-reclassified segment, likewise a single bullet.
+      two callers. ``:1925`` re-routes an LLM-reclassified appendix
+      segment. ``:2320`` is ``_recover_unrendered_records``, which passes
+      multi-cell rows here DELIBERATELY: it skips a multi-column row only
+      when the row carries no digit and its cells are majority
+      column-label words (``_is_column_header_row``), and keeps "a dateless
+      multi-cell row of real content (committee membership: 'Member |
+      Committee on X | Organization')". That row is flattened here on
+      purpose, because the alternative is leaving the record unrendered.
     - ``stage_6_word_template.py:2386`` ``_unconsumed_personal_data_batch``
       -- A entries no Personal Data slot consumed. Its PII scan reads the
       RAW text, precisely because this call destroys the fragment boundaries
       that scan splits on.
     - ``sections/appendix.py:70`` -- the appendix, which by construction
       holds only entries no section renderer claimed.
-    - ``sections/mentoring.py:203`` ``_insert_mentoring_summaries`` -- only
-      the aggregate entries ``_is_mentee_record()`` rejected; every mentee
-      record went to ``_create_mentee_table_with_spacing`` instead.
+    - ``sections/mentoring.py:203`` ``_insert_mentoring_summaries`` -- three
+      feeds, screened differently. ``n3a_summaries``/``n3b_summaries`` are
+      what ``_is_mentee_record()`` rejected, every mentee record having gone
+      to ``_create_mentee_table_with_spacing`` instead (``:112-115``). The
+      third feed, ``n4_entries`` (``:194``), is NOT screened by
+      ``_is_mentee_record`` and never passes through that partition: N4
+      mentoring outcomes have no table anywhere in the WCM template, so
+      there is nothing to screen them against.
     - ``sections/researcher_profiles.py:62`` -- S0 identifier lines (ORCID,
-      Google Scholar), one short line each.
+      Google Scholar). The template has neither a heading nor a table for
+      them, so every S0 entry is a bullet.
 
-    None of that is enforced by a type or an assertion, so it is a
-    convention and not a guarantee: a genuine table row whose upstream
-    classification failed arrives here and is flattened into one
+    So the residual-text framing holds only for the table-backed sections
+    (clinical practice, passthrough, the mentee tables). For teaching, N4,
+    S0 and the appendix there is no table in the template to route to, and a
+    row-shaped record reaches this function by construction rather than
+    through a routing failure. Either way nothing is enforced by a type or
+    an assertion: a genuine table row is flattened into one
     "cell — cell — cell" line, with no warning. That cost is pinned rather
     than left to be discovered in a delivered document --
     ``test_cell_separators.py`` covers the residual-text path and
