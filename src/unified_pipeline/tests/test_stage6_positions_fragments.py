@@ -751,6 +751,56 @@ def test_merge_refuses_a_pair_that_names_no_employer_at_all():
                 or titled["extracted_fields"].get("end_date"))
 
 
+# Employer strings a source CV produces that carry no word at all: an empty
+# field, whitespace, and the dash or ampersand a table cell is left as when the
+# CV had nothing to put there. Field extraction passes these through as an
+# institution, so they arrive at the merge looking like a named employer.
+NAMELESS_EMPLOYERS = ["", "   ", "-", "–", "—", "&", ", ,"]
+
+
+@pytest.mark.parametrize("nameless", NAMELESS_EMPLOYERS)
+def test_an_employer_with_no_word_in_it_matches_nothing(nameless):
+    """Pins `_employers_match`'s first guard: an employer that names nobody is
+    no evidence, in either argument position and against itself.
+
+    The comparison is on word sets, so a value with no word in it produces an
+    empty set, and every empty set is a subset of every other. Without the
+    guard the subset test reads "unknown" as "equal to anything" -- the exact
+    reading review item 2 asked to be replaced with a fail-closed one.
+    """
+    assert not _employers_match(nameless, "Lincoln Hospital")
+    assert not _employers_match("Lincoln Hospital", nameless)
+    assert not _employers_match(nameless, nameless)
+
+
+def test_two_named_employers_still_match_by_word_subset():
+    """The guard's positive control: refusing the nameless ones must not cost
+    the sub-unit match the comparison exists for."""
+    assert _employers_match("Lincoln Hospital",
+                            "Lincoln Hospital, Department of Emergency Medicine")
+
+
+def test_a_placeholder_employer_does_not_license_a_merge():
+    """The same guard at the merge decision rather than in the helper.
+
+    A source table that leaves its employer cell as a dash hands field
+    extraction an institution with no word in it. That is a missing employer
+    wearing a name, and it is no evidence that the row beside it is the same
+    appointment: both rows must survive carrying what they came with. Read as
+    a match, it copies the dates off one row onto the other and deletes it --
+    an appointment the CV never claimed, which is the loss review item 2 is
+    about.
+    """
+    dated = _position_entry(1, "", "Lincoln Hospital", ["Hospital Appointments"],
+                            "2002-07", "2006-12")
+    titled = _position_entry(2, "Attending Physician", "—", ["Hospital Appointments"])
+
+    assert _render_positions([dated, titled], code="D2") == [
+        ["", "Lincoln Hospital", "07/02-12/06"],
+        ["Attending Physician", "—", ""],
+    ]
+
+
 def _rule_1_pair_resting_on_inheritance():
     """A title-only row that inherited employer X, then a bare-dates row
     naming employer Y: Rule 1 (adjacent pair) merges them on the inheritance
@@ -817,6 +867,31 @@ def test_a_merge_resting_on_inheritance_alone_is_counted(build_entries, capsys):
 
     assert len(merged) == len(entries) - 1
     assert "1 merged row(s) matched no employer name" in capsys.readouterr().out
+
+
+def test_the_unmatched_employer_tally_counts_every_such_merge(capsys):
+    """The tally is a count, not a flag.
+
+    A header that inherited one employer over two roles that both name another
+    rests on the thin rule twice, and the run has to say two -- every other
+    fixture in this group produces exactly one, which a tally hard-wired to
+    that number, or a boolean dressed up as one, would satisfy just as well.
+    """
+    entries = [
+        _position_entry(1, "Chief of Service", "Quexley General Hospital",
+                        ["Hospital Appointments"], "1998-01", "2001-12"),
+        _position_entry(2, "", "", ["Hospital Appointments"], "2002-07", "2006-12"),
+        _position_entry(3, "Attending Physician", "Norvale University Medical College",
+                        ["Hospital Appointments"]),
+        _position_entry(4, "Associate Attending Physician",
+                        "Norvale University Medical College", ["Hospital Appointments"]),
+    ]
+    WCMTemplateGenerator._propagate_institution_to_subentries(entries)
+
+    merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
+
+    assert len(merged) == 3
+    assert "2 merged row(s) matched no employer name" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("build_entries", [_rule_1_pair_with_matching_employers,
