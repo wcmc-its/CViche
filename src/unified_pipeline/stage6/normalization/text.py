@@ -24,26 +24,52 @@ logger = logging.getLogger(__name__)
 # a suffix, not two authors named "Jr." and "Brown" (#560).
 _AUTHOR_SUFFIX_RE = re.compile(r'^(?:Jr|Sr|II|III|IV)\.?$', re.I)
 
+# Marks an author list puts *on* an initials group rather than in it: the
+# abbreviating period, and the co-first / corresponding-author asterisk and
+# daggers. Stripped before the shape test, so "Opresko, PL*" is classified
+# exactly as "Opresko, PL" is instead of falling out of the initials rule on
+# a typographic mark (5 corpus author strings, all Opresko/Bournique).
+_INITIALS_TRAILING_MARKS = ".*†‡"
+
+# One initials group, hyphenated: "R-Y". Each side is a single letter of any
+# script, so the uppercase test below is applied to the sides, not the hyphen.
+_HYPHENATED_INITIALS_RE = re.compile(r'^[^\W\d_](-[^\W\d_])+$')
+
+# Longest run of letters still readable as an initials group rather than as a
+# short given name ("Scot", "Wang").
+_MAX_INITIALS_LETTERS = 4
+
 
 def _looks_like_initials(token: str) -> bool:
-    """Whether a comma-split token could be an initials group.
+    """Whether a comma-split token is an initials group rather than a name.
+
+    THE initials rule for this module. Every path that has to decide
+    "initials or name?" calls this one predicate -- the pair detector, the
+    pair parser's upper-casing, and the fallback parser -- so a token can no
+    longer be classified one way on one path and the other way on the other.
+    The fallback used to carry its own pair of tests (an ASCII-only
+    1-3 uppercase-letter regex, plus a case-blind "2 characters or fewer and
+    isupper()"), and those disagreed with this function on spaced groups
+    ("N J"), four-letter groups, hyphenated groups and lone lowercase
+    initials -- 45 of the farm's 1,711 distinct author strings parse
+    differently depending on which of the two definitions ran.
 
     A single alphabetic character of any case or script is always an
     initial -- "Kelly, r" and "Kelly, Å" both occur in the corpus (#560),
     and a lone letter has no other plausible reading. 2-4 characters must
-    still be uppercase (as before widening): initials are conventionally
-    written that way, and a short mixed-case word ("Scot", "Li", "Wei") is
-    at least as likely to be a real given name as an initials group -- the
-    old ASCII-only `[A-Z]{1,4}` was doing useful work there and only needed
-    widening for the single-character case. Hyphenated initials ("R-Y")
+    still be uppercase: initials are conventionally written that way, and a
+    short mixed-case word ("Scot", "Li", "Wei") is at least as likely to be
+    a real given name as an initials group. Hyphenated initials ("R-Y")
     follow the same rule per side.
     """
-    t = token.rstrip('.').replace(' ', '')
+    t = token.rstrip(_INITIALS_TRAILING_MARKS).replace(' ', '')
     if not t:
         return False
-    if re.match(r'^[^\W\d_](-[^\W\d_])+$', t):
+    if _HYPHENATED_INITIALS_RE.match(t):
         return t.replace('-', '').isupper()
-    return t.isalpha() and (len(t) == 1 or (len(t) <= 4 and t.isupper()))
+    return t.isalpha() and (
+        len(t) == 1 or (len(t) <= _MAX_INITIALS_LETTERS and t.isupper())
+    )
 
 
 def _parse_surname_initial_pairs(parts: list[str]) -> list[str]:
@@ -111,9 +137,9 @@ def _parse_author_fallback(parts: list[str]) -> tuple[list[str], bool]:
 
     The pair detector rejected this input -- one missing comma anywhere in
     the list is enough (#560) -- so comma position can no longer be trusted
-    to mean "surname, initials" across the whole string. A token that looks
-    like just initials, a suffix, or a bare 1-2 character ALL-CAPS fragment
-    merges into the author immediately before it -- but only when that
+    to mean "surname, initials" across the whole string. A token that is
+    initials-shaped (`_looks_like_initials`) or a recognised suffix merges
+    into the author immediately before it -- but only when that
     author is still "open": a bare name with no initials of its own yet,
     the exact shape a stray comma produces ("Konopasek, L" split by one
     comma that shouldn't be there). An author that already has its own
@@ -121,10 +147,10 @@ def _parse_author_fallback(parts: list[str]) -> tuple[list[str], bool]:
     fragment with nothing open to attach to is emitted as its own element
     rather than dropped, so the token count never falls (#560).
 
-    A mixed-case or lowercase 1-2 character token is not treated as a
-    fragment at all -- it is at least as likely to be a real short surname
-    ("Li", "Wu", "Ma", "Ye") as an initials group, so it is kept as its own
-    standalone author instead (#560).
+    A mixed-case or lowercase 1-2 character token is not initials-shaped and
+    so is not treated as a fragment at all -- it is at least as likely to be
+    a real short surname ("Li", "Wu", "Ma", "Ye") as an initials group, so
+    it is kept as its own standalone author instead (#560).
     """
     cleaned_authors: list[str] = []
     has_et_al = False
@@ -138,22 +164,9 @@ def _parse_author_fallback(parts: list[str]) -> tuple[list[str], bool]:
             has_et_al = True
             continue
 
-        # Look like just initials ("MR"), a recognised suffix ("Jr"), or a
-        # bare 1-2 character ALL-CAPS fragment ("SM"): not a standalone
-        # author. A mixed-case or lowercase 1-2 character token ("Li",
-        # "Wu", "Ma", "Ye") is at least as likely to be a real short
-        # surname as an initials fragment -- only an ALL-CAPS shape is
-        # initials-shaped here, matching `_looks_like_initials` and the
-        # pairs branch above (#560: the old case-blind `len(...) <= 2`
-        # dropped every author whose surname happened to be short and had
-        # no still-open predecessor to merge into, e.g. "Li, Wu, Ma, Ye").
-        is_initials_group = bool(re.match(r'^[A-Z]{1,3}\.?$', author_stripped))
         is_suffix = bool(_AUTHOR_SUFFIX_RE.match(author_stripped.rstrip('.')))
-        is_short_fragment = (
-            len(author_stripped) <= 2 and author_stripped.isupper()
-        )
 
-        if is_initials_group or is_suffix or is_short_fragment:
+        if _looks_like_initials(author_stripped) or is_suffix:
             fragment = author_stripped.rstrip('.,')
             if fragment:
                 if merge_target_open:

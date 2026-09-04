@@ -34,6 +34,10 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.formatting.values import _format_citation  # noqa: E402
+from unified_pipeline.stage6.normalization.text import (  # noqa: E402
+    _parse_author_fallback,
+    _parse_surname_initial_pairs,
+)
 
 
 def _cite(authors: str) -> str:
@@ -280,3 +284,69 @@ def test_surname_in_a_shifted_initials_slot_is_not_upper_cased():
     citation = _cite('AB, A-B, Smith, AB')
     assert 'SMITH' not in citation
     assert citation == '1. A-B Smith, AB. A Study.'
+
+
+# --------------------------------------------------------------------------
+# Round-2 review response (#735 review, items 2 and 6). One initials rule for
+# both parsing paths, and the two parsers reachable on their own.
+# --------------------------------------------------------------------------
+
+def test_a_spaced_initials_group_is_initials_on_the_fallback_path_too():
+    """The duplication the review found: `_looks_like_initials` strips the
+    space out of "N J" and calls it initials, while the fallback's own
+    `^[A-Z]{1,3}\\.?$` test saw a 3-character string containing a space and
+    called it a standalone author. "Wei" in the last initials slot makes the
+    pair detector decline, so this string parses on the fallback path, where
+    "N J" now merges into the open surname before it instead of being
+    emitted as an author of its own."""
+    assert _cite('Alpha, I, Bravo, N J, Charlie, Wei') == (
+        '1. Alpha I, Bravo N J, Charlie, Wei. A Study.'
+    )
+
+
+def test_a_four_letter_initials_group_is_initials_on_the_fallback_path_too():
+    """Same divergence, other shape: the fallback's regex stopped at three
+    uppercase letters and its length test at two characters, so a 4-letter
+    group -- which `_looks_like_initials` accepts -- was a standalone
+    author on one path and initials on the other."""
+    assert _cite('Alpha, ABCD, Bravo, Wei') == (
+        '1. Alpha ABCD, Bravo, Wei. A Study.'
+    )
+
+
+def test_an_authorship_marker_does_not_stop_a_token_being_initials():
+    """Strict unification alone would have LOST a case the old fallback got
+    right: its case-blind length test happened to accept "L*" (a co-first
+    author marker) because `str.isupper()` ignores the asterisk, while
+    `_looks_like_initials` rejected it on `str.isalpha()`. The marks are
+    stripped in the one predicate instead, so both paths accept them --
+    5 of the farm's author strings are this shape."""
+    assert _cite('Alpha, PL*, Bravo, JW*') == '1. Alpha PL*, Bravo JW*. A Study.'
+
+
+def test_pair_parser_is_reachable_and_never_drops_a_token():
+    """`_parse_surname_initial_pairs` extracted from `_normalize_author_names`
+    (#735 review item 6): testable without driving the whole citation."""
+    assert _parse_surname_initial_pairs(['Kelly', 'R', 'Pirog', 'R']) == [
+        'Kelly R', 'Pirog R',
+    ]
+    # trailing element with nothing to pair with is emitted, not dropped
+    assert _parse_surname_initial_pairs(['Kelly', 'R', 'Pirog']) == [
+        'Kelly R', 'Pirog',
+    ]
+    # a suffix in the initials slot belongs to the surname before it
+    assert _parse_surname_initial_pairs(['Smith', 'John', 'Jr.', 'Brown']) == [
+        'Smith John', 'Jr Brown',
+    ]
+
+
+def test_fallback_parser_is_reachable_and_reports_et_al_separately():
+    """`_parse_author_fallback` extracted from `_normalize_author_names`
+    (#735 review item 6). "et al" is returned as a flag rather than as an
+    author element, which is what lets the caller re-attach it."""
+    assert _parse_author_fallback(['Alpha', 'I', 'Bravo', 'Wei']) == (
+        ['Alpha I', 'Bravo', 'Wei'], False,
+    )
+    assert _parse_author_fallback(['Alpha', 'et al']) == (['Alpha'], True)
+    # an initials fragment with no open predecessor is kept, not dropped
+    assert _parse_author_fallback(['Alpha B', 'C']) == (['Alpha B', 'C'], False)
