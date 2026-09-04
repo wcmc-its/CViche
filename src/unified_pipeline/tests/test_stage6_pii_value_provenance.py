@@ -32,7 +32,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.normalization.text import (  # noqa: E402
+from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     _from_pii_fragment,
     _pii_fragments,
 )

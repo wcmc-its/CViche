@@ -57,7 +57,7 @@ from .taxonomy import (  # noqa: F401
     _TAXONOMY_CODE_PREFIX,
     _strip_taxonomy_code,
 )
-from .text import (  # noqa: F401
+from .pii import (  # noqa: F401
     _PII_LABEL_RE,
     _PII_FIELD_KEY_RE,
     _PII_FRAGMENT_SPLIT_RE,

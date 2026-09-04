@@ -1,17 +1,14 @@
-"""Value normalization lifted out of stage_6_word_template (#398).
+"""Protected personal data: detection, and provenance for one value.
 
-Text in, cleaner text out. Author names in a single citation spelling, an
-institution string with its trailing org suffix removed, markdown stripped for a
-Word run, a repeated phrase collapsed, the reader's internal cell separators
-made readable, a leaked 3b taxonomy code stripped off the front of a bullet.
+A data-governance concern, not a normalization one. Nothing here cleans a
+value; it decides whether a value may be rendered at all. Kept apart from
+the rest of ``normalization`` deliberately -- a change to an author-name or
+separator rule must not be able to widen or narrow what counts as protected
+data, and the two now cannot share an edit by accident.
 
-They are kept together because they change for the same reason -- a new spelling
-variant, separator or leaked token observed in a CV -- and apart from
-`formatting`, which changes when the WCM template's appearance changes. The
-sibling `fields.py` handles the case where the input is not text yet.
-
-Names keep their leading underscore for now. Renaming and relocating in one
-change would make a failure impossible to attribute to either.
+Split out of the former ``text.py``. Names keep their leading underscore for
+now. Renaming and relocating in one change would make a failure impossible
+to attribute to either.
 """
 import re
 
