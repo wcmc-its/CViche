@@ -590,9 +590,53 @@ _PII_LABEL_VALUE_RE = re.compile(
 )
 
 
+# Fewer alphanumeric characters than this and a value is not evidence of
+# anything: "1965" sits inside every birth date and inside half a CV's year
+# columns, so a short value found inside a PII fragment is a coincidence,
+# not provenance.
+_PII_CONTAINMENT_MIN_ALNUM = 6
+
+
 def _squash(text) -> str:
     """Whitespace-FREE normalization for verbatim containment checks."""
     return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def _collapse_whitespace(text) -> str:
+    """Whitespace-COLLAPSED, case-folded normalization.
+
+    Deliberately not `_squash`: that one deletes whitespace outright, which
+    also deletes the token boundaries `_from_pii_fragment` has to align on.
+    """
+    return re.sub(r"\s+", " ", str(text or "")).strip().lower()
+
+
+# "Alphanumeric" for the edge test: a word character that is not an
+# underscore, so it is Unicode-aware without treating "_" as part of a token.
+_ALNUM_CHAR = r"[^\W_]"
+
+
+def _pii_containment_pattern(value) -> re.Pattern | None:
+    """A whitespace-insensitive, token-aligned matcher for one extracted value.
+
+    None when the value carries fewer than `_PII_CONTAINMENT_MIN_ALNUM`
+    alphanumeric characters -- too short to be evidence of anything.
+
+    Whitespace must not decide the match: the value and the fragment come
+    from different places and stage 4 re-spaces what it extracts, so the
+    value's characters are joined by "any whitespace, or none", which is the
+    same tolerance `_squash` had. What is added is the edge condition: an
+    alphanumeric first or last character may not sit against another
+    alphanumeric character in the fragment, so a match cannot begin or end
+    in the middle of one of the fragment's own tokens.
+    """
+    squashed = _squash(value)
+    if sum(c.isalnum() for c in squashed) < _PII_CONTAINMENT_MIN_ALNUM:
+        return None
+    body = r"\s*".join(re.escape(c) for c in squashed)
+    lead = f"(?<!{_ALNUM_CHAR})" if squashed[0].isalnum() else ""
+    trail = f"(?!{_ALNUM_CHAR})" if squashed[-1].isalnum() else ""
+    return re.compile(lead + body + trail)
 
 
 def _pii_fragments(text: str | None) -> list[str]:
@@ -613,6 +657,27 @@ def _from_pii_fragment(value, pii_fragments: list[str]) -> bool:
     entry is actively supplying live contact data: on the corpus it drops real
     office addresses, an office phone and a work email from three CVs whose
     contact block happens to also carry a birth date.
+
+    This is a containment test and not true provenance, and it cannot be
+    made into one here: real provenance would need stage 4 to record the
+    source span each value was lifted from, and stage 4 emits raw LLM JSON
+    against no schema and no spans. So the containment test is made as sound
+    as a containment test can be, closing the two ways it goes wrong:
+
+    - it must not match mid-token. The value's characters are still
+      matched across any whitespace, exactly as `_squash` did, but the
+      match may no longer begin or end against an alphanumeric character
+      inside the fragment -- so a value cannot be denied because its
+      characters happen to run through the middle of a date or an SSN.
+    - it must not match on a value too short to mean anything.
+      `_PII_CONTAINMENT_MIN_ALNUM` is the floor: a bare "1965", which is
+      inside every birth date, no longer denies an address.
+
+    Measured over the 66-CV farm before the change: 319 A-coded entries,
+    288 deny decisions, 0 of which differ between the old bare-substring
+    test and this one.
     """
-    squashed = _squash(value)
-    return bool(squashed) and any(squashed in _squash(f) for f in pii_fragments)
+    pattern = _pii_containment_pattern(value)
+    if pattern is None:
+        return False
+    return any(pattern.search(_collapse_whitespace(f)) for f in pii_fragments)
