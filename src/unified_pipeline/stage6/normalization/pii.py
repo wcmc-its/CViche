@@ -86,13 +86,6 @@ _PII_LABEL_VALUE_RE = re.compile(
 )
 
 
-# Fewer alphanumeric characters than this and a value is not evidence of
-# anything: "1965" sits inside every birth date and inside half a CV's year
-# columns, so a short value found inside a PII fragment is a coincidence,
-# not provenance.
-_PII_CONTAINMENT_MIN_ALNUM = 6
-
-
 def _squash(text) -> str:
     """Whitespace-FREE normalization for verbatim containment checks."""
     return re.sub(r"\s+", "", str(text or "")).lower()
@@ -115,8 +108,12 @@ _ALNUM_CHAR = r"[^\W_]"
 def _pii_containment_pattern(value) -> re.Pattern | None:
     """A whitespace-insensitive, token-aligned matcher for one extracted value.
 
-    None when the value carries fewer than `_PII_CONTAINMENT_MIN_ALNUM`
-    alphanumeric characters -- too short to be evidence of anything.
+    None only when there is nothing to match -- an absent or blank value.
+    Deliberately no minimum length: round 1 imposed one and it re-opened
+    #472. "Ohio" out of "PLACE OF BIRTH: Ohio" is four characters, and it is
+    the protected value itself, not a coincidence; so is the "1/1/90" of a
+    birth date. A floor high enough to dismiss a bare year dismisses those
+    too, and where the two conflict protection wins.
 
     Whitespace must not decide the match: the value and the fragment come
     from different places and stage 4 re-spaces what it extracts, so the
@@ -127,7 +124,7 @@ def _pii_containment_pattern(value) -> re.Pattern | None:
     in the middle of one of the fragment's own tokens.
     """
     squashed = _squash(value)
-    if sum(c.isalnum() for c in squashed) < _PII_CONTAINMENT_MIN_ALNUM:
+    if not squashed:
         return None
     body = r"\s*".join(re.escape(c) for c in squashed)
     lead = f"(?<!{_ALNUM_CHAR})" if squashed[0].isalnum() else ""
@@ -157,21 +154,26 @@ def _from_pii_fragment(value, pii_fragments: list[str]) -> bool:
     This is a containment test and not true provenance, and it cannot be
     made into one here: real provenance would need stage 4 to record the
     source span each value was lifted from, and stage 4 emits raw LLM JSON
-    against no schema and no spans. So the containment test is made as sound
-    as a containment test can be, closing the two ways it goes wrong:
+    against no schema and no spans. So the containment test is made as
+    sound as a containment test can be, in the one way that narrows it
+    without giving anything back: the match must be TOKEN-ALIGNED. The
+    value's characters are still matched across any whitespace, exactly as
+    `_squash` did, but the match may no longer begin or end against an
+    alphanumeric character inside the fragment -- so a value is not denied
+    because its characters happen to run through the middle of a date or an
+    SSN ("23-45-6789" out of "123-45-6789").
 
-    - it must not match mid-token. The value's characters are still
-      matched across any whitespace, exactly as `_squash` did, but the
-      match may no longer begin or end against an alphanumeric character
-      inside the fragment -- so a value cannot be denied because its
-      characters happen to run through the middle of a date or an SSN.
-    - it must not match on a value too short to mean anything.
-      `_PII_CONTAINMENT_MIN_ALNUM` is the floor: a bare "1965", which is
-      inside every birth date, no longer denies an address.
+    A minimum value length was tried as a second narrowing and reverted: it
+    is not separable from the protected values themselves. "Ohio" out of
+    "PLACE OF BIRTH: Ohio" is shorter than a bare year, and a year that is
+    a component of the birth date is the protected value, not an unrelated
+    one that collided with it. Where the false-positive concern and the
+    protection conflict, the protection wins.
 
-    Measured over the 66-CV farm before the change: 319 A-coded entries,
-    288 deny decisions, 0 of which differ between the old bare-substring
-    test and this one.
+    Measured over the 66-CV farm with `scripts/measure_normalization_claims.py`:
+    the deny decisions this predicate makes are identical to the old
+    bare-substring test's on every A-coded entry. See that script's
+    `pii_deny_decisions` section for the current counts.
     """
     pattern = _pii_containment_pattern(value)
     if pattern is None:

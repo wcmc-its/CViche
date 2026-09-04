@@ -10,9 +10,14 @@ characters happen to run through the inside of a date or an SSN.
 Real provenance is not available here and cannot be faked: it would need
 stage 4 to record the source span each value was lifted from, and stage 4
 emits raw LLM JSON against no schema and no spans. So the containment test
-is made as sound as a containment test can be -- token-aligned, with a
-minimum length -- and these tests pin both halves plus the two cases that
-motivated the predicate in the first place.
+is made as sound as a containment test can be -- TOKEN-ALIGNED -- and these
+tests pin that plus the cases that motivated the predicate in the first
+place.
+
+Round 2 removed a second narrowing, a minimum value length, which had
+re-opened #472: "Ohio" out of "PLACE OF BIRTH: Ohio" is four characters
+and it is the protected value, not a coincidental collision with one. The
+tests below pin the short protected values as denied.
 
 The three corpus CVs whose real office address, office phone and work email
 must survive an entry that also carries a birth date are covered end to end
@@ -85,13 +90,36 @@ def test_a_value_that_ends_mid_token_is_not_denied():
     assert not _from_pii_fragment("12/13/194", fragments)
 
 
-def test_a_bare_year_no_longer_denies_by_sitting_inside_a_date():
-    """A four-character year is inside every birth date and inside half the
-    year columns of a CV, so it is not evidence of anything. The minimum
-    length is what stops it; the year IS token-aligned inside the date."""
+def test_a_year_that_is_a_component_of_the_birth_date_is_denied():
+    """Round 1 dismissed a bare year as "inside every birth date, so not
+    evidence of anything" and put a minimum value length in to stop it.
+    That is backwards: the year of a birth date IS the protected value, and
+    the same floor then let "PLACE OF BIRTH: Ohio" render its Ohio. The
+    year is token-aligned inside the date and stays denied; a year that is
+    NOT part of a PII fragment was never reachable here, because
+    `_pii_fragments` only returns the fragments a PII label introduces."""
     fragments = _pii_fragments("Date of Birth: 12/13/1947")
     assert fragments
-    assert not _from_pii_fragment("1947", fragments)
+    assert _from_pii_fragment("1947", fragments)
+
+
+def test_a_short_birthplace_value_is_denied():
+    """The #472 case at its shortest: a one-word birthplace. Round 1's
+    six-alphanumeric-character floor let "Ohio" and "Utah" through, and
+    `personal_data.py` renders whatever survives into the Office address
+    row -- exactly the defect the module exists to prevent."""
+    for state in ("Ohio", "Utah"):
+        fragments = _pii_fragments(f"PLACE OF BIRTH: {state}")
+        assert fragments
+        assert _from_pii_fragment(state, fragments), state
+
+
+def test_a_short_two_digit_year_birth_date_is_denied():
+    """"1/1/90" carries four alphanumeric characters, so the floor let the
+    whole birth date through."""
+    fragments = _pii_fragments("Date of Birth: 1/1/90")
+    assert fragments
+    assert _from_pii_fragment("1/1/90", fragments)
 
 
 def test_an_empty_or_missing_value_is_never_denied():
