@@ -46,6 +46,31 @@ _CITATION_MATCH_MIN_RATIO = 0.5
 # whatever a binary float's repr happens to do (round-2 review of #481,
 # point 5): $0.125 is $0.13, not $0.12.
 _CURRENCY_CENTS = Decimal('0.01')
+# The magnitude a currency amount is allowed to have, as `Decimal.adjusted()`
+# -- the exponent of the leading digit, so 24 admits everything under 10**25.
+# It is checked BEFORE `int()` or `quantize()` touch a digit (round-3 review of
+# #481). `f"${int(num):,}"` on Decimal('1e999999999') -- eleven characters of
+# input -- materialises a billion-digit integer, and the cost grows with the
+# square of the exponent: measured on the commit this fixes, 1e50000 took
+# 0.043s, 1e200000 0.696s, 1e1000000 17.289s and 1e2000000 69.173s, so the
+# eleven-character input above is hours of CPU. That is worse than the
+# OverflowError the round-2 fix replaced -- b77d766 failed in 0.000s and loudly
+# -- because a try/except cannot catch a hang and no stage-6 caller has a
+# timeout. `adjusted()` reads the exponent without materialising anything --
+# Decimal('1e999999999').adjusted() is 999999999 in about a microsecond -- so
+# the bound costs nothing.
+#
+# Why 24, rather than the ~10**30 past which a dollar figure has stopped being
+# an amount at all: 10**25 is already eleven orders of magnitude past world
+# GDP, so a grant line reading $10,000,000,000,000,000,000,000,000 is a parse
+# artefact and not an award either way -- and 10**25 is also the largest
+# magnitude this function can render to the cent under the default 28-digit
+# decimal context, carry included (25 integer digits + 2 cents + 1 for a
+# rounding carry = exactly 28). Choosing the smaller of the two makes this one
+# bound subsume the InvalidOperation that the round-2 `quantize` guard was
+# added for: no magnitude reaches that except clause any more, so the two
+# guards cannot disagree about what an oversized value renders as.
+_CURRENCY_MAX_ADJUSTED_EXPONENT = 24
 
 
 def _value_referenced(value: str, citation_text: str) -> bool:
@@ -238,16 +263,30 @@ def _format_currency(value) -> str:
     Returns:
         Formatted currency string (e.g., "$14,876") or empty string
 
-    Zero is an amount, not an absence: 0, 0.0 and "0" all render "$0". Only
-    None, an empty/blank string, and a value that is not a number or string at
-    all render "". Parsing goes through `decimal.Decimal`, so an amount binary
-    float cannot hold exactly keeps its cents, and the fractional branch states
-    its rounding (half-up to two places) instead of inheriting the repr's.
+    Zero is an amount, not an absence: 0, 0.0 and "0" all render "$0". "" is
+    returned for None, an empty or blank string, a bool, and any other type
+    that is not a number or a string. `True` and `False` are named here
+    because they are `int` subclasses and so would otherwise be amounts -- the
+    docstring said "not a number or string at all" through round 3, which did
+    not describe them (round-3 review of #481). Parsing goes through
+    `decimal.Decimal`, so an amount binary float cannot hold exactly keeps its
+    cents, and the fractional branch states its rounding (half-up to two
+    places) instead of inheriting the repr's.
 
-    Total for every str/int/float/Decimal: a magnitude the decimal context
-    cannot format (27+ integer digits with a fraction, "1e5000") takes the same
-    fallback an unparseable string takes and returns the original text, rather
-    than raising into a caller that has no handler.
+    A magnitude past `_CURRENCY_MAX_ADJUSTED_EXPONENT`, and "nan"/"inf", take
+    the same fallback an unparseable string takes: the original text, rather
+    than an exception raised into a caller that has no handler, or -- the
+    round-3 defect that bound now closes -- an unbounded materialisation of the
+    digits inside `int()`.
+
+    Not total, and deliberately not claimed to be: an `int` at or past
+    10**4301 raises ValueError out of the `str(value)` on the way in, above
+    `sys.get_int_max_str_digits()`. That conversion sits outside the guarded
+    region and stays there, because the fallback the guard returns *is*
+    `value_str` -- catching its own construction would leave nothing to return.
+    The input is unreachable through `json.loads`, which raises on the same
+    limit while parsing the literal, and it raised identically before this
+    change (verified against b77d766).
     """
     # `if not value` also swallowed a real $0 (round-2 review of #481, point 4).
     # The check is on type, not truthiness: a bool or a list from raw stage-4
@@ -268,14 +307,15 @@ def _format_currency(value) -> str:
     # Remove any existing currency symbols, commas, and whitespace
     cleaned = re.sub(r'[$,\s]', '', value_str)
 
-    # Parsing and formatting are guarded together, not just the constructor.
-    # `quantize` raises InvalidOperation whenever the result needs more digits
-    # than the decimal context allows (28 by default), so a value with 27 or
-    # more integer digits and a fraction escaped this function uncaught; the
-    # sole caller (`sections/research_support.py`) has no handler, so on the
-    # web path that failed the whole run. `int()` on a very large exponent
-    # ("1e5000") raises ValueError for the same reason. Nothing between the
-    # `try` and the returns may raise now.
+    # Parsing and formatting are guarded together, not just the constructor
+    # (round-2 review of #481). `quantize` raises InvalidOperation whenever the
+    # result needs more digits than the decimal context allows (28 by default),
+    # so a value with 27 or more integer digits and a fraction escaped this
+    # function uncaught; the sole caller (`sections/research_support.py`) has no
+    # handler, so on the web path that failed the whole run. The magnitude bound
+    # below now turns every such value away before `quantize` sees it, which
+    # leaves this clause covering what it is really for: `Decimal(cleaned)`
+    # signalling InvalidOperation on text that is not a number at all.
     try:
         # Handle cases like "14876" or "14876.00"
         num = Decimal(cleaned)
@@ -285,6 +325,13 @@ def _format_currency(value) -> str:
             # int() and fell through to the original string, while "inf" raised
             # OverflowError, which the except clause did not catch and which
             # escaped this function. Both now return the original string.
+            return value_str
+        # Bound the magnitude before anything materialises the digits. This
+        # cannot be an exception handler: past this point `int()` does not
+        # raise, it runs -- for minutes, on eleven characters of input (see
+        # `_CURRENCY_MAX_ADJUSTED_EXPONENT`). `adjusted()` is O(1) and reads
+        # only the exponent, so the check is free.
+        if num.adjusted() > _CURRENCY_MAX_ADJUSTED_EXPONENT:
             return value_str
         # Format with commas and $ symbol, no decimal places for whole numbers
         if num == num.to_integral_value():

@@ -30,6 +30,11 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_stage6_bibliography_editors_publisher.py -p no:cacheprovider
 """
 
+import os
+import subprocess
+import sys
+from decimal import ROUND_HALF_UP, Decimal
+
 import pytest
 
 from unified_pipeline.stage6.formatting.values import (
@@ -531,47 +536,220 @@ def test_format_currency_rounds_half_up_not_half_to_even():
     assert f"${0.125:,.2f}" == '$0.12'
 
 
-def test_format_currency_magnitude_past_the_decimal_context_does_not_raise():
-    """Round-3: the round-2 guard wrapped only the `Decimal(cleaned)` call, so
-    `quantize` -- which signals InvalidOperation as soon as the result needs
-    more digits than the context allows (28 by default) -- raised straight out
-    of this function. 26 integer digits plus cents fit; 27 did not, and the one
-    production caller (`sections/research_support.py`, no try/except) would
-    have taken the exception, failing the whole run on the orchestrator path.
+def test_format_currency_brackets_the_magnitude_bound_from_both_sides():
+    """Round 2 found `quantize` signalling InvalidOperation out of this
+    function at 27 integer digits, and scoped a fallback to that branch; round
+    3 found the *other* branch hanging on the same class of input. One
+    magnitude bound now answers both, so it is pinned from both sides rather
+    than only from above: the largest magnitude that renders, and the first
+    that does not.
 
     The fallback value is pinned, not just the absence of an exception: an
-    amount the context cannot render in cents takes the same route an
-    unparseable string takes and comes back as its own text."""
-    fits = '1' + '0' * 25 + '.55'                       # 26 integer digits
-    assert len(fits.split('.')[0]) == 26
-    assert _format_currency(fits) == '$10,000,000,000,000,000,000,000,000.55'
+    amount past the bound takes the same route an unparseable string takes and
+    comes back as its own text."""
+    # Imported inside the test, as the ratio threshold above is. It also keeps
+    # this file importable against a values.py that predates the constant, so a
+    # differential run against the baseline reports a real assertion failure
+    # rather than a collection-time ImportError.
+    from unified_pipeline.stage6.formatting.values import (
+        _CURRENCY_MAX_ADJUSTED_EXPONENT,
+    )
 
-    over = '1' + '0' * 26 + '.55'                       # 27 integer digits
-    assert len(over.split('.')[0]) == 27
-    assert _format_currency(over) == '100000000000000000000000000.55'
+    fits = '9' * 25 + '.55'                             # 25 integer digits
+    assert Decimal(fits).adjusted() == _CURRENCY_MAX_ADJUSTED_EXPONENT
+    assert _format_currency(fits) == '$9,999,999,999,999,999,999,999,999.55'
+
+    over = '1' + '0' * 25 + '.55'                       # 26 integer digits
+    assert Decimal(over).adjusted() == _CURRENCY_MAX_ADJUSTED_EXPONENT + 1
+    assert _format_currency(over) == over
 
 
 @pytest.mark.parametrize('value', [
-    '1' + '0' * 26 + '.55',      # 27 integer digits: quantize InvalidOperation
+    '1' + '0' * 26 + '.55',      # 27 integer digits
     '1' + '0' * 29 + '.55',      # 30
     '1' + '0' * 39 + '.55',      # 40
     '1e5000',                    # int() ValueError, 4300-digit conversion limit
     '-' + '1' + '0' * 39 + '.55',
 ])
-def test_format_currency_is_total_over_extreme_magnitudes(value):
-    """Every str/int/float/Decimal input must return a string. "1e5000" is the
-    pre-existing half of this: `f"${int(num):,}"` raises ValueError past
-    sys.get_int_max_str_digits(), and the pre-Decimal parser raised
-    OverflowError on the same input, so both arms crashed on it before this
-    commit. Guarding the whole body closes that one as well."""
+def test_format_currency_extreme_magnitudes_return_the_original_text(value):
+    """Renamed from `test_format_currency_is_total_over_extreme_magnitudes`
+    (round-3 review of #481). The old name claimed totality over every
+    str/int/float/Decimal and the tree does not have it: an `int` at or past
+    10**4301 raises inside `str(value)`, before the guarded region -- see
+    `test_format_currency_int_past_the_str_digit_limit_raises_as_it_always_did`
+    below, which pins that residual instead of denying it.
+
+    Every row here is cheap to materialise, which is why they all passed at
+    df43344 while the same function hung on an input eleven characters long.
+    The magnitudes that are not cheap belong in
+    `test_format_currency_returns_inside_a_wall_clock_budget`, which runs them
+    out of process: putting them here would hang the whole suite the moment the
+    bound regressed, instead of failing it -- measured, that file took 45.5s to
+    report three failures against df43344 rather than never returning."""
     assert _format_currency(value) == value
 
 
-def test_format_currency_whole_amounts_are_not_capped_by_the_context():
-    """The fallback is scoped to the branch that actually cannot render: a
-    whole amount of any size still formats, because `int()` is exact and no
-    quantize runs."""
-    assert _format_currency('1' + '0' * 29) == '$' + '100,' + '000,' * 8 + '000'
+# ---------------------------------------------------------------------------
+# Round-3 review: the guard turned a fast raise into an unbounded hang
+# ---------------------------------------------------------------------------
+
+# A hang is not a raise. `assert _format_currency(v) == v` passes against a
+# call that eventually returns, however long "eventually" is, and there is no
+# in-process way to interrupt one: the time is spent inside a single C-level
+# int conversion, so a SIGALRM handler does not get a bytecode boundary to run
+# on. The call therefore runs in a child process under a hard wall-clock
+# timeout, which turns a hang into a failed test rather than a stalled suite.
+_CURRENCY_CALL_BUDGET_SECONDS = 0.5
+# Generous next to the budget above, because it also covers interpreter
+# startup and the import (~0.16s measured); the budget, timed inside the
+# child around the call alone, is what actually pins the cost.
+_CURRENCY_CHILD_TIMEOUT_SECONDS = 15.0
+
+_CURRENCY_CHILD = """
+import sys, time
+from unified_pipeline.stage6.formatting.values import _format_currency
+t0 = time.perf_counter()
+out = _format_currency(sys.argv[1])
+sys.stdout.write("%.6f\\n%s" % (time.perf_counter() - t0, out))
+"""
+
+
+def _time_format_currency_out_of_process(value):
+    """Return `(result, seconds)` for `_format_currency(value)` in a child.
+
+    Fails the test if the child does not finish, rather than waiting on it.
+    """
+    env = dict(
+        os.environ,
+        PYTHONPATH=os.pathsep.join(entry for entry in sys.path if entry),
+        PYTHONDONTWRITEBYTECODE='1',
+    )
+    try:
+        done = subprocess.run(
+            [sys.executable, '-c', _CURRENCY_CHILD, value],
+            capture_output=True, text=True, env=env,
+            timeout=_CURRENCY_CHILD_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            f"_format_currency({value!r}) did not return within "
+            f"{_CURRENCY_CHILD_TIMEOUT_SECONDS}s -- the magnitude is being "
+            f"materialised again (round-3 review of #481)."
+        )
+    assert done.returncode == 0, done.stderr
+    seconds, _, out = done.stdout.partition('\n')
+    return out, float(seconds)
+
+
+# The measured cost of `int(Decimal(v))` on the commit this pins against
+# (df43344) grows with the square of the exponent -- 1e50000 0.043s, 1e200000
+# 0.696s, 1e1000000 17.289s, 1e2000000 69.173s -- so the first row, eleven
+# characters of input, is hours of CPU. b77d766 raised OverflowError on all
+# four in 0.000s.
+@pytest.mark.parametrize('value,history', [
+    ('1e999999999', 'no return in 15s at df43344'),
+    ('1e5000000', 'no return in 15s at df43344'),
+    ('1e1000000', '17.289s at df43344'),
+    ('1' + '0' * 39 + '.55', '40 integer digits'),
+])
+def test_format_currency_returns_inside_a_wall_clock_budget(value, history):
+    """The round-3 guard converted a fast, loud OverflowError into silent
+    unbounded CPU inside a stage the orchestrator does not time out, and
+    `except (ValueError, ArithmeticError)` cannot catch that. The cost is now
+    bounded by `Decimal.adjusted()`, which reads the exponent in O(1) without
+    materialising a digit, so these all return immediately.
+
+    Both halves are asserted, because either alone is worthless here: the
+    value, so a guard that returns the wrong thing fails; the elapsed time, so
+    a guard that is merely slower than it looks fails too."""
+    out, seconds = _time_format_currency_out_of_process(value)
+
+    assert out == value, history
+    assert seconds < _CURRENCY_CALL_BUDGET_SECONDS, (
+        f"{value[:16]}... ({history}) took {seconds:.3f}s, budget "
+        f"{_CURRENCY_CALL_BUDGET_SECONDS}s")
+
+
+def test_format_currency_int_past_the_str_digit_limit_raises_as_it_always_did():
+    """The one input `_format_currency` does not survive, pinned rather than
+    claimed away (round-3 review of #481). `str(value)` sits before the try,
+    and CPython refuses to render an int wider than
+    `sys.get_int_max_str_digits()` (4300). It is left there deliberately: the
+    fallback every guarded path returns *is* `value_str`, so the conversion
+    cannot be inside the region whose handler needs it.
+
+    Not a regression -- b77d766 raises the identical ValueError -- and not
+    reachable through `json.loads`, which refuses the same literal at the same
+    limit while parsing it, as the second half asserts."""
+    import json
+
+    with pytest.raises(ValueError, match='Exceeds the limit'):
+        _format_currency(10 ** 4301)
+
+    with pytest.raises(ValueError, match='Exceeds the limit'):
+        json.loads('1' + '0' * 4301)
+
+    # One digit under the limit is fine on both, and takes the ordinary
+    # oversized-magnitude fallback rather than raising.
+    just_under = '1' + '0' * 4298
+    assert len(str(int(just_under))) == 4299
+    assert _format_currency(int(just_under)) == just_under
+
+
+def test_format_currency_bound_applies_to_the_whole_branch_too():
+    """Replaces `..._whole_amounts_are_not_capped_by_the_context`, whose
+    docstring said "a whole amount of any size still formats, because `int()`
+    is exact and no quantize runs". Exact is not the same as cheap, and that
+    sentence was the round-3 defect written down as a feature: `int()` on
+    Decimal('1e999999999') is exact and materialises a billion digits while it
+    gets there. The two branches now share one bound, so a whole amount and a
+    fractional amount of the same magnitude agree about where rendering
+    stops."""
+    from unified_pipeline.stage6.formatting.values import (
+        _CURRENCY_MAX_ADJUSTED_EXPONENT,
+    )
+
+    whole_fits = '9' * 25
+    assert Decimal(whole_fits).adjusted() == _CURRENCY_MAX_ADJUSTED_EXPONENT
+    assert _format_currency(whole_fits) == '$9,999,999,999,999,999,999,999,999'
+
+    whole_over = '1' + '0' * 25                         # 26 integer digits
+    assert _format_currency(whole_over) == whole_over
+    assert _format_currency(whole_over + '.55') == whole_over + '.55'
+
+
+def test_currency_bound_subsumes_the_quantize_signal_rather_than_splitting_it():
+    """The bound and the round-2 InvalidOperation fallback must not divide the
+    magnitude range between them, or the same "too big" input renders through
+    two different code paths depending on where it lands.
+
+    The bound is the smaller of the two candidate numbers for exactly this
+    reason: 25 integer digits, plus 2 for cents, plus 1 for a rounding carry,
+    is 28 -- the default decimal context precision -- so every magnitude the
+    bound admits can still be quantized, carry and all, and no magnitude
+    reaches the except clause. Raising the constant breaks this test before it
+    can silently re-split the range."""
+    import decimal
+
+    from unified_pipeline.stage6.formatting.values import (
+        _CURRENCY_CENTS,
+        _CURRENCY_MAX_ADJUSTED_EXPONENT,
+    )
+
+    integer_digits = _CURRENCY_MAX_ADJUSTED_EXPONENT + 1
+    cents = -_CURRENCY_CENTS.as_tuple().exponent
+    carry = 1
+    assert integer_digits == 25
+    assert cents == 2
+    assert integer_digits + cents + carry <= decimal.getcontext().prec
+
+    # The worst admitted case: every digit a nine, so quantizing to cents
+    # rounds up and grows the integer part by one.
+    worst = '9' * integer_digits + '.999'
+    assert Decimal(worst).adjusted() == _CURRENCY_MAX_ADJUSTED_EXPONENT
+    assert Decimal(worst).quantize(_CURRENCY_CENTS, rounding=ROUND_HALF_UP) == (
+        Decimal('1' + '0' * integer_digits + '.00'))
+    assert _format_currency(worst) == '$10,000,000,000,000,000,000,000,000.00'
 
 
 # ---------------------------------------------------------------------------
