@@ -99,73 +99,11 @@ def _clean_inline_tabs(text: str) -> str:
       tab renders ragged against Word's default tab stops, so the first becomes
       ": " (label: value) and any further tabs become " — ".
 
-    UPSTREAM CONTRACT -- what each caller has already decided before it gets
-    here. It is not one contract but two, and neither is "a row can never
-    arrive". Every count below is re-derived by one of these two greps
-    rather than remembered; re-run them instead of trusting the numbers,
-    which is how this block came to be wrong twice. From
-    ``src/unified_pipeline``::
-
-        git grep -n '_clean_inline_tabs(' -- stage6/sections stage_6_word_template.py
-        git grep -c '_insert_bulleted_entry(' -- stage6/sections
-
-    The first lists SIX call sites, each re-read here against its own
-    callers:
-
-    - ``stage_6_word_template.py:1137`` ``_insert_bulleted_entry`` -- a
-      shared bullet helper, so the contract is its callers', not its own.
-      The second grep gives its call sites: NINE, in three section modules
-      (teaching 7, clinical_practice 1, passthrough 1). The seven in
-      ``teaching.py`` all sit inside one function, ``_insert_teaching_entry``
-      (``:158``, ``:165``, ``:174``, ``:197``, ``:204``, ``:224``, ``:235``),
-      which renders every entry as a bullet because the WCM template has no
-      teaching table to route to. The other two are the other kind, an
-      explicit fallback taken only when the section's table was not found in
-      the template: ``clinical_practice.py:487``, inside
-      ``_insert_multiline_as_bullets`` (itself called from ``:271``, ``:351``
-      and ``:457``, one per L1/L2/L3 no-table branch), and
-      ``passthrough.py:279``, in ``_fill_hospital_affiliation``'s
-      ``else:  # No table`` arm.
-    - ``stage_6_word_template.py:2084`` ``_insert_reconsidered_segment`` --
-      two callers. ``:1925`` re-routes an LLM-reclassified appendix
-      segment. ``:2320`` is ``_recover_unrendered_records``, which passes
-      multi-cell rows here DELIBERATELY: it skips a multi-column row only
-      when the row carries no digit and its cells are majority
-      column-label words (``_is_column_header_row``), and keeps "a dateless
-      multi-cell row of real content (committee membership: 'Member |
-      Committee on X | Organization')". That row is flattened here on
-      purpose, because the alternative is leaving the record unrendered.
-    - ``stage_6_word_template.py:2386`` ``_unconsumed_personal_data_batch``
-      -- A entries no Personal Data slot consumed. Its PII scan reads the
-      RAW text, precisely because this call destroys the fragment boundaries
-      that scan splits on.
-    - ``sections/appendix.py:70`` -- the appendix, which by construction
-      holds only entries no section renderer claimed.
-    - ``sections/mentoring.py:203`` ``_insert_mentoring_summaries`` -- three
-      feeds, screened differently. ``n3a_summaries``/``n3b_summaries`` are
-      what ``_is_mentee_record()`` rejected, every mentee record having gone
-      to ``_create_mentee_table_with_spacing`` instead (``:112-115``). The
-      third feed, ``n4_entries`` (``:194``), is mostly unscreened: what it
-      starts from is the N4 entries (``:83``), which never meet
-      ``_is_mentee_record`` at all, because N4 mentoring outcomes have no
-      table anywhere in the WCM template to screen them against. Its one
-      screened input is ``:120``, which moves in the N3 summaries
-      ``_is_mentoring_outcome`` reclaims -- those did pass the partition.
-    - ``sections/researcher_profiles.py:62`` -- S0 identifier lines (ORCID,
-      Google Scholar). The template has neither a heading nor a table for
-      them, so every S0 entry is a bullet.
-
-    So the residual-text framing holds only for the table-backed sections
-    (clinical practice, passthrough, the mentee tables). For teaching, N4,
-    S0 and the appendix there is no table in the template to route to, and a
-    row-shaped record reaches this function by construction rather than
-    through a routing failure. Either way nothing is enforced by a type or
-    an assertion: a genuine table row is flattened into one
-    "cell — cell — cell" line, with no warning. That cost is pinned rather
-    than left to be discovered in a delivered document --
-    ``test_cell_separators.py`` covers the residual-text path and
-    ``test_stage6_cell_separator_contract.py`` covers what the flattening
-    fallback actually produces when a row does reach it.
+    The upstream routing contract is asserted rather than described here:
+    ``test_stage6_cell_separator_contract.py`` enumerates the six call
+    sites and what each has already decided, and pins what happens when a
+    genuine table row reaches this function anyway -- it is flattened into
+    one "cell — cell — cell" line, with no warning.
 
     ponytail: the name says "tabs" but it now handles both separators. Kept as-is
     so this change does not collide with the three bullet call sites that #254
