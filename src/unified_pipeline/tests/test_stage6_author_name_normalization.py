@@ -1,7 +1,7 @@
 """Regression tests for #560: `_normalize_author_names` silently deleted
 authors and initials instead of keeping them.
 
-`_normalize_author_names` (`stage6/normalization/text.py`) has exactly one
+`_normalize_author_names` (`stage6/normalization/authors.py`) has exactly one
 caller, `_format_citation` (`stage6/formatting/values.py:17`), reached via
 `authors = fields.get('authors', '')` -> `_normalize_author_names(authors)`
 whenever `formatting_source != 'stage_5d_llm'`. These tests assert through

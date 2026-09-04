@@ -1,7 +1,7 @@
 """Regression tests for #532: the PII deny predicate missed colon-less
 labels.
 
-`_PII_LABEL_RE` (`stage6/normalization/text.py`) requires a colon
+`_PII_LABEL_RE` (`stage6/normalization/pii.py`) requires a colon
 terminator, so it denies "Date of Birth: 12/13/1947" but not "Date of Birth
 - 01/01/1990", "DOB\\t01/01/1990", or "SSN  123-45-6789" -- a colon-less
 label evades both deny paths #473 added (the value stays in the Personal

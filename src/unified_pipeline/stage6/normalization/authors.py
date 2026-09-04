@@ -5,8 +5,8 @@ Owns one domain: a CV's raw ``authors`` string in, Vancouver-style
 variant is observed in a CV, and for no other reason -- a leaked taxonomy
 code or a new protected-data label does not touch a line of it.
 
-Split out of the former ``text.py``, which held eight unrelated
-normalizations behind one import. Names keep their leading underscore for
+Split out of the former ``text.py``, which held this and five other
+unrelated domains behind one import. Names keep their leading underscore for
 now. Renaming and relocating in one change would make a failure impossible
 to attribute to either.
 """
