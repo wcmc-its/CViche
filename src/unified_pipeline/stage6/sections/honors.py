@@ -75,9 +75,9 @@ from unified_pipeline.core.render_check import entry_lines
 logger = logging.getLogger(__name__)
 
 
-# A '|' part that is nothing but a year or a year range is a date column, not
-# an award. `_parse_honor_lines` classifies parts with exactly this shape, and
-# `_entry_parts` has to agree with it, so the pattern is compiled once here and
+# A part that is nothing but a year or a year range is a date, not an award.
+# `_parse_honor_lines` classifies a whole line with exactly this shape, and
+# `_is_date_column` builds on it, so the pattern is compiled once here and
 # shared rather than written out twice (docs/CODING_STANDARDS.md §8.2).
 _YEAR_ONLY_RE = re.compile(
     r'^(\d{4}(?:\s*-\s*\d{4})?|\d{4}(?:\s*-\s*present)?)$', re.IGNORECASE)
@@ -717,7 +717,7 @@ def _extract_organization_from_award(text: str) -> str:
     if m:
         return m.group(1).strip().rstrip('.,;')
 
-    # Strategy 4: institutional keyword anywhere - build org around last match
+    # Strategy 4: institutional keyword anywhere - build org around the anchor
     org = _build_org_around_keyword(text)
     if len(org.split()) >= _MIN_ORG_WORDS \
             and len(org) < len(text) * _MAX_ORG_SHARE_OF_TEXT:
