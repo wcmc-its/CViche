@@ -30,6 +30,14 @@ that the drop is at least *visible*: `CONSUMED_GRANT_FIELDS` lists every key the
 renderer reads and `_create_grant_table` logs the leftovers at debug level. That
 is a diagnostic, not a registry -- it tells you a field was dropped, it does not
 render it.
+
+Logging rule for this module: no `logger` call carries a value taken from the
+CV. Every one of them says what happened and why -- an effort figure was
+discarded as unparseable or out of range, a title matched several project
+names, a field was not consumed -- using counts, key names and module
+constants only. The verbose `print` lines are the other channel and do quote
+titles; those are the stage's parsed stdout contract (CODING_STANDARDS.md 7.1)
+and are unchanged, word for word, from before this module was split out.
 """
 import logging
 import re
@@ -145,10 +153,14 @@ def normalize_percent_effort(effort_value: str) -> str | None:
     try:
         value = Decimal(effort_value)
     except InvalidOperation:
+        logger.debug("Discarded a percent effort figure: not a number")
         return None
     percent = value * 100 if value <= FRACTIONAL_EFFORT_CEILING else value
     if percent <= 0 or percent > MAX_PERCENT_EFFORT:
-        logger.debug("Discarded an out-of-range percent effort figure: %s", percent)
+        logger.debug(
+            "Discarded a percent effort figure: outside the range (0, %s] percent",
+            MAX_PERCENT_EFFORT,
+        )
         return None
     text = format(percent.quantize(PERCENT_EFFORT_PRECISION, rounding=ROUND_HALF_UP), 'f')
     if '.' in text:

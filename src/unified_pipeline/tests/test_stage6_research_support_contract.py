@@ -27,6 +27,7 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_stage6_research_support_contract.py -p no:cacheprovider
 """
 
+import logging
 import sys
 from pathlib import Path
 
@@ -404,6 +405,27 @@ def test_out_of_range_percent_effort_is_dropped(raw):
     3932312407 item 3).
     """
     assert normalize_percent_effort(raw) is None
+
+
+@pytest.mark.parametrize('raw', ['150', '-1', 'abc'])
+def test_a_discarded_effort_figure_is_never_written_to_the_log(raw, caplog):
+    """The discard is logged structurally: what happened, never which figure.
+
+    The figure is a cell of the CV's own role/effort table, so it is CV
+    content. The out-of-range branch used to log the value itself -- "Discarded
+    an out-of-range percent effort figure: 150" -- in a module whose docstring
+    states the no-PII logging rule and whose other logger calls carry counts
+    and key names only.
+
+    Values chosen so the assertion cannot pass by accident: none of them is a
+    substring of the range the message names.
+    """
+    with caplog.at_level(logging.DEBUG, logger=research_support.__name__):
+        assert normalize_percent_effort(raw) is None
+
+    assert caplog.records, 'the discard is still expected to be logged'
+    for record in caplog.records:
+        assert raw not in record.getMessage()
 
 
 def test_extracted_effort_reaches_the_rendered_percent_effort_cell():
