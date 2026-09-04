@@ -8,7 +8,16 @@ The section also re-buckets its own records. A grant coded M2A whose end date is
 already past belongs under Past (Completed) Funding, and one whose status text
 reads "Under review" belongs under Pending regardless of its dates. The status
 rule lives in `normalization.grant_status_rebucket_target`, imported below; the
-date rule is applied by the writer, which annotates the move as a comment.
+date rule is `reclassify_past_m2a_grants` here, and either move is annotated on
+the grant as a comment.
+
+Those rules, and the percent-effort rules above them, are module-level functions
+taking plain data and returning plain data -- no `self`, no python-docx, and no
+writes back into the records the caller handed in, which arrive copied
+(`copy_entries_for_render`). `_fill_research_support` is the rendering half and
+calls them. The verbose lines are a parsed contract (CODING_STANDARDS.md §7.1),
+so the classifiers return their progress lines and the writer prints them,
+rather than either half rewording one.
 
 Known gap, unchanged by this move: `_create_grant_table` is a fixed-slot
 `fields.get(...)` enumeration, so a stage-4 field it does not name is dropped
@@ -187,9 +196,9 @@ def filter_role_effort_headers(
 
     Such a row is not a grant: it is a source-table header whose body lists
     "<project name> <effort>" pairs, e.g. "Individual's role in project
-    including percent effort\nProject Alpha 0.01". The pairs are added to
-    `effort_lookup` (normalized project name -> "1%") and the row itself is
-    dropped from the entries to render.
+    including percent effort" then "Project Alpha 0.01" on the next line. The
+    pairs are added to `effort_lookup` (normalized project name -> "1%") and
+    the row itself is dropped from the entries to render.
 
     `effort_lookup` is the section's own accumulator and is extended in place,
     because the count reported per header row is cumulative across all three
