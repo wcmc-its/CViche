@@ -36,6 +36,14 @@ fallback is counted in `stats['membership_organization_fallbacks']` and logged,
 because a recovered organization is a lower-confidence cell than an extracted
 one and the run should say so.
 
+That recovery is bounded by one rule: it may MOVE a word out of the
+organization cell -- a date into the date column, a membership type into the
+prefix `_organization_cell` writes back -- but it may never lose one.
+`_recovery_covers_text` checks it on every entry, and a recovery that fails
+renders the entry's whole raw text instead, which is the cell the section
+rendered before this extractor existed. A misread fragment can therefore cost
+a row its improvement, never any of its content.
+
 Finding the table takes two tries. The heading text has changed across template
 revisions ("PROFESSIONAL ORGANIZATIONS", "SOCIETY MEMBERSHIPS", "MEMBERSHIPS"),
 and if none of them match, the fallback searches for a table whose first cell
