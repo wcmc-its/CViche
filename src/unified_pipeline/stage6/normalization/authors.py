@@ -19,10 +19,8 @@ _AUTHOR_SUFFIX_RE = re.compile(r'^(?:Jr|Sr|II|III|IV)\.?$', re.I)
 # Marks an author list puts *on* an initials group rather than in it: the
 # abbreviating period, and the co-first / corresponding-author asterisk and
 # daggers. Stripped before the shape test, so "Alpha, PL*" is classified
-# exactly as "Alpha, PL" is instead of falling out of the initials rule on a
-# typographic mark. 4 of the farm's 1,711 distinct author strings carry a
-# marked initials group; regenerate with
-# `scripts/measure_normalization_claims.py --only marks`.
+# exactly as "Alpha, PL" is. 4 of the farm's 1,711 distinct author strings
+# carry one (`measure_normalization_claims.py --only marks`).
 _INITIALS_TRAILING_MARKS = ".*†‡"
 
 # One initials group, hyphenated: "R-Y". Each side is a single letter of any
@@ -39,28 +37,20 @@ def _looks_like_initials(token: str) -> bool:
 
     THE initials rule for this module. Every path that has to decide
     "initials or name?" calls this one predicate -- the pair detector, the
-    pair parser's surname-slot test, the pair parser's upper-casing, and the
-    fallback parser -- so a token can no longer be classified one way on one
-    path and the other way on the other. The surname-slot test was the last
-    holdout: it asked `len(surname) <= 2 and surname.isupper()` on its own,
-    a fourth definition that disagreed with this one on marked groups
-    ("PL*"), on 3-4 letter groups and on a lone lowercase initial.
-    The fallback used to carry its own pair of tests (an ASCII-only
-    1-3 uppercase-letter regex, plus a case-blind "2 characters or fewer and
-    isupper()"), and those disagreed with this function on spaced groups
-    ("N J"), four-letter groups, hyphenated groups and lone lowercase
-    initials -- 81 of the farm's 1,711 distinct author strings carry at
-    least one comma-token the two definitions classify differently.
-    Regenerate with
-    `scripts/measure_normalization_claims.py --only initials`.
+    pair parser's surname-slot test, its upper-casing, and the fallback
+    parser -- so a token can no longer be classified one way on one path and
+    the other way on the other. The definitions this replaced disagreed on
+    marked groups ("PL*"), spaced groups ("N J"), 3-4 letter groups,
+    hyphenated groups and lone lowercase initials, on 81 of the farm's 1,711
+    distinct author strings (`measure_normalization_claims.py --only
+    initials`).
 
-    A single alphabetic character of any case or script is always an
-    initial -- "Kelly, r" and "Kelly, Å" both occur in the corpus (#560),
-    and a lone letter has no other plausible reading. 2-4 characters must
-    still be uppercase: initials are conventionally written that way, and a
-    short mixed-case word ("Scot", "Li", "Wei") is at least as likely to be
-    a real given name as an initials group. Hyphenated initials ("R-Y")
-    follow the same rule per side.
+    A single alphabetic character of any case or script is always an initial
+    -- "Kelly, r" and "Kelly, Å" both occur in the corpus (#560), and a lone
+    letter has no other plausible reading. 2-4 characters must still be
+    uppercase: a short mixed-case word ("Scot", "Li", "Wei") is at least as
+    likely to be a real given name as an initials group. Hyphenated initials
+    ("R-Y") follow the same rule per side.
     """
     t = token.rstrip(_INITIALS_TRAILING_MARKS).replace(' ', '')
     if not t:
@@ -89,18 +79,9 @@ def _parse_surname_initial_pairs(parts: list[str]) -> list[str]:
     deleted it outright: "AB, PL*, Smith, JA" rendered as "PL* Smith, JA".
 
     That placement follows `_parse_author_fallback`'s orphan rule on the
-    FIRST orphan and diverges on the second. Both merge an orphan into the
-    element before it while that element is still "open", and both emit it
-    on its own when nothing is open. This parser then leaves the emitted
-    orphan open, so a second consecutive orphan coalesces into it
-    (["Alpha", "B", "C", "D", "Echo", "F"] -> "Alpha B", "C D", "Echo F");
-    the fallback closes it, so a second fragment stands alone
-    (["Alpha B", "C", "D", "Echo F"] -> "Alpha B", "C", "D", "Echo F").
-    The divergence is deliberate -- it is an explicit assignment on each
-    side, and
+    FIRST orphan and diverges on the second, deliberately and on both sides:
     `test_the_two_parsers_place_a_second_consecutive_orphan_differently`
-    pins both -- and the corpus does not adjudicate it; see the branch
-    comment below for what it does say.
+    holds the shapes.
     """
     cleaned_authors: list[str] = []
     merge_target_open = False
@@ -133,24 +114,14 @@ def _parse_surname_initial_pairs(parts: list[str]) -> list[str]:
             # still "open" (a bare token carrying no initials of its own
             # yet), emitted on its own when there is nothing open to charge
             # it to -- and never dropped, which is what this branch used to
-            # do. Emitting it re-opens the merge target, which is where
-            # this diverges from `_parse_author_fallback`; see the docstring
-            # above.
-            #
-            # Consecutive orphans therefore coalesce into one element. What
-            # the corpus actually says about that, measured with
-            # `scripts/measure_normalization_claims.py --only orphans`: of
-            # the farm's 1,711 distinct author strings, 228 reach this
-            # parser and exactly 1 reaches this branch, where it places two
-            # tokens back to back -- each a single uppercase letter (shapes
-            # {'A': 2}, runs {2: 1}). So the corpus does NOT show a surname
-            # being rejoined to its own initial; there is no surname in that
-            # string at all, only two bare letters. Coalescing renders them
-            # as one element with the shape of a Vancouver author, not
-            # coalescing renders them as two bare letters, and nothing in
-            # the source says which reading is right. #560's bar -- no
-            # token deleted -- is met either way, which is the part the
-            # measurement does settle.
+            # do. Emitting it re-opens the merge target, so consecutive
+            # orphans coalesce -- where this diverges from
+            # `_parse_author_fallback`. The corpus does not adjudicate that:
+            # `measure_normalization_claims.py --only orphans` reports
+            # `strings hitting the surname slot : 1`, placing two tokens back
+            # to back, `{'A': 2}` by shape -- two bare letters with no
+            # surname in the string at all. #560's bar, no token deleted, is
+            # met on either reading.
             if merge_target_open:
                 cleaned_authors[-1] = f"{cleaned_authors[-1]} {surname}"
                 merge_target_open = False
@@ -160,15 +131,11 @@ def _parse_surname_initial_pairs(parts: list[str]) -> list[str]:
             i += 1
             continue
 
-        # Normalize spaced initials: "P L" -> "PL". Upper-case only a
-        # token that is actually initials-shaped. Belt and braces since the
-        # orphan branch above started placing rather than skipping: it
-        # advances by one onto an odd-indexed token, which the detector has
-        # already validated as initials, so that token takes the orphan
-        # branch too and the parity restores -- a real surname can no longer
-        # reach this slot. Nothing enforces that reasoning, and rendering a
-        # surname as "SMITH" would be a new corruption of a name this
-        # function is supposed to leave alone (#560), so the test stays.
+        # Normalize spaced initials: "P L" -> "PL". The shape test before
+        # the upper-casing is belt and braces -- the orphan branch above
+        # restores the parity, so a real surname should not reach this slot
+        # -- but nothing enforces that, and rendering a surname as "SMITH"
+        # would be a fresh corruption of a name (#560).
         initials_normalized = initials.replace(' ', '')
         if _looks_like_initials(initials_normalized):
             initials_normalized = initials_normalized.upper()
@@ -223,17 +190,12 @@ def _parse_author_fallback(parts: list[str]) -> tuple[list[str], bool]:
                 if merge_target_open:
                     cleaned_authors[-1] = f"{cleaned_authors[-1]} {fragment}"
                 else:
-                    # Nothing open to charge this fragment to. Keep it as its
-                    # own element: it is unattributable, not absent. The live
-                    # case is a source string that already reads
-                    # "... Alpha H, F, MJ. K" -- the author before the
-                    # fragment carries its own initial, so it is closed, and
-                    # dropping the "F" is the deletion #560 is about. There is
-                    # no author here it can be merged onto without inventing
-                    # an attribution. Placeholder surname on purpose: the
-                    # shape is what matters and the corpus name does not
-                    # belong in the source, the same reason round 1 stopped
-                    # logging author strings.
+                    # Nothing open to charge this fragment to: it is
+                    # unattributable, not absent, so it is kept as its own
+                    # element. The live shape is "... Alpha H, F, MJ. K" --
+                    # the author before the fragment already carries its own
+                    # initial, so it is closed, and dropping the "F" is the
+                    # deletion #560 is about.
                     cleaned_authors.append(fragment)
             merge_target_open = False
             continue
@@ -275,29 +237,14 @@ def _normalize_author_names(authors: str) -> str:
     - Trailing punctuation
 
     Never drops a token that names or belongs to a real author (#560), on
-    either parser. Both used to.
-
-    The fallback discarded any comma-split token it could not place -- an
-    initials group, a name suffix, a bare 1-2 character fragment -- and that
-    test was case-blind: a short *surname* ("Li", "Wu", "Ma", "Ye") was
-    discarded exactly like a short initials fragment. Because a single
-    missing comma anywhere in the list is enough to make the pair detector
-    decline the whole string, that one discard rule was stripping every
-    later author's initials from citations that had them, or dropping
-    short-surnamed authors outright.
-
-    The pair parser had a discard of its own, on the shape the fallback
-    never sees: an initials group sitting where a surname should be, which
-    it skipped over. "AB, PL*, Smith, JA" lost "AB" outright, and the farm's
-    one live occurrence of the shape lost two tokens together, both single
-    uppercase letters. It is placed rather than skipped now.
-
-    In both, such a token merges into the author immediately before it, and
-    when there is no open author to merge into it is emitted as its own
-    element instead. Neither parser reduces the token count any more. They
-    are not the same rule, though: on a SECOND consecutive orphan the pair
-    parser coalesces and the fallback does not -- deliberately, and pinned
-    on both sides. `_parse_surname_initial_pairs`' docstring has the shapes.
+    either parser. Both used to: the fallback discarded any comma-split
+    token it could not place, case-blind, so a short *surname* ("Li", "Wu",
+    "Ma", "Ye") went the way of a short initials fragment; the pair parser
+    skipped an initials group standing in a surname slot. An unplaceable
+    token now merges into the author before it, or is emitted as its own
+    element when there is none open, so neither parser reduces the token
+    count. The two orphan rules are not identical -- see
+    `_parse_surname_initial_pairs`.
     """
     if not authors:
         return ''
@@ -333,12 +280,11 @@ def _normalize_author_names(authors: str) -> str:
                 looks_like_pairs = False
                 break
 
-    # Structural metadata only. These strings are CV-derived author names,
-    # so neither the input nor the result is logged: debug logs land in
-    # centralized systems with wider retention and access than the app
-    # itself. The token counts are what makes #560 visible in a log -- the
-    # bug is a token disappearing between "in" and "out" -- and they say
-    # nothing about who the authors are.
+    # Structural metadata only: these strings are CV-derived author names,
+    # and debug logs land in centralized systems with wider retention and
+    # access than the app itself. The token counts say nothing about who the
+    # authors are, and a token disappearing between "in" and "out" is
+    # exactly what #560 is.
     if looks_like_pairs and len(parts) >= 2:
         cleaned_authors = _parse_surname_initial_pairs(parts)
         result = ', '.join(cleaned_authors)
@@ -356,9 +302,8 @@ def _normalize_author_names(authors: str) -> str:
     result = ', '.join(cleaned_authors)
     if has_et_al:
         result += ', et al.'
-    # The issue asks for the token count before AND after: the count is the
-    # only thing that makes this bug visible in a log, and it is the "after"
-    # number that would have shown the old fallback deleting a token (#560).
+    # Before AND after: it is the "after" count that would have shown the
+    # old fallback deleting a token (#560).
     logger.debug(
         "_normalize_author_names: branch=fallback tokens_in=%d tokens_out=%d "
         "changed=%s",
