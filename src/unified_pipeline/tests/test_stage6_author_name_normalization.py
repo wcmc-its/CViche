@@ -377,10 +377,9 @@ def test_fallback_parser_is_reachable_and_reports_et_al_separately():
 
 
 # --------------------------------------------------------------------------
-# Round-2 verification. The pair parser had a token deletion of its own, on a
-# shape the fallback never sees: an initials group standing where a surname
-# should be was skipped over rather than placed. It is the same defect #560
-# is about, in the other parser, and one live farm string hits it.
+# The pair parser's own token deletion, on a shape the fallback never sees:
+# an initials group standing where a surname should be was skipped over
+# rather than placed. Same defect as #560, other parser; one farm string.
 # --------------------------------------------------------------------------
 
 def test_an_initials_group_in_a_surname_slot_is_not_deleted():
@@ -396,12 +395,9 @@ def test_an_initials_group_in_a_surname_slot_is_not_deleted():
 def test_the_pair_parser_keeps_every_alphabetic_character_of_its_input():
     """The property, not one example: for the shapes that reach the pair
     parser at all, every letter and digit of the input survives into the
-    output. The old skip broke it on any list missing a surname.
-
-    Counted as a multiset, not as set membership (#735 review): `char in
-    joined` passes as long as SOME "A" survives, so dropping one of two
-    identical tokens -- exactly what the old skip did to "AB, PL, Smith,
-    JA" -- would not have failed it."""
+    output, counted as a multiset -- so a repeated token cannot go missing
+    behind an identical one. The old skip broke this on any list missing a
+    surname."""
     for authors in (
         'AB, PL*, Smith, JA',
         'AB, PL, Smith, JA',
