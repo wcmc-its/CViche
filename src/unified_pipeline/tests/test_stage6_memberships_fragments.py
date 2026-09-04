@@ -61,6 +61,18 @@ by the fallback itself. The block pins the general rule rather than that one
 cell: a recovered organization may give up a tail only when the date column
 now carries every word of it.
 
+Block (t) is the third round, and the same class of loss one level up. The
+render gate read 2082_Dr_Scot's memberships table missing "Faculty Associate"
+on two of three rows. The fallback's structured-alias branch resolved the
+organization and the membership type TOGETHER: an `institution` field named
+the organization, the branch returned on it, and the `role` field sitting
+beside it was never read -- so the role reached no cell of the document, and
+the third row, which takes a different path, kept its role and left the table
+internally inconsistent. Block (s)'s no-loss check would have caught it, but
+round 2 had exempted the alias branch from it on purpose. The block pins both
+halves of the repair: the two values are resolved independently, and the
+exemption is gone.
+
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_memberships_fragments.py -p no:cacheprovider
@@ -475,9 +487,10 @@ def test_organization_fallback_is_counted_and_not_silent():
 
 def test_organization_fallback_prefers_a_structured_alias_field():
     """Two farm uids carry the organization under `institution` with
-    `organization` absent; reading it beats parsing the raw text."""
+    `organization` absent; reading it beats parsing the raw text, which here
+    would have kept the tab and the date in the organization cell."""
     recovered = _organization_fallback(
-        "2016-Present\tsome flattened source text",
+        "2016-Present\tAmerican College of Physicians",
         {"institution": "American College of Physicians"},
     )
     assert recovered.organization == "American College of Physicians"
@@ -841,6 +854,100 @@ def test_a_lift_that_would_unbalance_a_bracket_is_refused():
     text = "American Academy of Forensic Sciences (elected Fellow, 1980)"
     assert _split_trailing_dates(text) == (text, "")
     assert _organization_fallback(text, {}).organization == text
+
+
+# --- (t) round 3: a structured alias must not silence the field beside it ---
+
+# 2082_Dr_Scot's two section I entries verbatim in shape: stage 4 extracted
+# them under another taxonomy code's field schema (course_code/institution/
+# role, stage4/schemas.py), so the organization arrives under `institution`
+# and the membership role under `role` -- section I's own `organization` and
+# `membership_type` keys are both absent.
+ALIAS_AND_ROLE_ENTRIES = [
+    {
+        "text": "2016-present\tFaculty Associate. Center for Southeast Asian Studies",
+        "extracted_fields": {
+            "course_code": None, "course_title": None,
+            "institution": "Center for Southeast Asian Studies",
+            "role": "Faculty Associate", "enrollment": None,
+            "start_date": "2016", "end_date": "present",
+        },
+    },
+    {
+        "text": "2012-2020\tFaculty Associate-Center for Nonprofit and NGO Studies",
+        "extracted_fields": {
+            "course_code": None, "course_title": None,
+            "institution": "Center for Nonprofit and NGO Studies",
+            "role": "Faculty Associate", "enrollment": None,
+            "start_date": "2012", "end_date": "2020",
+        },
+    },
+]
+
+
+def test_a_role_beside_an_institution_alias_still_reaches_the_organization_cell():
+    """The alias branch resolved organization AND membership type together:
+    `institution` named the organization, the branch returned on it, and the
+    `role` sitting beside it was never read -- so "Faculty Associate" was
+    rendered nowhere in the document. The date correctly moving to the date
+    column is the improvement; losing the role with it was not."""
+    rows = _render_memberships(ALIAS_AND_ROLE_ENTRIES)
+    assert rows == [
+        ["Faculty Associate, Center for Southeast Asian Studies", "2016-Present"],
+        ["Faculty Associate, Center for Nonprofit and NGO Studies", "2012-2020"],
+    ], rows
+
+
+def test_the_membership_type_alias_is_read_independently_of_the_organization_one():
+    """Each value prefers its own structured alias; neither short-circuits the
+    other. `fellowship_designation` is section I's own second designation
+    field and is read the same way."""
+    for type_key in ("role", "fellowship_designation", "membership_type"):
+        recovered = _organization_fallback(
+            "2016-present\tFaculty Associate. Center for Southeast Asian Studies",
+            {"institution": "Center for Southeast Asian Studies",
+             type_key: "Faculty Associate"},
+        )
+        assert recovered.membership_type == "Faculty Associate", type_key
+        assert recovered.organization == "Center for Southeast Asian Studies", type_key
+
+
+def test_a_work_title_is_not_read_as_a_membership_type():
+    """`title` names a work -- a paper, a talk, a patent -- on every schema
+    that emits it, and no schema emits `position` at all, so neither is a
+    membership designation. Reading `title` here would prefix a publication
+    name onto an organization cell."""
+    recovered = _organization_fallback(
+        "American College of Physicians",
+        {"institution": "American College of Physicians",
+         "title": "A Randomized Trial of Something", "position": "Chair"},
+    )
+    assert recovered.membership_type == ""
+    assert recovered.organization == "American College of Physicians"
+
+
+def test_an_alias_naming_less_than_the_entry_is_refused_like_any_other_recovery():
+    """The no-loss check covers the alias branch too. An alias names ONE
+    field, so it can be right about the organization and still leave the rest
+    of the entry unaccounted for; when it does, the row goes back to the raw
+    text rather than dropping the remainder."""
+    text = "Elected Fellow\tAmerican College of Physicians, Cardiology Council"
+    recovered = _organization_fallback(
+        text, {"institution": "American College of Physicians"})
+    assert recovered.organization == text.strip()
+    assert recovered.membership_type == ""
+
+
+def test_the_entrys_own_date_fields_count_as_covered_by_the_date_column():
+    """The caller renders `start_date`/`end_date` into the date cell, so the
+    no-loss check has to count them -- otherwise an alias-supplied row whose
+    dates live in the fields is refused for "losing" words the row prints."""
+    recovered = _organization_fallback(
+        "2016 - present American College of Physicians",
+        {"institution": "American College of Physicians",
+         "start_date": "2016", "end_date": "present"},
+    )
+    assert recovered.organization == "American College of Physicians"
 
 
 if __name__ == "__main__":
