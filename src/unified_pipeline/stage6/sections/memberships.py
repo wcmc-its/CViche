@@ -17,6 +17,12 @@ College of Surgeons". An entry with no `organization` field falls back to its
 first 150 characters of raw text -- a truncated membership is still a
 membership; a missing one is a loss.
 
+Dates go through `_membership_dates_cell` on both paths. The multi-membership
+parser hands back one raw range string ("2015-present") while the single path
+has separate `start_date`/`end_date` fields; `_split_date_range` reduces the
+first shape to the second so both end at the same `format_date_range(..., 'I')`
+call and equivalent memberships cannot render two different date formats.
+
 Finding the table takes two tries. The heading text has changed across template
 revisions ("PROFESSIONAL ORGANIZATIONS", "SOCIETY MEMBERSHIPS", "MEMBERSHIPS"),
 and if none of them match, the fallback searches for a table whose first cell
@@ -34,6 +40,7 @@ uses one of the shared `_add_table_row_with_*` variants, which stay on
 callers below must not also increment it -- and it refuses a `data` list longer
 than the table has columns instead of dropping the surplus cells.
 """
+import re
 from typing import List
 
 try:
@@ -52,6 +59,15 @@ from ..formatting import (
 from ..parsing import _is_table_header_entry, _parse_multi_membership_entry
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
+
+# Section I's taxonomy code -- the key into formatting/dates.py's DATE_FORMATS,
+# which maps it to 'yyyy'. Named because it appears in the one date-formatting
+# helper below and nowhere else; a bare 'I' at a call site reads like an index.
+_MEMBERSHIPS_TAXONOMY_CODE = 'I'
+
+# One raw range string -> (start, end). Hyphen, en dash and em dash only: a
+# slash is part of a date ("1/1997"), not a separator between two.
+_DATE_RANGE_SPLIT_RE = re.compile(r'\s*[-–—]\s*')
 
 
 class MembershipsRowShapeError(ValueError):
@@ -92,6 +108,32 @@ def _entry_parts(text: str) -> List[str]:
     if len(lines) != 1:
         return lines
     return [p.strip() for p in lines[0].split('|') if p.strip()]
+
+
+def _split_date_range(dates: str) -> tuple[str, str]:
+    """One raw membership date cell -> the (start, end) pair the formatter wants.
+
+    `_parse_multi_membership_entry` returns a range already joined into one
+    string; the single-membership path has the two halves as separate fields.
+    Reducing the first shape to the second is what lets both reach the same
+    `format_date_range` call.
+    """
+    if not dates:
+        return '', ''
+    halves = _DATE_RANGE_SPLIT_RE.split(dates.strip(), maxsplit=1)
+    return halves[0].strip(), (halves[1].strip() if len(halves) > 1 else '')
+
+
+def _membership_dates_cell(start_date: str, end_date: str) -> str:
+    """The ONE place a section I date cell is formatted (#476 review).
+
+    Both the single- and multi-membership paths end here, so equivalent
+    memberships cannot render different date formats depending on which branch
+    the entry took.
+    """
+    if not (start_date or end_date):
+        return ''
+    return format_date_range(start_date, end_date, _MEMBERSHIPS_TAXONOMY_CODE)
 
 
 class MembershipsSection:
@@ -186,7 +228,11 @@ class MembershipsSection:
                     org_text = f"{mem_type}, {org}" if mem_type and mem_type.lower() not in org.lower() else org
                     # `_add_table_row` owns stats['entries_inserted'] -- do not
                     # increment it here as well (#476 review).
-                    self._add_table_row(table, [org_text, dates], entry=entry)
+                    self._add_table_row(
+                        table,
+                        [org_text, _membership_dates_cell(*_split_date_range(dates))],
+                        entry=entry,
+                    )
                 continue
 
             # Single membership - use extracted fields
@@ -205,7 +251,7 @@ class MembershipsSection:
                 org_text = organization
 
             # Format date range for table column
-            date_str = format_date_range(start_date, end_date, 'I') if (start_date or end_date) else ''
+            date_str = _membership_dates_cell(start_date, end_date)
 
             # Add row to table
             self._add_table_row(table, [org_text, date_str], entry=entry)

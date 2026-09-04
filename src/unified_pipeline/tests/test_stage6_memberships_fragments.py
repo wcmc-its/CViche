@@ -108,7 +108,12 @@ def test_positive_control_pipe_blind_multi_membership_entry_gains_both_rows():
     '\\n'), so `len(lines) > 2` is never true and `_parse_multi_membership_
     entry` never runs; the entry falls to the single-membership branch,
     which uses `extracted_fields` describing only the first membership and
-    silently drops the second. Fails on dev."""
+    silently drops the second. Fails on dev.
+
+    The dates read "2015-Present"/"2018-Present" rather than the raw
+    "2015-present"/"2018-present" the parser hands back because the
+    multi-membership path now formats its dates through the same
+    `format_date_range(..., 'I')` call the single path always used."""
     entry = {
         "text": "Member | State Medical Society | 2015-present | Fellow | National Surgical Association | 2018-present",
         "extracted_fields": {
@@ -120,9 +125,9 @@ def test_positive_control_pipe_blind_multi_membership_entry_gains_both_rows():
     rows = _render_memberships([entry])
     assert len(rows) == 2, f"expected 2 memberships, got {rows}"
     assert rows[0][0] == "Member, State Medical Society"
-    assert rows[0][1] == "2015-present"
+    assert rows[0][1] == "2015-Present"
     assert rows[1][0] == "Fellow, National Surgical Association"
-    assert rows[1][1] == "2018-present"
+    assert rows[1][1] == "2018-Present"
 
 
 # --- (c) negative controls: unaffected shapes render exactly as today -------
@@ -166,10 +171,11 @@ def test_multiline_single_membership_still_renders_the_parsed_row():
     resolves to exactly ONE membership is a path #476 must not touch: it is
     not newline-blind, so the parsed-count gate added for the blind case must
     not reach it. Measured on origin/dev this renders the PARSED row
-    ('Fellow, American Academy of Pediatrics' / '1997-present'), not the
-    extracted-fields row ('American Academy of Pediatrics' / '1997-Present')
-    -- the extracted fields here deliberately differ from the parse so the
-    two paths are distinguishable in the assertion."""
+    ('Fellow, American Academy of Pediatrics'), not the extracted-fields row
+    ('American Academy of Pediatrics') -- the extracted fields here
+    deliberately differ from the parse so the two paths are distinguishable
+    in the assertion. The date reads '1997-Present' on both paths now that
+    they share one formatter."""
     entry = {
         "text": "Fellow\nAmerican Academy of Pediatrics\n1997-present",
         "extracted_fields": {
@@ -179,7 +185,7 @@ def test_multiline_single_membership_still_renders_the_parsed_row():
         },
     }
     rows = _render_memberships([entry])
-    assert rows == [["Fellow, American Academy of Pediatrics", "1997-present"]], rows
+    assert rows == [["Fellow, American Academy of Pediatrics", "1997-Present"]], rows
 
 
 if __name__ == "__main__":
