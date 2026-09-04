@@ -30,9 +30,12 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_stage6_bibliography_editors_publisher.py -p no:cacheprovider
 """
 
+import pytest
+
 from unified_pipeline.stage6.formatting.values import (
     _append_missing_stage5d_values,
     _format_citation,
+    _format_currency,
     _value_referenced,
 )
 
@@ -439,3 +442,84 @@ def test_stage5d_non_string_editors_value_is_skipped_not_rendered():
     citation, _, _ = _format_citation(_entry(fields), 10)
 
     assert citation == '10. Doe J. A Chapter. In: Book. Acme Press; 2020.'
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review, points 4 and 5: `_format_currency`
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('value', [0, 0.0, '0', '0.00', ' 0 ', '$0'])
+def test_format_currency_zero_is_an_amount_not_an_absence(value):
+    """`if not value: return ''` made a real $0 award render as nothing.
+    A zero-dollar line is a fact about a grant, not a missing value. Only
+    int/float 0 were broken -- the string "0" is truthy and already worked,
+    and is pinned here so the guard cannot regress in the other direction."""
+    assert _format_currency(value) == '$0'
+
+
+@pytest.mark.parametrize('value', [None, '', '   ', '\t'])
+def test_format_currency_absent_values_still_render_empty(value):
+    """The other half of point 4: making zero render must not make an
+    absent value render "$0"."""
+    assert _format_currency(value) == ''
+
+
+@pytest.mark.parametrize('value', [[], {}, ['14876'], True, False])
+def test_format_currency_non_amount_types_render_empty(value):
+    """The guard is on type, not truthiness, so raw stage-4 JSON junk (a
+    bool, a list) renders nothing rather than its repr. `[]` and `False`
+    rendered "" before this change too (they are falsy); `['14876']` and
+    `True` previously reached the parser and returned their own repr."""
+    assert _format_currency(value) == ''
+
+
+@pytest.mark.parametrize('value', ['not a number', 'TBD', 'pending', 'nan', 'inf'])
+def test_format_currency_unparseable_value_returns_the_original_string(value):
+    """Pre-existing behaviour, pinned because the parser changed: an
+    unparseable value falls through to the original string. `decimal` raises
+    InvalidOperation where `float` raised ValueError, so dropping the added
+    except clause turns this into an uncaught exception; "nan"/"inf" parse as
+    Decimals and are held back by the finiteness check."""
+    assert _format_currency(value) == value
+
+
+@pytest.mark.parametrize('value,expected', [
+    (14876, '$14,876'),
+    ('14876', '$14,876'),
+    ('14876.00', '$14,876'),
+    ('$14,876', '$14,876'),
+    ('14,876', '$14,876'),
+    (1234.5, '$1,234.50'),
+    (-5.5, '$-5.50'),
+])
+def test_format_currency_renders_whole_and_fractional_amounts(value, expected):
+    """The whole-number branch keeps rendering with no decimals ("$14,876",
+    not "$14,876.00") -- the shape every corpus grant row uses today."""
+    assert _format_currency(value) == expected
+
+
+def test_format_currency_keeps_cents_a_float_cannot_represent():
+    """Point 5. 12345678901234567.89 has 19 significant digits; the nearest
+    double is 12345678901234568.0, which is whole, so the float parser took
+    the whole-number branch and rendered a different amount. Decimal keeps
+    every digit. The float rendering is computed here rather than pasted, so
+    this fails the moment the parser goes back to float."""
+    value = '12345678901234567.89'
+
+    assert _format_currency(value) == '$12,345,678,901,234,567.89'
+
+    as_float = float(value)
+    float_rendering = (
+        f"${int(as_float):,}" if as_float == int(as_float) else f"${as_float:,.2f}"
+    )
+    assert float_rendering == '$12,345,678,901,234,568'
+    assert _format_currency(value) != float_rendering
+
+
+def test_format_currency_rounds_half_up_not_half_to_even():
+    """The rounding policy is now stated (ROUND_HALF_UP) rather than
+    inherited: 0.125 is exactly representable in binary and `f"{0.125:,.2f}"`
+    rounds it to even, giving "$0.12". A half-cent on a dollar figure rounds
+    up."""
+    assert _format_currency(0.125) == '$0.13'
+    assert f"${0.125:,.2f}" == '$0.12'

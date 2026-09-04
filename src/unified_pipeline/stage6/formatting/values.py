@@ -10,6 +10,7 @@ how it *reads*: 14876 becomes "$14,876", a publication record becomes a numbered
 Vancouver citation. A change to one should not require a change to the other.
 """
 import re
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Dict, List, Optional, Tuple
 
 from ..normalization import _normalize_author_names
@@ -33,6 +34,10 @@ _CITATION_STOPWORDS = frozenset({
     'vol', 'volume', 'page', 'pages', 'published', 'publisher',
 })
 _CITATION_TOKEN_RE = re.compile(r"[^\W_]+")
+# Money is quantized to cents under a named rounding policy rather than
+# whatever a binary float's repr happens to do (round-2 review of #481,
+# point 5): $0.125 is $0.13, not $0.12.
+_CURRENCY_CENTS = Decimal('0.01')
 
 
 def _value_referenced(value: str, citation_text: str) -> bool:
@@ -200,8 +205,20 @@ def _format_currency(value) -> str:
 
     Returns:
         Formatted currency string (e.g., "$14,876") or empty string
+
+    Zero is an amount, not an absence: 0, 0.0 and "0" all render "$0". Only
+    None, an empty/blank string, and a value that is not a number or string at
+    all render "". Parsing goes through `decimal.Decimal`, so an amount binary
+    float cannot hold exactly keeps its cents, and the fractional branch states
+    its rounding (half-up to two places) instead of inheriting the repr's.
     """
-    if not value:
+    # `if not value` also swallowed a real $0 (round-2 review of #481, point 4).
+    # The check is on type, not truthiness: a bool or a list from raw stage-4
+    # JSON is not an amount and must not reach the formatter, which would print
+    # its repr into the document.
+    if isinstance(value, bool) or not isinstance(value, (int, float, Decimal, str)):
+        return ''
+    if isinstance(value, str) and not value.strip():
         return ''
 
     # Convert to string and extract numeric portion
@@ -217,15 +234,18 @@ def _format_currency(value) -> str:
     # Try to extract a number
     try:
         # Handle cases like "14876" or "14876.00"
-        num = float(cleaned)
-        # Format with commas and $ symbol, no decimal places for whole numbers
-        if num == int(num):
-            return f"${int(num):,}"
-        else:
-            return f"${num:,.2f}"
-    except ValueError:
+        num = Decimal(cleaned)
+    except (ValueError, InvalidOperation):
         # If we can't parse it, return the original value
         return value_str
+    if not num.is_finite():
+        # Decimal parses "nan"/"inf"; float did too, but int() on them raised
+        # and the value fell through to the original string. Keep that.
+        return value_str
+    # Format with commas and $ symbol, no decimal places for whole numbers
+    if num == num.to_integral_value():
+        return f"${int(num):,}"
+    return f"${num.quantize(_CURRENCY_CENTS, rounding=ROUND_HALF_UP):,f}"
 
 
 def _format_mentee_duration(fields: Dict) -> str:
