@@ -229,11 +229,16 @@ def _parse_author_fallback(parts: list[str]) -> tuple[list[str], bool]:
                     cleaned_authors[-1] = f"{cleaned_authors[-1]} {fragment}"
                 else:
                     # Nothing open to charge this fragment to. Keep it as its
-                    # own element: it is unattributable, not absent, and the
-                    # live case is a source string that already reads
-                    # "... Shariati H, F, MJ. K" -- dropping the "F" is the
-                    # deletion #560 is about, and there is no author here it
-                    # can be merged onto without inventing an attribution.
+                    # own element: it is unattributable, not absent. The live
+                    # case is a source string that already reads
+                    # "... Alpha H, F, MJ. K" -- the author before the
+                    # fragment carries its own initial, so it is closed, and
+                    # dropping the "F" is the deletion #560 is about. There is
+                    # no author here it can be merged onto without inventing
+                    # an attribution. Placeholder surname on purpose: the
+                    # shape is what matters and the corpus name does not
+                    # belong in the source, the same reason round 1 stopped
+                    # logging author strings.
                     cleaned_authors.append(fragment)
             merge_target_open = False
             continue
