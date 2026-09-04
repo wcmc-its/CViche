@@ -188,13 +188,21 @@ def test_past_m2a_grant_is_rendered_under_completed_funding():
 
 # --- item 3: open-ended end dates are never reclassified ------------------------
 
-@pytest.mark.parametrize('end_date', ['Present', 'current', 'ONGOING', ''])
+@pytest.mark.parametrize('end_date', ['Present', 'current', 'ONGOING', '', 'TBD'])
 def test_current_end_date_does_not_move_m2a_grant(end_date):
     """"Present"/"current"/"ongoing"/"" keep a grant in Current Research Funding.
 
-    `OPEN_ENDED_END_DATES` is matched case-insensitively; without a test a
-    refactor of the date parser could silently file every active grant under
-    Past (Completed) Funding (review thread 3932451691 item 3).
+    Without a test, a refactor of the date parser could silently file every
+    active grant under Past (Completed) Funding (review thread 3932451691
+    item 3).
+
+    What this pins is the outcome, not one branch: an open-ended end date is
+    held out of the reclassifier twice over -- by the `OPEN_ENDED_END_DATES`
+    membership test and, since none of those four literals contains a
+    four-digit year, by the `\\d{4}` search behind it. No input can tell the
+    two apart while the literal list stays digit-free, so removing either one
+    leaves this test green. "TBD" is the second guard on its own: not in the
+    literal list, still no year to parse.
     """
     gen = _sectioned_generator()
     gen._fill_research_support(

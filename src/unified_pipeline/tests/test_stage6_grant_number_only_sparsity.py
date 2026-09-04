@@ -32,6 +32,11 @@ alongside dates, role and effort as the "second field," which is what this
 real entry actually carries and is required for the render-gate expectation
 that ODAWYA gains a table.
 
+This file stays about the sparsity guard alone. The rest of section M2 -- the
+bucket rules, the field fallbacks, the effort rules and the eight-row rendering
+contract -- is pinned in `test_stage6_research_support_contract.py`, split out
+because the two together run past a thousand lines.
+
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_grant_number_only_sparsity.py -p no:cacheprovider
