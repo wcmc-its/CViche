@@ -17,6 +17,12 @@ three separate D2 entries (no tab in any one entry's text) and are the model
 for what -DAZFA's rendering should now look like; `test_negative_control_
 already_split_entry_is_unchanged` pins that this fix does not touch them.
 
+Groups (d) and (e) cover the rest of the section's repair work rather than the
+fragment scanner: that one record yields exactly one rendered row and one
+increment of `entries_inserted`, and that the two passes which rewrite stage-4
+output -- institution propagation and appointment merging -- refuse to act
+without evidence rather than falling back on document adjacency.
+
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_positions_fragments.py -p no:cacheprovider
@@ -33,6 +39,7 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
 from unified_pipeline.stage6.sections.positions import (  # noqa: E402
+    _institution_from_raw_text,
     _tab_joined_child_fragments,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
@@ -59,7 +66,9 @@ NO_CHILD_CASES = [
 ]
 
 
-def _render_positions(entries):
+def _positions_generator():
+    """A generator whose document holds just the D2 anchor and an empty
+    three-column table, ready for `_fill_positions`."""
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document()
     gen.doc.add_paragraph("D. POSITIONS")
@@ -67,8 +76,33 @@ def _render_positions(entries):
     table = gen.doc.add_table(rows=1, cols=3)
     for i, header in enumerate(["Title", "Institution/Location", "Dates"]):
         table.rows[0].cells[i].text = header
+    return gen, table
+
+
+def _render_positions(entries):
+    gen, table = _positions_generator()
     gen._fill_positions({"D2": entries})
     return [[c.text for c in r.cells] for r in table.rows[1:]]
+
+
+def _position_entry(idx, title, institution, hierarchy, start="", end=""):
+    """A minimal D2 record: document position, title, employer and the source
+    heading path propagation reads."""
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": "D2",
+        "hierarchy": hierarchy,
+        "extracted_fields": {
+            "title": title,
+            "institution": institution,
+            "start_date": start,
+            "end_date": end,
+        },
+    }
+
+
+def _institution_of(entry):
+    return (entry.get("extracted_fields") or {}).get("institution") or ""
 
 
 def _borman_entry():
@@ -172,6 +206,128 @@ def test_negative_control_already_split_entry_is_unchanged():
     assert len(rows) == 1
     assert rows[0][0] == "Attending Physician"
     assert rows[0][2] == "07/02-06/03"
+
+
+# --- (d) the rendering layer owns the row count ------------------------------
+
+def test_entries_inserted_counts_one_per_rendered_row():
+    """Pins the row-count invariant: `entries_inserted` is incremented exactly
+    once per physical row, child rows included.
+
+    A parent with two recovered children must leave the counter at 3. One
+    (children not counted) or five (children counted at two levels) both mean
+    the statistic no longer describes the document.
+    """
+    gen, table = _positions_generator()
+    gen._fill_positions({"D2": [_borman_entry()]})
+    assert len(table.rows) - 1 == 3
+    assert gen.stats["entries_inserted"] == 3
+
+
+# --- (e) the repair passes fail closed ---------------------------------------
+
+def test_institution_propagation_stops_at_unrelated_entries():
+    """Pins that a carried-forward employer stops at a source-structure
+    boundary instead of running to the end of the code list.
+
+    Document order alone used to keep an employer in scope for every later
+    record, so a record under a different source heading inherited it. The
+    record under the other heading must stay empty, and so must the record
+    after it -- the carry is dropped at the boundary, not resumed across it.
+    """
+    parent = _position_entry(1, "Chief of Service", "Lincoln Hospital",
+                             ["Hospital Appointments"], "2001", "2004")
+    sibling = _position_entry(2, "Attending Physician", "", ["Hospital Appointments"])
+    unrelated = _position_entry(3, "Course Director", "", ["Teaching"])
+    after = _position_entry(4, "Preceptor", "", ["Hospital Appointments"])
+
+    WCMTemplateGenerator._propagate_institution_to_subentries(
+        [parent, sibling, unrelated, after])
+
+    assert _institution_of(sibling) == "Lincoln Hospital"
+    assert _institution_of(unrelated) == ""
+    assert _institution_of(after) == ""
+
+
+def test_raw_text_employer_candidate_must_name_an_employer():
+    """Pins the last-resort employer scan against City/State-shaped text.
+
+    It used to take any fragment containing a "City, ST" pattern wherever it
+    sat, so a bare location, a "Surname, Forename", or a whole date-prefixed
+    record line became the Institution cell of a record that had no employer.
+    A candidate must name something in front of a location tail, and must
+    carry no year.
+    """
+    employer = "Attending Physician\tLincoln Hospital, Bronx, NY\t07/2002"
+    assert _institution_from_raw_text(employer) == "Lincoln Hospital, Bronx, NY"
+
+    for text in (
+        "Attending Physician\tBronx, NY",                       # bare location
+        "Reviewer\tMarblegate, Quenby",                         # a person
+        "Aug 2019-Dec 2023, Associate Director, Institute of "
+        "Speculative Metrics, Norvale University, Crab Hollow, ZQ\n"
+        "Jan 2024-Present, Vice Chair",                         # record lines
+    ):
+        assert _institution_from_raw_text(text) == "", f"accepted {text!r}"
+
+
+def test_merge_needs_employer_evidence_not_adjacency():
+    """Pins that the merge refuses a pair whose employers disagree.
+
+    A title-only row next to a bare dates row used to take that row's dates
+    and delete it whatever the two said about their employers, which invents
+    an appointment the CV never claimed. Two employers with no word in common
+    must leave both rows standing and the titled row date-less.
+    """
+    dated = _position_entry(1, "", "Quexley College", ["Hospital Appointments"],
+                            "2019-09", "2021-06")
+    titled = _position_entry(2, "Program Director", "Norvale University Medical College",
+                             ["Hospital Appointments"])
+
+    merged = WCMTemplateGenerator._merge_grouped_appointments([dated, titled])
+
+    assert len(merged) == 2
+    # the titled row keeps its own employer, and gains no dates from the other
+    assert _institution_of(titled) == "Norvale University Medical College"
+    assert not (titled["extracted_fields"].get("start_date")
+                or titled["extracted_fields"].get("end_date"))
+
+
+def test_merge_refuses_a_pair_that_names_no_employer_at_all():
+    """Pins the other half of the same rule: a missing employer is not a match.
+
+    Two records that neither name an employer nor inherited one from a parent
+    row used to merge on adjacency alone, because the header test read two
+    unknown employers as equal.
+    """
+    dated = _position_entry(1, "", "", ["Hospital Appointments"], "2002-07", "2006-12")
+    titled = _position_entry(2, "Attending Physician", "", ["Hospital Appointments"])
+
+    merged = WCMTemplateGenerator._merge_grouped_appointments([dated, titled])
+
+    assert len(merged) == 2
+    assert not (titled["extracted_fields"].get("start_date")
+                or titled["extracted_fields"].get("end_date"))
+
+
+def test_merge_still_joins_a_sub_unit_of_the_same_employer():
+    """The other half of the same rule: a record naming a sub-unit of the
+    header's employer is still one appointment with it, so requiring evidence
+    does not cost the merge the case it was written for.
+    """
+    dated = _position_entry(1, "", "Lincoln Hospital", ["Hospital Appointments"],
+                            "2002-07", "2006-12")
+    titled = _position_entry(
+        2, "Attending Physician",
+        "Lincoln Hospital, Department of Emergency Medicine",
+        ["Hospital Appointments"])
+
+    merged = WCMTemplateGenerator._merge_grouped_appointments([dated, titled])
+
+    assert len(merged) == 1
+    assert merged[0]["extracted_fields"]["title"] == "Attending Physician"
+    assert merged[0]["extracted_fields"]["start_date"] == "2002-07"
+    assert merged[0]["extracted_fields"]["end_date"] == "2006-12"
 
 
 if __name__ == "__main__":
