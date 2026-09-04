@@ -29,12 +29,21 @@ increment of `entries_inserted`, and that the two passes which rewrite stage-4
 output -- institution propagation and appointment merging -- refuse to act
 without evidence rather than falling back on document adjacency.
 
-Group (f) is the other side of (e). Refusing to carry an employer across a
-source-structure boundary leaves the record on the far side of it with no
-title, no employer and no dates, and rendering that record put three blank
-cells into a delivered CV. The rule the group pins is two-sided: a record with
-nothing to put in any column renders no row at all, and a row carrying even
-one populated cell is kept.
+Group (f) is the other side of (e). A record can reach the renderer with no
+title, no employer and no dates -- stage 3b routes a stray line to a D code
+and stage 4 finds no field in it, or the employer that would have been carried
+onto it is refused at a source-structure boundary -- and rendering it put
+three blank cells into a delivered CV. The rule the group pins is two-sided: a
+record with nothing to put in any column renders no row at all, and a row
+carrying even one populated cell is kept.
+
+The farm's own instances of it are the two the `_normalized_positions`
+docstring names, NGFNYQ and SO2IVQ: a fieldless D1 record leading its code
+list, so no employer was ever carried onto it and it was already three blank
+cells before this branch. The boundary half of the shape is synthetic here --
+the boundary stop fires on no farm document -- and is pinned anyway, because
+it is the case a CV with two appointment headings produces and the corpus is
+not evidence of its absence.
 
 Run with:
 
@@ -886,9 +895,15 @@ LEADERSHIP_HEADING = ["ADMINISTRATIVE AND ACADEMIC LEADERSHIP"]
 
 
 def _appointment_and_distant_prose():
-    """The 6NGAYQ D1 shape, with synthetic names: one real appointment under
-    the appointments heading, and a stray sentence ~200 elements later under
-    the leadership heading that stage 3b also routed to D1."""
+    """A synthetic two-heading shape: one real appointment under the
+    appointments heading, and a stray sentence ~200 elements later under the
+    leadership heading that stage 3b also routed to D1.
+
+    Synthetic on purpose. No farm document puts a fieldless D record after an
+    employer under a different heading, so the corpus cannot supply this
+    fixture -- it is the shape a CV with two appointment headings produces,
+    and the two passes it runs through are exactly the two that would then
+    disagree about the record."""
     appointment = _position_entry(
         19, "Faculty member of the residency program",
         "Northgate Hospitals Psychiatry Residency Program",
@@ -900,15 +915,16 @@ def _appointment_and_distant_prose():
 
 
 def test_a_stray_sentence_under_another_heading_renders_no_row():
-    """Pins the 6NGAYQ D1 regression: a fieldless record on the far side of a
+    """Pins both halves at once: a fieldless record on the far side of a
     source-structure boundary must render no row at all.
 
     Two defects meet on this record. The employer used to propagate to it in
     document order across ~200 elements and a different source heading, so it
     rendered a row claiming an employer the sentence never named. Stopping the
-    carry then left the record with nothing in any column and it rendered
-    three blank cells instead -- a row a reader cannot read as anything.
-    Neither is correct output: the record must not become a row.
+    carry then leaves the record with nothing in any column, and rendering it
+    puts three blank cells in the delivered CV -- a row a reader cannot read
+    as anything. Neither is correct output: the record must not become a row,
+    and it must not become a row with a borrowed employer either.
     """
     appointment, prose = _appointment_and_distant_prose()
 
