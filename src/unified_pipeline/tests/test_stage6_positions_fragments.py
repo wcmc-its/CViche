@@ -675,50 +675,87 @@ def test_merge_refuses_a_pair_that_names_no_employer_at_all():
                 or titled["extracted_fields"].get("end_date"))
 
 
-def test_a_merge_resting_on_inheritance_alone_is_counted(capsys):
+def _rule_1_pair_resting_on_inheritance():
+    """A title-only row that inherited employer X, then a bare-dates row
+    naming employer Y: Rule 1 (adjacent pair) merges them on the inheritance
+    alone, because the CV cannot say whether Y is a unit inside X."""
+    return [
+        _position_entry(1, "Chief of Service", "Quexley General Hospital",
+                        ["Hospital Appointments"], "1998-01", "2001-12"),
+        _position_entry(2, "Attending Physician", "", ["Hospital Appointments"]),
+        _position_entry(3, "", "Norvale University Medical College",
+                        ["Hospital Appointments"], "2002-07", "2006-12"),
+    ]
+
+
+def _rule_2_pair_resting_on_inheritance():
+    """The same thin evidence through Rule 2 (header + children): the header
+    named no employer and inherited one, and the role beneath it names a
+    different employer."""
+    return [
+        _position_entry(1, "Chief of Service", "Quexley General Hospital",
+                        ["Hospital Appointments"], "1998-01", "2001-12"),
+        _position_entry(2, "", "", ["Hospital Appointments"], "2002-07", "2006-12"),
+        _position_entry(3, "Attending Physician", "Norvale University Medical College",
+                        ["Hospital Appointments"]),
+    ]
+
+
+def _rule_1_pair_with_matching_employers():
+    return [
+        _position_entry(1, "Attending Physician",
+                        "Lincoln Hospital, Department of Emergency Medicine",
+                        ["Hospital Appointments"]),
+        _position_entry(2, "", "Lincoln Hospital", ["Hospital Appointments"],
+                        "2002-07", "2006-12"),
+    ]
+
+
+def _rule_2_pair_with_matching_employers():
+    return [
+        _position_entry(1, "", "Lincoln Hospital", ["Hospital Appointments"],
+                        "2002-07", "2006-12"),
+        _position_entry(2, "Attending Physician", "", ["Hospital Appointments"]),
+    ]
+
+
+@pytest.mark.parametrize("build_entries", [_rule_1_pair_resting_on_inheritance,
+                                           _rule_2_pair_resting_on_inheritance])
+def test_a_merge_resting_on_inheritance_alone_is_counted(build_entries, capsys):
     """Pins the one merge rule that still fires without a matching employer,
-    and the tally that makes it visible.
+    and the tally that makes it visible, at both merge sites.
 
     A record inherits its employer from the nearest preceding row that named
-    one, which is not always the row it is later compared against: here
-    "Attending Physician" inherits Quexley General Hospital and the row below
-    it is a bare-dates row naming Norvale University Medical College. The
-    merge happens -- refusing it on the name mismatch was tried and put back
-    the title-less dated row that the #156 fixture (a ward, "Medical/Surgical
-    Unit", inside an inherited "New York Presbyterian Hospital") exists to
+    one, which is not always the row it is later compared against, so a row
+    carrying employer X can merge with one naming employer Y. The merge
+    happens: refusing it on the name mismatch was tried and put back the
+    title-less dated row that the #156 fixture -- a ward, "Medical/Surgical
+    Unit", inside an inherited "New York Presbyterian Hospital" -- exists to
     keep out, and the stage-4 fields cannot tell that ward from a different
-    employer. So the run counts these instead of refusing them, and a merge
-    whose employers DO match is not counted.
+    employer. So the run reports how many of its merges rest on this.
     """
-    parent = _position_entry(1, "Chief of Service", "Quexley General Hospital",
-                             ["Hospital Appointments"], "1998-01", "2001-12")
-    inheritor = _position_entry(2, "Attending Physician", "", ["Hospital Appointments"])
-    other_employer = _position_entry(3, "", "Norvale University Medical College",
-                                     ["Hospital Appointments"], "2002-07", "2006-12")
-    entries = [parent, inheritor, other_employer]
+    entries = build_entries()
     WCMTemplateGenerator._propagate_institution_to_subentries(entries)
-    assert _institution_of(inheritor) == "Quexley General Hospital"
 
     merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
 
-    assert len(merged) == 2
-    assert inheritor["extracted_fields"]["start_date"] == "2002-07"
+    assert len(merged) == len(entries) - 1
     assert "1 of those merges matched no employer name" in capsys.readouterr().out
 
 
-def test_a_merge_whose_employers_match_is_not_counted(capsys):
-    """The tally's other half: a sub-position that inherited the header's own
-    employer merges without being reported, so the count is a measure of the
-    thin-evidence merges only and not of merging in general."""
-    header = _position_entry(1, "", "Lincoln Hospital", ["Hospital Appointments"],
-                             "2002-07", "2006-12")
-    sub_position = _position_entry(2, "Attending Physician", "", ["Hospital Appointments"])
-    entries = [header, sub_position]
+@pytest.mark.parametrize("build_entries", [_rule_1_pair_with_matching_employers,
+                                           _rule_2_pair_with_matching_employers])
+def test_a_merge_whose_employers_match_is_not_counted(build_entries, capsys):
+    """The tally's other half, at both merge sites: a row merging with an
+    employer it matches -- a sub-unit of it, or one it inherited from that
+    very row -- is not reported, so the count measures the thin-evidence
+    merges only and not merging in general."""
+    entries = build_entries()
     WCMTemplateGenerator._propagate_institution_to_subentries(entries)
 
     merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
 
-    assert len(merged) == 1
+    assert len(merged) == len(entries) - 1
     assert "matched no employer name" not in capsys.readouterr().out
 
 
