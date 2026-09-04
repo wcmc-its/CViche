@@ -42,6 +42,9 @@ from .records import (  # noqa: F401
 from .authors import (  # noqa: F401
     _normalize_author_names,
 )
+from .content import (  # noqa: F401
+    _deduplicate_repeated_content,
+)
 from .institutions import (  # noqa: F401
     _get_cleaned_institution_name,
     _strip_org_tail,
@@ -55,7 +58,6 @@ from .text import (  # noqa: F401
     _from_pii_fragment,
     _TAXONOMY_CODE_PREFIX,
     _clean_inline_tabs,
-    _deduplicate_repeated_content,
     _strip_markdown_for_word,
     _strip_taxonomy_code,
 )
