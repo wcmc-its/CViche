@@ -29,12 +29,21 @@ increment of `entries_inserted`, and that the two passes which rewrite stage-4
 output -- institution propagation and appointment merging -- refuse to act
 without evidence rather than falling back on document adjacency.
 
-Group (f) is the other side of (e). Refusing to carry an employer across a
-source-structure boundary leaves the record on the far side of it with no
-title, no employer and no dates, and rendering that record put three blank
-cells into a delivered CV. The rule the group pins is two-sided: a record with
-nothing to put in any column renders no row at all, and a row carrying even
-one populated cell is kept.
+Group (f) is the other side of (e). A record can reach the renderer with no
+title, no employer and no dates -- stage 3b routes a stray line to a D code
+and stage 4 finds no field in it, or the employer that would have been carried
+onto it is refused at a source-structure boundary -- and rendering it put
+three blank cells into a delivered CV. The rule the group pins is two-sided: a
+record with nothing to put in any column renders no row at all, and a row
+carrying even one populated cell is kept.
+
+The farm's own instances of it are the two the `_normalized_positions`
+docstring names, NGFNYQ and SO2IVQ: a fieldless D1 record leading its code
+list, so no employer was ever carried onto it and it was already three blank
+cells before this branch. The boundary half of the shape is synthetic here --
+the boundary stop fires on no farm document -- and is pinned anyway, because
+it is the case a CV with two appointment headings produces and the corpus is
+not evidence of its absence.
 
 Run with:
 
@@ -55,7 +64,10 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
 from unified_pipeline.stage6.sections.positions import (  # noqa: E402
+    _child_position_records,
+    _employers_match,
     _institution_from_raw_text,
+    _position_row_cells,
     _tab_joined_child_fragments,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
@@ -470,6 +482,63 @@ def test_a_d3_child_inherits_the_organization_field():
     ]
 
 
+def test_a_child_keeps_the_parent_location_field():
+    """Pins the parent's `location` field onto the recovered child's row.
+
+    `_get_institution_location` falls back to `extracted_fields['location']`
+    when stage-5b enrichment names no city, and the child record copied
+    institution, organization and department but not that field. The child row
+    then named the employer without its city and state while the parent row
+    directly above it kept them -- two rows of one appointment disagreeing
+    about where it was.
+    """
+    entry = _tab_joined_entry([("Senior Attending Physician", "06/2003", "12/2004")],
+                              institution="Norvale University Hospital")
+    entry["extracted_fields"]["location"] = "Crab Hollow, ZQ"
+
+    assert _render_positions([entry]) == [
+        ["Attending Physician", "Norvale University Hospital, Crab Hollow, ZQ", "07/02-12/06"],
+        ["Senior Attending Physician", "Norvale University Hospital, Crab Hollow, ZQ", "06/03-12/04"],
+    ]
+
+
+# The employer-field shapes a stage-4 position record arrives in. The
+# Institution cell reads four fields and any subset of them can be populated,
+# so the parent/child equality is asserted across the subsets rather than
+# against whichever one a single fixture happens to use.
+EMPLOYER_FIELD_SHAPES = [
+    {"institution": "Norvale University Hospital"},
+    {"institution": "Norvale University Hospital", "location": "Crab Hollow, ZQ"},
+    {"organization": "Quexley Medical Society", "location": "Crab Hollow, ZQ"},
+    {"institution": "Norvale University Hospital",
+     "department": "Department of Emergency Medicine",
+     "location": "Crab Hollow, ZQ"},
+    {"location": "Crab Hollow, ZQ"},
+]
+
+
+@pytest.mark.parametrize("employer_fields", EMPLOYER_FIELD_SHAPES)
+def test_a_child_institution_cell_is_the_parents_whichever_field_carries_it(employer_fields):
+    """`_child_position_records` claims a child's Institution cell comes out
+    identical to its parent's. That holds only while the record copies every
+    field the cell reads, so the claim is asserted against the renderer itself
+    -- the two cells, run lists and all -- across the employer-field subsets a
+    stage-4 record arrives in, rather than against a list of field names that
+    can silently fall behind the cell.
+    """
+    parent = _tab_joined_entry([("Senior Attending Physician", "06/2003", "12/2004")])
+    parent["extracted_fields"] = {"title": "Attending Physician",
+                                  "start_date": "2002-07", "end_date": "2006-12",
+                                  **employer_fields}
+
+    children = _child_position_records(parent)
+    parent_cell = _position_row_cells(parent)[1]
+
+    assert len(children) == 1
+    assert any(text.strip() for text, _, _ in parent_cell)
+    assert _position_row_cells(children[0])[1] == parent_cell
+
+
 def test_recovery_does_not_mutate_the_supplied_entries():
     """Stage-4 records are pipeline data later stages read, so recovering a
     child must not write into the record it came from (test item 9).
@@ -682,6 +751,56 @@ def test_merge_refuses_a_pair_that_names_no_employer_at_all():
                 or titled["extracted_fields"].get("end_date"))
 
 
+# Employer strings a source CV produces that carry no word at all: an empty
+# field, whitespace, and the dash or ampersand a table cell is left as when the
+# CV had nothing to put there. Field extraction passes these through as an
+# institution, so they arrive at the merge looking like a named employer.
+NAMELESS_EMPLOYERS = ["", "   ", "-", "–", "—", "&", ", ,"]
+
+
+@pytest.mark.parametrize("nameless", NAMELESS_EMPLOYERS)
+def test_an_employer_with_no_word_in_it_matches_nothing(nameless):
+    """Pins `_employers_match`'s first guard: an employer that names nobody is
+    no evidence, in either argument position and against itself.
+
+    The comparison is on word sets, so a value with no word in it produces an
+    empty set, and every empty set is a subset of every other. Without the
+    guard the subset test reads "unknown" as "equal to anything" -- the exact
+    reading review item 2 asked to be replaced with a fail-closed one.
+    """
+    assert not _employers_match(nameless, "Lincoln Hospital")
+    assert not _employers_match("Lincoln Hospital", nameless)
+    assert not _employers_match(nameless, nameless)
+
+
+def test_two_named_employers_still_match_by_word_subset():
+    """The guard's positive control: refusing the nameless ones must not cost
+    the sub-unit match the comparison exists for."""
+    assert _employers_match("Lincoln Hospital",
+                            "Lincoln Hospital, Department of Emergency Medicine")
+
+
+def test_a_placeholder_employer_does_not_license_a_merge():
+    """The same guard at the merge decision rather than in the helper.
+
+    A source table that leaves its employer cell as a dash hands field
+    extraction an institution with no word in it. That is a missing employer
+    wearing a name, and it is no evidence that the row beside it is the same
+    appointment: both rows must survive carrying what they came with. Read as
+    a match, it copies the dates off one row onto the other and deletes it --
+    an appointment the CV never claimed, which is the loss review item 2 is
+    about.
+    """
+    dated = _position_entry(1, "", "Lincoln Hospital", ["Hospital Appointments"],
+                            "2002-07", "2006-12")
+    titled = _position_entry(2, "Attending Physician", "—", ["Hospital Appointments"])
+
+    assert _render_positions([dated, titled], code="D2") == [
+        ["", "Lincoln Hospital", "07/02-12/06"],
+        ["Attending Physician", "—", ""],
+    ]
+
+
 def _rule_1_pair_resting_on_inheritance():
     """A title-only row that inherited employer X, then a bare-dates row
     naming employer Y: Rule 1 (adjacent pair) merges them on the inheritance
@@ -748,6 +867,31 @@ def test_a_merge_resting_on_inheritance_alone_is_counted(build_entries, capsys):
 
     assert len(merged) == len(entries) - 1
     assert "1 merged row(s) matched no employer name" in capsys.readouterr().out
+
+
+def test_the_unmatched_employer_tally_counts_every_such_merge(capsys):
+    """The tally is a count, not a flag.
+
+    A header that inherited one employer over two roles that both name another
+    rests on the thin rule twice, and the run has to say two -- every other
+    fixture in this group produces exactly one, which a tally hard-wired to
+    that number, or a boolean dressed up as one, would satisfy just as well.
+    """
+    entries = [
+        _position_entry(1, "Chief of Service", "Quexley General Hospital",
+                        ["Hospital Appointments"], "1998-01", "2001-12"),
+        _position_entry(2, "", "", ["Hospital Appointments"], "2002-07", "2006-12"),
+        _position_entry(3, "Attending Physician", "Norvale University Medical College",
+                        ["Hospital Appointments"]),
+        _position_entry(4, "Associate Attending Physician",
+                        "Norvale University Medical College", ["Hospital Appointments"]),
+    ]
+    WCMTemplateGenerator._propagate_institution_to_subentries(entries)
+
+    merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
+
+    assert len(merged) == 3
+    assert "2 merged row(s) matched no employer name" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("build_entries", [_rule_1_pair_with_matching_employers,
@@ -826,9 +970,15 @@ LEADERSHIP_HEADING = ["ADMINISTRATIVE AND ACADEMIC LEADERSHIP"]
 
 
 def _appointment_and_distant_prose():
-    """The 6NGAYQ D1 shape, with synthetic names: one real appointment under
-    the appointments heading, and a stray sentence ~200 elements later under
-    the leadership heading that stage 3b also routed to D1."""
+    """A synthetic two-heading shape: one real appointment under the
+    appointments heading, and a stray sentence ~200 elements later under the
+    leadership heading that stage 3b also routed to D1.
+
+    Synthetic on purpose. No farm document puts a fieldless D record after an
+    employer under a different heading, so the corpus cannot supply this
+    fixture -- it is the shape a CV with two appointment headings produces,
+    and the two passes it runs through are exactly the two that would then
+    disagree about the record."""
     appointment = _position_entry(
         19, "Faculty member of the residency program",
         "Northgate Hospitals Psychiatry Residency Program",
@@ -840,15 +990,16 @@ def _appointment_and_distant_prose():
 
 
 def test_a_stray_sentence_under_another_heading_renders_no_row():
-    """Pins the 6NGAYQ D1 regression: a fieldless record on the far side of a
+    """Pins both halves at once: a fieldless record on the far side of a
     source-structure boundary must render no row at all.
 
     Two defects meet on this record. The employer used to propagate to it in
     document order across ~200 elements and a different source heading, so it
     rendered a row claiming an employer the sentence never named. Stopping the
-    carry then left the record with nothing in any column and it rendered
-    three blank cells instead -- a row a reader cannot read as anything.
-    Neither is correct output: the record must not become a row.
+    carry then leaves the record with nothing in any column, and rendering it
+    puts three blank cells in the delivered CV -- a row a reader cannot read
+    as anything. Neither is correct output: the record must not become a row,
+    and it must not become a row with a borrowed employer either.
     """
     appointment, prose = _appointment_and_distant_prose()
 

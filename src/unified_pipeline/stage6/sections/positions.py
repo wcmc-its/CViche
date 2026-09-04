@@ -145,6 +145,17 @@ _LOCATION_TAIL_RE = re.compile(r',\s*(?:[A-Z]{2}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)
 # that is the shape the pre-#476 fallback kept mistaking for an institution.
 _YEAR_IN_FRAGMENT_RE = re.compile(r'\b(?:19|20)\d{2}\b')
 
+# The `extracted_fields` keys a recovered child appointment copies from its
+# parent: every key `_position_row_cells` can read while building the
+# Institution cell, so the child's employer cell comes out identical to the
+# parent's whatever the record carries. `location` is on the list because
+# `_get_institution_location` falls back to it when stage-5b enrichment names
+# no city, and a child that did not copy it rendered the employer stripped of
+# its city and state. Title and dates are deliberately absent: a child has its
+# own. Enumerated rather than copied wholesale so a child still carries no
+# classification, coverage or comment fields (#476).
+_INHERITED_EMPLOYER_FIELDS = ('institution', 'organization', 'department', 'location')
+
 
 def _child_position_records(entry: dict) -> list[dict]:
     """The tab-joined child appointments of `entry`, as position records of
@@ -157,11 +168,13 @@ def _child_position_records(entry: dict) -> list[dict]:
     other record.
 
     A child is the same appointment as its parent under a later title, so its
-    record copies the parent's employer fields and enrichment verbatim and its
-    Institution cell comes out identical to the parent's. It copies nothing
-    else: no classification, coverage or comment fields, so a child row
-    carries no Word comments, which is what the pre-#476 child rows did by
-    passing `entry=None`. `entry` itself is never modified.
+    record copies the parent's enrichment and every employer field the
+    Institution cell reads (`_INHERITED_EMPLOYER_FIELDS`, which is that read
+    set and not a subset of it), and its Institution cell therefore comes out
+    identical to the parent's. It copies nothing else: no classification,
+    coverage or comment fields, so a child row carries no Word comments, which
+    is what the pre-#476 child rows did by passing `entry=None`. `entry`
+    itself is never modified.
 
     A child whose title and formatted dates are the parent's own is dropped:
     stage 4 sometimes promotes a bullet-prefixed fragment to its own record
@@ -182,18 +195,13 @@ def _child_position_records(entry: dict) -> list[dict]:
         if (title.lower() == parent_title
                 and format_date_range(start, end, taxonomy_code) == parent_dates):
             continue
+        child_fields = {key: fields.get(key, '') for key in _INHERITED_EMPLOYER_FIELDS}
+        child_fields.update({'title': title, 'start_date': start, 'end_date': end})
         records.append({
             'text': text,
             'taxonomy_code': taxonomy_code,
             'institution_enrichment': dict(enrichment) if isinstance(enrichment, dict) else enrichment,
-            'extracted_fields': {
-                'title': title,
-                'institution': fields.get('institution', ''),
-                'organization': fields.get('organization', ''),
-                'department': fields.get('department', ''),
-                'start_date': start,
-                'end_date': end,
-            },
+            'extracted_fields': child_fields,
         })
     return records
 
@@ -887,7 +895,12 @@ class PositionsSection:
         stray sentence into a D code, field extraction finds no title,
         employer or dates in it, and the record reaches here with nothing to
         put in any of the three columns. Rendering it puts an empty row in the
-        delivered CV. It is measured on the corpus farm at one row.
+        delivered CV. Measured on the corpus farm at two rows: one D1 record
+        each in NGFNYQ and SO2IVQ, the same two on stage-4, stage-5 and
+        stage-5d inputs alike, so the count is a property of the records and
+        not of which stage a run reads them from. Both are the first record in
+        their code list, so neither ever had an employer to lose: they were
+        already three blank cells before this section grew a boundary check.
         """
         positions = []
         blank = 0
