@@ -22,6 +22,12 @@ uses: a blank `docx.Document` plus the three WCM funding headers as plain
 paragraphs, which is all `_fill_research_support` looks for. No template file,
 no DB, no LLM.
 
+Every person named below is invented -- "Ada Testowner" for the CV owner,
+"Jane Smith" for an extracted PI. This module's own subject is that a grant's
+values are CV content, so its fixtures do not get to be an exception: a real
+researcher's name checked into a test is the same disclosure whether or not
+their grants came with it.
+
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_research_support_contract.py -p no:cacheprovider
@@ -296,24 +302,24 @@ def test_principal_investigator_role_auto_fills_cv_owner():
         {'M2A': [_entry('M2A', title='Owner Led Project', agency='NIH',
                         pi_role='Principal Investigator', start_date='01/2019',
                         end_date='Present')]},
-        cv_owner={'first_name': 'Adam', 'last_name': 'Wende'},
+        cv_owner={'first_name': 'Ada', 'last_name': 'Testowner'},
         current_year=TEST_YEAR)
 
     cells = _cells(_tables_under(gen, CURRENT)[0])
-    assert cells['Name of Principal Investigator:'] == 'Adam Wende'
+    assert cells['Name of Principal Investigator:'] == 'Ada Testowner'
     assert cells['Your role:'] == 'Principal Investigator'
 
 
 def test_non_pi_role_does_not_auto_fill_cv_owner():
     """The auto-fill needs both "principal" and "investigator"; a Co-I gets nothing."""
-    assert resolve_pi_name({}, '', 'Co-Investigator', 'Adam Wende') == ''
-    assert resolve_pi_name({}, '', 'Principal Investigator', 'Adam Wende') == 'Adam Wende'
+    assert resolve_pi_name({}, '', 'Co-Investigator', 'Ada Testowner') == ''
+    assert resolve_pi_name({}, '', 'Principal Investigator', 'Ada Testowner') == 'Ada Testowner'
 
 
 def test_extracted_pi_name_beats_the_cv_owner():
     """An extracted PI name wins over the owner auto-fill."""
     assert resolve_pi_name({'pi_name': 'Jane Smith'}, '', 'Principal Investigator',
-                           'Adam Wende') == 'Jane Smith'
+                           'Ada Testowner') == 'Jane Smith'
 
 
 def test_null_role_with_a_cv_owner_does_not_crash():
@@ -327,11 +333,11 @@ def test_null_role_with_a_cv_owner_does_not_crash():
     the caller wire that manufactures the None. The PI cell stays empty, which
     is what a falsy role rendered before, so nothing that renders today moves.
     """
-    assert resolve_pi_name({'role': None}, '', None, 'Adam Wende') == ''
+    assert resolve_pi_name({'role': None}, '', None, 'Ada Testowner') == ''
 
     table = _generator()._create_grant_table(
         {'title': 'Null Role Project', 'agency': 'NIH', 'role': None},
-        'M2A', owner_name='Adam Wende')
+        'M2A', owner_name='Ada Testowner')
     assert _cells(table)['Name of Principal Investigator:'] == ''
 
 
