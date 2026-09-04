@@ -116,10 +116,21 @@ _FRAGMENT_SPLIT_RE = re.compile(r'[\n\t|]')
 _ORGANIZATION_FALLBACK_MAX_CHARS = 150
 # Field names other extraction shapes use for the same value as `organization`.
 _ORGANIZATION_FIELD_ALIASES = ('institution', 'organization_name', 'society')
+# A written-out month is part of the date, not part of the organization name.
+# Full names and the three-letter abbreviations, with an optional period, and
+# only ever immediately in front of a year -- so "March 2018" is a date while
+# "Marching Band Alumni 2018" keeps "Marching Band Alumni".
+_MONTH_NAME_ALTERNATION = (
+    r'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?'
+    r'|aug(?:ust)?|sep(?:t)?(?:ember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?'
+)
+_DATE_ENDPOINT = (
+    rf'(?:\b(?:{_MONTH_NAME_ALTERNATION})\.?\s+)?(?:\d{{1,2}}/)?\d{{4}}|present'
+)
 _TRAILING_DATES_RE = re.compile(
     r'[\s,;:(\[]*'
-    r'((?:\d{1,2}/)?\d{4}|present)'
-    r'(?:\s*[-–—]\s*((?:\d{1,2}/)?\d{4}|present))?'
+    rf'({_DATE_ENDPOINT})'
+    rf'(?:\s*[-–—]\s*({_DATE_ENDPOINT}))?'
     r'[\s)\].,;:]*$',
     re.IGNORECASE,
 )
@@ -306,6 +317,13 @@ def _split_trailing_dates(fragment: str) -> tuple[str, str]:
     for a fragment that is nothing BUT a date -- the caller reads that as
     "this fragment is the date column, not the organization" and keeps
     looking.
+
+    A written-out month counts as part of the date. Reading only the year left
+    the month behind as the "organization", which on the farm's 6NGAYQ turned
+    an entry whose whole text is "February 2018 - Present" into an
+    organization cell reading "February": a strictly shortened prefix of what
+    the section rendered before, and the same class of loss the raw-text
+    fallback was replaced to stop.
     """
     match = _TRAILING_DATES_RE.search(fragment)
     if not match:
