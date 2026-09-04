@@ -241,13 +241,10 @@ def test_fallback_token_count_is_never_reduced():
     )
 
 
-def test_fallback_logs_the_token_count_before_and_after():
-    """#560 asks for a diagnostic recording the input and the token count
-    "before and after" -- the after count is the number that would have
-    made the dropped token visible in a log. Round 1 logged the before
-    count only."""
+def _debug_records(authors: str) -> list:
+    """Every DEBUG message the normalization module emits for `authors`."""
     import logging
-    caplog_logger = logging.getLogger(
+    module_logger = logging.getLogger(
         'unified_pipeline.stage6.normalization.text'
     )
     records = []
@@ -257,16 +254,40 @@ def test_fallback_logs_the_token_count_before_and_after():
             records.append(record.getMessage())
 
     handler = _Capture()
-    previous_level = caplog_logger.level
-    caplog_logger.addHandler(handler)
-    caplog_logger.setLevel(logging.DEBUG)
+    previous_level = module_logger.level
+    module_logger.addHandler(handler)
+    module_logger.setLevel(logging.DEBUG)
     try:
-        _cite('Li, Wu, Ma, Ye')
+        _cite(authors)
     finally:
-        caplog_logger.removeHandler(handler)
-        caplog_logger.setLevel(previous_level)
+        module_logger.removeHandler(handler)
+        module_logger.setLevel(previous_level)
+    return records
 
-    assert any('4 tokens in, 4 out' in m for m in records), records
+
+def test_fallback_logs_the_token_count_before_and_after():
+    """#560 asks for a diagnostic recording the token count "before and
+    after" -- the after count is the number that would have made the
+    dropped token visible in a log. Round 1 logged the before count only.
+    The counts survived the round-2 change that stopped logging the author
+    strings themselves, which is the whole point of keeping this test."""
+    records = _debug_records('Li, Wu, Ma, Ye')
+    assert any('tokens_in=4 tokens_out=4' in m for m in records), records
+
+
+def test_no_author_text_reaches_the_debug_log():
+    """CV author names are personal data and debug logs are retained more
+    widely than the application's own storage. Both fallback statements
+    used to carry %r of the raw input and of the result; the diagnostic is
+    now structural only. Uses distinctive surnames so a leak cannot hide
+    behind a common word."""
+    authors = 'Quillfeather, Zbygniewski, Xolotlpec, Vandermolenaar'
+    records = _debug_records(authors)
+    assert records, 'the diagnostic disappeared entirely'
+    joined = ' '.join(records)
+    for surname in authors.split(', '):
+        assert surname not in joined, f'{surname!r} leaked into {joined!r}'
+    assert 'branch=fallback' in joined, joined
 
 
 def test_surname_in_a_shifted_initials_slot_is_not_upper_cased():

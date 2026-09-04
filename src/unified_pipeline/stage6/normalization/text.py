@@ -234,6 +234,8 @@ def _normalize_author_names(authors: str) -> str:
     if not authors:
         return ''
 
+    original = authors
+
     # Clean up double/triple commas
     authors = re.sub(r',{2,}', ',', authors)
 
@@ -263,14 +265,24 @@ def _normalize_author_names(authors: str) -> str:
                 looks_like_pairs = False
                 break
 
+    # Structural metadata only. These strings are CV-derived author names,
+    # so neither the input nor the result is logged: debug logs land in
+    # centralized systems with wider retention and access than the app
+    # itself. The token counts are what makes #560 visible in a log -- the
+    # bug is a token disappearing between "in" and "out" -- and they say
+    # nothing about who the authors are.
     if looks_like_pairs and len(parts) >= 2:
-        return ', '.join(_parse_surname_initial_pairs(parts))
+        cleaned_authors = _parse_surname_initial_pairs(parts)
+        result = ', '.join(cleaned_authors)
+        logger.debug(
+            "_normalize_author_names: branch=pairs tokens_in=%d tokens_out=%d "
+            "changed=%s", len(parts), len(cleaned_authors), result != original,
+        )
+        return result
 
-    # Fall back to simpler processing for other formats.
     logger.debug(
-        "_normalize_author_names: pair detector rejected %r (%d comma-"
-        "separated tokens); using non-destructive fallback",
-        authors, len(parts),
+        "_normalize_author_names: branch=fallback tokens_in=%d "
+        "(pair detector declined)", len(parts),
     )
     cleaned_authors, has_et_al = _parse_author_fallback(parts)
     result = ', '.join(cleaned_authors)
@@ -280,8 +292,10 @@ def _normalize_author_names(authors: str) -> str:
     # only thing that makes this bug visible in a log, and it is the "after"
     # number that would have shown the old fallback deleting a token (#560).
     logger.debug(
-        "_normalize_author_names: fallback emitted %r (%d tokens in, %d out)",
-        result, len(parts), len(cleaned_authors) + (1 if has_et_al else 0),
+        "_normalize_author_names: branch=fallback tokens_in=%d tokens_out=%d "
+        "changed=%s",
+        len(parts), len(cleaned_authors) + (1 if has_et_al else 0),
+        result != original,
     )
     return result
 
@@ -393,9 +407,12 @@ def _deduplicate_repeated_content(text: str, separator: str = '|') -> str:
     # truncating any two-segment title to its first half regardless of
     # whether the segments matched at all (#561).
     if matching_count == len(parts):
+        # Structural metadata only: the segment itself is CV-derived text
+        # (a grant or appointment title), so its length is logged and its
+        # content is not.
         logger.debug(
             "_deduplicate_repeated_content: collapsed %d identical segments "
-            "to %r", len(parts), first_part,
+            "to one of %d characters", len(parts), len(first_part),
         )
         return first_part
 
