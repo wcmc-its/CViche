@@ -25,6 +25,7 @@ render it.
 import logging
 import re
 from datetime import datetime
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 try:
     from docx.table import Table
@@ -93,6 +94,16 @@ REBUCKET_TARGET_CODES = frozenset({'M2B', 'M2C'})
 # One line under that header: "Project Title 0.01" / "Project Title .08FTE".
 PROJECT_EFFORT_LINE_RE = re.compile(r'^(.+?)\s+(\d*\.?\d+)\s*(?:FTE)?$', re.IGNORECASE)
 
+# A figure at or below this reads as a fraction of full time (0.08 -> 8%);
+# above it, as a percentage already (25 -> 25%). Anything outside
+# (0%, MAX_PERCENT_EFFORT] is not a percent effort at all and is dropped rather
+# than rendered.
+FRACTIONAL_EFFORT_CEILING = Decimal('1')
+MAX_PERCENT_EFFORT = Decimal('100')
+# Two decimal places: "1.5%" survives, ".08 FTE" does not become "8.00%", and a
+# stray long decimal cannot render as a 12-digit percentage.
+PERCENT_EFFORT_PRECISION = Decimal('0.01')
+
 # End-date text that means "still running", so an M2A grant carrying it is
 # never reclassified as completed however the year parses.
 OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
@@ -107,6 +118,33 @@ class UnsupportedRebucketTargetError(ValueError):
     a bare KeyError off `bucket_lists[target]`, naming neither the code nor the
     grant, is a poor way to find that out (review thread 3932312407 item 2).
     """
+
+
+def normalize_percent_effort(effort_value: str) -> str | None:
+    """Render one raw effort figure as the percentage the WCM row shows.
+
+    `0.015 -> '1.5%'`, `0.08 -> '8%'`, `1.5 -> '1.5%'`, `25 -> '25%'`; no
+    trailing '.0'. Returns None for a figure this section will not show at all:
+    unparseable, zero or negative, or over 100%.
+
+    The two int() calls this replaces did not round, they truncated, and did it
+    on both branches: `int(0.015 * 100)` rendered a 1.5% effort as "1%" and
+    `int(1.5)` rendered a 1.5% effort as "1%" as well, while 0 rendered as "0%"
+    and 150 as "150%" (review thread 3932312407 item 3). Decimal, not float, so
+    the fraction branch cannot land on 1.4999999999999998.
+    """
+    try:
+        value = Decimal(effort_value)
+    except InvalidOperation:
+        return None
+    percent = value * 100 if value <= FRACTIONAL_EFFORT_CEILING else value
+    if percent <= 0 or percent > MAX_PERCENT_EFFORT:
+        logger.debug("Discarded an out-of-range percent effort figure: %s", percent)
+        return None
+    text = format(percent.quantize(PERCENT_EFFORT_PRECISION, rounding=ROUND_HALF_UP), 'f')
+    if '.' in text:
+        text = text.rstrip('0').rstrip('.')
+    return f"{text}%"
 
 
 def _print_verbose(messages: list[str], verbose: bool) -> None:
@@ -171,18 +209,11 @@ def filter_role_effort_headers(
             effort_match = PROJECT_EFFORT_LINE_RE.search(line)
             if not effort_match:
                 continue
-            project_name = effort_match.group(1).strip().lower()
-            effort_value = effort_match.group(2)
-            # Normalize to percentage (0.01 -> 1%, .08 -> 8%)
-            try:
-                effort_float = float(effort_value)
-                if effort_float <= 1:
-                    effort_pct = f"{int(effort_float * 100)}%"
-                else:
-                    effort_pct = f"{int(effort_float)}%"
-                effort_lookup[project_name] = effort_pct
-            except ValueError:
-                pass
+            # Normalize to percentage (0.01 -> 1%, .08 -> 8%, 0.015 -> 1.5%)
+            effort_pct = normalize_percent_effort(effort_match.group(2))
+            if effort_pct is None:
+                continue
+            effort_lookup[effort_match.group(1).strip().lower()] = effort_pct
         messages.append(
             f"  Filtered role/effort header entry, extracted {len(effort_lookup)} effort values")
     return filtered, messages
