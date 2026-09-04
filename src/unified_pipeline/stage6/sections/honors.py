@@ -203,6 +203,11 @@ class HonorRecord:
     date: str = ''
 
 
+def _is_date_column(part: str) -> bool:
+    """Is this '|' cell the template's date column?"""
+    return bool(_YEAR_ONLY_RE.match(part) or _DATE_COLUMN_RE.match(part))
+
+
 def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     """Non-empty parts of an honors entry (#476), scoped to exactly the
     newline-blind case entry_lines already names as its own blind spot: a
@@ -244,16 +249,22 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     not produce). `column_values` are the column cells stage 4 already
     extracted for this entry -- its granting body and its date -- and a part
     they already name is a column, not an award. What survives that filter,
-    plus the bare-year parts, decides:
+    plus the date-looking parts, decides:
 
     - fewer than `_MIN_AWARDS_FOR_SPLIT` award-looking parts: not a list of
       awards, return `lines` unchanged (`dev`'s exact behaviour);
-    - bare years present but not one per award: the pipes are column
-      separators, not record separators -- "Award | Organization | Year" has
-      two award-looking parts and one year, so it fails here even when stage 4
+    - dates present but not one per award: the pipes are column separators,
+      not record separators -- "Award | Organization | Year" has two
+      award-looking parts and one date, so it fails here even when stage 4
       extracted nothing to filter with. Return `lines` unchanged.
-    - otherwise (each award carries its own year, or none of them do): the
+    - otherwise (each award carries its own date, or none of them do): the
       pipes separate records, so the split stands.
+
+    A date cell is `_is_date_column`, not a bare year: the same question
+    `_honor_columns` asks, so the two agree about which cell is the date.
+    Asking only about bare years here read "Award | Organization | August
+    2025" as three separate awards, because none of its three cells was a
+    bare year (#733 review).
 
     Note what is returned on the split path: `parts`, the WHOLE split, never
     the filtered `awards` list -- the filters decide, they never drop text.
@@ -270,12 +281,12 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
         return lines
     parts = [p.strip() for p in lines[0].split('|') if p.strip()]
     claimed = {v.strip().lower() for v in column_values if v and v.strip()}
-    years = [p for p in parts if _YEAR_ONLY_RE.match(p)]
+    dates = [p for p in parts if _is_date_column(p)]
     awards = [p for p in parts
-              if not _YEAR_ONLY_RE.match(p) and p.lower() not in claimed]
+              if not _is_date_column(p) and p.lower() not in claimed]
     if len(awards) < _MIN_AWARDS_FOR_SPLIT:
         return lines
-    if years and len(years) != len(awards):
+    if dates and len(dates) != len(awards):
         return lines
     return parts
 
@@ -292,11 +303,6 @@ def _field_text(fields: Mapping, *names: str) -> str:
         if value:
             return value if isinstance(value, str) else str(value)
     return ''
-
-
-def _is_date_column(part: str) -> bool:
-    """Is this '|' cell the template's date column?"""
-    return bool(_YEAR_ONLY_RE.match(part) or _DATE_COLUMN_RE.match(part))
 
 
 def _honor_columns(line: str) -> HonorRecord | None:
@@ -784,6 +790,12 @@ class HonorsSection:
                 continue
 
             for record in parse_honor_entry(entry):
+                if not (record.award or record.organization or record.date):
+                    # An entry with no text and no extracted fields has
+                    # nothing to render; an empty row is not the honest
+                    # answer to that, and reaching cells for it is what
+                    # used to raise on a None text.
+                    continue
                 self._add_honors_row(table, record)
 
     def _add_honors_row(self, table, record: HonorRecord):
