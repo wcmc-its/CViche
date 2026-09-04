@@ -17,6 +17,12 @@ three separate D2 entries (no tab in any one entry's text) and are the model
 for what -DAZFA's rendering should now look like; `test_negative_control_
 already_split_entry_is_unchanged` pins that this fix does not touch them.
 
+The corpus fixture is one production shape, so it is the regression case and
+not the specification: groups (b) and (c) state the cardinality contract on
+synthetic fixtures instead -- parent + N valid children renders N + 1 rows,
+in source order, for N = 1, 2 and 3, and a child that is malformed, that is
+ordinary tab-separated prose, or that repeats its parent adds no row at all.
+
 Groups (d) and (e) cover the rest of the section's repair work rather than the
 fragment scanner: that one record yields exactly one rendered row and one
 increment of `entries_inserted`, and that the two passes which rewrite stage-4
@@ -28,8 +34,11 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_stage6_positions_fragments.py -p no:cacheprovider
 """
 
+import copy
 import sys
 from pathlib import Path
+
+import pytest
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -65,24 +74,61 @@ NO_CHILD_CASES = [
     "• Attending Physician | 07/2002 – 06/2003",
 ]
 
+# The same four shapes as whole records: text, the fields stage 4 extracted
+# for them, and the single row each must still render (test item 6 -- the
+# helper returning no children does not by itself prove the record renders).
+NO_CHILD_RENDER_CASES = [
+    (NO_CHILD_CASES[0],
+     {"title": "Program Director", "institution": "Quexley Clinic Foundation",
+      "start_date": "2009", "end_date": "2018"},
+     ["Program Director", "Quexley Clinic Foundation", "2009-2018"]),
+    (NO_CHILD_CASES[1],
+     {"title": "Consulting Physician", "institution": "Quexley Health Network",
+      "start_date": "2013", "end_date": "present"},
+     ["Consulting Physician", "Quexley Health Network", "2013-Present"]),
+    (NO_CHILD_CASES[2],
+     {"title": "Attending Physician", "institution": "Quexley General Hospital, Crab Hollow, ZQ",
+      "start_date": "2023-07", "end_date": "Present"},
+     ["Attending Physician", "Quexley General Hospital, Crab Hollow, ZQ", "07/23-Present"]),
+    (NO_CHILD_CASES[3],
+     {"title": "Attending Physician", "institution": None,
+      "start_date": "2002-07", "end_date": "2003-06"},
+     ["Attending Physician", "", "07/02-06/03"]),
+]
 
-def _positions_generator():
-    """A generator whose document holds just the D2 anchor and an empty
+# Synthetic employer and template anchors for the cardinality fixtures. No
+# corpus name: these state the accepted input shape, and a production UID
+# should not be the only specification of it (test item 8).
+SYNTHETIC_EMPLOYER = "Quexley General Hospital, Crab Hollow, ZQ"
+TABLE_ANCHORS = {
+    "D1": "Academic Appointments",
+    "D2": "Hospital Appointments",
+    "D3": "Other Professional Positions",
+}
+GENERIC_TABLE_ANCHOR = "PROFESSIONAL POSITIONS"
+
+
+def _positions_generator(anchor="Hospital Appointments"):
+    """A generator whose document holds just one section anchor and an empty
     three-column table, ready for `_fill_positions`."""
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document()
     gen.doc.add_paragraph("D. POSITIONS")
-    gen.doc.add_paragraph("Hospital Appointments")
+    gen.doc.add_paragraph(anchor)
     table = gen.doc.add_table(rows=1, cols=3)
     for i, header in enumerate(["Title", "Institution/Location", "Dates"]):
         table.rows[0].cells[i].text = header
     return gen, table
 
 
-def _render_positions(entries):
-    gen, table = _positions_generator()
-    gen._fill_positions({"D2": entries})
+def _rendered_rows(table):
     return [[c.text for c in r.cells] for r in table.rows[1:]]
+
+
+def _render_positions(entries, code="D2"):
+    gen, table = _positions_generator(TABLE_ANCHORS[code])
+    gen._fill_positions({code: entries})
+    return _rendered_rows(table)
 
 
 def _position_entry(idx, title, institution, hierarchy, start="", end=""):
@@ -118,6 +164,33 @@ def _borman_entry():
     }
 
 
+def _tab_joined_entry(children, title="Attending Physician",
+                      institution=SYNTHETIC_EMPLOYER, start="2002-07",
+                      end="2006-12", header_dates="07/2002 – 12/2006",
+                      code="D2", idx=1):
+    """A synthetic parent record whose text carries `children` -- each a
+    (title, start, end) triple -- as bullet-prefixed, tab-joined fragments in
+    the -DAZFA shape."""
+    text = f"{title} | {institution} | {header_dates}" + "".join(
+        f"\t• {child_title} | {child_start} – {child_end}"
+        for child_title, child_start, child_end in children)
+    return {
+        "text": text,
+        "taxonomy_code": code,
+        "element_idx_start": idx,
+        "extracted_fields": {
+            "title": title,
+            "institution": institution,
+            "start_date": start,
+            "end_date": end,
+        },
+    }
+
+
+def _synthetic_row(title, dates, institution=SYNTHETIC_EMPLOYER):
+    return [title, institution, dates]
+
+
 # --- (a) no content the old split saw is lost or fabricated -----------------
 
 def test_tab_joined_child_fragments_recovers_exactly_the_two_children():
@@ -137,6 +210,24 @@ def test_tab_joined_child_fragments_recovers_exactly_the_two_children():
         assert any(end in f for f in frags)
 
 
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_tab_joined_child_fragments_recovers_every_child_at_any_cardinality(count):
+    """Pins the scanner's cardinality contract, which the two-child corpus
+    fixture cannot state on its own: N bullet-prefixed children in the text
+    come back as N children, whatever N is.
+
+    A `>1 child` guard, or a loop that consumed one fragment too many after a
+    match, would still satisfy the -DAZFA regression while dropping data.
+    """
+    children = [("Attending Physician", "07/2002", "06/2003"),
+                ("Senior Attending Physician", "06/2003", "12/2004"),
+                ("Interim Director", "01/2005", "12/2006")][:count]
+    entry = _tab_joined_entry(children)
+
+    assert _tab_joined_child_fragments(entry["text"]) == [
+        (title, (start, end)) for title, start, end in children]
+
+
 def test_no_tab_no_children_even_with_a_leading_bullet():
     """The gate is a literal tab, not just bullet-then-date-range -- this is
     what keeps MNZ7IA/ZZLKMA's already-split entries (a bullet-prefixed
@@ -145,28 +236,255 @@ def test_no_tab_no_children_even_with_a_leading_bullet():
         assert _tab_joined_child_fragments(case) == [], f"unexpected children for {case!r}"
 
 
+@pytest.mark.parametrize("tail", [
+    "\tSupervised residents in the emergency department",   # ordinary prose
+    "\t• Directed the residency programme year-round",      # bullet, no dates
+    "\t• Interim Director | Summer 2005",                   # bullet, unparseable dates
+    "\t• Interim Director 01/2005 – 12/2006",               # no pipe: one fragment
+    "\t• | 01/2005 – 12/2006",                              # dates, no title
+    "\t01/2005 – 12/2006",                                  # dates, no bullet
+])
+def test_a_tab_fragment_that_is_not_a_child_appointment_yields_nothing(tail):
+    """Pins the boundary the tab gate draws (test items 4 and 5).
+
+    The production gate is tab presence, so everything after a tab reaches
+    the scanner. A fragment only becomes a child when it is bullet-prefixed,
+    carries a title, and is immediately followed by a fragment that is
+    wholly a date range: arbitrary tab-separated descriptions, and children
+    missing a title or a parseable date, are dropped whole rather than
+    recovered half-populated.
+    """
+    text = f"Attending Physician | {SYNTHETIC_EMPLOYER} | 07/2002 – 12/2006{tail}"
+    assert _tab_joined_child_fragments(text) == []
+
+
+def test_a_malformed_child_does_not_take_its_valid_siblings_with_it():
+    """A child with an unparseable date range is skipped where it stands and
+    the scan continues: the well-formed child after it is still recovered.
+
+    Pinned because the scanner advances by one fragment on a non-match and by
+    two on a match; an unconditional two-step would swallow the next child.
+    """
+    text = (f"Attending Physician | {SYNTHETIC_EMPLOYER} | 07/2002 – 12/2006"
+            "\t• Interim Director | Summer 2005"
+            "\t• Senior Attending Physician | 06/2003 – 12/2004")
+
+    assert _tab_joined_child_fragments(text) == [
+        ("Senior Attending Physician", ("06/2003", "12/2004")),
+    ]
+
+
 # --- (b) positive control: fails on dev today --------------------------------
 
 def test_positive_control_borman_entry_gains_both_child_rows():
-    rows = _render_positions([_borman_entry()])
-    assert len(rows) == 3, f"expected parent + 2 children, got {rows}"
+    """The -DAZFA D2 entry renders as three complete rows, asserted cell for
+    cell: a row count plus a title check would pass on a regression that put
+    the wrong institution or dates in a row, and two legitimate appointments
+    may share a title, so per-row uniqueness is not the contract either.
+    """
+    assert _render_positions([_borman_entry()]) == [
+        ["Attending Physician, Department of Emergency Medicine",
+         "Lincoln Hospital, Bronx, NY", "07/02-12/06"],
+        ["Attending Physician", "Lincoln Hospital, Bronx, NY", "07/02-06/03"],
+        ["Attending Physician & Assistant Director",
+         "Lincoln Hospital, Bronx, NY", "06/03-12/06"],
+    ]
 
-    parent, child1, child2 = rows
-    assert parent[0] == "Attending Physician, Department of Emergency Medicine"
-    assert parent[2] == "07/02-12/06"
 
-    assert child1[0] == "Attending Physician"
-    assert child1[2] == "07/02-06/03"
-    assert child2[0] == "Attending Physician & Assistant Director"
-    assert child2[2] == "06/03-12/06"
+# --- (c) the cardinality contract, on synthetic fixtures ---------------------
 
-    # institution/location inherited verbatim from the parent row
-    assert child1[1] == parent[1] == "Lincoln Hospital, Bronx, NY"
-    assert child2[1] == parent[1]
+def test_parent_with_one_child_renders_two_rows():
+    """Parent + 1 valid child = 2 rows. The corpus fixture has two children,
+    so an off-by-one that dropped the first child would still pass it."""
+    entry = _tab_joined_entry([("Senior Attending Physician", "06/2003", "12/2006")])
 
-    # each row appears exactly once
-    titles = [r[0] for r in rows]
-    assert len(titles) == len(set(titles)) == 3
+    assert _render_positions([entry]) == [
+        _synthetic_row("Attending Physician", "07/02-12/06"),
+        _synthetic_row("Senior Attending Physician", "06/03-12/06"),
+    ]
+
+
+def test_parent_with_three_children_renders_four_rows():
+    """Parent + 3 valid children = 4 rows, each carrying its own title and
+    dates and the parent's employer. A `>1 child` guard would pass the
+    two-child corpus fixture and drop the third child here."""
+    entry = _tab_joined_entry([
+        ("Attending Physician", "07/2002", "06/2003"),
+        ("Senior Attending Physician", "06/2003", "12/2004"),
+        ("Interim Director", "01/2005", "12/2006"),
+    ])
+
+    assert _render_positions([entry]) == [
+        _synthetic_row("Attending Physician", "07/02-12/06"),
+        _synthetic_row("Attending Physician", "07/02-06/03"),
+        _synthetic_row("Senior Attending Physician", "06/03-12/04"),
+        _synthetic_row("Interim Director", "01/05-12/06"),
+    ]
+
+
+def test_children_render_in_source_order_not_date_order():
+    """Children follow their parent in the order the source text lists them.
+
+    The section sorts records reverse-chronologically, and children are
+    recovered after that sort, so a CV that lists its promotions newest-first
+    keeps that order instead of having it reversed under the parent.
+    """
+    entry = _tab_joined_entry([
+        ("Interim Director", "01/2005", "12/2006"),
+        ("Senior Attending Physician", "06/2003", "12/2004"),
+        ("Attending Physician", "07/2002", "06/2003"),
+    ])
+
+    assert [row[0] for row in _render_positions([entry])] == [
+        "Attending Physician",           # the parent header row
+        "Interim Director",
+        "Senior Attending Physician",
+        "Attending Physician",
+    ]
+
+
+@pytest.mark.parametrize("tail", [
+    "\tSupervised residents in the emergency department",
+    "\t• Directed the residency programme year-round",
+    "\t• Interim Director | Summer 2005",
+    "\t• | 01/2005 – 12/2006",
+])
+def test_no_valid_child_renders_the_parent_row_alone(tail):
+    """The render-level half of the boundary: a tab fragment that is not a
+    child appointment must not become a phantom position row.
+
+    Asserted through `_fill_positions` rather than the scanner, because the
+    row count is decided in normalization and a phantom row would be visible
+    only here.
+    """
+    entry = _tab_joined_entry([])
+    entry["text"] += tail
+
+    assert _render_positions([entry]) == [
+        _synthetic_row("Attending Physician", "07/02-12/06"),
+    ]
+
+
+def test_a_child_that_repeats_its_parent_is_not_rendered_twice():
+    """A child whose title and formatted dates are the parent's own is
+    dropped: stage 4 sometimes promotes a bullet-prefixed fragment to its own
+    record, and that record arrives here as its own parent. This is the one
+    documented exception to parent + N children = N + 1 rows."""
+    entry = _tab_joined_entry([("Attending Physician", "07/2002", "12/2006")])
+
+    assert _render_positions([entry]) == [
+        _synthetic_row("Attending Physician", "07/02-12/06"),
+    ]
+
+
+def test_parent_without_an_institution_still_renders_its_child():
+    """A child copies the parent's employer fields verbatim, so a parent with
+    no employer yields a child with none -- an empty Institution cell on both
+    rows, never a fabricated one, and never a child dropped for lack of it."""
+    entry = _tab_joined_entry(
+        [("Senior Attending Physician", "06/2003", "12/2006")], institution="")
+
+    assert _render_positions([entry]) == [
+        ["Attending Physician", "", "07/02-12/06"],
+        ["Senior Attending Physician", "", "06/03-12/06"],
+    ]
+
+
+def test_multiple_parents_keep_their_own_children():
+    """Two tab-joined parents in one table: each child follows its own parent
+    and carries that parent's employer. A recovery pass that collected
+    children globally, or attached them to the wrong record, would show up
+    here as a row under the wrong employer."""
+    recent = _tab_joined_entry(
+        [("Senior Attending Physician", "06/2003", "12/2006")], idx=1)
+    earlier = _tab_joined_entry(
+        [("Staff Physician", "01/1997", "12/1998")],
+        title="Resident Physician", institution="Norvale University Hospital, Crab Hollow, ZQ",
+        start="1995-07", end="1998-12", header_dates="07/1995 – 12/1998", idx=2)
+
+    assert _render_positions([recent, earlier]) == [
+        _synthetic_row("Attending Physician", "07/02-12/06"),
+        _synthetic_row("Senior Attending Physician", "06/03-12/06"),
+        ["Resident Physician", "Norvale University Hospital, Crab Hollow, ZQ", "07/95-12/98"],
+        ["Staff Physician", "Norvale University Hospital, Crab Hollow, ZQ", "01/97-12/98"],
+    ]
+
+
+@pytest.mark.parametrize("code", ["D1", "D2", "D3"])
+def test_a_recovered_child_renders_in_its_own_code_table(code):
+    """The same record shape through each of the three template tables.
+
+    `_fill_positions` looks each table up by its own anchor paragraph and
+    normalizes each code list separately, so child recovery has to be proved
+    on all three routes, not only on the D2 one the corpus fixture uses.
+    """
+    entry = _tab_joined_entry(
+        [("Senior Attending Physician", "06/2003", "12/2006")], code=code)
+
+    assert _render_positions([entry], code=code) == [
+        _synthetic_row("Attending Physician", "07/02-12/06"),
+        _synthetic_row("Senior Attending Physician", "06/03-12/06"),
+    ]
+
+
+def test_a_recovered_child_renders_into_the_generic_positions_table():
+    """The fourth route: a template with none of the three subsection anchors
+    falls back to one combined PROFESSIONAL POSITIONS table, which normalizes
+    D1 + D2 + D3 together. Recovery has to survive that path too."""
+    gen, table = _positions_generator(GENERIC_TABLE_ANCHOR)
+    entry = _tab_joined_entry([("Senior Attending Physician", "06/2003", "12/2006")])
+
+    gen._fill_positions({"D2": [entry]})
+
+    assert _rendered_rows(table) == [
+        _synthetic_row("Attending Physician", "07/02-12/06"),
+        _synthetic_row("Senior Attending Physician", "06/03-12/06"),
+    ]
+
+
+def test_a_d3_child_inherits_the_organization_field():
+    """D3 records carry their employer as `organization`, not `institution`.
+    A child copies both, so the D3 Institution cell is the parent's whatever
+    field name it arrived under."""
+    organization = "Quexley Medical Society, Crab Hollow, ZQ"
+    entry = _tab_joined_entry(
+        [("Board Chair", "01/2004", "12/2006")], title="Board Member",
+        institution=organization, code="D3")
+    entry["extracted_fields"] = {
+        "title": "Board Member",
+        "organization": organization,
+        "start_date": "2002-07",
+        "end_date": "2006-12",
+    }
+
+    assert _render_positions([entry], code="D3") == [
+        ["Board Member", organization, "07/02-12/06"],
+        ["Board Chair", organization, "01/04-12/06"],
+    ]
+
+
+def test_recovery_does_not_mutate_the_supplied_entries():
+    """Stage-4 records are pipeline data later stages read, so recovering a
+    child must not write into the record it came from (test item 9).
+
+    Scoped to the recovery path, which is what these entries exercise: the
+    two repair passes deliberately write into the records they repair --
+    institution propagation fills a blank employer in place, and the merge
+    copies dates onto the row it keeps, both asserted in group (e). This
+    fixture gives every record its own employer, title and dates so neither
+    pass has anything to do and any difference is the recovery path's.
+    """
+    entries = [
+        _tab_joined_entry([("Senior Attending Physician", "06/2003", "12/2006")], idx=1),
+        _position_entry(2, "Chief Resident", "Norvale University Hospital, Crab Hollow, ZQ",
+                        ["Hospital Appointments"], "1999-07", "2001-06"),
+    ]
+    before = copy.deepcopy(entries)
+
+    rows = _render_positions(entries, code="D2")
+
+    assert len(rows) == 3
+    assert entries == before
 
 
 # --- (c) negative control: a single-part entry is unchanged ------------------
@@ -208,6 +526,37 @@ def test_negative_control_already_split_entry_is_unchanged():
     assert rows[0][2] == "07/02-06/03"
 
 
+@pytest.mark.parametrize("text,fields,expected", NO_CHILD_RENDER_CASES)
+def test_an_entry_with_no_tab_joined_child_renders_exactly_one_row(text, fields, expected):
+    """The render-level complement to `test_no_tab_no_children_even_with_a_
+    leading_bullet`: the scanner returning no children proves the helper is
+    quiet, not that the record still renders. Each of these shapes must come
+    out as the single row it was before the recovery path existed.
+    """
+    entry = {"text": text, "taxonomy_code": "D2", "extracted_fields": dict(fields)}
+
+    assert _render_positions([entry]) == [expected]
+
+
+def test_an_already_split_child_beside_a_tab_joined_parent_is_not_duplicated():
+    """Both shapes in one table (test item 7): a stage-4 record that is already
+    its own row, and a parent whose child still has to be recovered from the
+    text. The recovery path must add the parent's child once and leave the
+    already-split record alone -- not duplicate it, not give it the other
+    employer, not drop it.
+    """
+    parent = _tab_joined_entry([("Senior Attending Physician", "06/2003", "12/2006")], idx=1)
+    already_split = _position_entry(
+        2, "Chief Resident", "Norvale University Hospital, Crab Hollow, ZQ",
+        ["Hospital Appointments"], "1999-07", "2001-06")
+
+    assert _render_positions([parent, already_split]) == [
+        _synthetic_row("Attending Physician", "07/02-12/06"),
+        _synthetic_row("Senior Attending Physician", "06/03-12/06"),
+        ["Chief Resident", "Norvale University Hospital, Crab Hollow, ZQ", "07/99-06/01"],
+    ]
+
+
 # --- (d) the rendering layer owns the row count ------------------------------
 
 def test_entries_inserted_counts_one_per_rendered_row():
@@ -222,6 +571,22 @@ def test_entries_inserted_counts_one_per_rendered_row():
     gen._fill_positions({"D2": [_borman_entry()]})
     assert len(table.rows) - 1 == 3
     assert gen.stats["entries_inserted"] == 3
+
+
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_entries_inserted_counts_child_rows_at_every_cardinality(count):
+    """The same invariant across N: a parent with N valid children leaves the
+    counter at N + 1, and the table holds exactly that many rows. Pinning one
+    cardinality cannot tell a per-row increment from a per-record one."""
+    children = [("Attending Physician", "07/2002", "06/2003"),
+                ("Senior Attending Physician", "06/2003", "12/2004"),
+                ("Interim Director", "01/2005", "12/2006")][:count]
+    gen, table = _positions_generator()
+
+    gen._fill_positions({"D2": [_tab_joined_entry(children)]})
+
+    assert len(table.rows) - 1 == count + 1
+    assert gen.stats["entries_inserted"] == count + 1
 
 
 # --- (e) the repair passes fail closed ---------------------------------------
@@ -310,6 +675,35 @@ def test_merge_refuses_a_pair_that_names_no_employer_at_all():
                 or titled["extracted_fields"].get("end_date"))
 
 
+def test_merge_refuses_a_row_that_inherited_a_different_employer():
+    """A record inherits its employer from the nearest preceding row that
+    named one, which is not always the row it is then compared against.
+
+    Here "Attending Physician" inherits Quexley General Hospital from the row
+    above it, and the row below is a bare-dates row naming Norvale University
+    Medical College. Treating the inheritance alone as evidence copies
+    Norvale's dates onto a Quexley row and deletes Norvale's own row -- a
+    position taking a different employer's dates, which is the failure the
+    fail-closed employer rule exists to stop. Both rows must survive, and the
+    titled row must gain no dates.
+    """
+    parent = _position_entry(1, "Chief of Service", "Quexley General Hospital",
+                             ["Hospital Appointments"], "1998-01", "2001-12")
+    inheritor = _position_entry(2, "Attending Physician", "", ["Hospital Appointments"])
+    other_employer = _position_entry(3, "", "Norvale University Medical College",
+                                     ["Hospital Appointments"], "2002-07", "2006-12")
+    entries = [parent, inheritor, other_employer]
+    WCMTemplateGenerator._propagate_institution_to_subentries(entries)
+    assert _institution_of(inheritor) == "Quexley General Hospital"
+
+    merged = WCMTemplateGenerator._merge_grouped_appointments(entries)
+
+    assert len(merged) == 3
+    assert not (inheritor["extracted_fields"].get("start_date")
+                or inheritor["extracted_fields"].get("end_date"))
+    assert _institution_of(other_employer) == "Norvale University Medical College"
+
+
 def test_merge_still_joins_a_sub_unit_of_the_same_employer():
     """The other half of the same rule: a record naming a sub-unit of the
     header's employer is still one appointment with it, so requiring evidence
@@ -330,6 +724,25 @@ def test_merge_still_joins_a_sub_unit_of_the_same_employer():
     assert merged[0]["extracted_fields"]["end_date"] == "2006-12"
 
 
+def test_merge_still_joins_a_sub_position_that_inherited_its_employer():
+    """The inheritance case the employer match must not cost: a title-only
+    sub-position that inherited the header's own employer still merges with
+    it, so a CV that indents its roles under one employer heading is
+    unaffected by the stricter rule.
+    """
+    header = _position_entry(1, "", "Lincoln Hospital", ["Hospital Appointments"],
+                             "2002-07", "2006-12")
+    sub_position = _position_entry(2, "Attending Physician", "", ["Hospital Appointments"])
+    entries = [header, sub_position]
+    WCMTemplateGenerator._propagate_institution_to_subentries(entries)
+
+    merged = WCMTemplateGenerator._merge_grouped_appointments(entries)
+
+    assert len(merged) == 1
+    assert merged[0]["extracted_fields"]["title"] == "Attending Physician"
+    assert merged[0]["extracted_fields"]["start_date"] == "2002-07"
+    assert merged[0]["extracted_fields"]["end_date"] == "2006-12"
+
+
 if __name__ == "__main__":
-    import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
