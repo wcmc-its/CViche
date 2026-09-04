@@ -343,20 +343,26 @@ def _is_one_appointment(first: dict, second: dict) -> bool:
     2. both records name an employer, and the two names match;
     3. one names an employer and the other named none but INHERITED one from
        a parent row, which `_propagate_institution_to_subentries` recorded —
-       a sub-position under an employer heading, not a competing employer —
-       AND the inherited employer is that same employer.
-
-    The employer match in rule 3 is not redundant. A record inherits from the
-    nearest preceding row that named an employer, which is not always the row
-    it is being compared against: a title-only row that inherited employer X
-    can sit next to a bare-dates row naming employer Y. Qualifying it on the
-    inheritance alone copies Y's dates onto an X row and deletes Y's own row,
-    which is the "position from a different employer inherits dates from the
-    previous employer" case #476 review item 2 names.
+       a sub-position under an employer heading, not a competing employer.
 
     Everything else fails closed, including the case the old rule was loosest
     on: two records that both name an employer and disagree, and two records
     that neither name nor inherit one.
+
+    Rule 3 is the one that is still evidence-thin, and deliberately so. A
+    record inherits from the nearest preceding row that named an employer,
+    which is not always the row it is then compared against, so the rule also
+    admits a title-only row that inherited employer X sitting next to a
+    bare-dates row naming employer Y. Requiring the two effective employers to
+    match instead was tried and reverted: the #156 fixture (I5NKUG) is exactly
+    that shape and the merge there is the RIGHT one -- "Staff Nurse", which
+    inherited "New York Presbyterian Hospital", merges with the bare-dates row
+    of "Medical/Surgical Unit", a ward inside it that shares no word with its
+    name. Refusing on the name mismatch put back the title-less dated row that
+    issue is about. The stage-4 fields cannot tell a ward of the inherited
+    employer from a different employer, so the merge stands and
+    `_merge_grouped_appointments` counts it instead (the `unmatched_employer`
+    tally there).
     """
     if _same_source_element(first, second):
         return True
@@ -364,8 +370,7 @@ def _is_one_appointment(first: dict, second: dict) -> bool:
     if claim_first and claim_second:
         return _employers_match(claim_first, claim_second)
     if claim_first or claim_second:
-        return ((_inherited_institution(first) or _inherited_institution(second))
-                and _employers_match(_entry_employer(first), _entry_employer(second)))
+        return _inherited_institution(first) or _inherited_institution(second)
     return False
 
 
@@ -522,6 +527,14 @@ class PositionsSection:
         # without holding the same objects the pass ran on.
         dropped: set[int] = set()  # indices of header rows absorbed by children
         merged = 0
+        # Merges that rest on rule 3 of `_is_one_appointment` alone: one row
+        # inherited its employer from a parent row and the other names an
+        # employer whose name does not match it. The pair is one appointment
+        # when the named one is a ward or unit inside the inherited one (the
+        # #156 fixture), and is not when it is a different employer -- a
+        # distinction the stage-4 fields do not carry. Counted rather than
+        # refused, so a run says how much of its merging rests on it.
+        unmatched_employer = 0
 
         # Pass 1 — Rule 2: a title-less dated entry is an employer header; the
         # immediately-following title-only rows are the roles held there. Copy the
@@ -552,6 +565,9 @@ class PositionsSection:
                 for child in children:
                     _copy_dates(entry, child)
                     merged += 1
+                    if not _employers_match(_entry_employer(entry),
+                                            _entry_employer(child)):
+                        unmatched_employer += 1
                 dropped.add(i)
 
         # Pass 2 — Rule 1: a title-only row immediately adjacent (in document
@@ -587,6 +603,9 @@ class PositionsSection:
                 _copy_dates(ordered[neighbor], entry)
                 dropped.add(neighbor)
                 merged += 1
+                if not _employers_match(_entry_employer(entry),
+                                        _entry_employer(ordered[neighbor])):
+                    unmatched_employer += 1
 
         # Rule 3: a title-less dated "employer summary" header whose date range is
         # already represented by titled sub-positions at the same employer is
@@ -614,6 +633,9 @@ class PositionsSection:
                     merged += 1
                     break
 
+        if verbose and unmatched_employer:
+            print(f"    {unmatched_employer} of those merges matched no employer "
+                  f"name; one row had inherited its employer from a parent row")
         if not dropped:
             if verbose and merged:
                 print(f"    Merged dates into {merged} fragmented appointment rows")

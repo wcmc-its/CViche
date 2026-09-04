@@ -675,17 +675,20 @@ def test_merge_refuses_a_pair_that_names_no_employer_at_all():
                 or titled["extracted_fields"].get("end_date"))
 
 
-def test_merge_refuses_a_row_that_inherited_a_different_employer():
-    """A record inherits its employer from the nearest preceding row that
-    named one, which is not always the row it is then compared against.
+def test_a_merge_resting_on_inheritance_alone_is_counted(capsys):
+    """Pins the one merge rule that still fires without a matching employer,
+    and the tally that makes it visible.
 
-    Here "Attending Physician" inherits Quexley General Hospital from the row
-    above it, and the row below is a bare-dates row naming Norvale University
-    Medical College. Treating the inheritance alone as evidence copies
-    Norvale's dates onto a Quexley row and deletes Norvale's own row -- a
-    position taking a different employer's dates, which is the failure the
-    fail-closed employer rule exists to stop. Both rows must survive, and the
-    titled row must gain no dates.
+    A record inherits its employer from the nearest preceding row that named
+    one, which is not always the row it is later compared against: here
+    "Attending Physician" inherits Quexley General Hospital and the row below
+    it is a bare-dates row naming Norvale University Medical College. The
+    merge happens -- refusing it on the name mismatch was tried and put back
+    the title-less dated row that the #156 fixture (a ward, "Medical/Surgical
+    Unit", inside an inherited "New York Presbyterian Hospital") exists to
+    keep out, and the stage-4 fields cannot tell that ward from a different
+    employer. So the run counts these instead of refusing them, and a merge
+    whose employers DO match is not counted.
     """
     parent = _position_entry(1, "Chief of Service", "Quexley General Hospital",
                              ["Hospital Appointments"], "1998-01", "2001-12")
@@ -696,12 +699,27 @@ def test_merge_refuses_a_row_that_inherited_a_different_employer():
     WCMTemplateGenerator._propagate_institution_to_subentries(entries)
     assert _institution_of(inheritor) == "Quexley General Hospital"
 
-    merged = WCMTemplateGenerator._merge_grouped_appointments(entries)
+    merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
 
-    assert len(merged) == 3
-    assert not (inheritor["extracted_fields"].get("start_date")
-                or inheritor["extracted_fields"].get("end_date"))
-    assert _institution_of(other_employer) == "Norvale University Medical College"
+    assert len(merged) == 2
+    assert inheritor["extracted_fields"]["start_date"] == "2002-07"
+    assert "1 of those merges matched no employer name" in capsys.readouterr().out
+
+
+def test_a_merge_whose_employers_match_is_not_counted(capsys):
+    """The tally's other half: a sub-position that inherited the header's own
+    employer merges without being reported, so the count is a measure of the
+    thin-evidence merges only and not of merging in general."""
+    header = _position_entry(1, "", "Lincoln Hospital", ["Hospital Appointments"],
+                             "2002-07", "2006-12")
+    sub_position = _position_entry(2, "Attending Physician", "", ["Hospital Appointments"])
+    entries = [header, sub_position]
+    WCMTemplateGenerator._propagate_institution_to_subentries(entries)
+
+    merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
+
+    assert len(merged) == 1
+    assert "matched no employer name" not in capsys.readouterr().out
 
 
 def test_merge_still_joins_a_sub_unit_of_the_same_employer():
