@@ -32,9 +32,12 @@ call and equivalent memberships cannot render two different date formats.
 Finding the table takes two tries. The heading text has changed across template
 revisions ("PROFESSIONAL ORGANIZATIONS", "SOCIETY MEMBERSHIPS", "MEMBERSHIPS"),
 and if none of them match, the fallback searches for a table whose first cell
-says "Organization" -- then checks that its SECOND column header says "Date"
+says "Organization" -- then checks that its SECOND column header names a date
 before writing into it, because "Organization" alone also matches tables
-belonging to other sections.
+belonging to other sections. That second check goes through
+`_is_date_header_cell`, which case- and whitespace-folds the cell first, so
+"DATE", "Dates" and "Date  Awarded" are accepted where a literal "Date"
+substring test rejected the first two.
 
 Extraction keeps the source table's own header row, so header-shaped entries are
 dropped explicitly rather than rendered as a membership called "Organization".
@@ -92,6 +95,10 @@ _DATE_RANGE_SPLIT_RE = re.compile(r'\s*[-–—]\s*')
 # Word tokens for the type-already-named test: everything that is not a letter
 # or digit is a separator, so "Fellow," "(Fellow)" and "Fellow" tokenize alike.
 _TOKEN_SPLIT_RE = re.compile(r'[^0-9a-z]+')
+
+# Header-cell normalization for the "Organization" fallback table's guard.
+_HEADER_WHITESPACE_RE = re.compile(r'\s+')
+_DATE_HEADER_RE = re.compile(r'\bdates?\b')
 
 
 class MembershipsRowShapeError(ValueError):
@@ -230,6 +237,21 @@ def _organization_cell(membership_type: str, organization: str) -> str:
     return organization
 
 
+def _normalize_header_cell(cell_text: str) -> str:
+    """Case- and whitespace-fold one table header cell for matching."""
+    return _HEADER_WHITESPACE_RE.sub(' ', str(cell_text or '')).strip().lower()
+
+
+def _is_date_header_cell(cell_text: str) -> bool:
+    """True when a header cell names a date column.
+
+    Normalized, so "DATE", "Dates", "Date  Awarded" and "Date (yyyy-yyyy)" all
+    match where a literal "Date" substring test accepted only the last two
+    (#476 review). Still a whole-word test, so "Update" is not a date column.
+    """
+    return bool(_DATE_HEADER_RE.search(_normalize_header_cell(cell_text)))
+
+
 class MembershipsSection:
     """Section I writers, mixed into `WCMTemplateGenerator`."""
 
@@ -262,7 +284,7 @@ class MembershipsSection:
             if table and (
                 not table.rows
                 or len(table.rows[0].cells) < 2
-                or "Date" not in table.rows[0].cells[1].text
+                or not _is_date_header_cell(table.rows[0].cells[1].text)
             ):
                 table = None  # Wrong table
 
