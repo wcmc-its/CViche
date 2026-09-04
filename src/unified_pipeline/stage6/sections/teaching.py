@@ -44,7 +44,7 @@ Title" or a dangling continuation line is source-table furniture, not a
 teaching activity.
 """
 import logging
-from typing import Dict, List
+from typing import TypedDict
 
 from ..formatting import normalize_iso_dates_in_text
 from ..normalization import _strip_markdown_for_word
@@ -53,7 +53,7 @@ from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_fragments, entry_lines
 
 
-def _fragment_parts(text: str) -> List[str]:
+def _fragment_parts(text: str) -> list[str]:
     """Stripped, non-empty fragments of Stage 5c's own formatted text
     (#476), for the `elif formatted_text:` branch below (line ~199) only.
 
@@ -81,10 +81,41 @@ def _fragment_parts(text: str) -> List[str]:
 
 logger = logging.getLogger(__name__)
 
+
+class _TeachingFields(TypedDict, total=False):
+    """`extracted_fields` as section K actually reads it (review thread
+    3927100368), in place of an unparameterized `Dict` that told a reader
+    nothing about which keys exist or what they hold.
+
+    `total=False` because stage 4's JSON has no schema enforcing any of these
+    keys: this documents the contract the renderer relies on, it is not a
+    validation layer -- see `normalization/fields.py` for why this codebase
+    coerces at read time instead of rejecting.
+
+    `course_code` and `course_title` are `str | list[str]` because extraction
+    emits both shapes for the same field; the `'; '.join(...)` normalization
+    below exists for the list case, and this union is the fact that makes it
+    necessary rather than defensive noise.
+    """
+    formatted_text: str
+    course_code: str | list[str]
+    course_title: str | list[str]
+    institution: str
+    role: str
+
+
+class _TeachingEntry(TypedDict, total=False):
+    """One stage-4/5c entry as the K writers read it. Same `total=False`
+    reasoning as `_TeachingFields`."""
+    text: str
+    extracted_fields: _TeachingFields
+    taxonomy_code: str
+
+
 # K-code to candidate header strings, tried in order (see module docstring and
 # docs/CODING_STANDARDS.md §8.2). K1-K5: didactic, clinical, administrative,
 # continuing education, and outreach teaching, respectively.
-TEACHING_SECTION_HEADERS = {
+TEACHING_SECTION_HEADERS: dict[str, list[str]] = {
     'K1': ['Didactic teaching', 'Didactic'],
     'K2': ['Clinical teaching', 'bedside teaching'],
     'K3': ['Administrative teaching', 'leadership role'],
@@ -92,11 +123,23 @@ TEACHING_SECTION_HEADERS = {
     'K5': ['outreach activities', 'Other education/outreach', 'community education or patient'],
 }
 
+# The source CV's own table column labels. A raw line that is nothing but one of
+# these is furniture, not a teaching activity (#574). One frozenset rather than
+# a list literal rebuilt per line of every entry: it is this section's
+# vocabulary for "column header", and it now has one definition (§8.2).
+_STRUCTURAL_COLUMN_LABELS = frozenset({'title', 'institution', 'dates', 'role'})
+
+# A raw line at least this long that also carries a ';' is a run-together list
+# of activities rather than one activity; below it, a ';' is punctuation inside
+# a single item. Named because the bare 100 said nothing about which of the two
+# it was guarding against (§8.2).
+_SEMICOLON_SPLIT_MIN_CHARS = 100
+
 
 class TeachingSection:
     """Section K writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_teaching(self, entries_by_code: Dict[str, List[Dict]]):
+    def _fill_teaching(self, entries_by_code: dict[str, list[_TeachingEntry]]) -> None:
         """Fill K. TEACHING ACTIVITIES section.
 
         Routes K-codes to their appropriate WCM subsections:
@@ -117,8 +160,7 @@ class TeachingSection:
         if total_entries == 0:
             return
 
-        if self.verbose:
-            print(f"Filling Teaching ({total_entries} entries)...")
+        logger.info("Filling Teaching (%d entries)...", total_entries)
 
         # Fill each K-code section separately
         for code, search_texts in k_section_map.items():
@@ -150,7 +192,8 @@ class TeachingSection:
                 self._insert_teaching_entry(section_idx + 1, entry,
                                             is_first_visible=is_first_in_section)
 
-    def _insert_teaching_entry(self, insert_idx: int, entry: Dict, is_first_visible: bool = False):
+    def _insert_teaching_entry(self, insert_idx: int, entry: _TeachingEntry,
+                               is_first_visible: bool = False) -> None:
         """Insert a single teaching entry as a bulleted item.
 
         Handles Stage 5c formatted text (with track changes), structured fields,
@@ -233,9 +276,9 @@ class TeachingSection:
                 lines = []
                 for line in original_text.split('\n'):
                     line = line.strip()
-                    if not line or line.lower() in ['title', 'institution', 'dates', 'role']:
+                    if not line or line.lower() in _STRUCTURAL_COLUMN_LABELS:
                         continue
-                    if ';' in line and len(line) > 100:
+                    if ';' in line and len(line) > _SEMICOLON_SPLIT_MIN_CHARS:
                         lines.extend([item.strip() for item in line.split(';') if item.strip()])
                     else:
                         lines.append(line)
