@@ -35,6 +35,10 @@ _spec.loader.exec_module(measure)
 _BRACKETED_TOKEN = "Zyzzyva"
 _SURNAME = "Qwghlm"
 _INITIALS = "VX"
+# Initials-shaped, so they reach the surname slot, and distinctive enough
+# that finding one in the output can only mean the orphan measure printed a
+# token instead of its shape.
+_ORPHANS = ("QZ", "XJ")
 
 
 def _write(path: Path, payload) -> None:
@@ -67,6 +71,16 @@ def _synthetic_farm(root: Path) -> Path:
                     "authors": f"{_SURNAME}, {_INITIALS}, K, T, {_SURNAME}2, RR",
                 },
             },
+            {
+                # The same shape with traceable orphan tokens, so a measure
+                # that printed the token rather than its shape is caught.
+                "taxonomy_code": "S6",
+                "text": "3. A Third Study.",
+                "extracted_fields": {
+                    "authors": (f"{_SURNAME}3, {_INITIALS}, {_ORPHANS[0]}, "
+                                f"{_ORPHANS[1]}, {_SURNAME}4, RR"),
+                },
+            },
         ],
     })
     return farm
@@ -92,12 +106,14 @@ def test_the_orphan_measure_prints_a_shape_and_not_the_author_token(tmp_path, ca
     out = capsys.readouterr().out
     assert _SURNAME not in out
     assert _INITIALS not in out
-    assert "distinct author strings          : 2" in out
-    assert "reaching the pair parser         : 2" in out
-    assert "strings hitting the surname slot : 1" in out
-    assert "tokens placed by that branch     : 2" in out
-    assert "those tokens, by shape           : {'A': 2}" in out
-    assert "consecutive-orphan runs, by len  : {2: 1}" in out
+    for orphan in _ORPHANS:
+        assert orphan not in out
+    assert "distinct author strings          : 3" in out
+    assert "reaching the pair parser         : 3" in out
+    assert "strings hitting the surname slot : 2" in out
+    assert "tokens placed by that branch     : 4" in out
+    assert "those tokens, by shape           : {'A': 2, 'AA': 2}" in out
+    assert "consecutive-orphan runs, by len  : {2: 2}" in out
     assert "mirror/dispatcher disagreements  : 0" in out
 
 
@@ -108,7 +124,8 @@ def test_no_measure_prints_any_synthetic_farm_value(tmp_path, capsys):
     farm = _synthetic_farm(tmp_path)
     assert measure.main([str(farm)]) == 0
     out = capsys.readouterr().out
-    for token in (_BRACKETED_TOKEN, _SURNAME, _INITIALS, "Journal of Examples"):
+    for token in (_BRACKETED_TOKEN, _SURNAME, _INITIALS,
+                  "Journal of Examples", *_ORPHANS):
         assert token not in out, f"{token!r} leaked into the script's output"
 
 
