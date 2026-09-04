@@ -34,6 +34,14 @@ _CITATION_STOPWORDS = frozenset({
     'vol', 'volume', 'page', 'pages', 'published', 'publisher',
 })
 _CITATION_TOKEN_RE = re.compile(r"[^\W_]+")
+# How much of a value has to show up before it reads as already present.
+# "Any one significant token" was the round-1 rule and it was too loose:
+# "Oxford University Press" matched a citation naming "Oxford Medical
+# Journal" on "oxford" alone, and the real publisher was then silently
+# dropped from the rendered citation (round-2 review of #481, point 6).
+# Half, not more: "Springer-Verlag, NY" against "In: Springer; 2021." is a
+# genuine match that offers exactly one of its two tokens.
+_CITATION_MATCH_MIN_RATIO = 0.5
 # Money is quantized to cents under a named rounding policy rather than
 # whatever a binary float's repr happens to do (round-2 review of #481,
 # point 5): $0.125 is $0.13, not $0.12.
@@ -48,6 +56,15 @@ def _value_referenced(value: str, citation_text: str) -> bool:
     stop word. A value left with no significant token of its own reads as
     absent, so the caller appends it rather than trusting a match on a word
     ("and", "eds") that appears in citations regardless of this value.
+
+    At least `_CITATION_MATCH_MIN_RATIO` of the surviving tokens must appear.
+    Known residual, stated rather than papered over: a two-token value with
+    one matching token is exactly at the threshold, so "Oxford University"
+    against "Oxford Medical Journal" still reads as referenced and that
+    publisher is still dropped. Requiring more than half would break
+    "Springer-Verlag, NY" against "In: Springer; 2021." -- the same 1-of-2
+    shape, but a real match. Token overlap alone cannot separate the two, and
+    this deliberately does not try to be cleverer than that.
     """
     if not value:
         return False
@@ -58,7 +75,8 @@ def _value_referenced(value: str, citation_text: str) -> bool:
     ]
     if not tokens:
         return False
-    return any(re.search(rf"\b{re.escape(t)}\b", haystack) for t in tokens)
+    matched = sum(1 for t in tokens if re.search(rf"\b{re.escape(t)}\b", haystack))
+    return matched / len(tokens) >= _CITATION_MATCH_MIN_RATIO
 
 
 def _append_missing_stage5d_values(formatted_citation: str, fields: Dict) -> str:

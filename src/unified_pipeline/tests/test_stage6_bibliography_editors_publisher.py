@@ -523,3 +523,75 @@ def test_format_currency_rounds_half_up_not_half_to_even():
     up."""
     assert _format_currency(0.125) == '$0.13'
     assert f"${0.125:,.2f}" == '$0.12'
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review, point 6: "any token overlaps" is too loose
+# ---------------------------------------------------------------------------
+
+# Table-driven, as asked for in round-2 review point 7. Every row carries the
+# match ratio it exercises, because the ratio is the rule under test: a value
+# reads as referenced only when at least half its significant tokens appear.
+# The first six rows are the round-1 cases, re-checked against the new rule --
+# none of them may move.
+@pytest.mark.parametrize('ratio,value,citation,expected', [
+    ('1 of 2', 'Springer-Verlag, NY', 'In: Springer; 2021.', True),
+    ('0 of 1', 'GNYHA', 'Welcome to parenting. 2010.', False),
+    ('no tokens', 'NY', 'Published in New York, NY.', False),
+    ('0 of 2', 'A. Smith and B. Jones',
+     'Doe J. Diet and exercise. In: Book. 2020.', False),
+    ('0 of 1', 'Smith A (eds.)',
+     'Doe J. Chapter. In: Brown B, eds. Book. 2020.', False),
+    ('1 of 2', 'University of the Arts',
+     'Doe J. A short history of the Arts. 2020.', True),
+    # The reviewer's own case: "oxford" alone used to carry the match, so a
+    # real publisher was dropped from a citation that never named it.
+    ('1 of 3', 'Oxford University Press',
+     'Smith J. A paper. Oxford Medical Journal. 2020.', False),
+    ('2 of 3', 'Oxford University Press',
+     'Smith J. A chapter. In: Oxford University; 2020.', True),
+    ('3 of 3', 'Oxford University Press',
+     'Smith J. A chapter. In: Oxford University Press; 2020.', True),
+    ('1 of 1', 'Müller', 'Smith J. A Chapter. In: Müller; 2020.', True),
+    ('0 of 3', 'Oxford University Press',
+     'Smith J. A paper. NEJM. 2020;10(2):1-5.', False),
+])
+def test_value_referenced_ratio_table(ratio, value, citation, expected):
+    assert _value_referenced(value, citation) is expected, ratio
+
+
+def test_citation_match_ratio_threshold_is_bracketed_from_both_sides():
+    """Pins the threshold itself, not just the cases either side of it.
+
+    1-of-3 must read as absent, so lowering the rule back to "any token
+    overlaps" fails here; 1-of-2 must read as present, so raising it above a
+    half (to two thirds, or to every token) fails there. That brackets the
+    threshold into (1/3, 1/2], and 0.5 is the value in the module."""
+    from unified_pipeline.stage6.formatting.values import _CITATION_MATCH_MIN_RATIO
+
+    assert _value_referenced(
+        'Oxford University Press', 'Smith J. A paper. Oxford Medical Journal. 2020.'
+    ) is False
+    assert _value_referenced(
+        'Springer-Verlag, NY', 'In: Springer; 2021.'
+    ) is True
+    assert _CITATION_MATCH_MIN_RATIO == 0.5
+
+
+def test_stage5d_publisher_sharing_one_token_of_three_is_appended():
+    """The wire consequence of point 6, not just the helper: a citation that
+    names "Oxford Medical Journal" does not name the publisher "Oxford
+    University Press", and under the round-1 rule the publisher was silently
+    dropped from the rendered citation."""
+    fields = {
+        'publisher': 'Oxford University Press',
+        'formatted_citation': 'Smith J. A paper. Oxford Medical Journal. 2020.',
+        'formatting_source': 'stage_5d_llm',
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 11)
+
+    assert citation == (
+        '11. Smith J. A paper. Oxford Medical Journal. 2020. '
+        'Oxford University Press.'
+    )
