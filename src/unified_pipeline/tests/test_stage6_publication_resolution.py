@@ -5,8 +5,10 @@ becomes a `ResolvedPublication` whose every field is already the text a
 renderer prints. This file is its contract:
 
 - the None guards (#659) on all three top-level keys, plus the type behind
-  each, because `enrichment_data` is the empty *string* in 18,913 of the
-  20,582 local farm entries and `.get` on a string raises;
+  each. Measured, no farm entry exercises either guard -- `enrichment_data`
+  is *absent* in 18,913 of the 20,582 local entries and a dict in the other
+  1,669, never `''` and never null -- so both are hardening against a shape
+  nothing upstream enforces, and this file is where that stays true;
 - enrichment-over-extracted precedence, in both directions, for each of the
   six PubMed keys;
 - non-text coercion for every field the renderer prints, which is what
@@ -52,8 +54,10 @@ from unified_pipeline.stage6.normalization.publication import (  # noqa: E402
     {},
     {'extracted_fields': None, 'enrichment_data': None, 'enriched_fields': None},
     {'extracted_fields': {}, 'enrichment_data': {}, 'enriched_fields': []},
-    # The shape the farm actually carries: stage 5 writes '' rather than {}
-    # for an unenriched entry, and '' has no .get.
+    # No farm entry carries these two as '' -- an unenriched entry omits the
+    # key entirely (measured: enrichment_data absent 18,913 / dict 1,669,
+    # enriched_fields absent 18,369 / list 2,213). Kept because '' has no
+    # .get and nothing upstream forbids it.
     {'extracted_fields': {}, 'enrichment_data': '', 'enriched_fields': ''},
     # Nothing writes these, but nothing type-checks a json.load either.
     {'extracted_fields': ['a'], 'enrichment_data': ['b'], 'enriched_fields': {'c': 1}},
@@ -125,7 +129,12 @@ def test_prose_field_that_is_a_string_is_carried_through(field):
 #: The fields that are a number or an identifier rather than prose. Stage 4
 #: writes an int for these (69 int `year` and 1 int `volume` across the
 #: 20,582-entry farm), so unlike the prose fields a number is a real value.
-_SCALAR_FIELDS = ('volume', 'issue', 'pages', 'doi', 'pmid', 'pmcid')
+#:
+#: `year` is in this tuple as of round 5 and that is the point of the tuple:
+#: it was the one field routed around both coercers, so every shape below
+#: reached the page as its own repr. Nothing about it is special, and the
+#: table is what says so.
+_SCALAR_FIELDS = ('year', 'volume', 'issue', 'pages', 'doi', 'pmid', 'pmcid')
 
 
 @pytest.mark.parametrize('field', _SCALAR_FIELDS)
@@ -157,8 +166,9 @@ def test_target_name_keeps_its_none_and_drops_a_non_string():
 
 def test_enriched_fields_is_a_tuple_and_a_non_list_is_dropped():
     """A frozen record cannot carry a list without lying about being frozen.
-    A non-list value -- '' in 18,369 farm entries -- resolves to empty rather
-    than being iterated character by character."""
+    A non-list value resolves to empty rather than being iterated character
+    by character. (The farm shape is absent-or-list: 18,369 entries omit the
+    key and 2,213 carry a non-empty list. `''` is the hardening case.)"""
     assert resolve_publication(
         {'enriched_fields': ['title', 'journal']}).enriched_fields == ('title', 'journal')
     assert resolve_publication({'enriched_fields': ''}).enriched_fields == ()
@@ -174,7 +184,7 @@ def test_resolved_publication_cannot_be_mutated_by_a_renderer():
 
 
 # ---------------------------------------------------------------------------
-# The year: preserved verbatim, and pinned so #767 is visible rather than lost
+# The year: the last field that bypassed both coercers
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize('value,expected', [
@@ -186,21 +196,40 @@ def test_year_renders_a_string_or_an_int(value, expected):
     assert resolve_publication({'extracted_fields': {'year': value}}).year == expected
 
 
-def test_year_absent_is_empty_but_an_explicit_null_renders_the_text_None():
-    """The one field NOT routed through `_scalar_text`, pinned so the
-    difference is a visible decision rather than an oversight.
+#: What `str(fields.get('year', ''))` -- the expression this replaced -- put
+#: on the page for each shape, against what `_scalar_text` puts there now.
+#: Every row is a repr the old expression rendered into a citation.
+_YEAR_REPR_LEAKS = (
+    (None, 'None'),
+    ([2021], '[2021]'),
+    ({'year': 2021}, "{'year': 2021}"),
+    (True, 'True'),
+    (0, '0'),
+    (0.0, '0.0'),
+)
 
-    `str(fields.get('year', ''))` renders an explicit `None` as the literal
-    four-character string "None", which reaches 299 of the 20,582 farm
-    citations today (many of them read exactly "18. None."). It is carried
-    across unchanged because PR #737's structural round is a refactor whose
-    gate is byte-identity with the pre-split renderer -- fixing it here would
-    change 299 rendered citations inside a change whose gate cannot see them.
-    Tracked, with the measurement and the one-line fix, in #767: when that
-    lands, this test flips to `== ''` and `_legacy_year_text` is deleted."""
+
+@pytest.mark.parametrize('value,old_repr', _YEAR_REPR_LEAKS)
+def test_a_non_year_shape_no_longer_reaches_the_page_as_its_repr(value, old_repr):
+    """`year` was carried across the split as a bare `str()`, which is not a
+    coercion: it printed the repr of whatever stage 4 wrote. The docstring
+    that guarded it claimed the two expressions "differ on exactly one
+    input"; measured, they differ on all six rows of this table.
+
+    The corpus-visible one is `None`. 381 of the 20,582 farm entries carry
+    `year: null` and 299 of them rendered the literal text "None" into a
+    citation -- many reading exactly "18. None.". After this they render no
+    year, which is also the cosmetic defect PR #737's own body noted on
+    2082_Dr_Scot's "Legislative Norms in the Twenty-First Century" entry."""
+    resolved = resolve_publication({'extracted_fields': {'year': value}})
+
+    assert str(value) == old_repr, 'the table must state the real old output'
+    assert resolved.year == ''
+
+
+def test_an_absent_and_a_null_year_are_now_the_same_absence():
     assert resolve_publication({'extracted_fields': {}}).year == ''
-    assert resolve_publication({'extracted_fields': {'year': None}}).year == 'None'
-
+    assert resolve_publication({'extracted_fields': {'year': None}}).year == ''
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +291,7 @@ def test_an_empty_title_of_any_shape_falls_through_to_the_chapter_title(title):
     }})
 
     assert resolved.title == 'The Chapter Title'
+
 
 # ---------------------------------------------------------------------------
 # Enrichment precedence, in both directions

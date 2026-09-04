@@ -24,7 +24,13 @@ renderer:
   branch with no guard at all, where a list would have raised `TypeError`
   out of `_normalize_author_names` or `.rstrip`. The fix is not four more
   `isinstance` calls: it is that a value reaches the renderer as text or not
-  at all, which is what `_text`/`_scalar_text` below are for.
+  at all, which is what `_text`/`_scalar_text` below are for. That sentence
+  was not true when it was first written: `year` was still carried across as
+  `str(fields.get('year', ''))`, one bare `str()` that turned every shape --
+  a list, a dict, `True`, `None` -- into its own repr and shipped it to the
+  page. It is routed through `_scalar_text` as of round 5, so the claim now
+  holds of every field this module returns, and the corpus effect of closing
+  it is measured on `resolve_publication` below.
 - **Normalization ran during rendering.** `_normalize_author_names` was
   called inside the assembly loop, so "render" was not a purely
   representational step (point 14). It runs once, here, while the record is
@@ -173,23 +179,6 @@ def _scalar_text(value: object) -> str:
     return str(value)
 
 
-def _legacy_year_text(fields: PublicationFields) -> str:
-    """`str(fields.get('year', ''))`, preserved verbatim from the renderer
-    this resolver replaces -- deliberately NOT `_scalar_text`.
-
-    The two differ on exactly one input, and it is a live defect: an explicit
-    null year renders the literal text "None" into the citation. 299 of the
-    20,582 farm entries do it today (e.g. "18. None."); `_scalar_text` would
-    return `''` and drop it. That is a rendering change across the whole
-    corpus, and this module is a pure refactor whose acceptance gate is
-    byte-identity with the pre-split renderer on every one of those entries.
-    So the behaviour is carried across unchanged and named, rather than
-    quietly improved inside a refactor where no gate could see it. Tracked
-    separately, with the measurement, in #767.
-    """
-    return str(fields.get('year', ''))
-
-
 def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
     """Read one raw bibliography entry and return the record a renderer prints.
 
@@ -203,15 +192,26 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
     Each is guarded with `or` and then a type check, not with a `.get`
     default (#659): a default only applies when the key is *absent*, so an
     entry carrying the key with an explicit `None` hands the `None` straight
-    back and the first `.get` on it raises `AttributeError`. Stage 5 writes a
-    dict today and no farm entry carries an explicit null, so the `or` is
-    hardening; the type check behind it is not, because `enrichment_data` is
-    the empty *string* in 18,913 of the 20,582 farm entries.
+    back and the first `.get` on it raises `AttributeError`.
+
+    Both guards are hardening on the shapes this corpus actually carries, and
+    that is stated rather than assumed. Measured over the 20,582 local farm
+    entries: `enrichment_data` is *absent* in 18,913 and a dict in the other
+    1,669 -- never `''` and never null (`grep -roh '"enrichment_data": *""'`
+    and the same for `null` both return 0); `enriched_fields` is absent in
+    18,369 and a non-empty list in 2,213; `extracted_fields` is a dict in all
+    20,582. So no farm entry exercises either the `or` or the `isinstance`
+    today. They stay because the shape is not enforced anywhere upstream --
+    stage 4 writes raw LLM JSON against no schema (#442, #450, #554) and a
+    single explicit null would raise `AttributeError` out of the first `.get`
+    on the web path, which has no handler.
 
     Precedence: a PubMed value outranks the extracted one, and absent, `None`
     and `''` all fall through to the extracted value -- an empty enrichment
     field is what stage 5 writes when PubMed had no such field, not an
-    instruction to render nothing.
+    instruction to render nothing. `''` is the live one of those three: the
+    six `pubmed_*` keys are present on every enrichment dict, and 331 of them
+    across the farm are empty strings.
     """
     fields = entry.get('extracted_fields') or {}
     enrichment = entry.get('enrichment_data') or {}
@@ -259,7 +259,14 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
         book_title=_text(fields.get('book_title')),
         editors=editors,
         publisher=publisher,
-        year=_legacy_year_text(fields),
+        # Through the same coercer as every other scalar. The renderer this
+        # module replaced read `str(fields.get('year', ''))`, which is not a
+        # coercion at all: it printed whatever repr the value had. 381 farm
+        # entries carry `year: null` and 299 of them rendered the literal
+        # text "None" into the citation ("18. None."), and a list or a dict
+        # would have rendered its brackets the same way. An absent year and
+        # a null year now both render no year.
+        year=_scalar_text(fields.get('year')),
         volume=(_scalar_text(enrichment.get('pubmed_volume'))
                 or _scalar_text(fields.get('volume'))),
         issue=(_scalar_text(enrichment.get('pubmed_issue'))

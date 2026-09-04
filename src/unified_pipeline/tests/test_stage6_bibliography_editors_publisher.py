@@ -1005,6 +1005,64 @@ def test_fallback_non_string_editors_and_publisher_never_reach_the_page(value):
 
 
 # ---------------------------------------------------------------------------
+# Round 5: the same table for `year`, the last field that bypassed both
+# coercers -- at the rendered-citation level, not just the resolver's
+# ---------------------------------------------------------------------------
+
+#: Every field `_format_citation` prints as text, and the raw stage-4 shapes
+#: that used to have a way onto the page. `year` is the row this table was
+#: extended for: `str(fields.get('year', ''))` rendered all six.
+_TEXT_RENDERED_FIELDS = (
+    'authors', 'title', 'chapter_title', 'journal', 'book_title', 'editors',
+    'publisher', 'year', 'volume', 'issue', 'pages', 'doi', 'pmid', 'pmcid',
+)
+
+
+def _repr_probe_fields(field, value):
+    """Base fields with `field` set to `value`, arranged so the field under
+    test can actually reach the page: `chapter_title` renders only when there
+    is no `title`, so the base drops `title` for that row."""
+    fields = {'authors': 'Smith J', 'title': 'A Paper', 'journal': 'NEJM'}
+    if field == 'chapter_title':
+        del fields['title']
+    fields[field] = value
+    return fields
+#: The fields that must stay prose: a number in one of these is a repr, not
+#: a value. The rest are the scalars, where an int is a real value.
+_PROSE_RENDERED_FIELDS = frozenset({
+    'authors', 'title', 'chapter_title', 'journal', 'book_title', 'editors',
+    'publisher',
+})
+#: Shapes that may never appear in a citation under any field.
+_NEVER_RENDERED_SHAPES = (['x'], {'k': 'v'}, None, True, 0)
+
+
+@pytest.mark.parametrize('field', _TEXT_RENDERED_FIELDS)
+@pytest.mark.parametrize('value', _NEVER_RENDERED_SHAPES)
+def test_no_stage4_field_can_render_its_repr_into_a_citation(field, value):
+    """The whole point of routing every field through `_text`/`_scalar_text`:
+    a repr never reaches the page. Asserted on the rendered string, not on
+    the resolved record, because the record is not what the reader sees.
+
+    `year` × `None` is the row that failed before round 5, on 299 real farm
+    citations."""
+    citation, _, _ = _format_citation(_entry(_repr_probe_fields(field, value)), 7)
+
+    assert str(value) not in citation, f'{field}={value!r} leaked str({value!r})'
+    assert '[' not in citation and '{' not in citation
+
+
+@pytest.mark.parametrize('field', _TEXT_RENDERED_FIELDS)
+def test_an_int_is_a_value_for_a_scalar_field_and_a_repr_for_a_prose_one(field):
+    """The other direction, so the table above cannot pass by coercing
+    everything to nothing: stage 4 writes an int for a scalar (69 int `year`
+    and 1 int `volume` on the farm) and that int must still render."""
+    citation, _, _ = _format_citation(_entry(_repr_probe_fields(field, 4321)), 7)
+
+    assert ('4321' in citation) is (field not in _PROSE_RENDERED_FIELDS)
+
+
+# ---------------------------------------------------------------------------
 # Round-2 review, test-coverage list: `_format_mentee_duration`
 # ---------------------------------------------------------------------------
 
