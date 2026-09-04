@@ -111,6 +111,68 @@ def _tab_joined_child_fragments(text: str) -> list[tuple[str, tuple[str, str]]]:
     return children
 
 
+# Shortest text fragment that could name an employer -- anything below this is
+# a stray delimiter or an initial, never an institution.
+_MIN_INSTITUTION_FRAGMENT_CHARS = 3
+
+# A source table's column header emitted as data ("Title", "Dates", "City").
+_COLUMN_HEADER_FRAGMENT_RE = re.compile(r'^(title|institution|dates?|city|state|\d)')
+
+# A location at the END of a fragment: ", NY", ", New York", ", Qatar". Anchored
+# on purpose -- a location in the middle of a fragment means the fragment is a
+# whole record line, not an employer (#476 review item 5).
+_LOCATION_TAIL_RE = re.compile(r',\s*(?:[A-Z]{2}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\.?\s*$')
+
+# A four-digit year anywhere in the fragment. An employer name does not carry
+# one; a record line ("Aug 2019-Dec 2023, Associate Director, ...") does, and
+# that is the shape the pre-#476 fallback kept mistaking for an institution.
+_YEAR_IN_FRAGMENT_RE = re.compile(r'\b(?:19|20)\d{2}\b')
+
+
+def _names_employer_and_location(part: str) -> bool:
+    """True when a text fragment names an employer AND its location, as in
+    "Lincoln Hospital, Bronx, NY".
+
+    The pre-#476 fallback took any City/State-shaped text as an institution
+    candidate, so a bare "Bronx, NY" -- or a "Smith, John" -- could become the
+    employer of a record that had none (#476 review item 5). Require the
+    location to be a tail on something else: three or more comma-separated
+    components, the last two being city and state/country, and a head that
+    carries a word. And reject any fragment carrying a year, which makes it
+    one of the record lines the entry's text is a list of, not a name.
+    """
+    if not _LOCATION_TAIL_RE.search(part):
+        return False
+    if _YEAR_IN_FRAGMENT_RE.search(part):
+        return False
+    components = [component.strip() for component in part.split(',')]
+    if len(components) < 3:
+        return False
+    return bool(re.search(r'[A-Za-z]{3}', ' '.join(components[:-2])))
+
+
+def _institution_from_raw_text(text: str) -> str:
+    """Last-resort employer for a record whose extracted fields and stage-5b
+    enrichment both name none: the first tab- or newline-separated fragment of
+    its raw text that names an employer and a location, '' when none does.
+
+    Structured extraction and enrichment are preferred and the caller checks
+    both before calling this (#476 review item 5); this only decides what
+    counts as a candidate once they have come back empty.
+    """
+    if '\t' not in text and '\n' not in text:
+        return ''
+    for part in re.split(r'[\t\n]', text):
+        part = part.strip()
+        if len(part) < _MIN_INSTITUTION_FRAGMENT_CHARS:
+            continue
+        if _COLUMN_HEADER_FRAGMENT_RE.match(part.lower()):
+            continue
+        if _names_employer_and_location(part):
+            return part
+    return ''
+
+
 def _source_hierarchy(entry: dict) -> tuple[str, ...]:
     """The record's stage-1b heading path, as a comparable tuple."""
     hierarchy = entry.get('hierarchy')
@@ -609,28 +671,19 @@ class PositionsSection:
         raw_institution = fields.get('institution', '') or fields.get('organization', '')
         department = fields.get('department', '')
 
-        # Only try to recover institution from raw text if it's actually EMPTY
+        # Structured sources first (#476 review item 5): the stage-5b cleaned
+        # name, then the extracted field. The raw text is read only when both
+        # come back empty -- the cleaned name already won over anything the
+        # text scan produced, so consulting it first drops a scan whose result
+        # was going to be discarded, and nothing else.
         # Don't overwrite valid extracted institutions like "Weill Cornell Medical College"
         # just because they don't include city/state (that comes from enrichment)
-        if not raw_institution:
-            raw_text = entry.get('text', '')
-            # Try to extract institution from tab-separated or newline-separated text
-            if '\t' in raw_text or '\n' in raw_text:
-                parts = re.split(r'[\t\n]', raw_text)
-                for part in parts:
-                    part = part.strip()
-                    # Skip parts that look like titles, dates, or headers
-                    if not part or len(part) < 3:
-                        continue
-                    if re.match(r'^(title|institution|dates?|city|state|\d)', part.lower()):
-                        continue
-                    # Check for location patterns (City, State or Organization City, State)
-                    if re.search(r',\s*[A-Z]{2}\b', part) or re.search(r'\b[A-Z][a-z]+,\s*[A-Z][A-Za-z]', part):
-                        raw_institution = part
-                        break
+        cleaned_institution = _get_cleaned_institution_name(entry)
+        if not raw_institution and not cleaned_institution:
+            raw_institution = _institution_from_raw_text(entry.get('text', ''))
 
         # Use LLM-cleaned institution name (strips embedded location); fall back to raw field
-        institution = _get_cleaned_institution_name(entry) or raw_institution
+        institution = cleaned_institution or raw_institution
 
         # Build base institution string with department
         institution_base = institution
