@@ -201,7 +201,25 @@ def normalize_percent_effort(effort_value: str) -> str | None:
 
     `0.015 -> '1.5%'`, `0.08 -> '8%'`, `1.5 -> '1.5%'`, `25 -> '25%'`; no
     trailing '.0'. Returns None for a figure this section will not show at all:
-    unparseable, zero or negative, or over 100%.
+    unparseable, not a number, zero or negative, or over 100%.
+
+    "Unparseable" and "not a number" are two guards, not one, because Decimal
+    splits them: `Decimal('abc')` raises InvalidOperation from the constructor,
+    but `Decimal('NaN')` constructs happily and then raises the same exception
+    off the very next line -- every comparison against a NaN signals. The
+    docstring promised None for both and the code only delivered one, so the
+    `is_nan()` guard below makes the code match the contract rather than the
+    contract match the code. Widened rather than narrowed on purpose: the
+    function is module-public, `normalize_percent_effort` is what the M2 tests
+    call directly, and a docstring that says "returns None for unparseable"
+    while raising is the more expensive of the two lies. `Decimal('Infinity')`
+    needs no guard -- it compares fine and the range check below already
+    discards it, in both signs.
+
+    Not reachable from the sole production call site at `:313`:
+    `PROJECT_EFFORT_LINE_RE` group 2 is digits with at most one decimal point
+    and no letter, so it can never hand over the string "nan". Stage 6 renders
+    the same bytes either way -- this is a contract fix, not a bug fix.
 
     The two int() calls this replaces did not round, they truncated, and did it
     on both branches: `int(0.015 * 100)` rendered a 1.5% effort as "1%" and
@@ -213,6 +231,9 @@ def normalize_percent_effort(effort_value: str) -> str | None:
         value = Decimal(effort_value)
     except InvalidOperation:
         logger.debug("Discarded a percent effort figure: not a number")
+        return None
+    if value.is_nan():
+        logger.debug("Discarded a percent effort figure: NaN")
         return None
     percent = value * 100 if value <= FRACTIONAL_EFFORT_CEILING else value
     if percent <= 0 or percent > MAX_PERCENT_EFFORT:

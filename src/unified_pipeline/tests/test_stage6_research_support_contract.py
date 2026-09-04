@@ -427,6 +427,31 @@ def test_out_of_range_percent_effort_is_dropped(raw):
     assert normalize_percent_effort(raw) is None
 
 
+@pytest.mark.parametrize('raw', ['nan', 'NaN', '-NaN', 'sNaN'])
+def test_a_nan_effort_figure_is_discarded_rather_than_raised(raw):
+    """A NaN got past the constructor guard and raised off the next comparison.
+
+    `Decimal('abc')` raises InvalidOperation from the constructor and is caught;
+    `Decimal('NaN')` constructs, and then `value <= FRACTIONAL_EFFORT_CEILING`
+    signals the same InvalidOperation out of the function. The docstring
+    promised None for anything unparseable, so this pins the promise for the
+    input that broke it. `PROJECT_EFFORT_LINE_RE` cannot produce these strings,
+    so no rendered byte depends on it.
+    """
+    assert normalize_percent_effort(raw) is None
+
+
+@pytest.mark.parametrize('raw', ['Infinity', '-Infinity'])
+def test_an_infinite_effort_figure_needs_no_extra_guard(raw):
+    """Infinity is why the NaN guard is `is_nan()` and not `is_finite()`.
+
+    Unlike NaN it compares without signalling, so the range check already
+    discards it in both signs; pinned so a later widening of that guard is a
+    deliberate choice rather than an accident.
+    """
+    assert normalize_percent_effort(raw) is None
+
+
 @pytest.mark.parametrize('raw', ['150', '-1', 'abc'])
 def test_a_discarded_effort_figure_is_never_written_to_the_log(raw, caplog):
     """The discard is logged structurally: what happened, never which figure.
