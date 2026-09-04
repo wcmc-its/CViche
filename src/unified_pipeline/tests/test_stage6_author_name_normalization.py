@@ -27,6 +27,7 @@ Run with:
 """
 
 import sys
+from collections import Counter
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -395,7 +396,12 @@ def test_an_initials_group_in_a_surname_slot_is_not_deleted():
 def test_the_pair_parser_keeps_every_alphabetic_character_of_its_input():
     """The property, not one example: for the shapes that reach the pair
     parser at all, every letter and digit of the input survives into the
-    output. The old skip broke it on any list missing a surname."""
+    output. The old skip broke it on any list missing a surname.
+
+    Counted as a multiset, not as set membership (#735 review): `char in
+    joined` passes as long as SOME "A" survives, so dropping one of two
+    identical tokens -- exactly what the old skip did to "AB, PL, Smith,
+    JA" -- would not have failed it."""
     for authors in (
         'AB, PL*, Smith, JA',
         'AB, PL, Smith, JA',
@@ -405,10 +411,12 @@ def test_the_pair_parser_keeps_every_alphabetic_character_of_its_input():
     ):
         parts = [p.strip() for p in authors.split(',') if p.strip()]
         joined = ''.join(_parse_surname_initial_pairs(parts))
-        for token in parts:
-            for char in token:
-                if char.isalnum():
-                    assert char in joined, f'{char!r} of {authors!r} was dropped'
+        expected = Counter(c for token in parts for c in token if c.isalnum())
+        actual = Counter(c for c in joined if c.isalnum())
+        assert actual == expected, (
+            f'{authors!r} lost {dict(expected - actual)} '
+            f'and gained {dict(actual - expected)}'
+        )
 
 
 def test_the_two_parsers_place_a_second_consecutive_orphan_differently():
