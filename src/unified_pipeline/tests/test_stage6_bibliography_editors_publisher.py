@@ -36,6 +36,7 @@ from unified_pipeline.stage6.formatting.values import (
     _append_missing_stage5d_values,
     _format_citation,
     _format_currency,
+    _format_mentee_duration,
     _value_referenced,
 )
 
@@ -721,3 +722,174 @@ def test_fallback_non_string_editors_and_publisher_never_reach_the_page(value):
     citation, _, _ = _format_citation(_entry(fields), 14)
 
     assert citation == '14. Smith J. In: A Book. 2021.'
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review, test-coverage list: `_format_mentee_duration`
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('fields,expected', [
+    ({'start_date': '2019', 'end_date': '2021'}, '2019-2021'),
+    ({'start_date': '2019', 'end_date': ''}, '2019-present'),
+    ({'start_date': '2019'}, '2019-present'),
+    ({'start_date': '', 'end_date': ''}, ''),
+    ({}, ''),
+    # An end with no start reads as no duration at all rather than
+    # "-2021" -- current behaviour, pinned because nothing else states it.
+    ({'end_date': '2021'}, ''),
+])
+def test_format_mentee_duration_covers_every_branch(fields, expected):
+    """The helper had no test of any kind. All three branches (start+end,
+    start alone, neither) plus the end-alone shape that falls into the last
+    one."""
+    assert _format_mentee_duration(fields) == expected
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review, test-coverage list: the two stage-5d entry conditions
+# ---------------------------------------------------------------------------
+
+def test_empty_formatted_citation_falls_through_to_deterministic_assembly():
+    """`formatted_citation` present but empty, with the stage-5d source: the
+    branch is guarded on the text, not the source, so the entry is assembled
+    from its extracted fields instead of rendering "1. "."""
+    fields = {
+        'authors': 'Smith J',
+        'title': 'A Paper',
+        'journal': 'NEJM',
+        'year': '2021',
+        'formatted_citation': '',
+        'formatting_source': 'stage_5d_llm',
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 1)
+
+    assert citation == '1. Smith J. A Paper. NEJM. 2021.'
+
+
+def test_non_stage5d_formatting_source_falls_through_to_deterministic_assembly():
+    """The other half of the same condition: a `formatted_citation` written
+    by anything other than stage 5d is not trusted, and the entry is
+    assembled from its fields -- the LLM string does not appear."""
+    fields = {
+        'authors': 'Smith J',
+        'title': 'A Paper',
+        'journal': 'NEJM',
+        'year': '2021',
+        'formatted_citation': 'Some other formatter wrote this.',
+        'formatting_source': 'stage_4_llm',
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 1)
+
+    assert citation == '1. Smith J. A Paper. NEJM. 2021.'
+    assert 'Some other formatter' not in citation
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review, test-coverage list: the stage-5d single-field branches
+# ---------------------------------------------------------------------------
+
+def test_stage5d_editors_only_already_referenced_are_not_appended():
+    """The editors-only branch in its negative direction. (Its positive
+    direction -- editors alone, absent, appended -- is already pinned by
+    test_stage5d_editors_matching_only_on_a_stopword_are_appended; the
+    publisher-only branch by
+    test_stage5d_publisher_sharing_one_token_of_three_is_appended and
+    test_stage5d_entry_with_reworded_publisher_is_not_duplicated.)"""
+    fields = {
+        'editors': 'Moaddel M, Gelfand M',
+        'formatted_citation': 'Yount K. A chapter. In: Moaddel M, Gelfand M, eds. Book. 2008.',
+        'formatting_source': 'stage_5d_llm',
+    }
+    expected = '1. ' + fields['formatted_citation']
+
+    citation, _, _ = _format_citation(_entry(fields), 1)
+
+    assert citation == expected
+
+
+def test_stage5d_both_values_absent_are_appended_editors_first():
+    """Both branches firing on one entry, at the wire rather than on the
+    helper (where test_append_missing_stage5d_values_appends_both_when_both_absent
+    pins it): the editors clause is appended before the publisher, and both
+    sit after the LLM's own text."""
+    fields = {
+        'editors': 'Adams Q, Baker R',
+        'publisher': 'Zenith House',
+        'formatted_citation': 'Doe J. A chapter. In: Book. 2020.',
+        'formatting_source': 'stage_5d_llm',
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 15)
+
+    assert citation == (
+        '15. Doe J. A chapter. In: Book. 2020. Adams Q, Baker R, eds. Zenith House.'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review, test-coverage list: enrichment precedence and fallback
+# ---------------------------------------------------------------------------
+
+_BASE_ENRICHMENT_FIELDS = {
+    'authors': 'Extracted A',
+    'title': 'Extracted Title',
+    'journal': 'Extracted Journal',
+    'year': '2021',
+    'volume': '11',
+    'issue': '22',
+    'pages': '33-44',
+}
+
+
+@pytest.mark.parametrize('enrichment_key,enriched_value,expected', [
+    ('pubmed_authors', 'Enriched A', '1. Enriched A. Extracted Title. Extracted Journal. 2021;11(22):33-44.'),
+    ('pubmed_title', 'Enriched Title', '1. Extracted A. Enriched Title. Extracted Journal. 2021;11(22):33-44.'),
+    ('pubmed_journal', 'Enriched Journal', '1. Extracted A. Extracted Title. Enriched Journal. 2021;11(22):33-44.'),
+    ('pubmed_volume', '99', '1. Extracted A. Extracted Title. Extracted Journal. 2021;99(22):33-44.'),
+    ('pubmed_issue', '88', '1. Extracted A. Extracted Title. Extracted Journal. 2021;11(88):33-44.'),
+    ('pubmed_pages', '77-78', '1. Extracted A. Extracted Title. Extracted Journal. 2021;11(22):77-78.'),
+])
+def test_enriched_pubmed_value_wins_over_the_extracted_one(
+    enrichment_key, enriched_value, expected
+):
+    """Each of the six enrichment keys the citation reads, one row each:
+    the PubMed value replaces the extracted one and nothing else moves."""
+    entry = _entry(dict(_BASE_ENRICHMENT_FIELDS), {enrichment_key: enriched_value})
+
+    citation, _, _ = _format_citation(entry, 1)
+
+    assert citation == expected
+
+
+@pytest.mark.parametrize('enrichment_key', [
+    'pubmed_authors', 'pubmed_title', 'pubmed_journal',
+    'pubmed_volume', 'pubmed_issue', 'pubmed_pages',
+])
+def test_extracted_value_is_used_when_the_enriched_one_is_absent_or_empty(
+    enrichment_key
+):
+    """The fallback half of the same six. Absent, None and empty-string all
+    fall back -- the `or` chain treats an empty enrichment value as no
+    enrichment, which is what stage 5 writes when PubMed had no such field."""
+    all_extracted = (
+        '1. Extracted A. Extracted Title. Extracted Journal. 2021;11(22):33-44.'
+    )
+
+    for enrichment in ({}, {enrichment_key: None}, {enrichment_key: ''}):
+        entry = _entry(dict(_BASE_ENRICHMENT_FIELDS), enrichment)
+
+        citation, _, _ = _format_citation(entry, 1)
+
+        assert citation == all_extracted, enrichment
+
+
+def test_enriched_fields_list_is_passed_through_to_the_caller():
+    """The third return value is the entry's own `enriched_fields`, which the
+    caller uses to mark enriched text -- unchanged by either branch."""
+    entry = _entry({'authors': 'Smith J', 'year': '2021'}, enriched=['title', 'journal'])
+
+    _, _, enriched_fields = _format_citation(entry, 1)
+
+    assert enriched_fields == ['title', 'journal']
