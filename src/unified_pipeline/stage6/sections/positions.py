@@ -178,7 +178,11 @@ def _child_position_records(entry: dict) -> list[dict]:
 
     A child whose title and formatted dates are the parent's own is dropped:
     stage 4 sometimes promotes a bullet-prefixed fragment to its own record
-    (MNZ7IA, ZZLKMA), and that record arrives here as its own parent.
+    (MNZ7IA, ZZLKMA), and that record arrives here as its own parent. On the
+    farm that drop is unreached, because the tab gate in
+    `_tab_joined_child_fragments` already returns nothing for those records:
+    over a real `generate()` of every farm document the scanner fires on one
+    entry, -DAZFA's D2 record, and keeps both of the children it finds.
     """
     text = entry.get('text', '') or ''
     children = _tab_joined_child_fragments(text)
@@ -616,7 +620,15 @@ class PositionsSection:
         employer used to count as a match, so a title-only row could inherit
         the dates of an unrelated employer's row and delete it: that is a
         plausible appointment the CV never claimed, and it happens on the
-        corpus farm today (one D1 pair, employers with no word in common).
+        corpus farm today: one D1 pair, in 2082, whose two employers share no
+        word. Re-derive it by logging every pair `_is_one_appointment` refuses
+        over a real `generate()` of every farm document. Both merge sites call
+        it only once the title/dates shape has already qualified the pair, so
+        a refusal under Rule 1 -- which tested no employer at all before #476
+        -- is exactly a merge the old rule made; a refusal under Rule 2 has to
+        be read against that rule's own `same_employer` test, which counted a
+        missing employer as a match. It is that one pair on the stage-4
+        inputs and none on stage-5 or -5d, 2082 being a stage-4-only document.
 
         Rules 2 then 1 run as separate passes so a header is never mistaken for a
         lone adjacent dates row. Dates are only ever *copied into* a row that
@@ -895,12 +907,26 @@ class PositionsSection:
         stray sentence into a D code, field extraction finds no title,
         employer or dates in it, and the record reaches here with nothing to
         put in any of the three columns. Rendering it puts an empty row in the
-        delivered CV. Measured on the corpus farm at two rows: one D1 record
-        each in NGFNYQ and SO2IVQ, the same two on stage-4, stage-5 and
-        stage-5d inputs alike, so the count is a property of the records and
-        not of which stage a run reads them from. Both are the first record in
-        their code list, so neither ever had an employer to lose: they were
-        already three blank cells before this section grew a boundary check.
+        delivered CV. Measured on the corpus farm at three rows, one record
+        each in 6NGAYQ, NGFNYQ and SO2IVQ, the same three on stage-4, stage-5
+        and stage-5d inputs alike, so the count is a property of the records
+        and not of which stage a run reads them from. Re-derive it by summing
+        `stats['blank_position_rows_skipped']` over a real `generate()` of
+        every farm document: exercising this function on its own undercounts,
+        because grouping records by the taxonomy code they were STORED with
+        misses the ones stage 6 reroutes into a D code mid-render, which is
+        what 6NGAYQ's is (stored `I`, rendered as D1).
+
+        The three are not one shape. NGFNYQ's and SO2IVQ's lead their D1 list
+        in document order, so no employer was ever carried onto them and they
+        were three blank cells before this section grew a boundary check.
+        6NGAYQ's is the opposite case, and the reason that check and this drop
+        belong together: its record sits ~200 elements after the only D1 row
+        it could have inherited from, under a different source heading, and it
+        is the one record on the farm whose employer carry
+        `_crosses_source_boundary` refuses. Before that check it rendered a row
+        naming an employer its own text never mentions; after it, the record
+        has nothing in any column and this drop is what keeps it out.
         """
         positions = []
         blank = 0
