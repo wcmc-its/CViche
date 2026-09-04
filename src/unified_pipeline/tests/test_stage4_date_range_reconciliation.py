@@ -29,6 +29,8 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage4.coercion import (  # noqa: E402
     DATE_RANGE_TAXONOMY_CODES,
+    _MAX_PLAUSIBLE_YEAR,
+    _MIN_PLAUSIBLE_YEAR,
     apply_regex_post_processing,
     reconcile_date_range,
 )
@@ -59,11 +61,15 @@ def test_positive_control_dropped_end_is_restored_from_closed_range():
     assert "start_date" not in reformatted
 
 
-def test_positive_control_wired_through_both_pipeline_call_sites_shape():
-    # apply_regex_post_processing is the shared function both stage4/
-    # extraction.py call sites (the recovery path and the main path) invoke;
-    # this pins that reconcile_date_range fires through that one function,
-    # for a fully-blank start/end pair too (no disagreement possible).
+def test_blank_dates_are_reconciled_through_post_processing():
+    # Exercises apply_regex_post_processing directly, for a fully-blank
+    # start/end pair (so no disagreeing-start case is possible): both fields
+    # are restored from the range and both are reported as repairs.
+    #
+    # This does NOT cover the two stage4/extraction.py call sites. Both of
+    # them reach reconcile_date_range only through apply_regex_post_processing,
+    # but neither call site is executed here, so nothing below would catch a
+    # call site that stopped calling it.
     fields = {"title": "Grant X", "start_date": None, "end_date": None}
     text = "Grant X, 2025-2026, PI"
 
@@ -73,6 +79,28 @@ def test_positive_control_wired_through_both_pipeline_call_sites_shape():
     assert updated["end_date"] == "2026"
     assert reformatted["start_date"]["reformatted"] == "2025"
     assert reformatted["end_date"]["reformatted"] == "2026"
+
+
+# --- every separator CLOSED_DATE_RANGE_PATTERN declares -------------------
+# The pattern is r'(?<!\d)(\d{4})(?:\s*[-\u2013\u2014]\s*|\s+to\s+)(\d{4})(?!\d)',
+# i.e. four alternatives: ASCII hyphen, en dash, em dash, and a literal " to ".
+# Only the hyphen form was covered, so dropping a character from the class --
+# or the " to " branch -- would have left the whole file green.
+
+@pytest.mark.parametrize(
+    "separator",
+    ["-", "\u2013", "\u2014", " to "],
+    ids=["ascii-hyphen", "en-dash", "em-dash", "to"],
+)
+def test_every_declared_separator_is_reconciled(separator):
+    fields = {"start_date": None, "end_date": None}
+    text = f"Committee service 2018{separator}2020"
+
+    updated, reformatted = apply_regex_post_processing(text, fields, "D1")
+
+    assert updated["start_date"] == "2018"
+    assert updated["end_date"] == "2020"
+    assert reformatted["end_date"]["reformatted"] == "2020"
 
 
 # --- condition 1: schema must declare both start_date and end_date ---------
@@ -171,6 +199,26 @@ def test_disagreeing_start_skips_the_whole_repair():
     assert reformatted == {}
 
 
+def test_month_qualified_start_date_reads_as_disagreement_and_blocks_repair():
+    # "Agrees" is an exact string comparison against the matched 4-digit year
+    # (`str(existing_start).strip() != range_start`), so a month-qualified
+    # "Sep 2018" does NOT agree with the text's "2018" and the whole repair is
+    # skipped. reconcile_date_range's docstring states this (disclosed as #556
+    # round-1 finding 5) but nothing asserted it, so relaxing the comparison to
+    # a year-only one could have landed silently.
+    fields = {"start_date": "Sep 2018", "end_date": None}
+    text = "Role held 2018-2020"
+
+    updated, reformatted = apply_regex_post_processing(text, fields, "D1")
+
+    assert updated["start_date"] == "Sep 2018"  # unchanged, not normalised
+    assert updated["end_date"] is None          # not filled from the match
+    # Checked against the live function rather than assumed: for code D1 with
+    # these fields no other post-processor writes into `reformatted`, so the
+    # empty-dict assertion is exact and not a proxy for "no date entry".
+    assert reformatted == {}
+
+
 # --- direct unit coverage of reconcile_date_range itself -------------------
 
 def test_reconcile_date_range_direct_call_no_taxonomy_gate():
@@ -261,6 +309,43 @@ def test_condition_digit_glued_identifier_blocks_repair():
 
     assert updated["end_date"] is None
     assert reformatted == {}
+
+
+# --- the plausible-year bounds are inclusive at both ends ------------------
+
+@pytest.mark.parametrize(
+    ("start_year", "end_year", "repairs"),
+    [
+        (_MIN_PLAUSIBLE_YEAR, _MIN_PLAUSIBLE_YEAR + 1, True),
+        (_MAX_PLAUSIBLE_YEAR - 1, _MAX_PLAUSIBLE_YEAR, True),
+        (_MIN_PLAUSIBLE_YEAR - 1, _MIN_PLAUSIBLE_YEAR, False),
+        (_MAX_PLAUSIBLE_YEAR, _MAX_PLAUSIBLE_YEAR + 1, False),
+    ],
+    ids=["min-inclusive", "max-inclusive", "one-below-min", "one-above-max"],
+)
+def test_plausible_year_bounds_are_inclusive(start_year, end_year, repairs):
+    # Pins two things: that the bounds are inclusive (a range touching either
+    # bound still repairs, one year outside does not), and the bound values
+    # themselves. The value pin is load-bearing, not decoration -- cases
+    # derived from the constants alone are invariant to widening them, since
+    # widening moves the case data by the same amount and every case still
+    # passes. With the pin, changing the declared span fails here and has to
+    # be argued for rather than drifting in.
+    assert (_MIN_PLAUSIBLE_YEAR, _MAX_PLAUSIBLE_YEAR) == (1900, 2100)
+
+    fields = {"start_date": None, "end_date": None}
+    text = f"Role {start_year}-{end_year}"
+
+    updated, reformatted = apply_regex_post_processing(text, fields, "D1")
+
+    if repairs:
+        assert updated["start_date"] == str(start_year)
+        assert updated["end_date"] == str(end_year)
+        assert reformatted["end_date"]["reformatted"] == str(end_year)
+    else:
+        assert updated["start_date"] is None
+        assert updated["end_date"] is None
+        assert reformatted == {}
 
 
 # --- drift guard: DATE_RANGE_TAXONOMY_CODES vs. the live schema -----------
