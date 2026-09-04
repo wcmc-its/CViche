@@ -10,12 +10,18 @@ More than two lines is the signal to hand the entry to
 `_parse_multi_membership_entry` and emit a row per membership rather than trust
 the `extracted_fields`, which describe only the first.
 
-Either way the organization cell is built the same: the membership type is
-prefixed only when it is not already inside the organization name, so "Fellow,
-American College of Surgeons" does not become "Fellow, Fellow of the American
-College of Surgeons". An entry with no `organization` field falls back to its
-first 150 characters of raw text -- a truncated membership is still a
-membership; a missing one is a loss.
+Either way the organization cell is built the same, by `_organization_cell`:
+the membership type is prefixed only when it is not already inside the
+organization name, so "Fellow, American College of Surgeons" does not become
+"Fellow, Fellow of the American College of Surgeons". That containment test is
+token/phrase-aware, not substring: a type is "already named" only when its
+words appear as a contiguous run of the organization's own words, so "Member"
+is still prefixed to an organization that merely contains the letters m-e-m-b-e-r
+somewhere inside a longer word.
+
+An entry with no `organization` field falls back to its first 150 characters of
+raw text -- a truncated membership is still a membership; a missing one is a
+loss.
 
 Dates go through `_membership_dates_cell` on both paths. The multi-membership
 parser hands back one raw range string ("2015-present") while the single path
@@ -82,6 +88,10 @@ _DATE_PREFIX_RE = re.compile(r'^\d{1,2}/\d{4}')
 # One raw range string -> (start, end). Hyphen, en dash and em dash only: a
 # slash is part of a date ("1/1997"), not a separator between two.
 _DATE_RANGE_SPLIT_RE = re.compile(r'\s*[-–—]\s*')
+
+# Word tokens for the type-already-named test: everything that is not a letter
+# or digit is a separator, so "Fellow," "(Fellow)" and "Fellow" tokenize alike.
+_TOKEN_SPLIT_RE = re.compile(r'[^0-9a-z]+')
 
 
 class MembershipsRowShapeError(ValueError):
@@ -190,6 +200,36 @@ def _membership_dates_cell(start_date: str, end_date: str) -> str:
     return format_date_range(start_date, end_date, _MEMBERSHIPS_TAXONOMY_CODE)
 
 
+def _tokens(text: str) -> list[str]:
+    """Lowercased word tokens, punctuation dropped."""
+    return [token for token in _TOKEN_SPLIT_RE.split(text.lower()) if token]
+
+
+def _type_already_named(membership_type: str, organization: str) -> bool:
+    """True when the organization name already contains the membership type.
+
+    Phrase containment over WORDS, not characters (#476 review): the type's
+    tokens must appear as a contiguous run of the organization's tokens. A
+    substring test suppressed "Member" from any organization containing those
+    six letters inside a longer word, and "Fellow" from anything containing
+    "fellowship".
+    """
+    type_tokens = _tokens(membership_type)
+    if not type_tokens:
+        return True
+    org_tokens = _tokens(organization)
+    span = len(type_tokens)
+    return any(org_tokens[i:i + span] == type_tokens
+               for i in range(len(org_tokens) - span + 1))
+
+
+def _organization_cell(membership_type: str, organization: str) -> str:
+    """The organization column's text: "Type, Organization" or just the name."""
+    if membership_type and not _type_already_named(membership_type, organization):
+        return f"{membership_type}, {organization}"
+    return organization
+
+
 class MembershipsSection:
     """Section I writers, mixed into `WCMTemplateGenerator`."""
 
@@ -279,12 +319,12 @@ class MembershipsSection:
             memberships = _parse_multi_membership_entry(parts) if len(parts) > 2 else []
             if len(memberships) > 1 or (memberships and len(lines) > 2):
                 for mem_type, org, dates in memberships:
-                    org_text = f"{mem_type}, {org}" if mem_type and mem_type.lower() not in org.lower() else org
                     # `_add_table_row` owns stats['entries_inserted'] -- do not
                     # increment it here as well (#476 review).
                     self._add_table_row(
                         table,
-                        [org_text, _membership_dates_cell(*_split_date_range(dates))],
+                        [_organization_cell(mem_type, org),
+                         _membership_dates_cell(*_split_date_range(dates))],
                         entry=entry,
                     )
                 continue
@@ -299,10 +339,7 @@ class MembershipsSection:
                 organization = original_text[:150]
 
             # Format: Membership Type, Organization
-            if membership_type and membership_type.lower() not in organization.lower():
-                org_text = f"{membership_type}, {organization}"
-            else:
-                org_text = organization
+            org_text = _organization_cell(membership_type, organization)
 
             # Format date range for table column
             date_str = _membership_dates_cell(start_date, end_date)
