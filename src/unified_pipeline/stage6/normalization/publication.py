@@ -65,6 +65,13 @@ class PublicationFields(TypedDict, total=False):
     """
     authors: str
     title: str
+    #: The S4 book-chapter schema writes the chapter's own title here and
+    #: never writes `title` at all, so a renderer that reads only `title`
+    #: renders the book and silently loses the chapter (#728). Resolved into
+    #: the `title` slot below rather than given a slot of its own: it is the
+    #: same thing under a schema-specific name, and a second slot would make
+    #: every downstream renderer decide between them.
+    chapter_title: str
     journal: str
     book_title: str
     editors: str
@@ -237,7 +244,17 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
         # Normalized once, here, rather than inside the render loop (point 14).
         authors=_normalize_author_names(
             _text(enrichment.get('pubmed_authors')) or _text(fields.get('authors'))),
-        title=_text(enrichment.get('pubmed_title')) or _text(fields.get('title')),
+        # #728. Stage 4's S4 (book chapter) schema has no `title` key at all:
+        # it writes the chapter's title to `chapter_title` and the book's to
+        # `book_title`. The renderer read only `title`, so every chapter that
+        # reached the deterministic path rendered "Authors. In: Book." and
+        # dropped the chapter -- 53 of the 95 farm S4 entries. The other 42
+        # carry a `title` written back by stage 5d and take the formatted-
+        # citation branch above, so this fall-through cannot double-render:
+        # `chapter_title` is read only when there is no title to render.
+        title=(_text(enrichment.get('pubmed_title'))
+               or _text(fields.get('title'))
+               or _text(fields.get('chapter_title'))),
         journal=_text(enrichment.get('pubmed_journal')) or _text(fields.get('journal')),
         book_title=_text(fields.get('book_title')),
         editors=editors,

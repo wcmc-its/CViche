@@ -202,6 +202,67 @@ def test_year_absent_is_empty_but_an_explicit_null_renders_the_text_None():
     assert resolve_publication({'extracted_fields': {'year': None}}).year == 'None'
 
 
+
+# ---------------------------------------------------------------------------
+# #728: the S4 chapter title, which stage 4 writes under a different key
+# ---------------------------------------------------------------------------
+
+def test_a_chapter_title_fills_the_title_slot_when_stage4_wrote_no_title():
+    """The measured S4 shape, and the whole of #728: stage 4's S4 schema has
+    no `title` key -- 53 of the 95 farm S4 entries carry `chapter_title` and
+    no `title` at all (zero carry `title: null`)."""
+    resolved = resolve_publication({'extracted_fields': {
+        'chapter_title': 'Genomic Instability in Human Premature Aging',
+        'book_title': 'Aging at the Molecular Level',
+    }})
+
+    assert resolved.title == 'Genomic Instability in Human Premature Aging'
+    assert resolved.book_title == 'Aging at the Molecular Level'
+
+
+@pytest.mark.parametrize('title', ['A Real Title', 'Extracted'])
+def test_an_extracted_title_outranks_the_chapter_title(title):
+    """The other 42 farm S4 entries carry both, because stage 5d writes a
+    `title` back. `chapter_title` is a fall-through, never an override -- the
+    reason the fix cannot render the chapter twice."""
+    resolved = resolve_publication({'extracted_fields': {
+        'title': title,
+        'chapter_title': 'The Chapter Title',
+    }})
+
+    assert resolved.title == title
+
+
+def test_a_pubmed_title_still_outranks_a_chapter_title():
+    """Precedence order is unchanged: enrichment, then extracted, then the
+    schema-specific name."""
+    resolved = resolve_publication({
+        'extracted_fields': {'chapter_title': 'The Chapter Title'},
+        'enrichment_data': {'pubmed_title': 'The PubMed Title'},
+    })
+
+    assert resolved.title == 'The PubMed Title'
+
+
+@pytest.mark.parametrize('value', _NON_TEXT_VALUES)
+def test_a_non_text_chapter_title_resolves_to_empty_like_every_other_field(value):
+    """It goes through `_text` like the rest -- a new field is not a new hole
+    in the coercion."""
+    assert resolve_publication(
+        {'extracted_fields': {'chapter_title': value}}).title == ''
+
+
+@pytest.mark.parametrize('title', ['', None, []])
+def test_an_empty_title_of_any_shape_falls_through_to_the_chapter_title(title):
+    """`''`, an explicit null and a non-text shape all mean "no title", so
+    all three reach the chapter title rather than only the absent key."""
+    resolved = resolve_publication({'extracted_fields': {
+        'title': title,
+        'chapter_title': 'The Chapter Title',
+    }})
+
+    assert resolved.title == 'The Chapter Title'
+
 # ---------------------------------------------------------------------------
 # Enrichment precedence, in both directions
 # ---------------------------------------------------------------------------
@@ -365,13 +426,12 @@ _PUBLICATION_CODES = ('S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9')
 #: not name, with no warning (`_recover_unrendered_records` checks whole
 #: lines and cannot see a missing field).
 #:
-#: `chapter_title` is the live defect in this list, not an intentional
-#: omission: stage 4's own S4 schema writes the chapter's title there and the
-#: renderer reads `title`, which S4 never writes, so 53 farm book chapters
-#: render the book and never the chapter. Tracked in #768. `narrative` and
-#: the rest are genuinely not part of a Vancouver citation.
+#: `chapter_title` left this list in round 5 (#728): stage 4's own S4 schema
+#: writes the chapter's title there and never writes `title`, so 53 farm book
+#: chapters rendered the book and never the chapter. `narrative` and the rest
+#: are genuinely not part of a Vancouver citation.
 _SCHEMA_KEYS_NOT_RENDERED = frozenset({
-    'abstract_number', 'chapter_title', 'conference_name', 'edition', 'isbn',
+    'abstract_number', 'conference_name', 'edition', 'isbn',
     'location', 'media_type', 'narrative', 'publication_venue',
     'report_number', 'status', 'target_journal', 'url', 'venue',
 })

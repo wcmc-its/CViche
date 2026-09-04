@@ -155,6 +155,67 @@ def test_fallback_s4_entry_without_editors_omits_the_eds_clause():
     assert 'Acme Press; 2021.' in citation
 
 
+def test_fallback_s4_entry_renders_the_chapter_title_stage4_actually_wrote():
+    """#728. Stage 4's S4 schema writes `chapter_title`, not `title`, so the
+    fields below are the real shape of 53 farm book chapters -- and before
+    this fix every one of them rendered the book and lost the chapter.
+
+    The chapter title takes the title slot, ahead of the `In:` clause, which
+    is where a Vancouver chapter citation puts it."""
+    fields = {
+        'authors': 'Smith J, Doe A',
+        'year': '2021',
+        'chapter_title': 'The Chapter That Was Lost',
+        'book_title': 'The Big Book of Pediatrics',
+        'editors': 'Editor X',
+        'publisher': 'Acme Press',
+        'pages': '10-20',
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 5)
+
+    assert citation == (
+        '5. Smith J, Doe A. The Chapter That Was Lost. '
+        'In: Editor X, eds. The Big Book of Pediatrics. Acme Press; 2021:10-20.')
+
+
+def test_an_s4_entry_carrying_both_titles_renders_the_chapter_once():
+    """The 42 farm S4 entries that do carry a `title` (stage 5d writes one
+    back). The fall-through must not append a second copy of the chapter."""
+    fields = {
+        'authors': 'Smith J',
+        'year': '2021',
+        'title': 'The Chapter That Was Lost',
+        'chapter_title': 'The Chapter That Was Lost',
+        'book_title': 'The Big Book of Pediatrics',
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 6)
+
+    assert citation.count('The Chapter That Was Lost') == 1
+    assert citation == (
+        '6. Smith J. The Chapter That Was Lost. '
+        'In: The Big Book of Pediatrics. 2021.')
+
+
+def test_a_chapter_title_does_not_displace_an_article_title():
+    """A stray `chapter_title` on an entry that has its own title changes
+    nothing -- the guard is which value is empty, not which code the entry
+    carries."""
+    fields = {
+        'authors': 'Smith J',
+        'title': 'A Paper',
+        'journal': 'NEJM',
+        'year': '2021',
+        'chapter_title': 'Not This One',
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 7)
+
+    assert citation == '7. Smith J. A Paper. NEJM. 2021.'
+    assert 'Not This One' not in citation
+
+
 def test_fallback_s4_entry_without_publisher_matches_pre_fix_trailer():
     """No publisher -> the trailer is the original plain Year:Pages form,
     unchanged from before this fix."""
