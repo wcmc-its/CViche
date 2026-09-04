@@ -1105,7 +1105,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
     def _insert_bulleted_entry(self, insert_idx: int, text: str, entry: Dict = None,
                                 add_blank_before: bool = False,
-                                list_level: Optional[int] = None) -> Optional[Paragraph]:
+                                list_level: Optional[int] = None,
+                                entry_sibling_paras: list[Paragraph] | None = None) -> Optional[Paragraph]:
         """Insert a SINGLE bulleted entry paragraph with a bullet character prefix.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
@@ -1119,6 +1120,13 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 ilvl via _apply_list_bullet instead of prefixing a literal "• "
                 glyph (#474). Left at None by the three non-K call sites, whose
                 1,765 corpus-wide glyphs are #483.
+            entry_sibling_paras: The OTHER paragraphs this same entry already
+                rendered into, when a caller is splitting one entry across
+                several bullets and attaching the entry to this one. Passed on
+                to `_add_entry_comments`, whose low-coverage overflow check has
+                to weigh everything the entry rendered rather than this single
+                paragraph (#476 review). A caller that renders an entry as one
+                paragraph leaves it None and the check is unchanged.
 
         Returns:
             The created paragraph, or None if insertion failed
@@ -1145,7 +1153,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             self._apply_list_bullet(entry_para, level=list_level)
 
         if entry:
-            self._add_entry_comments(entry_para, entry)
+            self._add_entry_comments(entry_para, entry,
+                                     entry_paras=[entry_para, *(entry_sibling_paras or [])])
 
         self.stats['entries_inserted'] += 1
         return entry_para
@@ -2404,13 +2413,21 @@ Now analyze the text above:"""
         return batch
 
 
-    def _add_entry_comments(self, para: Paragraph, entry: Dict):
+    def _add_entry_comments(self, para: Paragraph, entry: Dict,
+                            entry_paras: list[Paragraph] | None = None):
         """Add all relevant comments from an entry to the paragraph.
 
         Collects comments from various upstream pipeline stages:
         - Stage 2/3: Classification reasoning, taxonomy assignment notes
         - Stage 4: Extraction notes, coverage warnings
         - Stage 5: Enrichment status, validation warnings
+
+        `entry_paras` is every paragraph the entry rendered into, for the
+        callers that split one entry across several bullets and attach the
+        comments to the first of them. Only the low-coverage overflow check
+        below reads it; comments themselves still go on `para`. Left None by
+        every caller that renders an entry as a single paragraph, and the
+        check then measures `para` exactly as it always did.
         """
         comments_to_add = []
 
@@ -2482,7 +2499,15 @@ Now analyze the text above:"""
                     # Skip entries with formatted_text — they already have full LLM-formatted content
                     # Skip if the paragraph already contains most of the original text
                     # (e.g., bullet entries that render full original_text directly)
-                    para_text_len = len(para.text.strip()) if para else 0
+                    # Measure what the ENTRY rendered, not just `para`. The
+                    # bullet fallbacks split one entry over N paragraphs and
+                    # attach the comments to the FIRST of them, so reading
+                    # `para.text` alone scored a fully-rendered entry at 1/N
+                    # covered and handed it to `_route_overflow_entries`,
+                    # which re-emitted the whole entry underneath the bullets
+                    # that already carried every word of it (#476 review).
+                    rendered_paras = entry_paras if entry_paras is not None else ([para] if para else [])
+                    para_text_len = len(' '.join(p.text.strip() for p in rendered_paras).strip())
                     para_already_has_content = para_text_len >= len(original_text) * 0.8
                     if not taxonomy_code.startswith('S') and not has_formatted_text and not para_already_has_content:
                         self._overflow_entries.append((entry, para, taxonomy_code))

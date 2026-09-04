@@ -563,12 +563,26 @@ class ClinicalPracticeSection:
             return 0
 
         # Insert in reverse order since we're inserting before insert_idx
+        inserted_paras = []
         for j, line_text in enumerate(reversed(lines)):
             is_last = (j == len(lines) - 1)  # Last in reversed = first in original
-            self._insert_bulleted_entry(
+            para = self._insert_bulleted_entry(
                 insert_idx, line_text,
                 entry if is_last else None,  # Attach entry/comments to first bullet
-                add_blank_before=add_blank_before and is_last, list_level=0
+                add_blank_before=add_blank_before and is_last, list_level=0,
+                # Because insertion runs backwards, every later bullet of this
+                # entry already exists by the time the first one -- the one the
+                # entry rides -- is written. Hand them over with it: the
+                # low-coverage overflow check behind `_add_entry_comments`
+                # weighs the entry's rendered text against its source text, and
+                # measuring only the first bullet scored a fully-rendered
+                # N-part entry as 1/N covered, so `_route_overflow_entries`
+                # re-emitted the entire entry below bullets that already
+                # carried it (#476 review; +36 duplicated word tokens on one
+                # corpus CV, invisible to a loss-only census).
+                entry_sibling_paras=inserted_paras if is_last else None,
             )
+            if para is not None:
+                inserted_paras.append(para)
 
         return len(lines) + (1 if add_blank_before else 0)
