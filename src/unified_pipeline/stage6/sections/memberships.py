@@ -19,15 +19,22 @@ words appear as a contiguous run of the organization's own words, so "Member"
 is still prefixed to an organization that merely contains the letters m-e-m-b-e-r
 somewhere inside a longer word.
 
-An entry with no `organization` field falls back to its first 150 characters of
-raw text -- a truncated membership is still a membership; a missing one is a
-loss.
-
 Dates go through `_membership_dates_cell` on both paths. The multi-membership
 parser hands back one raw range string ("2015-present") while the single path
 has separate `start_date`/`end_date` fields; `_split_date_range` reduces the
 first shape to the second so both end at the same `format_date_range(..., 'I')`
 call and equivalent memberships cannot render two different date formats.
+
+An entry with no `organization` field goes to `_organization_fallback`, a
+dedicated extractor: it prefers a structured alias field, otherwise takes the
+entry's FIRST fragment (newline/tab/pipe), lifts a trailing date range out of
+it into the date column, and separates a leading membership-type prefix so the
+type is prefixed by the normal path rather than baked into the organization
+name. That replaced a flat `original_text[:150]`, which put membership type,
+dates and unrelated trailing source text into the organization cell. Every
+fallback is counted in `stats['membership_organization_fallbacks']` and logged,
+because a recovered organization is a lower-confidence cell than an extracted
+one and the run should say so.
 
 Finding the table takes two tries. The heading text has changed across template
 revisions ("PROFESSIONAL ORGANIZATIONS", "SOCIETY MEMBERSHIPS", "MEMBERSHIPS"),
@@ -49,7 +56,9 @@ uses one of the shared `_add_table_row_with_*` variants, which stay on
 callers below must not also increment it -- and it refuses a `data` list longer
 than the table has columns instead of dropping the surplus cells.
 """
+import logging
 import re
+from typing import NamedTuple
 
 try:
     from docx.table import Table
@@ -67,6 +76,8 @@ from ..formatting import (
 from ..parsing import _is_table_header_entry, _parse_multi_membership_entry
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
+
+logger = logging.getLogger(__name__)
 
 # Section I's taxonomy code -- the key into formatting/dates.py's DATE_FORMATS,
 # which maps it to 'yyyy'. Named because it appears in the one date-formatting
@@ -100,6 +111,20 @@ _TOKEN_SPLIT_RE = re.compile(r'[^0-9a-z]+')
 _HEADER_WHITESPACE_RE = re.compile(r'\s+')
 _DATE_HEADER_RE = re.compile(r'\bdates?\b')
 
+# Fallback organization extraction.
+_FRAGMENT_SPLIT_RE = re.compile(r'[\n\t|]')
+_ORGANIZATION_FALLBACK_MAX_CHARS = 150
+# Field names other extraction shapes use for the same value as `organization`.
+_ORGANIZATION_FIELD_ALIASES = ('institution', 'organization_name', 'society')
+_TRAILING_DATES_RE = re.compile(
+    r'[\s,;:(\[]*'
+    r'((?:\d{1,2}/)?\d{4}|present)'
+    r'(?:\s*[-–—]\s*((?:\d{1,2}/)?\d{4}|present))?'
+    r'[\s)\].,;:]*$',
+    re.IGNORECASE,
+)
+_LEADING_TYPE_RE = re.compile(r'^([^,:;–—-]{1,40})\s*[,:;–—-]\s+(.+)$')
+
 
 class MembershipsRowShapeError(ValueError):
     """`_add_table_row` was handed more values than the table has columns.
@@ -113,6 +138,19 @@ class MembershipsRowShapeError(ValueError):
     document over a bad CV, and failing loudly beats emitting a document that
     silently lost a column (#476 review).
     """
+
+
+class MembershipFallback(NamedTuple):
+    """What `_organization_fallback` recovered from an entry's raw text.
+
+    A record rather than a bare tuple because the three strings are all
+    optional, all interchangeable by type, and read at a call site that then
+    merges each one INDIVIDUALLY with a structured field of the same name --
+    `recovered[0]` at that call site would be a silent swap waiting to happen.
+    """
+    membership_type: str
+    organization: str
+    dates: str
 
 
 def _classify_part(part: str) -> str:
@@ -252,6 +290,140 @@ def _is_date_header_cell(cell_text: str) -> bool:
     return bool(_DATE_HEADER_RE.search(_normalize_header_cell(cell_text)))
 
 
+def _truncate_on_word_boundary(text: str, limit: int) -> str:
+    """`text` cut to `limit` characters at the last whole word that fits."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    space = cut.rfind(' ')
+    return (cut[:space] if space > 0 else cut).rstrip()
+
+
+def _split_trailing_dates(fragment: str) -> tuple[str, str]:
+    """Lift a trailing date or date range off a fragment.
+
+    Returns (fragment without the dates, the dates). The remainder is empty
+    for a fragment that is nothing BUT a date -- the caller reads that as
+    "this fragment is the date column, not the organization" and keeps
+    looking.
+    """
+    match = _TRAILING_DATES_RE.search(fragment)
+    if not match:
+        return fragment, ''
+    remainder = fragment[:match.start()].strip(' ,;:-–—([')
+    start, end = match.group(1), match.group(2) or ''
+    return remainder, (f"{start}-{end}" if end else start)
+
+
+def _split_leading_membership_type(fragment: str) -> tuple[str, str]:
+    """Separate a leading "Member, " / "Elected Fellow - " prefix off a fragment.
+
+    Returns ('', fragment) unless the prefix is short enough and keyword-shaped
+    enough to be a membership type by the same rule `_classify_part` uses, so
+    "Fellow of the American College of Surgeons" -- which carries no separator
+    -- stays intact.
+    """
+    match = _LEADING_TYPE_RE.match(fragment)
+    if not match:
+        return '', fragment
+    prefix, rest = match.group(1).strip(), match.group(2).strip()
+    if not rest or _classify_part(prefix) != 'type':
+        return '', fragment
+    return prefix, rest
+
+
+def _organization_fallback(text: str, fields: dict) -> MembershipFallback:
+    """Recover an organization for an entry whose `organization` field is empty.
+
+    Replaces `original_text[:150]`, which rendered membership type, dates and
+    any unrelated trailing source text into the organization cell, truncated
+    mid-word (#476 review). Order of preference:
+
+    1. a structured field that names the same thing under another key;
+    2. the entry's first fragment (newline, tab or pipe) that is neither purely
+       a date nor purely a membership type, with any trailing date range lifted
+       into the date column and a leading membership-type prefix separated out
+       so the normal `_organization_cell` path prefixes it;
+    3. that fragment truncated at a word boundary if it is still over-long.
+
+    Skipping date-only and type-only fragments matters: extraction flattens a
+    two-column source table into "1999\tSome Society..." and a pipe-joined
+    record into "Fellow | Some Society | 1/1997-present", and taking fragment
+    zero blindly would render the year, or the word "Fellow", as the
+    organization. Every fragment is still scanned for a date even after the
+    organization is found, so the date in a trailing fragment is not lost.
+
+    The date it lifts out reaches the date column through the same
+    `_membership_dates_cell` call as every other date, so a lifted start with
+    no end renders "1999-Present" exactly as a structured `start_date` with no
+    `end_date` already does.
+
+    The organization it returns is empty only when the entry carries no text
+    at all, so a non-blank entry cannot become a blank row through this path.
+    """
+    for key in _ORGANIZATION_FIELD_ALIASES:
+        value = str(fields.get(key) or '').strip()
+        if value:
+            return MembershipFallback('', value, '')
+
+    fragments = [f.strip() for f in _FRAGMENT_SPLIT_RE.split(str(text or '')) if f.strip()]
+    if not fragments:
+        return MembershipFallback('', '', '')
+
+    dates, membership_type, organization = '', '', ''
+    for fragment in fragments:
+        remainder, fragment_dates = _split_trailing_dates(fragment)
+        if fragment_dates and not dates:
+            dates = fragment_dates
+        if not remainder:
+            continue  # the whole fragment was a date: it belongs in the date column
+        if _classify_part(remainder) == 'type':
+            membership_type = membership_type or remainder
+            continue  # the whole fragment was a membership type
+        if organization:
+            continue  # already found; keep scanning only to collect dates
+        prefix, rest = _split_leading_membership_type(remainder)
+        membership_type = membership_type or prefix
+        organization = rest
+
+    if not organization:
+        # Every fragment was a date or a bare membership type. Keep the entry's
+        # own first fragment rather than render a blank cell.
+        membership_type, organization = '', fragments[0]
+
+    return MembershipFallback(
+        membership_type,
+        _truncate_on_word_boundary(organization, _ORGANIZATION_FALLBACK_MAX_CHARS),
+        dates,
+    )
+
+
+def _single_membership_row(fields: dict, original_text: str) -> tuple[str, str, bool]:
+    """The (organization cell, dates cell, fallback fired) for one membership.
+
+    Module-level rather than a method: it needs no generator state, and every
+    name added to a section mixin is a name that can shadow another mixin's
+    (the `_add_table_row` collision).
+    """
+    organization = str(fields.get('organization') or '').strip()
+    membership_type = str(fields.get('membership_type') or '').strip()
+    start_date = str(fields.get('start_date') or '').strip()
+    end_date = str(fields.get('end_date') or '').strip()
+
+    fallback_fired = False
+    if not organization:
+        fallback_fired = True
+        recovered = _organization_fallback(original_text, fields)
+        organization = recovered.organization
+        membership_type = membership_type or recovered.membership_type
+        if not (start_date or end_date):
+            start_date, end_date = _split_date_range(recovered.dates)
+
+    return (_organization_cell(membership_type, organization),
+            _membership_dates_cell(start_date, end_date),
+            fallback_fired)
+
+
 class MembershipsSection:
     """Section I writers, mixed into `WCMTemplateGenerator`."""
 
@@ -351,20 +523,32 @@ class MembershipsSection:
                     )
                 continue
 
-            # Single membership - use extracted fields
-            organization = fields.get('organization', '')
-            membership_type = fields.get('membership_type', '')
-            start_date = fields.get('start_date', '')
-            end_date = fields.get('end_date', '')
+            # Single membership - use extracted fields, or recover from the
+            # raw text when the organization field is empty.
+            org_text, date_str, fallback_fired = _single_membership_row(fields, original_text)
 
-            if not organization:
-                organization = original_text[:150]
+            if not (org_text.strip() or date_str.strip()):
+                # Neither column has content: an empty, whitespace-only or
+                # separator-only source record. Rendering it would add a blank
+                # row to the document, so it is dropped -- counted and logged
+                # rather than dropped silently.
+                self.stats['membership_entries_blank'] = \
+                    self.stats.get('membership_entries_blank', 0) + 1
+                logger.warning(
+                    "memberships: entry at %s has neither an organization nor a "
+                    "date; no row rendered",
+                    entry.get('element_idx_start', '?'),
+                )
+                continue
 
-            # Format: Membership Type, Organization
-            org_text = _organization_cell(membership_type, organization)
-
-            # Format date range for table column
-            date_str = _membership_dates_cell(start_date, end_date)
+            if fallback_fired:
+                self.stats['membership_organization_fallbacks'] = \
+                    self.stats.get('membership_organization_fallbacks', 0) + 1
+                logger.warning(
+                    "memberships: entry at %s has no 'organization' field; the "
+                    "organization was recovered from its raw text",
+                    entry.get('element_idx_start', '?'),
+                )
 
             # Add row to table
             self._add_table_row(table, [org_text, date_str], entry=entry)
