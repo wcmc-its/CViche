@@ -10,7 +10,7 @@ how it *reads*: 14876 becomes "$14,876", a publication record becomes a numbered
 Vancouver citation. A change to one should not require a change to the other.
 """
 import re
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Dict, List, Optional, Tuple
 
 from ..normalization import _normalize_author_names
@@ -243,6 +243,11 @@ def _format_currency(value) -> str:
     all render "". Parsing goes through `decimal.Decimal`, so an amount binary
     float cannot hold exactly keeps its cents, and the fractional branch states
     its rounding (half-up to two places) instead of inheriting the repr's.
+
+    Total for every str/int/float/Decimal: a magnitude the decimal context
+    cannot format (27+ integer digits with a fraction, "1e5000") takes the same
+    fallback an unparseable string takes and returns the original text, rather
+    than raising into a caller that has no handler.
     """
     # `if not value` also swallowed a real $0 (round-2 review of #481, point 4).
     # The check is on type, not truthiness: a bool or a list from raw stage-4
@@ -263,24 +268,34 @@ def _format_currency(value) -> str:
     # Remove any existing currency symbols, commas, and whitespace
     cleaned = re.sub(r'[$,\s]', '', value_str)
 
-    # Try to extract a number
+    # Parsing and formatting are guarded together, not just the constructor.
+    # `quantize` raises InvalidOperation whenever the result needs more digits
+    # than the decimal context allows (28 by default), so a value with 27 or
+    # more integer digits and a fraction escaped this function uncaught; the
+    # sole caller (`sections/research_support.py`) has no handler, so on the
+    # web path that failed the whole run. `int()` on a very large exponent
+    # ("1e5000") raises ValueError for the same reason. Nothing between the
+    # `try` and the returns may raise now.
     try:
         # Handle cases like "14876" or "14876.00"
         num = Decimal(cleaned)
-    except (ValueError, InvalidOperation):
-        # If we can't parse it, return the original value
+        if not num.is_finite():
+            # Decimal parses "nan" and "inf" as values rather than rejecting
+            # them. float parsed them too: "nan" then raised ValueError inside
+            # int() and fell through to the original string, while "inf" raised
+            # OverflowError, which the except clause did not catch and which
+            # escaped this function. Both now return the original string.
+            return value_str
+        # Format with commas and $ symbol, no decimal places for whole numbers
+        if num == num.to_integral_value():
+            return f"${int(num):,}"
+        return f"${num.quantize(_CURRENCY_CENTS, rounding=ROUND_HALF_UP):,f}"
+    except (ValueError, ArithmeticError):
+        # ArithmeticError rather than InvalidOperation alone: it is the parent
+        # of every decimal signal (InvalidOperation, Overflow) and of
+        # OverflowError, so no arithmetic path can leave this function.
+        # If we can't parse or format it, return the original value
         return value_str
-    if not num.is_finite():
-        # Decimal parses "nan" and "inf" as values rather than rejecting them.
-        # float parsed them too: "nan" then raised ValueError inside int() and
-        # fell through to the original string, while "inf" raised OverflowError,
-        # which the except clause did not catch and which escaped this function.
-        # Both now return the original string.
-        return value_str
-    # Format with commas and $ symbol, no decimal places for whole numbers
-    if num == num.to_integral_value():
-        return f"${int(num):,}"
-    return f"${num.quantize(_CURRENCY_CENTS, rounding=ROUND_HALF_UP):,f}"
 
 
 def _format_mentee_duration(fields: Dict) -> str:

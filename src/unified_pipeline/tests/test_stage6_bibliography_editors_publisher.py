@@ -531,6 +531,49 @@ def test_format_currency_rounds_half_up_not_half_to_even():
     assert f"${0.125:,.2f}" == '$0.12'
 
 
+def test_format_currency_magnitude_past_the_decimal_context_does_not_raise():
+    """Round-3: the round-2 guard wrapped only the `Decimal(cleaned)` call, so
+    `quantize` -- which signals InvalidOperation as soon as the result needs
+    more digits than the context allows (28 by default) -- raised straight out
+    of this function. 26 integer digits plus cents fit; 27 did not, and the one
+    production caller (`sections/research_support.py`, no try/except) would
+    have taken the exception, failing the whole run on the orchestrator path.
+
+    The fallback value is pinned, not just the absence of an exception: an
+    amount the context cannot render in cents takes the same route an
+    unparseable string takes and comes back as its own text."""
+    fits = '1' + '0' * 25 + '.55'                       # 26 integer digits
+    assert len(fits.split('.')[0]) == 26
+    assert _format_currency(fits) == '$10,000,000,000,000,000,000,000,000.55'
+
+    over = '1' + '0' * 26 + '.55'                       # 27 integer digits
+    assert len(over.split('.')[0]) == 27
+    assert _format_currency(over) == '100000000000000000000000000.55'
+
+
+@pytest.mark.parametrize('value', [
+    '1' + '0' * 26 + '.55',      # 27 integer digits: quantize InvalidOperation
+    '1' + '0' * 29 + '.55',      # 30
+    '1' + '0' * 39 + '.55',      # 40
+    '1e5000',                    # int() ValueError, 4300-digit conversion limit
+    '-' + '1' + '0' * 39 + '.55',
+])
+def test_format_currency_is_total_over_extreme_magnitudes(value):
+    """Every str/int/float/Decimal input must return a string. "1e5000" is the
+    pre-existing half of this: `f"${int(num):,}"` raises ValueError past
+    sys.get_int_max_str_digits(), and the pre-Decimal parser raised
+    OverflowError on the same input, so both arms crashed on it before this
+    commit. Guarding the whole body closes that one as well."""
+    assert _format_currency(value) == value
+
+
+def test_format_currency_whole_amounts_are_not_capped_by_the_context():
+    """The fallback is scoped to the branch that actually cannot render: a
+    whole amount of any size still formats, because `int()` is exact and no
+    quantize runs."""
+    assert _format_currency('1' + '0' * 29) == '$' + '100,' + '000,' * 8 + '000'
+
+
 # ---------------------------------------------------------------------------
 # Round-2 review, point 6: "any token overlaps" is too loose
 # ---------------------------------------------------------------------------
