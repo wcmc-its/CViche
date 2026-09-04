@@ -895,7 +895,12 @@ class PositionsSection:
         stray sentence into a D code, field extraction finds no title,
         employer or dates in it, and the record reaches here with nothing to
         put in any of the three columns. Rendering it puts an empty row in the
-        delivered CV. It is measured on the corpus farm at one row.
+        delivered CV. Measured on the corpus farm at two rows: one D1 record
+        each in NGFNYQ and SO2IVQ, the same two on stage-4, stage-5 and
+        stage-5d inputs alike, so the count is a property of the records and
+        not of which stage a run reads them from. Both are the first record in
+        their code list, so neither ever had an employer to lose: they were
+        already three blank cells before this section grew a boundary check.
         """
         positions = []
         blank = 0
