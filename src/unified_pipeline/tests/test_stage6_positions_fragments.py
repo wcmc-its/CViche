@@ -740,7 +740,7 @@ def test_a_merge_resting_on_inheritance_alone_is_counted(build_entries, capsys):
     merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
 
     assert len(merged) == len(entries) - 1
-    assert "1 of those merges matched no employer name" in capsys.readouterr().out
+    assert "1 merged row(s) matched no employer name" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("build_entries", [_rule_1_pair_with_matching_employers,

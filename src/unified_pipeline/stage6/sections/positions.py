@@ -634,7 +634,7 @@ class PositionsSection:
                     break
 
         if verbose and unmatched_employer:
-            print(f"    {unmatched_employer} of those merges matched no employer "
+            print(f"    {unmatched_employer} merged row(s) matched no employer "
                   f"name; one row had inherited its employer from a parent row")
         if not dropped:
             if verbose and merged:
