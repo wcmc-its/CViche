@@ -5,10 +5,6 @@ value; it decides whether a value may be rendered at all. Kept apart from
 the rest of ``normalization`` deliberately -- a change to an author-name or
 separator rule must not be able to widen or narrow what counts as protected
 data, and the two now cannot share an edit by accident.
-
-Split out of the former ``text.py``. Names keep their leading underscore for
-now. Renaming and relocating in one change would make a failure impossible
-to attribute to either.
 """
 import re
 

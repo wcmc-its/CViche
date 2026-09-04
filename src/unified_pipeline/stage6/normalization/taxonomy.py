@@ -3,10 +3,6 @@
 Its own module because its input is neither a CV value nor a Word marker: it
 is a pipeline-internal label that escaped stage 3b into a bullet. It changes
 when the taxonomy changes, and nothing else in ``normalization`` does.
-
-Split out of the former ``text.py``. Names keep their leading underscore for
-now. Renaming and relocating in one change would make a failure impossible
-to attribute to either.
 """
 import re
 

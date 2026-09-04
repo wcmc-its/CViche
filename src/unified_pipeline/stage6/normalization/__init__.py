@@ -31,7 +31,9 @@ protected-data label are four independent events, and one file meant any of them
 could be edited into any of the others. They are separate modules so that
 ownership, blast radius and the tests that pin them line up with the domain.
 `pii.py` is the one that most needed it -- it decides whether a value may be
-rendered at all, which is a data-governance rule, not a cleanup.
+rendered at all, which is a data-governance rule, not a cleanup. The private
+`_`-prefixed names are unchanged throughout: renaming and relocating in one
+change would make a failure impossible to attribute to either.
 
 `fields.py` is separate because its input is not text yet. Stage 4 stores raw
 LLM JSON against no schema, so a field the renderer expects to be a string can

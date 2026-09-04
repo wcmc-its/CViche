@@ -4,10 +4,6 @@ Neither a domain concern nor a rendering one: it repairs an artifact of
 table extraction, where a merged cell arrives with its own content repeated
 across every segment. It changes when a new extraction pathology is
 observed in a CV, whatever the value happens to mean.
-
-Split out of the former ``text.py``. Names keep their leading underscore for
-now. Renaming and relocating in one change would make a failure impossible
-to attribute to either.
 """
 import logging
 

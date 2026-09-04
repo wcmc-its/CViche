@@ -6,10 +6,6 @@ Rendering concerns, not domain ones. Neither function decides what a value
 table row. They change when what the writer emits changes, not when a CV
 spelling does, which is why they no longer sit next to the author and
 institution rules.
-
-Split out of the former ``text.py``. Names keep their leading underscore for
-now. Renaming and relocating in one change would make a failure impossible
-to attribute to either.
 """
 import re
 

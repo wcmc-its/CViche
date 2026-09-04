@@ -6,10 +6,6 @@ position entry, and the trailing organization segment an award name
 duplicates from its own Organization cell. Both change when the enrichment
 shape or an observed award spelling changes; neither has anything to say
 about how a value is rendered.
-
-Split out of the former ``text.py``. Names keep their leading underscore for
-now. Renaming and relocating in one change would make a failure impossible
-to attribute to either.
 """
 import re
 from typing import TypedDict
