@@ -39,16 +39,16 @@ def _looks_like_initials(token: str) -> bool:
     "initials or name?" calls this one predicate -- the pair detector, the
     pair parser's surname-slot test, its upper-casing, and the fallback
     parser -- so a token can no longer be classified one way on one path and
-    the other way on the other. The definitions this replaced disagree with
-    it on 81 of the farm's 1,711 distinct author strings
-    (`measure_normalization_claims.py --only initials`).
+    the other way on the other. Of those four, only the FALLBACK's own
+    definition is measured: `measure_normalization_claims.py --only initials`
+    reports `classified differently by the two: 81`.
 
     A single alphabetic character of any case or script is always an initial
     -- #560 gives "Kelly, r" and "Kelly, Å" as shapes the old ASCII-uppercase
-    gate rejected, and a lone letter has no other plausible reading. 2-4 characters must still be
-    uppercase: a short mixed-case word ("Scot", "Li", "Wei") is at least as
-    likely to be a real given name as an initials group. Hyphenated initials
-    ("R-Y") follow the same rule per side.
+    gate rejected, and a lone letter has no other plausible reading. 2-4
+    characters must still be uppercase: a short mixed-case word ("Scot",
+    "Li", "Wei") is at least as likely to be a real given name as an initials
+    group. Hyphenated initials ("R-Y") follow the same rule per side.
     """
     t = token.rstrip(_INITIALS_TRAILING_MARKS).replace(' ', '')
     if not t:
@@ -74,7 +74,7 @@ def _parse_surname_initial_pairs(parts: list[str]) -> list[str]:
     initials to pair with is emitted on its own; an initials group in a
     surname slot -- a list that is missing a surname, so the group has no
     pair -- is placed rather than skipped over. It used to be skipped, which
-    deleted it outright: "AB, PL*, Smith, JA" rendered as "PL* Smith, JA".
+    deleted it outright: "AB, PL, Smith, JA" rendered as "Smith JA".
 
     That placement follows `_parse_author_fallback`'s orphan rule on the
     FIRST orphan and diverges on the second, deliberately and on both sides:
@@ -117,9 +117,9 @@ def _parse_surname_initial_pairs(parts: list[str]) -> list[str]:
             # `_parse_author_fallback`. The corpus does not adjudicate that:
             # `measure_normalization_claims.py --only orphans` reports
             # `strings hitting the surname slot : 1`, placing two tokens back
-            # to back, `{'A': 2}` by shape -- two bare letters with no
-            # surname in the string at all. #560's bar, no token deleted, is
-            # met on either reading.
+            # to back, `{'A': 2}` by shape -- two single-letter tokens
+            # standing where a surname should be. #560's bar, no token
+            # deleted, is met on either reading.
             if merge_target_open:
                 cleaned_authors[-1] = f"{cleaned_authors[-1]} {surname}"
                 merge_target_open = False
