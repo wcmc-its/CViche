@@ -126,11 +126,22 @@ def _parse_surname_initial_pairs(parts: list[str]) -> list[str]:
             # that element is still "open" (a bare token carrying no
             # initials of its own yet), emitted on its own when there is
             # nothing open to charge it to -- and never dropped, which is
-            # what this branch used to do. Consecutive orphans therefore
-            # coalesce into one element, and that is the reading the corpus
-            # wants: its one occurrence is a two-character surname followed
-            # by its own initial, and merging reconstructs that author
-            # exactly where skipping deleted both tokens.
+            # what this branch used to do.
+            #
+            # Consecutive orphans therefore coalesce into one element. What
+            # the corpus actually says about that, measured with
+            # `scripts/measure_normalization_claims.py --only orphans`: of
+            # the farm's 1,711 distinct author strings, 228 reach this
+            # parser and exactly 1 reaches this branch, where it places two
+            # tokens back to back -- each a single uppercase letter (shapes
+            # {'A': 2}, runs {2: 1}). So the corpus does NOT show a surname
+            # being rejoined to its own initial; there is no surname in that
+            # string at all, only two bare letters. Coalescing renders them
+            # as one element with the shape of a Vancouver author, not
+            # coalescing renders them as two bare letters, and nothing in
+            # the source says which reading is right. #560's bar -- no
+            # token deleted -- is met either way, which is the part the
+            # measurement does settle.
             if merge_target_open:
                 cleaned_authors[-1] = f"{cleaned_authors[-1]} {surname}"
                 merge_target_open = False
@@ -264,8 +275,8 @@ def _normalize_author_names(authors: str) -> str:
     The pair parser had a discard of its own, on the shape the fallback
     never sees: an initials group sitting where a surname should be, which
     it skipped over. "AB, PL*, Smith, JA" lost "AB" outright, and the farm's
-    one live occurrence lost a two-character surname and its initial
-    together. It is placed rather than skipped now.
+    one live occurrence of the shape lost two tokens together, both single
+    uppercase letters. It is placed rather than skipped now.
 
     In both, such a token merges into the author immediately before it, and
     when there is no open author to merge into it is emitted as its own

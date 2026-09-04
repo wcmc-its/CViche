@@ -410,12 +410,14 @@ def test_the_pair_parser_keeps_every_alphabetic_character_of_its_input():
 
 
 def test_consecutive_orphan_initials_coalesce_into_one_author():
-    """The farm's one live occurrence of the skip is a two-character
-    surname followed by its own single initial, both in surname slots
-    because the list around them is a clean pair sequence. Skipping deleted
-    both; merging the second into the first reconstructs the author exactly
-    as the published citation spells it. Shape reproduced synthetically --
-    "A, E, L, B" between two ordinary pairs."""
+    """The farm's one live occurrence of the skip places two tokens back to
+    back, each a single uppercase letter, both in surname slots because the
+    list around them is a clean pair sequence (measured with
+    `scripts/measure_normalization_claims.py --only orphans`: shapes
+    {'A': 2}, runs {2: 1}). Skipping deleted both. This pins what placing
+    them does instead -- consecutive orphans coalesce, so the two letters
+    render as one element rather than two. Shape reproduced synthetically
+    -- "A, E, L, B" between two ordinary pairs."""
     assert _cite('Alpha, A, E, L, Bravo, B') == (
         '1. Alpha A, E L, Bravo B. A Study.'
     )
