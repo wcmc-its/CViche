@@ -1,9 +1,11 @@
 """Best-effort outbound notifications for run lifecycle events.
 
-Posts a Microsoft Teams message when a run starts processing and again when it
-reaches a terminal status (complete or failed). Fully decoupled from run
-execution: a missing webhook URL is a silent no-op, and any delivery failure is
-logged and swallowed so it can never affect run status or surface to the user.
+Posts a Microsoft Teams message when a run starts processing, again when it
+reaches a terminal status (complete or failed), and again when a user submits
+feedback on a run. Fully decoupled from run execution and from the feedback
+API: a missing webhook URL is a silent no-op, and any delivery failure is
+logged and swallowed so it can never affect run status, feedback submission,
+or surface to the user.
 
 Cards are Adaptive Cards wrapped in the {"type": "message", "attachments": [...]}
 envelope that the Teams *Workflows* incoming webhook expects. (The older Office
@@ -248,12 +250,61 @@ def build_teams_payload(run, score=None, submitter=None, doctor=None) -> dict:
     return _adaptive_card(f"CViche run {run_id} {status}", color, facts, run_id, summary)
 
 
+def build_feedback_payload(feedback, run, submitter=None) -> dict:
+    """Build the Teams card for a user-submitted run feedback survey.
+
+    Only ratings and category picks go on the card -- never a reviewer's
+    free-text answer (biggest_issue, issue_locations). Those can name a
+    specific person or quote CV content, and this posts to an external Teams
+    webhook outside the app's access controls; open the run in-app to read
+    them.
+
+    Args:
+        feedback: the Feedback ORM object (reviewer_role, overall_usefulness,
+            likelihood_to_recommend, overall_accuracy).
+        run: the Run ORM object the feedback was submitted against.
+        submitter: display name/email of who submitted the feedback, or None
+            to omit.
+    """
+    run_id = getattr(run, "id", None) or "unknown"
+    filename = getattr(run, "filename", None) or "unknown"
+    usefulness = getattr(feedback, "overall_usefulness", None)
+    recommend = getattr(feedback, "likelihood_to_recommend", None)
+
+    facts = [
+        {"name": "Run ID", "value": str(run_id)},
+        {"name": "File", "value": str(filename)},
+    ]
+    if submitter:
+        facts.append({"name": "Submitted by", "value": str(submitter)})
+    facts += [
+        {"name": "Reviewer role", "value": str(getattr(feedback, "reviewer_role", None) or "n/a")},
+        {"name": "Overall usefulness", "value": f"{usefulness}/5" if usefulness is not None else "n/a"},
+        {"name": "Likelihood to recommend", "value": f"{recommend}/5" if recommend is not None else "n/a"},
+    ]
+    accuracy = getattr(feedback, "overall_accuracy", None)
+    if accuracy is not None:
+        facts.append({"name": "Overall accuracy", "value": f"{accuracy}/10"})
+
+    # A low recommend score is the signal worth a red card; a high one is a
+    # green nod. 3 (neutral) falls through to the default color.
+    if recommend is not None and recommend <= 2:
+        color = "attention"
+    elif recommend is not None and recommend >= 4:
+        color = "good"
+    else:
+        color = _DEFAULT_COLOR
+
+    summary = f"CViche feedback on run {run_id}: usefulness {usefulness or 'n/a'}/5, recommend {recommend or 'n/a'}/5"
+    return _adaptive_card(f"CViche feedback on run {run_id}", color, facts, run_id, summary)
+
+
 def _post(payload, run_id) -> None:
     """Best-effort: POST a prepared card to the Teams webhook.
 
     No-ops silently when the webhook URL is not configured. Catches and logs
     every exception (and any non-2xx response) so it can never raise or affect
-    run status. Shared by the started and terminal notifications.
+    run status. Shared by the started, terminal, and feedback notifications.
     """
     try:
         url = _webhook_url()
@@ -284,3 +335,12 @@ def notify_run_terminal(run, score=None, submitter=None, doctor=None) -> None:
     every exception so it can never raise or affect run status.
     """
     _post(build_teams_payload(run, score, submitter, doctor), getattr(run, "id", "unknown"))
+
+
+def notify_feedback_submitted(feedback, run, submitter=None) -> None:
+    """Best-effort: POST a Teams notification when a user submits run feedback.
+
+    No-ops silently when the webhook URL is not configured. Catches and logs
+    every exception so it can never raise or affect the feedback submission.
+    """
+    _post(build_feedback_payload(feedback, run, submitter), getattr(run, "id", "unknown"))
