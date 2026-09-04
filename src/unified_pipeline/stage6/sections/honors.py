@@ -112,15 +112,31 @@ _ORG_STOP_WORDS = frozenset([
 # name -- "University *of* the State *of* New York".
 _ORG_CONNECTIVES = frozenset(['of', 'the', 'and', 'at', 'in', 'for'])
 
-_ORG_KEYWORDS = (r'(?:University|College|Hospital|Medical\s+Center|Society|'
-                 r'Association|Institute|Academy|Foundation|'
-                 r'Program\s+Directors|Center)')
+# Keywords that name an institution wherever they appear. A CV writes these
+# in an organization's name, essentially never inside an award's.
+_STRONG_ORG_KEYWORDS = (r'(?:University|College|Hospital|Medical\s+Center|'
+                        r'Society|Association|Institute|Academy|Foundation|'
+                        r'Program\s+Directors)')
+
+# ...and the generic one, which does occur inside award names ("Cancer Center
+# Excellence Award"). It is still an organization signal, but only where
+# nothing stronger appears: matching on the LAST keyword of a single flat
+# list let a generic word inside an award name beat the real granting body
+# (#733 review). `Medical Center` stays in the strong list and, being the
+# longer alternative, still wins over a bare `Center` at the same position.
+_GENERIC_ORG_KEYWORDS = r'(?:Center)'
+
+_ORG_KEYWORDS = (r'(?:' + _STRONG_ORG_KEYWORDS + r'|'
+                 + _GENERIC_ORG_KEYWORDS + r')')
 
 # A built organization has to be more than one word, and Strategy 4 additionally
 # refuses one that is most of the line it was cut from -- that is an award name
 # with a keyword in it, not an organization.
 _MIN_ORG_WORDS = 2
 _MAX_ORG_SHARE_OF_TEXT = 0.7
+
+# A comma segment longer than this is a sentence, not an organization name.
+_MAX_ORG_SEGMENT_WORDS = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -512,12 +528,55 @@ def _split_award_year(text: str) -> tuple[str, str]:
     return text, ''
 
 
+def _continues_org_name(between: str) -> bool:
+    """Is the text between two keywords still part of one organization name?
+
+    The same test the backwards walk below applies word by word: proper
+    nouns and connectives continue a name, award vocabulary ends it.
+    """
+    for word in between.split():
+        wc = word.strip('.,;–—-()\"’')
+        if not wc:
+            continue
+        if wc.lower() in _ORG_STOP_WORDS:
+            return False
+        if wc[0].islower() and wc.lower() not in _ORG_CONNECTIVES:
+            return False
+    return True
+
+
+def _org_keyword_anchor(txt: str) -> re.Match | None:
+    """The institutional keyword an organization name should be built around.
+
+    The last STRONG keyword, not the last keyword of one flat list: a
+    generic word can sit inside an award's own name and used to win purely
+    by coming later ("... Teaching Center Award" beating the university that
+    granted it, #733 review). The generic keyword still decides when no
+    strong one appears anywhere in the text.
+
+    It also still decides when it only CONTINUES the strong keyword's name
+    -- "New York Presbyterian Hospital Weill Cornell Center" is one
+    organization, and anchoring on `Hospital` would cut it in half. That is
+    the difference the stop-word test makes: award vocabulary between the
+    two keywords means the generic one belongs to the award, not the org.
+    """
+    strong = list(re.finditer(_STRONG_ORG_KEYWORDS, txt, re.IGNORECASE))
+    generic = list(re.finditer(_GENERIC_ORG_KEYWORDS, txt, re.IGNORECASE))
+    if not strong:
+        return generic[-1] if generic else None
+    anchor = strong[-1]
+    for m in generic:
+        if m.start() >= anchor.end() \
+                and _continues_org_name(txt[anchor.end():m.start()]):
+            anchor = m
+    return anchor
+
+
 def _build_org_around_keyword(txt: str) -> str:
-    """Find last institutional keyword in text and build org name around it."""
-    keywords = list(re.finditer(_ORG_KEYWORDS, txt, re.IGNORECASE))
-    if not keywords:
+    """Build an organization name around the text's keyword anchor."""
+    km = _org_keyword_anchor(txt)
+    if km is None:
         return ''
-    km = keywords[-1]  # Use last keyword to capture full org span
 
     # Walk backwards from keyword
     before = txt[:km.start()]
@@ -572,15 +631,17 @@ def _extract_organization_from_award(text: str) -> str:
             return org
 
     # Strategy 2: comma-separated segments (check last segments first).
-    # Two passes: an institutional-keyword segment anywhere beats the
-    # short-proper-noun fallback — a single reversed pass used to return
-    # "MD" or a bare city before ever reaching the real org (#229).
+    # Three passes: a strong-keyword segment beats a generic-keyword one
+    # (#733 review, same reason as `_build_org_around_keyword`), and either
+    # beats the short-proper-noun fallback — a single reversed pass used to
+    # return "MD" or a bare city before ever reaching the real org (#229).
     if ',' in text:
         segs = [s.strip().rstrip('.,;') for s in text.split(',')]
-        for seg in reversed(segs):
-            if seg and re.search(_ORG_KEYWORDS, seg, re.IGNORECASE) \
-                    and len(seg.split()) <= 10:
-                return seg
+        for keywords in (_STRONG_ORG_KEYWORDS, _GENERIC_ORG_KEYWORDS):
+            for seg in reversed(segs):
+                if seg and re.search(keywords, seg, re.IGNORECASE) \
+                        and len(seg.split()) <= _MAX_ORG_SEGMENT_WORDS:
+                    return seg
         for seg in reversed(segs):
             if not seg or seg.upper() in _US_STATE_ABBREVS \
                     or any(ch.isdigit() for ch in seg):
