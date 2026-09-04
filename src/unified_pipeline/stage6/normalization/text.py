@@ -505,8 +505,36 @@ def _clean_inline_tabs(text: str) -> str:
       tab renders ragged against Word's default tab stops, so the first becomes
       ": " (label: value) and any further tabs become " — ".
 
-    Properly structured content (mentee/board tables) is routed to real Word
-    tables upstream via classification; this is the fallback for residual text.
+    UPSTREAM CONTRACT -- what every caller has already decided before it
+    gets here. This is the residual-text path: the routing that sends a
+    table-shaped record to a real Word table runs first, and only what that
+    routing declined reaches this function. The six call sites, each read
+    before being written down here:
+
+    - ``stage_6_word_template.py:1137`` ``_insert_bulleted_entry`` -- one
+      entry rendered as a single bullet paragraph.
+    - ``stage_6_word_template.py:2084`` ``_insert_reconsidered_segment`` --
+      one LLM-reclassified segment, likewise a single bullet.
+    - ``stage_6_word_template.py:2386`` ``_unconsumed_personal_data_batch``
+      -- A entries no Personal Data slot consumed. Its PII scan reads the
+      RAW text, precisely because this call destroys the fragment boundaries
+      that scan splits on.
+    - ``sections/appendix.py:70`` -- the appendix, which by construction
+      holds only entries no section renderer claimed.
+    - ``sections/mentoring.py:203`` ``_insert_mentoring_summaries`` -- only
+      the aggregate entries ``_is_mentee_record()`` rejected; every mentee
+      record went to ``_create_mentee_table_with_spacing`` instead.
+    - ``sections/researcher_profiles.py:62`` -- S0 identifier lines (ORCID,
+      Google Scholar), one short line each.
+
+    None of that is enforced by a type or an assertion, so it is a
+    convention and not a guarantee: a genuine table row whose upstream
+    classification failed arrives here and is flattened into one
+    "cell — cell — cell" line, with no warning. That cost is pinned rather
+    than left to be discovered in a delivered document --
+    ``test_cell_separators.py`` covers the residual-text path and
+    ``test_stage6_cell_separator_contract.py`` covers what the flattening
+    fallback actually produces when a row does reach it.
 
     ponytail: the name says "tabs" but it now handles both separators. Kept as-is
     so this change does not collide with the three bullet call sites that #254
