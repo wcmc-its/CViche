@@ -5,15 +5,23 @@ because the row shape is identical across them and only the source code list
 differs.
 
 Most of this module is not rendering. It is repair work on stage-4 output, and
-it is why the section is 389 lines for an 85-line writer:
+it is why the section is this long for an 85-line writer:
 
 - `_propagate_institution_to_subentries` -- source CVs indent sub-positions
   under an employer heading, and field extraction sees each bullet on its own,
-  so the institution has to be carried forward in document order.
+  so the institution has to be carried forward in document order. It stops at
+  a source-structure boundary (`_crosses_source_boundary`) and records the
+  parent it took each institution from.
 - `_merge_grouped_appointments` -- the same appointment arrives split into a
   title-less "employer + dates" row and one or more date-less "title only"
   rows. Rendered straight that produces blank-TITLE rows, which read as
-  active/"Present" once sorted, and blank-DATES rows.
+  active/"Present" once sorted, and blank-DATES rows. It merges only where
+  `_is_one_appointment` finds evidence the two rows are one appointment;
+  adjacency alone is not evidence.
+- `_normalized_positions` -- the single place that decides how many rows a
+  table gets: sort, drop a source column-header row, and recover a tab-joined
+  child appointment (`_child_position_records`) as a record of its own. The
+  render loop is then one row per record, with no early return under it.
 
 `_position_title` and `_position_has_dates` are the predicates that merge pass
 reads each record through, and `_PLACEHOLDER_TITLES` is the column-header
@@ -127,6 +135,58 @@ _LOCATION_TAIL_RE = re.compile(r',\s*(?:[A-Z]{2}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)
 # one; a record line ("Aug 2019-Dec 2023, Associate Director, ...") does, and
 # that is the shape the pre-#476 fallback kept mistaking for an institution.
 _YEAR_IN_FRAGMENT_RE = re.compile(r'\b(?:19|20)\d{2}\b')
+
+
+def _child_position_records(entry: dict) -> list[dict]:
+    """The tab-joined child appointments of `entry`, as position records of
+    their own (#476 review item 6).
+
+    Rendering used to discover these mid-render, after the parent row had
+    already been written, so the number of rows a section produced could not
+    be read off its record list. They are recovered during normalization
+    instead, and each one renders through the same `_add_position_row` as any
+    other record.
+
+    A child is the same appointment as its parent under a later title, so its
+    record copies the parent's employer fields and enrichment verbatim and its
+    Institution cell comes out identical to the parent's. It copies nothing
+    else: no classification, coverage or comment fields, so a child row
+    carries no Word comments, which is what the pre-#476 child rows did by
+    passing `entry=None`. `entry` itself is never modified.
+
+    A child whose title and formatted dates are the parent's own is dropped:
+    stage 4 sometimes promotes a bullet-prefixed fragment to its own record
+    (MNZ7IA, ZZLKMA), and that record arrives here as its own parent.
+    """
+    text = entry.get('text', '') or ''
+    children = _tab_joined_child_fragments(text)
+    if not children:
+        return []
+    fields = entry.get('extracted_fields', {}) or {}
+    taxonomy_code = entry.get('taxonomy_code', ACADEMIC_APPOINTMENT_CODE)
+    parent_title = PositionsSection._position_title(entry).lower()
+    parent_dates = format_date_range(fields.get('start_date', ''),
+                                     fields.get('end_date', ''), taxonomy_code)
+    enrichment = entry.get('institution_enrichment')
+    records = []
+    for title, (start, end) in children:
+        if (title.lower() == parent_title
+                and format_date_range(start, end, taxonomy_code) == parent_dates):
+            continue
+        records.append({
+            'text': text,
+            'taxonomy_code': taxonomy_code,
+            'institution_enrichment': dict(enrichment) if isinstance(enrichment, dict) else enrichment,
+            'extracted_fields': {
+                'title': title,
+                'institution': fields.get('institution', ''),
+                'organization': fields.get('organization', ''),
+                'department': fields.get('department', ''),
+                'start_date': start,
+                'end_date': end,
+            },
+        })
+    return records
 
 
 def _names_employer_and_location(part: str) -> bool:
@@ -596,9 +656,8 @@ class PositionsSection:
             if acad_table:
                 _clear_table_data(acad_table, keep_header=True)
                 self.stats['tables_populated'] += 1
-                sorted_d1 = sort_entries_reverse_chronological(d1_entries)
-                for entry in sorted_d1:
-                    self._add_position_row(acad_table, entry)
+                for position in self._normalized_positions(d1_entries):
+                    self._add_position_row(acad_table, position)
 
         # Fill Hospital Appointments table (D2)
         hosp_idx = self._find_paragraph_with_text("Hospital Appointments")
@@ -607,9 +666,8 @@ class PositionsSection:
             if hosp_table:
                 _clear_table_data(hosp_table, keep_header=True)
                 self.stats['tables_populated'] += 1
-                sorted_d2 = sort_entries_reverse_chronological(d2_entries)
-                for entry in sorted_d2:
-                    self._add_position_row(hosp_table, entry)
+                for position in self._normalized_positions(d2_entries):
+                    self._add_position_row(hosp_table, position)
 
         # Fill Other Professional Positions table (D3)
         other_idx = self._find_paragraph_with_text("Other Professional Positions")
@@ -618,9 +676,8 @@ class PositionsSection:
             if other_table:
                 _clear_table_data(other_table, keep_header=True)
                 self.stats['tables_populated'] += 1
-                sorted_d3 = sort_entries_reverse_chronological(d3_entries)
-                for entry in sorted_d3:
-                    self._add_position_row(other_table, entry)
+                for position in self._normalized_positions(d3_entries):
+                    self._add_position_row(other_table, position)
 
         # Fallback: If no specific subsection tables found, use the generic PROFESSIONAL POSITIONS table
         if acad_idx is None and hosp_idx is None and other_idx is None:
@@ -637,29 +694,66 @@ class PositionsSection:
 
             # Combine all and sort
             all_entries = d1_entries + d2_entries + d3_entries
-            sorted_entries = sort_entries_reverse_chronological(all_entries)
-            for entry in sorted_entries:
-                self._add_position_row(table, entry)
+            for position in self._normalized_positions(all_entries):
+                self._add_position_row(table, position)
 
-    def _add_position_row(self, table, entry: dict):
-        """Add a single position entry to a table."""
-        original_text = entry.get('text', '')
+    def _is_source_column_header(self, entry: dict) -> bool:
+        """True for a source table's column-header row that field extraction
+        emitted as a data record -- "Title | Institution | Dates" and the like.
+
+        Lives here rather than in `_add_position_row` (#476 review items 6 and
+        7): what does and does not become a row is a normalization decision,
+        and taking it before rendering is what lets the render loop increment
+        the row counter once per iteration with no early return under it.
+        """
         fields = entry.get('extracted_fields', {}) or {}
-
-        # Check if we have valid extracted fields - if so, use them even if text looks like a header
+        # Valid extracted fields win, even if the text looks like a header
         has_valid_fields = bool(
             fields.get('title') or
             fields.get('institution') or
             fields.get('organization') or
             (fields.get('start_date') and fields.get('end_date'))
         )
+        if has_valid_fields:
+            return False
+        original_text = entry.get('text', '')
+        if not _is_table_header_entry(original_text, ['title', 'institution', 'organization', 'dates', 'city', 'state', 'position']):
+            return False
+        if self.verbose:
+            print(f"  Skipping position header entry: '{original_text[:50]}...'")
+        return True
 
-        # Skip table header entries that were mistakenly extracted as data
-        # BUT only if we don't have valid extracted fields to work with
-        if not has_valid_fields and _is_table_header_entry(original_text, ['title', 'institution', 'organization', 'dates', 'city', 'state', 'position']):
-            if self.verbose:
-                print(f"  Skipping position header entry: '{original_text[:50]}...'")
-            return
+    def _normalized_positions(self, entries: list[dict]) -> list[dict]:
+        """The position records a table renders, in rendered order.
+
+        Everything that decides HOW MANY rows the section produces happens
+        here (#476 review item 6): the reverse-chronological sort, dropping a
+        source column-header row extraction mistook for data, and recovering a
+        tab-joined child appointment as a record of its own, immediately after
+        the parent it came from.
+
+        So the caller is `for position in positions: self._add_position_row(...)`
+        with nothing under it that can skip or add a row, and
+        `entries_inserted` -- incremented once, at the end of
+        `_add_table_row_with_mixed_content` (stage_6_word_template.py) --
+        counts exactly one per physical row, child rows included (review item
+        7). This method never modifies the records it is given.
+        """
+        positions = []
+        for entry in sort_entries_reverse_chronological(entries):
+            if self._is_source_column_header(entry):
+                continue
+            positions.append(entry)
+            positions.extend(_child_position_records(entry))
+        return positions
+
+    def _add_position_row(self, table, entry: dict):
+        """Render one normalized position record as one table row.
+
+        Renders unconditionally: every record `_normalized_positions` yields
+        becomes exactly one row (#476 review item 7).
+        """
+        fields = entry.get('extracted_fields', {}) or {}
 
         title = fields.get('title') or ''
         # Detect placeholder values that are actually column headers from source CV tables
@@ -738,31 +832,3 @@ class PositionsSection:
             [title_content, institution_content, dates_content],
             entry=entry
             )
-
-        self._add_tab_joined_child_position_rows(
-            table, original_text, institution_content, taxonomy_code,
-            title.strip().lower(), dates)
-
-    def _add_tab_joined_child_position_rows(self, table, original_text: str,
-                                             institution_content: list[tuple],
-                                             taxonomy_code: str,
-                                             parent_title_lower: str,
-                                             parent_dates: str) -> None:
-        """Emit one additional row per tab-joined child fragment (#476) found
-        in ``original_text``, immediately after the parent row this entry
-        already added. Institution/location are inherited verbatim from the
-        parent row's own cell content -- these are the same appointment, just
-        a later title within it. Never emits a child whose (title, dates)
-        exactly match the parent's own -- a guard `_tab_joined_child_
-        fragments` itself does not need to make, since a bullet-prefixed
-        fragment that stage 4 already promoted to its own entry (MNZ7IA,
-        ZZLKMA) reaches here as that entry's OWN header, not as a child."""
-        for child_title, (child_start, child_end) in _tab_joined_child_fragments(original_text):
-            child_dates = format_date_range(child_start, child_end, taxonomy_code)
-            if child_title.lower() == parent_title_lower and child_dates == parent_dates:
-                continue
-            self._add_table_row_with_mixed_content(
-                table,
-                [[(child_title, False, "")], institution_content, [(child_dates, False, "")]],
-                entry=None
-                )
