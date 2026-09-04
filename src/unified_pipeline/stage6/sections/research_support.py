@@ -322,7 +322,14 @@ class ResearchSupportSection:
         title = _deduplicate_repeated_content(title)
 
         agency = fields.get('agency') or fields.get('funding_source', '') or fields.get('sponsor', '')
-        total_funding = fields.get('total_funding', '') or fields.get('annual_direct_costs', '')
+        # The two funding keys are read twice, in opposite precedence: the
+        # duplicate-content check below wants total_funding first, the rendered
+        # "Annual direct costs" row wants annual_direct_costs first. Both reads
+        # go through these locals, so clearing a duplicate below no longer has to
+        # write '' back into the caller's `fields` to make the second read agree
+        # (review thread 3932312407 item 1).
+        annual_direct_costs = fields.get('annual_direct_costs', '')
+        total_funding = fields.get('total_funding', '') or annual_direct_costs
 
         # Detect and fix cross-field duplication where the same content appears in multiple fields
         # This happens when Stage 4 incorrectly puts the same text in agency, title, AND funding
@@ -332,8 +339,7 @@ class ResearchSupportSection:
         if title and total_funding and title.strip().lower() == total_funding.strip().lower():
             # Funding is same as title - clear funding
             total_funding = ''
-            fields['total_funding'] = ''
-            fields['annual_direct_costs'] = ''
+            annual_direct_costs = ''
         role = fields.get('pi_role') or fields.get('role', '') or fields.get('description', '')
         start_date = fields.get('start_date', '') or fields.get('date', '')
         end_date = fields.get('end_date', '')
@@ -408,7 +414,7 @@ class ResearchSupportSection:
             pi_name = owner_name
 
         # Format costs as currency
-        costs = fields.get('annual_direct_costs') or fields.get('total_funding', '')
+        costs = annual_direct_costs or total_funding
         costs_formatted = _format_currency(costs)
 
         # Carry the grant/award identifier in Award Source. The WCM template has no
