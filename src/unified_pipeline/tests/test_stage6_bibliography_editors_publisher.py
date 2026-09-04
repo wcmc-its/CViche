@@ -216,6 +216,60 @@ def test_fallback_journal_present_ignores_publisher():
     assert 'Should Not Appear' not in citation
 
 
+def test_fallback_journal_beats_a_book_title_on_the_same_entry():
+    """The source line is one slot and the journal owns it. An entry
+    carrying both -- a misclassified chapter, or an article whose stage-4
+    extraction picked up a series title -- renders the journal and no "In:"
+    clause.
+
+    Added after a mutation check: swapping the two branches changed 3 farm
+    entries and no test, so the precedence was load-bearing and unpinned."""
+    fields = {
+        'authors': 'Smith J',
+        'year': '2021',
+        'journal': 'NEJM',
+        'book_title': 'A Book That Must Not Appear',
+        'editors': 'Editor X',
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 16)
+
+    assert citation == '16. Smith J. NEJM. 2021.'
+    assert 'In:' not in citation
+    assert 'A Book That Must Not Appear' not in citation
+
+
+def test_fallback_title_ending_in_a_period_does_not_double_it():
+    """The renderer owns the period after the title, so a stage-4 title that
+    already ends in one must not render "A Paper..".
+
+    Also from the mutation check: dropping the `rstrip('.')` changed 2,523 of
+    the 20,582 farm entries and no test at all -- titles arrive with their
+    own terminal period that often."""
+    fields = {'authors': 'Smith J', 'title': 'A Paper.', 'journal': 'NEJM'}
+
+    citation, _, _ = _format_citation(_entry(fields), 17)
+
+    assert citation == '17. Smith J. A Paper. NEJM.'
+
+
+@pytest.mark.parametrize('title,expected', [
+    ('A Paper', '1. A Paper. NEJM.'),
+    ('A Paper.', '1. A Paper. NEJM.'),
+    ('A Paper...', '1. A Paper. NEJM.'),
+    ('Is it a paper?', '1. Is it a paper?. NEJM.'),
+    ('.', '1. . NEJM.'),
+])
+def test_title_terminal_punctuation_table(title, expected):
+    """Only a period is stripped, and every trailing period is -- a question
+    mark keeps its own and gains the renderer's, which is what the farm
+    already renders."""
+    citation, _, _ = _format_citation(
+        _entry({'title': title, 'journal': 'NEJM'}), 1)
+
+    assert citation == expected
+
+
 # ---------------------------------------------------------------------------
 # #481: the stage-5d safety net (the HU4DXA "GNYHA" case)
 # ---------------------------------------------------------------------------
