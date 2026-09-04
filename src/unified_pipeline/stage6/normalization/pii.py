@@ -132,9 +132,9 @@ def _from_pii_fragment(value, pii_fragments: list[str]) -> bool:
     Deny by value PROVENANCE, not by entry. Dropping a whole entry that
     contains a PII label is right in the appendix, where the entry renders
     nothing so discarding it is free -- but it is wrong here, where the same
-    entry is actively supplying live contact data: #472's diagnosis was three
-    CVs losing real office addresses, an office phone and a work email to a
-    birth date sitting in the same contact block.
+    entry is actively supplying live contact data: #472's table is three CVs
+    losing five real values -- an office address, an office phone, a work
+    email and two home addresses -- to a birth date in the same block.
 
     This is a containment test and not true provenance, and it cannot be made
     into one here: real provenance would need stage 4 to record the source
@@ -144,7 +144,7 @@ def _from_pii_fragment(value, pii_fragments: list[str]) -> bool:
     its characters run through the middle of a date or an SSN ("23-45-6789"
     out of "123-45-6789"). A minimum value length was tried as a second
     narrowing and reverted: it is not separable from the protected values
-    themselves. Both, and the motivating cases, are pinned by
+    themselves. Both, and two of that table's five values, are pinned by
     `test_stage6_pii_value_provenance.py` and by
     `test_stage6_personal_data_recovery.py::
     test_real_contact_data_survives_an_entry_that_also_carries_pii`.

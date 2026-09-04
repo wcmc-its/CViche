@@ -338,8 +338,8 @@ def test_a_four_letter_initials_group_is_initials_on_the_fallback_path_too():
 
 def test_an_authorship_marker_does_not_stop_a_token_being_initials():
     """Strict unification alone would have LOST a case the old fallback got
-    right: its case-blind length test happened to accept "L*" (a co-first
-    author marker) because `str.isupper()` ignores the asterisk, while
+    right: its length test happened to accept "L*" (a co-first author
+    marker) because `str.isupper()` ignores the asterisk, while
     `_looks_like_initials` rejected it on `str.isalpha()`. The marks are
     stripped in the one predicate instead, so both paths accept them --
     4 of the farm's 1,711 distinct author strings are this shape, the same

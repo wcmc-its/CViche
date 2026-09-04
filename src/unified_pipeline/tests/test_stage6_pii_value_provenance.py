@@ -19,10 +19,10 @@ re-opened #472: "Ohio" out of "PLACE OF BIRTH: Ohio" is four characters
 and it is the protected value, not a coincidental collision with one. The
 tests below pin the short protected values as denied.
 
-The three corpus CVs whose real office address, office phone and work email
-must survive an entry that also carries a birth date are covered end to end
-by test_stage6_personal_data_recovery.py::
-test_real_contact_data_survives_an_entry_that_also_carries_pii.
+Two of the five real values in #472's table -- an office address and an
+office phone -- are pinned by test_stage6_personal_data_recovery.py::
+test_real_contact_data_survives_an_entry_that_also_carries_pii; the work
+email and the two home addresses in that table are not.
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_pii_value_provenance.py -p no:cacheprovider
 

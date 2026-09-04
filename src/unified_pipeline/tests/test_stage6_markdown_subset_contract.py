@@ -5,9 +5,9 @@ markers and a "- " bullet prefix, and does nothing at all about links,
 emphasis, inline code, escapes, ATX headers or ordered lists. The review
 offered a rename or a documented, tested subset; the subset is documented in
 the function's own docstring and pinned here, because renaming would churn
-`sections/teaching.py`, `stage_6_word_template.py`,
-`normalization/__init__.py` and `test_stage6_import_surface.py` for no
-behaviour gain.
+all five files `git grep _strip_markdown_for_word` names -- its definition
+in `normalization/rendering.py`, `normalization/__init__.py`,
+`sections/teaching.py`, `stage_6_word_template.py` and this one.
 
 Every assertion below is what the function does TODAY. The point of the file
 is that the unsupported constructs are passed through deliberately, not by
