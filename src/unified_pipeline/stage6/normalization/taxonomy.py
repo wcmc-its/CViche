@@ -23,12 +23,13 @@ def _strip_taxonomy_code(text: str) -> str:
 
     Shape-match, not an allowlist of the 42 real codes, and the shape also
     matches a leading grant mechanism such as "[R01] ". Measured before
-    keeping it that way: across the farm's 412 stage-3b/4/5/5b/5c/5d
-    artifacts (1,326,667 string values), exactly 2 values begin with a
-    bracketed token at all, both "[Editor]", and neither matches this
-    shape -- 0 false positives, and 0 true positives too, since a leaked
-    code is a per-run artifact rather than something the stored stage
-    outputs carry. An allowlist buys nothing at 0 measured collisions and
+    keeping it that way, and regenerable with
+    `scripts/measure_normalization_claims.py --only taxonomy`: across the
+    farm's 412 stage-3b/4/5/5b/5c/5d artifacts (1,326,667 string values),
+    exactly 2 values open with a bracketed single token at all, both
+    "[Editor]", and neither matches this shape -- 0 false positives, and 0
+    true positives too, since a leaked code is a per-run artifact rather
+    than something the stored stage outputs carry. An allowlist buys nothing at 0 measured collisions and
     would need editing every time the taxonomy gains a code, so the shape
     stays; switch to the TAXONOMY_TO_SECTION key set if that measurement
     ever comes back non-zero. The cost of the shape is pinned by

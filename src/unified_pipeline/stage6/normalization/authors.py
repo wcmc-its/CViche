@@ -23,9 +23,11 @@ _AUTHOR_SUFFIX_RE = re.compile(r'^(?:Jr|Sr|II|III|IV)\.?$', re.I)
 
 # Marks an author list puts *on* an initials group rather than in it: the
 # abbreviating period, and the co-first / corresponding-author asterisk and
-# daggers. Stripped before the shape test, so "Opresko, PL*" is classified
-# exactly as "Opresko, PL" is instead of falling out of the initials rule on
-# a typographic mark (5 corpus author strings, all Opresko/Bournique).
+# daggers. Stripped before the shape test, so "Alpha, PL*" is classified
+# exactly as "Alpha, PL" is instead of falling out of the initials rule on a
+# typographic mark. 4 of the farm's 1,711 distinct author strings carry a
+# marked initials group; regenerate with
+# `scripts/measure_normalization_claims.py --only marks`.
 _INITIALS_TRAILING_MARKS = ".*†‡"
 
 # One initials group, hyphenated: "R-Y". Each side is a single letter of any
@@ -52,8 +54,10 @@ def _looks_like_initials(token: str) -> bool:
     1-3 uppercase-letter regex, plus a case-blind "2 characters or fewer and
     isupper()"), and those disagreed with this function on spaced groups
     ("N J"), four-letter groups, hyphenated groups and lone lowercase
-    initials -- 45 of the farm's 1,711 distinct author strings parse
-    differently depending on which of the two definitions ran.
+    initials -- 81 of the farm's 1,711 distinct author strings carry at
+    least one comma-token the two definitions classify differently.
+    Regenerate with
+    `scripts/measure_normalization_claims.py --only initials`.
 
     A single alphabetic character of any case or script is always an
     initial -- "Kelly, r" and "Kelly, Å" both occur in the corpus (#560),

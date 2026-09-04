@@ -170,10 +170,17 @@ def _from_pii_fragment(value, pii_fragments: list[str]) -> bool:
     one that collided with it. Where the false-positive concern and the
     protection conflict, the protection wins.
 
-    Measured over the 66-CV farm with `scripts/measure_normalization_claims.py`:
-    the deny decisions this predicate makes are identical to the old
-    bare-substring test's on every A-coded entry. See that script's
-    `pii_deny_decisions` section for the current counts.
+    Measured over the 66-CV farm with
+    `scripts/measure_normalization_claims.py --only pii`: 319 A-coded
+    entries, of which 0 carry a PII fragment at all, so 0 deny decisions
+    and nothing to compare. That is the honest reading and it is worth
+    stating plainly -- the local farm's stage-4 artifacts hold no
+    protected-data label, so no corpus run can see this predicate move in
+    either direction, and a corpus-green result is not evidence about it.
+    The motivating cases are pinned by
+    `test_stage6_pii_value_provenance.py` and by
+    `test_stage6_personal_data_recovery.py::
+    test_real_contact_data_survives_an_entry_that_also_carries_pii`.
     """
     pattern = _pii_containment_pattern(value)
     if pattern is None:
