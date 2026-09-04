@@ -43,12 +43,12 @@ _PACKAGE = _SRC / "unified_pipeline"
 
 # Every call site, as (module path under `src/unified_pipeline`, enclosing
 # function) -> what that caller has already decided before calling. Six, and
-# not one contract but two: the table-backed sections reach this function only
-# on a fallback, while teaching, N4, S0 and the appendix have no table in the
-# WCM template at all, so a row-shaped record arrives there by construction.
+# not one contract: a table-backed section reaches this function only on a
+# fallback, while teaching, N4, S0 and the appendix have no table in the WCM
+# template at all, so a row-shaped record arrives there by construction.
 _CALL_SITES = {
     ("stage_6_word_template.py", "_insert_bulleted_entry"):
-        "shared bullet helper -- the contract is its nine callers', below",
+        "shared bullet helper -- the contract is its nine call sites', below",
     ("stage_6_word_template.py", "_insert_reconsidered_segment"):
         "a re-routed appendix segment, and _recover_unrendered_records, "
         "which passes a dateless multi-cell row here on purpose rather "
