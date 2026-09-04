@@ -273,17 +273,23 @@ def test_l3_does_not_repeat_the_institution_and_dates_it_just_composed():
         assert " ".join(added).count(value) == 1, f"{value!r} rendered more than once"
 
 
-def test_l3_drops_a_repeated_fragment_but_not_a_short_word_inside_a_longer_one():
-    """The duplication filter compares content WORDS in contiguous order, not
-    substrings: "MD" must not be treated as already-rendered because the
-    composed bullet happens to contain "Biomedical", and a repeat must still
-    be caught across the ", " the composer itself inserted."""
+def test_l3_drops_a_repeated_fragment_but_not_a_word_inside_a_longer_one():
+    """The duplication filter compares content WORDS in contiguous order, and
+    both halves of that matter.
+
+    "Division of Bioethics" is the institution the composed bullet already
+    names, so it must go -- and it has to be recognised across the ", " the
+    composer itself inserted, which a fragment-vs-fragment comparison would
+    miss. "Ethics" is a different fragment that only LOOKS present: it is a
+    substring of "Bioethics" and nothing more, so a substring test drops real
+    content here while the word comparison keeps it.
+    """
     gen, added = _render_through_template(
         "_fill_clinical_practice_l3",
-        [_entry("Director\tMD\tBiomedical Informatics Program",
-                institution="Biomedical Informatics Program", start_date="2015", end_date="2020")],
+        [_entry("Chair\tDivision of Bioethics\tEthics",
+                institution="Division of Bioethics", start_date="2015", end_date="2020")],
     )
-    assert added == ["", "Director, Biomedical Informatics Program, 2015-2020", "MD"]
+    assert added == ["", "Chair, Division of Bioethics, 2015-2020", "Ethics"]
 
 
 @pytest.mark.parametrize("code,filler,header", SUBSECTIONS)
