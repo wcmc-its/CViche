@@ -41,7 +41,6 @@ callers below must not also increment it -- and it refuses a `data` list longer
 than the table has columns instead of dropping the surplus cells.
 """
 import re
-from typing import List
 
 try:
     from docx.table import Table
@@ -65,6 +64,21 @@ from unified_pipeline.core.render_check import entry_lines
 # helper below and nowhere else; a bare 'I' at a call site reads like an index.
 _MEMBERSHIPS_TAXONOMY_CODE = 'I'
 
+# The vocabulary `_parse_multi_membership_entry` (stage6/parsing/text.py)
+# classifies parts with, restated here so `_entry_parts`'s grammar gate accepts
+# exactly the splits that parser can actually read. The parser keeps these
+# private to its own body; duplicating the two rules is deliberate -- a gate
+# that used a DIFFERENT grammar than the consumer would either admit splits the
+# parser then mangles, or reject splits it would have read correctly.
+_MEMBERSHIP_TYPE_KEYWORDS = ('member', 'fellow', 'diplomat', 'associate', 'elected', 'honorary')
+_MEMBERSHIP_TYPE_MAX_WORDS = 3
+_DATE_PART_RE = re.compile(
+    r'^(\d{1,2}/?\d{0,4}\s*-\s*(?:present|\d{1,2}/?\d{0,4}))$'
+    r'|^(\d{4}\s*-\s*(?:present|\d{4}))$',
+    re.IGNORECASE,
+)
+_DATE_PREFIX_RE = re.compile(r'^\d{1,2}/\d{4}')
+
 # One raw range string -> (start, end). Hyphen, en dash and em dash only: a
 # slash is part of a date ("1/1997"), not a separator between two.
 _DATE_RANGE_SPLIT_RE = re.compile(r'\s*[-–—]\s*')
@@ -84,7 +98,39 @@ class MembershipsRowShapeError(ValueError):
     """
 
 
-def _entry_parts(text: str) -> List[str]:
+def _classify_part(part: str) -> str:
+    """'type', 'date' or 'organization' for one fragment of an entry.
+
+    Mirrors `_parse_multi_membership_entry`'s own precedence exactly: a
+    membership-type keyword in a short-enough part wins over a date shape,
+    and anything that is neither is an organization.
+    """
+    if any(kw in part.lower() for kw in _MEMBERSHIP_TYPE_KEYWORDS) \
+            and len(part.split()) <= _MEMBERSHIP_TYPE_MAX_WORDS:
+        return 'type'
+    if _DATE_PART_RE.match(part) or _DATE_PREFIX_RE.match(part):
+        return 'date'
+    return 'organization'
+
+
+def _parts_look_like_memberships(parts: list[str]) -> bool:
+    """True when a '|' split produced something shaped like membership records.
+
+    '|' is not always structural: it survives extraction inside a single
+    organization or source field too, and splitting there turns one membership
+    into several (#476 review). A membership record is a membership TYPE, an
+    ORGANIZATION and a DATE RANGE in some order, so the split is only accepted
+    when the parts supply all three roles. Two halves of one organization name
+    supply only the organization role and are left fused, which is what the
+    renderer did before the split existed.
+    """
+    if len(parts) < 2:
+        return False
+    roles = {_classify_part(part) for part in parts}
+    return roles == {'type', 'date', 'organization'}
+
+
+def _entry_parts(text: str) -> list[str]:
     """Parts of a memberships entry (#476), scoped to exactly the
     newline-blind case: a text with no literal newline at all keeps
     `entry_lines`'s own single opaque part today, even when it is really a
@@ -103,11 +149,19 @@ def _entry_parts(text: str) -> List[str]:
     today's single clean row. This fix is narrower than that entry's real
     bug (a genuine 2-record fusion the #221 recovery pass papers over with an
     Appendix bullet); it isn't newline-blind and isn't this issue's to fix.
+
+    The split is also only accepted when the resulting parts actually parse as
+    membership records -- see `_parts_look_like_memberships`. An entry whose
+    single '|' is punctuation inside one organization or source field keeps its
+    single opaque part rather than becoming two organizations.
     """
     lines = entry_lines(text)
     if len(lines) != 1:
         return lines
-    return [p.strip() for p in lines[0].split('|') if p.strip()]
+    parts = [p.strip() for p in lines[0].split('|') if p.strip()]
+    if not _parts_look_like_memberships(parts):
+        return lines
+    return parts
 
 
 def _split_date_range(dates: str) -> tuple[str, str]:
