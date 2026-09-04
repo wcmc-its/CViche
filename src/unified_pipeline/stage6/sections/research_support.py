@@ -75,6 +75,242 @@ CONSUMED_GRANT_FIELDS = frozenset({
     'study_title', 'text', 'title', 'trial_title',
 })
 
+# "Individual's role in project including percent effort" and its variants: a
+# source-table header row, not a grant. Searched over the first 60 characters
+# only, so a real grant that happens to mention a role further in survives.
+ROLE_EFFORT_HEADER_RE = re.compile(
+    r"(?:Individual's role|your role|role in project|percent effort)",
+    re.IGNORECASE
+)
+
+# One line under that header: "Project Title 0.01" / "Project Title .08FTE".
+PROJECT_EFFORT_LINE_RE = re.compile(r'^(.+?)\s+(\d*\.?\d+)\s*(?:FTE)?$', re.IGNORECASE)
+
+# End-date text that means "still running", so an M2A grant carrying it is
+# never reclassified as completed however the year parses.
+OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
+
+
+def _print_verbose(messages: list[str], verbose: bool) -> None:
+    """Print what a pure classifier reported, if the generator is verbose.
+
+    The classifiers below return their progress lines instead of printing them,
+    because stage stdout is a parsed contract (CODING_STANDARDS.md 7.1) and the
+    strings therefore have to survive the split from rendering unchanged.
+    """
+    if verbose:
+        for message in messages:
+            print(message)
+
+
+def copy_entries_for_render(entries: list[dict]) -> list[dict]:
+    """Shallow-copy one bucket's entries so classification never writes through
+    to the caller's pipeline records (review thread 3932312407 item 1).
+
+    Both levels this section writes to are copied: the entry itself, which gains
+    `reclassification_note`, and its `extracted_fields`, which gains
+    `percent_effort`. Nothing here writes any deeper, so deeper values stay
+    shared. A non-dict `extracted_fields` is passed through exactly as it
+    arrived rather than coerced -- a malformed record still fails where it
+    always did, instead of failing somewhere new.
+    """
+    copies: list[dict] = []
+    for entry in entries:
+        clone = dict(entry)
+        fields = clone.get('extracted_fields')
+        if isinstance(fields, dict):
+            clone['extracted_fields'] = dict(fields)
+        copies.append(clone)
+    return copies
+
+
+def filter_role_effort_headers(
+    entries: list[dict], effort_lookup: dict[str, str]
+) -> tuple[list[dict], list[str]]:
+    """Split the role/effort header rows out of one bucket's entries.
+
+    Such a row is not a grant: it is a source-table header whose body lists
+    "<project name> <effort>" pairs, e.g. "Individual's role in project
+    including percent effort\nProject Alpha 0.01". The pairs are added to
+    `effort_lookup` (normalized project name -> "1%") and the row itself is
+    dropped from the entries to render.
+
+    `effort_lookup` is the section's own accumulator and is extended in place,
+    because the count reported per header row is cumulative across all three
+    buckets and always has been. Returns (entries to render, verbose lines).
+    """
+    filtered: list[dict] = []
+    messages: list[str] = []
+    for entry in entries:
+        text = entry.get('text', '')
+        if not ROLE_EFFORT_HEADER_RE.search(text[:60]):
+            filtered.append(entry)
+            continue
+        for line in text.split('\n')[1:]:  # Skip the header line
+            line = line.strip()
+            if not line:
+                continue
+            effort_match = PROJECT_EFFORT_LINE_RE.search(line)
+            if not effort_match:
+                continue
+            project_name = effort_match.group(1).strip().lower()
+            effort_value = effort_match.group(2)
+            # Normalize to percentage (0.01 -> 1%, .08 -> 8%)
+            try:
+                effort_float = float(effort_value)
+                if effort_float <= 1:
+                    effort_pct = f"{int(effort_float * 100)}%"
+                else:
+                    effort_pct = f"{int(effort_float)}%"
+                effort_lookup[project_name] = effort_pct
+            except ValueError:
+                pass
+        messages.append(
+            f"  Filtered role/effort header entry, extracted {len(effort_lookup)} effort values")
+    return filtered, messages
+
+
+def apply_effort_to_grants(entries: list[dict], effort_lookup: dict[str, str]) -> list[str]:
+    """Attach each extracted percent effort to the grant whose title it names.
+
+    An effort already on the record wins -- the lookup only fills a gap.
+    Writes land on this section's copies of the records (`copy_entries_for_render`),
+    never on the caller's. Returns the verbose lines.
+    """
+    messages: list[str] = []
+    for entry in entries:
+        fields = entry.get('extracted_fields') or {}
+        title = (fields.get('title', '') or '').lower().strip()
+        if not title or fields.get('percent_effort'):
+            continue
+        # Try to find matching effort in lookup
+        for project_name, effort in effort_lookup.items():
+            if project_name in title or title in project_name:
+                fields['percent_effort'] = effort
+                messages.append(f"  Matched effort {effort} to '{title[:40]}...'")
+                break
+    return messages
+
+
+def rebucket_grants_by_status(
+    m2a_entries: list[dict], m2b_entries: list[dict], m2c_entries: list[dict]
+) -> tuple[list[dict], list[dict], list[dict], list[str]]:
+    """Move grants between buckets on their own extracted status text (#210).
+
+    An explicit "Under review" / "Not funded" beats date inference, which is why
+    this runs before `reclassify_past_m2a_grants`. Returns the three buckets in
+    M2A/M2B/M2C order plus the verbose lines; the inputs are left as they were.
+    """
+    current = list(m2a_entries)
+    completed = list(m2b_entries)
+    pending = list(m2c_entries)
+    bucket_lists = {'M2B': completed, 'M2C': pending}
+    messages: list[str] = []
+    for source_code, source_list in (('M2A', current), ('M2B', completed)):
+        for entry in list(source_list):
+            fields = entry.get('extracted_fields') or {}
+            target, note = grant_status_rebucket_target(fields.get('status'))
+            if not target or target == source_code:
+                continue
+            source_list.remove(entry)
+            entry.setdefault('reclassification_note', note)
+            bucket_lists[target].append(entry)
+            title = str(fields.get('title') or 'Unknown')
+            messages.append(f"  Status rebucket {source_code}->{target}: '{title[:40]}'")
+    return current, completed, pending, messages
+
+
+def reclassify_past_m2a_grants(
+    m2a_entries: list[dict], m2b_entries: list[dict], current_year: int
+) -> tuple[list[dict], list[dict], list[str]]:
+    """Move M2A grants whose end date is already past into M2B, with a note.
+
+    `current_year` is a parameter rather than a `datetime.now()` read so the
+    boundary is testable and re-rendering an old document reproduces the buckets
+    it had (review thread 3932312407 item 7). Returns (M2A, M2B, verbose lines);
+    the inputs are left as they were.
+    """
+    current = list(m2a_entries)
+    completed = list(m2b_entries)
+    messages: list[str] = []
+
+    # Check each M2A entry for past end dates
+    entries_to_move = []
+    for entry in current:
+        fields = entry.get('extracted_fields') or {}
+        end_date = fields.get('end_date', '')
+
+        # Parse end date to check if it's in the past
+        if end_date and end_date.lower() not in OPEN_ENDED_END_DATES:
+            # Try to extract year from end date
+            year_match = re.search(r'(\d{4})', str(end_date))
+            if year_match:
+                end_year = int(year_match.group(1))
+                if end_year < current_year:
+                    # This grant has ended - reclassify to M2B
+                    entries_to_move.append((entry, end_date, end_year))
+
+    # Move entries and add reclassification comments
+    for entry, end_date, end_year in entries_to_move:
+        current.remove(entry)
+
+        # Add reclassification note to the entry
+        if 'reclassification_note' not in entry:
+            entry['reclassification_note'] = f"Reclassified from Current (M2A) to Completed (M2B): end date {end_date} is before {current_year}"
+
+        completed.append(entry)
+
+        title = (entry.get('extracted_fields') or {}).get('title') or 'Unknown'
+        messages.append(f"  Reclassified to M2B: '{title[:40]}...' (ended {end_year})")
+
+    return current, completed, messages
+
+
+def resolve_pi_name(fields: dict, raw_text: str, role: str, owner_name: str) -> str:
+    """Resolve the principal investigator for one grant.
+
+    Extracted field first, then the trailing cell of a pipe-delimited source row,
+    then the CV owner when the role says they are the PI. Text in, text out: no
+    docx, so the parser's heuristics are testable on their own (review thread
+    3932312407 item 5).
+    """
+    pi_name = fields.get('pi_name') or fields.get('principal_investigator', '') or fields.get('co_investigators', '')
+
+    # Parse PI name from raw text if not in extracted fields
+    # Common format: "Agency | Amount | Dates | PI Name"
+    if not pi_name and raw_text and '|' in raw_text:
+        parts = [p.strip() for p in raw_text.split('|')]
+        # Skip if all parts are identical (repeated content from merged cells)
+        unique_parts = set(p.lower() for p in parts if p)
+        if len(parts) >= 4 and len(unique_parts) > 1:
+            # The last part is often the PI name
+            potential_name = parts[-1].strip()
+            # Check if it looks like a name:
+            # - Not just digits/dates
+            # - Matches the whitespace-separated name pattern below
+            # - Short enough to be a name (< 50 chars)
+            # - Doesn't contain project/grant keywords
+            project_keywords = ['project', 'study', 'grant', 'research', 'program', 'trial',
+                                'investigation', 'promotion', 'implementation', 'development']
+            if (potential_name and
+                len(potential_name) < 50 and
+                not re.match(r'^[\d\-/]+$', potential_name) and
+                not any(kw in potential_name.lower() for kw in project_keywords)):
+                # "First Last" or "First M. Last" -- whitespace-separated only.
+                # "Last, First" is NOT supported: the comma form never matches
+                # this pattern, so "Smith, Jane" in the trailing cell is left
+                # alone rather than half-parsed (review thread 3932312407 item
+                # 4). Teaching the pattern the comma form would change rendered
+                # PI names across the corpus, so it is a measured change, not a
+                # comment fix.
+                if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+$', potential_name):
+                    pi_name = potential_name
+
+    # Auto-fill PI name when role indicates Principal Investigator and no PI name specified
+    if not pi_name and owner_name and 'principal' in role.lower() and 'investigator' in role.lower():
+        pi_name = owner_name
+    return pi_name
+
 
 class ResearchSupportSection:
     """Section M2 writers, mixed into `WCMTemplateGenerator`."""
@@ -84,6 +320,7 @@ class ResearchSupportSection:
         entries_by_code: dict[str, list[dict]],
         cv_owner: dict | None = None,
         document_uid: str = '',
+        current_year: int | None = None,
     ):
         """Fill research support section with individual tables per grant.
 
@@ -105,121 +342,46 @@ class ResearchSupportSection:
 
         Reclassification: Grants classified as M2A (current) but with end dates
         before the current year are moved to M2B (completed) with a comment.
+
+        Every rule above lives in the module-level classifiers -- they take plain
+        data and return plain data, so a bucket decision is testable without a
+        DOCX (review thread 3932312407 item 5). This method is the rendering
+        half: template lookup, table deletion, table creation, XML insertion and
+        stats.
+
+        Args:
+            entries_by_code: stage-4 entries keyed by taxonomy code.
+            cv_owner: the CV owner's record, for auto-filling the PI name.
+            document_uid: run-scoped document id, used to resolve the owner.
+            current_year: the year "current funding" is judged against. Defaults
+                to the system clock; pass it to make a boundary reproducible.
         """
         # Get CV owner name for auto-filling PI when role is Principal Investigator
         owner_name = _get_cv_owner_name(cv_owner, document_uid)
-        current_year = datetime.now().year
+        if current_year is None:
+            current_year = datetime.now().year
 
-        # Filter out role/effort header entries and extract percent effort metadata
-        # These are entries like "Individual's role in project including percent effort\nProject Name 0.01"
-        role_effort_pattern = re.compile(
-            r"(?:Individual's role|your role|role in project|percent effort)",
-            re.IGNORECASE
-        )
-        effort_lookup = {}  # project_name_normalized -> percent_effort
+        # Classification, on this section's own copies of the records so nothing
+        # below writes back into the caller's pipeline data.
+        effort_lookup: dict[str, str] = {}  # project_name_normalized -> percent_effort
+        buckets: list[list[dict]] = []
+        for code, _header in RESEARCH_SUPPORT_SECTIONS:
+            entries = copy_entries_for_render(entries_by_code.get(code, []))
+            entries, messages = filter_role_effort_headers(entries, effort_lookup)
+            _print_verbose(messages, self.verbose)
+            buckets.append(entries)
+        m2a_entries, m2b_entries, m2c_entries = buckets
 
-        def filter_and_extract_effort(entries):
-            """Filter out role/effort headers and build effort lookup."""
-            filtered = []
-            for entry in entries:
-                text = entry.get('text', '')
-                # Check if this is a role/effort header entry
-                if role_effort_pattern.search(text[:60]):
-                    # Parse project names and their percent efforts from this entry
-                    # Pattern: "Project Title 0.01" or "Project Title .08FTE"
-                    lines = text.split('\n')
-                    for line in lines[1:]:  # Skip the header line
-                        line = line.strip()
-                        if not line:
-                            continue
-                        # Match pattern: "Project Name 0.01" or "Project Name .08FTE"
-                        effort_match = re.search(r'^(.+?)\s+(\d*\.?\d+)\s*(?:FTE)?$', line, re.IGNORECASE)
-                        if effort_match:
-                            project_name = effort_match.group(1).strip().lower()
-                            effort_value = effort_match.group(2)
-                            # Normalize to percentage (0.01 -> 1%, .08 -> 8%)
-                            try:
-                                effort_float = float(effort_value)
-                                if effort_float <= 1:
-                                    effort_pct = f"{int(effort_float * 100)}%"
-                                else:
-                                    effort_pct = f"{int(effort_float)}%"
-                                effort_lookup[project_name] = effort_pct
-                            except ValueError:
-                                pass
-                    if self.verbose:
-                        print(f"  Filtered role/effort header entry, extracted {len(effort_lookup)} effort values")
-                    continue  # Skip this entry, don't add to filtered
-                filtered.append(entry)
-            return filtered
+        for entries in (m2a_entries, m2b_entries, m2c_entries):
+            _print_verbose(apply_effort_to_grants(entries, effort_lookup), self.verbose)
 
-        # Reclassify M2A grants with past end dates to M2B
-        m2a_entries = filter_and_extract_effort(list(entries_by_code.get('M2A', [])))
-        m2b_entries = filter_and_extract_effort(list(entries_by_code.get('M2B', [])))
-        m2c_entries = filter_and_extract_effort(list(entries_by_code.get('M2C', [])))
+        m2a_entries, m2b_entries, m2c_entries, messages = rebucket_grants_by_status(
+            m2a_entries, m2b_entries, m2c_entries)
+        _print_verbose(messages, self.verbose)
 
-        # Apply extracted percent effort to matching grants
-        def apply_effort_to_grants(entries):
-            for entry in entries:
-                fields = entry.get('extracted_fields') or {}
-                title = (fields.get('title', '') or '').lower().strip()
-                if title and not fields.get('percent_effort'):
-                    # Try to find matching effort in lookup
-                    for project_name, effort in effort_lookup.items():
-                        if project_name in title or title in project_name:
-                            fields['percent_effort'] = effort
-                            if self.verbose:
-                                print(f"  Matched effort {effort} to '{title[:40]}...'")
-                            break
-
-        apply_effort_to_grants(m2a_entries)
-        apply_effort_to_grants(m2b_entries)
-        apply_effort_to_grants(m2c_entries)
-
-        # Rebucket by each grant's own extracted status BEFORE date inference:
-        # an explicit "Under review" / "Not funded" beats everything (#210).
-        bucket_lists = {'M2B': m2b_entries, 'M2C': m2c_entries}
-        for source_code, source_list in (('M2A', m2a_entries), ('M2B', m2b_entries)):
-            for entry in list(source_list):
-                fields = entry.get('extracted_fields') or {}
-                target, note = grant_status_rebucket_target(fields.get('status'))
-                if target and target != source_code:
-                    source_list.remove(entry)
-                    entry.setdefault('reclassification_note', note)
-                    bucket_lists[target].append(entry)
-                    if self.verbose:
-                        title = str(fields.get('title') or 'Unknown')
-                        print(f"  Status rebucket {source_code}->{target}: '{title[:40]}'")
-
-        # Check each M2A entry for past end dates
-        entries_to_move = []
-        for entry in m2a_entries:
-            fields = entry.get('extracted_fields') or {}
-            end_date = fields.get('end_date', '')
-
-            # Parse end date to check if it's in the past
-            if end_date and end_date.lower() not in ('present', 'current', 'ongoing', ''):
-                # Try to extract year from end date
-                year_match = re.search(r'(\d{4})', str(end_date))
-                if year_match:
-                    end_year = int(year_match.group(1))
-                    if end_year < current_year:
-                        # This grant has ended - reclassify to M2B
-                        entries_to_move.append((entry, end_date, end_year))
-
-        # Move entries and add reclassification comments
-        for entry, end_date, end_year in entries_to_move:
-            m2a_entries.remove(entry)
-
-            # Add reclassification note to the entry
-            if 'reclassification_note' not in entry:
-                entry['reclassification_note'] = f"Reclassified from Current (M2A) to Completed (M2B): end date {end_date} is before {current_year}"
-
-            m2b_entries.append(entry)
-
-            if self.verbose:
-                title = (entry.get('extracted_fields') or {}).get('title') or 'Unknown'
-                print(f"  Reclassified to M2B: '{title[:40]}...' (ended {end_year})")
+        m2a_entries, m2b_entries, messages = reclassify_past_m2a_grants(
+            m2a_entries, m2b_entries, current_year)
+        _print_verbose(messages, self.verbose)
 
         # Map taxonomy codes to WCM template section headers
         # These must match the exact text in the official WCM template
@@ -376,42 +538,8 @@ class ResearchSupportSection:
                 percent_effort = role
                 role = ''
 
-        pi_name = fields.get('pi_name') or fields.get('principal_investigator', '') or fields.get('co_investigators', '')
-
-        # Parse PI name from raw text if not in extracted fields
-        # Common format: "Agency | Amount | Dates | PI Name"
         raw_text = entry.get('text', '') if entry else ''
-        if not pi_name and raw_text and '|' in raw_text:
-            parts = [p.strip() for p in raw_text.split('|')]
-            # Skip if all parts are identical (repeated content from merged cells)
-            unique_parts = set(p.lower() for p in parts if p)
-            if len(parts) >= 4 and len(unique_parts) > 1:
-                # The last part is often the PI name
-                potential_name = parts[-1].strip()
-                # Check if it looks like a name:
-                # - Not just digits/dates
-                # - Matches the whitespace-separated name pattern below
-                # - Short enough to be a name (< 50 chars)
-                # - Doesn't contain project/grant keywords
-                project_keywords = ['project', 'study', 'grant', 'research', 'program', 'trial',
-                                    'investigation', 'promotion', 'implementation', 'development']
-                if (potential_name and
-                    len(potential_name) < 50 and
-                    not re.match(r'^[\d\-/]+$', potential_name) and
-                    not any(kw in potential_name.lower() for kw in project_keywords)):
-                    # "First Last" or "First M. Last" -- whitespace-separated
-                    # only. "Last, First" is NOT supported: the comma form never
-                    # matches this pattern, so "Smith, Jane" in the trailing cell
-                    # is left alone rather than half-parsed (review thread
-                    # 3932312407 item 4). Teaching the pattern the comma form
-                    # would change rendered PI names across the corpus, so it is
-                    # a measured change, not a comment fix.
-                    if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+$', potential_name):
-                        pi_name = potential_name
-
-        # Auto-fill PI name when role indicates Principal Investigator and no PI name specified
-        if not pi_name and owner_name and 'principal' in role.lower() and 'investigator' in role.lower():
-            pi_name = owner_name
+        pi_name = resolve_pi_name(fields, raw_text, role, owner_name)
 
         # Format costs as currency
         costs = annual_direct_costs or total_funding

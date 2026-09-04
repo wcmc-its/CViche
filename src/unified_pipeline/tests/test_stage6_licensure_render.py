@@ -8,7 +8,9 @@
 2. `_fill_research_support` rebuckets a grant by its own status string via
    `grant_status_rebucket_target`. An M2A grant whose status reads "In review"
    must render under Pending Funding, not Current Research Funding — the same
-   symptom #210 fixed for the literal "Under review".
+   symptom #210 fixed for the literal "Under review". The move's note is read
+   off the rendered comment rather than off the caller's entry, because M2
+   classifies on its own copies of the records and leaves the input alone.
 
 Run with:
 
@@ -81,14 +83,17 @@ def _body_index(doc, element):
 
 
 def test_in_review_grant_renders_under_pending_funding():
-    gen = WCMTemplateGenerator(verbose=False)
+    gen = WCMTemplateGenerator(verbose=False, emit_comments=True)
     gen.doc = Document(gen.template_path)
 
     entry = {**_IN_REVIEW_GRANT, "extracted_fields": dict(_IN_REVIEW_GRANT["extracted_fields"])}
+    submitted = {**entry, "extracted_fields": dict(entry["extracted_fields"])}
     gen._fill_research_support({"M2A": [entry]})
 
-    assert entry.get("reclassification_note"), "status rebucket left no note"
-    assert "Pending (M2C)" in entry["reclassification_note"]
+    notes = [c["text"] for c in gen._comments if c["author"] == "Reclassification"]
+    assert notes, "status rebucket left no reclassification comment"
+    assert any("Pending (M2C)" in note for note in notes), notes
+    assert entry == submitted, "rendering wrote back into the caller's own record"
 
     grant_table = None
     for table in gen.doc.tables:
