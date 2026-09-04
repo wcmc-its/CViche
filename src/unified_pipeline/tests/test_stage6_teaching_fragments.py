@@ -1,34 +1,39 @@
-"""Section K (teaching) newline-blind fix (#476, PR1 of the accuracy wave).
+"""Section K (teaching) newline-blind fix (#476, PR1 of the accuracy wave),
+and the delimiter contract review thread 3927100368 asked to have pinned.
 
-`teaching.py:149` and `:172` were two of the ten `entry_lines`-based call
-sites, on two DIFFERENT variables -- not compared to each other, so this
-section's own decision is made per call site rather than as one migration:
+Section K reconstructs an entry's bullet text at two call sites that read two
+DIFFERENT variables, so the section's delimiter decision is made per call site
+rather than as one migration:
 
-`:149` -- `original_lines = entry_lines(original_text)`, inside the
-`if formatted_text and original_text:` branch -- answers "did Stage 5c fuse
-multiple distinct source entries into one formatted blob?" (the comment's
-own words: "Stage 5c may have over-combined"). Switching it to
-`entry_fragments` was tried and reverted after reading what it actually does
-to the farm: 495 K entries are genuinely ONE teaching record whose raw text
-happens to be tab-joined ("Title\\tDate\\tDescription" -- e.g. TDXCPW's
-"Leadership in education, Duke Psychiatry Residency Program\\tJuly 2020 -
-June 2024\\tSelected Initiatives:..."), which Stage 5c already reformats
+The RAW-text side -- `original_lines = entry_lines(original_text)`, inside
+`_teaching_entry_lines`' `if formatted_text and original_text:` branch --
+answers "did Stage 5c fuse multiple distinct source entries into one formatted
+blob?" ("Stage 5c may have over-combined"). Switching it to `entry_fragments`
+was tried and reverted after reading what it actually does to the farm: 456 of
+722 K entries are genuinely ONE teaching record whose raw text happens to be
+tab-joined ("Title\\tDate\\tDescription"), which Stage 5c already reformats
 correctly into one well-structured bullet with its own markdown sub-bullets
 ("**2020-2024** - **Course Director**...\\n  - Selected initiatives...").
-`entry_fragments` makes every one of those 495 look like a multi-item entry,
-which takes the OTHER branch and replaces that one good, LLM-formatted
-bullet with several raw, unformatted fragment bullets (title, date and
-description as three separate bullets with no attempt at prose). This is
-a regression, not a fix, and `test_regression_guard_...` below pins it by
-showing what the discarded change would have done.
+`entry_fragments` makes every one of those look like a multi-item entry, which
+takes the OTHER branch and replaces one good, LLM-formatted bullet with several
+raw, unformatted fragment bullets (title, date and description as three
+separate bullets with no attempt at prose). That is a regression, not a fix,
+and `test_regression_guard_raw_text_...` below pins it by showing what the
+discarded change would have done. The same reading is why the last fallback
+(raw text, no formatted_text, no course_title) also keeps the newline-only
+split: tab-splitting it turns 19 farm entries into 41 bullets, 16 of them a
+bare date, when `_clean_inline_tabs` already renders the untouched row as
+"Title: Date — Description".
 
-`:172` -- `lines = entry_lines(new_text)`, inside the `elif formatted_text:`
-branch (only reached when `original_text` is EMPTY) -- has nothing to
-compare against, so the "did 5c over-combine" question doesn't apply; it
-just decides how many `'. '`-joined pieces of Stage 5c's OWN prose to
-combine. Migrated to `_fragment_parts` (entry_fragments-based). 0 farm K
-entries reach this branch with either text present, so the positive control
-is synthetic (§6.5 hole, disclosed in the PR body).
+The Stage-5c-prose side -- `_item_parts(...)` inside the `elif formatted_text:`
+branch, reached only when `original_text` is EMPTY -- has nothing to compare
+against, so the "did 5c over-combine" question doesn't apply; it just decides
+how many `'. '`-joined pieces of Stage 5c's OWN prose to combine. It splits on
+newlines and tabs, and deliberately NOT on `|`: a pipe joins the cells of one
+row, and `_clean_inline_tabs` already renders it as " — " inside a single
+bullet (review thread 3927100368, item 4). 0 farm K entries reach this branch
+with either text present, so the positive control is synthetic (§6.5 hole,
+disclosed in the PR body).
 
 This branch turns out to be unreachable through `_insert_teaching_entry` as
 written, for a reason that has nothing to do with #476:
@@ -36,11 +41,11 @@ written, for a reason that has nothing to do with #476:
 returns True -- and the function returns immediately -- whenever
 `entry.get('text', '')` is falsy, which is exactly the condition the
 `elif formatted_text:` branch needs to be reached at all. The positive and
-negative controls below patch `_is_structural_label` out for the one test
-that needs to exercise the branch itself, which is the honest way to pin
-what the changed line does without either fabricating a reachable-looking
-fixture or silently declining to test :172 the way the other four sections'
-positive controls are tested end to end.
+negative controls below patch `_is_structural_label` out for the tests that
+need to exercise the branch itself, which is the honest way to pin what the
+changed line does without either fabricating a reachable-looking fixture or
+silently declining to test it the way the other four sections' positive
+controls are tested end to end.
 
 Run with:
 
@@ -58,7 +63,7 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
 from unified_pipeline.stage6.sections import teaching  # noqa: E402
-from unified_pipeline.stage6.sections.teaching import _fragment_parts  # noqa: E402
+from unified_pipeline.stage6.sections.teaching import _item_parts  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
@@ -76,21 +81,36 @@ def _generator_with_trailing_paragraph():
     return gen
 
 
-# --- (a) no line the old newline split produced is lost (the :172 helper) --
+# --- (a) no line the old newline split produced is lost ---------------------
 
-def test_fragment_parts_keeps_every_entry_lines_part():
+def test_item_parts_keeps_every_entry_lines_part():
     for case in MULTILINE_CASES:
         old = entry_lines(case)
         assert len(old) > 1
-        assert _fragment_parts(case) == old, f"diverged on {case!r}"
+        assert _item_parts(case) == old, f"diverged on {case!r}"
 
 
-# --- (b) positive control (:172): fails on dev today ------------------------
+# --- (b) the delimiter contract: tab and newline split, '|' does not --------
 
-def test_positive_control_172_pipe_blind_formatted_text_gains_both_parts(monkeypatch):
+def test_item_parts_splits_tabs_but_not_pipes():
+    """Review thread 3927100368 item 4. `|` joins the cells of ONE item
+    ("Role | Institution") and `_clean_inline_tabs` renders it as " — " in a
+    single bullet, so making it an item separator would split one teaching
+    record into two. A future swap of `_item_parts` for `entry_fragments`
+    would do exactly that; this is the test that stops it.
+    """
+    mixed = "Role A | Institution A\tRole B | Institution B"
+    assert _item_parts(mixed) == ["Role A | Institution A", "Role B | Institution B"]
+    # entry_fragments is the function NOT to use here, and this is why.
+    assert len(entry_fragments(mixed)) == 4
+
+
+# --- (c) positive control: the tab-joined blob gains both parts -------------
+
+def test_positive_control_pipe_blind_formatted_text_gains_both_parts(monkeypatch):
     """`elif formatted_text:` branch: original_text is empty, formatted_text
-    is a single-line, pipe-joined blob. entry_lines returns ONE part, so
-    combined_text is that whole unsplit blob today. Fails on dev.
+    is a single-line, tab-joined blob. entry_lines returns ONE part, so
+    combined_text was that whole unsplit blob before #476.
 
     `_is_structural_label` is patched out (see module docstring): it always
     returns True when `entry.get('text', '')` is falsy, which is exactly
@@ -101,7 +121,7 @@ def test_positive_control_172_pipe_blind_formatted_text_gains_both_parts(monkeyp
     entry = {
         "text": "",
         "extracted_fields": {
-            "formatted_text": "Course Director, Internal Medicine Clerkship | Preceptor, Ambulatory Clinic",
+            "formatted_text": "Course Director, Internal Medicine Clerkship\tPreceptor, Ambulatory Clinic",
         },
     }
     gen = _generator_with_trailing_paragraph()
@@ -112,9 +132,29 @@ def test_positive_control_172_pipe_blind_formatted_text_gains_both_parts(monkeyp
     assert matches[0] == "Course Director, Internal Medicine Clerkship. Preceptor, Ambulatory Clinic"
 
 
-# --- (c) negative control: single-part text is unchanged --------------------
+def test_pipe_joined_formatted_text_stays_one_item(monkeypatch):
+    """Same branch, the other half of the contract: a pipe is not an item
+    separator, so the blob stays one bullet and `_clean_inline_tabs` renders
+    the pipe as " — " rather than the two ". "-joined items entry_fragments
+    would have produced.
+    """
+    monkeypatch.setattr(teaching, "_is_structural_label", lambda entry: False)
+    entry = {
+        "text": "",
+        "extracted_fields": {
+            "formatted_text": "Course Director, Internal Medicine Clerkship | Preceptor, Ambulatory Clinic",
+        },
+    }
+    gen = _generator_with_trailing_paragraph()
+    gen._insert_teaching_entry(1, entry, is_first_visible=False)
+    matches = [p.text for p in gen.doc.paragraphs if "Course Director" in p.text]
+    assert len(matches) == 1
+    assert matches[0] == "Course Director, Internal Medicine Clerkship — Preceptor, Ambulatory Clinic"
 
-def test_negative_control_172_single_part_unchanged(monkeypatch):
+
+# --- (d) negative control: single-part text is unchanged --------------------
+
+def test_negative_control_single_part_unchanged(monkeypatch):
     monkeypatch.setattr(teaching, "_is_structural_label", lambda entry: False)
     entry = {
         "text": "",
@@ -126,16 +166,16 @@ def test_negative_control_172_single_part_unchanged(monkeypatch):
     assert "Course Director, Internal Medicine Clerkship" in texts
 
 
-# --- :149 regression guard: pins the DECLINED migration ---------------------
+# --- raw-text regression guard: pins the DECLINED migration -----------------
 
-def test_regression_guard_149_entry_fragments_would_wrongly_fragment_the_farm_shape():
-    """Not a behaviour pin -- a documentation-as-code guard for why :149
-    keeps `entry_lines`. TDXCPW's real farm shape: tab-joined single record,
-    Stage 5c already reformats it well. entry_lines correctly sees ONE line
-    (uses the good formatted_text); entry_fragments would see 3+ fragments
+def test_regression_guard_raw_text_entry_fragments_would_wrongly_fragment_the_farm_shape():
+    """Not a behaviour pin -- a documentation-as-code guard for why the raw
+    text paths keep `entry_lines`. The real farm shape: tab-joined single
+    record, Stage 5c already reformats it well. entry_lines correctly sees ONE
+    line (uses the good formatted_text); entry_fragments would see 3+ fragments
     (would wrongly take the "multi-item, use raw lines" branch and discard
     the LLM formatting). If this test ever fails, the farm shape changed and
-    :149's discarded migration needs re-evaluating, not silently redone.
+    the discarded migration needs re-evaluating, not silently redone.
     """
     original_text = (
         "Leadership in education, Duke Psychiatry Residency Program"
