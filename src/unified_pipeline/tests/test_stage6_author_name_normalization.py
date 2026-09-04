@@ -34,7 +34,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.formatting.values import _format_citation  # noqa: E402
-from unified_pipeline.stage6.normalization.text import (  # noqa: E402
+from unified_pipeline.stage6.normalization.authors import (  # noqa: E402
     _parse_author_fallback,
     _parse_surname_initial_pairs,
 )
@@ -245,7 +245,7 @@ def _debug_records(authors: str) -> list:
     """Every DEBUG message the normalization module emits for `authors`."""
     import logging
     module_logger = logging.getLogger(
-        'unified_pipeline.stage6.normalization.text'
+        'unified_pipeline.stage6.normalization.authors'
     )
     records = []
 
