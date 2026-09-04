@@ -37,13 +37,18 @@ three blank cells into a delivered CV. The rule the group pins is two-sided: a
 record with nothing to put in any column renders no row at all, and a row
 carrying even one populated cell is kept.
 
-The farm's own instances of it are the two the `_normalized_positions`
-docstring names, NGFNYQ and SO2IVQ: a fieldless D1 record leading its code
-list, so no employer was ever carried onto it and it was already three blank
-cells before this branch. The boundary half of the shape is synthetic here --
-the boundary stop fires on no farm document -- and is pinned anyway, because
-it is the case a CV with two appointment headings produces and the corpus is
-not evidence of its absence.
+The farm's own instances of it are the three the `_normalized_positions`
+docstring names. Two, NGFNYQ and SO2IVQ, are a fieldless D1 record leading its
+code list, so no employer was ever carried onto it and it was already three
+blank cells before this branch. The third, 6NGAYQ, is this group's fixture
+shape and the boundary half of it: a fieldless record ~200 elements past the
+one row it could have inherited from, under a different source heading. It is
+the only record on the farm where the propagation boundary stop fires.
+
+Both counts need a real `generate()` of every farm document to see. 6NGAYQ's
+record is stored under code `I` and reaches the D1 list only because stage 6
+reroutes it mid-render, so a harness that groups records by the code they were
+stored with misses it and reports two blank rows and no boundary stop at all.
 
 Run with:
 
@@ -970,15 +975,20 @@ LEADERSHIP_HEADING = ["ADMINISTRATIVE AND ACADEMIC LEADERSHIP"]
 
 
 def _appointment_and_distant_prose():
-    """A synthetic two-heading shape: one real appointment under the
-    appointments heading, and a stray sentence ~200 elements later under the
-    leadership heading that stage 3b also routed to D1.
+    """The 6NGAYQ D1 shape, with synthetic names and text: one real
+    appointment under the appointments heading, and a fieldless stray record
+    ~200 elements later under the leadership heading that reaches the D1 list
+    anyway.
 
-    Synthetic on purpose. No farm document puts a fieldless D record after an
-    employer under a different heading, so the corpus cannot supply this
-    fixture -- it is the shape a CV with two appointment headings produces,
-    and the two passes it runs through are exactly the two that would then
-    disagree about the record."""
+    6NGAYQ's element-217 record is the only one on the whole farm where the
+    propagation boundary stop fires, so the two passes this fixture runs
+    through are the two that disagreed about a real corpus record. What is
+    reproduced from it: the two element indices, the leadership heading, and a
+    record with no title, employer or dates arriving in the D1 list from
+    somewhere other than the appointments heading. What is not: the employer,
+    the titles and the sentence are invented, the appointments heading is
+    shortened, and the farm record arrives as D1 by stage 6's own mismatch
+    correction (stage 3b stored it as `I`) rather than out of stage 3b."""
     appointment = _position_entry(
         19, "Faculty member of the residency program",
         "Northgate Hospitals Psychiatry Residency Program",
@@ -990,8 +1000,8 @@ def _appointment_and_distant_prose():
 
 
 def test_a_stray_sentence_under_another_heading_renders_no_row():
-    """Pins both halves at once: a fieldless record on the far side of a
-    source-structure boundary must render no row at all.
+    """Pins the 6NGAYQ regression, both halves at once: a fieldless record on
+    the far side of a source-structure boundary must render no row at all.
 
     Two defects meet on this record. The employer used to propagate to it in
     document order across ~200 elements and a different source heading, so it
