@@ -343,7 +343,16 @@ def _is_one_appointment(first: dict, second: dict) -> bool:
     2. both records name an employer, and the two names match;
     3. one names an employer and the other named none but INHERITED one from
        a parent row, which `_propagate_institution_to_subentries` recorded —
-       a sub-position under an employer heading, not a competing employer.
+       a sub-position under an employer heading, not a competing employer —
+       AND the inherited employer is that same employer.
+
+    The employer match in rule 3 is not redundant. A record inherits from the
+    nearest preceding row that named an employer, which is not always the row
+    it is being compared against: a title-only row that inherited employer X
+    can sit next to a bare-dates row naming employer Y. Qualifying it on the
+    inheritance alone copies Y's dates onto an X row and deletes Y's own row,
+    which is the "position from a different employer inherits dates from the
+    previous employer" case #476 review item 2 names.
 
     Everything else fails closed, including the case the old rule was loosest
     on: two records that both name an employer and disagree, and two records
@@ -355,7 +364,8 @@ def _is_one_appointment(first: dict, second: dict) -> bool:
     if claim_first and claim_second:
         return _employers_match(claim_first, claim_second)
     if claim_first or claim_second:
-        return _inherited_institution(first) or _inherited_institution(second)
+        return ((_inherited_institution(first) or _inherited_institution(second))
+                and _employers_match(_entry_employer(first), _entry_employer(second)))
     return False
 
 
