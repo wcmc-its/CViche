@@ -8,12 +8,21 @@ The line against `normalization` is also deliberate. Normalization decides what 
 value *is* -- which author-name spelling, which institution string. This decides
 how it *reads*: 14876 becomes "$14,876", a publication record becomes a numbered
 Vancouver citation. A change to one should not require a change to the other.
+
+The citation half is the sharpest example, and it did not start out that way.
+`_format_citation` used to resolve its own fields -- enrichment precedence, type
+guards, stage-5d reconciliation, author normalization -- and then render them, so
+the two concerns were one 123-line function and the renderer named four pipeline
+keys. It now receives a `ResolvedPublication` from
+`normalization/publication.py`, and what is left here is the rendering: which
+shape a record takes, and what punctuation joins it (round-4 review of PR #737,
+points 1/2/3 and 8-15).
 """
 import re
 from decimal import ROUND_HALF_UP, Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import Dict
 
-from ..normalization import _append_missing_stage5d_values, _normalize_author_names
+from ..normalization import ResolvedPublication, resolve_publication
 
 # Money is quantized to cents under a named rounding policy rather than
 # whatever a binary float's repr happens to do (round-2 review of #481,
@@ -46,132 +55,134 @@ _CURRENCY_CENTS = Decimal('0.01')
 _CURRENCY_MAX_ADJUSTED_EXPONENT = 24
 
 
-def _format_citation(entry: Dict, num: int) -> Tuple[str, Optional[str], List[str]]:
+def _source_parts(pub: ResolvedPublication) -> list[str]:
+    """The line saying where the work appeared, as zero or one part.
+
+    A journal for an article (S1/S2/S6); the `In: Editors, eds. Book Title.`
+    clause for a chapter (S4, #481), with the `, eds.` half written only when
+    editors were extracted. Two shapes rather than one because they are
+    mutually exclusive on a real record and the journal wins: an article that
+    happens to carry a stray `publisher` is still an article.
+
+    Neither, for the two shapes that have no source line at all -- an S3 book,
+    whose own title already rendered above, and an S7 paper that is still in
+    review and has nowhere to have appeared yet.
     """
-    Format a publication entry as Vancouver-style citation.
+    if pub.journal:
+        return [pub.journal + "."]
+    if not pub.book_title:
+        return []
+    if pub.editors:
+        return [f"In: {pub.editors}, eds. {pub.book_title}."]
+    return [f"In: {pub.book_title}."]
+
+
+def _journal_trailer_parts(pub: ResolvedPublication) -> list[str]:
+    """`Year;Volume(Issue):Pages.` -- the journal-article trailer, and the
+    fallback for every other shape that names no publisher.
+
+    That fallback is not incidental: a book chapter whose stage-4 record has
+    no publisher rendered exactly this before #481 and still must
+    (test_fallback_s4_entry_without_publisher_matches_pre_fix_trailer).
+    """
+    cit_parts = []
+    if pub.year:
+        cit_parts.append(pub.year)
+    if pub.volume:
+        cit_parts.append(f";{pub.volume}")
+    if pub.issue:
+        cit_parts.append(f"({pub.issue})")
+    if pub.pages:
+        cit_parts.append(f":{pub.pages}")
+    if not cit_parts:
+        return []
+    return ["".join(cit_parts) + "."]
+
+
+def _book_trailer_parts(pub: ResolvedPublication) -> list[str]:
+    """`Publisher; Year:Pages.` -- the book/chapter trailer (#481).
+
+    S3/S4 never carry volume or issue, which is why this and the journal
+    trailer can be alternatives rather than having to merge: the fields the
+    other one would add are never populated on a record that reaches here.
+    """
+    trailer = pub.publisher
+    year_pages = pub.year
+    if pub.pages:
+        year_pages = f"{year_pages}:{pub.pages}" if year_pages else pub.pages
+    if year_pages:
+        trailer = f"{trailer}; {year_pages}"
+    return [trailer + "."]
+
+
+def _identifier_parts(pub: ResolvedPublication) -> list[str]:
+    """The `doi:... PMID:... PMCID:...` run, as zero or one part.
+
+    One owner for the punctuation (round-2 review of #481, point 12). Each id
+    used to carry its own trailing period and the join then stripped the tail
+    back off and re-added one, so two places decided the same character and
+    the separator only worked because the strip undid it. The ids are built
+    bare, the separator adds the period between them, and one period closes
+    the run.
+    """
+    ids = []
+    if pub.doi:
+        ids.append(f"doi:{pub.doi}")
+    if pub.pmid:
+        ids.append(f"PMID:{pub.pmid}")
+    if pub.pmcid:
+        ids.append(f"PMCID:{pub.pmcid}")
+    if not ids:
+        return []
+    return [". ".join(ids) + "."]
+
+
+def _format_citation(entry: dict, num: int) -> tuple[str, str | None, list[str]]:
+    """Format a publication entry as a numbered Vancouver-style citation.
+
+    Orchestration only: resolve the entry, pick the trailer, join the parts.
+    Every question about what the values *are* -- which of an enriched and an
+    extracted value wins, whether a stage-4 field is text at all, whether
+    stage 5d already wrote the whole citation, how an author list is spelled
+    -- is answered by `resolve_publication` before this function sees the
+    record (round-4 review of PR #737, points 1/2/3 and 8-15). That is why no
+    pipeline key appears below.
+
+    One decision is left, and it is a rendering decision: a record that names
+    a publisher and no journal ends in the book trailer, everything else in
+    the journal trailer. It is deliberately not two whole-citation "shape"
+    renderers, because the source line and the trailer are not chosen by the
+    same predicate -- a chapter with no publisher takes the book source line
+    and the journal trailer -- and a shape split would have to either
+    duplicate the `In:` clause or carry a branch no input can distinguish.
+
+    The taxonomy code is not consulted: a misclassified entry should still
+    render as what its own fields say it is.
 
     Returns:
         (citation_text, target_name, enriched_fields) tuple
     """
-    fields = entry.get('extracted_fields') or {}
-    # `or`, not a dict/list default (#659): a default only applies when the key
-    # is absent, so an entry carrying the key with an explicit None hands the
-    # None straight back and the first `.get`/iteration on it raises. Exactly
-    # the `extracted_fields` defect above, on the two adjacent lines (found
-    # reviewing that fix). Stage 5 writes a dict today
-    # (`stage_5_pubmed_enrichment.py:655`) and no entry in the 61-CV local farm
-    # carries an explicit null here, so this is hardening, not an observed
-    # crash -- the entries reaching stage 6 are raw LLM-shaped JSON with no
-    # schema between them and this line.
-    enrichment = entry.get('enrichment_data') or {}
-    enriched_fields = entry.get('enriched_fields') or []  # Track which fields were enriched
+    pub = resolve_publication(entry)
 
-    # Read once, for both branches below. Stage 4 is raw LLM-shaped JSON, so
-    # either value can arrive as a list, and both the stage-5d safety net and
-    # the deterministic "In: ..., eds." clause render it straight into the
-    # citation -- a repr in the document rather than a crash, which is worse
-    # (round-2 review of #481, point 13).
-    editors = fields.get('editors', '')
-    publisher = fields.get('publisher', '')
-    if not isinstance(editors, str):
-        editors = ''
-    if not isinstance(publisher, str):
-        publisher = ''
-
-    # Check if Stage 5d provided a pre-formatted citation (for non-enriched entries)
-    formatted_citation = fields.get('formatted_citation', '')
-    if formatted_citation and fields.get('formatting_source') == 'stage_5d_llm':
-        # Use the LLM-formatted citation directly, topped up with any
-        # extracted editors/publisher the LLM's own text dropped (#481).
-        formatted_citation = _append_missing_stage5d_values(
-            formatted_citation, editors, publisher)
-        citation = f"{num}. {formatted_citation}"
-        target_name = fields.get('target_name')
-        return citation, target_name, enriched_fields
+    # Stage 5d's LLM already wrote this one, and the resolver already topped
+    # it up with the editors/publisher its text omitted (#481).
+    if pub.formatted_citation:
+        return (f"{num}. {pub.formatted_citation}",
+                pub.target_name, list(pub.enriched_fields))
 
     parts = []
-
-    # Authors - prefer enriched PubMed authors, fall back to extracted
-    authors = enrichment.get('pubmed_authors') or fields.get('authors', '')
-    if authors:
-        # Clean and normalize author names
-        authors = _normalize_author_names(authors)
-        parts.append(authors + ".")
-
-    # Title - prefer enriched PubMed title, fall back to extracted
-    title = enrichment.get('pubmed_title') or fields.get('title', '')
-    if title:
-        title = title.rstrip('.')
-        parts.append(title + ".")
-
-    # Journal or Book title - prefer enriched
-    journal = enrichment.get('pubmed_journal') or fields.get('journal', '')
-    book_title = fields.get('book_title', '')
-    if journal:
-        parts.append(journal + ".")
-    elif book_title:
-        # For book chapters (S4), use "In: Editors, eds. Book Title." (#481)
-        if editors:
-            parts.append(f"In: {editors}, eds. {book_title}.")
-        else:
-            parts.append(f"In: {book_title}.")
-
-    # Year;Volume(Issue):Pages -- or, for a book/chapter (S3/S4) with a
-    # publisher and no journal, "Publisher; Year:Pages." (#481). S3/S4 never
-    # carry volume/issue, so the two trailer shapes don't collide.
-    year = str(fields.get('year', ''))
-    volume = enrichment.get('pubmed_volume') or fields.get('volume', '')
-    issue = enrichment.get('pubmed_issue') or fields.get('issue', '')
-    pages = enrichment.get('pubmed_pages') or fields.get('pages', '')
-
-    if publisher and not journal:
-        trailer = publisher
-        year_pages = year
-        if pages:
-            year_pages = f"{year_pages}:{pages}" if year_pages else pages
-        if year_pages:
-            trailer = f"{trailer}; {year_pages}"
-        parts.append(trailer + ".")
+    if pub.authors:
+        parts.append(pub.authors + ".")
+    if pub.title:
+        parts.append(pub.title.rstrip('.') + ".")
+    parts.extend(_source_parts(pub))
+    if pub.publisher and not pub.journal:
+        parts.extend(_book_trailer_parts(pub))
     else:
-        cit_parts = []
-        if year:
-            cit_parts.append(year)
-        if volume:
-            cit_parts.append(f";{volume}")
-        if issue:
-            cit_parts.append(f"({issue})")
-        if pages:
-            cit_parts.append(f":{pages}")
+        parts.extend(_journal_trailer_parts(pub))
+    parts.extend(_identifier_parts(pub))
 
-        if cit_parts:
-            parts.append("".join(cit_parts) + ".")
-
-    # Identifiers - separated by periods
-    ids = []
-    doi = fields.get('doi', '')
-    pmid = fields.get('pmid', '')
-    pmcid = fields.get('pmcid', '')
-
-    if doi:
-        ids.append(f"doi:{doi}")
-    if pmid:
-        ids.append(f"PMID:{pmid}")
-    if pmcid:
-        ids.append(f"PMCID:{pmcid}")
-
-    if ids:
-        # One owner for the punctuation (round-2 review of #481, point 12).
-        # Each id used to carry its own trailing period and the join then
-        # stripped the tail back off and re-added one, so two places decided
-        # the same character and the separator only worked because the strip
-        # undid it. The ids are built bare, the separator adds the period
-        # between them, and one period closes the run.
-        parts.append(". ".join(ids) + ".")
-
-    citation = f"{num}. " + " ".join(parts)
-    target_name = fields.get('target_name')
-
-    return citation, target_name, enriched_fields
+    return f"{num}. " + " ".join(parts), pub.target_name, list(pub.enriched_fields)
 
 
 def _format_currency(value) -> str:

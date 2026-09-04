@@ -30,6 +30,7 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_stage6_bibliography_editors_publisher.py -p no:cacheprovider
 """
 
+import inspect
 import os
 import subprocess
 import sys
@@ -37,6 +38,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 import pytest
 
+from unified_pipeline.stage6.formatting import values as values_module
 from unified_pipeline.stage6.formatting.values import (
     _format_citation,
     _format_currency,
@@ -346,8 +348,9 @@ def test_stage5d_editors_matching_only_on_a_stopword_are_appended():
 def test_stage5d_non_string_editors_value_is_skipped_not_rendered():
     """Stage 4 is raw LLM-shaped JSON with no schema enforcement, so
     `editors` can arrive as a list. `_value_referenced` would raise TypeError
-    on it (`re.findall` over a list); the safety net skips a non-string value
-    instead, leaving the citation exactly as stage 5d wrote it."""
+    on it (`re.findall` over a list); `resolve_publication` turns a non-string
+    value into `''` before the safety net is called, so the citation is left
+    exactly as stage 5d wrote it."""
     fields = {
         'editors': ['Smith A', 'Jones B'],
         'publisher': 'Acme Press',
@@ -358,6 +361,53 @@ def test_stage5d_non_string_editors_value_is_skipped_not_rendered():
     citation, _, _ = _format_citation(_entry(fields), 10)
 
     assert citation == '10. Doe J. A Chapter. In: Book. Acme Press; 2020.'
+
+
+# ---------------------------------------------------------------------------
+# PR #737 round 4, points 1/2/10/11/14: what the renderer is allowed to know
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize('literal', [
+    'extracted_fields', 'enrichment_data', 'formatting_source', 'stage_5d_llm',
+])
+def test_the_renderer_module_names_no_pipeline_key(literal):
+    """Points 2/10/11 as a check rather than a claim.
+
+    The renderer receives already-reconciled structured data, so no stage
+    key, no enrichment key and no formatting-source value may appear in its
+    source at all -- not in code, not in a comment that would tempt the next
+    reader to reach for one. `stage6/normalization/publication.py` is the
+    only module in stage 6 that reads those shapes."""
+    source = inspect.getsource(values_module)
+
+    assert literal not in source
+
+
+def test_rendering_does_not_normalize_author_names(monkeypatch):
+    """Point 14 at the wire: `_normalize_author_names` used to be called from
+    inside the assembly loop, which made rendering more than representational.
+    Rendering a whole citation must now call it exactly once, from the
+    resolver, before any part is assembled."""
+    from unified_pipeline.stage6.normalization import publication
+
+    calls = []
+    real = publication._normalize_author_names
+
+    def counting(authors):
+        calls.append(authors)
+        return real(authors)
+
+    monkeypatch.setattr(publication, '_normalize_author_names', counting)
+
+    citation, _, _ = _format_citation(_entry({
+        'authors': 'Kelly, R, Pirog, R',
+        'title': 'A Paper',
+        'journal': 'NEJM',
+        'year': '2021',
+    }), 1)
+
+    assert citation == '1. Kelly R, Pirog R. A Paper. NEJM. 2021.'
+    assert calls == ['Kelly, R, Pirog, R']
 
 
 # ---------------------------------------------------------------------------
