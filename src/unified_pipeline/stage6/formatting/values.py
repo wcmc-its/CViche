@@ -13,35 +13,8 @@ import re
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Dict, List, Optional, Tuple
 
-from ..normalization import _normalize_author_names
+from ..normalization import _append_missing_stage5d_values, _normalize_author_names
 
-# #481: a value is treated as already present in an LLM-formatted citation
-# once any of its own significant words shows up there -- not the whole
-# value verbatim -- so a reworded-but-present publisher/editors ("Springer"
-# for "Springer-Verlag, NY") isn't appended a second time. Below this length
-# a token (an initial, "of", "NY") is too common to mean anything on its own.
-_CITATION_TOKEN_MIN_LEN = 3
-# Tokens that clear the length floor and still identify nothing: English
-# function words plus the editorial boilerplate a citation carries anyway.
-# The floor alone was not enough -- len("and") and len("eds") are both 3, so
-# "A. Smith and B. Jones" read as already present in any citation whose text
-# contained the word "and" anywhere, and the editors half of the safety net
-# below could never fire (found reviewing this fix, #481). Shorter function
-# words ("of", "in", "an") need no entry here; the floor already drops them.
-_CITATION_STOPWORDS = frozenset({
-    'and', 'the', 'for', 'with', 'from', 'that', 'this',
-    'eds', 'edited', 'editor', 'editors', 'edition', 'chief',
-    'vol', 'volume', 'page', 'pages', 'published', 'publisher',
-})
-_CITATION_TOKEN_RE = re.compile(r"[^\W_]+")
-# How much of a value has to show up before it reads as already present.
-# "Any one significant token" was the round-1 rule and it was too loose:
-# "Oxford University Press" matched a citation naming "Oxford Medical
-# Journal" on "oxford" alone, and the real publisher was then silently
-# dropped from the rendered citation (round-2 review of #481, point 6).
-# Half, not more: "Springer-Verlag, NY" against "In: Springer; 2021." is a
-# genuine match that offers exactly one of its two tokens.
-_CITATION_MATCH_MIN_RATIO = 0.5
 # Money is quantized to cents under a named rounding policy rather than
 # whatever a binary float's repr happens to do (round-2 review of #481,
 # point 5): $0.125 is $0.13, not $0.12.
@@ -73,62 +46,6 @@ _CURRENCY_CENTS = Decimal('0.01')
 _CURRENCY_MAX_ADJUSTED_EXPONENT = 24
 
 
-def _value_referenced(value: str, citation_text: str) -> bool:
-    """Whole-word, casefolded overlap test (#481) between a candidate value
-    (a publisher or editors string) and an already-formatted citation.
-
-    A token counts only if it clears `_CITATION_TOKEN_MIN_LEN` *and* is not a
-    stop word. A value left with no significant token of its own reads as
-    absent, so the caller appends it rather than trusting a match on a word
-    ("and", "eds") that appears in citations regardless of this value.
-
-    At least `_CITATION_MATCH_MIN_RATIO` of the surviving tokens must appear.
-    Known residual, stated rather than papered over: a two-token value with
-    one matching token is exactly at the threshold, so "Oxford University"
-    against "Oxford Medical Journal" still reads as referenced and that
-    publisher is still dropped. Requiring more than half would break
-    "Springer-Verlag, NY" against "In: Springer; 2021." -- the same 1-of-2
-    shape, but a real match. Token overlap alone cannot separate the two, and
-    this deliberately does not try to be cleverer than that.
-    """
-    if not value:
-        return False
-    haystack = citation_text.casefold()
-    tokens = [
-        t for t in (raw.casefold() for raw in _CITATION_TOKEN_RE.findall(value))
-        if len(t) >= _CITATION_TOKEN_MIN_LEN and t not in _CITATION_STOPWORDS
-    ]
-    if not tokens:
-        return False
-    matched = sum(1 for t in tokens if re.search(rf"\b{re.escape(t)}\b", haystack))
-    return matched / len(tokens) >= _CITATION_MATCH_MIN_RATIO
-
-
-def _append_missing_stage5d_values(formatted_citation: str, fields: Dict) -> str:
-    """Deterministic safety net for the stage-5d LLM path (#481).
-
-    Stage 5d's copy-back loop -- the `for field in [...]` list of names it
-    writes back onto `entry['extracted_fields']` in
-    `stage_5d_citation_formatter.py` -- omits `editors` and `publisher` even
-    when its own prompt extracted them, so a book/chapter citation the LLM
-    formatted without one of those values has no later stage that can add it.
-    Append whichever of the two `extracted_fields` actually carries and the
-    LLM's own text does not already reference. A non-string value is skipped:
-    stage 4 is raw LLM-shaped JSON, so `editors` can arrive as a list, and
-    neither crashing the render nor writing a repr into a citation is wanted.
-    """
-    additions = []
-    editors = fields.get('editors')
-    if isinstance(editors, str) and editors and not _value_referenced(editors, formatted_citation):
-        additions.append(f"{editors}, eds.")
-    publisher = fields.get('publisher')
-    if isinstance(publisher, str) and publisher and not _value_referenced(publisher, formatted_citation):
-        additions.append(f"{publisher}.")
-    if not additions:
-        return formatted_citation
-    return f"{formatted_citation} " + " ".join(additions)
-
-
 def _format_citation(entry: Dict, num: int) -> Tuple[str, Optional[str], List[str]]:
     """
     Format a publication entry as Vancouver-style citation.
@@ -149,12 +66,25 @@ def _format_citation(entry: Dict, num: int) -> Tuple[str, Optional[str], List[st
     enrichment = entry.get('enrichment_data') or {}
     enriched_fields = entry.get('enriched_fields') or []  # Track which fields were enriched
 
+    # Read once, for both branches below. Stage 4 is raw LLM-shaped JSON, so
+    # either value can arrive as a list, and both the stage-5d safety net and
+    # the deterministic "In: ..., eds." clause render it straight into the
+    # citation -- a repr in the document rather than a crash, which is worse
+    # (round-2 review of #481, point 13).
+    editors = fields.get('editors', '')
+    publisher = fields.get('publisher', '')
+    if not isinstance(editors, str):
+        editors = ''
+    if not isinstance(publisher, str):
+        publisher = ''
+
     # Check if Stage 5d provided a pre-formatted citation (for non-enriched entries)
     formatted_citation = fields.get('formatted_citation', '')
     if formatted_citation and fields.get('formatting_source') == 'stage_5d_llm':
         # Use the LLM-formatted citation directly, topped up with any
         # extracted editors/publisher the LLM's own text dropped (#481).
-        formatted_citation = _append_missing_stage5d_values(formatted_citation, fields)
+        formatted_citation = _append_missing_stage5d_values(
+            formatted_citation, editors, publisher)
         citation = f"{num}. {formatted_citation}"
         target_name = fields.get('target_name')
         return citation, target_name, enriched_fields
@@ -177,16 +107,6 @@ def _format_citation(entry: Dict, num: int) -> Tuple[str, Optional[str], List[st
     # Journal or Book title - prefer enriched
     journal = enrichment.get('pubmed_journal') or fields.get('journal', '')
     book_title = fields.get('book_title', '')
-    editors = fields.get('editors', '')
-    publisher = fields.get('publisher', '')
-    # Same guard the stage-5d safety net above applies (round-2 review of
-    # #481, point 13): stage 4 is raw LLM-shaped JSON, so either value can
-    # arrive as a list, and this branch renders it straight into the citation
-    # -- a repr in the document rather than a crash, which is worse.
-    if not isinstance(editors, str):
-        editors = ''
-    if not isinstance(publisher, str):
-        publisher = ''
     if journal:
         parts.append(journal + ".")
     elif book_title:

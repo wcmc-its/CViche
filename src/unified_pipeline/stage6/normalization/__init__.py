@@ -11,17 +11,30 @@ decides what the value *is* -- which author-name spelling, which institution
 string, whether a repeated phrase is dropped. A change to one should not require
 a change to the other.
 
-    text.py     a value in, a cleaner value out
-    fields.py   a stage-4 field of unpredictable *shape* in, plain text out
-    records.py  a record filed wrongly in, the correction out
+    text.py              a value in, a cleaner value out
+    fields.py            a stage-4 field of unpredictable *shape* in, plain text out
+    records.py           a record filed wrongly in, the correction out
+    citation_matching.py does this citation's text already say that value?
 
 `fields.py` is separate from `text.py` because its input is not text yet. Stage 4
 stores raw LLM JSON against no schema, so a field the renderer expects to be a
 string can arrive as a dict or a list -- and `cell.text = <dict>` aborts the whole
 document (#442, #450). Until a schema layer exists between stage 4 and stage 6,
 that absence is absorbed there and nowhere else.
+
+Dependencies run one way here too: nothing in this package imports `formatting/`,
+`sections/`, or `stage_6_word_template` -- those import this, so a back-edge
+would be an import cycle that fails at load rather than at render.
 """
 
+from .citation_matching import (  # noqa: F401
+    _CITATION_MATCH_MIN_RATIO,
+    _CITATION_STOPWORDS,
+    _CITATION_TOKEN_MIN_LEN,
+    _CITATION_TOKEN_RE,
+    _append_missing_stage5d_values,
+    _value_referenced,
+)
 from .fields import (  # noqa: F401
     _CELL_PHONE_KEYS,
     _OFFICE_PHONE_KEYS,
