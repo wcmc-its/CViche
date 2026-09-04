@@ -19,9 +19,11 @@ it is why the section is this long for an 85-line writer:
   `_is_one_appointment` finds evidence the two rows are one appointment;
   adjacency alone is not evidence.
 - `_normalized_positions` -- the single place that decides how many rows a
-  table gets: sort, drop a source column-header row, and recover a tab-joined
-  child appointment (`_child_position_records`) as a record of its own. The
-  render loop is then one row per record, with no early return under it.
+  table gets: sort, drop a source column-header row, recover a tab-joined
+  child appointment (`_child_position_records`) as a record of its own, and
+  drop a record whose three cells (`_position_row_cells`) all come out empty,
+  because an all-blank row is never correct output. The render loop is then
+  one row per record, with no early return under it.
 
 `_position_title` and `_position_has_dates` are the predicates that merge pass
 reads each record through, and `_PLACEHOLDER_TITLES` is the column-header
@@ -29,6 +31,7 @@ vocabulary `_position_title` filters against -- field extraction emits "Title"
 or "Role" as a title when the source CV had a table header there. All three are
 reached only from this module.
 """
+import logging
 import re
 
 from unified_pipeline.core.render_check import entry_fragments
@@ -38,6 +41,12 @@ from ..normalization import _get_cleaned_institution_name
 from ..parsing import _dates_overlap_or_match, _is_table_header_entry
 from ..resolution import _get_institution_location
 from ..sorting import element_idx_sort_key, sort_entries_reverse_chronological
+
+logger = logging.getLogger(__name__)
+
+# One table cell as `_add_table_row_with_mixed_content` takes it: a list of
+# (text, is_track_change, track_change_reason) runs.
+CellContent = list[tuple[str, bool, str]]
 
 # Section D taxonomy codes, in template table order (docs/CODING_STANDARDS.md
 # §8.2): D1 Academic Appointments, D2 Hospital Appointments, D3 Other
@@ -372,6 +381,107 @@ def _is_one_appointment(first: dict, second: dict) -> bool:
     if claim_first or claim_second:
         return _inherited_institution(first) or _inherited_institution(second)
     return False
+
+
+def _position_row_cells(entry: dict) -> tuple[CellContent, CellContent, CellContent]:
+    """The Title / Institution / Dates cell contents of one position row.
+
+    Split out of `_add_position_row` so that the decision to render a record
+    and the rendering of it read the SAME cells: `_normalized_positions` drops
+    a record whose three cells all come out empty, and a predicate that
+    re-derived the cells by hand could disagree with the renderer and drop a
+    row that would have carried content.
+
+    Each cell is the `(text, is_track_change, reason)` run list that
+    `_add_table_row_with_mixed_content` takes. Reads the record only.
+    """
+    fields = entry.get('extracted_fields', {}) or {}
+
+    title = fields.get('title') or ''
+    # Detect placeholder values that are actually column headers from source CV tables
+    # e.g., field extraction returning "Title" when the CV had "Title | Institution | Dates"
+    title_lower = title.strip().lower()
+    if title_lower in ('title', 'position', 'role', 'name', 'description', 'activity'):
+        title = ''
+    # D3 entries often use 'organization' instead of 'institution' in field extraction
+    raw_institution = fields.get('institution', '') or fields.get('organization', '')
+    department = fields.get('department', '')
+
+    # Structured sources first (#476 review item 5): the stage-5b cleaned
+    # name, then the extracted field. The raw text is read only when both
+    # come back empty -- the cleaned name already won over anything the
+    # text scan produced, so consulting it first drops a scan whose result
+    # was going to be discarded, and nothing else.
+    # Don't overwrite valid extracted institutions like "Weill Cornell Medical College"
+    # just because they don't include city/state (that comes from enrichment)
+    cleaned_institution = _get_cleaned_institution_name(entry)
+    if not raw_institution and not cleaned_institution:
+        raw_institution = _institution_from_raw_text(entry.get('text', ''))
+
+    # Use LLM-cleaned institution name (strips embedded location); fall back to raw field
+    institution = cleaned_institution or raw_institution
+
+    # Build base institution string with department
+    institution_base = institution
+    if department:
+        institution_base = f"{institution}, {department}"
+
+    # Location from Stage 5b enrichment
+    location, location_is_enriched = _get_institution_location(entry)
+
+    # Get taxonomy code for this entry (D1, D2, or D3)
+    taxonomy_code = entry.get('taxonomy_code', 'D1')
+
+    # Dates - format according to D1/D2/D3 requirements (mm/yy - mm/yy)
+    start = fields.get('start_date', '')
+    end = fields.get('end_date', '')
+    dates = format_date_range(start, end, taxonomy_code)
+
+    # Build cell contents with mixed normal/track-change content
+    title_content = [(title, False, "")]
+
+    # Check if location is already present in institution_base to avoid duplication
+    # e.g., "University of Pittsburgh, Pittsburgh, PA" shouldn't get ", Pittsburgh, PA" appended again
+    location_already_present = False
+    if location and institution_base:
+        # Check if city is already in the institution string
+        location_parts = location.split(',')
+        if location_parts:
+            city = location_parts[0].strip()
+            # Check for city name in institution (case-insensitive)
+            if city.lower() in institution_base.lower():
+                location_already_present = True
+
+    if location and location_is_enriched and not location_already_present:
+        # Institution/dept is normal text, ", City, State" is track change
+        if institution_base:
+            institution_content = [
+                (institution_base, False, ""),
+                (f", {location}", True, "Institution Enrichment")
+            ]
+        else:
+            institution_content = [(location, True, "Institution Enrichment")]
+    elif location and not location_already_present:
+        institution_full = f"{institution_base}, {location}" if institution_base else location
+        institution_content = [(institution_full, False, "")]
+    else:
+        institution_content = [(institution_base, False, "")]
+
+    dates_content = [(dates, False, "")]
+
+    return title_content, institution_content, dates_content
+
+
+def _renders_no_content(cells: tuple[CellContent, ...]) -> bool:
+    """True when every cell of the row would come out empty.
+
+    Such a record has no title, no employer the renderer can resolve from any
+    of its four sources, and no dates -- so its row is three blank cells in
+    the delivered document, which is never correct output. A row that carries
+    even one populated cell is legitimately sparse and is kept: the binding
+    rule is that no row may lose its last populated cell.
+    """
+    return not any(text.strip() for cell in cells for text, _, _ in cell)
 
 
 class PositionsSection:
@@ -760,9 +870,10 @@ class PositionsSection:
 
         Everything that decides HOW MANY rows the section produces happens
         here (#476 review item 6): the reverse-chronological sort, dropping a
-        source column-header row extraction mistook for data, and recovering a
+        source column-header row extraction mistook for data, recovering a
         tab-joined child appointment as a record of its own, immediately after
-        the parent it came from.
+        the parent it came from, and dropping a record that would render three
+        blank cells.
 
         So the caller is `for position in positions: self._add_position_row(...)`
         with nothing under it that can skip or add a row, and
@@ -770,97 +881,46 @@ class PositionsSection:
         `_add_table_row_with_mixed_content` (stage_6_word_template.py) --
         counts exactly one per physical row, child rows included (review item
         7). This method never modifies the records it is given.
+
+        The blank-row drop is a content check, not a programming error, so it
+        warns and counts rather than raising: stage 3b classifies the odd
+        stray sentence into a D code, field extraction finds no title,
+        employer or dates in it, and the record reaches here with nothing to
+        put in any of the three columns. Rendering it puts an empty row in the
+        delivered CV. It is measured on the corpus farm at one row.
         """
         positions = []
+        blank = 0
         for entry in sort_entries_reverse_chronological(entries):
             if self._is_source_column_header(entry):
                 continue
-            positions.append(entry)
-            positions.extend(_child_position_records(entry))
+            for record in (entry, *_child_position_records(entry)):
+                if _renders_no_content(_position_row_cells(record)):
+                    blank += 1
+                    logger.warning(
+                        "%s: position record at element %s has no title, "
+                        "employer or dates; its row would be blank, dropping it",
+                        record.get('taxonomy_code', ''),
+                        record.get('element_idx_start'))
+                    continue
+                positions.append(record)
+        if blank:
+            self.stats['blank_position_rows_skipped'] = (
+                self.stats.get('blank_position_rows_skipped', 0) + blank)
+            if self.verbose:
+                print(f"  Dropped {blank} position record(s) with no title, "
+                      f"employer or dates")
         return positions
 
     def _add_position_row(self, table, entry: dict):
         """Render one normalized position record as one table row.
 
         Renders unconditionally: every record `_normalized_positions` yields
-        becomes exactly one row (#476 review item 7).
+        becomes exactly one row (#476 review item 7). Whether a record yields
+        a row at all is decided there, against these same cells.
         """
-        fields = entry.get('extracted_fields', {}) or {}
-
-        title = fields.get('title') or ''
-        # Detect placeholder values that are actually column headers from source CV tables
-        # e.g., field extraction returning "Title" when the CV had "Title | Institution | Dates"
-        title_lower = title.strip().lower()
-        if title_lower in ('title', 'position', 'role', 'name', 'description', 'activity'):
-            title = ''
-        # D3 entries often use 'organization' instead of 'institution' in field extraction
-        raw_institution = fields.get('institution', '') or fields.get('organization', '')
-        department = fields.get('department', '')
-
-        # Structured sources first (#476 review item 5): the stage-5b cleaned
-        # name, then the extracted field. The raw text is read only when both
-        # come back empty -- the cleaned name already won over anything the
-        # text scan produced, so consulting it first drops a scan whose result
-        # was going to be discarded, and nothing else.
-        # Don't overwrite valid extracted institutions like "Weill Cornell Medical College"
-        # just because they don't include city/state (that comes from enrichment)
-        cleaned_institution = _get_cleaned_institution_name(entry)
-        if not raw_institution and not cleaned_institution:
-            raw_institution = _institution_from_raw_text(entry.get('text', ''))
-
-        # Use LLM-cleaned institution name (strips embedded location); fall back to raw field
-        institution = cleaned_institution or raw_institution
-
-        # Build base institution string with department
-        institution_base = institution
-        if department:
-            institution_base = f"{institution}, {department}"
-
-        # Location from Stage 5b enrichment
-        location, location_is_enriched = _get_institution_location(entry)
-
-        # Get taxonomy code for this entry (D1, D2, or D3)
-        taxonomy_code = entry.get('taxonomy_code', 'D1')
-
-        # Dates - format according to D1/D2/D3 requirements (mm/yy - mm/yy)
-        start = fields.get('start_date', '')
-        end = fields.get('end_date', '')
-        dates = format_date_range(start, end, taxonomy_code)
-
-        # Build cell contents with mixed normal/track-change content
-        title_content = [(title, False, "")]
-
-        # Check if location is already present in institution_base to avoid duplication
-        # e.g., "University of Pittsburgh, Pittsburgh, PA" shouldn't get ", Pittsburgh, PA" appended again
-        location_already_present = False
-        if location and institution_base:
-            # Check if city is already in the institution string
-            location_parts = location.split(',')
-            if location_parts:
-                city = location_parts[0].strip()
-                # Check for city name in institution (case-insensitive)
-                if city.lower() in institution_base.lower():
-                    location_already_present = True
-
-        if location and location_is_enriched and not location_already_present:
-            # Institution/dept is normal text, ", City, State" is track change
-            if institution_base:
-                institution_content = [
-                    (institution_base, False, ""),
-                    (f", {location}", True, "Institution Enrichment")
-                ]
-            else:
-                institution_content = [(location, True, "Institution Enrichment")]
-        elif location and not location_already_present:
-            institution_full = f"{institution_base}, {location}" if institution_base else location
-            institution_content = [(institution_full, False, "")]
-        else:
-            institution_content = [(institution_base, False, "")]
-
-        dates_content = [(dates, False, "")]
-
         self._add_table_row_with_mixed_content(
             table,
-            [title_content, institution_content, dates_content],
+            list(_position_row_cells(entry)),
             entry=entry
             )

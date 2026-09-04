@@ -29,6 +29,13 @@ increment of `entries_inserted`, and that the two passes which rewrite stage-4
 output -- institution propagation and appointment merging -- refuse to act
 without evidence rather than falling back on document adjacency.
 
+Group (f) is the other side of (e). Refusing to carry an employer across a
+source-structure boundary leaves the record on the far side of it with no
+title, no employer and no dates, and rendering that record put three blank
+cells into a delivered CV. The rule the group pins is two-sided: a record with
+nothing to put in any column renders no row at all, and a row carrying even
+one populated cell is kept.
+
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_positions_fragments.py -p no:cacheprovider
@@ -797,6 +804,132 @@ def test_merge_still_joins_a_sub_position_that_inherited_its_employer():
     assert merged[0]["extracted_fields"]["title"] == "Attending Physician"
     assert merged[0]["extracted_fields"]["start_date"] == "2002-07"
     assert merged[0]["extracted_fields"]["end_date"] == "2006-12"
+
+
+# --- (f) no all-blank row, and no populated row dropped ----------------------
+
+def _fieldless_record(idx, text, hierarchy, code="D1"):
+    """A record stage 3b routed to a D code and stage 4 found no field in:
+    no title, no employer, no dates. The shape that reaches the renderer with
+    nothing to put in any of the three columns."""
+    return {
+        "element_idx_start": idx,
+        "taxonomy_code": code,
+        "hierarchy": hierarchy,
+        "text": text,
+        "extracted_fields": {},
+    }
+
+
+APPOINTMENTS_HEADING = ["ACADEMIC APPOINTMENTS AND OTHER WORK EXPERIENCE"]
+LEADERSHIP_HEADING = ["ADMINISTRATIVE AND ACADEMIC LEADERSHIP"]
+
+
+def _appointment_and_distant_prose():
+    """The 6NGAYQ D1 shape, with synthetic names: one real appointment under
+    the appointments heading, and a stray sentence ~200 elements later under
+    the leadership heading that stage 3b also routed to D1."""
+    appointment = _position_entry(
+        19, "Faculty member of the residency program",
+        "Northgate Hospitals Psychiatry Residency Program",
+        APPOINTMENTS_HEADING, "January 2025", "Present")
+    appointment["taxonomy_code"] = "D1"
+    prose = _fieldless_record(217, "I remain subscribed to their newsletter.",
+                              LEADERSHIP_HEADING)
+    return appointment, prose
+
+
+def test_a_stray_sentence_under_another_heading_renders_no_row():
+    """Pins the 6NGAYQ D1 regression: a fieldless record on the far side of a
+    source-structure boundary must render no row at all.
+
+    Two defects meet on this record. The employer used to propagate to it in
+    document order across ~200 elements and a different source heading, so it
+    rendered a row claiming an employer the sentence never named. Stopping the
+    carry then left the record with nothing in any column and it rendered
+    three blank cells instead -- a row a reader cannot read as anything.
+    Neither is correct output: the record must not become a row.
+    """
+    appointment, prose = _appointment_and_distant_prose()
+
+    rows = _render_positions([appointment, prose], code="D1")
+
+    assert rows == [
+        ["Faculty member of the residency program",
+         "Northgate Hospitals Psychiatry Residency Program", "01/25-Present"],
+    ]
+
+
+def test_the_stray_sentence_inherits_no_employer():
+    """The first half of the same regression, read off the record rather than
+    the rendered table: the boundary check must still refuse the carry, so a
+    later blank-row guard can never be what is hiding a false employer."""
+    appointment, prose = _appointment_and_distant_prose()
+
+    WCMTemplateGenerator._propagate_institution_to_subentries([appointment, prose])
+
+    assert _institution_of(prose) == ""
+
+
+@pytest.mark.parametrize("fields,expected", [
+    ({"title": "Attending Physician"},
+     ["Attending Physician", "", ""]),
+    ({"institution": "Northgate Hospital"},
+     ["", "Northgate Hospital", ""]),
+    ({"start_date": "2002-07", "end_date": "2006-12"},
+     ["", "", "07/02-12/06"]),
+])
+def test_a_row_with_a_single_populated_cell_is_still_rendered(fields, expected):
+    """The guard's other side: only an all-blank row is dropped.
+
+    A legitimately sparse record -- a title the CV gave no employer or dates
+    for, an employer with neither, a bare date span -- still carries content a
+    reader needs, so it keeps its row. Dropping on "incomplete" rather than on
+    "empty" would delete real appointments.
+    """
+    entry = {"element_idx_start": 1, "taxonomy_code": "D2",
+             "text": "", "extracted_fields": dict(fields)}
+
+    assert _render_positions([entry]) == [expected]
+
+
+def test_a_blank_record_is_reported_rather_than_dropped_silently():
+    """A dropped row is a content defect upstream, so the run has to say it
+    happened: a verbose line and a stats counter, not a silent skip."""
+    gen, table = _positions_generator(TABLE_ANCHORS["D1"])
+    gen.verbose = True
+    appointment, prose = _appointment_and_distant_prose()
+
+    gen._fill_positions({"D1": [appointment, prose]})
+
+    assert len(_rendered_rows(table)) == 1
+    assert gen.stats["blank_position_rows_skipped"] == 1
+
+
+def test_entries_inserted_still_counts_one_per_rendered_row():
+    """Review item 7's invariant across the new drop: the counter follows the
+    physical rows, so a record that renders no row increments nothing."""
+    gen, table = _positions_generator(TABLE_ANCHORS["D1"])
+    appointment, prose = _appointment_and_distant_prose()
+
+    gen._fill_positions({"D1": [appointment, prose]})
+
+    assert gen.stats["entries_inserted"] == len(_rendered_rows(table)) == 1
+
+
+def test_a_blank_parent_still_yields_its_recovered_children():
+    """The guard is applied per record, not per entry: a parent stage 4 found
+    no field for is dropped, and the child appointments recovered from its own
+    text still render. Dropping the entry wholesale would lose them.
+    """
+    parent = _tab_joined_entry([("Attending Physician", "07/2002", "06/2003"),
+                                ("Assistant Director", "06/2003", "12/2006")])
+    parent["extracted_fields"] = {}
+
+    assert _render_positions([parent]) == [
+        _synthetic_row("Attending Physician", "07/02-06/03", institution=""),
+        _synthetic_row("Assistant Director", "06/03-12/06", institution=""),
+    ]
 
 
 if __name__ == "__main__":
