@@ -41,7 +41,37 @@ def test_leaves_legitimate_content_untouched():
     assert _strip_taxonomy_code("") == ""
 
 
+def test_a_leading_grant_mechanism_is_stripped_by_the_shape_match():
+    """The measured cost of shape-matching instead of allow-listing (#735
+    review). "[R01]" fits `[A-Z]\\d{1,2}[A-Z]?` as exactly as "[D1]" does,
+    so a bullet that opens with a grant mechanism loses it.
+
+    Pinned rather than fixed, on a measurement: across the farm's 412
+    stage-3b/4/5/5b/5c/5d artifacts (1,326,667 string values) exactly 2
+    values begin with a bracketed token at all, both "[Editor]", and
+    neither matches this shape -- 0 false positives to fix. If that
+    measurement ever comes back non-zero, `_strip_taxonomy_code` says what
+    to switch to (the TAXONOMY_TO_SECTION key set) and this test is where
+    the change lands."""
+    assert _strip_taxonomy_code("[R01] Mechanism of injury") == (
+        "Mechanism of injury"
+    )
+    # and the same token mid-line is still safe, which is what bounds the cost
+    assert _strip_taxonomy_code("Grant [R01] awarded 2020") == (
+        "Grant [R01] awarded 2020"
+    )
+
+
+def test_a_bracketed_non_code_token_is_left_alone():
+    """The only leading bracketed token that actually occurs in the farm."""
+    assert _strip_taxonomy_code("[Editor] Journal of Examples") == (
+        "[Editor] Journal of Examples"
+    )
+
+
 if __name__ == "__main__":
     test_strips_leaked_taxonomy_codes()
     test_leaves_legitimate_content_untouched()
+    test_a_leading_grant_mechanism_is_stripped_by_the_shape_match()
+    test_a_bracketed_non_code_token_is_left_alone()
     print("OK")
