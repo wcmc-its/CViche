@@ -534,15 +534,16 @@ class ClinicalPracticeSection:
 
     def _insert_multiline_as_bullets(self, insert_idx: int, text: str, entry: dict | None = None,
                                        add_blank_before: bool = False) -> int:
-        """Insert multi-line text as separate bullets, one per line.
+        """Insert multi-part text as separate bullets, one per part.
 
         This is the STANDARD method for inserting bulleted content. It respects
-        the original document's line structure - if the source had multiple lines,
-        each becomes its own bullet.
+        the original document's structure - if the source had multiple lines or
+        tab-separated parts, each becomes its own bullet. `_bullet_parts` above
+        defines what counts as a part.
 
         Args:
             insert_idx: Index of paragraph to insert before
-            text: The text content (may contain newlines)
+            text: The text content (may contain newlines and tabs)
             entry: Optional entry dict for adding comments (attached to first bullet only)
             add_blank_before: If True, add a blank line before the first entry
 
