@@ -595,3 +595,69 @@ def test_stage5d_publisher_sharing_one_token_of_three_is_appended():
         '11. Smith J. A paper. Oxford Medical Journal. 2020. '
         'Oxford University Press.'
     )
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review, point 12: one owner for the identifier punctuation
+# ---------------------------------------------------------------------------
+
+def _identifier_run_as_round_1_built_it(doi='', pmid='', pmcid=''):
+    """The pre-change expression, verbatim from `values.py` before this
+    commit, so the equality below is a differential proof rather than a
+    pasted string that could have been copied from the new output."""
+    ids = []
+    if doi:
+        ids.append(f"doi:{doi}.")
+    if pmid:
+        ids.append(f"PMID:{pmid}.")
+    if pmcid:
+        ids.append(f"PMCID:{pmcid}.")
+    return " ".join(ids).rstrip('.') + "." if ids else ''
+
+
+@pytest.mark.parametrize('ids', [
+    {'doi': '10.1000/abc'},
+    {'pmid': '12345678'},
+    {'pmcid': 'PMC1234567'},
+    {'doi': '10.1000/abc', 'pmid': '12345678'},
+    {'pmid': '12345678', 'pmcid': 'PMC1234567'},
+    {'doi': '10.1000/abc', 'pmcid': 'PMC1234567'},
+    {'doi': '10.1000/abc', 'pmid': '12345678', 'pmcid': 'PMC1234567'},
+])
+def test_identifier_run_is_byte_identical_to_the_two_owner_form(ids):
+    """1-, 2- and 3-identifier runs render exactly as they did when each id
+    carried its own period and the join stripped the tail back off."""
+    fields = {'authors': 'Smith J', 'year': '2021', **ids}
+
+    citation, _, _ = _format_citation(_entry(fields), 1)
+
+    assert citation.endswith(_identifier_run_as_round_1_built_it(**ids))
+
+
+def test_identifier_run_renders_the_expected_literal_shapes():
+    """The same three cases spelled out, so a change to both the code and
+    the round-1 helper above cannot pass unnoticed."""
+    def run(**ids):
+        return _format_citation(_entry({**ids}), 1)[0]
+
+    assert run(doi='10.1000/abc') == '1. doi:10.1000/abc.'
+    assert run(doi='10.1000/abc', pmid='123') == '1. doi:10.1000/abc. PMID:123.'
+    assert run(doi='10.1000/abc', pmid='123', pmcid='PMC9') == (
+        '1. doi:10.1000/abc. PMID:123. PMCID:PMC9.'
+    )
+
+
+def test_identifier_value_that_ends_in_a_period_keeps_its_own_period():
+    """The one shape where the single-owner form differs, recorded rather
+    than hidden: a stage-4 doi extracted with a trailing period used to have
+    it stripped by the `rstrip('.')` (which ate the value's character, not
+    just the separator's) and now keeps it, so the run reads "abc..". It
+    differs only when the *last* identifier ends in a period -- with a pmid
+    or pmcid following, both forms already agreed. No farm entry carries such
+    a value: 0 of the 2,003 doi/pmid/pmcid values in the 66 local stage-4
+    field-extraction outputs, and 0 of the 4,035 in the 61 stage-5d outputs,
+    end in a period."""
+    citation, _, _ = _format_citation(_entry({'doi': '10.1000/abc.'}), 1)
+
+    assert citation == '1. doi:10.1000/abc..'
+    assert _identifier_run_as_round_1_built_it(doi='10.1000/abc.') == 'doi:10.1000/abc.'

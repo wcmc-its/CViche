@@ -200,14 +200,20 @@ def _format_citation(entry: Dict, num: int) -> Tuple[str, Optional[str], List[st
     pmcid = fields.get('pmcid', '')
 
     if doi:
-        ids.append(f"doi:{doi}.")
+        ids.append(f"doi:{doi}")
     if pmid:
-        ids.append(f"PMID:{pmid}.")
+        ids.append(f"PMID:{pmid}")
     if pmcid:
-        ids.append(f"PMCID:{pmcid}.")
+        ids.append(f"PMCID:{pmcid}")
 
     if ids:
-        parts.append(" ".join(ids).rstrip('.') + ".")  # Ensure single final period
+        # One owner for the punctuation (round-2 review of #481, point 12).
+        # Each id used to carry its own trailing period and the join then
+        # stripped the tail back off and re-added one, so two places decided
+        # the same character and the separator only worked because the strip
+        # undid it. The ids are built bare, the separator adds the period
+        # between them, and one period closes the run.
+        parts.append(". ".join(ids) + ".")
 
     citation = f"{num}. " + " ".join(parts)
     target_name = fields.get('target_name')
