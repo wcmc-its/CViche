@@ -11,6 +11,9 @@ const SAML_ERROR_MESSAGES: Record<string, string> = {
   saml_not_enabled: "SSO login is not available. Please use the standard sign-in form.",
   not_authorized: "You are not authorized to use CViche. Contact Paul Albert at paa2013@med.cornell.edu to request access.",
   directory_unavailable: "Unable to verify group membership. The directory service may be temporarily unavailable. Please try again in a few minutes.",
+  session_store_unavailable: "We could not start your session because the sign-in service is temporarily unavailable. Please try again in a few minutes.",
+  session_state_unavailable: "We could not start your session because sign-in state could not be read. Please try again in a few minutes, or contact IT support if this persists.",
+  session_revocation_failed: "You were signed out on this device, but we could not end your session on the server. Please try signing out again in a few minutes.",
 }
 
 export default function LoginPage() {

@@ -1232,7 +1232,7 @@ class TestPerRequestCheck:
 
         set_cached_membership("test0001", ACCESS_GROUP, ADMIN_GROUP,
                               MembershipResult(in_access_group=True, in_admin_group=False))
-        token = create_session_cookie(user)
+        token = create_session_cookie(user, db)
 
         response = client.get("/api/auth/me", cookies={COOKIE_NAME: token})
         assert response.status_code == 200
@@ -1253,7 +1253,7 @@ class TestPerRequestCheck:
 
         set_cached_membership("test0001", ACCESS_GROUP, ADMIN_GROUP,
                               MembershipResult(in_access_group=False, in_admin_group=False))
-        token = create_session_cookie(user)
+        token = create_session_cookie(user, db)
 
         response = client.get("/api/auth/me", cookies={COOKIE_NAME: token})
         assert response.status_code == 401
@@ -1272,7 +1272,7 @@ class TestPerRequestCheck:
         db.commit()
         db.refresh(user)
 
-        token = create_session_cookie(user)
+        token = create_session_cookie(user, db)
 
         response = client.get("/api/auth/me", cookies={COOKIE_NAME: token})
         assert response.status_code == 200
@@ -1639,7 +1639,7 @@ class TestEmptyAccessGroupFailsClosed:
         db.add(user)
         db.commit()
         db.refresh(user)
-        token = create_session_cookie(user)
+        token = create_session_cookie(user, db)
 
         response = client.get("/api/auth/me", cookies={COOKIE_NAME: token})
         assert response.status_code == 401

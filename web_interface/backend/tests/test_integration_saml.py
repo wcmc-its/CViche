@@ -278,7 +278,7 @@ class TestSamlErrorPaths:
 
         # No cached membership and ED is down -> 401
         mock_check_ed.side_effect = EdUnavailableError("Connection refused")
-        token = create_session_cookie(user)
+        token = create_session_cookie(user, db)
 
         response = client.get("/api/auth/me", cookies={COOKIE_NAME: token})
         assert response.status_code == 401

@@ -7,6 +7,7 @@ from urllib.parse import quote
 import app.api.steps as steps_mod
 from app.models import User, Run
 from app.auth import create_session_cookie, COOKIE_NAME
+from sqlalchemy.orm import object_session
 
 _ORIGINAL = "Eulho Jung_CV_JUN_2026_USU.docx"
 
@@ -24,7 +25,9 @@ def _user_and_run(db, role="user", suffix="", filename=_ORIGINAL, file_type="doc
 
 
 def _auth(client, user):
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user))
+    # create_session_cookie reads the current epoch from a DB session;
+    # `user` was just committed on the test's session, so borrow that one.
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, object_session(user)))
 
 
 class _LocalStorage:

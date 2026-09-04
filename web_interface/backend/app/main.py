@@ -3,7 +3,6 @@ import asyncio
 import logging
 import os
 import traceback
-from urllib.parse import urlsplit
 
 
 from fastapi import FastAPI, Request, Depends, Response, status
@@ -26,58 +25,18 @@ from app.database import init_db, get_db
 from app.middleware.request_id import RequestIDMiddleware
 from app.api import upload, runs, steps, websocket, auth_routes, consent_routes, feedback_routes, admin_routes, saml_routes
 from app.config_loader import get_config
-# ---------------------------------------------------------------------------
-# Allowed origins (env-configurable, comma-separated)
-# ---------------------------------------------------------------------------
-_LOCALHOST_ORIGINS = (
-    "http://localhost:3000,http://localhost:3001,http://localhost:5173,"
-    "http://127.0.0.1:3000,http://127.0.0.1:3001,http://127.0.0.1:5173"
-)
-
-
-def _resolve_allowed_origins() -> list[str]:
-    """Resolve allowed origins. Precedence: CVICHE_ALLOWED_ORIGINS env var,
-    then auth_config.yaml (where the deploy buildspec writes it, under `auth`),
-    then localhost dev defaults.
-
-    The deploy buildspec writes CVICHE_ALLOWED_ORIGINS into auth_config.yaml
-    rather than as an env var, so an env-only lookup silently fell back to the
-    localhost defaults in production -- which then rejected same-origin POST
-    requests from the real prod origin via the CSRF middleware below. Reading
-    the YAML as a fallback makes the configured value take effect.
-    """
-    raw, source = get_config("auth", "CVICHE_ALLOWED_ORIGINS", default=_LOCALHOST_ORIGINS)
-    if source == "default":
-        raw = _LOCALHOST_ORIGINS
-    return [o.strip() for o in raw.split(",") if o.strip()]
-    
-
-_allowed_origins = _resolve_allowed_origins()
-
-
-def _origin_key(origin: str) -> tuple[str, str, int] | None:
-    """Parse an Origin value into a comparable (scheme, host, port) triple.
-
-    Default ports are normalized so "https://host" == "https://host:443".
-    Returns None when unparseable (no scheme/host, bad port), which callers
-    must treat as not-allowed.
-    """
-    try:
-        parts = urlsplit(origin.strip())
-        host, port = parts.hostname, parts.port
-    except ValueError:
-        return None
-    if not parts.scheme or not host:
-        return None
-    if port is None:
-        port = {"http": 80, "https": 443}.get(parts.scheme, 0)
-    # urlsplit/.hostname already lowercase these, but normalize explicitly so a
-    # non-normalized configured origin (e.g. "HTTPS://Host") still compares equal.
-    return (parts.scheme.lower(), host.lower(), port)
-
-
-_allowed_origin_keys = frozenset(
-    key for key in (_origin_key(o) for o in _allowed_origins) if key is not None
+# Allowed origins live in app/origins.py so the WebSocket endpoint can share
+# the same allowlist (a WS upgrade gets neither a CORS check nor CSRFMiddleware).
+# Re-imported here under their original names: CSRFMiddleware and the CORS
+# middleware below read _origin_key/_allowed_origin_keys/_allowed_origins as
+# before, and _LOCALHOST_ORIGINS/_resolve_allowed_origins stay reachable as
+# app.main attributes for anything that already reads them there.
+from app.origins import (  # noqa: F401
+    _LOCALHOST_ORIGINS,
+    _resolve_allowed_origins,
+    _allowed_origins,
+    _origin_key,
+    _allowed_origin_keys,
 )
 
 

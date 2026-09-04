@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, contains_eager
 
 from app.database import get_db
 from app.models import User, Run, Feedback, SystemConfig, Consent
-from app.auth import require_admin, get_session_epoch
+from app.auth import require_admin, SessionEpochUnreadable
 from app.errors import not_found, validation_error
 from app.schemas import (
     AdminStats,
@@ -512,6 +512,30 @@ async def update_config(
 # ---------------------------------------------------------------------------
 # POST /api/admin/sessions/revoke-all
 # ---------------------------------------------------------------------------
+def _current_session_epoch(row) -> int:
+    """The epoch to bump from, read straight off the SystemConfig row.
+
+    Deliberately not auth.get_session_epoch(): that one fails closed on a
+    missing row (it must -- see #657 review, thread 9), but here a missing row
+    is the one benign case, an instance that has never been revoked. It is
+    written back below, so the next read is well-formed either way. An
+    unparseable value is still a misconfiguration and propagates as a 500
+    rather than resetting the counter to 0 and un-revoking every session.
+    """
+    if row is None:
+        return 0
+    try:
+        value = json.loads(row.value)
+    except (TypeError, ValueError) as exc:
+        raise SessionEpochUnreadable("session_epoch is not valid JSON") from exc
+    # bool first: it is an int subclass, so `true` would otherwise read as 1.
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise SessionEpochUnreadable(
+            "session_epoch is not an integer (got %s)" % type(value).__name__
+        )
+    return value
+
+
 @router.post("/admin/sessions/revoke-all")
 async def revoke_all_sessions(
     db: Session = Depends(get_db),
@@ -526,8 +550,8 @@ async def revoke_all_sessions(
     the only way to revoke stateless signed-cookie sessions before their TTL --
     use it after a credential leak, a permissions change, or to force re-auth.
     """
-    new_epoch = get_session_epoch(db) + 1
     row = db.query(SystemConfig).filter(SystemConfig.key == "session_epoch").first()
+    new_epoch = _current_session_epoch(row) + 1
     if row:
         row.value = json.dumps(new_epoch)
         row.updated_by = admin.id

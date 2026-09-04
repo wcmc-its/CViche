@@ -80,9 +80,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }
 
   const logout = async () => {
-    await authApi.logout()
-    setUser(null)
-    setConsentStatus(null)
+    // finally, not a plain sequence: logout answers 503 when the server-side
+    // session could not be revoked (see auth_routes.logout). The device must
+    // still end up signed out in that case -- the error is re-thrown so the
+    // caller can surface the failed revocation, but never at the cost of
+    // leaving stale auth state behind.
+    try {
+      await authApi.logout()
+    } finally {
+      setUser(null)
+      setConsentStatus(null)
+    }
   }
 
   // Clear in-memory auth state without calling the server. Used when the

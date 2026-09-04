@@ -1,0 +1,493 @@
+"""The /ws/run/{run_id}/stream upgrade path and the emitter's terminal dedup.
+
+PR #657 review, threads 1-7. Before this, the WebSocket endpoint accepted any
+origin, ran its authorization (a DB query plus a Valkey round trip) inline on
+the event loop, validated the session exactly once at upgrade, and replayed the
+terminal event with a raw send that could double-report a run's end.
+
+What is pinned here:
+  - An Origin that is present and not on the allowlist never gets a socket, and
+    is refused *before* authentication (thread 1). A missing Origin is allowed,
+    the same way CSRFMiddleware allows it.
+  - Authorization runs through run_in_threadpool, not on the event loop
+    (thread 2), and is the same authenticate_session_cookie REST runs (thread 3).
+  - An open socket re-checks its session on an interval and closes when the
+    session stops being valid -- 4001 when it is gone, 1013 when the store
+    cannot say (threads 4/5).
+  - A terminal event reaches any one socket at most once, whichever of the two
+    routes (live broadcast / connect-time replay) gets there first (thread 6),
+    and every event carries an event_id (thread 7).
+"""
+import asyncio
+import json
+import os
+import threading
+
+os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
+
+from unittest.mock import MagicMock
+
+import pytest
+import redis.exceptions
+from starlette.websockets import WebSocketDisconnect
+
+import app.api.websocket as ws_module
+import app.session_idle as session_idle
+from app.models import Run, SystemConfig, User
+from app.pipeline.event_emitter import EventEmitter
+from app.session_idle import IdleSessionStore
+
+_STREAM_URL = "/ws/run/{run_id}/stream"
+_ALLOWED_ORIGIN = "http://localhost:3000"
+_DISALLOWED_ORIGIN = "https://cviche.weill.cornell.edu.evil.example"
+
+
+# ---------------------------------------------------------------------------
+# Fixtures and helpers
+# ---------------------------------------------------------------------------
+
+def _fake_store(ttl=1200):
+    fakeredis = pytest.importorskip("fakeredis")
+    store = IdleSessionStore("redis://fake", ttl)  # truthy url -> enabled
+    store._client = fakeredis.FakeStrictRedis()
+    return store
+
+
+@pytest.fixture
+def idle_store(monkeypatch):
+    """Install a fake-backed idle store as the process singleton for a test."""
+    store = _fake_store()
+    monkeypatch.setattr(session_idle, "_store", store)
+    return store
+
+
+def _make_user(db, email="ws@example.com", role="user"):
+    user = User(email=email, display_name="WS User", role=role,
+                status="active", consent_version="1.0")
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+def _make_run(db, run_id, user_id, status="running", **fields):
+    run = Run(id=run_id, filename="cv.docx", file_type="docx", status=status,
+              user_id=user_id, **fields)
+    db.add(run)
+    db.commit()
+    return run
+
+
+def _set_epoch(db, value):
+    row = db.query(SystemConfig).filter(SystemConfig.key == "session_epoch").first()
+    encoded = json.dumps(value)
+    if row:
+        row.value = encoded
+    else:
+        db.add(SystemConfig(key="session_epoch", value=encoded))
+    db.commit()
+
+
+def _authenticate(client, db, user):
+    """Mint a real session cookie for `user`, install it, and return its sid."""
+    from app.auth import COOKIE_NAME, create_session_cookie, decode_session_cookie
+
+    _set_epoch(db, 0)
+    token = create_session_cookie(user, db)
+    client.cookies.set(COOKIE_NAME, token)
+    return decode_session_cookie(token).get("sid")
+
+
+def _expect_close(ws, timeout=5.0):
+    """Wait for the server to close an open socket; return the disconnect.
+
+    Bounded on purpose: a plain ws.receive_json() would hang the whole suite
+    forever if the server stopped closing (which is exactly the regression
+    these tests exist to catch), instead of failing.
+    """
+    outcome = {}
+
+    def receive():
+        try:
+            outcome["message"] = ws.receive_json()
+        except BaseException as exc:  # re-raised on the main thread below
+            outcome["exc"] = exc
+
+    worker = threading.Thread(target=receive, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    if worker.is_alive():
+        pytest.fail(f"socket still open after {timeout}s; expected the server to close it")
+    exc = outcome.get("exc")
+    assert isinstance(exc, WebSocketDisconnect), \
+        f"expected the server to close the socket, got {outcome!r}"
+    return exc
+
+
+def _connect(client, run_id, **kwargs):
+    return client.websocket_connect(_STREAM_URL.format(run_id=run_id), **kwargs)
+
+
+def _rejection(client, run_id, **kwargs):
+    """Open the socket expecting a refusal; return the WebSocketDisconnect.
+
+    Handles both shapes: a pre-accept close (the origin gate) surfaces as a
+    refused handshake and raises on entry, while a close after accept() -- what
+    every authorization failure does, so the browser sees the code -- raises on
+    the first receive.
+    """
+    try:
+        with _connect(client, run_id, **kwargs) as ws:
+            return _expect_close(ws)
+    except WebSocketDisconnect as exc:
+        return exc
+
+
+# ---------------------------------------------------------------------------
+# Origin allowlist (thread 1)
+# ---------------------------------------------------------------------------
+
+def test_disallowed_origin_is_refused_before_authentication(client, db, seed_simple_mode):
+    """A page on another origin must not be able to open an authenticated
+    stream with the user's cookie: a WS upgrade gets no CORS check and never
+    reaches CSRFMiddleware, so this endpoint has to check it itself.
+
+    No cookie is sent, and the *reason* is what proves the ordering -- the
+    origin gate answers first, so the auth gate is never reached.
+    """
+    exc = _rejection(client, "ABC123", headers={"origin": _DISALLOWED_ORIGIN})
+
+    assert exc.code == 4003
+    assert exc.reason == "Origin not allowed"
+
+
+def test_allowed_origin_passes_the_origin_gate(client, db, seed_simple_mode):
+    """An allowlisted origin reaches the next gate (authentication), which is
+    what rejects this unauthenticated connection."""
+    exc = _rejection(client, "ABC123", headers={"origin": _ALLOWED_ORIGIN})
+
+    assert exc.code == 4001
+    assert exc.reason == "Authentication required"
+
+
+def test_missing_origin_is_allowed(client, db, seed_simple_mode):
+    """Non-browser clients send no Origin; CSRFMiddleware permits those, and
+    this gate matches it rather than inventing a stricter rule for one route."""
+    exc = _rejection(client, "ABC123")
+
+    assert exc.code == 4001
+    assert exc.reason == "Authentication required"
+
+
+# ---------------------------------------------------------------------------
+# Authorization at upgrade (threads 2, 3)
+# ---------------------------------------------------------------------------
+
+def test_no_cookie_closes_4001(client, db, seed_simple_mode, idle_store):
+    exc = _rejection(client, "ABC123")
+    assert exc.code == 4001
+
+
+def test_unknown_run_closes_1008(client, db, seed_simple_mode, idle_store):
+    user = _make_user(db)
+    _authenticate(client, db, user)
+
+    exc = _rejection(client, "NOSUCH")
+
+    assert exc.code == 1008
+    assert exc.reason == "Run not found"
+
+
+def test_another_users_run_closes_4003(client, db, seed_simple_mode, idle_store):
+    owner = _make_user(db, email="owner@example.com")
+    intruder = _make_user(db, email="intruder@example.com")
+    _make_run(db, "OWNED1", owner.id)
+    _authenticate(client, db, intruder)
+
+    exc = _rejection(client, "OWNED1")
+
+    assert exc.code == 4003
+    assert exc.reason == "Access denied"
+
+
+def test_store_outage_at_upgrade_closes_1013(client, db, seed_simple_mode, monkeypatch):
+    """The store is configured but unreachable: we cannot tell whether the
+    session is valid, so the socket is refused with "try again later" (1013),
+    never opened on an unverifiable session (D1's fail-closed policy)."""
+    from app.auth import COOKIE_NAME, _serializer
+
+    broken = IdleSessionStore("redis://fake", 1200)
+    broken._client = MagicMock()
+    broken._client.get.side_effect = redis.exceptions.ConnectionError("valkey down")
+    monkeypatch.setattr(session_idle, "_store", broken)
+
+    user = _make_user(db)
+    _make_run(db, "RUN013", user.id)
+    client.cookies.set(COOKIE_NAME, _serializer.dumps({"v": 2, "sid": "live-sid"}))
+
+    exc = _rejection(client, "RUN013")
+
+    assert exc.code == 1013
+
+
+def test_authorized_socket_receives_the_terminal_replay(client, db, seed_simple_mode, idle_store):
+    """Happy path: an authenticated owner gets an open socket, and the run's
+    terminal status is replayed to it on connect."""
+    user = _make_user(db)
+    _make_run(db, "DONE01", user.id, status="complete", total_cost=1.25, total_tokens=42)
+    _authenticate(client, db, user)
+
+    with _connect(client, "DONE01", headers={"origin": _ALLOWED_ORIGIN}) as ws:
+        message = ws.receive_json()
+
+    assert message["event"] == "RUN_COMPLETE"
+    assert message["total_cost"] == 1.25
+    assert message["total_tokens"] == 42
+    # Stamped like every other emitted event (thread 7).
+    assert message["event_id"]
+    assert message["timestamp"]
+
+
+def test_authorization_and_snapshot_run_off_the_event_loop(
+    client, db, seed_simple_mode, idle_store, monkeypatch
+):
+    """Both blocking steps at upgrade go through run_in_threadpool.
+
+    Run inline, one upgrade's DB query plus Valkey round trip stalls delivery
+    on every other socket this worker holds (thread 2). Asserted by recording
+    what actually went through the offload, not by reading the source.
+    """
+    calls = []
+    real_run_in_threadpool = ws_module.run_in_threadpool
+
+    async def recording(func, *args, **kwargs):
+        calls.append(func.__name__)
+        return await real_run_in_threadpool(func, *args, **kwargs)
+
+    monkeypatch.setattr(ws_module, "run_in_threadpool", recording)
+
+    user = _make_user(db)
+    _make_run(db, "DONE02", user.id, status="complete")
+    _authenticate(client, db, user)
+
+    with _connect(client, "DONE02") as ws:
+        ws.receive_json()
+
+    assert "_authorize_stream" in calls
+    assert "_terminal_snapshot" in calls
+
+
+# ---------------------------------------------------------------------------
+# Periodic re-validation (threads 4, 5)
+# ---------------------------------------------------------------------------
+
+def test_revoked_session_closes_an_open_socket(
+    client, db, seed_simple_mode, idle_store, monkeypatch
+):
+    """A socket outlives its session otherwise: a logout or "sign out everyone"
+    was honored only on the next REST request, while the stream kept running
+    for the life of the run."""
+    monkeypatch.setattr(ws_module, "_REVALIDATE_SECONDS", 0.05)
+
+    user = _make_user(db)
+    _make_run(db, "LIVE01", user.id, status="running")
+    sid = _authenticate(client, db, user)
+
+    with _connect(client, "LIVE01") as ws:
+        # Revoke server-side, exactly as logout does.
+        idle_store.end(sid)
+        closed = _expect_close(ws)
+
+    assert closed.code == 4001
+    assert closed.reason == "Session no longer valid"
+
+
+def test_store_outage_during_revalidation_closes_1013(
+    client, db, seed_simple_mode, idle_store, monkeypatch
+):
+    """Same fail-closed rule mid-stream as at upgrade: an unreachable store is
+    "we cannot tell", which closes the socket, not "assume it is fine"."""
+    monkeypatch.setattr(ws_module, "_REVALIDATE_SECONDS", 0.05)
+
+    user = _make_user(db)
+    _make_run(db, "LIVE02", user.id, status="running")
+    _authenticate(client, db, user)
+
+    with _connect(client, "LIVE02") as ws:
+        broken_client = MagicMock()
+        broken_client.get.side_effect = redis.exceptions.ConnectionError("valkey down")
+        idle_store._client = broken_client
+        closed = _expect_close(ws)
+
+    assert closed.code == 1013
+
+
+def test_revalidation_does_not_slide_the_idle_window(
+    client, db, seed_simple_mode, idle_store, monkeypatch
+):
+    """An abandoned tab must still idle out. Re-validation reads the session
+    record; it must never refresh its TTL, or an open socket would keep its own
+    session alive forever."""
+    monkeypatch.setattr(ws_module, "_REVALIDATE_SECONDS", 0.05)
+    touches = []
+    real_touch = idle_store.touch
+
+    def recording_touch(sid):
+        touches.append(sid)
+        return real_touch(sid)
+
+    monkeypatch.setattr(idle_store, "touch", recording_touch)
+
+    user = _make_user(db)
+    _make_run(db, "LIVE03", user.id, status="running")
+    sid = _authenticate(client, db, user)
+
+    with _connect(client, "LIVE03") as ws:
+        idle_store.end(sid)
+        _expect_close(ws)
+
+    # Exactly one touch: the upgrade itself (opening a stream IS user
+    # activity). Every later re-validation passes touch_idle=False.
+    assert touches == [sid]
+
+
+# ---------------------------------------------------------------------------
+# Emitter: terminal dedup and event_id (threads 6, 7)
+# ---------------------------------------------------------------------------
+
+class _RecordingSocket:
+    """A stand-in for a Starlette WebSocket that records what it was sent."""
+
+    def __init__(self):
+        self.sent = []
+
+    async def accept(self):
+        return None
+
+    async def send_text(self, message: str):
+        self.sent.append(json.loads(message))
+
+
+def _event_names(socket):
+    return [message["event"] for message in socket.sent]
+
+
+def _run(coro_fn):
+    asyncio.run(coro_fn())
+
+
+def test_terminal_event_once_when_replay_precedes_the_live_event():
+    emitter = EventEmitter()
+    socket = _RecordingSocket()
+
+    async def scenario():
+        await emitter.connect("R1", socket)
+        await emitter.send_direct("R1", socket, {"event": "RUN_COMPLETE", "total_cost": 1.0})
+        await emitter.emit_run_complete("R1", 1.0, 10, 5)
+
+    _run(scenario)
+
+    assert _event_names(socket) == ["RUN_COMPLETE"]
+
+
+def test_terminal_event_once_when_the_live_event_precedes_the_replay():
+    """The other order: a client that connects in the same instant the run
+    finishes gets the broadcast first and the replay second."""
+    emitter = EventEmitter()
+    socket = _RecordingSocket()
+
+    async def scenario():
+        await emitter.connect("R1", socket)
+        await emitter.emit_run_failed("R1", "boom", 3)
+        await emitter.send_direct("R1", socket, {"event": "RUN_FAILED", "error": "boom", "step": 3})
+
+    _run(scenario)
+
+    assert _event_names(socket) == ["RUN_FAILED"]
+
+
+class _InterleavingSocket(_RecordingSocket):
+    """A _RecordingSocket whose send_text yields control once before
+    recording, so two coroutines racing to deliver to the same socket can
+    both pass a dedup check made before the yield."""
+
+    async def send_text(self, message: str):
+        await asyncio.sleep(0)
+        await super().send_text(message)
+
+
+def test_terminal_event_once_when_replay_and_live_delivery_interleave():
+    """The replay (send_direct) and a live broadcast (_deliver_local) can run
+    concurrently: a client connecting in the same instant the run finishes.
+    If send_text yields before the dedup mark is claimed, both routes can
+    pass the membership check before either marks, and the socket is told
+    twice (#657 review, thread 6)."""
+    emitter = EventEmitter()
+    socket = _InterleavingSocket()
+
+    async def scenario():
+        await emitter.connect("R1", socket)
+        await asyncio.gather(
+            emitter.send_direct("R1", socket, {"event": "RUN_COMPLETE", "total_cost": 1.0}),
+            emitter.emit_run_complete("R1", 1.0, 10, 5),
+        )
+
+    _run(scenario)
+
+    assert _event_names(socket) == ["RUN_COMPLETE"]
+
+
+def test_non_terminal_events_are_never_deduped():
+    """The dedup is scoped to the three run-ending events; a run emits many
+    LOG/PROGRESS events and every one of them must arrive."""
+    emitter = EventEmitter()
+    socket = _RecordingSocket()
+
+    async def scenario():
+        await emitter.connect("R1", socket)
+        await emitter.emit_log("R1", 1, "first")
+        await emitter.emit_log("R1", 1, "second")
+        await emitter.emit_log("R1", 1, "third")
+
+    _run(scenario)
+
+    assert _event_names(socket) == ["LOG", "LOG", "LOG"]
+    assert [m["message"] for m in socket.sent] == ["first", "second", "third"]
+
+
+def test_disconnect_clears_the_terminal_mark():
+    """A reconnecting client is a new socket and must be told again -- and the
+    mark must not outlive the socket, or the set grows for the life of the
+    process."""
+    emitter = EventEmitter()
+    socket = _RecordingSocket()
+
+    async def scenario():
+        await emitter.connect("R1", socket)
+        await emitter.send_direct("R1", socket, {"event": "RUN_CANCELLED"})
+        emitter.disconnect("R1", socket)
+        await emitter.connect("R1", socket)
+        await emitter.send_direct("R1", socket, {"event": "RUN_CANCELLED"})
+
+    _run(scenario)
+
+    assert _event_names(socket) == ["RUN_CANCELLED", "RUN_CANCELLED"]
+
+
+def test_every_event_carries_a_distinct_event_id():
+    """event_id lets a consumer recognize the same event arriving twice rather
+    than inferring it from field equality. Additive: the frontend switches on
+    `event` and ignores unknown keys."""
+    emitter = EventEmitter()
+    socket = _RecordingSocket()
+
+    async def scenario():
+        await emitter.connect("R1", socket)
+        await emitter.emit_log("R1", 1, "same")
+        await emitter.emit_log("R1", 1, "same")
+
+    _run(scenario)
+
+    ids = [m["event_id"] for m in socket.sent]
+    assert all(ids)
+    assert len(set(ids)) == 2

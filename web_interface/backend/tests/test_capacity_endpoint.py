@@ -9,6 +9,7 @@ tests pin that contract.
 from unittest.mock import patch
 
 from app.models import User
+from sqlalchemy.orm import object_session
 
 
 def _make_user(db):
@@ -26,7 +27,9 @@ def _make_user(db):
 
 def _auth(client, user):
     from app.auth import create_session_cookie, COOKIE_NAME
-    client.cookies.set(COOKIE_NAME, create_session_cookie(user))
+    # create_session_cookie reads the current epoch from a DB session;
+    # `user` was just committed on the test's session, so borrow that one.
+    client.cookies.set(COOKIE_NAME, create_session_cookie(user, object_session(user)))
 
 
 def test_capacity_available_when_below_cap(client, db, seed_simple_mode):
