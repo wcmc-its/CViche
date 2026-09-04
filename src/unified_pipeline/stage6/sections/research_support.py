@@ -348,7 +348,7 @@ class ResearchSupportSection:
                 potential_name = parts[-1].strip()
                 # Check if it looks like a name:
                 # - Not just digits/dates
-                # - Matches name pattern (First Last or Last, First)
+                # - Matches the whitespace-separated name pattern below
                 # - Short enough to be a name (< 50 chars)
                 # - Doesn't contain project/grant keywords
                 project_keywords = ['project', 'study', 'grant', 'research', 'program', 'trial',
@@ -357,7 +357,13 @@ class ResearchSupportSection:
                     len(potential_name) < 50 and
                     not re.match(r'^[\d\-/]+$', potential_name) and
                     not any(kw in potential_name.lower() for kw in project_keywords)):
-                    # Check for name patterns (First Last or Last, First)
+                    # "First Last" or "First M. Last" -- whitespace-separated
+                    # only. "Last, First" is NOT supported: the comma form never
+                    # matches this pattern, so "Smith, Jane" in the trailing cell
+                    # is left alone rather than half-parsed (review thread
+                    # 3932312407 item 4). Teaching the pattern the comma form
+                    # would change rendered PI names across the corpus, so it is
+                    # a measured change, not a comment fix.
                     if re.match(r'^[A-Z][a-z]+(?:\s+[A-Z]\.?)?\s+[A-Z][a-z]+$', potential_name):
                         pi_name = potential_name
 
