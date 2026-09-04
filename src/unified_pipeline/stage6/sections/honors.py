@@ -477,20 +477,33 @@ def parse_honor_entry(entry: Mapping) -> list[HonorRecord]:
                                      granting_body, date)]
 
 
+# A year or a year range, in either of the two dash characters CVs use.
+# Shared by the leading and the trailing half of `_split_award_year` so the
+# two cannot drift apart again (#733 review): the trailing half used to
+# accept a bare year only, so "2015-2017 Award" parsed and "Award 2015-2017"
+# did not, despite the function's contract naming ranges.
+_YEAR_OR_RANGE = (r'(?:19|20)\d{2}(?:\s*[-–]\s*(?:(?:19|20)\d{2}|present))?')
+
+_LEADING_YEAR_RE = re.compile(r'^\s*(' + _YEAR_OR_RANGE + r')\b[\s,.:–-]*',
+                              re.IGNORECASE)
+_TRAILING_YEAR_RE = re.compile(r'(?:^|[\s,(])(' + _YEAR_OR_RANGE
+                               + r')\s*[).]?\s*$', re.IGNORECASE)
+
+
 def _split_award_year(text: str) -> tuple[str, str]:
     """Split an award line into (name-without-year, year-or-range).
 
     Handles the shapes the honors fallback parser actually sees (#229):
     leading years/ranges ("2020 AECT ...", "2015-2017 Featured ...") and
-    trailing years with punctuation ("..., August 2025." / "... (2021)").
-    Returns the original text and '' when no year is found.
+    trailing years and ranges with punctuation ("..., August 2025." /
+    "... (2021)" / "... 2015–2017"). Leading and trailing accept the same
+    year grammar, hyphen or en-dash. Returns the original text and '' when
+    no year is found.
     """
-    m = re.match(r'^\s*((?:19|20)\d{2}(?:\s*[-–]\s*'
-                 r'(?:(?:19|20)\d{2}|present))?)\b[\s,.:–-]*',
-                 text, re.IGNORECASE)
+    m = _LEADING_YEAR_RE.match(text)
     if m:
         return text[m.end():].strip(' ,.;'), m.group(1)
-    m = re.search(r'(?:^|[\s,(])((?:19|20)\d{2})\s*[).]?\s*$', text)
+    m = _TRAILING_YEAR_RE.search(text)
     if m:
         cleaned = text[:m.start()].rstrip(' ,.(;')
         # "..., August 2025." leaves a dangling month — drop it too
