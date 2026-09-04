@@ -341,7 +341,9 @@ def test_an_authorship_marker_does_not_stop_a_token_being_initials():
     author marker) because `str.isupper()` ignores the asterisk, while
     `_looks_like_initials` rejected it on `str.isalpha()`. The marks are
     stripped in the one predicate instead, so both paths accept them --
-    5 of the farm's author strings are this shape."""
+    4 of the farm's 1,711 distinct author strings are this shape, the same
+    number `_INITIALS_TRAILING_MARKS` cites, regenerated with
+    `scripts/measure_normalization_claims.py --only marks`."""
     assert _cite('Alpha, PL*, Bravo, JW*') == '1. Alpha PL*, Bravo JW*. A Study.'
 
 
