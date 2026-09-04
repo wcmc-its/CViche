@@ -208,7 +208,10 @@ def _format_currency(value) -> str:
     the same fallback an unparseable string takes: the original text, rather
     than an exception raised into a caller that has no handler, or -- the
     round-3 defect that bound now closes -- an unbounded materialisation of the
-    digits inside `int()`.
+    digits inside `int()`. Zero is exempt from the bound and renders "$0" at
+    any exponent, because `adjusted()` on a zero reports its exponent and not
+    0; without the exemption "0E+999999999" came back as its own text, which
+    is a genuine zero turned into prose.
 
     Not total, and deliberately not claimed to be: an `int` at or past
     10**4301 raises ValueError out of the `str(value)` on the way in, above
@@ -257,6 +260,21 @@ def _format_currency(value) -> str:
             # OverflowError, which the except clause did not catch and which
             # escaped this function. Both now return the original string.
             return value_str
+        # Zero is an amount at every exponent, and it has to be answered
+        # BEFORE the magnitude bound, because `adjusted()` on a zero is its
+        # exponent rather than 0: Decimal('0E+999999999').adjusted() is
+        # 999999999. The bound would therefore read a genuine zero as
+        # oversized and return the raw text "0E+999999999" -- undoing, for
+        # that one spelling of zero, the fix two commits earlier in this same
+        # PR (a $0 annual direct cost is an amount, not an absence). Answering
+        # first cannot reintroduce the hang the bound exists to prevent: a
+        # zero has no digits to materialise, and `int()`, `to_integral_value()`
+        # and `is_zero()` on Decimal('0E+2000000000') all return in under
+        # 30 microseconds. Unreachable through the corpus (no stage-4 cost
+        # field is in exponent form) and reachable through the API, which
+        # accepts whatever JSON stage 4 wrote.
+        if num.is_zero():
+            return '$0'
         # Bound the magnitude before anything materialises the digits. This
         # cannot be an exception handler: past this point `int()` does not
         # raise, it runs -- for minutes, on eleven characters of input (see

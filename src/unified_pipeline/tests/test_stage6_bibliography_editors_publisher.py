@@ -477,6 +477,34 @@ def test_format_currency_zero_is_an_amount_not_an_absence(value):
     assert _format_currency(value) == '$0'
 
 
+@pytest.mark.parametrize('value', [
+    '0E+999999999', '-0E+999999999', '0e+25', '0E-999999999',
+    Decimal('0E+999999999'), Decimal('0E+2000000000'),
+])
+def test_format_currency_zero_is_still_an_amount_in_exponent_form(value):
+    """Round 5. `Decimal.adjusted()` on a zero is its *exponent*, not 0 --
+    Decimal('0E+999999999').adjusted() is 999999999 -- so the magnitude bound
+    added in this PR read every exponent-form zero as oversized and returned
+    its raw text. Measured across the arms: '0E+999999999' rendered '$0' on
+    b77d766 and on df43344, and '0E+999999999' (the text) at 11fe9f7. That is
+    a genuine zero turned into prose, and it undoes df43344's own fix for one
+    spelling of zero.
+
+    Unreachable through the corpus -- no stage-4 cost field is in exponent
+    form -- and reachable through the API, which renders whatever JSON stage 4
+    wrote. Answering zero before the bound cannot reintroduce the hang: a zero
+    has no digits to materialise."""
+    assert _format_currency(value) == '$0'
+
+
+def test_the_zero_exemption_does_not_widen_the_magnitude_bound():
+    """The exemption is for zero alone. The smallest non-zero value at the
+    same exponent still takes the fallback, so "past the bound" has not
+    quietly become "past the bound unless it starts with a 0"."""
+    assert _format_currency('1E+25') == '1E+25'
+    assert _format_currency('0.0000001E+25') == '$1,000,000,000,000,000,000'
+
+
 @pytest.mark.parametrize('value', [None, '', '   ', '\t'])
 def test_format_currency_absent_values_still_render_empty(value):
     """The other half of point 4: making zero render must not make an
