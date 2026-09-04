@@ -138,6 +138,21 @@ _MAX_ORG_SHARE_OF_TEXT = 0.7
 # A comma segment longer than this is a sentence, not an organization name.
 _MAX_ORG_SEGMENT_WORDS = 10
 
+# "Society of Fictional Medicine Mentoring Award" -- a granting body named
+# at the START of the award text. Two different questions are being asked
+# here and they need two different case rules (#733 review): the
+# institutional keyword and the award vocabulary are matched
+# case-insensitively, because a CV writes them however it likes, while
+# `[A-Z]` is the signal that what follows "of"/"for" is a PROPER NAME and
+# must stay case-sensitive. Compiling the whole pattern with re.IGNORECASE
+# made `[A-Z]` match a lowercase letter, so the branch accepted text with no
+# proper name in it at all -- exactly what the check was there to reject.
+_NAMED_BODY_RE = re.compile(
+    r'((?i:(?:Medical\s+)?' + _ORG_KEYWORDS
+    + r'\s+(?:of|for)\s+(?:the\s+)?(?:State\s+of\s+)?)'
+    r'[A-Z][\w\s.-]+?)'
+    r'(?i:\s+(?:Mentoring|Award|Certificate|Medical\s+Student|Grant))')
+
 
 @dataclass(frozen=True, slots=True)
 class HonorRecord:
@@ -651,12 +666,7 @@ def _extract_organization_from_award(text: str) -> str:
                 return seg
 
     # Strategy 3: "Association/Society of X" at start of text
-    m = re.match(
-        r'((?:Medical\s+)?' + _ORG_KEYWORDS
-        + r'\s+(?:of|for)\s+(?:the\s+)?(?:State\s+of\s+)?'
-        r'[A-Z][\w\s.-]+?)(?:\s+(?:Mentoring|Award|Certificate|Medical\s+Student|Grant))',
-        text, re.IGNORECASE
-    )
+    m = _NAMED_BODY_RE.match(text)
     if m:
         return m.group(1).strip().rstrip('.,;')
 
