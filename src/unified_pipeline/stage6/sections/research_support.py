@@ -20,7 +20,6 @@ editing this file, not just stage 4 (CODING_STANDARDS.md §7.3).
 """
 import re
 from datetime import datetime
-from typing import Dict, List, Optional
 
 try:
     from docx.table import Table
@@ -55,7 +54,12 @@ RESEARCH_SUPPORT_SECTIONS = (
 class ResearchSupportSection:
     """Section M2 writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_research_support(self, entries_by_code: Dict[str, List[Dict]], cv_owner: Dict = None, document_uid: str = ''):
+    def _fill_research_support(
+        self,
+        entries_by_code: dict[str, list[dict]],
+        cv_owner: dict | None = None,
+        document_uid: str = '',
+    ):
         """Fill research support section with individual tables per grant.
 
         Creates a table for each grant with the WCM data model:
@@ -252,7 +256,14 @@ class ResearchSupportSection:
                         if spacing_para is not None:
                             last_element = spacing_para
 
-    def _create_grant_table(self, fields: Dict, code: str, entry: Dict = None, insert_after_element=None, owner_name: str = '') -> Optional[Table]:
+    def _create_grant_table(
+        self,
+        fields: dict,
+        code: str,
+        entry: dict | None = None,
+        insert_after_element=None,
+        owner_name: str = '',
+    ) -> Table | None:
         """Create an individual grant table with the WCM data model.
 
         Args:
@@ -440,7 +451,7 @@ class ResearchSupportSection:
 
         return table
 
-    def _format_grant_duration(self, fields: Dict, taxonomy_code: str = 'M2A') -> str:
+    def _format_grant_duration(self, fields: dict, taxonomy_code: str = 'M2A') -> str:
         """Format grant duration according to WCM requirements.
 
         Grants use mm/yy format per the template.
