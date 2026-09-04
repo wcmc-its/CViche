@@ -76,6 +76,12 @@ _MIN_LINE_HEADER_KEYWORDS = 2
 # a runaway blob cannot fill the cell.
 _MAX_RAW_AWARD_CHARS = 150
 
+# The WCM template's H table: award | organization | date awarded (yyyy).
+_HONORS_TABLE_COLUMNS = 3
+
+# How many rows were written into a table that does not have those columns.
+_FALLBACK_SCHEMA_STAT = 'honors_fallback_table_schema'
+
 # "MD" (from "Bethesda, MD") and "Bloomington" are comma segments the
 # short-proper-noun org fallback happily returns (#229) — never treat a
 # bare state abbreviation as an organization.
@@ -472,6 +478,16 @@ def _record_for_single_award(original_text: str,
                        granting_body, date)
 
 
+def _award_with_organization(record: HonorRecord) -> str:
+    """Award and granting body in one cell, for a template variant whose
+    honors table has no organization column of its own."""
+    if not record.organization:
+        return record.award
+    if not record.award:
+        return record.organization
+    return f"{record.award}, {record.organization}"
+
+
 def parse_honor_entry(entry: Mapping) -> list[HonorRecord]:
     """Every honors row one stage-5 entry should render as.
 
@@ -682,6 +698,21 @@ def _extract_organization_from_award(text: str) -> str:
 class HonorsSection:
     """Section H writers, mixed into `WCMTemplateGenerator`."""
 
+    def _note_honors_schema_fallback(self, num_cols: int):
+        """Record that the honors table is not the template's three columns.
+
+        Counted per row so the shortfall is measurable, warned once per
+        document so a CV with thirty honors does not write thirty identical
+        lines. No CV content is logged -- only the shape.
+        """
+        seen = self.stats.get(_FALLBACK_SCHEMA_STAT, 0)
+        self.stats[_FALLBACK_SCHEMA_STAT] = seen + 1
+        if not seen:
+            logger.warning(
+                "Honors table has %d column(s), not the template's %d; "
+                "folding the granting body into the award cell for this "
+                "document's honors rows.", num_cols, _HONORS_TABLE_COLUMNS)
+
     def _split_award_year(self, text: str) -> tuple[str, str]:
         """Pinned class surface for the module-level parser of the same name."""
         return _split_award_year(text)
@@ -731,20 +762,38 @@ class HonorsSection:
                 self._add_honors_row(table, record)
 
     def _add_honors_row(self, table, record: HonorRecord):
-        """Add a single row to the honors table."""
+        """Add a single row to the honors table.
+
+        The WCM template's H table is three columns -- award, organization,
+        date. A template variant with fewer columns has nowhere to put the
+        organization, and the narrower branches used to silently drop it,
+        producing a valid-looking DOCX with the granting body missing (#733
+        review). A renderer must not abort a document over a template
+        variant, so the alternate schema is supported explicitly instead:
+        the granting body is folded into the award cell, and the
+        degradation is counted and logged rather than swallowed (§5.4).
+        """
+        num_cols = len(table.columns)
+        if num_cols < 1:
+            self._note_honors_schema_fallback(num_cols)
+            return
+
         row = table.add_row()
         num_cols = len(row.cells)
 
-        if num_cols >= 3:
+        if num_cols >= _HONORS_TABLE_COLUMNS:
             row.cells[0].text = record.award
             row.cells[1].text = record.organization
             row.cells[2].text = record.date
-        elif num_cols >= 2:
-            row.cells[0].text = record.award
-            row.cells[1].text = record.date
         else:
-            row.cells[0].text = (f"{record.award} ({record.date})"
-                                 if record.date else record.award)
+            self._note_honors_schema_fallback(num_cols)
+            label = _award_with_organization(record)
+            if num_cols >= 2:
+                row.cells[0].text = label
+                row.cells[1].text = record.date
+            else:
+                row.cells[0].text = (f"{label} ({record.date})"
+                                     if record.date else label)
 
         # Apply font formatting to each cell
         for cell in row.cells:
