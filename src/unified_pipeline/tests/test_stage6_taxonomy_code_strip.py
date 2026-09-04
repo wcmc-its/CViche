@@ -47,11 +47,11 @@ def test_a_leading_grant_mechanism_is_stripped_by_the_shape_match():
     so a bullet that opens with a grant mechanism loses it.
 
     Pinned rather than fixed, on a measurement
-    (`scripts/measure_normalization_claims.py --only taxonomy`): across the
-    farm's 412 stage-3b/4/5/5b/5c/5d artifacts (1,326,667 string values)
-    exactly 2 values begin with a bracketed token at all, one distinct
-    token between them, and it does not match this shape -- 0 false
-    positives to fix. If that measurement ever comes back non-zero,
+    (`scripts/measure_normalization_claims.py --only taxonomy`): across
+    every stage that stores JSON, `values opening with a [token] : 2`,
+    one distinct token between them, and `matching
+    _TAXONOMY_CODE_PREFIX : 0` -- no false positive to fix.
+    If that measurement ever comes back non-zero,
     `_strip_taxonomy_code` says what to switch to (the TAXONOMY_TO_SECTION
     key set) and this test is where the change lands."""
     assert _strip_taxonomy_code("[R01] Mechanism of injury") == (

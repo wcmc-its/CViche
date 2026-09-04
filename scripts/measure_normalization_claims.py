@@ -59,13 +59,14 @@ from unified_pipeline.stage6.normalization.taxonomy import (  # noqa: E402
 # from field extraction onward. Stage 3b has no extracted fields yet.
 _AUTHOR_STAGE_DIRS = (
     "stage_4_field_extraction",
+    "stage_4_5_research_summary",
     "stage_5_enrichment",
     "stage_5b_institution_enrichment",
     "stage_5c_teaching_formatted",
     "stage_5d_citation_formatted",
 )
 
-# Every stage whose output a leaked taxonomy code could still be sitting in.
+# Every stage whose stored JSON a leaked taxonomy code could still be in.
 _TAXONOMY_STAGE_DIRS = ("stage_3b_classified_entries",) + _AUTHOR_STAGE_DIRS
 
 # The marks that are stripped OFF an initials group rather than read as part
@@ -73,8 +74,8 @@ _TAXONOMY_STAGE_DIRS = ("stage_3b_classified_entries",) + _AUTHOR_STAGE_DIRS
 _AUTHORSHIP_MARKS = _INITIALS_TRAILING_MARKS.replace(".", "")
 
 # The initials test `_parse_author_fallback` carried before the two paths were
-# unified: an ASCII-only 1-3 uppercase-letter regex, plus a case-blind
-# "2 characters or fewer and isupper()". Kept here, and only here, so the
+# unified: an ASCII-only 1-3 uppercase-letter regex, plus a
+# "2 characters or fewer and isupper()" test. Kept here, and only here, so the
 # disagreement the authors.py docstring cites stays reproducible.
 _LEGACY_INITIALS_GROUP_RE = re.compile(r"^[A-Z]{1,3}\.?$")
 

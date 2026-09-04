@@ -17,11 +17,11 @@ _TAXONOMY_CODE_PREFIX = re.compile(r"^\s*\[[A-Z]\d{1,2}[A-Z]?\]\s+")
 def _strip_taxonomy_code(text: str) -> str:
     """Drop a leading bracketed taxonomy code from bullet text before render.
 
-    A shape match, not an allowlist, so a bracketed
-    non-code such as "[R01]" is stripped too -- pinned by
-    `test_stage6_taxonomy_code_strip.py`. `measure_normalization_claims.py
-    --only taxonomy` says what that costs on the farm's 412 artifacts:
+    A shape match, not an allowlist, so a bracketed non-code such as "[R01]"
+    is stripped too -- pinned by `test_stage6_taxonomy_code_strip.py`, and
+    `measure_normalization_claims.py --only taxonomy` says what it costs:
 
+        artifacts read                   : 477
         values opening with a [token]    : 2
         those tokens, by shape           : {'Aaaaaa': 1}
         matching _TAXONOMY_CODE_PREFIX   : 0
