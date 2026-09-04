@@ -26,22 +26,29 @@ first shape to the second so both end at the same `format_date_range(..., 'I')`
 call and equivalent memberships cannot render two different date formats.
 
 An entry with no `organization` field goes to `_organization_fallback`, a
-dedicated extractor: it prefers a structured alias field, otherwise takes the
-entry's FIRST fragment (newline/tab/pipe), lifts a trailing date range out of
-it into the date column, and separates a leading membership-type prefix so the
-type is prefixed by the normal path rather than baked into the organization
-name. That replaced a flat `original_text[:150]`, which put membership type,
-dates and unrelated trailing source text into the organization cell. Every
-fallback is counted in `stats['membership_organization_fallbacks']` and logged,
-because a recovered organization is a lower-confidence cell than an extracted
-one and the run should say so.
+dedicated extractor: it takes the entry's FIRST fragment (newline/tab/pipe),
+lifts a trailing date range out of it into the date column, and separates a
+leading membership-type prefix so the type is prefixed by the normal path
+rather than baked into the organization name -- then lets a structured alias
+field override whichever of the two values it names. That replaced a flat
+`original_text[:150]`, which put membership type, dates and unrelated trailing
+source text into the organization cell. Every fallback is counted in
+`stats['membership_organization_fallbacks']` and logged, because a recovered
+organization is a lower-confidence cell than an extracted one and the run
+should say so.
 
-That recovery is bounded by one rule: it may MOVE a word out of the
-organization cell -- a date into the date column, a membership type into the
-prefix `_organization_cell` writes back -- but it may never lose one.
-`_recovery_covers_text` checks it on every entry, and a recovery that fails
-renders the entry's whole raw text instead, which is the cell the section
-rendered before this extractor existed. A misread fragment can therefore cost
+The organization alias and the membership-type alias are read INDEPENDENTLY.
+Resolving them together cost 2082_Dr_Scot both of its memberships' roles: an
+`institution` field named the organization, the branch returned on it, and the
+`role` field sitting beside it never reached a cell.
+
+That recovery is bounded by one rule, with no exemptions: it may MOVE a word
+out of the organization cell -- a date into the date column, a membership type
+into the prefix `_organization_cell` writes back -- but it may never lose one.
+`_recovery_covers_text` checks it on every entry, alias-supplied or scanned,
+and a recovery that fails renders the entry's whole raw text instead, which is
+the cell the section rendered before this extractor existed. A misread
+fragment, or an alias that names less than the entry does, can therefore cost
 a row its improvement, never any of its content.
 
 Finding the table takes two tries. The heading text has changed across template
@@ -124,6 +131,16 @@ _FRAGMENT_SPLIT_RE = re.compile(r'[\n\t|]')
 _ORGANIZATION_FALLBACK_MAX_CHARS = 150
 # Field names other extraction shapes use for the same value as `organization`.
 _ORGANIZATION_FIELD_ALIASES = ('institution', 'organization_name', 'society')
+# ...and for the same value as `membership_type`. Stage 4 picks a field schema
+# per taxonomy code (stage4/schemas.py), so an entry that reaches section I
+# under a different code's schema names the role under that schema's key:
+# `role` is the one the farm actually produces (2082_Dr_Scot's memberships
+# carry the K-schema's course_code/institution/role shape), and
+# `fellowship_designation` is section I's own second designation field.
+# `position` is emitted by no schema at all and `title` only ever names a work
+# -- a publication, a talk, a patent -- so neither is a membership designation
+# and neither is listed here.
+_MEMBERSHIP_TYPE_FIELD_ALIASES = ('membership_type', 'fellowship_designation', 'role')
 # A written-out month is part of the date, not part of the organization name.
 # Full names and the three-letter abbreviations, with an optional period, and
 # only ever immediately in front of a year -- so "March 2018" is a date while
@@ -325,6 +342,31 @@ def _brackets_balanced(text: str) -> bool:
                for opener, closer in _BRACKET_PAIRS)
 
 
+def _first_field(fields: dict, aliases: tuple[str, ...]) -> str:
+    """The first non-empty value `fields` holds under any of `aliases`."""
+    for key in aliases:
+        value = str(fields.get(key) or '').strip()
+        if value:
+            return value
+    return ''
+
+
+def _structured_dates(fields: dict) -> str:
+    """The entry's own `start_date`/`end_date` as one raw range string.
+
+    Only the no-loss check reads this. The caller already prefers these fields
+    over anything the recovery lifts out of the text, so the check has to count
+    them as material that reaches the date column -- otherwise an entry whose
+    dates live in the fields rather than in a fragment the scanner recognizes
+    is refused for "losing" words the row does in fact render.
+    """
+    start = str(fields.get('start_date') or '').strip()
+    end = str(fields.get('end_date') or '').strip()
+    if start and end:
+        return f"{start}-{end}"
+    return start or end
+
+
 def _recovery_covers_text(text: str, recovered: MembershipFallback) -> bool:
     """True when every word of `text` still reaches a cell of the rendered row.
 
@@ -332,6 +374,13 @@ def _recovery_covers_text(text: str, recovered: MembershipFallback) -> bool:
     membership type into the prefix `_organization_cell` writes back -- but it
     is not allowed to lose any. Word-level and set-based, so re-ordering,
     punctuation, tabs and a repeated organization name all read as covered.
+
+    Dates are counted at the material that reaches the date column, not at the
+    precision the column prints: section I's date format is 'yyyy', so a
+    "1/1997" in the source renders as "1997" whether or not this recovery ever
+    ran. That narrowing is the column's own long-standing policy, applied to
+    every section I entry; this check is about the recovery, so it must not
+    read a policy loss as a recovery loss.
     """
     rendered = set(_tokens(' '.join((recovered.membership_type,
                                      recovered.organization,
@@ -398,6 +447,14 @@ def _organization_fallback(text: str, fields: dict) -> MembershipFallback:
        so the normal `_organization_cell` path prefixes it;
     3. that fragment truncated at a word boundary if it is still over-long.
 
+    The organization and the membership type are chosen INDEPENDENTLY, each
+    preferring its own structured alias and each falling back to the fragment
+    scan. Resolving them together -- returning early as soon as an alias named
+    the organization -- is what lost "Faculty Associate" off 2082_Dr_Scot's
+    "2016-present\\tFaculty Associate. Center for Southeast Asian Studies":
+    `institution` named the organization, so the `role` beside it was never
+    read and the type reached no cell at all.
+
     Skipping date-only and type-only fragments matters: extraction flattens a
     two-column source table into "1999\tSome Society..." and a pipe-joined
     record into "Fellow | Some Society | 1/1997-present", and taking fragment
@@ -413,31 +470,29 @@ def _organization_fallback(text: str, fields: dict) -> MembershipFallback:
     The organization it returns is empty only when the entry carries no text
     at all, so a non-blank entry cannot become a blank row through this path.
 
-    Every recovery is then checked against one invariant: the row may MOVE a
-    word out of the organization cell, never lose it. `_recovery_covers_text`
-    re-reads the entry's own words and requires each one to still land in the
-    organization, the membership type or the date. A recovery that fails goes
-    back to the whole raw text -- exactly the cell the section rendered before
-    this extractor existed, so a fragment the segmentation misread can only
-    cost the row its improvement, never any of its content. It fires on the
-    farm's tab-flattened two-column entries whose date half is written in a
-    shape the date test does not read ("2003-", "2018-Pres", "2008-12"): the
-    date half then reads as the organization and the real name, sitting in the
-    next fragment, would have been dropped.
+    EVERY recovery is then checked against one invariant, the alias-supplied
+    ones included: the row may MOVE a word out of the organization cell, never
+    lose it. `_recovery_covers_text` re-reads the entry's own words and
+    requires each one to still land in the organization, the membership type
+    or the date. A recovery that fails goes back to the whole raw text --
+    exactly the cell the section rendered before this extractor existed, so a
+    fragment the segmentation misread, or an alias field that names less than
+    the entry does, can only cost the row its improvement, never any of its
+    content. It fires on the farm's tab-flattened two-column entries whose
+    date half is written in a shape the date test does not read ("2003-",
+    "2018-Pres", "2008-12"): the date half then reads as the organization and
+    the real name, sitting in the next fragment, would have been dropped.
 
-    The structured-alias branch above is deliberately outside that check. An
-    alias field is an extraction result about the whole entry rather than a
-    re-segmentation of its text, so it is entitled to name the organization
-    without also accounting for the entry's dates and role words.
+    Round 2 exempted the structured-alias branch from that check, on the
+    argument that an alias field is an extraction result about the whole entry
+    rather than a re-segmentation of its text. The exemption is gone, because
+    that argument is wrong in the one way that matters: an alias names ONE
+    field, so it can be right about the organization and still leave the rest
+    of the entry unaccounted for. Nothing about the branch is exempt now --
+    what makes an alias-supplied row pass is that the type alias and the
+    entry's own date fields cover the words the organization alias does not.
     """
-    for key in _ORGANIZATION_FIELD_ALIASES:
-        value = str(fields.get(key) or '').strip()
-        if value:
-            return MembershipFallback('', value, '')
-
     fragments = [f.strip() for f in _FRAGMENT_SPLIT_RE.split(str(text or '')) if f.strip()]
-    if not fragments:
-        return MembershipFallback('', '', '')
 
     dates, membership_type, organization = '', '', ''
     for fragment in fragments:
@@ -455,10 +510,17 @@ def _organization_fallback(text: str, fields: dict) -> MembershipFallback:
         membership_type = membership_type or prefix
         organization = rest
 
+    # A structured field beats the scan for the value it names -- and only for
+    # that value.
+    membership_type = _first_field(fields, _MEMBERSHIP_TYPE_FIELD_ALIASES) or membership_type
+    organization = _first_field(fields, _ORGANIZATION_FIELD_ALIASES) or organization
+    dates = dates or _structured_dates(fields)
+
     if not organization:
-        # Every fragment was a date or a bare membership type. Keep the entry's
-        # own first fragment rather than render a blank cell.
-        membership_type, organization = '', fragments[0]
+        # Every fragment was a date or a bare membership type, and no field
+        # names one either. Keep the entry's own first fragment rather than
+        # render a blank cell.
+        membership_type, organization = '', (fragments[0] if fragments else '')
 
     recovered = MembershipFallback(membership_type, organization, dates)
     if not _recovery_covers_text(text, recovered):
