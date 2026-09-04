@@ -22,9 +22,34 @@ dropping content.
 `_insert_multiline_as_bullets` is the bullet fallback used by all three
 subsections (L2 joined L1 and L3 in #572; it used the single-bullet inserter,
 which collapsed a multi-line entry into one list paragraph with soft line
-breaks). It splits on newlines so a multi-line source entry becomes one bullet
-per line rather than one bullet containing embedded newlines, and attaches the
-entry's Word comments to the first bullet only.
+breaks). It segments through `_bullet_parts` and attaches the entry's Word
+comments to the first bullet only.
+
+`_bullet_parts` deliberately diverges from
+`unified_pipeline.core.render_check.entry_lines`, and exactly one input class
+separates them -- text containing a tab:
+
+    input             entry_lines       _bullet_parts   verdict
+    "A\\nB"            ["A", "B"]        ["A", "B"]      same
+    "A\\n\\n\\nB"        ["A", "B"]        ["A", "B"]      same
+    "  A  \\n  B  "    ["A", "B"]        ["A", "B"]      same
+    "" / None         []                []              same
+    "A|B"             ["A|B"]           ["A|B"]         same
+    "A\\tB"            ["A\\tB"]          ["A", "B"]      DIVERGES
+
+Tab is the divergence and the whole point of #476: the readers flatten a
+source CV's tab-aligned row into one string, and each fragment is a separate
+item. '|' is NOT a bullet boundary here -- it is this file's own column
+separator (see `_bullet_parts`), so a "Title | Institution | Dates" entry
+stays one item and is welded to " — " downstream by `_clean_inline_tabs`.
+That table is pinned by test_stage6_clinical_practice_fragments.py, which
+asserts the "same" rows against the real `entry_lines` rather than a copy of
+its rules.
+
+All three subsections hand their raw entry text straight to this helper. They
+did not always: L1 and L2 welded every tab away first and L3 kept only
+`split('\\t')[0]`, so the fragment split was dormant on L1/L2 and L3 deleted
+every fragment after the first from the rendered document (#476 review).
 """
 from ..formatting import (
     _clear_table_data,
@@ -42,16 +67,18 @@ def _bullet_parts(text: str) -> list[str]:
     (#476), split on '\\n' and '\\t' -- deliberately NOT '|'.
 
     '|' is this file's own column separator, used at every table-fill branch
-    below (`:258`, `:351`, `:431`) to pull Title/Location/Dates apart as
-    fields of ONE entry, never as a signal of separate entries -- splitting
-    on it here, inside the shared bullet writer all three subsections share,
-    would turn a single "Role | Institution | Dates" bullet into three wrong
-    ones. Tab is safe to add: L1 and L2's own callers (`:291`, `:371`)
-    already weld every tab in `bullet_text` away before calling this
-    function (`.replace('\\t', ' — ', 1).replace('\\t', ' ')`), so this never
-    fires for them; only L3's rare all-raw fallback (role, institution AND
-    dates all empty) can still pass a text with an unwelded tab, and a tab
-    there marks a genuinely separate item exactly the way '\\n' already does.
+    below to pull Title/Location/Dates apart as fields of ONE entry, never as
+    a signal of separate entries -- splitting on it here, inside the shared
+    bullet writer all three subsections use, would turn a single
+    "Role | Institution | Dates" bullet into three wrong ones. It stays one
+    part here and `_clean_inline_tabs` welds it to " — " on the way into the
+    paragraph.
+
+    '\\t' is the opposite: it is how the readers flatten a source CV's
+    tab-aligned row, and each fragment is its own item. All three of this
+    file's bullet-fallback branches now pass their raw entry text in, so this
+    split reaches production; see the module docstring for the exact table of
+    where this contract diverges from `entry_lines`.
     """
     parts = []
     for line in str(text or "").split("\n"):
@@ -285,8 +312,16 @@ class ClinicalPracticeSection:
                     # L1 clinical practice entries are narrative summaries —
                     # use the full original text rather than just the extracted
                     # clinical_role label, which loses the descriptive detail.
-                    # Clean up tab-delimited format from source CV.
-                    bullet_text = original_text.replace('\t', ' — ', 1).replace('\t', ' ') if '\t' in original_text else original_text
+                    # The text is handed through with its tabs intact so
+                    # `_insert_multiline_as_bullets` can give each flattened
+                    # part its own bullet (#476 review). This line used to weld
+                    # them first (`.replace('\t', ' — ', 1).replace('\t', ' ')`),
+                    # which turned the first tab into an em-dash and every
+                    # later tab into a bare space -- so a three-part row
+                    # rendered as ONE bullet with parts two and three run
+                    # together, and the fragment split below never fired at all
+                    # on this path.
+                    bullet_text = original_text
 
                     if bullet_text:
                         # Use multiline helper to properly split entries with multiple lines
@@ -366,7 +401,9 @@ class ClinicalPracticeSection:
                     original_text = entry.get('text', '').strip()
                     if _is_structural_label(entry):
                         continue
-                    bullet_text = original_text.replace('\t', ' — ', 1).replace('\t', ' ') if '\t' in original_text else original_text
+                    # Handed through with its tabs intact, exactly as L1
+                    # does above and for the same reason (#476 review).
+                    bullet_text = original_text
                     if bullet_text:
                         # Use multiline helper so a multi-line entry becomes
                         # one bullet per line, matching L1 and L3 (#572)
@@ -462,8 +499,18 @@ class ClinicalPracticeSection:
                     end_date = fields.get('end_date') or ''
                     dates = format_date_range(start_date, end_date, 'L3') or ''
 
+                    # Only the FIRST tab-separated fragment can stand in for
+                    # a missing role field. Everything after that first tab
+                    # used to be dropped on the floor here, so a flattened
+                    # "Role<TAB>Institution<TAB>Dates" row rendered as the
+                    # bare role and lost the other two parts outright (#476
+                    # review). `role_remainder` carries them to the bullet
+                    # writer instead, keeping their own '\t'/'\n' structure so
+                    # `_bullet_parts` gives each fragment its own bullet.
+                    role_remainder = ''
                     if not role and original_text:
-                        role = original_text.split('\t')[0].strip()
+                        role, _, role_remainder = original_text.partition('\t')
+                        role = role.strip()
 
                     if role and institution and dates:
                         bullet_text = f"{role}, {institution}, {dates}"
@@ -473,6 +520,9 @@ class ClinicalPracticeSection:
                         bullet_text = role
                     else:
                         bullet_text = original_text
+
+                    if role_remainder.strip():
+                        bullet_text = f"{bullet_text}\t{role_remainder}"
 
                     if bullet_text:
                         # Use multiline helper to properly split entries with multiple lines
