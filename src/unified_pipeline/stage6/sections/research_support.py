@@ -83,12 +83,30 @@ ROLE_EFFORT_HEADER_RE = re.compile(
     re.IGNORECASE
 )
 
+# The only buckets a status rebucket may move a grant INTO. M2A is deliberately
+# absent: `grant_status_rebucket_target` returns 'M2B', 'M2C' or None
+# (normalization/records.py), and no status text promotes a grant back to
+# Current. Kept as a named set so the rebucketer can say which code it was
+# handed instead of dying on a dict lookup.
+REBUCKET_TARGET_CODES = frozenset({'M2B', 'M2C'})
+
 # One line under that header: "Project Title 0.01" / "Project Title .08FTE".
 PROJECT_EFFORT_LINE_RE = re.compile(r'^(.+?)\s+(\d*\.?\d+)\s*(?:FTE)?$', re.IGNORECASE)
 
 # End-date text that means "still running", so an M2A grant carrying it is
 # never reclassified as completed however the year parses.
 OPEN_ENDED_END_DATES = ('present', 'current', 'ongoing', '')
+
+
+class UnsupportedRebucketTargetError(ValueError):
+    """A status rule asked for a funding bucket this section cannot render into.
+
+    Preventive, with no incident behind it: today
+    `grant_status_rebucket_target` returns only 'M2B', 'M2C' or None, so this
+    cannot fire. The point is what happens the day it returns something else --
+    a bare KeyError off `bucket_lists[target]`, naming neither the code nor the
+    grant, is a poor way to find that out (review thread 3932312407 item 2).
+    """
 
 
 def _print_verbose(messages: list[str], verbose: bool) -> None:
@@ -200,6 +218,12 @@ def rebucket_grants_by_status(
     An explicit "Under review" / "Not funded" beats date inference, which is why
     this runs before `reclassify_past_m2a_grants`. Returns the three buckets in
     M2A/M2B/M2C order plus the verbose lines; the inputs are left as they were.
+
+    Raises:
+        UnsupportedRebucketTargetError: the status rule named a bucket outside
+            REBUCKET_TARGET_CODES. Not swallowed and not defaulted to a bucket
+            of our choosing: filing a grant under a guess is worse than
+            stopping (CODING_STANDARDS.md 5.4).
     """
     current = list(m2a_entries)
     completed = list(m2b_entries)
@@ -212,10 +236,16 @@ def rebucket_grants_by_status(
             target, note = grant_status_rebucket_target(fields.get('status'))
             if not target or target == source_code:
                 continue
+            title = str(fields.get('title') or 'Unknown')
+            if target not in REBUCKET_TARGET_CODES:
+                raise UnsupportedRebucketTargetError(
+                    f"grant_status_rebucket_target returned bucket {target!r} for "
+                    f"a {source_code} grant '{title[:40]}'; research support renders "
+                    f"only {sorted(REBUCKET_TARGET_CODES)}"
+                )
             source_list.remove(entry)
             entry.setdefault('reclassification_note', note)
             bucket_lists[target].append(entry)
-            title = str(fields.get('title') or 'Unknown')
             messages.append(f"  Status rebucket {source_code}->{target}: '{title[:40]}'")
     return current, completed, pending, messages
 
