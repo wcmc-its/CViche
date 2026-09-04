@@ -1232,3 +1232,63 @@ def test_enriched_fields_list_is_passed_through_to_the_caller():
     _, _, enriched_fields = _format_citation(entry, 1)
 
     assert enriched_fields == ['title', 'journal']
+
+
+@pytest.mark.parametrize(
+    "year, volume, issue, pages, expected_trailer",
+    [
+        # The separators only appear when there is something on their left.
+        ("2020", "154", "1", "27-31", "2020;154(1):27-31."),
+        (None, "154", "1", "27-31", "154(1):27-31."),
+        (None, "154", None, None, "154."),
+        (None, None, None, "1-9", "1-9."),
+        (None, None, "3", "1-9", "(3):1-9."),
+        ("2020", None, None, None, "2020."),
+    ],
+)
+def test_journal_trailer_separators_need_something_on_their_left(
+    year, volume, issue, pages, expected_trailer
+):
+    """`;` separates year from volume and `:` separates pages from what
+    precedes them -- neither is the following value's own prefix.
+
+    Emitting them unconditionally was invisible while a null `year` still
+    rendered the literal string "None": the trailer read `None;154(1):27-31`,
+    which is wrong but not *dangling*. Routing `year` through `_scalar_text`
+    turned those into ` ;154(1):27-31` on 7 farm citations across 2 delivered
+    CVs (2100_Mocco, GLC5JG_Mocco), all S1 with a real volume and no year --
+    found reviewing round 5 of #481. The colon case has no farm instance and
+    is fixed as the same rule, not as an observed failure.
+    """
+    entry = {'extracted_fields': {
+        'authors': 'Waldau B',
+        'title': 'A study',
+        'journal': 'Acta neurochirurgica',
+        'year': year,
+        'volume': volume,
+        'issue': issue,
+        'pages': pages,
+    }}
+
+    citation, _, _ = _format_citation(entry, 95)
+
+    assert citation == f"95. Waldau B. A study. Acta neurochirurgica. {expected_trailer}"
+
+
+def test_journal_trailer_never_leads_with_a_bare_separator():
+    """The property behind the table above, stated once: whatever the trailer
+    renders, it never starts with the punctuation that is supposed to join it
+    to a value that is not there."""
+    for volume, issue, pages in (
+        ("154", "1", "27-31"), ("154", None, None), (None, "3", "1-9"),
+        (None, None, "1-9"), ("154", None, "27-31"),
+    ):
+        entry = {'extracted_fields': {
+            'authors': 'A B', 'title': 'T', 'journal': 'J', 'year': None,
+            'volume': volume, 'issue': issue, 'pages': pages,
+        }}
+
+        citation, _, _ = _format_citation(entry, 1)
+
+        assert " ;" not in citation, citation
+        assert " :" not in citation, citation

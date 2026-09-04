@@ -89,11 +89,19 @@ def _journal_trailer_parts(pub: ResolvedPublication) -> list[str]:
     if pub.year:
         cit_parts.append(pub.year)
     if pub.volume:
-        cit_parts.append(f";{pub.volume}")
+        # The ";" SEPARATES year from volume -- it is not the volume's own
+        # prefix. Emitting it unconditionally left a dangling ";154(1):27-31"
+        # once a null year stopped rendering the literal "None" (round-5
+        # review of #481: 7 citations, 2 delivered CVs, all S1 with a real
+        # volume and no year). With no year the volume simply leads.
+        cit_parts.append(f";{pub.volume}" if cit_parts else pub.volume)
     if pub.issue:
         cit_parts.append(f"({pub.issue})")
     if pub.pages:
-        cit_parts.append(f":{pub.pages}")
+        # Same rule as the ";" above: ":" separates pages from the
+        # volume/issue that precede them, so with nothing before it the
+        # pages lead rather than dangling off a stray colon.
+        cit_parts.append(f":{pub.pages}" if cit_parts else pub.pages)
     if not cit_parts:
         return []
     return ["".join(cit_parts) + "."]
