@@ -219,8 +219,8 @@ def _normalize_author_names(authors: str) -> str:
     - Trailing punctuation
 
     Never drops a token that names or belongs to a real author (#560).
-    Previously, a comma-split token the pair detector or the fallback below
-    couldn't place -- an initials group, a name suffix, a bare 1-2 character
+    Previously, a comma-split token that neither the pair detector nor the
+    fallback could place -- an initials group, a name suffix, a bare 1-2 character
     fragment -- was silently discarded, and that test was case-blind: a
     short *surname* ("Li", "Wu", "Ma", "Ye") was discarded exactly like a
     short initials fragment. Because a single missing comma anywhere in the
