@@ -545,49 +545,19 @@ _PII_FIELD_KEY_RE = re.compile(r"""^(?:.*_)?(?:
 _PII_FRAGMENT_SPLIT_RE = re.compile(r"[\n\t|]|\s{3,}")
 
 
-# Colon-less companion to _PII_LABEL_RE (#532). A colon-less label like
-# "Date of Birth - 01/01/1990", "DOB\t01/01/1990" or "SSN  123-45-6789" is
-# invisible to _PII_LABEL_RE and to the split above, which never separates
-# "label" from "value" without one of \n \t | or 3+ spaces between them --
-# and a dash is none of those. The label text alone is NOT enough signal to
-# deny without a colon: relaxing the terminator to accept '-' is exactly
-# what _PII_LABEL_RE's own tests (test_deny_predicate_requires_a_colon_
-# terminator) exist to block, because it swallows real CV content that
-# merely starts with a listed word ("Children's Oncology Group - Emeritus",
-# "Born - Digital: A Study of Youth Media Practices"). So here the VALUE has
-# to carry the signal too: stem, then a non-colon separator (tab, dash/en-
-# dash/em-dash, or 2+ spaces), then a date- or SSN-shaped value. A neutral
-# word after the stem ("Digital", "Emeritus") never matches, because it
-# isn't date- or SSN-shaped -- only the label+value pair together denies.
-#
-# Scoped to date-of-birth and SSN only. A colon-less "place of birth"
-# companion is declined here: unlike a date or an SSN, a place name has no
-# comparably distinctive shape to require, so it would either miss most
-# real cases or risk matching ordinary prose after one of these stems --
-# see #532.
-#
-# The separator set is #532's own list -- tab, dash, 2+ spaces. A SINGLE
-# space is deliberately not in it, so "SSN 123-45-6789" and "Date of Birth
-# 01/01/1990" are a known, disclosed residual rather than a silent one
-# (pinned in test_stage6_pii_colonless_labels.py). A single space is the
-# ordinary word separator of running prose, so admitting it widens the
-# predicate over every sentence that contains one of these stems; that is a
-# deny widening worth its own false-positive measurement over the corpus,
-# not a rider on this one.
-#
-# The leading lookbehind matters: without it "born"/"ssn" match INSIDE a
-# longer word, so "University of Michigan-Dearborn – 2015" or "Osborn -
-# 2012" (surname/institution substrings followed by a dash and a year,
-# which happens to be exactly the value shape this predicate looks for)
-# were false-denied -- the same #473 false-positive class this predicate
-# exists not to reintroduce. A plain \b is not enough, because a hyphen is
-# a non-word character and therefore IS a word boundary: "Foreign-born –
-# 2015" and "US-born  1990" (a demographic or biographical compound next to
-# a CV date column) still matched on the "born" half. The lookbehind
-# rejects a preceding hyphen or dash as well as a preceding word
-# character. It is ASCII-plus-dashes only, which is fine here: every stem
-# alternative is plain ASCII.
-_PII_LABEL_VALUE_RE = re.compile(r"""
+# Colon-less companion to _PII_LABEL_RE (#532), composed from three named
+# parts below so the shape reads off the code: stem, non-colon separator,
+# date-or-SSN-shaped value. Why both halves are required: the label alone
+# swallows real CV content that merely starts with a listed word
+# ("Children's Oncology Group - Emeritus", "Born - Digital: A Study of Youth
+# Media Practices"), so the VALUE has to carry signal too. Why the stem's
+# lookbehind is not a plain \b: a hyphen IS a word boundary, so \b still let
+# "Foreign-born – 2015" and "University of Michigan-Dearborn – 2015" match
+# on their "born" half -- the #473 false-positive class this predicate
+# exists not to reintroduce. Scope (date of birth and SSN only, no
+# place-of-birth), the deliberate single-space residual, and every negative
+# control are pinned by test_stage6_pii_colonless_labels.py.
+_PII_COLONLESS_STEM = r"""
     (?<![\w\-–—])
     (?: date \s* of \s* birth
       | birth \s*-? \s* date
@@ -597,7 +567,13 @@ _PII_LABEL_VALUE_RE = re.compile(r"""
       | social \s* security (?: \s* (?: number | no\.? ) )?
       | ssn
     )
+"""
+
+_PII_COLONLESS_SEPARATOR = r"""
     \s* (?: [-–—] \s* | \t \s* | \s{2,} )
+"""
+
+_PII_COLONLESS_VALUE = r"""
     (?: \d{1,2} [/-] \d{1,2} [/-] \d{2,4}
       | \d{3} -? \d{2} -? \d{4}
       | (?: jan(?:uary)? | feb(?:ruary)? | mar(?:ch)? | apr(?:il)? | may
@@ -606,7 +582,12 @@ _PII_LABEL_VALUE_RE = re.compile(r"""
         ) \s+ \d{1,2} , \s* \d{4}
       | \d{4}
     )
-""", re.X | re.I)
+"""
+
+_PII_LABEL_VALUE_RE = re.compile(
+    _PII_COLONLESS_STEM + _PII_COLONLESS_SEPARATOR + _PII_COLONLESS_VALUE,
+    re.X | re.I,
+)
 
 
 def _squash(text) -> str:
