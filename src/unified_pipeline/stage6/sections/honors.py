@@ -54,7 +54,10 @@ writing and because every parse below depends on it:
 A whole entry that is really the source table's HEADER row is dropped before
 any of this, by `_is_honors_header_entry`. The one thing that tells a header
 apart from data: a header row NAMES a date column ("Date awarded (yyyy)"),
-it never carries a date VALUE.
+it never carries a date VALUE. A header row fused into a multi-LINE entry is
+dropped a line at a time instead, by `_looks_like_column_header`, and what
+survives that is what the award cell falls back to -- never the entry's raw
+text, which still has the header row in it.
 
 The consequence the reviewer named explicitly: "Excellence in Research |
 Teaching Award | 2024" is read as one award, the organization "Teaching
@@ -523,7 +526,7 @@ def _records_for_award_list(awards: Sequence[HonorRecord],
     return records
 
 
-def _record_for_single_award(original_text: str,
+def _record_for_single_award(fallback_text: str,
                              columns: HonorRecord | None,
                              award_name: str,
                              granting_body: str,
@@ -535,13 +538,19 @@ def _record_for_single_award(original_text: str,
     over it wherever it has them; it only fills what they left empty, which
     is what keeps "Award | Organization | Year" out of the award cell as a
     raw string (#733 review).
+
+    `fallback_text` is the entry's own text with any column-header line
+    removed (`parse_honor_entry`), not the raw text: a two-line entry whose
+    first line is the source table's header row used to render that header
+    as the award name, because the line `_parse_honor_lines` had already
+    dropped was still in the string this falls back to (#733 review). It is
+    otherwise the raw text, verbatim and merely capped -- an entry whose
+    pipe shape the parser declined to guess at still renders as its own
+    text, which is the contract the module docstring states.
     """
     if not award_name:
-        # Stripped for the same reason `_field_text` strips: a whitespace-only
-        # entry text otherwise became a whitespace-only award cell, which is a
-        # blank rendered row rather than the nothing it should be (#733 review).
         award_name = (columns.award if columns is not None
-                      else original_text.strip()[:_MAX_RAW_AWARD_CHARS])
+                      else fallback_text[:_MAX_RAW_AWARD_CHARS])
     if columns is not None:
         granting_body = granting_body or columns.organization
         date = date or columns.date
@@ -552,7 +561,7 @@ def _record_for_single_award(original_text: str,
     if not date:
         award_name, date = _split_award_year(award_name)
         if not date:
-            _, date = _split_award_year(original_text)
+            _, date = _split_award_year(fallback_text)
 
     if date:
         date = format_date_for_section(date, 'H')
@@ -597,18 +606,24 @@ def parse_honor_entry(entry: Mapping) -> list[HonorRecord]:
     # #476: '\n' and '|' boundaries; the extracted column cells are passed so
     # a single award's own "Award | Organization | Year" cell join is not
     # mistaken for two awards -- see _entry_parts.
-    awards, years = _parse_honor_lines(
-        _entry_parts(original_text, (granting_body, date)))
+    parts = _entry_parts(original_text, (granting_body, date))
+    awards, years = _parse_honor_lines(parts)
 
     if len(awards) > 1:
         return _records_for_award_list(awards, years, award_name,
                                        granting_body, date)
+    # What the single-award record falls back to: the entry's own parts
+    # minus any column-header line among them. Everything else is kept
+    # verbatim, so a pipe shape the parser declined to guess at still
+    # renders as its own text (#733 review).
+    fallback_text = '\n'.join(
+        p for p in parts if not _looks_like_column_header(p))
     # A single award line that named its own columns is the only thing that
-    # beats the raw text as a fallback -- a plain line, a tab-welded line and
-    # an unrecognised '|' shape all carry no columns and leave `columns` None.
+    # beats that text -- a plain line, a tab-welded line and an unrecognised
+    # '|' shape all carry no columns and leave `columns` None.
     columns = (awards[0] if len(awards) == 1
                and (awards[0].organization or awards[0].date) else None)
-    return [_record_for_single_award(original_text, columns, award_name,
+    return [_record_for_single_award(fallback_text, columns, award_name,
                                      granting_body, date)]
 
 
