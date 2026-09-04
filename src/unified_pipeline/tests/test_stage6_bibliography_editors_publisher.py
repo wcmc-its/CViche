@@ -63,6 +63,36 @@ def test_format_citation_none_extracted_fields_does_not_raise():
     assert enriched_fields == []
 
 
+def test_format_citation_none_enrichment_data_does_not_raise():
+    """The same #659 defect on the adjacent line: `enrichment_data` carrying
+    an explicit None reaches `enrichment.get('pubmed_authors')` and raises
+    AttributeError. Asked for in round-2 review of this PR."""
+    entry = {
+        'extracted_fields': {'authors': 'Smith J', 'year': '2021'},
+        'enrichment_data': None,
+        'enriched_fields': [],
+    }
+
+    citation, _, enriched_fields = _format_citation(entry, 1)
+
+    assert citation == '1. Smith J. 2021.'
+    assert enriched_fields == []
+
+
+def test_format_citation_none_enriched_fields_is_returned_as_an_empty_list():
+    """Third line of the same trio: an explicit None `enriched_fields` was
+    returned to the caller as None, and every caller iterates it."""
+    entry = {
+        'extracted_fields': {'authors': 'Smith J', 'year': '2021'},
+        'enrichment_data': {},
+        'enriched_fields': None,
+    }
+
+    _, _, enriched_fields = _format_citation(entry, 1)
+
+    assert enriched_fields == []
+
+
 def test_format_citation_missing_extracted_fields_key_still_works():
     """The pre-existing default-args case (no key at all) keeps working
     after the guard changes from a dict default to `or {}`."""

@@ -89,8 +89,17 @@ def _format_citation(entry: Dict, num: int) -> Tuple[str, Optional[str], List[st
         (citation_text, target_name, enriched_fields) tuple
     """
     fields = entry.get('extracted_fields') or {}
-    enrichment = entry.get('enrichment_data', {})
-    enriched_fields = entry.get('enriched_fields', [])  # Track which fields were enriched
+    # `or`, not a dict/list default (#659): a default only applies when the key
+    # is absent, so an entry carrying the key with an explicit None hands the
+    # None straight back and the first `.get`/iteration on it raises. Exactly
+    # the `extracted_fields` defect above, on the two adjacent lines (found
+    # reviewing that fix). Stage 5 writes a dict today
+    # (`stage_5_pubmed_enrichment.py:655`) and no entry in the 61-CV local farm
+    # carries an explicit null here, so this is hardening, not an observed
+    # crash -- the entries reaching stage 6 are raw LLM-shaped JSON with no
+    # schema between them and this line.
+    enrichment = entry.get('enrichment_data') or {}
+    enriched_fields = entry.get('enriched_fields') or []  # Track which fields were enriched
 
     # Check if Stage 5d provided a pre-formatted citation (for non-enriched entries)
     formatted_citation = fields.get('formatted_citation', '')
