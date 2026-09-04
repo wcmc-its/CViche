@@ -90,9 +90,22 @@ def _parse_surname_initial_pairs(parts: list[str]) -> list[str]:
     Nothing is discarded, on either shape (#560). A trailing element with no
     initials to pair with is emitted on its own; an initials group in a
     surname slot -- a list that is missing a surname, so the group has no
-    pair -- is placed the way `_parse_author_fallback` places an orphan
-    fragment rather than skipped over. It used to be skipped, which deleted
-    it outright: "AB, PL*, Smith, JA" rendered as "PL* Smith, JA".
+    pair -- is placed rather than skipped over. It used to be skipped, which
+    deleted it outright: "AB, PL*, Smith, JA" rendered as "PL* Smith, JA".
+
+    That placement follows `_parse_author_fallback`'s orphan rule on the
+    FIRST orphan and diverges on the second. Both merge an orphan into the
+    element before it while that element is still "open", and both emit it
+    on its own when nothing is open. This parser then leaves the emitted
+    orphan open, so a second consecutive orphan coalesces into it
+    (["Alpha", "B", "C", "D", "Echo", "F"] -> "Alpha B", "C D", "Echo F");
+    the fallback closes it, so a second fragment stands alone
+    (["Alpha B", "C", "D", "Echo F"] -> "Alpha B", "C", "D", "Echo F").
+    The divergence is deliberate -- it is an explicit assignment on each
+    side, and
+    `test_the_two_parsers_place_a_second_consecutive_orphan_differently`
+    pins both -- and the corpus does not adjudicate it; see the branch
+    comment below for what it does say.
     """
     cleaned_authors: list[str] = []
     merge_target_open = False
@@ -121,12 +134,13 @@ def _parse_surname_initial_pairs(parts: list[str]) -> list[str]:
         if _looks_like_initials(surname):
             # An initials group in a surname slot: the source list is
             # missing the surname it belongs to, so there is no pair to
-            # make. Placed exactly as `_parse_author_fallback` places an
-            # orphan fragment -- merged into the element before it while
-            # that element is still "open" (a bare token carrying no
-            # initials of its own yet), emitted on its own when there is
-            # nothing open to charge it to -- and never dropped, which is
-            # what this branch used to do.
+            # make. Merged into the element before it while that element is
+            # still "open" (a bare token carrying no initials of its own
+            # yet), emitted on its own when there is nothing open to charge
+            # it to -- and never dropped, which is what this branch used to
+            # do. Emitting it re-opens the merge target, which is where
+            # this diverges from `_parse_author_fallback`; see the docstring
+            # above.
             #
             # Consecutive orphans therefore coalesce into one element. What
             # the corpus actually says about that, measured with
@@ -280,7 +294,10 @@ def _normalize_author_names(authors: str) -> str:
 
     In both, such a token merges into the author immediately before it, and
     when there is no open author to merge into it is emitted as its own
-    element instead. Neither parser reduces the token count any more.
+    element instead. Neither parser reduces the token count any more. They
+    are not the same rule, though: on a SECOND consecutive orphan the pair
+    parser coalesces and the fallback does not -- deliberately, and pinned
+    on both sides. `_parse_surname_initial_pairs`' docstring has the shapes.
     """
     if not authors:
         return ''

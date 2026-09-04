@@ -411,6 +411,22 @@ def test_the_pair_parser_keeps_every_alphabetic_character_of_its_input():
                     assert char in joined, f'{char!r} of {authors!r} was dropped'
 
 
+def test_the_two_parsers_place_a_second_consecutive_orphan_differently():
+    """The orphan placement is NOT identical across the two parsers, which
+    the pair parser's docstring claimed it was (#735 review). Both merge an
+    orphan into an open element and both emit it alone when nothing is
+    open; the pair parser then leaves that emitted orphan open, so a second
+    consecutive orphan coalesces into it, while the fallback closes it, so
+    a second fragment stands alone. Pinned on both sides so the difference
+    stays a decision rather than becoming a drift."""
+    assert _parse_surname_initial_pairs(
+        ['Alpha', 'B', 'C', 'D', 'Echo', 'F']
+    ) == ['Alpha B', 'C D', 'Echo F']
+    assert _parse_author_fallback(
+        ['Alpha B', 'C', 'D', 'Echo F']
+    ) == (['Alpha B', 'C', 'D', 'Echo F'], False)
+
+
 def test_consecutive_orphan_initials_coalesce_into_one_author():
     """The farm's one live occurrence of the skip places two tokens back to
     back, each a single uppercase letter, both in surname slots because the
