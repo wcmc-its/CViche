@@ -61,10 +61,13 @@ _CHILD_BULLET_GLYPHS = ('•', '-', '–', '*')
 
 # Key `_propagate_institution_to_subentries` writes on a record whose
 # institution it filled in from a parent row, holding that parent's
-# `element_idx_start`. It is the only parent/child link this section has: the
-# stage-4 records carry no parent identifier of their own, so the merge pass
-# reads this key to tell an employer a record NAMED from one it INHERITED
-# (#476 review items 1 and 2).
+# `element_idx_start`. It is the only record-to-record parent link this
+# section has. The stage-4 records do carry `parent_code`/`parent_label`, but
+# those name the taxonomy node a record was classified under, not a row above
+# it, and `parent_idx` matches no other record's `element_idx_start` on any of
+# the 361 records the farm's D lists hold (re-derive over a real `generate()`
+# of every farm document). So the merge pass reads this key to tell an
+# employer a record NAMED from one it INHERITED (#476 review items 1 and 2).
 INHERITED_INSTITUTION_KEY = 'institution_propagated_from'
 
 # A child fragment's own date range, e.g. "07/2002 - 06/2003" or
@@ -142,7 +145,7 @@ _LOCATION_TAIL_RE = re.compile(r',\s*(?:[A-Z]{2}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)
 
 # A four-digit year anywhere in the fragment. An employer name does not carry
 # one; a record line ("Aug 2019-Dec 2023, Associate Director, ...") does, and
-# that is the shape the pre-#476 fallback kept mistaking for an institution.
+# that is the shape the pre-#476 fallback would take for an institution.
 _YEAR_IN_FRAGMENT_RE = re.compile(r'\b(?:19|20)\d{2}\b')
 
 # The `extracted_fields` keys a recovered child appointment copies from its
@@ -178,7 +181,11 @@ def _child_position_records(entry: dict) -> list[dict]:
 
     A child whose title and formatted dates are the parent's own is dropped:
     stage 4 sometimes promotes a bullet-prefixed fragment to its own record
-    (MNZ7IA, ZZLKMA), and that record arrives here as its own parent.
+    (MNZ7IA, ZZLKMA), and that record arrives here as its own parent. On the
+    farm that drop is unreached, because the tab gate in
+    `_tab_joined_child_fragments` already returns nothing for those records:
+    over a real `generate()` of every farm document the scanner fires on one
+    entry, -DAZFA's D2 record, and keeps both of the children it finds.
     """
     text = entry.get('text', '') or ''
     children = _tab_joined_child_fragments(text)
@@ -236,6 +243,11 @@ def _institution_from_raw_text(text: str) -> str:
     Structured extraction and enrichment are preferred and the caller checks
     both before calling this (#476 review item 5); this only decides what
     counts as a candidate once they have come back empty.
+
+    Tightening the candidate rule changes nothing the corpus can show: over a
+    real `generate()` of every farm document this is reached on 7 records and
+    returns '' on all 7, under the pre-#476 rule and this one alike. It is a
+    guard on a path the farm does not exercise, not a measured repair.
     """
     if '\t' not in text and '\n' not in text:
         return ''
@@ -616,7 +628,15 @@ class PositionsSection:
         employer used to count as a match, so a title-only row could inherit
         the dates of an unrelated employer's row and delete it: that is a
         plausible appointment the CV never claimed, and it happens on the
-        corpus farm today (one D1 pair, employers with no word in common).
+        corpus farm today: one D1 pair, in 2082, whose two employers share no
+        word. Re-derive it by logging every pair `_is_one_appointment` refuses
+        over a real `generate()` of every farm document. Both merge sites call
+        it only once the title/dates shape has already qualified the pair, so
+        a refusal under Rule 1 -- which tested no employer at all before #476
+        -- is exactly a merge the old rule made; a refusal under Rule 2 has to
+        be read against that rule's own `same_employer` test, which counted a
+        missing employer as a match. It is that one pair on the stage-4
+        inputs and none on stage-5 or -5d, 2082 being a stage-4-only document.
 
         Rules 2 then 1 run as separate passes so a header is never mistaken for a
         lone adjacent dates row. Dates are only ever *copied into* a row that
@@ -895,12 +915,26 @@ class PositionsSection:
         stray sentence into a D code, field extraction finds no title,
         employer or dates in it, and the record reaches here with nothing to
         put in any of the three columns. Rendering it puts an empty row in the
-        delivered CV. Measured on the corpus farm at two rows: one D1 record
-        each in NGFNYQ and SO2IVQ, the same two on stage-4, stage-5 and
-        stage-5d inputs alike, so the count is a property of the records and
-        not of which stage a run reads them from. Both are the first record in
-        their code list, so neither ever had an employer to lose: they were
-        already three blank cells before this section grew a boundary check.
+        delivered CV. Measured on the corpus farm at three rows, one record
+        each in 6NGAYQ, NGFNYQ and SO2IVQ, the same three on stage-4, stage-5
+        and stage-5d inputs alike, so the count is a property of the records
+        and not of which stage a run reads them from. Re-derive it by summing
+        `stats['blank_position_rows_skipped']` over a real `generate()` of
+        every farm document: exercising this function on its own undercounts,
+        because grouping records by the taxonomy code they were STORED with
+        misses the ones stage 6 reroutes into a D code mid-render, which is
+        what 6NGAYQ's is (stored `I`, rendered as D1).
+
+        The three are not one shape. NGFNYQ's and SO2IVQ's lead their D1 list
+        in document order, so no employer was ever carried onto them and they
+        were three blank cells before this section grew a boundary check.
+        6NGAYQ's is the opposite case, and the reason that check and this drop
+        belong together: its record sits ~200 elements after the only D1 row
+        it could have inherited from, under a different source heading, and it
+        is the one record on the farm whose employer carry
+        `_crosses_source_boundary` refuses. Before that check it rendered a row
+        naming an employer its own text never mentions; after it, the record
+        has nothing in any column and this drop is what keeps it out.
         """
         positions = []
         blank = 0
