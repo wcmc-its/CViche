@@ -111,6 +111,38 @@ def _tab_joined_child_fragments(text: str) -> list[tuple[str, tuple[str, str]]]:
     return children
 
 
+def _source_hierarchy(entry: dict) -> tuple[str, ...]:
+    """The record's stage-1b heading path, as a comparable tuple."""
+    hierarchy = entry.get('hierarchy')
+    if isinstance(hierarchy, (list, tuple)):
+        return tuple(str(level) for level in hierarchy)
+    return (str(hierarchy),) if hierarchy else ()
+
+
+def _crosses_source_boundary(donor: dict, entry: dict) -> bool:
+    """True when `entry` sits in a different block of the source CV than
+    `donor`, so an employer carried forward from `donor` is out of scope.
+
+    Two boundaries, both from the source structure rather than from document
+    order (#476 review item 3): a different heading path, and a different
+    source table. A heading paragraph followed by the table of roles beneath
+    it is NOT a boundary -- same heading path, and only one of the two sits
+    in a table.
+
+    Coarse by construction: stage 1b gives many CVs a single heading for the
+    whole document, and paragraph records carry no table index, so on those
+    records this gate allows what it allowed before. It stops propagation
+    where the source says there is a break, which is the case the pass could
+    not see at all before -- not everywhere one might exist.
+    """
+    if _source_hierarchy(donor) != _source_hierarchy(entry):
+        return True
+    donor_table = donor.get('table_index')
+    entry_table = entry.get('table_index')
+    return (donor_table is not None and entry_table is not None
+            and donor_table != entry_table)
+
+
 def _entry_employer(entry: dict) -> str:
     """The record's employer, lowercased for comparison, '' when it has none.
     D3 records carry it as `organization` rather than `institution`."""
@@ -217,38 +249,62 @@ class PositionsSection:
         entry but can't see the parent's institution.  This forward-propagates
         institution (and its enrichment data) in document order so sub-entries
         inherit their parent context.
+
+        Document order alone is not enough to say two records belong together
+        (#476 review item 3): if extraction loses an institution boundary, an
+        employer would otherwise stay in scope for every later record in the
+        list. `_crosses_source_boundary` stops the carry at a heading-path or
+        source-table change, and the carried employer is dropped there rather
+        than resumed after the unrelated record. Each filled-in institution
+        records its parent under `INHERITED_INSTITUTION_KEY`, which is also
+        what `_is_one_appointment` reads to tell an inherited institution from
+        one the record named itself.
         """
         if not entries:
             return entries
         # Sort by document order (element_idx_start) to ensure parent comes first
         ordered = sorted(entries, key=lambda e: element_idx_sort_key(e.get('element_idx_start')))
+        parent = None
         last_institution = None
         last_enrichment = None
-        last_idx = None
         propagated = 0
+        stopped = 0
         for entry in ordered:
             fields = entry.get('extracted_fields', {}) or {}
             inst = fields.get('institution') or fields.get('organization') or ''
             if inst:
+                parent = entry
                 last_institution = inst
                 last_enrichment = entry.get('institution_enrichment')
-                last_idx = entry.get('element_idx_start')
-            elif last_institution:
-                # This entry has no institution — inherit from parent
-                if not fields:
-                    entry['extracted_fields'] = fields = {}
-                fields['institution'] = last_institution
-                # Record which row it came from. Two passes need it: this one
-                # only to be honest about provenance, and the merge pass to
-                # tell an inherited institution from an employer the record
-                # named itself (#476 review items 1 and 2).
-                entry[INHERITED_INSTITUTION_KEY] = last_idx
-                # Also propagate enrichment if available
-                if last_enrichment and not entry.get('institution_enrichment'):
-                    entry['institution_enrichment'] = dict(last_enrichment)
-                propagated += 1
+                continue
+            if parent is None:
+                continue
+            if _crosses_source_boundary(parent, entry):
+                # A different block of the source CV: the employer carried
+                # this far is out of scope, and stays out — a later record is
+                # not re-attached to it across the unrelated one.
+                parent = None
+                last_institution = None
+                last_enrichment = None
+                stopped += 1
+                continue
+            # This entry has no institution — inherit from parent
+            if not fields:
+                entry['extracted_fields'] = fields = {}
+            fields['institution'] = last_institution
+            # Record which row it came from. Two passes need it: this one
+            # only to be honest about provenance, and the merge pass to
+            # tell an inherited institution from an employer the record
+            # named itself (#476 review items 1 and 2).
+            entry[INHERITED_INSTITUTION_KEY] = parent.get('element_idx_start')
+            # Also propagate enrichment if available
+            if last_enrichment and not entry.get('institution_enrichment'):
+                entry['institution_enrichment'] = dict(last_enrichment)
+            propagated += 1
         if verbose and propagated > 0:
             print(f"    Propagated institution to {propagated} sub-entries")
+        if verbose and stopped > 0:
+            print(f"    Stopped institution propagation at {stopped} source-structure boundaries")
         return entries
 
     # Title strings that field extraction sometimes emits when the source CV had
