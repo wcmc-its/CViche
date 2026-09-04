@@ -96,11 +96,24 @@ class GrantFields(TypedDict, total=False):
     and guard below stays exactly where it was (review thread 3932312407
     items 1 and 10).
 
-    The value types are measured rather than assumed. Across the 66 CVs of the
-    local corpus, 335 M2 records carry these keys as `str` or as JSON null and
+    The value types are measured rather than assumed. The population is the
+    335 records the 66-CV local corpus classifies M2A, M2B or M2C -- not the
+    348 whose code merely starts "M2": the other 13 carry the bare parent
+    code, which `RESEARCH_SUPPORT_SECTIONS` does not name, so this section
+    never sees them. Those 335 carry these keys as `str` or as JSON null and
     as nothing else: `start_date` 285 str / 30 null, `title` 282/28, `end_date`
     267/48, `agency` 265/45, `pi_role` 229/81, `total_funding` 206/97,
-    `grant_number` 97/213. Null is the ordinary case, not the exotic one --
+    `grant_number` 97/213. Re-derive from `src/unified_pipeline/`::
+
+        import collections, glob, json
+        counts = collections.defaultdict(collections.Counter)
+        for path in glob.glob('outputs/stage_4_field_extraction/*.json'):
+            for entry in json.load(open(path)).get('entries') or []:
+                if entry.get('taxonomy_code') in ('M2A', 'M2B', 'M2C'):
+                    for key, value in (entry.get('extracted_fields') or {}).items():
+                        counts[key][type(value).__name__] += 1
+
+    Null is the ordinary case, not the exotic one --
     `fields.get('title', '')` really does hand back None on a record that
     carries the key empty, which is why the reads below are `or`-chained
     rather than defaulted, and why typing these `str` would have been a lie
