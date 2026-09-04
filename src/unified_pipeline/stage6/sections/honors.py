@@ -24,6 +24,31 @@ is testable on strings alone.
     parse_honor_entry               the whole entry -> `list[HonorRecord]`
     HonorsSection._add_honors_row   the only part that touches the table
 
+The delimiter contract, stated once here because the reviewer asked for it in
+writing and because every parse below depends on it:
+
+    newline   always a record boundary. One line, one award.
+    '|'       a STRUCTURAL column or record boundary, never a character
+              inside an award's name. Column order is the template's own:
+              `award | organization | date`, in the two-column form
+              ("Award | 2020", "Award | Organization") or the three-column
+              one ("Award | Organization | 2020"). Any other pipe shape --
+              a leading date, four or more cells, an odd count that pairs no
+              year to an award -- is left as one unsplit line rather than
+              guessed at, and renders as its own text.
+    tab       a column boundary inside ONE award ("Award\\tDate\\tNote"),
+              except when the last cell is a bare year, which is that
+              award's date. A tab-bearing line is never additionally split
+              on '|'; see `_entry_parts` for the three farm entries that
+              rule exists for.
+
+The consequence the reviewer named explicitly: "Excellence in Research |
+Teaching Award | 2024" is read as one award, the organization "Teaching
+Award" and the date 2024 -- not as one award whose name contains a pipe, and
+not as two awards. Nothing in the text distinguishes those readings, and the
+pipeline's own table-cell join emits exactly this three-column shape. It is a
+fallback either way: whatever stage 4 extracted for the entry wins over it.
+
 `_US_STATE_ABBREVS` and `_MONTH_TAIL_RE` are the two vocabularies those parsers
 filter against, and they exist because of specific mis-parses (#229): a bare
 state abbreviation out of "Bethesda, MD" is not an organization, and a trailing
