@@ -30,9 +30,11 @@ dropped explicitly rather than rendered as a membership called "Organization".
 `_add_table_row` is the generic row writer, and it lives here because this is
 the only section that calls it. Everything else either writes cells directly or
 uses one of the shared `_add_table_row_with_*` variants, which stay on
-`WCMTemplateGenerator`.
+`WCMTemplateGenerator`. It owns `stats['entries_inserted']` outright -- the
+callers below must not also increment it -- and it refuses a `data` list longer
+than the table has columns instead of dropping the surplus cells.
 """
-from typing import Dict, List
+from typing import List
 
 try:
     from docx.table import Table
@@ -50,6 +52,20 @@ from ..formatting import (
 from ..parsing import _is_table_header_entry, _parse_multi_membership_entry
 from ..sorting import sort_entries_reverse_chronological
 from unified_pipeline.core.render_check import entry_lines
+
+
+class MembershipsRowShapeError(ValueError):
+    """`_add_table_row` was handed more values than the table has columns.
+
+    A caller/template programming error, never CV content: both call sites in
+    `_fill_memberships` pass a two-element list, and the memberships table the
+    section writes into has two columns on every path that reaches the writer
+    (the WCM template's own table, or a fallback table the header guard already
+    rejected unless it had at least two columns). Content decides what goes IN
+    the two cells, never how many cells there are -- so this cannot abort a
+    document over a bad CV, and failing loudly beats emitting a document that
+    silently lost a column (#476 review).
+    """
 
 
 def _entry_parts(text: str) -> List[str]:
@@ -81,7 +97,7 @@ def _entry_parts(text: str) -> List[str]:
 class MembershipsSection:
     """Section I writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_memberships(self, entries: List[Dict]):
+    def _fill_memberships(self, entries: list[dict]):
         """Fill I. PROFESSIONAL ORGANIZATIONS AND SOCIETY MEMBERSHIPS section.
 
         Entries have fields: organization, membership_type, start_date, end_date
@@ -168,8 +184,9 @@ class MembershipsSection:
             if len(memberships) > 1 or (memberships and len(lines) > 2):
                 for mem_type, org, dates in memberships:
                     org_text = f"{mem_type}, {org}" if mem_type and mem_type.lower() not in org.lower() else org
+                    # `_add_table_row` owns stats['entries_inserted'] -- do not
+                    # increment it here as well (#476 review).
                     self._add_table_row(table, [org_text, dates], entry=entry)
-                    self.stats['entries_inserted'] += 1
                 continue
 
             # Single membership - use extracted fields
@@ -192,33 +209,51 @@ class MembershipsSection:
 
             # Add row to table
             self._add_table_row(table, [org_text, date_str], entry=entry)
-            self.stats['entries_inserted'] += 1
 
-    def _add_table_row(self, table: Table, data: List[str], is_header: bool = False, entry: Dict = None):
+    def _add_table_row(self, table: Table, data: list[str], is_header: bool = False,
+                       entry: dict | None = None):
         """Add a row to a table with proper formatting.
+
+        Owns `stats['entries_inserted']`: incremented here, once per row
+        actually written, and never by the callers as well. Both layers used to
+        increment it, so one rendered membership reported two inserted entries
+        (#476 review).
 
         Args:
             table: The table to add to
             data: List of cell values
             is_header: Whether this is a header row
             entry: Optional entry dict - if provided, adds comments from upstream pipeline
+
+        Raises:
+            MembershipsRowShapeError: `data` is longer than the table is wide.
         """
         if not table:
             return
+
+        # Validate before adding the row so a rejected call leaves no stray
+        # empty row behind. `add_row()` creates exactly one cell per grid
+        # column, so this count is the added row's cell count.
+        columns = len(table.columns)
+        if len(data) > columns:
+            raise MembershipsRowShapeError(
+                f"memberships row writer got {len(data)} value(s) for a table with "
+                f"{columns} column(s); the surplus value(s) would be dropped silently"
+            )
+
         row = table.add_row()
         first_cell_para = None
         for i, value in enumerate(data):
-            if i < len(row.cells):
-                cell = row.cells[i]
-                cell.text = str(value) if value else ""
-                # Set vertical alignment to center (middle)
-                _set_cell_vertical_alignment(cell, 'center')
-                for para in cell.paragraphs:
-                    if i == 0 and first_cell_para is None:
-                        first_cell_para = para
-                    for run in para.runs:
-                        # Always 11pt Arial, bold for headers
-                        _set_font(run, size=11, bold=is_header)
+            cell = row.cells[i]
+            cell.text = str(value) if value else ""
+            # Set vertical alignment to center (middle)
+            _set_cell_vertical_alignment(cell, 'center')
+            for para in cell.paragraphs:
+                if i == 0 and first_cell_para is None:
+                    first_cell_para = para
+                for run in para.runs:
+                    # Always 11pt Arial, bold for headers
+                    _set_font(run, size=11, bold=is_header)
 
         # Add comments to the first cell if entry provided
         if entry and first_cell_para:
