@@ -219,6 +219,35 @@ def filter_role_effort_headers(
     return filtered, messages
 
 
+def match_effort_for_title(title: str, effort_lookup: dict[str, str]) -> str | None:
+    """Resolve one normalized grant title to an extracted percent effort.
+
+    Normalized exact match first. Substring matching stays as the explicit
+    fallback -- a source table really does write "Project Alpha" in the effort
+    header and "Project Alpha: aims 1-3" in the grant list -- but it no longer
+    guesses: a title that substring-matches more than one project name gets
+    nothing.
+
+    The old rule was substring-only and took the first hit in insertion order,
+    so with both "Project Alpha" (1%) and "Project Alpha Extended" (8%) in the
+    header, the *Extended* grant was handed Alpha's 1% (review thread
+    3932312407 item 6). Exact-first settles that pair outright; the
+    ambiguity rule covers the pairs no exact match settles.
+    """
+    exact = effort_lookup.get(title)
+    if exact is not None:
+        return exact
+    candidates = [effort for project_name, effort in effort_lookup.items()
+                  if project_name in title or title in project_name]
+    if len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        logger.debug(
+            "Assigned no percent effort: the grant title substring-matches %d "
+            "project names in the effort header", len(candidates))
+    return None
+
+
 def apply_effort_to_grants(entries: list[dict], effort_lookup: dict[str, str]) -> list[str]:
     """Attach each extracted percent effort to the grant whose title it names.
 
@@ -233,11 +262,11 @@ def apply_effort_to_grants(entries: list[dict], effort_lookup: dict[str, str]) -
         if not title or fields.get('percent_effort'):
             continue
         # Try to find matching effort in lookup
-        for project_name, effort in effort_lookup.items():
-            if project_name in title or title in project_name:
-                fields['percent_effort'] = effort
-                messages.append(f"  Matched effort {effort} to '{title[:40]}...'")
-                break
+        effort = match_effort_for_title(title, effort_lookup)
+        if effort is None:
+            continue
+        fields['percent_effort'] = effort
+        messages.append(f"  Matched effort {effort} to '{title[:40]}...'")
     return messages
 
 
