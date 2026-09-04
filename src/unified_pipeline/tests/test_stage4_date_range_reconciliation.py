@@ -86,11 +86,18 @@ def test_blank_dates_are_reconciled_through_post_processing():
 # i.e. four alternatives: ASCII hyphen, en dash, em dash, and a literal " to ".
 # Only the hyphen form was covered, so dropping a character from the class --
 # or the " to " branch -- would have left the whole file green.
+#
+# The " to " branch is spelled lowercase, but the pattern is compiled with
+# re.IGNORECASE, so " TO " and " To " repair as well. That flag was
+# load-bearing and unasserted: removing re.IGNORECASE from
+# CLOSED_DATE_RANGE_PATTERN passed the entire suite. The two case-varied
+# rows below are what makes this test's name ("every declared separator")
+# true of the compiled pattern rather than of its source text alone.
 
 @pytest.mark.parametrize(
     "separator",
-    ["-", "\u2013", "\u2014", " to "],
-    ids=["ascii-hyphen", "en-dash", "em-dash", "to"],
+    ["-", "\u2013", "\u2014", " to ", " TO ", " To "],
+    ids=["ascii-hyphen", "en-dash", "em-dash", "to", "to-uppercase", "to-titlecase"],
 )
 def test_every_declared_separator_is_reconciled(separator):
     fields = {"start_date": None, "end_date": None}
