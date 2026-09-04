@@ -164,11 +164,6 @@ def _parse_author_fallback(parts: list[str]) -> tuple[list[str], bool]:
     initials ("Sanguino SM") is not reopened by a later fragment; a
     fragment with nothing open to attach to is emitted as its own element
     rather than dropped, so the token count never falls (#560).
-
-    A mixed-case or lowercase 1-2 character token is not initials-shaped and
-    so is not treated as a fragment at all -- it is at least as likely to be
-    a real short surname ("Li", "Wu", "Ma", "Ye") as an initials group, so
-    it is kept as its own standalone author instead (#560).
     """
     cleaned_authors: list[str] = []
     has_et_al = False
@@ -232,19 +227,11 @@ def _normalize_author_names(authors: str) -> str:
       (full given names aren't initials -- the pair detector correctly
       declines this shape; abbreviating "John A" to "JA" is not attempted)
 
-    Fixes common issues:
-    - Double commas: "Watson, K.,," -> "Watson K"
-    - Trailing punctuation
-
-    Never drops a token that names or belongs to a real author (#560), on
-    either parser. Both used to: the fallback discarded any comma-split
-    token it could not place, case-blind, so a short *surname* ("Li", "Wu",
-    "Ma", "Ye") went the way of a short initials fragment; the pair parser
-    skipped an initials group standing in a surname slot. An unplaceable
-    token now merges into the author before it, or is emitted as its own
-    element when there is none open, so neither parser reduces the token
-    count. The two orphan rules are not identical -- see
-    `_parse_surname_initial_pairs`.
+    Never drops a token that names or belongs to a real author (#560). Both
+    parsers used to: the fallback discarded any comma-split token it could
+    not place, case-blind, so a short *surname* ("Li", "Wu", "Ma", "Ye")
+    went the way of a short initials fragment; the pair parser skipped an
+    initials group standing in a surname slot.
     """
     if not authors:
         return ''
@@ -260,11 +247,6 @@ def _normalize_author_names(authors: str) -> str:
     # Replace " & " with ", "
     authors = re.sub(r'\s*&\s*', ', ', authors)
 
-    # Handle the "LastName, Initial, LastName, Initial" format
-    # Pattern: word followed by comma and single letter(s)
-    # e.g., "Kelly, R, Pirog, R" -> list of ("Kelly", "R"), ("Pirog", "R")
-
-    # First, check if this looks like alternating "Name, Initial" pairs
     parts = [p.strip() for p in authors.split(',') if p.strip()]
 
     # Try to detect the pattern: alternating surnames and initials. A

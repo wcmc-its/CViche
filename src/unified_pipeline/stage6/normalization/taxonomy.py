@@ -1,8 +1,8 @@
 """A leaked stage-3b taxonomy code, stripped off rendered text.
 
-Its own module because its input is neither a CV value nor a Word marker: it
-is a pipeline-internal label that escaped stage 3b into a bullet. It changes
-when the taxonomy changes, and nothing else in ``normalization`` does.
+Its own module because its input is neither a CV value nor a Word marker but a
+pipeline-internal label that escaped stage 3b into a bullet. It changes when
+the taxonomy changes, and nothing else in ``normalization`` does.
 """
 import re
 
