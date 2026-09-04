@@ -291,20 +291,20 @@ def test_no_author_text_reaches_the_debug_log():
 
 
 def test_surname_in_a_shifted_initials_slot_is_not_upper_cased():
-    """The pairs branch's `len(surname) <= 2 and surname.isupper()` skip
-    advances by one, which shifts the loop off the parity the detector
-    validated -- a real surname can then land in the initials slot and was
-    rendered in capitals ("Smith" -> "SMITH"). Upper-casing is now applied
-    only to a token that is itself initials-shaped.
+    """The pairs branch's old surname-slot skip advanced by one, which
+    shifted the loop off the parity the detector validated -- a real
+    surname could then land in the initials slot and was rendered in
+    capitals ("Smith" -> "SMITH"). Upper-casing is applied only to a token
+    that is itself initials-shaped.
 
-    The pinned output below is deliberately not lossless: the skip that
-    protects "Smith" from being upper-cased also advances past the first
-    input "AB" token entirely, so only one of the two "AB"s in
-    'AB, A-B, Smith, AB' survives into the rendered citation -- a known,
-    accepted side effect of the skip, not asserted away by this test."""
+    Round 2: the same input also pins that the shift no longer costs a
+    token. The skip used to advance past the leading "AB" entirely, so one
+    of the two "AB"s in 'AB, A-B, Smith, AB' never reached the citation --
+    round 1 asserted that loss as an accepted side effect. The orphan
+    branch now places the token instead of stepping over it."""
     citation = _cite('AB, A-B, Smith, AB')
     assert 'SMITH' not in citation
-    assert citation == '1. A-B Smith, AB. A Study.'
+    assert citation == '1. AB A-B, Smith AB. A Study.'
 
 
 # --------------------------------------------------------------------------
@@ -371,3 +371,54 @@ def test_fallback_parser_is_reachable_and_reports_et_al_separately():
     assert _parse_author_fallback(['Alpha', 'et al']) == (['Alpha'], True)
     # an initials fragment with no open predecessor is kept, not dropped
     assert _parse_author_fallback(['Alpha B', 'C']) == (['Alpha B', 'C'], False)
+
+
+# --------------------------------------------------------------------------
+# Round-2 verification. The pair parser had a token deletion of its own, on a
+# shape the fallback never sees: an initials group standing where a surname
+# should be was skipped over rather than placed. It is the same defect #560
+# is about, in the other parser, and one live farm string hits it.
+# --------------------------------------------------------------------------
+
+def test_an_initials_group_in_a_surname_slot_is_not_deleted():
+    """"AB, PL*, Smith, JA" rendered as "PL* Smith, JA": the leading "AB"
+    was skipped over and never emitted. Widening the initials rule to
+    accept the co-first-author asterisk is what routed this string to the
+    pair parser in the first place, so the skip has to stop deleting."""
+    citation = _cite('AB, PL*, Smith, JA')
+    assert 'AB' in citation
+    assert citation == '1. AB PL*, Smith JA. A Study.'
+
+
+def test_the_pair_parser_keeps_every_alphabetic_character_of_its_input():
+    """The property, not one example: for the shapes that reach the pair
+    parser at all, every letter and digit of the input survives into the
+    output. The old skip broke it on any list missing a surname."""
+    for authors in (
+        'AB, PL*, Smith, JA',
+        'AB, PL, Smith, JA',
+        'AB, A-B, Smith, AB',
+        'Kelly, R, Pirog, R',
+        'Smith, John, Jr., Brown',
+    ):
+        parts = [p.strip() for p in authors.split(',') if p.strip()]
+        joined = ''.join(_parse_surname_initial_pairs(parts))
+        for token in parts:
+            for char in token:
+                if char.isalnum():
+                    assert char in joined, f'{char!r} of {authors!r} was dropped'
+
+
+def test_consecutive_orphan_initials_coalesce_into_one_author():
+    """The farm's one live occurrence of the skip is a two-character
+    surname followed by its own single initial, both in surname slots
+    because the list around them is a clean pair sequence. Skipping deleted
+    both; merging the second into the first reconstructs the author exactly
+    as the published citation spells it. Shape reproduced synthetically --
+    "A, E, L, B" between two ordinary pairs."""
+    assert _cite('Alpha, A, E, L, Bravo, B') == (
+        '1. Alpha A, E L, Bravo B. A Study.'
+    )
+    assert _parse_surname_initial_pairs(
+        ['Alpha', 'A', 'E', 'L', 'Bravo', 'B']
+    ) == ['Alpha A', 'E L', 'Bravo B']

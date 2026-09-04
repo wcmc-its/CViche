@@ -42,8 +42,12 @@ def _looks_like_initials(token: str) -> bool:
 
     THE initials rule for this module. Every path that has to decide
     "initials or name?" calls this one predicate -- the pair detector, the
-    pair parser's upper-casing, and the fallback parser -- so a token can no
-    longer be classified one way on one path and the other way on the other.
+    pair parser's surname-slot test, the pair parser's upper-casing, and the
+    fallback parser -- so a token can no longer be classified one way on one
+    path and the other way on the other. The surname-slot test was the last
+    holdout: it asked `len(surname) <= 2 and surname.isupper()` on its own,
+    a fourth definition that disagreed with this one on marked groups
+    ("PL*"), on 3-4 letter groups and on a lone lowercase initial.
     The fallback used to carry its own pair of tests (an ASCII-only
     1-3 uppercase-letter regex, plus a case-blind "2 characters or fewer and
     isupper()"), and those disagreed with this function on spaced groups
@@ -75,14 +79,19 @@ def _parse_surname_initial_pairs(parts: list[str]) -> list[str]:
     Reached only once `_normalize_author_names` has verified that every
     odd-indexed token is an initials group or a recognised name suffix, so
     the parity walked here is the parity the detector validated -- with one
-    deliberate exception, the "surname is itself initials" skip, which
+    exception, an initials group turning up in a SURNAME slot, which
     advances by one and therefore shifts the loop off that parity for
     everything after it.
 
-    Never reduces the token count: a trailing element with no initials to
-    pair with is emitted on its own rather than dropped (#560).
+    Nothing is discarded, on either shape (#560). A trailing element with no
+    initials to pair with is emitted on its own; an initials group in a
+    surname slot -- a list that is missing a surname, so the group has no
+    pair -- is placed the way `_parse_author_fallback` places an orphan
+    fragment rather than skipped over. It used to be skipped, which deleted
+    it outright: "AB, PL*, Smith, JA" rendered as "PL* Smith, JA".
     """
     cleaned_authors: list[str] = []
+    merge_target_open = False
     i = 0
     while i < len(parts):
         surname = parts[i].strip().rstrip('.,')
@@ -101,26 +110,47 @@ def _parse_surname_initial_pairs(parts: list[str]) -> list[str]:
             # The slot after this surname is a suffix, not an initials
             # group for a *following* pair -- attach it here.
             cleaned_authors.append(f"{surname} {initials.rstrip('.')}")
+            merge_target_open = False
             i += 2
             continue
 
+        if _looks_like_initials(surname):
+            # An initials group in a surname slot: the source list is
+            # missing the surname it belongs to, so there is no pair to
+            # make. Placed exactly as `_parse_author_fallback` places an
+            # orphan fragment -- merged into the element before it while
+            # that element is still "open" (a bare token carrying no
+            # initials of its own yet), emitted on its own when there is
+            # nothing open to charge it to -- and never dropped, which is
+            # what this branch used to do. Consecutive orphans therefore
+            # coalesce into one element, and that is the reading the corpus
+            # wants: its one occurrence is a two-character surname followed
+            # by its own initial, and merging reconstructs that author
+            # exactly where skipping deleted both tokens.
+            if merge_target_open:
+                cleaned_authors[-1] = f"{cleaned_authors[-1]} {surname}"
+                merge_target_open = False
+            else:
+                cleaned_authors.append(surname)
+                merge_target_open = True
+            i += 1
+            continue
+
         # Normalize spaced initials: "P L" -> "PL". Upper-case only a
-        # token that is actually initials-shaped. The `len(surname) <= 2`
-        # skip below advances by one, which shifts this loop off the
-        # parity the detector validated, so a real surname can land in
-        # the initials slot ("AB, A-B, Smith, AB" puts "Smith" here) --
-        # and rendering it as "SMITH" would be a new corruption of a
-        # name this function is supposed to leave alone (#560).
+        # token that is actually initials-shaped. Belt and braces since the
+        # orphan branch above started placing rather than skipping: it
+        # advances by one onto an odd-indexed token, which the detector has
+        # already validated as initials, so that token takes the orphan
+        # branch too and the parity restores -- a real surname can no longer
+        # reach this slot. Nothing enforces that reasoning, and rendering a
+        # surname as "SMITH" would be a new corruption of a name this
+        # function is supposed to leave alone (#560), so the test stays.
         initials_normalized = initials.replace(' ', '')
         if _looks_like_initials(initials_normalized):
             initials_normalized = initials_normalized.upper()
 
-        # Skip if surname looks like just initials
-        if len(surname) <= 2 and surname.isupper():
-            i += 1
-            continue
-
         cleaned_authors.append(f"{surname} {initials_normalized}")
+        merge_target_open = False
         i += 2
 
     return cleaned_authors
@@ -215,18 +245,27 @@ def _normalize_author_names(authors: str) -> str:
     - Double commas: "Watson, K.,," -> "Watson K"
     - Trailing punctuation
 
-    Never drops a token that names or belongs to a real author (#560).
-    Previously, a comma-split token that neither the pair detector nor the
-    fallback could place -- an initials group, a name suffix, a bare 1-2 character
-    fragment -- was silently discarded, and that test was case-blind: a
-    short *surname* ("Li", "Wu", "Ma", "Ye") was discarded exactly like a
-    short initials fragment. Because a single missing comma anywhere in the
-    list is enough to make the pair detector decline the whole string, that
-    one discard rule was stripping every later author's initials from
-    citations that had them, or dropping short-surnamed authors outright.
-    Such a token now merges into the author immediately before it, and when
-    there is no open author to merge into it is emitted as its own element
-    instead. Neither branch reduces the token count any more.
+    Never drops a token that names or belongs to a real author (#560), on
+    either parser. Both used to.
+
+    The fallback discarded any comma-split token it could not place -- an
+    initials group, a name suffix, a bare 1-2 character fragment -- and that
+    test was case-blind: a short *surname* ("Li", "Wu", "Ma", "Ye") was
+    discarded exactly like a short initials fragment. Because a single
+    missing comma anywhere in the list is enough to make the pair detector
+    decline the whole string, that one discard rule was stripping every
+    later author's initials from citations that had them, or dropping
+    short-surnamed authors outright.
+
+    The pair parser had a discard of its own, on the shape the fallback
+    never sees: an initials group sitting where a surname should be, which
+    it skipped over. "AB, PL*, Smith, JA" lost "AB" outright, and the farm's
+    one live occurrence lost a two-character surname and its initial
+    together. It is placed rather than skipped now.
+
+    In both, such a token merges into the author immediately before it, and
+    when there is no open author to merge into it is emitted as its own
+    element instead. Neither parser reduces the token count any more.
     """
     if not authors:
         return ''
