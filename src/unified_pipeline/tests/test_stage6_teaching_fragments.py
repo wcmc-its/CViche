@@ -255,9 +255,18 @@ def _index_of(texts, needle):
     raise AssertionError(f"{needle!r} not found in {texts!r}")
 
 
-def _entry(code, text, **fields):
-    """One stage-5c-shaped teaching entry. Keyword args become extracted_fields."""
-    return {"taxonomy_code": code, "text": text, "extracted_fields": dict(fields)}
+def _entry(code, text, hierarchy=None, **fields):
+    """One stage-5c-shaped teaching entry. Keyword args become extracted_fields.
+
+    `hierarchy` is a top-level entry key, not an extracted field: it carries the
+    source CV's own section labels above this entry, and `_is_structural_label`
+    reads it to decide whether an all-caps run is a header or is legitimate
+    all-caps content (a name, an initialism, an org written in caps).
+    """
+    entry = {"taxonomy_code": code, "text": text, "extracted_fields": dict(fields)}
+    if hierarchy is not None:
+        entry["hierarchy"] = list(hierarchy)
+    return entry
 
 
 # --- 1. end-to-end routing, against the real template ----------------------
@@ -479,9 +488,19 @@ def test_unknown_k_code_renders_nothing_and_is_left_for_the_appendix():
 
 def test_all_caps_structural_label_entry_is_not_rendered():
     """Case 6. A source CV's own section header extracted as an entry is
-    furniture: the WCM template supplies the structure."""
+    furniture: the WCM template supplies the structure.
+
+    The entry carries the hierarchy label it echoes, because that is what a
+    real one looks like and because case alone is not enough: #665 item 3
+    (merged as 7e82fb8) narrowed `_is_structural_label` to require either a
+    hierarchy echo or a stage-4 extraction that found nothing, after the
+    unconditional all-caps rule was found to drop legitimate all-caps content.
+    A fixture with no hierarchy and a populated `formatted_text` satisfies
+    neither signal, so it would render -- correctly, under the current rule.
+    """
     gen = _generator("Didactic teaching", "SENTINEL-END")
     gen._fill_teaching({"K1": [_entry("K1", "DIRECT TEACHING AND PRECEPTING",
+                                      hierarchy=["Direct Teaching and Precepting"],
                                       formatted_text="Direct teaching and precepting")]})
     assert _visible(gen) == ["Didactic teaching", "SENTINEL-END"]
 
