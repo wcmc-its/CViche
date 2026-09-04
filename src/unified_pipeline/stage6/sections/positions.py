@@ -22,7 +22,6 @@ or "Role" as a title when the source CV had a table header there. All three are
 reached only from this module.
 """
 import re
-from typing import Dict, List, Optional, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
 
@@ -55,14 +54,14 @@ _CHILD_DATE_RANGE_RE = re.compile(
 )
 
 
-def _split_child_date_range(fragment: str) -> Optional[Tuple[str, str]]:
+def _split_child_date_range(fragment: str) -> tuple[str, str] | None:
     """(start, end) raw date strings out of a child fragment, or None when
     the fragment isn't shaped like a date range."""
     m = _CHILD_DATE_RANGE_RE.match(fragment.strip())
     return (m.group(1), m.group(2)) if m else None
 
 
-def _tab_joined_child_fragments(text: str) -> List[Tuple[str, Tuple[str, str]]]:
+def _tab_joined_child_fragments(text: str) -> list[tuple[str, tuple[str, str]]]:
     """Bullet-prefixed child appointments tab-joined onto a D1/D2/D3 entry's
     header row (#476) -- e.g. the -DAZFA D2 entry "...| 07/2002 - 12/2006\t*
     Attending Physician | 07/2002 - 06/2003\t* Attending Physician &
@@ -108,7 +107,7 @@ class PositionsSection:
     """Section D writers, mixed into `WCMTemplateGenerator`."""
 
     @staticmethod
-    def _propagate_institution_to_subentries(entries: List[Dict], verbose: bool = False) -> List[Dict]:
+    def _propagate_institution_to_subentries(entries: list[dict], verbose: bool = False) -> list[dict]:
         """Fill blank institutions from the nearest preceding entry that has one.
 
         Source CVs often list sub-positions as indented bullets under a parent
@@ -150,7 +149,7 @@ class PositionsSection:
                                      'description', 'activity'})
 
     @classmethod
-    def _position_title(cls, entry: Dict) -> str:
+    def _position_title(cls, entry: dict) -> str:
         """Real title for a position entry, with column-header placeholders removed."""
         fields = entry.get('extracted_fields', {}) or {}
         title = (fields.get('title') or '').strip()
@@ -159,14 +158,14 @@ class PositionsSection:
         return title
 
     @staticmethod
-    def _position_has_dates(entry: Dict) -> bool:
+    def _position_has_dates(entry: dict) -> bool:
         """True if the entry carries any date of its own (start or end)."""
         fields = entry.get('extracted_fields', {}) or {}
         return bool(fields.get('start_date') or fields.get('end_date'))
 
     @classmethod
-    def _merge_grouped_appointments(cls, entries: List[Dict],
-                                    verbose: bool = False) -> List[Dict]:
+    def _merge_grouped_appointments(cls, entries: list[dict],
+                                    verbose: bool = False) -> list[dict]:
         """Reassemble appointments fragmented across title / employer rows.
 
         Source CVs commonly list one employer with a date range on its own line
@@ -203,7 +202,7 @@ class PositionsSection:
         ordered = sorted(entries,
                          key=lambda e: element_idx_sort_key(e.get('element_idx_start')))
 
-        def _copy_dates(src: Dict, dst: Dict) -> None:
+        def _copy_dates(src: dict, dst: dict) -> None:
             src_f = src.get('extracted_fields', {}) or {}
             dst_f = dst.get('extracted_fields')
             if not dst_f:
@@ -212,7 +211,7 @@ class PositionsSection:
                 dst_f['start_date'] = src_f.get('start_date', '')
                 dst_f['end_date'] = src_f.get('end_date', '')
 
-        def _employer(e: Dict) -> str:
+        def _employer(e: dict) -> str:
             f = e.get('extracted_fields', {}) or {}
             return (f.get('institution') or f.get('organization') or '').strip().lower()
 
@@ -315,7 +314,7 @@ class PositionsSection:
                   f"propagated dates to {merged} role row(s)")
         return result
 
-    def _fill_positions(self, entries_by_code: Dict[str, List[Dict]]):
+    def _fill_positions(self, entries_by_code: dict[str, list[dict]]):
         """Fill positions tables with track changes for enriched content.
 
         The WCM template has THREE separate position tables:
@@ -401,7 +400,7 @@ class PositionsSection:
             for entry in sorted_entries:
                 self._add_position_row(table, entry)
 
-    def _add_position_row(self, table, entry: Dict):
+    def _add_position_row(self, table, entry: dict):
         """Add a single position entry to a table."""
         original_text = entry.get('text', '')
         fields = entry.get('extracted_fields', {}) or {}
@@ -513,7 +512,7 @@ class PositionsSection:
             title.strip().lower(), dates)
 
     def _add_tab_joined_child_position_rows(self, table, original_text: str,
-                                             institution_content: List[Tuple],
+                                             institution_content: list[tuple],
                                              taxonomy_code: str,
                                              parent_title_lower: str,
                                              parent_dates: str) -> None:
