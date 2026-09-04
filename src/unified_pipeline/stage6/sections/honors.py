@@ -14,6 +14,8 @@ is testable on strings alone.
 
     _entry_parts                    the entry's parts: newlines always, '|'
                                     for the newline-blind single-line case
+    _is_honors_header_entry         whether the whole entry is the source
+                                    CV's own column-header row
     _parse_honor_lines              one pass over those parts, sorting them
                                     into award cells and loose year cells
     _split_award_year               peels a leading or trailing year off a
@@ -40,7 +42,19 @@ writing and because every parse below depends on it:
               except when the last cell is a bare year, which is that
               award's date. A tab-bearing line is never additionally split
               on '|'; see `_entry_parts` for the three farm entries that
-              rule exists for.
+              rule exists for. So a line carrying BOTH -- the review's
+              "2020\\tAward A | Award B | 2019" -- is one award: the tab
+              cells join (its last one is not a bare year), and the joined
+              line is then read as the three columns it now has, leaving the
+              leading "2020" inside the award's name. Peeling that year off
+              would mean choosing between it and the 2019 the date column
+              states, which nothing in the text settles, so it is left where
+              the source wrote it rather than guessed at.
+
+A whole entry that is really the source table's HEADER row is dropped before
+any of this, by `_is_honors_header_entry`. The one thing that tells a header
+apart from data: a header row NAMES a date column ("Date awarded (yyyy)"),
+it never carries a date VALUE.
 
 The consequence the reviewer named explicitly: "Excellence in Research |
 Teaching Award | 2024" is read as one award, the organization "Teaching
@@ -89,6 +103,12 @@ _MIN_AWARDS_FOR_SPLIT = 2
 # table header row, extracted as if it were data.
 _ENTRY_HEADER_KEYWORDS = ['award', 'honor', 'organization', 'date', 'year',
                           'granting']
+
+# The delimiters a source table's cells arrive joined by. `_is_table_header_entry`
+# splits on tab and pipe; the newline is added because a header row fused into a
+# multi-line entry carries one, and `_is_honors_header_entry` has to see the
+# same cells the parser will.
+_CELL_SPLIT_RE = re.compile(r'[\t|\n]')
 
 # The same thing one line at a time, for a header row fused into a
 # multi-line entry. Two of these in one line is a header, not an award.
@@ -292,16 +312,25 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
 
 
 def _field_text(fields: Mapping, *names: str) -> str:
-    """First non-empty value among `names`, coerced to a string.
+    """First non-empty value among `names`, coerced to a string and stripped.
 
     The stage-5 record is not a contract anything enforces: a key can be
     absent, `None`, or a number. Coercing here is what keeps a malformed
     field from reaching a table cell as `None` (#476 review).
+
+    "Non-empty" means non-empty after stripping, and the value is returned
+    stripped, because a cell holding only spaces is a blank row the renderer
+    cannot tell from real content: `_fill_honors` drops a record with nothing
+    in it, but " " is truthy, so a whitespace-only field rendered a visibly
+    empty row instead of nothing at all (#733 review).
     """
     for name in names:
         value = fields.get(name)
-        if value:
-            return value if isinstance(value, str) else str(value)
+        if not value:
+            continue
+        text = (value if isinstance(value, str) else str(value)).strip()
+        if text:
+            return text
     return ''
 
 
@@ -346,6 +375,31 @@ def _honor_columns(line: str) -> HonorRecord | None:
             return HonorRecord(parts[0], '', parts[1])
         return HonorRecord(parts[0], parts[1], '')
     return None
+
+
+def _is_honors_header_entry(text: str) -> bool:
+    """Is this whole entry the source CV's own column-header row?
+
+    `_is_table_header_entry` answers that for every section by counting header
+    words among the entry's cells, and for honors "award" is one of those
+    words -- so every cell of a genuine multi-award list ("Award A | 2024 |
+    Award B | 2023 | Award C | 2022") counts as a header cell and the entry is
+    dropped before the parser ever sees it. Five of the pipe and tab shapes the
+    review asked about behaved that way, including the fused multi-award list
+    #476 exists to recover: they rendered nothing at all, silently, which is
+    the exact loss this section set out to stop (#733 review).
+
+    The fact that separates the two is that a header row NAMES a date column
+    ("Date awarded (yyyy)"); it never carries a date VALUE. An entry with a
+    cell that is itself a date is therefore data, whatever its header-word
+    count, and only that case is taken back from the shared check -- a real
+    header row ("Name of award | Organization | Date awarded") still has no
+    date cell and is still skipped.
+    """
+    if not _is_table_header_entry(text, _ENTRY_HEADER_KEYWORDS):
+        return False
+    return not any(_is_date_column(cell.strip())
+                   for cell in _CELL_SPLIT_RE.split(text or '') if cell.strip())
 
 
 def _looks_like_column_header(line: str) -> bool:
@@ -483,8 +537,11 @@ def _record_for_single_award(original_text: str,
     raw string (#733 review).
     """
     if not award_name:
+        # Stripped for the same reason `_field_text` strips: a whitespace-only
+        # entry text otherwise became a whitespace-only award cell, which is a
+        # blank rendered row rather than the nothing it should be (#733 review).
         award_name = (columns.award if columns is not None
-                      else original_text[:_MAX_RAW_AWARD_CHARS])
+                      else original_text.strip()[:_MAX_RAW_AWARD_CHARS])
     if columns is not None:
         granting_body = granting_body or columns.organization
         date = date or columns.date
@@ -784,7 +841,7 @@ class HonorsSection:
 
             # Skip table header entries that were mistakenly extracted as data
             # Common patterns: "Name of award\tOrganization\tDate awarded" or similar
-            if _is_table_header_entry(original_text, _ENTRY_HEADER_KEYWORDS):
+            if _is_honors_header_entry(original_text):
                 if self.verbose:
                     print(f"  Skipping header entry: '{original_text[:50]}...'")
                 continue
