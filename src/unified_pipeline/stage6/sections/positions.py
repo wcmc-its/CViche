@@ -42,6 +42,14 @@ ACADEMIC_APPOINTMENT_CODE, HOSPITAL_APPOINTMENT_CODE, OTHER_POSITION_CODE = POSI
 # appointment -- see _tab_joined_child_fragments below).
 _CHILD_BULLET_GLYPHS = ('•', '-', '–', '*')
 
+# Key `_propagate_institution_to_subentries` writes on a record whose
+# institution it filled in from a parent row, holding that parent's
+# `element_idx_start`. It is the only parent/child link this section has: the
+# stage-4 records carry no parent identifier of their own, so the merge pass
+# reads this key to tell an employer a record NAMED from one it INHERITED
+# (#476 review items 1 and 2).
+INHERITED_INSTITUTION_KEY = 'institution_propagated_from'
+
 # A child fragment's own date range, e.g. "07/2002 - 06/2003" or
 # "2002 - present" -- loose enough to accept the en/em dash the corpus uses
 # interchangeably with a hyphen, strict enough that ordinary prose never
@@ -103,6 +111,100 @@ def _tab_joined_child_fragments(text: str) -> list[tuple[str, tuple[str, str]]]:
     return children
 
 
+def _entry_employer(entry: dict) -> str:
+    """The record's employer, lowercased for comparison, '' when it has none.
+    D3 records carry it as `organization` rather than `institution`."""
+    fields = entry.get('extracted_fields', {}) or {}
+    return (fields.get('institution') or fields.get('organization') or '').strip().lower()
+
+
+def _inherited_institution(entry: dict) -> bool:
+    """True when this record's institution was filled in from a parent row by
+    `_propagate_institution_to_subentries`, which records the parent's element
+    index. This is the explicit source parent/child link #476 review items 1
+    and 2 ask for in place of physical adjacency.
+
+    Membership, not truthiness: a parent whose own `element_idx_start` is
+    missing still records the link, and the record still counts as having
+    inherited."""
+    return INHERITED_INSTITUTION_KEY in entry
+
+
+def _employer_claim(entry: dict) -> str:
+    """The employer this record itself named, '' when it named none.
+
+    An inherited institution is not a claim: the record named no employer, it
+    was given one by its parent. Keeping the two apart is what lets the merge
+    refuse a pair whose employers genuinely disagree without also refusing a
+    sub-position that never named an employer at all.
+    """
+    return '' if _inherited_institution(entry) else _entry_employer(entry)
+
+
+def _employers_match(first: str, second: str) -> bool:
+    """True when two employer strings are BOTH known and name one employer.
+
+    A missing employer never matches (#476 review item 2): unknown is not
+    "equal by default", it is no evidence at all. The comparison is on
+    alphanumeric word sets, so punctuation and word order do not matter, and
+    a sub-unit of the same employer -- "Lincoln Hospital" against "Lincoln
+    Hospital, Department of Emergency Medicine" -- still matches by subset,
+    which is the case the pre-#476 rule was written for. Two employers with
+    no word in common never match.
+    """
+    words_first = set(re.findall(r'[a-z0-9]+', first.lower()))
+    words_second = set(re.findall(r'[a-z0-9]+', second.lower()))
+    if not words_first or not words_second:
+        return False
+    return words_first <= words_second or words_second <= words_first
+
+
+def _same_source_element(first: dict, second: dict) -> bool:
+    """True when two records came out of the SAME source paragraph or table cell.
+
+    This is the structural evidence #476 review item 1 asks for in place of
+    physical adjacency: two records sharing one `element_idx_start`, or one
+    (table, row) cell, are a single source line that field extraction split,
+    not two appointments that merely sit next to each other in the document.
+    """
+    idx = first.get('element_idx_start')
+    if idx is not None and idx == second.get('element_idx_start'):
+        return True
+    cell = (first.get('table_index'), first.get('row_index'))
+    return (cell[0] is not None and cell[1] is not None
+            and cell == (second.get('table_index'), second.get('row_index')))
+
+
+def _is_one_appointment(first: dict, second: dict) -> bool:
+    """True when there is evidence that two records are halves of ONE
+    appointment. Document adjacency on its own is not evidence (#476 review
+    items 1 and 2): in employment history a false merge invents a plausible
+    appointment the CV never claimed and deletes the row it took the dates
+    from, which is worse than leaving two rows unmerged.
+
+    Three ways to qualify, weakest last:
+
+    1. the two records came out of one source element — one line that field
+       extraction split, so they cannot be two appointments;
+    2. both records name an employer, and the two names match;
+    3. one names an employer and the other named none but INHERITED one from
+       a parent row, which `_propagate_institution_to_subentries` recorded —
+       a sub-position under an employer heading, not a competing employer.
+
+    Everything else fails closed, including the case the old rule was loosest
+    on: two records that both name an employer and disagree, and two records
+    that neither name nor inherit one.
+    """
+    if _same_source_element(first, second):
+        return True
+    claim_first, claim_second = _employer_claim(first), _employer_claim(second)
+    if claim_first and claim_second:
+        return _employers_match(claim_first, claim_second)
+    if claim_first or claim_second:
+        return _inherited_institution(first) or _inherited_institution(second)
+    return False
+
+
 class PositionsSection:
     """Section D writers, mixed into `WCMTemplateGenerator`."""
 
@@ -122,6 +224,7 @@ class PositionsSection:
         ordered = sorted(entries, key=lambda e: element_idx_sort_key(e.get('element_idx_start')))
         last_institution = None
         last_enrichment = None
+        last_idx = None
         propagated = 0
         for entry in ordered:
             fields = entry.get('extracted_fields', {}) or {}
@@ -129,11 +232,17 @@ class PositionsSection:
             if inst:
                 last_institution = inst
                 last_enrichment = entry.get('institution_enrichment')
+                last_idx = entry.get('element_idx_start')
             elif last_institution:
                 # This entry has no institution — inherit from parent
                 if not fields:
                     entry['extracted_fields'] = fields = {}
                 fields['institution'] = last_institution
+                # Record which row it came from. Two passes need it: this one
+                # only to be honest about provenance, and the merge pass to
+                # tell an inherited institution from an employer the record
+                # named itself (#476 review items 1 and 2).
+                entry[INHERITED_INSTITUTION_KEY] = last_idx
                 # Also propagate enrichment if available
                 if last_enrichment and not entry.get('institution_enrichment'):
                     entry['institution_enrichment'] = dict(last_enrichment)
@@ -190,6 +299,14 @@ class PositionsSection:
             already covered by an overlapping *titled* row at the same employer is
             redundant — drop it (but keep it if it is the only record).
 
+        Rules 2 and 1 both require `_is_one_appointment` — a known, matching
+        employer or a shared source element — on top of adjacency (#476 review
+        items 1 and 2). Adjacency alone used to be enough, and a missing
+        employer used to count as a match, so a title-only row could inherit
+        the dates of an unrelated employer's row and delete it: that is a
+        plausible appointment the CV never claimed, and it happens on the
+        corpus farm today (one D1 pair, employers with no word in common).
+
         Rules 2 then 1 run as separate passes so a header is never mistaken for a
         lone adjacent dates row. Dates are only ever *copied into* a row that
         lacks them; an entry that already carries its own dates is never
@@ -211,10 +328,6 @@ class PositionsSection:
                 dst_f['start_date'] = src_f.get('start_date', '')
                 dst_f['end_date'] = src_f.get('end_date', '')
 
-        def _employer(e: dict) -> str:
-            f = e.get('extracted_fields', {}) or {}
-            return (f.get('institution') or f.get('organization') or '').strip().lower()
-
         # Positions in `ordered`, never id() of the dicts (#476 review item 4):
         # the bookkeeping then reads as "row 4 was absorbed by row 3" -- the
         # thing the rules are actually about -- and a caller can reproduce it
@@ -225,26 +338,25 @@ class PositionsSection:
         # Pass 1 — Rule 2: a title-less dated entry is an employer header; the
         # immediately-following title-only rows are the roles held there. Copy the
         # header's dates onto each child, then drop the redundant bare header.
-        # Children must share the header's employer (institution propagation has
-        # already pushed the header's institution onto its sub-rows, so a mismatch
-        # means the run has reached a different employer). Done before Rule 1 so a
-        # header is never mistaken for a lone adjacent dates row.
+        # A child must be evidently the header's own row: institution
+        # propagation runs first and has already pushed the header's
+        # institution onto its sub-rows, so a legitimate child arrives here
+        # carrying that employer. A child whose employer is missing or
+        # different ends the run instead of joining it -- unknown is not a
+        # match (#476 review item 2). Done before Rule 1 so a header is never
+        # mistaken for a lone adjacent dates row.
         for i, entry in enumerate(ordered):
             if i in dropped:
                 continue
             if cls._position_title(entry) or not cls._position_has_dates(entry):
                 continue
-            header_employer = _employer(entry)
             children = []
             for j in range(i + 1, len(ordered)):
                 if j in dropped:
                     continue
                 nxt = ordered[j]
-                nxt_employer = _employer(nxt)
-                same_employer = (not nxt_employer or not header_employer
-                                 or nxt_employer == header_employer)
                 if (cls._position_title(nxt) and not cls._position_has_dates(nxt)
-                        and same_employer):
+                        and _is_one_appointment(entry, nxt)):
                     children.append(nxt)
                 else:
                     break
@@ -257,16 +369,21 @@ class PositionsSection:
         # Pass 2 — Rule 1: a title-only row immediately adjacent (in document
         # order) to a remaining bare dates row, in either order, is one
         # appointment split across two lines (e.g. "Staff Nurse" /
-        # "Medical/Surgical Unit (07/04-04/10)"). Physical adjacency is the
-        # fingerprint; the bare dates row often carries a sub-unit/department in
-        # its institution field rather than a distinct employer, so the employer
-        # strings need not match here.
-        def _date_neighbor(j: int) -> int | None:
-            """Index of a surviving bare-dates row at position `j`, or None."""
+        # "Medical/Surgical Unit (07/04-04/10)") -- but only where
+        # `_is_one_appointment` finds the two halves actually related.
+        # Adjacency alone is not the fingerprint (#476 review item 1); the
+        # sub-unit/department case the loose rule was written for still
+        # merges, because `_employers_match` matches a sub-unit against its
+        # parent employer by word subset.
+        def _date_neighbor(anchor: dict, j: int) -> int | None:
+            """Index of a surviving bare-dates row at `j` that belongs to the
+            same appointment as `anchor`, or None."""
             if not 0 <= j < len(ordered) or j in dropped:
                 return None
             cand = ordered[j]
             if cls._position_title(cand) or not cls._position_has_dates(cand):
+                return None
+            if not _is_one_appointment(anchor, cand):
                 return None
             return j
 
@@ -275,9 +392,9 @@ class PositionsSection:
                 continue
             if not cls._position_title(entry) or cls._position_has_dates(entry):
                 continue
-            neighbor = _date_neighbor(i + 1)
+            neighbor = _date_neighbor(entry, i + 1)
             if neighbor is None:
-                neighbor = _date_neighbor(i - 1)
+                neighbor = _date_neighbor(entry, i - 1)
             if neighbor is not None:
                 _copy_dates(ordered[neighbor], entry)
                 dropped.add(neighbor)
@@ -294,7 +411,7 @@ class PositionsSection:
                 continue
             if cls._position_title(entry) or not cls._position_has_dates(entry):
                 continue
-            employer = _employer(entry)
+            employer = _entry_employer(entry)
             if not employer:
                 continue
             for j, other in enumerate(ordered):
@@ -302,7 +419,7 @@ class PositionsSection:
                     continue
                 if not cls._position_title(other) or not cls._position_has_dates(other):
                     continue
-                if _employer(other) != employer:
+                if _entry_employer(other) != employer:
                     continue
                 if _dates_overlap_or_match(entry, other):
                     dropped.add(i)
