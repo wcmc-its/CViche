@@ -43,6 +43,7 @@ import logging
 import re
 from datetime import datetime
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from typing import TypedDict, cast
 
 try:
     from docx.table import Table
@@ -75,23 +76,81 @@ RESEARCH_SUPPORT_SECTIONS = (
     ('M2C', 'Pending Funding'),
 )
 
-# Every stage-4 field key this section reads: the `fields.get(...)` slots in
-# `_create_grant_table` and `_format_grant_duration`, plus `status`, which only
-# the bucket rules read. Anything else stage 4 extracts for an M2 record reaches
-# no row of the WCM grant block, and the module docstring's known gap is exactly
-# that this happens silently -- so `_create_grant_table` names the leftovers at
-# debug level. Adding a `fields.get('x')` above means adding 'x' here, or the
-# key it now consumes still reads as dropped.
-CONSUMED_GRANT_FIELDS = frozenset({
-    'agency', 'funding_source', 'sponsor',
-    'annual_direct_costs', 'total_funding',
-    'co_investigators', 'pi_name', 'principal_investigator',
-    'date', 'start_date', 'end_date',
-    'description', 'major_goals', 'narrative',
-    'grant_number', 'non_financial_support', 'percent_effort',
-    'pi_role', 'role', 'status',
-    'study_title', 'text', 'title', 'trial_title',
-})
+
+class GrantFields(TypedDict, total=False):
+    """One M2 record's `extracted_fields`, as this section reads it.
+
+    The keys are the `fields.get(...)` slots in `_create_grant_table` and
+    `_format_grant_duration`, plus `status`, which only the bucket rules read.
+    Anything else stage 4 extracts for an M2 record reaches no row of the WCM
+    grant block -- the module docstring's known gap -- so adding a
+    `fields.get('x')` below means adding `x` here, or the key it now consumes
+    still reads as dropped by `CONSUMED_GRANT_FIELDS`.
+
+    `total=False`, and every value nullable, because that is what stage 4
+    actually guarantees: it stores raw LLM JSON from a call made with
+    `response_format={"type": "json_object"}` and no schema, and
+    `coerce_field_value_types` (stage4/coercion.py) only joins lists of
+    scalars, leaving every other shape as the model emitted it. This records
+    the contract, it does not enforce it: every runtime `.get(...)` fallback
+    and guard below stays exactly where it was (review thread 3932312407
+    items 1 and 10).
+
+    The value types are measured rather than assumed. Across the 66 CVs of the
+    local corpus, 335 M2 records carry these keys as `str` or as JSON null and
+    as nothing else: `start_date` 285 str / 30 null, `title` 282/28, `end_date`
+    267/48, `agency` 265/45, `pi_role` 229/81, `total_funding` 206/97,
+    `grant_number` 97/213. Null is the ordinary case, not the exotic one --
+    `fields.get('title', '')` really does hand back None on a record that
+    carries the key empty, which is why the reads below are `or`-chained
+    rather than defaulted, and why typing these `str` would have been a lie
+    that hid it.
+
+    Seven keys (`annual_direct_costs`, `funding_source`, `major_goals`,
+    `narrative`, `non_financial_support`, `principal_investigator`, `status`)
+    appear on no M2 record in that corpus at all, so their types come from
+    their consumer rather than from data. The two money keys are the only ones
+    widened past `str`: `_format_currency` documents "Number, string with
+    digits, or empty value" and stage-4 coercion leaves a JSON number numeric.
+
+    Structured stage-4 values -- a dict, or a list of record dicts -- are real
+    and are what `normalization/fields.py` exists to absorb, but the shapes
+    observed there are committee, address and phone fields, none of which are
+    grant fields, and none of the 335 records shows one here.
+    """
+
+    agency: str | None
+    funding_source: str | None
+    sponsor: str | None
+    annual_direct_costs: str | int | float | None
+    total_funding: str | int | float | None
+    co_investigators: str | None
+    pi_name: str | None
+    principal_investigator: str | None
+    date: str | None
+    start_date: str | None
+    end_date: str | None
+    description: str | None
+    major_goals: str | None
+    narrative: str | None
+    grant_number: str | None
+    non_financial_support: str | None
+    percent_effort: str | None
+    pi_role: str | None
+    role: str | None
+    status: str | None
+    study_title: str | None
+    text: str | None
+    title: str | None
+    trial_title: str | None
+
+
+# Every stage-4 field key this section reads, derived from the record type above
+# so the diagnostic and the contract cannot drift apart. Anything outside it
+# reaches no row of the WCM grant block, which the module docstring's known gap
+# says happens silently -- so `_create_grant_table` names the leftovers at debug
+# level.
+CONSUMED_GRANT_FIELDS: frozenset[str] = GrantFields.__optional_keys__
 
 # "Individual's role in project including percent effort" and its variants: a
 # source-table header row, not a grant. Searched over the first 60 characters
@@ -278,7 +337,7 @@ def apply_effort_to_grants(entries: list[dict], effort_lookup: dict[str, str]) -
     """
     messages: list[str] = []
     for entry in entries:
-        fields = entry.get('extracted_fields') or {}
+        fields = cast(GrantFields, entry.get('extracted_fields') or {})
         title = (fields.get('title', '') or '').lower().strip()
         if not title or fields.get('percent_effort'):
             continue
@@ -313,7 +372,7 @@ def rebucket_grants_by_status(
     messages: list[str] = []
     for source_code, source_list in (('M2A', current), ('M2B', completed)):
         for entry in list(source_list):
-            fields = entry.get('extracted_fields') or {}
+            fields = cast(GrantFields, entry.get('extracted_fields') or {})
             target, note = grant_status_rebucket_target(fields.get('status'))
             if not target or target == source_code:
                 continue
@@ -348,7 +407,7 @@ def reclassify_past_m2a_grants(
     # Check each M2A entry for past end dates
     entries_to_move = []
     for entry in current:
-        fields = entry.get('extracted_fields') or {}
+        fields = cast(GrantFields, entry.get('extracted_fields') or {})
         end_date = fields.get('end_date', '')
 
         # Parse end date to check if it's in the past
@@ -377,13 +436,20 @@ def reclassify_past_m2a_grants(
     return current, completed, messages
 
 
-def resolve_pi_name(fields: dict, raw_text: str, role: str, owner_name: str) -> str:
+def resolve_pi_name(
+    fields: GrantFields, raw_text: str, role: str, owner_name: str
+) -> str | None:
     """Resolve the principal investigator for one grant.
 
     Extracted field first, then the trailing cell of a pipe-delimited source row,
     then the CV owner when the role says they are the PI. Text in, text out: no
     docx, so the parser's heuristics are testable on their own (review thread
     3932312407 item 5).
+
+    Returns None, not '', when the record carries `co_investigators` as a JSON
+    null and nothing else resolves -- the `or` chain hands the null straight
+    back. The caller renders a falsy PI as an empty cell either way, so the
+    annotation is what changed here, not the behaviour.
     """
     pi_name = fields.get('pi_name') or fields.get('principal_investigator', '') or fields.get('co_investigators', '')
 
@@ -536,7 +602,7 @@ class ResearchSupportSection:
             last_element = self.doc.paragraphs[section_idx]._element
 
             for i, entry in enumerate(sorted_entries):
-                fields = entry.get('extracted_fields') or {}
+                fields = cast(GrantFields, entry.get('extracted_fields') or {})
 
                 # Create grant table - pass the element to insert after and owner name
                 grant_table = self._create_grant_table(fields, code, entry, insert_after_element=last_element, owner_name=owner_name)
@@ -556,7 +622,7 @@ class ResearchSupportSection:
 
     def _create_grant_table(
         self,
-        fields: dict,
+        fields: GrantFields,
         code: str,
         entry: dict | None = None,
         insert_after_element=None,
@@ -565,7 +631,11 @@ class ResearchSupportSection:
         """Create an individual grant table with the WCM data model.
 
         Args:
-            fields: Extracted field data for the grant
+            fields: Extracted field data for the grant. Typed as `GrantFields`,
+                which names the keys and their observed shapes but enforces
+                nothing at runtime -- the `.get(...)` fallbacks below are still
+                the only thing standing between a missing or null field and a
+                blank cell.
             code: Taxonomy code (M2A, M2B, M2C)
             entry: Full entry dict for comments/metadata
             insert_after_element: XML element to insert after. If None, falls back to RESEARCH SUPPORT.
@@ -606,6 +676,16 @@ class ResearchSupportSection:
 
         # Detect and fix cross-field duplication where the same content appears in multiple fields
         # This happens when Stage 4 incorrectly puts the same text in agency, title, AND funding
+        #
+        # The `.strip()` on `total_funding` below assumes a string. `GrantFields`
+        # types the two money keys `str | int | float | None` because that is
+        # what stage 4 can hand over -- `coerce_field_value_types` leaves a JSON
+        # number numeric -- so mypy reads this line as a possible
+        # AttributeError, the same class of abort that #442 and #450 were.
+        # Nothing here is changed to absorb it: no M2 record in the 66-CV corpus
+        # carries a numeric money field, and making the comparison total is a
+        # behaviour change in an unobserved case, not a typing change. Left
+        # visible on purpose rather than hidden behind a `str` annotation.
         if title and agency and title.strip().lower() == agency.strip().lower():
             # Agency and title are identical - keep as title only, clear agency
             agency = ''
@@ -738,7 +818,9 @@ class ResearchSupportSection:
 
         return table
 
-    def _format_grant_duration(self, fields: dict, taxonomy_code: str = 'M2A') -> str:
+    def _format_grant_duration(
+        self, fields: GrantFields, taxonomy_code: str = 'M2A'
+    ) -> str:
         """Format grant duration according to WCM requirements.
 
         Grants use mm/yy format per the template.

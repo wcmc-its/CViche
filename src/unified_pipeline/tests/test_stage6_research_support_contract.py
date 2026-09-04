@@ -27,6 +27,7 @@ Run with:
     python3 -m pytest src/unified_pipeline/tests/test_stage6_research_support_contract.py -p no:cacheprovider
 """
 
+import ast
 import logging
 import sys
 from pathlib import Path
@@ -1130,3 +1131,52 @@ def test_absent_values_render_as_empty_cells_not_missing_rows():
 
     assert [label for label, _ in _rows(table)] == [label for label, _ in _CONTRACT_ROWS]
     assert _cells(table)['Non-financial support:'] == ''
+
+
+def _fields_get_keys():
+    """Every literal key this module reads off a `fields` mapping."""
+    tree = ast.parse(Path(research_support.__file__).read_text(encoding='utf-8'))
+    keys = set()
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == 'get'
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == 'fields'
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and isinstance(node.args[0].value, str)):
+            keys.add(node.args[0].value)
+    return keys
+
+
+def test_every_field_the_module_reads_is_declared_on_the_grant_record_type():
+    """A `fields.get('x')` that `GrantFields` does not name makes the diagnostic lie.
+
+    `CONSUMED_GRANT_FIELDS` is derived from `GrantFields` and drives the
+    debug line that reports which stage-4 keys reached no row. A slot added to
+    `_create_grant_table` without its key added to the record type would leave
+    that key reported as dropped forever -- the diagnostic reporting a loss
+    that is not happening, which is worse than no diagnostic. Nothing enforced
+    the pairing before; this does, off the module's own source.
+    """
+    keys = _fields_get_keys()
+
+    assert keys, 'the AST walk found no fields.get(...) calls at all'
+    assert keys <= research_support.CONSUMED_GRANT_FIELDS, (
+        'read but not declared on GrantFields: '
+        f'{sorted(keys - research_support.CONSUMED_GRANT_FIELDS)}')
+
+
+def test_the_grant_record_type_declares_nothing_the_module_never_reads():
+    """The other direction: a declared key no reader wants is dead contract.
+
+    All 24 keys, `status` included, are reached through a `fields.get(...)` in
+    this module -- `status` from the bucket rules rather than from a rendered
+    row. A key left on the record type after its reader is deleted would go on
+    suppressing that key's line in the unconsumed-fields diagnostic, silently.
+    """
+    declared_but_unread = research_support.CONSUMED_GRANT_FIELDS - _fields_get_keys()
+
+    assert declared_but_unread == set(), sorted(declared_but_unread)
+    assert len(research_support.CONSUMED_GRANT_FIELDS) == 24
