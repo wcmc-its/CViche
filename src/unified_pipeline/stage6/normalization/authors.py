@@ -157,9 +157,9 @@ def _parse_author_fallback(parts: list[str]) -> tuple[list[str], bool]:
     initials-shaped (`_looks_like_initials`) or a recognised suffix merges
     into the author immediately before it -- but only when that
     author is still "open": a bare name with no initials of its own yet,
-    the exact shape a stray comma produces ("Konopasek, L" split by one
+    the exact shape a stray comma produces ("Alpha, L" split by one
     comma that shouldn't be there). An author that already has its own
-    initials ("Sanguino SM") is not reopened by a later fragment; a
+    initials ("Bravo SM") is not reopened by a later fragment; a
     fragment with nothing open to attach to is emitted as its own element
     rather than dropped, so the token count never falls (#560).
     """

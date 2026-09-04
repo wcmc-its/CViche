@@ -17,9 +17,9 @@ token it didn't recognise as a standalone name (an initials group, a
 suffix, a bare 1-2 character fragment) instead of keeping it. Because one
 missing comma anywhere in the list is enough to reject the whole string,
 that discard rule was capable of stripping every later author's initials
-from a citation, not just the one malformed entry -- reproduced live in the
-delivered document (W0MTVW / HU4DXA, "24. Sanguino SM, Konopasek, Raszka,
-Bostwick, Smith...").
+from a citation, not just the one malformed entry: #560 measures 595 of
+7,137 real author strings losing text at this step. Every author string
+below is invented -- corpus shapes, reproduced synthetically.
 
 Run with:
 
@@ -149,16 +149,16 @@ def test_docstrings_own_broken_example_is_pinned_as_it_actually_behaves():
 
 
 # --------------------------------------------------------------------------
-# The exact farm defect (W0MTVW / HU4DXA)
+# The farm defect's shape, in invented names
 # --------------------------------------------------------------------------
 
-def test_farm_defect_sanguino_citation_regains_its_initials():
-    """The live corpus defect: 'Sanguino SM' is already a complete
-    "Surname Initials" unit, which throws off the pair detector's parity
-    for the rest of a perfectly regular surname/initials list."""
-    authors = 'Sanguino SM, Konopasek, L, Raszka, WV, Bostwick, S, Smith, S'
+def test_a_leading_complete_unit_does_not_cost_the_rest_their_initials():
+    """The live corpus defect in invented names: 'Alpha SM' is already a
+    complete "Surname Initials" unit, which throws off the pair detector's
+    parity for the rest of a perfectly regular surname/initials list."""
+    authors = 'Alpha SM, Bravo, L, Charlie, WV, Delta, S, Echo, S'
     assert _cite(authors) == (
-        '1. Sanguino SM, Konopasek L, Raszka WV, Bostwick S, Smith S. A Study.'
+        '1. Alpha SM, Bravo L, Charlie WV, Delta S, Echo S. A Study.'
     )
 
 
@@ -208,26 +208,26 @@ def test_stage_5d_llm_entries_bypass_normalization_entirely():
 # Round-2 review response. The fallback's orphan branch still DROPPED an
 # ALL-CAPS fragment that had no "open" preceding author to merge into, so
 # the issue's "nothing on this path should ever reduce the token count" bar
-# was not actually met -- and it was live on the farm (2015_Wende, entry 5).
+# was not actually met -- and it was live on one of the farm's own entries.
 # The same fragment shape was already emitted standalone by the pairs
 # branch's trailing-element case, so the two branches also disagreed.
 # --------------------------------------------------------------------------
 
 def test_orphan_initials_fragment_with_no_open_predecessor_is_kept():
-    """The live farm string (2015_Wende, entry 5). "Shariati H" already
+    """The live farm string's shape, in invented names. "Alpha H" already
     carries its own initials, so it is not an open merge target; the "F"
     that follows it therefore had nothing to attach to and was dropped --
     a deleted token in a delivered document, which is the whole of #560.
     It is now emitted as its own element instead."""
     authors = (
-        'Kaczynski AT, Wende ME, Schipperijn J, Hughey SM, Stowe, EW, '
-        'Hipp, JA, Shariati H, F, MJ. K'
+        'Charlie AT, Delta ME, Echo J, Foxtrot SM, Golf, EW, '
+        'Hotel, JA, Alpha H, F, MJ. K'
     )
     citation = _cite(authors)
     assert ', F,' in citation
     assert citation == (
-        '1. Kaczynski AT, Wende ME, Schipperijn J, Hughey SM, Stowe EW, '
-        'Hipp JA, Shariati H, F, MJ. K. A Study.'
+        '1. Charlie AT, Delta ME, Echo J, Foxtrot SM, Golf EW, '
+        'Hotel JA, Alpha H, F, MJ. K. A Study.'
     )
 
 
