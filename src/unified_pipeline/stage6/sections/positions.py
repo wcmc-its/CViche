@@ -215,7 +215,11 @@ class PositionsSection:
             f = e.get('extracted_fields', {}) or {}
             return (f.get('institution') or f.get('organization') or '').strip().lower()
 
-        dropped = set()  # id() of header entries fully absorbed by children
+        # Positions in `ordered`, never id() of the dicts (#476 review item 4):
+        # the bookkeeping then reads as "row 4 was absorbed by row 3" -- the
+        # thing the rules are actually about -- and a caller can reproduce it
+        # without holding the same objects the pass ran on.
+        dropped: set[int] = set()  # indices of header rows absorbed by children
         merged = 0
 
         # Pass 1 — Rule 2: a title-less dated entry is an employer header; the
@@ -226,15 +230,16 @@ class PositionsSection:
         # means the run has reached a different employer). Done before Rule 1 so a
         # header is never mistaken for a lone adjacent dates row.
         for i, entry in enumerate(ordered):
-            if id(entry) in dropped:
+            if i in dropped:
                 continue
             if cls._position_title(entry) or not cls._position_has_dates(entry):
                 continue
             header_employer = _employer(entry)
             children = []
-            for nxt in ordered[i + 1:]:
-                if id(nxt) in dropped:
+            for j in range(i + 1, len(ordered)):
+                if j in dropped:
                     continue
+                nxt = ordered[j]
                 nxt_employer = _employer(nxt)
                 same_employer = (not nxt_employer or not header_employer
                                  or nxt_employer == header_employer)
@@ -247,7 +252,7 @@ class PositionsSection:
                 for child in children:
                     _copy_dates(entry, child)
                     merged += 1
-                dropped.add(id(entry))
+                dropped.add(i)
 
         # Pass 2 — Rule 1: a title-only row immediately adjacent (in document
         # order) to a remaining bare dates row, in either order, is one
@@ -256,25 +261,26 @@ class PositionsSection:
         # fingerprint; the bare dates row often carries a sub-unit/department in
         # its institution field rather than a distinct employer, so the employer
         # strings need not match here.
+        def _date_neighbor(j: int) -> int | None:
+            """Index of a surviving bare-dates row at position `j`, or None."""
+            if not 0 <= j < len(ordered) or j in dropped:
+                return None
+            cand = ordered[j]
+            if cls._position_title(cand) or not cls._position_has_dates(cand):
+                return None
+            return j
+
         for i, entry in enumerate(ordered):
-            if id(entry) in dropped:
+            if i in dropped:
                 continue
             if not cls._position_title(entry) or cls._position_has_dates(entry):
                 continue
-
-            def _date_neighbor(cand):
-                if cand is None or id(cand) in dropped:
-                    return None
-                if cls._position_title(cand) or not cls._position_has_dates(cand):
-                    return None
-                return cand
-
-            neighbor = _date_neighbor(ordered[i + 1] if i + 1 < len(ordered) else None)
+            neighbor = _date_neighbor(i + 1)
             if neighbor is None:
-                neighbor = _date_neighbor(ordered[i - 1] if i > 0 else None)
+                neighbor = _date_neighbor(i - 1)
             if neighbor is not None:
-                _copy_dates(neighbor, entry)
-                dropped.add(id(neighbor))
+                _copy_dates(ordered[neighbor], entry)
+                dropped.add(neighbor)
                 merged += 1
 
         # Rule 3: a title-less dated "employer summary" header whose date range is
@@ -283,23 +289,23 @@ class PositionsSection:
         # a title, on the rows beneath it.  Drop it so it does not render as a
         # blank-TITLE row.  Requires an overlapping *titled* sibling at the same
         # institution; a header with no such sibling is the sole record and kept.
-        for entry in ordered:
-            if id(entry) in dropped:
+        for i, entry in enumerate(ordered):
+            if i in dropped:
                 continue
             if cls._position_title(entry) or not cls._position_has_dates(entry):
                 continue
             employer = _employer(entry)
             if not employer:
                 continue
-            for other in ordered:
-                if other is entry or id(other) in dropped:
+            for j, other in enumerate(ordered):
+                if j == i or j in dropped:
                     continue
                 if not cls._position_title(other) or not cls._position_has_dates(other):
                     continue
                 if _employer(other) != employer:
                     continue
                 if _dates_overlap_or_match(entry, other):
-                    dropped.add(id(entry))
+                    dropped.add(i)
                     merged += 1
                     break
 
@@ -308,7 +314,7 @@ class PositionsSection:
                 print(f"    Merged dates into {merged} fragmented appointment rows")
             return entries
 
-        result = [e for e in ordered if id(e) not in dropped]
+        result = [e for k, e in enumerate(ordered) if k not in dropped]
         if verbose:
             print(f"    Merged {len(dropped)} fragmented appointment row(s); "
                   f"propagated dates to {merged} role row(s)")
