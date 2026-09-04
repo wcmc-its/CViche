@@ -50,7 +50,23 @@ All three subsections hand their raw entry text straight to this helper. They
 did not always: L1 and L2 welded every tab away first and L3 kept only
 `split('\\t')[0]`, so the fragment split was dormant on L1/L2 and L3 deleted
 every fragment after the first from the rendered document (#476 review).
+
+Recovering those fragments is only half the contract; the other half is not
+recovering the same text twice, which a loss-only corpus census cannot see:
+
+- L3 composes its bullet from the extracted `institution`/date fields and the
+  fragments after the role are usually those very fields again, flattened out
+  of one source row. `_fragment_is_new` drops a fragment the composed bullet
+  already says and keeps everything else.
+- Splitting an entry into N bullets also changed how much text the FIRST
+  bullet holds, and stage 6's low-coverage overflow router judged an entry by
+  that one paragraph -- so a fully rendered entry looked 1/N covered and was
+  re-emitted whole. `_insert_multiline_as_bullets` therefore hands the
+  sibling bullets it inserted to `_insert_bulleted_entry`, and the check in
+  `_add_entry_comments` weighs the entry's whole rendered text.
 """
+import re
+
 from ..formatting import (
     _clear_table_data,
     _set_font,
@@ -87,6 +103,51 @@ def _bullet_parts(text: str) -> list[str]:
             if cell:
                 parts.append(cell)
     return parts
+
+
+# A "content word" for the duplication check below: a run of letters or
+# digits, case-folded. Punctuation is not part of the comparison because the
+# composed bullet writes its own (", ") between fields while the flattened
+# fragment it duplicates carries none.
+_CONTENT_WORD_RE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _content_words(text: str) -> list[str]:
+    """`text` reduced to its case-folded content words."""
+    return _CONTENT_WORD_RE.findall(str(text or "").casefold())
+
+
+def _fragment_is_new(fragment: str, composed: str) -> bool:
+    """True when `fragment` says something `composed` does not already say.
+
+    L3's bullet fallback composes "Role, Institution, Dates" out of the
+    extracted fields and then appends the tab fragments that followed the
+    role in the source text. Those are usually two views of the SAME row --
+    the reader flattened one tab-aligned line, and stage 4 extracted its
+    columns as fields -- so appending every fragment rendered the institution
+    and the dates a second time, as their own bullets (#476 review; one
+    corpus CV grew a third paragraph whose entire text was already inside
+    the first).
+
+    The comparison is on content words in contiguous order, so "2015-2020"
+    is recognised inside "Attending Physician, NYP Weill Cornell, 2015-2020"
+    across the comma the composer added, and a short fragment cannot match
+    the middle of a longer word the way a plain substring test would. A
+    fragment with no content words at all -- stray punctuation left by the
+    flattening -- says nothing new by definition.
+
+    Genuinely new text is the case this must NOT swallow: a fragment such as
+    a programme or rotation name that appears nowhere in the composed bullet
+    still gets its own bullet, which is the data loss the review found in
+    the first place.
+    """
+    words = _content_words(fragment)
+    if not words:
+        return False
+    composed_words = _content_words(composed)
+    span = len(words)
+    return not any(composed_words[i:i + span] == words
+                   for i in range(len(composed_words) - span + 1))
 
 # Section L taxonomy codes (docs/CODING_STANDARDS.md §8.2): L1 Clinical
 # Practice, L2 Clinical Innovations, L3 Clinical Leadership.
@@ -521,8 +582,19 @@ class ClinicalPracticeSection:
                     else:
                         bullet_text = original_text
 
-                    if role_remainder.strip():
-                        bullet_text = f"{bullet_text}\t{role_remainder}"
+                    # ... but only the fragments the composed bullet does not
+                    # already say. `institution` and `dates` are usually the
+                    # SAME text as the fragments after the role -- the readers
+                    # flattened one source row and stage 4 extracted its
+                    # columns as fields -- so appending them unconditionally
+                    # rendered the institution and the dates a second time as
+                    # their own bullets (#476 review).
+                    new_fragments = [part for part in _bullet_parts(role_remainder)
+                                     if _fragment_is_new(part, bullet_text)]
+                    if new_fragments:
+                        bullet_text = '\t'.join([bullet_text, *new_fragments])
+                    elif role_remainder.strip() and self.verbose:
+                        print("  L3 bullet already carries every fragment after the role")
 
                     if bullet_text:
                         # Use multiline helper to properly split entries with multiple lines
@@ -563,12 +635,26 @@ class ClinicalPracticeSection:
             return 0
 
         # Insert in reverse order since we're inserting before insert_idx
+        inserted_paras = []
         for j, line_text in enumerate(reversed(lines)):
             is_last = (j == len(lines) - 1)  # Last in reversed = first in original
-            self._insert_bulleted_entry(
+            para = self._insert_bulleted_entry(
                 insert_idx, line_text,
                 entry if is_last else None,  # Attach entry/comments to first bullet
-                add_blank_before=add_blank_before and is_last, list_level=0
+                add_blank_before=add_blank_before and is_last, list_level=0,
+                # Because insertion runs backwards, every later bullet of this
+                # entry already exists by the time the first one -- the one the
+                # entry rides -- is written. Hand them over with it: the
+                # low-coverage overflow check behind `_add_entry_comments`
+                # weighs the entry's rendered text against its source text, and
+                # measuring only the first bullet scored a fully-rendered
+                # N-part entry as 1/N covered, so `_route_overflow_entries`
+                # re-emitted the entire entry below bullets that already
+                # carried it (#476 review; +36 duplicated word tokens on one
+                # corpus CV, invisible to a loss-only census).
+                entry_sibling_paras=inserted_paras if is_last else None,
             )
+            if para is not None:
+                inserted_paras.append(para)
 
         return len(lines) + (1 if add_blank_before else 0)

@@ -114,12 +114,20 @@ SUBSECTIONS = [
 ]
 
 
-def _render_through_template(filler_name, entries):
+def _render_through_template(filler_name, entries, route_overflow=False):
     """Drive one subsection filler over the real template and return
-    (generator, paragraphs it inserted)."""
+    (generator, paragraphs it inserted).
+
+    `route_overflow` additionally runs `_route_overflow_entries`, the step a
+    real `run_stage6` runs after every section is filled. Stopping before it
+    hides a whole class of defect: the router re-emits an entry it judges
+    under-rendered, so a section can render correctly and still put its
+    content in the document twice."""
     gen = _template_generator()
     before = [p.text for p in gen.doc.paragraphs]
     getattr(gen, filler_name)(entries)
+    if route_overflow:
+        gen._route_overflow_entries()
     after = [p.text for p in gen.doc.paragraphs]
     return gen, _inserted_paragraphs(before, after)
 
@@ -140,6 +148,23 @@ PIPE_COLUMN_RENDERED = "Volunteer Clinic — NYP Weill Cornell — 2020-2023"
 
 MIXED_DELIMITER_CASE = "Alpha\nBeta\tGamma\nDelta"
 MIXED_DELIMITER_PARTS = ["Alpha", "Beta", "Gamma", "Delta"]
+
+# A tab-joined entry long enough (>300 chars) and poorly enough extracted
+# (<50% coverage) to be a candidate for stage 6's content-overflow router.
+# Those two thresholds are the router's own, in `_add_entry_comments`.
+OVERFLOW_SCOPE = (
+    "Scope: ambulatory continuity practice covering roughly two thousand patient "
+    "visits per year, with supervision of residents and medical students on the "
+    "inpatient service and a weekly procedure clinic dedicated to joint injections "
+    "and minor office surgery")
+OVERFLOW_PARTS = ["Attending Physician, Division of General Internal Medicine",
+                  "NYP Weill Cornell Medical Center", OVERFLOW_SCOPE, "2015-2020"]
+OVERFLOW_CASE = "\t".join(OVERFLOW_PARTS)
+
+# L3 with the role field missing and the fragments after the role repeating
+# the very fields the composed bullet is built from.
+L3_DUPLICATED_REMAINDER = "Attending Physician\tNYP Weill Cornell\t2015-2020"
+L3_COMPOSED_BULLET = "Attending Physician, NYP Weill Cornell, 2015-2020"
 
 
 # --- (a) the production path: does the split reach the document? -------------
@@ -202,10 +227,18 @@ def test_l3_composed_bullet_keeps_the_fragments_after_the_role():
     """The same branch when the entry DOES carry institution/dates fields:
     the first fragment still composes the "Role, Institution, Dates" bullet,
     and the fragments after it follow as their own bullets instead of being
-    discarded."""
+    discarded.
+
+    The fixture deliberately mixes both kinds of fragment. It used to carry
+    only genuinely-new text, which made it a test that could not fail on the
+    shape its own name describes: an entry flattened out of one source row
+    repeats the institution and the dates in the fragments AND in the
+    extracted fields, so the interesting question is which of the fragments
+    after the role survive, not whether any of them do.
+    """
     gen, added = _render_through_template(
         "_fill_clinical_practice_l3",
-        [_entry("Program Director\tSurgical residency rotation",
+        [_entry("Program Director\tNYP Weill Cornell\tSurgical residency rotation\t2015-2020",
                 institution="NYP Weill Cornell", start_date="2015", end_date="2020")],
     )
     assert added == [
@@ -213,6 +246,50 @@ def test_l3_composed_bullet_keeps_the_fragments_after_the_role():
         "Program Director, NYP Weill Cornell, 2015-2020",
         "Surgical residency rotation",
     ]
+
+
+def test_l3_does_not_repeat_the_institution_and_dates_it_just_composed():
+    """Pins the duplication the blind verifier found on the corpus.
+
+    With no extracted role, L3 takes the role from the text before the first
+    tab and composes "Role, Institution, Dates" from the extracted fields --
+    then appended EVERY remaining fragment, and those fragments are the same
+    institution and dates the composer had just written. One corpus CV grew a
+    third paragraph whose entire text was already inside the first. Rendered
+    before the fix as ['', 'Attending Physician, NYP Weill Cornell,
+    2015-2020', 'NYP Weill Cornell', '2015-2020'].
+
+    A loss-only census cannot see this, so assert the whole paragraph
+    sequence and that each value appears exactly once.
+    """
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry(L3_DUPLICATED_REMAINDER,
+                institution="NYP Weill Cornell", start_date="2015", end_date="2020")],
+    )
+    assert gen.stats["tables_populated"] == 0, "L3 took the table branch"
+    assert added == ["", L3_COMPOSED_BULLET]
+    for value in ("Attending Physician", "NYP Weill Cornell", "2015-2020"):
+        assert " ".join(added).count(value) == 1, f"{value!r} rendered more than once"
+
+
+def test_l3_drops_a_repeated_fragment_but_not_a_word_inside_a_longer_one():
+    """The duplication filter compares content WORDS in contiguous order, and
+    both halves of that matter.
+
+    "Division of Bioethics" is the institution the composed bullet already
+    names, so it must go -- and it has to be recognised across the ", " the
+    composer itself inserted, which a fragment-vs-fragment comparison would
+    miss. "Ethics" is a different fragment that only LOOKS present: it is a
+    substring of "Bioethics" and nothing more, so a substring test drops real
+    content here while the word comparison keeps it.
+    """
+    gen, added = _render_through_template(
+        "_fill_clinical_practice_l3",
+        [_entry("Chair\tDivision of Bioethics\tEthics",
+                institution="Division of Bioethics", start_date="2015", end_date="2020")],
+    )
+    assert added == ["", "Chair, Division of Bioethics, 2015-2020", "Ethics"]
 
 
 @pytest.mark.parametrize("code,filler,header", SUBSECTIONS)
@@ -235,6 +312,77 @@ def test_second_entry_renders_after_the_first_not_inside_it(code, filler, header
         "Second entry part a",
         "Second entry part b",
     ]
+
+
+# --- (a2) the overflow router: does the split make stage 6 render it twice? --
+
+def _low_coverage_entry(text, code):
+    """An entry the content-overflow router is entitled to consider: a K/L
+    code, under 50% extraction coverage, over 300 characters."""
+    return {"text": text, "taxonomy_code": code, "extracted_fields": {},
+            "extraction_coverage": {"extraction_coverage_percent": 20.0,
+                                    "unextracted_words": ["scope", "clinic"]}}
+
+
+@pytest.mark.parametrize("code,filler,header", SUBSECTIONS)
+def test_fragment_split_does_not_re_emit_the_entry_through_the_overflow_router(code, filler, header):
+    """Pins the duplication the blind verifier found on the corpus.
+
+    `_add_entry_comments` queues an entry for the content-overflow router
+    when the paragraph it just wrote holds less than 80% of the entry's
+    source text. The entry's comments ride the FIRST bullet, so once these
+    subsections stopped welding the tabs away, that first bullet held one
+    fragment of four -- the entry looked 1/4 rendered, and
+    `_route_overflow_entries` re-emitted the whole thing at the end of the
+    section, on top of the bullets that already carried every word of it.
+    On one corpus CV that was +36 duplicated word tokens.
+
+    Nothing here is under-rendered: all four fragments are on the page, so
+    the queue must be empty and every fragment must appear exactly once.
+    """
+    assert len(OVERFLOW_CASE) > 300, "fixture no longer reaches the router's length threshold"
+    gen, added = _render_through_template(
+        filler, [_low_coverage_entry(OVERFLOW_CASE, code)], route_overflow=True)
+
+    assert gen.stats["tables_populated"] == 0, f"{code} took the table branch"
+    assert gen._overflow_entries == [], "a fully rendered entry was queued for overflow"
+    assert gen.stats["overflow_bullets_added"] == 0
+    assert added == [""] + OVERFLOW_PARTS
+    for fragment in OVERFLOW_PARTS:
+        assert added.count(fragment) == 1, f"{fragment[:30]!r} rendered more than once"
+
+
+def test_a_genuinely_under_rendered_single_paragraph_entry_is_still_queued():
+    """The blast radius of the fix above, stated as a test.
+
+    `_add_entry_comments` serves every section, and the fix only changes what
+    it measures when a caller says an entry rendered into several paragraphs.
+    A caller that renders an entry as ONE paragraph passes nothing, and an
+    entry whose paragraph really does hold a fraction of its source text must
+    still reach the overflow router exactly as before.
+    """
+    scratch = _scratch_document()
+    entry = _low_coverage_entry(OVERFLOW_CASE, "L1")
+    scratch.gen._insert_bulleted_entry(scratch.insert_idx, "Attending Physician", entry)
+
+    assert len(scratch.gen._overflow_entries) == 1
+    queued_entry, queued_para, queued_code = scratch.gen._overflow_entries[0]
+    assert queued_entry is entry
+    # No list_level, so this call site prefixes the literal "• " glyph (#483).
+    assert queued_para.text == "• Attending Physician"
+    assert queued_code == "L1"
+
+
+def test_a_fully_rendered_single_paragraph_entry_is_still_not_queued():
+    """The other half of the same blast radius: a single-paragraph caller
+    whose paragraph does hold the whole source text was never queued, and
+    still is not. Together with the test above this pins both sides of the
+    80% check for the callers the fix does not touch."""
+    scratch = _scratch_document()
+    entry = _low_coverage_entry(OVERFLOW_CASE, "L1")
+    scratch.gen._insert_bulleted_entry(scratch.insert_idx, OVERFLOW_CASE, entry)
+
+    assert scratch.gen._overflow_entries == []
 
 
 # --- (b) `_bullet_parts` vs `entry_lines`: where the contracts agree ---------
