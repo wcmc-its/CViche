@@ -6,8 +6,9 @@ output pasted into a pull request, so its module docstring promises it
 shipped it with that promise already broken: `measure_taxonomy_shape` printed
 `sorted(bracketed)`, the bracketed tokens harvested from the farm, verbatim.
 
-These tests run the script over a SYNTHETIC farm whose values carry tokens
-that occur nowhere else, and fail if any of those tokens reaches stdout.
+These tests run the script over a SYNTHETIC farm whose values AND one of
+whose filenames carry tokens that occur nowhere else, and fail if any of
+those tokens reaches stdout.
 
     python3 -m pytest src/unified_pipeline/tests/test_measure_normalization_claims.py -p no:cacheprovider
 
@@ -15,6 +16,7 @@ Self-contained: no DB, no template, no python-docx, and no access to the real
 farm -- every artifact is written into pytest's tmp_path.
 """
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -39,6 +41,10 @@ _INITIALS = "VX"
 # that finding one in the output can only mean the orphan measure printed a
 # token instead of its shape.
 _ORPHANS = ("QZ", "XJ")
+# The farm's real filenames embed the CV owner's name, so a filename is as
+# leakable as a value. This one is written unparseable to force `_load`'s
+# error path, the only place a filename could reach stdout.
+_UNREADABLE_STEM = "Vhorlspruit"
 
 
 def _write(path: Path, payload) -> None:
@@ -83,6 +89,9 @@ def _synthetic_farm(root: Path) -> Path:
             },
         ],
     })
+    (farm / "stage_4_field_extraction" / f"{_UNREADABLE_STEM}.json").write_text(
+        "{not json"
+    )
     return farm
 
 
@@ -125,8 +134,23 @@ def test_no_measure_prints_any_synthetic_farm_value(tmp_path, capsys):
     assert measure.main([str(farm)]) == 0
     out = capsys.readouterr().out
     for token in (_BRACKETED_TOKEN, _SURNAME, _INITIALS,
-                  "Journal of Examples", *_ORPHANS):
+                  "Journal of Examples", _UNREADABLE_STEM, *_ORPHANS):
         assert token not in out, f"{token!r} leaked into the script's output"
+
+
+def test_an_unreadable_artifact_is_named_by_a_masked_id_not_by_its_filename(
+        tmp_path, capsys):
+    """`_load`'s error path is the one place a farm FILENAME could reach
+    stdout, and every farm filename embeds a person's name. It is reported
+    as the stage directory plus a digest, and the exception as its type --
+    an OSError's message would carry the path it failed on."""
+    farm = _synthetic_farm(tmp_path)
+    assert measure.main([str(farm)]) == 0
+    out = capsys.readouterr().out
+    assert _UNREADABLE_STEM not in out
+    digest = hashlib.sha256(f"{_UNREADABLE_STEM}.json".encode()).hexdigest()[:8]
+    assert (f"! unreadable, skipped: stage_4_field_extraction/{digest} "
+            "(JSONDecodeError)") in out
 
 
 def test_token_shape_keeps_length_and_case_and_drops_the_characters():

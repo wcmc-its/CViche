@@ -18,12 +18,15 @@ its path is not a repository constant; every run names it explicitly. This
 script only reads -- it opens nothing for writing, creates no file inside
 the farm, and prints counts and character-class SHAPES, never a CV-derived
 value. The output is meant to be pasted into a pull request, so a token
-harvested from a CV must never reach it: every per-token line goes through
-`_token_shape`, and `test_measure_normalization_claims.py` fails if a
-distinctive token from a synthetic farm shows up in stdout.
+harvested from a CV must never reach it, and neither must a farm FILENAME,
+which embeds the CV owner's name: every per-token line goes through
+`_token_shape`, every artifact reference through `_masked_id`, and
+`test_measure_normalization_claims.py` fails if a distinctive token or
+filename from a synthetic farm shows up in stdout.
 """
 
 import argparse
+import hashlib
 import json
 import logging
 import re
@@ -126,12 +129,25 @@ def _json_files(farm: Path, stage_dirs) -> list[Path]:
     return files
 
 
+def _masked_id(path: Path) -> str:
+    """A stable, non-reversible handle for one artifact file.
+
+    Every farm filename embeds the CV owner's name, so the name may not be
+    printed by a script whose output is pasted into a pull request. The stage
+    directory plus eight hex digits of the filename's digest identifies the
+    file to anyone holding the farm and to nobody else.
+    """
+    return f"{path.parent.name}/{hashlib.sha256(path.name.encode()).hexdigest()[:8]}"
+
+
 def _load(path: Path):
     """One artifact, or None when it is unreadable -- reported, never fatal."""
     try:
         return json.loads(path.read_text())
     except (OSError, ValueError) as exc:
-        print(f"  ! unreadable, skipped: {path.name} ({exc})")
+        # The exception is reported by TYPE: an OSError's message embeds the
+        # full path it failed on, filename included.
+        print(f"  ! unreadable, skipped: {_masked_id(path)} ({type(exc).__name__})")
         return None
 
 
