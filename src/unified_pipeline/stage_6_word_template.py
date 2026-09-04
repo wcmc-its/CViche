@@ -2923,21 +2923,34 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
     Takes a PATH, not parsed data, and that is load-bearing for concurrency.
-    Stage 6 rewrites entries in place as it renders -- reassigning
-    ``entry['taxonomy_code']`` when it reroutes a code, and writing back
-    ``entry['extracted_fields']`` when it propagates a parent institution or a
-    header's dates onto a sub-entry. 12 sites, in four functions:
-    ``_correct_mismatch_if_needed`` here (4);
+    Stage 6 rewrites entries in place as it renders: 12 sites, in four
+    functions -- ``_correct_mismatch_if_needed`` here (4);
     ``stage6.render_check.normalize_retired_code`` (2);
     ``stage6.sections.positions._propagate_institution_to_subentries`` (3); and
     ``_copy_dates`` inside
-    ``stage6.sections.positions._merge_grouped_appointments`` (3). Counted by::
+    ``stage6.sections.positions._merge_grouped_appointments`` (3) -- touching
+    six keys between them, not the two an earlier wording named:
+
+    * ``entry['taxonomy_code']`` (3 sites), the rerouted code;
+    * ``entry['taxonomy_code_original']`` (3), the code it was rerouted from,
+      written beside each of those;
+    * ``entry['extracted_fields']`` (2), installing a fresh ``{}`` on an entry
+      that carried none, so the field writes below have somewhere to land;
+    * ``fields['institution']`` (1), a parent's institution propagated into a
+      sub-entry's ``extracted_fields``;
+    * ``entry['institution_enrichment']`` (1), that parent's enrichment record
+      copied across with it;
+    * ``start_date`` and ``end_date`` inside ``extracted_fields`` (2), a
+      grouped appointment's dates copied onto a member that has neither.
+
+    Counted by::
 
         grep -rnE "[A-Za-z_][A-Za-z0-9_]*\['[a-z_]+'\] *=[^=]|\.setdefault\(" \
             src/unified_pipeline/stage_6_word_template.py src/unified_pipeline/stage6/
 
-    which returns 21 lines today; the other 9 write to ``self.stats`` or to a
-    copy the function made itself, so they reach no caller. Section M2 used to
+    which returns 21 lines today; the other 9 write to ``self.stats`` (2) or to
+    a copy the function made itself (7: four in ``sections/research_support.py``,
+    three in ``normalization/records.py``), so they reach no caller. Section M2 used to
     be among them -- it annotated ``entry['reclassification_note']`` and filled
     ``fields['percent_effort']`` -- but it now classifies on
     ``copy_entries_for_render`` clones, so those three writes stop at the
