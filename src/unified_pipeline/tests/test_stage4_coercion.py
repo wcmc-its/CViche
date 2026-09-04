@@ -88,6 +88,23 @@ def test_fte_not_applied_outside_grant_taxonomy():
     assert "percent_effort" not in updated
 
 
+@pytest.mark.parametrize(
+    "text,expected_original",
+    [
+        ("Award effort: .8 FTE annually", ".8 FTE"),        # decimal-FTE path
+        ("Award effort: 25 % effort annually", "25 % effort"),  # percent path
+    ],
+)
+def test_percent_effort_record_reports_the_matched_text(text, expected_original):
+    # The reformatted record's `original` is the literal substring the winning
+    # pattern matched -- the one value `_find_percent_effort` now returns
+    # alongside the percent, and previously read off a match object the caller
+    # held itself. Both of the helper's matching return paths are pinned;
+    # nothing asserted this field on either shape before.
+    _, reformatted = apply_regex_post_processing(text, {}, "M2")
+    assert reformatted["percent_effort"]["original"] == expected_original
+
+
 # --- #3819066916: coerce_field_value_types contract -------------------------
 
 def test_non_dict_input_raises_type_error():

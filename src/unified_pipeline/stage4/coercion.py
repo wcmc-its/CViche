@@ -33,11 +33,33 @@ class ExtractedFields(TypedDict, total=False):
     guard, and imports both modules -- which a test may do and this module
     may not.
 
-    Not a validated shape: ``_ExtractedEntryFields`` in extraction.py is
-    ``extra="allow"``, so an LLM response may carry keys outside this set.
-    Those ride through ``apply_regex_post_processing``'s ``.copy()``
-    untouched; what this type documents is the declared surface, which is
-    what every helper below keys off.
+    Not a validated shape, and measurably not the observed one:
+    ``_ExtractedEntryFields`` in extraction.py is ``extra="allow"``, so an
+    LLM response may carry keys outside this set -- and does. Measured
+    2026-09-04 over the 66-CV local corpus
+    (``outputs/stage_4_field_extraction``): 568 of the 10737 entries that
+    carry an ``extracted_fields`` dict -- 5.3% -- hold at least one of 74
+    distinct undeclared keys, led by ``text`` (133 entries), ``event_name``
+    (116), ``learner_level`` (58), ``division_department`` (51) and
+    ``primary_email`` (48), tailing off into ``column_1``..``column_12``.
+    They are LLM output noise, not a declared contract, and are
+    deliberately absent from the list above: adding them would break the
+    ``get_active_schemas()`` drift guard that is what makes this type mean
+    anything. They ride through ``apply_regex_post_processing``'s
+    ``.copy()`` untouched; what this type documents is the declared
+    surface, which is what every helper below keys off.
+
+    That 5.3% gap is inert only because nothing type-checks it: both origin
+    sites declare the dict ``Any`` (``recovered_fields`` on the recovery
+    path, ``extracted_fields`` on the main path, both in extraction.py),
+    and neither file is in mypy's scope (``mypy.ini`` lists only
+    ``segmentation_regression.py``). Narrow either annotation, or add
+    either file to that scope, and the same 568 entries turn this
+    docstring's "declared surface" framing into a live inaccuracy -- a
+    checker would then be asked to reconcile an observed key set against a
+    declared one that does not contain it. The answer at that point is an
+    explicit ``dict[str, Any]`` bridge at the boundary, not noise keys
+    here.
     """
 
     abstract_number: Any
@@ -713,30 +735,47 @@ _FTE_PERCENT_PATTERNS = (
 )
 
 
+def _find_percent_effort(original_text: str) -> tuple[str, str] | None:
+    """Find the first percent-effort/FTE mention in ``original_text``.
+
+    Returns ``(matched_text, percent)`` -- the literal text the winning
+    pattern matched, and the normalised ``"NN%"`` value -- or ``None`` when
+    no pattern matches. Patterns are tried in the same order as before this
+    helper existed: the decimal-FTE pattern first, then each of
+    ``_FTE_PERCENT_PATTERNS``; first match wins.
+
+    Returning the pair is what makes the pairing checkable. The caller used
+    to hold a match object and a percent string as two separate locals,
+    assigned in lockstep and both left ``None`` on the no-match path, so
+    their "either both or neither" invariant existed only dynamically and
+    no reader (or checker) could confirm it from the code. As one return
+    value, the invariant is the type.
+    """
+    decimal_match = re.search(_FTE_DECIMAL_PATTERN, original_text, re.IGNORECASE)
+    if decimal_match:
+        return decimal_match.group(0), f"{round(float(decimal_match.group(1)) * 100)}%"
+
+    for pattern in _FTE_PERCENT_PATTERNS:
+        percent_match = re.search(pattern, original_text, re.IGNORECASE)
+        if percent_match:
+            return percent_match.group(0), f"{percent_match.group(1)}%"
+
+    return None
+
+
 def _normalize_grant_effort(original_text: str, updated: ExtractedFields, reformatted: ReformattedFields) -> None:
     """Extract percent-effort/FTE for grant entries, if the LLM didn't already fill it in."""
     if updated.get('percent_effort'):
         return
 
-    decimal_match = re.search(_FTE_DECIMAL_PATTERN, original_text, re.IGNORECASE)
-    if decimal_match:
-        match = decimal_match
-        percent_effort = f"{round(float(decimal_match.group(1)) * 100)}%"
-    else:
-        match = None
-        percent_effort = None
-        for pattern in _FTE_PERCENT_PATTERNS:
-            percent_match = re.search(pattern, original_text, re.IGNORECASE)
-            if percent_match:
-                match = percent_match
-                percent_effort = f"{percent_match.group(1)}%"
-                break
-        if match is None:
-            return
+    found = _find_percent_effort(original_text)
+    if found is None:
+        return
 
+    matched_text, percent_effort = found
     updated['percent_effort'] = percent_effort
     reformatted['percent_effort'] = {
-        'original': match.group(0),
+        'original': matched_text,
         'reformatted': percent_effort,
         'reason': 'Extracted percent effort via regex'
     }
