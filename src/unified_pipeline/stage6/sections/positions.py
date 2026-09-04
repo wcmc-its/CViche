@@ -61,10 +61,13 @@ _CHILD_BULLET_GLYPHS = ('•', '-', '–', '*')
 
 # Key `_propagate_institution_to_subentries` writes on a record whose
 # institution it filled in from a parent row, holding that parent's
-# `element_idx_start`. It is the only parent/child link this section has: the
-# stage-4 records carry no parent identifier of their own, so the merge pass
-# reads this key to tell an employer a record NAMED from one it INHERITED
-# (#476 review items 1 and 2).
+# `element_idx_start`. It is the only record-to-record parent link this
+# section has. The stage-4 records do carry `parent_code`/`parent_label`, but
+# those name the taxonomy node a record was classified under, not a row above
+# it, and `parent_idx` matches no other record's `element_idx_start` on any of
+# the 361 records the farm's D lists hold (re-derive over a real `generate()`
+# of every farm document). So the merge pass reads this key to tell an
+# employer a record NAMED from one it INHERITED (#476 review items 1 and 2).
 INHERITED_INSTITUTION_KEY = 'institution_propagated_from'
 
 # A child fragment's own date range, e.g. "07/2002 - 06/2003" or
@@ -142,7 +145,7 @@ _LOCATION_TAIL_RE = re.compile(r',\s*(?:[A-Z]{2}|[A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)
 
 # A four-digit year anywhere in the fragment. An employer name does not carry
 # one; a record line ("Aug 2019-Dec 2023, Associate Director, ...") does, and
-# that is the shape the pre-#476 fallback kept mistaking for an institution.
+# that is the shape the pre-#476 fallback would take for an institution.
 _YEAR_IN_FRAGMENT_RE = re.compile(r'\b(?:19|20)\d{2}\b')
 
 # The `extracted_fields` keys a recovered child appointment copies from its
@@ -240,6 +243,11 @@ def _institution_from_raw_text(text: str) -> str:
     Structured extraction and enrichment are preferred and the caller checks
     both before calling this (#476 review item 5); this only decides what
     counts as a candidate once they have come back empty.
+
+    Tightening the candidate rule changes nothing the corpus can show: over a
+    real `generate()` of every farm document this is reached on 7 records and
+    returns '' on all 7, under the pre-#476 rule and this one alike. It is a
+    guard on a path the farm does not exercise, not a measured repair.
     """
     if '\t' not in text and '\n' not in text:
         return ''
