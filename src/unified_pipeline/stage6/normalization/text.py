@@ -46,137 +46,87 @@ def _looks_like_initials(token: str) -> bool:
     return t.isalpha() and (len(t) == 1 or (len(t) <= 4 and t.isupper()))
 
 
-def _normalize_author_names(authors: str) -> str:
+def _parse_surname_initial_pairs(parts: list[str]) -> list[str]:
+    """Join alternating "Surname", "Initials" tokens into "Surname Initials".
+
+    Reached only once `_normalize_author_names` has verified that every
+    odd-indexed token is an initials group or a recognised name suffix, so
+    the parity walked here is the parity the detector validated -- with one
+    deliberate exception, the "surname is itself initials" skip, which
+    advances by one and therefore shifts the loop off that parity for
+    everything after it.
+
+    Never reduces the token count: a trailing element with no initials to
+    pair with is emitted on its own rather than dropped (#560).
     """
-    Normalize author names to proper Vancouver format.
+    cleaned_authors: list[str] = []
+    i = 0
+    while i < len(parts):
+        surname = parts[i].strip().rstrip('.,')
 
-    Handles formats like:
-    - "Kelly, R, Pirog, R" -> "Kelly R, Pirog R" (LastName, Initial pairs)
-    - "Smith JA, Jones MB" -> "Smith JA, Jones MB" (already Vancouver)
-    - "Smith, John A., Jones, Mary B." -> "Smith, John A, Jones, Mary B"
-      (full given names aren't initials -- the pair detector correctly
-      declines this shape; abbreviating "John A" to "JA" is not attempted)
+        if i + 1 >= len(parts):
+            # A trailing element with no initials to pair with is still
+            # a name -- emit it rather than drop it (#560).
+            if surname:
+                cleaned_authors.append(surname)
+            i += 1
+            continue
 
-    Fixes common issues:
-    - Double commas: "Watson, K.,," -> "Watson K"
-    - Trailing punctuation
+        initials = parts[i + 1].strip().rstrip('.,')
 
-    Never drops a token that names or belongs to a real author (#560).
-    Previously, a comma-split token the pair detector or the fallback below
-    couldn't place -- an initials group, a name suffix, a bare 1-2 character
-    fragment -- was silently discarded, and that test was case-blind: a
-    short *surname* ("Li", "Wu", "Ma", "Ye") was discarded exactly like a
-    short initials fragment. Because a single missing comma anywhere in the
-    list is enough to make the pair detector decline the whole string, that
-    one discard rule was stripping every later author's initials from
-    citations that had them, or dropping short-surnamed authors outright.
-    Such a token now merges into the author immediately before it, and when
-    there is no open author to merge into it is emitted as its own element
-    instead. Neither branch reduces the token count any more: an orphan
-    fragment is unattributable, but the answer to "which author does this
-    belong to?" being unknown is not a reason to delete the fragment, and
-    the pairs branch above already emits a trailing unpaired element the
-    same way.
-    """
-    if not authors:
-        return ''
-
-    # Clean up double/triple commas
-    authors = re.sub(r',{2,}', ',', authors)
-
-    # Remove trailing punctuation
-    authors = authors.rstrip('.,;')
-
-    # Replace " & " with ", "
-    authors = re.sub(r'\s*&\s*', ', ', authors)
-
-    # Handle the "LastName, Initial, LastName, Initial" format
-    # Pattern: word followed by comma and single letter(s)
-    # e.g., "Kelly, R, Pirog, R" -> list of ("Kelly", "R"), ("Pirog", "R")
-
-    # First, check if this looks like alternating "Name, Initial" pairs
-    parts = [p.strip() for p in authors.split(',') if p.strip()]
-
-    # Try to detect the pattern: alternating surnames and initials. A
-    # recognised suffix in the initials slot doesn't have to look like
-    # initials itself -- it belongs to the surname before it (#560).
-    looks_like_pairs = True
-    if len(parts) >= 2:
-        for i in range(1, len(parts), 2):
-            part = parts[i]
-            if _AUTHOR_SUFFIX_RE.match(part.rstrip('.')):
-                continue
-            if not _looks_like_initials(part):
-                looks_like_pairs = False
-                break
-
-    if looks_like_pairs and len(parts) >= 2:
-        # Combine pairs: ["Kelly", "R", "Pirog", "R"] -> ["Kelly R", "Pirog R"]
-        cleaned_authors = []
-        i = 0
-        while i < len(parts):
-            surname = parts[i].strip().rstrip('.,')
-
-            if i + 1 >= len(parts):
-                # A trailing element with no initials to pair with is still
-                # a name -- emit it rather than drop it (#560).
-                if surname:
-                    cleaned_authors.append(surname)
-                i += 1
-                continue
-
-            initials = parts[i + 1].strip().rstrip('.,')
-
-            if _AUTHOR_SUFFIX_RE.match(initials.rstrip('.')):
-                # The slot after this surname is a suffix, not an initials
-                # group for a *following* pair -- attach it here.
-                cleaned_authors.append(f"{surname} {initials.rstrip('.')}")
-                i += 2
-                continue
-
-            # Normalize spaced initials: "P L" -> "PL". Upper-case only a
-            # token that is actually initials-shaped. The `len(surname) <= 2`
-            # skip below advances by one, which shifts this loop off the
-            # parity the detector validated, so a real surname can land in
-            # the initials slot ("AB, A-B, Smith, AB" puts "Smith" here) --
-            # and rendering it as "SMITH" would be a new corruption of a
-            # name this function is supposed to leave alone (#560).
-            initials_normalized = initials.replace(' ', '')
-            if _looks_like_initials(initials_normalized):
-                initials_normalized = initials_normalized.upper()
-
-            # Skip if surname looks like just initials
-            if len(surname) <= 2 and surname.isupper():
-                i += 1
-                continue
-
-            cleaned_authors.append(f"{surname} {initials_normalized}")
+        if _AUTHOR_SUFFIX_RE.match(initials.rstrip('.')):
+            # The slot after this surname is a suffix, not an initials
+            # group for a *following* pair -- attach it here.
+            cleaned_authors.append(f"{surname} {initials.rstrip('.')}")
             i += 2
+            continue
 
-        return ', '.join(cleaned_authors)
+        # Normalize spaced initials: "P L" -> "PL". Upper-case only a
+        # token that is actually initials-shaped. The `len(surname) <= 2`
+        # skip below advances by one, which shifts this loop off the
+        # parity the detector validated, so a real surname can land in
+        # the initials slot ("AB, A-B, Smith, AB" puts "Smith" here) --
+        # and rendering it as "SMITH" would be a new corruption of a
+        # name this function is supposed to leave alone (#560).
+        initials_normalized = initials.replace(' ', '')
+        if _looks_like_initials(initials_normalized):
+            initials_normalized = initials_normalized.upper()
 
-    # Fall back to simpler processing for other formats. The pair detector
-    # rejected this input -- one missing comma anywhere in the list is
-    # enough (#560) -- so comma position can no longer be trusted to mean
-    # "surname, initials" across the whole string. A token that looks like
-    # just initials, a suffix, or a bare 1-2 character ALL-CAPS fragment
-    # merges into the author immediately before it -- but only when that
-    # author is still "open": a bare name with no initials of its own yet,
-    # the exact shape a stray comma produces ("Konopasek, L" split by one
-    # comma that shouldn't be there). An author that already has its own
-    # initials ("Sanguino SM") is not reopened by a later fragment; a
-    # fragment with nothing open to attach to is emitted as its own element
-    # rather than dropped, so the token count never falls (#560).
-    # A mixed-case or lowercase 1-2 character token is not treated
-    # as a fragment at all -- it is at least as likely to be a real short
-    # surname ("Li", "Wu", "Ma", "Ye") as an initials group, so it is kept
-    # as its own standalone author instead (#560).
-    logger.debug(
-        "_normalize_author_names: pair detector rejected %r (%d comma-"
-        "separated tokens); using non-destructive fallback",
-        authors, len(parts),
-    )
-    cleaned_authors = []
+        # Skip if surname looks like just initials
+        if len(surname) <= 2 and surname.isupper():
+            i += 1
+            continue
+
+        cleaned_authors.append(f"{surname} {initials_normalized}")
+        i += 2
+
+    return cleaned_authors
+
+
+def _parse_author_fallback(parts: list[str]) -> tuple[list[str], bool]:
+    """Parse a comma-split author list the pair detector declined.
+
+    Returns the cleaned author elements and whether an "et al." marker was
+    seen; the marker is not one of the elements, the caller re-attaches it.
+
+    The pair detector rejected this input -- one missing comma anywhere in
+    the list is enough (#560) -- so comma position can no longer be trusted
+    to mean "surname, initials" across the whole string. A token that looks
+    like just initials, a suffix, or a bare 1-2 character ALL-CAPS fragment
+    merges into the author immediately before it -- but only when that
+    author is still "open": a bare name with no initials of its own yet,
+    the exact shape a stray comma produces ("Konopasek, L" split by one
+    comma that shouldn't be there). An author that already has its own
+    initials ("Sanguino SM") is not reopened by a later fragment; a
+    fragment with nothing open to attach to is emitted as its own element
+    rather than dropped, so the token count never falls (#560).
+
+    A mixed-case or lowercase 1-2 character token is not treated as a
+    fragment at all -- it is at least as likely to be a real short surname
+    ("Li", "Wu", "Ma", "Ye") as an initials group, so it is kept as its own
+    standalone author instead (#560).
+    """
+    cleaned_authors: list[str] = []
     has_et_al = False
     merge_target_open = False
 
@@ -233,6 +183,83 @@ def _normalize_author_names(authors: str) -> str:
             # is complete and shouldn't absorb a later stray fragment too.
             merge_target_open = ' ' not in author
 
+    return cleaned_authors, has_et_al
+
+
+def _normalize_author_names(authors: str) -> str:
+    """
+    Normalize author names to proper Vancouver format.
+
+    Input cleanup, format detection, dispatch to one of the two parsers
+    above, and the "et al." marker; the parsing itself lives in
+    `_parse_surname_initial_pairs` and `_parse_author_fallback`.
+
+    Handles formats like:
+    - "Kelly, R, Pirog, R" -> "Kelly R, Pirog R" (LastName, Initial pairs)
+    - "Smith JA, Jones MB" -> "Smith JA, Jones MB" (already Vancouver)
+    - "Smith, John A., Jones, Mary B." -> "Smith, John A, Jones, Mary B"
+      (full given names aren't initials -- the pair detector correctly
+      declines this shape; abbreviating "John A" to "JA" is not attempted)
+
+    Fixes common issues:
+    - Double commas: "Watson, K.,," -> "Watson K"
+    - Trailing punctuation
+
+    Never drops a token that names or belongs to a real author (#560).
+    Previously, a comma-split token the pair detector or the fallback below
+    couldn't place -- an initials group, a name suffix, a bare 1-2 character
+    fragment -- was silently discarded, and that test was case-blind: a
+    short *surname* ("Li", "Wu", "Ma", "Ye") was discarded exactly like a
+    short initials fragment. Because a single missing comma anywhere in the
+    list is enough to make the pair detector decline the whole string, that
+    one discard rule was stripping every later author's initials from
+    citations that had them, or dropping short-surnamed authors outright.
+    Such a token now merges into the author immediately before it, and when
+    there is no open author to merge into it is emitted as its own element
+    instead. Neither branch reduces the token count any more.
+    """
+    if not authors:
+        return ''
+
+    # Clean up double/triple commas
+    authors = re.sub(r',{2,}', ',', authors)
+
+    # Remove trailing punctuation
+    authors = authors.rstrip('.,;')
+
+    # Replace " & " with ", "
+    authors = re.sub(r'\s*&\s*', ', ', authors)
+
+    # Handle the "LastName, Initial, LastName, Initial" format
+    # Pattern: word followed by comma and single letter(s)
+    # e.g., "Kelly, R, Pirog, R" -> list of ("Kelly", "R"), ("Pirog", "R")
+
+    # First, check if this looks like alternating "Name, Initial" pairs
+    parts = [p.strip() for p in authors.split(',') if p.strip()]
+
+    # Try to detect the pattern: alternating surnames and initials. A
+    # recognised suffix in the initials slot doesn't have to look like
+    # initials itself -- it belongs to the surname before it (#560).
+    looks_like_pairs = True
+    if len(parts) >= 2:
+        for i in range(1, len(parts), 2):
+            part = parts[i]
+            if _AUTHOR_SUFFIX_RE.match(part.rstrip('.')):
+                continue
+            if not _looks_like_initials(part):
+                looks_like_pairs = False
+                break
+
+    if looks_like_pairs and len(parts) >= 2:
+        return ', '.join(_parse_surname_initial_pairs(parts))
+
+    # Fall back to simpler processing for other formats.
+    logger.debug(
+        "_normalize_author_names: pair detector rejected %r (%d comma-"
+        "separated tokens); using non-destructive fallback",
+        authors, len(parts),
+    )
+    cleaned_authors, has_et_al = _parse_author_fallback(parts)
     result = ', '.join(cleaned_authors)
     if has_et_al:
         result += ', et al.'
