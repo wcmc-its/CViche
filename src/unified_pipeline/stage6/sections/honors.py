@@ -86,9 +86,20 @@ _US_STATE_ABBREVS = frozenset({
     'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC', 'SD', 'TN', 'TX', 'UT',
     'VT', 'VA', 'WA', 'WV', 'WI', 'WY', 'DC'})
 
-_MONTH_TAIL_RE = re.compile(
-    r'[\s,]*(?:January|February|March|April|May|June|July|August|'
-    r'September|October|November|December)$', re.IGNORECASE)
+_MONTH_NAME = (r'(?:January|February|March|April|May|June|July|August|'
+               r'September|October|November|December)')
+
+_MONTH_TAIL_RE = re.compile(r'[\s,]*' + _MONTH_NAME + r'$', re.IGNORECASE)
+
+# What a '|' cell has to look like to be the template's "Date awarded"
+# column. Wider than `_YEAR_ONLY_RE`, which answers a different question (is
+# this whole PART a bare year, i.e. its own record separator?): a date cell
+# that stage 2 lifted out of a source table can carry the month or a slash
+# form the source wrote, and "Award | Organization | August 2025" is the same
+# three-column line as "Award | Organization | 2025".
+_DATE_COLUMN_RE = re.compile(
+    r'^(?:' + _MONTH_NAME + r'\s+)?(?:\d{1,2}/)?(?:19|20)\d{2}'
+    r'(?:\s*[-–]\s*(?:(?:19|20)\d{2}|present))?$', re.IGNORECASE)
 
 # Words that are part of award descriptions, not organization names.
 _ORG_STOP_WORDS = frozenset([
@@ -221,6 +232,54 @@ def _field_text(fields: Mapping, *names: str) -> str:
     return ''
 
 
+def _is_date_column(part: str) -> bool:
+    """Is this '|' cell the template's date column?"""
+    return bool(_YEAR_ONLY_RE.match(part) or _DATE_COLUMN_RE.match(part))
+
+
+def _honor_columns(line: str) -> HonorRecord | None:
+    """The columns a '|'-joined line names, or None if it names none.
+
+    The section's contract is `award | organization | date`, and both the
+    two- and the three-column form of it occur. Reading the second cell as
+    the date unconditionally -- what this branch did before (#733 review) --
+    turns the three-column form's ORGANIZATION into the date and loses the
+    real one, so the two forms are told apart here by which cells look like a
+    date:
+
+        "Award | 2020"                -> award, no org, date        (2 cells)
+        "Award | Organization"        -> award, org, no date        (2 cells)
+        "Award | Organization | 2020" -> award, org, date           (3 cells)
+
+    Anything else -- a leading date ("2020 | Award", a real farm shape whose
+    mislabeling `_entry_parts` documents as a separate, pre-existing bug), a
+    date in the middle, four or more cells -- returns None, and the caller
+    falls back to the historical first-cell/second-cell reading rather than
+    guessing at a shape nothing has established.
+
+    LIMITATION, since the reviewer asked for it in writing: '|' is a
+    STRUCTURAL delimiter here, never a character inside an award's name.
+    "Excellence in Research | Teaching Award | 2024" therefore parses as
+    award "Excellence in Research", organization "Teaching Award", date
+    2024 -- not as one award whose name contains a pipe, and not as two
+    awards. Nothing in the text can distinguish those readings, and the
+    pipeline's own table-cell join emits exactly this three-column shape, so
+    the column reading is the one that matches how the text is produced. It
+    is also only a FALLBACK: when stage 4 extracted an award name,
+    granting body or date for the entry, those win over anything parsed out
+    of the raw text (`_record_for_single_award`).
+    """
+    parts = [p.strip() for p in line.split('|') if p.strip()]
+    if (len(parts) == 3 and not _is_date_column(parts[0])
+            and not _is_date_column(parts[1]) and _is_date_column(parts[2])):
+        return HonorRecord(parts[0], parts[1], parts[2])
+    if len(parts) == 2 and not _is_date_column(parts[0]):
+        if _is_date_column(parts[1]):
+            return HonorRecord(parts[0], '', parts[1])
+        return HonorRecord(parts[0], parts[1], '')
+    return None
+
+
 def _looks_like_column_header(line: str) -> bool:
     """A source CV's own table header row, fused into an entry as a line."""
     line_lower = line.lower().replace('\t', ' ')
@@ -262,10 +321,20 @@ def _parse_honor_lines(lines: Sequence[str]) -> tuple[list[HonorRecord], list[st
         if _YEAR_ONLY_RE.match(line):
             years.append(line)
         elif '|' in line:
-            parts = line.split('|')
-            awards.append(HonorRecord(parts[0].strip()))
-            if len(parts) > 1 and parts[1].strip():
-                years.append(parts[1].strip())
+            columns = _honor_columns(line)
+            if columns is None:
+                # Not one of the documented column forms — the historical
+                # first-cell/second-cell reading, unchanged.
+                parts = line.split('|')
+                awards.append(HonorRecord(parts[0].strip()))
+                if len(parts) > 1 and parts[1].strip():
+                    years.append(parts[1].strip())
+            else:
+                awards.append(columns)
+                if columns.date:
+                    # Also a loose year, so an entry that mixes column lines
+                    # with bare-year lines keeps its positional alignment.
+                    years.append(columns.date)
         else:
             awards.append(HonorRecord(line))
     return awards, years
@@ -309,9 +378,11 @@ def _records_for_award_list(awards: Sequence[HonorRecord],
                 format_date_for_section(date, 'H') if date else ''))
             continue
 
-        # Try to get the corresponding year from the ordered list
+        # The line's own date column if it named one, else the corresponding
+        # year from the ordered list
         award_text = parsed.award
-        year_for_award = ordered_years[i] if i < len(ordered_years) else ''
+        year_for_award = parsed.date or (
+            ordered_years[i] if i < len(ordered_years) else '')
 
         # If no year found from text, extract the inline year
         # (leading "2020 Award ...", range, or trailing "... 2025.")
@@ -331,12 +402,24 @@ def _records_for_award_list(awards: Sequence[HonorRecord],
 
 
 def _record_for_single_award(original_text: str,
+                             columns: HonorRecord | None,
                              award_name: str,
                              granting_body: str,
                              date: str) -> HonorRecord:
-    """The record for an entry that holds one award, from stage 4's fields."""
+    """The record for an entry that holds one award, from stage 4's fields.
+
+    `columns` is the column tuple `_honor_columns` recognised when the whole
+    entry was one '|'-joined line, else None. Stage 4's extracted fields win
+    over it wherever it has them; it only fills what they left empty, which
+    is what keeps "Award | Organization | Year" out of the award cell as a
+    raw string (#733 review).
+    """
     if not award_name:
-        award_name = original_text[:_MAX_RAW_AWARD_CHARS]
+        award_name = (columns.award if columns is not None
+                      else original_text[:_MAX_RAW_AWARD_CHARS])
+    if columns is not None:
+        granting_body = granting_body or columns.organization
+        date = date or columns.date
 
     # If no extracted date, parse the inline year out of the name
     # (leading "2021 Award ...", range, or trailing "... 2021.");
@@ -385,7 +468,12 @@ def parse_honor_entry(entry: Mapping) -> list[HonorRecord]:
     if len(awards) > 1:
         return _records_for_award_list(awards, years, award_name,
                                        granting_body, date)
-    return [_record_for_single_award(original_text, award_name,
+    # A single award line that named its own columns is the only thing that
+    # beats the raw text as a fallback -- a plain line, a tab-welded line and
+    # an unrecognised '|' shape all carry no columns and leave `columns` None.
+    columns = (awards[0] if len(awards) == 1
+               and (awards[0].organization or awards[0].date) else None)
+    return [_record_for_single_award(original_text, columns, award_name,
                                      granting_body, date)]
 
 
