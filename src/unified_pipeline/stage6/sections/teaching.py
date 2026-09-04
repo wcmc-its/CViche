@@ -173,8 +173,9 @@ def _item_parts(text: str | None) -> list[str]:
     Its one caller is `_teaching_entry_lines`' Stage-5c-prose branch (the
     second `if formatted_text:`), which runs only when `original_text` is
     empty -- Stage 5c's own prose carries no source-table furniture, so a tab
-    in it is a fused item rather than a cell boundary. Raw source text is deliberately split by `entry_lines` instead;
-    the docstring says why, with the farm counts.
+    in it is a fused item rather than a cell boundary. Raw source text is
+    deliberately split by `entry_lines` instead; the module docstring says
+    why, with the farm counts.
     """
     return [part.strip()
             for line in str(text or '').split('\n')
