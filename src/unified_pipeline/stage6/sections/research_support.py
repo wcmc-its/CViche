@@ -16,8 +16,13 @@ with no warning. `grant_number` used to be the standing example -- 528 of 537
 corpus values reached no render -- until it was folded into the Award Source
 label below; that fix is a one-off `.get()` addition, not a registry, so the
 *next* unnamed field will drop exactly as silently. Adding a field means
-editing this file, not just stage 4 (CODING_STANDARDS.md §7.3).
+editing this file, not just stage 4 (CODING_STANDARDS.md §7.3). What is new is
+that the drop is at least *visible*: `CONSUMED_GRANT_FIELDS` lists every key the
+renderer reads and `_create_grant_table` logs the leftovers at debug level. That
+is a diagnostic, not a registry -- it tells you a field was dropped, it does not
+render it.
 """
+import logging
 import re
 from datetime import datetime
 
@@ -42,6 +47,8 @@ from ..normalization import (
 from ..resolution import _get_cv_owner_name
 from ..sorting import sort_entries_reverse_chronological
 
+logger = logging.getLogger(__name__)
+
 # M2A/M2B/M2C -> WCM template section header text, in display order
 # (docs/CODING_STANDARDS.md §8.2).
 RESEARCH_SUPPORT_SECTIONS = (
@@ -49,6 +56,24 @@ RESEARCH_SUPPORT_SECTIONS = (
     ('M2B', 'Past (Completed) Funding'),
     ('M2C', 'Pending Funding'),
 )
+
+# Every stage-4 field key this section reads: the `fields.get(...)` slots in
+# `_create_grant_table` and `_format_grant_duration`, plus `status`, which only
+# the bucket rules read. Anything else stage 4 extracts for an M2 record reaches
+# no row of the WCM grant block, and the module docstring's known gap is exactly
+# that this happens silently -- so `_create_grant_table` names the leftovers at
+# debug level. Adding a `fields.get('x')` above means adding 'x' here, or the
+# key it now consumes still reads as dropped.
+CONSUMED_GRANT_FIELDS = frozenset({
+    'agency', 'funding_source', 'sponsor',
+    'annual_direct_costs', 'total_funding',
+    'co_investigators', 'pi_name', 'principal_investigator',
+    'date', 'start_date', 'end_date',
+    'description', 'major_goals', 'narrative',
+    'grant_number', 'non_financial_support', 'percent_effort',
+    'pi_role', 'role', 'status',
+    'study_title', 'text', 'title', 'trial_title',
+})
 
 
 class ResearchSupportSection:
@@ -276,6 +301,17 @@ class ResearchSupportSection:
         Returns:
             Table object, or None if entry is too sparse to create a useful table
         """
+        # The rows below are a fixed enumeration, so a stage-4 field none of them
+        # names is dropped with no warning (module docstring). Say which keys
+        # those are, at debug level. KEYS ONLY -- a grant's values are CV content
+        # and this logger is not a place to put PII.
+        unconsumed_fields = sorted(set(fields) - CONSUMED_GRANT_FIELDS)
+        if unconsumed_fields:
+            logger.debug(
+                "Extracted %s fields not consumed by the research-support renderer: %s",
+                code, ', '.join(unconsumed_fields),
+            )
+
         # Validate minimum required fields - skip header-like entries
         # A valid grant should have at least a title OR (agency + role/dates)
         # Check multiple title field names since clinical trials use trial_title/study_title/text
