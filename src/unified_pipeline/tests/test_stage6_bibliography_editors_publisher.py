@@ -661,3 +661,63 @@ def test_identifier_value_that_ends_in_a_period_keeps_its_own_period():
 
     assert citation == '1. doi:10.1000/abc..'
     assert _identifier_run_as_round_1_built_it(doi='10.1000/abc.') == 'doi:10.1000/abc.'
+
+
+# ---------------------------------------------------------------------------
+# Round-2 review, point 13: a non-string value on the fallback path
+# ---------------------------------------------------------------------------
+
+def test_fallback_non_string_editors_value_is_skipped_not_rendered():
+    """The stage-5d net guards with isinstance; the deterministic fallback
+    branch did not, and it interpolates the value straight into "In: {editors},
+    eds." -- so a list from raw stage-4 JSON rendered its repr into the
+    document. (The stage-5d half of this is already pinned by
+    test_stage5d_non_string_editors_value_is_skipped_not_rendered.)"""
+    fields = {
+        'authors': 'Smith J',
+        'year': '2021',
+        'book_title': 'The Big Book of Pediatrics',
+        'editors': ['Editor X', 'Editor Y'],
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 12)
+
+    assert citation == '12. Smith J. In: The Big Book of Pediatrics. 2021.'
+    assert 'Editor X' not in citation
+    assert '[' not in citation
+
+
+def test_fallback_non_string_publisher_value_is_skipped_not_rendered():
+    """The publisher half, which the reviewer asked for by name: a non-string
+    publisher must not select the book trailer and must not render its repr.
+    The year trailer falls back to the plain Year:Pages form."""
+    fields = {
+        'authors': 'Smith J',
+        'year': '2021',
+        'title': 'My Book',
+        'publisher': {'name': 'Acme Press'},
+        'pages': '10-20',
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 13)
+
+    assert citation == '13. Smith J. My Book. 2021:10-20.'
+    assert 'Acme Press' not in citation
+    assert '{' not in citation
+
+
+@pytest.mark.parametrize('value', [None, 42, ['a'], {'a': 1}])
+def test_fallback_non_string_editors_and_publisher_never_reach_the_page(value):
+    """Table over the shapes raw stage-4 JSON can produce for either field:
+    none of them may appear in the rendered citation."""
+    fields = {
+        'authors': 'Smith J',
+        'year': '2021',
+        'book_title': 'A Book',
+        'editors': value,
+        'publisher': value,
+    }
+
+    citation, _, _ = _format_citation(_entry(fields), 14)
+
+    assert citation == '14. Smith J. In: A Book. 2021.'

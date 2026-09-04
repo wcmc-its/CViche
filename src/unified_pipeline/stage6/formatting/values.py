@@ -154,6 +154,14 @@ def _format_citation(entry: Dict, num: int) -> Tuple[str, Optional[str], List[st
     book_title = fields.get('book_title', '')
     editors = fields.get('editors', '')
     publisher = fields.get('publisher', '')
+    # Same guard the stage-5d safety net above applies (round-2 review of
+    # #481, point 13): stage 4 is raw LLM-shaped JSON, so either value can
+    # arrive as a list, and this branch renders it straight into the citation
+    # -- a repr in the document rather than a crash, which is worse.
+    if not isinstance(editors, str):
+        editors = ''
+    if not isinstance(publisher, str):
+        publisher = ''
     if journal:
         parts.append(journal + ".")
     elif book_title:
