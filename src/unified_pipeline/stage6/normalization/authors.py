@@ -39,15 +39,13 @@ def _looks_like_initials(token: str) -> bool:
     "initials or name?" calls this one predicate -- the pair detector, the
     pair parser's surname-slot test, its upper-casing, and the fallback
     parser -- so a token can no longer be classified one way on one path and
-    the other way on the other. The definitions this replaced disagreed on
-    marked groups ("PL*"), spaced groups ("N J"), 3-4 letter groups,
-    hyphenated groups and lone lowercase initials, on 81 of the farm's 1,711
-    distinct author strings (`measure_normalization_claims.py --only
-    initials`).
+    the other way on the other. The definitions this replaced disagree with
+    it on 81 of the farm's 1,711 distinct author strings
+    (`measure_normalization_claims.py --only initials`).
 
     A single alphabetic character of any case or script is always an initial
-    -- "Kelly, r" and "Kelly, Å" both occur in the corpus (#560), and a lone
-    letter has no other plausible reading. 2-4 characters must still be
+    -- #560 gives "Kelly, r" and "Kelly, Å" as shapes the old ASCII-uppercase
+    gate rejected, and a lone letter has no other plausible reading. 2-4 characters must still be
     uppercase: a short mixed-case word ("Scot", "Li", "Wei") is at least as
     likely to be a real given name as an initials group. Hyphenated initials
     ("R-Y") follow the same rule per side.

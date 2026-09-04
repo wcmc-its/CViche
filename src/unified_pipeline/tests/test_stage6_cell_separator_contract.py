@@ -48,7 +48,8 @@ _PACKAGE = _SRC / "unified_pipeline"
 # template at all, so a row-shaped record arrives there by construction.
 _CALL_SITES = {
     ("stage_6_word_template.py", "_insert_bulleted_entry"):
-        "shared bullet helper -- the contract is its nine call sites', below",
+        "shared bullet helper -- its own callers are pinned by "
+        "_BULLET_FALLBACKS below",
     ("stage_6_word_template.py", "_insert_reconsidered_segment"):
         "a re-routed appendix segment, and _recover_unrendered_records, "
         "which passes a dateless multi-cell row here on purpose rather "
@@ -65,9 +66,10 @@ _CALL_SITES = {
         "S0 identifier lines; the template has no heading or table for them",
 }
 
-# The two bullet fallbacks among `_insert_bulleted_entry`'s callers. The other
-# seven are in `teaching.py::_insert_teaching_entry`, which bullets every entry
-# because the template has no teaching table.
+# Every function that calls `_insert_bulleted_entry`, asserted below. Two are
+# fallbacks taken when a table-backed section cannot use its table; teaching is
+# not a fallback -- it bullets every entry, the template having no teaching
+# table at all.
 _BULLET_FALLBACKS = {
     ("stage6/sections/clinical_practice.py", "_insert_multiline_as_bullets"),
     ("stage6/sections/passthrough.py", "_fill_hospital_affiliation"),
