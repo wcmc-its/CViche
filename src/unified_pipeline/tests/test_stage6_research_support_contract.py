@@ -316,6 +316,25 @@ def test_extracted_pi_name_beats_the_cv_owner():
                            'Adam Wende') == 'Jane Smith'
 
 
+def test_null_role_with_a_cv_owner_does_not_crash():
+    """A JSON-null `role` reached the owner auto-fill as None and raised there.
+
+    `_create_grant_table` reads the role as
+    `fields.get('pi_role') or fields.get('role', '')`, which yields None -- not
+    '' -- on a record that carries `role` present and JSON-null while `pi_role`
+    is falsy. `resolve_pi_name` then called `None.lower()`, aborting the whole
+    stage-6 run for that CV. Both ends are pinned: the classifier direct, and
+    the caller wire that manufactures the None. The PI cell stays empty, which
+    is what a falsy role rendered before, so nothing that renders today moves.
+    """
+    assert resolve_pi_name({'role': None}, '', None, 'Adam Wende') == ''
+
+    table = _generator()._create_grant_table(
+        {'title': 'Null Role Project', 'agency': 'NIH', 'role': None},
+        'M2A', owner_name='Adam Wende')
+    assert _cells(table)['Name of Principal Investigator:'] == ''
+
+
 # --- item 7: PI extraction from a pipe-delimited source row ---------------------
 
 def test_pi_name_is_extracted_from_four_part_pipe_text():

@@ -437,7 +437,7 @@ def reclassify_past_m2a_grants(
 
 
 def resolve_pi_name(
-    fields: GrantFields, raw_text: str, role: str, owner_name: str
+    fields: GrantFields, raw_text: str, role: str | None, owner_name: str
 ) -> str | None:
     """Resolve the principal investigator for one grant.
 
@@ -450,6 +450,19 @@ def resolve_pi_name(
     null and nothing else resolves -- the `or` chain hands the null straight
     back. The caller renders a falsy PI as an empty cell either way, so the
     annotation is what changed here, not the behaviour.
+
+    `role` is `str | None` for the same reason, on the way in. The caller reads
+    it as `fields.get('pi_role') or fields.get('role', '')`
+    (`_create_grant_table`), and `GrantFields` types both keys `str | None`, so
+    the chain yields None -- not '' -- on a record that carries `role` present
+    and JSON-null while `pi_role` is falsy. Annotating it `str` made the
+    `role.lower()` below an AttributeError on exactly that record, reachable
+    only when nothing else resolved a PI and an owner name was present. Hence
+    the `role and` guard: a falsy role never matched the auto-fill anyway, so
+    it changes no record that renders today. The 66-CV corpus never fires it --
+    over its 335 M2A/M2B/M2C records `role` is absent 324 times and a str 11
+    times, never null -- but `pi_role` is null on 81 of them, which is what
+    puts the read on the `role` branch at all.
     """
     pi_name = fields.get('pi_name') or fields.get('principal_investigator', '') or fields.get('co_investigators', '')
 
@@ -484,7 +497,7 @@ def resolve_pi_name(
                     pi_name = potential_name
 
     # Auto-fill PI name when role indicates Principal Investigator and no PI name specified
-    if not pi_name and owner_name and 'principal' in role.lower() and 'investigator' in role.lower():
+    if not pi_name and owner_name and role and 'principal' in role.lower() and 'investigator' in role.lower():
         pi_name = owner_name
     return pi_name
 
