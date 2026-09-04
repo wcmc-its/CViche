@@ -43,6 +43,7 @@ from unified_pipeline.stage6.normalization.authors import (  # noqa: E402
     _parse_surname_initial_pairs,
 )
 from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
+    _PII_FIELD_KEY_RE,
     _from_pii_fragment,
     _pii_fragments,
     _squash,
@@ -443,14 +444,27 @@ def measure_pii_deny_decisions(farm: Path) -> None:
     three lines under it are 0 by construction and say nothing about the
     predicate -- the farm's stage-4 artifacts simply hold no protected-data
     label for it to act on, and the motivating cases live in the tests.
+
+    The last two lines widen that check past the A code and past the text,
+    to every stored stage-4 entry at any taxonomy code and to its extracted
+    field KEYS as well. They are what says whether "no protected-data label"
+    is a property of the A entries or of the whole farm, which is the
+    difference between "this predicate is untested by the corpus" and "the
+    corpus cannot see protected data at all".
     """
     files = _json_files(farm, ("stage_4_field_extraction",))
     entries = with_fragment = made = denied = differing = 0
+    all_entries = all_labelled = 0
     for path in files:
         data = _load(path)
         if data is None:
             continue
         for entry in data.get("entries", []) or []:
+            all_entries += 1
+            fields = entry.get("extracted_fields") or {}
+            if (_pii_fragments(entry.get("text", ""))
+                    or any(_PII_FIELD_KEY_RE.match(k) for k in fields)):
+                all_labelled += 1
             if entry.get("taxonomy_code") != "A":
                 continue
             entries += 1
@@ -466,6 +480,8 @@ def measure_pii_deny_decisions(farm: Path) -> None:
     print(f"  deny decisions made              : {made}")
     print(f"  values denied                    : {denied}")
     print(f"  differing from bare containment  : {differing}")
+    print(f"  stage-4 entries at any code      : {all_entries}")
+    print(f"  ... with a PII label or field key: {all_labelled}")
 
 
 _MEASURES = {

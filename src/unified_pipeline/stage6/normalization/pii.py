@@ -173,10 +173,15 @@ def _from_pii_fragment(value, pii_fragments: list[str]) -> bool:
     Measured over the 66-CV farm with
     `scripts/measure_normalization_claims.py --only pii`: 319 A-coded
     entries, of which 0 carry a PII fragment at all, so 0 deny decisions
-    and nothing to compare. That is the honest reading and it is worth
-    stating plainly -- the local farm's stage-4 artifacts hold no
-    protected-data label, so no corpus run can see this predicate move in
-    either direction, and a corpus-green result is not evidence about it.
+    and nothing to compare. Nor is that a property of the A code: of all
+    10,737 stage-4 entries the farm stores, at any taxonomy code, 0 carry a
+    protected-data label in their text or a protected-data key in their
+    extracted fields. That is the honest reading and it is worth stating
+    plainly -- no corpus run can see this predicate move in either
+    direction, and a corpus-green result is not evidence about it. It also
+    means the three-CV figure above is not re-derivable from the stored
+    artifacts: it comes from #472's own diagnosis, on entries the farm as it
+    stands no longer holds.
     The motivating cases are pinned by
     `test_stage6_pii_value_provenance.py` and by
     `test_stage6_personal_data_recovery.py::
