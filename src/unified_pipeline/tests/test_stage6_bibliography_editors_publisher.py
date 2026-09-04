@@ -479,8 +479,13 @@ def test_format_currency_unparseable_value_returns_the_original_string(value):
     """Pre-existing behaviour, pinned because the parser changed: an
     unparseable value falls through to the original string. `decimal` raises
     InvalidOperation where `float` raised ValueError, so dropping the added
-    except clause turns this into an uncaught exception; "nan"/"inf" parse as
-    Decimals and are held back by the finiteness check."""
+    except clause turns this into an uncaught exception.
+
+    "nan" and "inf" parse as Decimals and are held back by the finiteness
+    check instead. Under float only "nan" behaved this way (ValueError out of
+    int()); "inf" raised OverflowError, which the except clause never caught,
+    so it escaped the function -- the one row here that is a fix rather than a
+    pin."""
     assert _format_currency(value) == value
 
 

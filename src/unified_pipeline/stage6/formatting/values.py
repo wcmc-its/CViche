@@ -271,8 +271,11 @@ def _format_currency(value) -> str:
         # If we can't parse it, return the original value
         return value_str
     if not num.is_finite():
-        # Decimal parses "nan"/"inf"; float did too, but int() on them raised
-        # and the value fell through to the original string. Keep that.
+        # Decimal parses "nan" and "inf" as values rather than rejecting them.
+        # float parsed them too: "nan" then raised ValueError inside int() and
+        # fell through to the original string, while "inf" raised OverflowError,
+        # which the except clause did not catch and which escaped this function.
+        # Both now return the original string.
         return value_str
     # Format with commas and $ symbol, no decimal places for whole numbers
     if num == num.to_integral_value():
