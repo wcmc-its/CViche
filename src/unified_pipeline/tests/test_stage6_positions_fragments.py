@@ -55,7 +55,10 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.core.render_check import entry_fragments, entry_lines  # noqa: E402
 from unified_pipeline.stage6.sections.positions import (  # noqa: E402
+    _child_position_records,
+    _employers_match,
     _institution_from_raw_text,
+    _position_row_cells,
     _tab_joined_child_fragments,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
@@ -468,6 +471,63 @@ def test_a_d3_child_inherits_the_organization_field():
         ["Board Member", organization, "07/02-12/06"],
         ["Board Chair", organization, "01/04-12/06"],
     ]
+
+
+def test_a_child_keeps_the_parent_location_field():
+    """Pins the parent's `location` field onto the recovered child's row.
+
+    `_get_institution_location` falls back to `extracted_fields['location']`
+    when stage-5b enrichment names no city, and the child record copied
+    institution, organization and department but not that field. The child row
+    then named the employer without its city and state while the parent row
+    directly above it kept them -- two rows of one appointment disagreeing
+    about where it was.
+    """
+    entry = _tab_joined_entry([("Senior Attending Physician", "06/2003", "12/2004")],
+                              institution="Norvale University Hospital")
+    entry["extracted_fields"]["location"] = "Crab Hollow, ZQ"
+
+    assert _render_positions([entry]) == [
+        ["Attending Physician", "Norvale University Hospital, Crab Hollow, ZQ", "07/02-12/06"],
+        ["Senior Attending Physician", "Norvale University Hospital, Crab Hollow, ZQ", "06/03-12/04"],
+    ]
+
+
+# The employer-field shapes a stage-4 position record arrives in. The
+# Institution cell reads four fields and any subset of them can be populated,
+# so the parent/child equality is asserted across the subsets rather than
+# against whichever one a single fixture happens to use.
+EMPLOYER_FIELD_SHAPES = [
+    {"institution": "Norvale University Hospital"},
+    {"institution": "Norvale University Hospital", "location": "Crab Hollow, ZQ"},
+    {"organization": "Quexley Medical Society", "location": "Crab Hollow, ZQ"},
+    {"institution": "Norvale University Hospital",
+     "department": "Department of Emergency Medicine",
+     "location": "Crab Hollow, ZQ"},
+    {"location": "Crab Hollow, ZQ"},
+]
+
+
+@pytest.mark.parametrize("employer_fields", EMPLOYER_FIELD_SHAPES)
+def test_a_child_institution_cell_is_the_parents_whichever_field_carries_it(employer_fields):
+    """`_child_position_records` claims a child's Institution cell comes out
+    identical to its parent's. That holds only while the record copies every
+    field the cell reads, so the claim is asserted against the renderer itself
+    -- the two cells, run lists and all -- across the employer-field subsets a
+    stage-4 record arrives in, rather than against a list of field names that
+    can silently fall behind the cell.
+    """
+    parent = _tab_joined_entry([("Senior Attending Physician", "06/2003", "12/2004")])
+    parent["extracted_fields"] = {"title": "Attending Physician",
+                                  "start_date": "2002-07", "end_date": "2006-12",
+                                  **employer_fields}
+
+    children = _child_position_records(parent)
+    parent_cell = _position_row_cells(parent)[1]
+
+    assert len(children) == 1
+    assert any(text.strip() for text, _, _ in parent_cell)
+    assert _position_row_cells(children[0])[1] == parent_cell
 
 
 def test_recovery_does_not_mutate_the_supplied_entries():
