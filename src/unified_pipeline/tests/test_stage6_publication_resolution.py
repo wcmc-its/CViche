@@ -239,7 +239,11 @@ def test_an_absent_and_a_null_year_are_now_the_same_absence():
 def test_a_chapter_title_fills_the_title_slot_when_stage4_wrote_no_title():
     """The measured S4 shape, and the whole of #728: stage 4's S4 schema has
     no `title` key -- 53 of the 95 farm S4 entries carry `chapter_title` and
-    no `title` at all (zero carry `title: null`)."""
+    no `title` at all (zero carry `title: null`).
+
+    49 of those 53 change what they render. The other four are the two
+    guards this file pins either side of this test: one carries
+    `chapter_title: null`, three already had a PubMed title."""
     resolved = resolve_publication({'extracted_fields': {
         'chapter_title': 'Genomic Instability in Human Premature Aging',
         'book_title': 'Aging at the Molecular Level',

@@ -252,6 +252,10 @@ def resolve_publication(entry: dict[str, Any]) -> ResolvedPublication:
         # carry a `title` written back by stage 5d and take the formatted-
         # citation branch above, so this fall-through cannot double-render:
         # `chapter_title` is read only when there is no title to render.
+        #
+        # 53 lost it; 49 change. The four that do not: one carries
+        # `chapter_title: null`, and three already had a PubMed title, which
+        # outranks both extracted names and always did.
         title=(_text(enrichment.get('pubmed_title'))
                or _text(fields.get('title'))
                or _text(fields.get('chapter_title'))),
