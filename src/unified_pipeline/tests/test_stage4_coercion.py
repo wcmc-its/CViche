@@ -259,3 +259,30 @@ def test_reformatted_field_record_shape_is_pinned():
     assert ReformattedField.__total__ is True
     assert ReformattedFields.__total__ is False
     assert ExtractedFields.__total__ is False
+
+
+def test_percent_effort_search_order_is_decimal_fte_before_percent_patterns():
+    # `_find_percent_effort`'s docstring states the order as a contract
+    # ("the decimal-FTE pattern first, then each of _FTE_PERCENT_PATTERNS;
+    # first match wins"), but until this test nothing pinned it: swapping the
+    # two search blocks passed the whole suite. Both forms appear in this one
+    # text, so only the order decides the answer.
+    updated, _ = apply_regex_post_processing(
+        "0.8 fte and 50% effort", {}, "M2A"
+    )
+
+    assert updated["percent_effort"] == "80%"
+
+
+def test_percent_effort_already_extracted_is_not_overwritten():
+    # `_normalize_grant_effort` promises to fill in only what "the LLM didn't
+    # already fill in", and 30 corpus entries reach it with a truthy value --
+    # but deleting the early return passed the whole suite. The regex would
+    # find "50%" here; the LLM's own "25%" must survive, with no reformatted
+    # record claiming a repair that did not happen.
+    updated, reformatted = apply_regex_post_processing(
+        "50% effort on this grant", {"percent_effort": "25%"}, "M2A"
+    )
+
+    assert updated["percent_effort"] == "25%"
+    assert "percent_effort" not in reformatted
