@@ -135,6 +135,7 @@ _TRAILING_DATES_RE = re.compile(
     re.IGNORECASE,
 )
 _LEADING_TYPE_RE = re.compile(r'^([^,:;–—-]{1,40})\s*[,:;–—-]\s+(.+)$')
+_BRACKET_PAIRS = (('(', ')'), ('[', ']'))
 
 
 class MembershipsRowShapeError(ValueError):
@@ -310,6 +311,26 @@ def _truncate_on_word_boundary(text: str, limit: int) -> str:
     return (cut[:space] if space > 0 else cut).rstrip()
 
 
+def _brackets_balanced(text: str) -> bool:
+    """True when every bracket `text` opens it also closes."""
+    return all(text.count(opener) == text.count(closer)
+               for opener, closer in _BRACKET_PAIRS)
+
+
+def _recovery_covers_text(text: str, recovered: MembershipFallback) -> bool:
+    """True when every word of `text` still reaches a cell of the rendered row.
+
+    The recovery is allowed to MOVE words -- a date into the date column, a
+    membership type into the prefix `_organization_cell` writes back -- but it
+    is not allowed to lose any. Word-level and set-based, so re-ordering,
+    punctuation, tabs and a repeated organization name all read as covered.
+    """
+    rendered = set(_tokens(' '.join((recovered.membership_type,
+                                     recovered.organization,
+                                     recovered.dates))))
+    return all(token in rendered for token in _tokens(text))
+
+
 def _split_trailing_dates(fragment: str) -> tuple[str, str]:
     """Lift a trailing date or date range off a fragment.
 
@@ -329,6 +350,11 @@ def _split_trailing_dates(fragment: str) -> tuple[str, str]:
     if not match:
         return fragment, ''
     remainder = fragment[:match.start()].strip(' ,;:-–—([')
+    if remainder and _brackets_balanced(fragment) and not _brackets_balanced(remainder):
+        # The date sat inside a bracketed aside ("... (elected Fellow, 1980)")
+        # and lifting it would leave the organization holding a bracket it
+        # never closes. Leave the fragment whole instead.
+        return fragment, ''
     start, end = match.group(1), match.group(2) or ''
     return remainder, (f"{start}-{end}" if end else start)
 
@@ -378,6 +404,23 @@ def _organization_fallback(text: str, fields: dict) -> MembershipFallback:
 
     The organization it returns is empty only when the entry carries no text
     at all, so a non-blank entry cannot become a blank row through this path.
+
+    Every recovery is then checked against one invariant: the row may MOVE a
+    word out of the organization cell, never lose it. `_recovery_covers_text`
+    re-reads the entry's own words and requires each one to still land in the
+    organization, the membership type or the date. A recovery that fails goes
+    back to the whole raw text -- exactly the cell the section rendered before
+    this extractor existed, so a fragment the segmentation misread can only
+    cost the row its improvement, never any of its content. It fires on the
+    farm's tab-flattened two-column entries whose date half is written in a
+    shape the date test does not read ("2003-", "2018-Pres", "2008-12"): the
+    date half then reads as the organization and the real name, sitting in the
+    next fragment, would have been dropped.
+
+    The structured-alias branch above is deliberately outside that check. An
+    alias field is an extraction result about the whole entry rather than a
+    re-segmentation of its text, so it is entitled to name the organization
+    without also accounting for the entry's dates and role words.
     """
     for key in _ORGANIZATION_FIELD_ALIASES:
         value = str(fields.get(key) or '').strip()
@@ -409,10 +452,19 @@ def _organization_fallback(text: str, fields: dict) -> MembershipFallback:
         # own first fragment rather than render a blank cell.
         membership_type, organization = '', fragments[0]
 
+    recovered = MembershipFallback(membership_type, organization, dates)
+    if not _recovery_covers_text(text, recovered):
+        logger.warning(
+            "memberships: recovering an organization from raw text would have "
+            "dropped part of the entry; rendering the raw text instead"
+        )
+        recovered = MembershipFallback('', str(text or '').strip(), '')
+
     return MembershipFallback(
-        membership_type,
-        _truncate_on_word_boundary(organization, _ORGANIZATION_FALLBACK_MAX_CHARS),
-        dates,
+        recovered.membership_type,
+        _truncate_on_word_boundary(recovered.organization,
+                                   _ORGANIZATION_FALLBACK_MAX_CHARS),
+        recovered.dates,
     )
 
 
