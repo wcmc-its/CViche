@@ -216,9 +216,10 @@ def normalize_percent_effort(effort_value: str) -> str | None:
     needs no guard -- it compares fine and the range check below already
     discards it, in both signs.
 
-    Not reachable from the sole production call site at `:313`:
-    `PROJECT_EFFORT_LINE_RE` group 2 is digits with at most one decimal point
-    and no letter, so it can never hand over the string "nan". Stage 6 renders
+    Not reachable from the sole production call site, the
+    `PROJECT_EFFORT_LINE_RE` match inside `filter_role_effort_headers`: group 2
+    is digits with at most one decimal point and no letter, so it can never
+    hand over the string "nan". Stage 6 renders
     the same bytes either way -- this is a contract fix, not a bug fix.
 
     The two int() calls this replaces did not round, they truncated, and did it

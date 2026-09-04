@@ -274,7 +274,8 @@ def test_grant_number_alone_becomes_the_award_source_when_there_is_no_agency():
 
 
 def test_grant_number_already_in_the_agency_is_not_duplicated():
-    """The `:367` guard: a number already inside the agency text is not re-appended."""
+    """`_create_grant_table`'s Award Source guard: a number already inside the
+    agency text is not re-appended."""
     fields = {'agency': 'NIH R01 CA123456', 'title': 'Cancer Immunology Project',
               'grant_number': 'R01 CA123456'}
     table = _generator()._create_grant_table(fields, 'M2A')

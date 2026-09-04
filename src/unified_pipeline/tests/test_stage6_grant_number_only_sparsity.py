@@ -1,6 +1,7 @@
 """A grant identified only by its number is admitted; a bare fragment is not (#486).
 
-`_create_grant_table`'s sparsity guard (`research_support.py:294-311`) used to
+`_create_grant_table`'s sparsity guard (`research_support.py`, the
+`has_title` / `has_substantive_info` / `has_grant_number_info` test) used to
 require a title, or an agency plus a role/date -- an entry identified only by
 its grant number had neither, so it was rejected and rendered nowhere at all,
 even though grant_number itself has rendered into Award Source since #478/#479.
@@ -134,9 +135,11 @@ def test_narrative_with_no_identifier_still_rejected():
 
 def test_none_extracted_fields_does_not_raise_through_the_section_filler():
     # Reproduces on dev today as AttributeError: 'NoneType' object has no
-    # attribute 'get', via research_support.py:135/168/192/237's bare
-    # entry.get('extracted_fields', {}) -- {} is the *default*, only used when
-    # the key is absent; an explicit None value passes straight through.
+    # attribute 'get', via the bare entry.get('extracted_fields', {}) that
+    # apply_effort_to_grants, rebucket_grants_by_status,
+    # reclassify_past_m2a_grants and _fill_research_support each open with --
+    # {} is the *default*, only used when the key is absent; an explicit None
+    # value passes straight through.
     gen = _generator()
     for _, header in (
         ("M2A", "Current Research Funding"),
@@ -159,14 +162,15 @@ def test_none_extracted_fields_does_not_raise_through_the_section_filler():
     gen._fill_research_support(entries_by_code)
 
 
-def test_verbose_reclassification_message_exercises_the_192_read(capsys):
-    # research_support.py:192 -- (entry.get('extracted_fields') or {}).get('title') --
-    # sits inside `if self.verbose:`, so the test above (gen.verbose = False) never
-    # executes it at all. It is also structurally unreachable with extracted_fields =
-    # None: an M2A entry only reaches this reclassification loop once it has a real
-    # end_date, and :168's own `entry.get('extracted_fields') or {}` means end_date can
-    # only be non-empty when extracted_fields was already a real dict, not None -- so no
-    # input can make :192 see a None value in practice. This test instead closes the
+def test_verbose_reclassification_message_exercises_the_title_read(capsys):
+    # reclassify_past_m2a_grants' message line --
+    # (entry.get('extracted_fields') or {}).get('title') -- is emitted only when the
+    # generator is verbose, so the test above (gen.verbose = False) never executes it
+    # at all. It is also structurally unreachable with extracted_fields = None: an M2A
+    # entry only reaches this reclassification loop once it has a real end_date, and
+    # the same function's own `entry.get('extracted_fields') or {}` means end_date can
+    # only be non-empty when extracted_fields was already a real dict, not None -- so
+    # no input can make the title read see a None value in practice. This test closes the
     # "never executed at all" gap: verbose=True plus a real M2A entry with a past
     # end_date drives the line's ordinary, non-None path.
     gen = _generator()
