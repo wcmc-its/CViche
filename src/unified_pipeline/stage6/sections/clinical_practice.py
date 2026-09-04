@@ -547,7 +547,15 @@ class ClinicalPracticeSection:
             add_blank_before: If True, add a blank line before the first entry
 
         Returns:
-            Number of bullets inserted
+            Number of PARAGRAPHS inserted -- one per bullet, plus the blank
+            spacer when `add_blank_before` is set. All three callers use the
+            return value to advance their own insertion index, so it has to
+            count every paragraph this method added, not only the bullets.
+            Counting bullets alone left the first entry's spacer unaccounted
+            for, which placed every later entry one paragraph too high and
+            interleaved its bullets into the middle of the previous entry's
+            (#476 review; found by the end-to-end tests through the real
+            template, not by a helper unit test).
         """
         lines = _bullet_parts(text)
         if not lines:
@@ -562,4 +570,4 @@ class ClinicalPracticeSection:
                 add_blank_before=add_blank_before and is_last, list_level=0
             )
 
-        return len(lines)
+        return len(lines) + (1 if add_blank_before else 0)
