@@ -28,6 +28,11 @@ to a specific bug fix:
     exercises the surname regex, and the one used below.
   - #3819086998: negative-path coverage proving malformed identifiers/dates/
     FTE/author strings are left alone rather than silently misnormalized.
+  - #556 review round 4: `ExtractedFields` / `ReformattedField` /
+    `ReformattedFields` replaced `dict[str, Any]` across the regex
+    post-processing pass. `ExtractedFields`' key set is hand-kept (this
+    module may not import stage4.schemas), so it needs the same drift
+    guard `DATE_RANGE_TAXONOMY_CODES` has -- see the last two tests.
 
 Self-contained: no LLM calls, no I/O, no PII.
 """
@@ -41,6 +46,9 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage4.coercion import (  # noqa: E402
+    ExtractedFields,
+    ReformattedField,
+    ReformattedFields,
     apply_regex_post_processing,
     coerce_field_value_types,
     normalize_authors_vancouver,
@@ -192,3 +200,45 @@ def test_unsupported_author_format_passes_through_unchanged():
     # comma and no multi-word structure to parse -- it must pass through
     # rather than raising or being corrupted.
     assert normalize_authors_vancouver("Anonymous") == "Anonymous"
+
+
+# --- #556 round 4: drift guards for the hand-kept typed records ------------
+
+def test_extracted_fields_typeddict_matches_active_schemas():
+    # ExtractedFields' key set is the union of every field name the active
+    # schemas declare, hand-kept because coercion.py may not import
+    # stage4.schemas (module boundary, stage4/__init__.py) -- and because a
+    # TypedDict's keys must be literals, so no module arrangement could
+    # derive them at runtime either. Nothing else notices when a schema
+    # gains, loses or renames a field, which would silently leave a
+    # post-processor writing into a key the schema no longer declares. This
+    # test may import both modules even though coercion.py itself cannot,
+    # exactly as test_date_range_taxonomy_codes_matches_schema_derived_codes
+    # does for DATE_RANGE_TAXONOMY_CODES.
+    from unified_pipeline.stage4 import schemas
+
+    active = schemas.get_active_schemas()
+    schema_derived = {
+        field
+        for schema in active.values()
+        for field in schema.get("fields", [])
+    }
+
+    assert set(ExtractedFields.__annotations__) == schema_derived
+
+
+def test_reformatted_fields_keys_are_all_declared_extracted_fields():
+    # Every key ReformattedFields reports on is a field some schema declares,
+    # so a schema-side rename that the test above catches also tells you which
+    # post-processor's key went stale. Kept separate from that assertion so a
+    # failure names which of the two invariants broke.
+    assert set(ReformattedFields.__annotations__) <= set(ExtractedFields.__annotations__)
+
+
+def test_reformatted_field_record_shape_is_pinned():
+    # The three-key shape is written identically at every site in coercion.py;
+    # a fourth key added at one site only would be a silent partial record.
+    assert set(ReformattedField.__annotations__) == {"original", "reformatted", "reason"}
+    assert ReformattedField.__total__ is True
+    assert ReformattedFields.__total__ is False
+    assert ExtractedFields.__total__ is False
