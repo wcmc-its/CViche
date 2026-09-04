@@ -31,8 +31,8 @@ renderer reads and `_create_grant_table` logs the leftovers at debug level. That
 is a diagnostic, not a registry -- it tells you a field was dropped, it does not
 render it.
 
-Logging rule for this module: no `logger` call carries a value taken from the
-CV. Every one of them says what happened and why -- an effort figure was
+Logging rule for this module: no `logger` call and no exception message
+carries a value taken from the CV. Every one of them says what happened and why -- an effort figure was
 discarded as unparseable or out of range, a title matched several project
 names, a field was not consumed -- using counts, key names and module
 constants only. The verbose `print` lines are the other channel and do quote
@@ -406,16 +406,19 @@ def rebucket_grants_by_status(
     bucket_lists = {'M2B': completed, 'M2C': pending}
     messages: list[str] = []
     for source_code, source_list in (('M2A', current), ('M2B', completed)):
-        for entry in list(source_list):
+        for position, entry in enumerate(list(source_list)):
             fields = cast(GrantFields, entry.get('extracted_fields') or {})
             target, note = grant_status_rebucket_target(fields.get('status'))
             if not target or target == source_code:
                 continue
             title = str(fields.get('title') or 'Unknown')
             if target not in REBUCKET_TARGET_CODES:
+                # The grant is identified by its position, not its title: this
+                # message reaches a traceback and from there the pod logs, and a
+                # grant title is CV content.
                 raise UnsupportedRebucketTargetError(
                     f"grant_status_rebucket_target returned bucket {target!r} for "
-                    f"a {source_code} grant '{title[:40]}'; research support renders "
+                    f"{source_code} grant #{position}; research support renders "
                     f"only {sorted(REBUCKET_TARGET_CODES)}"
                 )
             source_list.remove(entry)

@@ -1101,6 +1101,11 @@ def test_unsupported_rebucket_target_raises_a_named_error(monkeypatch):
     returning anything else died on `bucket_lists[target]` naming neither the
     code nor the grant (thread 3932312407 item 2). Preventive: the real rule
     cannot return M2D today, so the rule is stubbed to prove the guard.
+
+    The message identifies the grant by its position, never by its title: it
+    reaches a traceback and from there the pod logs, and a grant title is CV
+    content. That is this module's stated logging rule, and an exception is
+    the one place it would be easy to break by accident.
     """
     monkeypatch.setattr(research_support, 'grant_status_rebucket_target',
                         lambda status: ('M2D', 'stub note') if status else (None, None))
@@ -1109,8 +1114,10 @@ def test_unsupported_rebucket_target_raises_a_named_error(monkeypatch):
     with pytest.raises(UnsupportedRebucketTargetError) as excinfo:
         rebucket_grants_by_status([entry], [], [])
 
-    assert 'M2D' in str(excinfo.value)
-    assert 'Misrouted Project Study' in str(excinfo.value)
+    message = str(excinfo.value)
+    assert 'M2D' in message
+    assert 'M2A' in message and '#0' in message
+    assert 'Misrouted Project Study' not in message
 
 
 def test_reclassify_past_m2a_grants_leaves_its_inputs_alone():
