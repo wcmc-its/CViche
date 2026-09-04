@@ -76,7 +76,9 @@ sources of text, in order:
 
 - `formatted_text` from stage 5c, when the raw entry is a single item. ISO dates
   the LLM left behind are normalized first, and markdown is stripped, since Word
-  runs have no markdown.
+  runs have no markdown. A `formatted_text` that strips down to nothing is not
+  bulleted blank; the raw line is used instead, and the entry is reported when
+  there is no raw line either.
 - the RAW lines, when the raw entry has several of them. Stage 5c routinely
   merges a multi-item teaching block into one sentence, so the original line
   breaks are the more faithful record; only one of the bullets carries the
@@ -189,9 +191,12 @@ def _teaching_entry_lines(fields: _TeachingFields, original_text: str) -> list[s
     renderer is left with one insertion loop instead of seven.
 
     An empty list means the entry reconstructs to nothing at all; the caller
-    logs that (§5.4 -- it is recorded, never swallowed). A single-element list
-    holding an empty string is NOT the same thing: that is a formatted_text
-    that stripped down to nothing, which has always rendered an empty bullet.
+    logs that (§5.4 -- it is recorded, never swallowed). It is never a list
+    holding one empty string: a `formatted_text` of nothing but whitespace or
+    markup used to be bulleted blank, which both put an empty list paragraph
+    on the page AND discarded whatever raw line the entry still carried, so
+    such a `formatted_text` now falls through to the raw line and, when there
+    is none, to the empty list the caller reports.
     """
     formatted_text = fields.get('formatted_text', '') or ''
     if formatted_text:
@@ -204,13 +209,23 @@ def _teaching_entry_lines(fields: _TeachingFields, original_text: str) -> list[s
         original_lines = entry_lines(original_text)
         if len(original_lines) > 1:
             return original_lines
-        return [_strip_markdown_for_word(formatted_text, preserve_newlines=True)]
+        stripped = _strip_markdown_for_word(formatted_text, preserve_newlines=True)
+        if stripped.strip():
+            return [stripped]
+        # Stage 5c sent a formatted_text with no words in it ("   ", "**  **").
+        # Bulleting it renders an empty list paragraph and throws away the raw
+        # line this entry still has, so take the raw line instead; when the raw
+        # text was blank too this is [] and the caller warns (#476).
+        return original_lines
 
     if formatted_text:
         parts = _item_parts(_strip_markdown_for_word(formatted_text, preserve_newlines=True))
         if len(parts) > 1:
             return ['. '.join(parts)]
-        return [parts[0] if parts else '']
+        # Same rule with no raw text to fall back to: `parts[:1]` is [] when the
+        # formatted text reduced to nothing, so the caller reports the entry
+        # rather than the renderer emitting a blank bullet for it.
+        return parts[:1]
 
     # No Stage 5c formatting - fall back to building text from fields
     course_code = fields.get('course_code', '')
