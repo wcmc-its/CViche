@@ -2919,16 +2919,34 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
                emit_track_changes: bool = True, emit_comments: bool = False,
                strip_template_instructions: bool = True,
                recover_unrendered_records: bool = True) -> str:
-    """
+    r"""
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
     Takes a PATH, not parsed data, and that is load-bearing for concurrency.
     Stage 6 rewrites entries in place as it renders -- reassigning
-    ``entry['taxonomy_code']`` when it reroutes a code, writing back
-    ``entry['extracted_fields']``, annotating ``entry['reclassification_note']``
-    -- 17 sites in all. Because this function is handed a path and parses the
-    JSON itself, every render owns the dicts it mutates, and the web path runs
-    renders concurrently (``run_service.py`` starts each run in a thread and the
+    ``entry['taxonomy_code']`` when it reroutes a code, and writing back
+    ``entry['extracted_fields']`` when it propagates a parent institution or a
+    header's dates onto a sub-entry. 12 sites, in four functions:
+    ``_correct_mismatch_if_needed`` here (4);
+    ``stage6.render_check.normalize_retired_code`` (2);
+    ``stage6.sections.positions._propagate_institution_to_subentries`` (3); and
+    ``_copy_dates`` inside
+    ``stage6.sections.positions._merge_grouped_appointments`` (3). Counted by::
+
+        grep -rnE "[A-Za-z_][A-Za-z0-9_]*\['[a-z_]+'\] *=[^=]|\.setdefault\(" \
+            src/unified_pipeline/stage_6_word_template.py src/unified_pipeline/stage6/
+
+    which returns 21 lines today; the other 9 write to ``self.stats`` or to a
+    copy the function made itself, so they reach no caller. Section M2 used to
+    be among them -- it annotated ``entry['reclassification_note']`` and filled
+    ``fields['percent_effort']`` -- but it now classifies on
+    ``copy_entries_for_render`` clones, so those three writes stop at the
+    section (``stage6/sections/research_support.py``). Re-run the grep rather
+    than trusting the count: it is a snapshot, not an invariant.
+
+    Because this function is handed a path and parses the JSON itself, every
+    render owns the dicts it mutates, and the web path runs renders
+    concurrently (``run_service.py`` starts each run in a thread and the
     orchestrator hands each stage to ``asyncio.to_thread``).
 
     Passing already-parsed stage 5 data in here to save a re-parse would be a
