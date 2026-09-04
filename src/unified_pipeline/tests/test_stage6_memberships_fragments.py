@@ -52,12 +52,22 @@ block pins:
 - the case-sensitive "Date" test on the fallback table's second header;
 - `original_text[:150]` as the organization fallback.
 
+Block (s) is the second round: the 66-CV render gate read an organization
+cell that the new fallback had shortened to "February" on an entry whose
+whole text is "February 2018 - Present". The recovery had lifted the trailing
+date by matching the year alone and left the month behind as the
+"organization" -- the raw-text truncation the fallback replaced, reintroduced
+by the fallback itself. The block pins the general rule rather than that one
+cell: a recovered organization may give up a tail only when the date column
+now carries every word of it.
+
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_memberships_fragments.py -p no:cacheprovider
 """
 
 import ast
+import re
 import sys
 from pathlib import Path
 
@@ -74,6 +84,7 @@ from unified_pipeline.stage6.sections.memberships import (  # noqa: E402
     MembershipsRowShapeError,
     _entry_parts,
     _organization_fallback,
+    _split_trailing_dates,
     _type_already_named,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
@@ -675,6 +686,161 @@ def test_a_blank_entry_does_not_suppress_a_real_one():
     gen, rows = _fill([{"text": "  ", "extracted_fields": {}}, real])
     assert rows == [["Fellow, American College of Surgeons", "2015-Present"]], rows
     assert gen.stats["entries_inserted"] == 1
+
+
+# --- (s) the render gate's regression: a recovered cell that lost characters -
+
+# The organization cell the raw-text fallback rendered before the dedicated
+# extractor existed. Every shape below is checked against it: the recovery is
+# allowed to move a date out of this cell, never to shorten it into nothing.
+_RAW_TEXT_FALLBACK_MAX = 150
+
+
+def _words(text):
+    return re.findall(r"[0-9a-z]+", text.lower())
+
+
+def _is_shortened_prefix(cell, text):
+    """True when `cell` is `text` cut short -- the defect shape, before the
+    date carve-out is applied."""
+    return cell != text and text.startswith(cell)
+
+
+def _dropped_words_are_all_in_the_date_cell(cell, text, date_cell):
+    """The one shortening the ticket allows: the tail the organization cell
+    gave up is a date, and the date column now carries it."""
+    tail = text[len(cell):]
+    date_words = set(_words(date_cell))
+    return all(word in date_words for word in _words(tail))
+
+
+_MONTH_WORDS = {
+    "january", "february", "march", "april", "may", "june", "july", "august",
+    "september", "october", "november", "december",
+    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct",
+    "nov", "dec",
+}
+
+
+def _is_a_date_word(word):
+    return word.isdigit() or word in _MONTH_WORDS or word in {"present", "pres"}
+
+
+def _cell_still_names_something(cell):
+    """A shortened cell has to be left holding an actual name. "February",
+    all that survived the render gate's regression, is a piece of the date it
+    was cut away from."""
+    return any(not _is_a_date_word(word) for word in _words(cell))
+
+
+# (raw text, extracted_fields) shapes taken from the farm's section I, with
+# organization names generalized. Each one reaches the fallback because no
+# `organization` field is extracted.
+NO_ORGANIZATION_FIELD_SHAPES = [
+    # The render gate's regression: the whole value is a date, and the date
+    # column already carries it from structured fields.
+    ("February 2018 – Present",
+     {"organization": None, "start_date": "February 2018", "end_date": "Present"}),
+    ("July 2023 – Present",
+     {"organization": None, "start_date": "2023-07", "end_date": "Present"}),
+    # A flattened two-column row whose date half is written in a shape the
+    # date test does not read, so the date half looks like an organization.
+    ("2003-             \tAmerican Association for Thoracic Surgery, Associate Member", {}),
+    ("2018-Pres\t\tMember - American College of Physicians", {}),
+    ("2008-12\t\tMember, American Thoracic Society", {}),
+    ("2004-08, 17, 2023\tMember, American Public Health Association", {}),
+    # A tab inside the organization name itself.
+    ("Psi Chi\t, National Honors Society in Psychology\t\t\t1995", {}),
+    # A date inside a bracketed aside.
+    ("American Academy of Forensic Sciences (elected Fellow, 1980)", {}),
+    # The shape the recovery is FOR: the date is its own trailing field.
+    ("American College of Physicians, Member\t\t\t2024-Present", {}),
+    ("2022\t\t\tAmerican Association for Thoracic Surgery", {}),
+]
+
+
+@pytest.mark.parametrize("text,fields", NO_ORGANIZATION_FIELD_SHAPES)
+def test_no_recovered_organization_cell_is_a_shortened_prefix(text, fields):
+    """The regression the 66-CV render gate caught on this PR.
+
+    The round-1 organization recovery lifted a trailing date off a fragment
+    by matching the year alone, so an entry whose whole text is a date left
+    the month behind: "February 2018 - Present" rendered an organization cell
+    reading "February", strictly shorter than the cell the section rendered
+    before, and exactly the raw-text-truncation failure the recovery was
+    written to stop.
+
+    The rule this pins is the general one, not the single cell: a recovered
+    organization may give up a tail only when the date column now carries
+    every word of it."""
+    _, rows = _fill([{"text": text, "extracted_fields": fields}])
+    assert len(rows) == 1, rows
+    cell, date_cell = rows[0]
+    if _is_shortened_prefix(cell, text):
+        assert _dropped_words_are_all_in_the_date_cell(cell, text, date_cell), (
+            f"organization cell lost {text[len(cell):]!r}, which the date cell "
+            f"{date_cell!r} does not carry")
+        assert _cell_still_names_something(cell), (
+            f"organization cell was shortened to {cell!r}, which is nothing "
+            f"but a piece of the date")
+
+
+def test_the_render_gate_regression_cell_verbatim():
+    """The exact pair of cells the gate read, pinned as values rather than as
+    an invariant: an entry whose whole text is a month-name date, with the
+    date column already filled from structured fields."""
+    entry = {
+        "text": "February 2018 – Present",
+        "extracted_fields": {
+            "organization": None, "start_date": "February 2018", "end_date": "Present",
+        },
+    }
+    _, rows = _fill([entry])
+    assert rows == [["February 2018 – Present", "2018-Present"]], rows
+
+
+def test_a_written_out_month_belongs_to_the_date_not_the_organization():
+    for text in ("February 2018 – Present", "July 2023 – Present",
+                 "Sept. 2004 - Present", "May 2001"):
+        remainder, dates = _split_trailing_dates(text)
+        assert remainder == "", (text, remainder)
+        assert dates, text
+
+
+def test_a_month_word_is_only_a_date_when_a_year_follows_it():
+    """The month is read as part of the date only immediately in front of a
+    year, so an organization whose name merely starts with those letters keeps
+    its name."""
+    assert _split_trailing_dates("Marching Band Alumni 2018") == (
+        "Marching Band Alumni", "2018")
+    assert _split_trailing_dates("Society of May") == ("Society of May", "")
+
+
+def test_recovery_that_would_drop_a_word_renders_the_raw_text_instead():
+    """A fragment split that mislays part of the entry is refused outright:
+    the cell goes back to the raw text, which is what the section rendered
+    before the recovery existed. Better a blob than a missing organization."""
+    text = "2003-             	American Association for Thoracic Surgery, Associate Member"
+    recovered = _organization_fallback(text, {})
+    assert recovered.organization == text.strip()
+    assert recovered.dates == ""
+
+
+def test_a_date_move_that_loses_nothing_is_still_made():
+    """The guard must not cost the recovery its point: where every word of the
+    entry still lands somewhere, the date leaves the organization cell."""
+    recovered = _organization_fallback(
+        "American College of Physicians, Member			2024-Present", {})
+    assert recovered.organization == "American College of Physicians, Member"
+    assert recovered.dates == "2024-Present"
+
+
+def test_a_lift_that_would_unbalance_a_bracket_is_refused():
+    """Lifting a date out of a bracketed aside left the organization holding
+    an opening bracket it never closes."""
+    text = "American Academy of Forensic Sciences (elected Fellow, 1980)"
+    assert _split_trailing_dates(text) == (text, "")
+    assert _organization_fallback(text, {}).organization == text
 
 
 if __name__ == "__main__":
