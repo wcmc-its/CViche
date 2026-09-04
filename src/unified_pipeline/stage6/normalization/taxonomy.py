@@ -26,10 +26,13 @@ def _strip_taxonomy_code(text: str) -> str:
     keeping it that way, and regenerable with
     `scripts/measure_normalization_claims.py --only taxonomy`: across the
     farm's 412 stage-3b/4/5/5b/5c/5d artifacts (1,326,667 string values),
-    exactly 2 values open with a bracketed single token at all, both
-    "[Editor]", and neither matches this shape -- 0 false positives, and 0
-    true positives too, since a leaked code is a per-run artifact rather
-    than something the stored stage outputs carry. An allowlist buys nothing at 0 measured collisions and
+    exactly 2 values open with a bracketed single token at all, and both
+    are the same token -- shape `Aaaaaa`, a capitalised six-letter word,
+    which this pattern does not match. So 0 false positives, and 0 true
+    positives too, since a leaked code is a per-run artifact rather than
+    something the stored stage outputs carry. The script reports that token
+    by shape and not verbatim, on purpose; the literal is pinned in
+    `test_stage6_taxonomy_code_strip.py` instead. An allowlist buys nothing at 0 measured collisions and
     would need editing every time the taxonomy gains a code, so the shape
     stays; switch to the TAXONOMY_TO_SECTION key set if that measurement
     ever comes back non-zero. The cost of the shape is pinned by
