@@ -42,14 +42,32 @@ Review round 1 (#733) added a second half to this file: regression cover for
 the parsing rules that review changed -- the two- and three-column '|' forms,
 trailing year ranges, strong-before-generic organization keywords, the
 case-sensitive proper-noun check, the narrower-table fallback, and the parser
-and record the rest of it now goes through. Its own header comment says what
-it deliberately leaves to the wider behaviour matrix.
+and record the rest of it now goes through.
+
+Round 1's second thread asked for the wider behaviour matrix, which is the
+third part of this file. Writing it found three rendering losses that had
+never failed a test, all of them silent:
+
+  * the shared `_is_table_header_entry` calls a cell header-like when it
+    contains one of the section's header words, and for honors "award" is one
+    of them -- so a fused multi-award list ("Award A | 2024 | Award B | 2023 |
+    Award C | 2022") counted as a header row and was dropped whole, rendering
+    NOTHING. Three of the review's own pipe and tab shapes did that;
+  * a column-header line fused into a multi-line entry was dropped by the
+    parser and then rendered anyway, because the single-award record fell back
+    to the entry's raw text with that line still in it;
+  * a whitespace-only field or text rendered a visibly blank row, because the
+    emptiness guard cannot see that " " is truthy.
+
+Each is pinned by a test below whose docstring names it.
 
 Run with:
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_honors_fragments.py -p no:cacheprovider
 """
 
+import contextlib
+import io
 import sys
 from pathlib import Path
 
@@ -58,14 +76,19 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
+from docx.shared import Pt  # noqa: E402
 
 from unified_pipeline.core.render_check import entry_lines  # noqa: E402
+from unified_pipeline.stage6.parsing import _is_table_header_entry  # noqa: E402
 from unified_pipeline.stage6.sections.honors import (  # noqa: E402
+    _ENTRY_HEADER_KEYWORDS,
     _FALLBACK_SCHEMA_STAT,
+    _MAX_RAW_AWARD_CHARS,
     HonorRecord,
     _entry_parts,
     _extract_organization_from_award,
     _honor_columns,
+    _is_honors_header_entry,
     _split_award_year,
     parse_honor_entry,
 )
@@ -97,14 +120,37 @@ BLIND_TAB_CASES = [
 _TEMPLATE_HEADERS = ["Name of award", "Organization", "Date awarded (yyyy)"]
 
 
-def _fill_honors_into(entries, cols=3):
-    """(rows, generator) after filling a `cols`-column H table."""
-    gen = WCMTemplateGenerator(verbose=False)
+def _honors_document(cols=3, heading="H. HONORS AND AWARDS",
+                     table_before_heading=False, stale_rows=0,
+                     with_table=True, verbose=False):
+    """A minimal document with an H heading and its table: (generator, table).
+
+    Deliberately hand-built rather than the bundled template, because the
+    shapes below need a two-column variant, a missing heading, a missing table
+    and a decoy table ahead of the heading -- none of which the real template
+    can be made to have. `test_production_template_fills_its_own_honors_table`
+    covers the real one.
+    """
+    gen = WCMTemplateGenerator(verbose=verbose)
     gen.doc = Document()
-    gen.doc.add_paragraph("H. HONORS AND AWARDS")
-    table = gen.doc.add_table(rows=1, cols=cols)
+    if table_before_heading:
+        gen.doc.add_paragraph("G. AN EARLIER SECTION")
+        gen.doc.add_table(rows=1, cols=2).rows[0].cells[0].text = "decoy"
+    if heading is not None:
+        gen.doc.add_paragraph(heading)
+    if not with_table:
+        return gen, None
+    table = gen.doc.add_table(rows=1 + stale_rows, cols=cols)
     for i, header in enumerate(_TEMPLATE_HEADERS[:cols]):
         table.rows[0].cells[i].text = header
+    for row in range(1, 1 + stale_rows):
+        table.rows[row].cells[0].text = f"stale row {row}"
+    return gen, table
+
+
+def _fill_honors_into(entries, cols=3, **kwargs):
+    """(rows, generator) after filling a `cols`-column H table."""
+    gen, table = _honors_document(cols=cols, **kwargs)
     gen._fill_honors(entries)
     return [[c.text for c in r.cells] for r in table.rows[1:]], gen
 
@@ -481,6 +527,514 @@ def test_an_entry_with_no_text_renders_nothing_rather_than_a_blank_row():
     assert parse_honor_entry({"text": None, "extracted_fields": None}) == [
         HonorRecord("", "", "")]
     assert _render_honors([{"text": None, "extracted_fields": None}]) == []
+
+
+# =========================================================================
+# Review round 1 (#733), thread 2: the behaviour matrix the review listed.
+# Empty entries, `_entry_parts`, `_fill_honors`, rendering, the production
+# template, a missing heading, header entries, the extracted-fields fallback
+# matrix, date formats, sorting, multiple entries, the odd pipe structures
+# named verbatim, tabs, the newline-and-pipe interaction, annotations, table
+# accuracy, table lookup, the long-raw-text fallback, None and malformed
+# fields, whitespace, duplicates, missing text and verbose mode.
+#
+# Three of these pin fixes this round made rather than behaviour that was
+# already right; their docstrings say which. The rest pin what the section
+# already did, which is what a matrix is for.
+# =========================================================================
+
+
+# --- empty and missing input ------------------------------------------------
+
+def test_no_entries_leaves_the_table_alone():
+    """`_fill_honors([])` returns before `_clear_table_data`, so an empty
+    honors list cannot blank rows a template shipped with, and does not count
+    a table as populated."""
+    rows, gen = _fill_honors_into([], stale_rows=1)
+    assert rows == [["stale row 1", "", ""]]
+    assert gen.stats['tables_populated'] == 0
+    assert gen.stats['entries_inserted'] == 0
+
+
+def test_missing_section_heading_renders_nothing():
+    """Neither "HONORS" nor "AWARDS" appears: the section is absent from this
+    template variant, so nothing is written and no table is claimed."""
+    rows, gen = _fill_honors_into([_ORG_ENTRY], heading="Z. SOME OTHER SECTION")
+    assert rows == []
+    assert gen.stats['tables_populated'] == 0
+
+
+def test_heading_with_no_table_after_it_renders_nothing():
+    """The heading is found but `_find_table_after_paragraph` returns None --
+    a variant that writes honors as prose. The renderer returns rather than
+    reaching into a table it does not have."""
+    gen, table = _honors_document(with_table=False)
+    gen._fill_honors([_ORG_ENTRY])
+    assert table is None
+    assert gen.stats['tables_populated'] == 0
+    assert gen.stats['entries_inserted'] == 0
+
+
+def test_entries_with_nothing_in_them_render_no_rows():
+    """The emptiness guard in `_fill_honors`. The whitespace-only cases are
+    the ones it could not see before this round: " " is truthy, so a
+    whitespace-only text or field reached a cell and rendered a visibly blank
+    row instead of nothing at all (#733 review)."""
+    rows, gen = _fill_honors_into([
+        {},
+        {"text": ""},
+        {"text": "   "},
+        {"text": None, "extracted_fields": None},
+        {"text": "  ", "extracted_fields": {"award_name": "  "}},
+    ])
+    assert rows == []
+    assert gen.stats['entries_inserted'] == 0
+
+
+def test_padded_fields_reach_the_cells_stripped():
+    """The other half of that fix: a padded field renders stripped, and a
+    whitespace-only one counts as absent rather than as content."""
+    assert parse_honor_entry({
+        "text": "2018 Fictional Merit Award",
+        "extracted_fields": {"award_name": " Padded Award ",
+                             "granting_body": "   ", "date": " 2018 "},
+    }) == [HonorRecord("Padded Award", "", "2018")]
+
+
+# --- `_entry_parts` unit tests ----------------------------------------------
+
+def test_entry_parts_on_empty_and_delimiterless_text():
+    """The degenerate inputs. `entry_lines` coerces None and drops blank
+    parts, and `_entry_parts` inherits both."""
+    assert _entry_parts("") == []
+    assert _entry_parts("   ") == []
+    assert _entry_parts(None) == []
+    assert _entry_parts("Single award, no delimiter") == [
+        "Single award, no delimiter"]
+
+
+def test_entry_parts_strips_parts_and_drops_empty_ones():
+    """One rule covers four of the review's odd shapes: a doubled, leading or
+    trailing pipe contributes no empty part, and every part comes back
+    stripped, so all four yield the same four parts."""
+    for text in ["Award A | 2024 || Award B | 2023",
+                 " Award A   |   2024   |   Award B   |   2023 ",
+                 "Award A | 2024 | Award B | 2023 |",
+                 "| Award A | 2024 | Award B | 2023"]:
+        assert _entry_parts(text) == [
+            "Award A", "2024", "Award B", "2023"], text
+
+
+def test_entry_parts_declines_the_shapes_it_cannot_pair():
+    """Fewer than two award-looking parts, or dates that do not pair one to
+    one with them: the pipes are column separators, not record separators, so
+    the line comes back whole."""
+    for text in ["Award A | 2024 | Award B",
+                 "Best Teaching Award | 2020",
+                 "Best Teaching Award | Purdue University | 2020"]:
+        assert _entry_parts(text) == [text], text
+
+
+def test_entry_parts_uses_the_extracted_columns_to_refuse_a_split():
+    """A part stage 4 already extracted as a column cell is a column, not an
+    award -- without that filter the pipeline's own "Award | Organization |
+    Year" cell join split into two awards."""
+    text = "Best Teaching Award | Purdue University | 2020"
+    assert _entry_parts(text, ("Purdue University", "2020")) == [text]
+
+
+# The review's own list, with the rows each shape must render. The first five
+# are the fused multi-award lists #476 exists to recover; the sixth is the
+# shape the parser deliberately declines to guess at.
+ODD_PIPE_SHAPES = [
+    ("three awards",
+     "Award A | 2024 | Award B | 2023 | Award C | 2022",
+     [["Award A", "", "2024"], ["Award B", "", "2023"],
+      ["Award C", "", "2022"]]),
+    ("empty fragments",
+     "Award A | 2024 || Award B | 2023",
+     [["Award A", "", "2024"], ["Award B", "", "2023"]]),
+    ("extra whitespace",
+     " Award A   |   2024   |   Award B   |   2023 ",
+     [["Award A", "", "2024"], ["Award B", "", "2023"]]),
+    ("trailing pipe",
+     "Award A | 2024 | Award B | 2023 |",
+     [["Award A", "", "2024"], ["Award B", "", "2023"]]),
+    ("leading pipe",
+     "| Award A | 2024 | Award B | 2023",
+     [["Award A", "", "2024"], ["Award B", "", "2023"]]),
+    ("odd number of parts",
+     "Award A | 2024 | Award B",
+     [["Award A | 2024 | Award B", "", ""]]),
+]
+
+
+# --- header rows must not render --------------------------------------------
+
+def test_a_real_column_header_row_never_renders():
+    """The source CV's own header row, extracted as if it were data. It names
+    a date column but carries no date, which is what still identifies it."""
+    for text in ["Name of award\tOrganization\tDate awarded",
+                 "Name of award | Organization | Date awarded",
+                 "Honor | Granting body | Year",
+                 "Award | Organization | Date awarded (yyyy)"]:
+        assert _is_honors_header_entry(text), text
+        assert _render_honors([_raw(text)]) == [], text
+
+
+def test_a_fused_multi_award_list_is_not_a_header_row():
+    """The first of this round's three rendering losses. The shared
+    `_is_table_header_entry` counts a cell as header-like when it contains one
+    of the section's header words, and "award" is one of them -- so every
+    award cell of a fused list counted and the entry was dropped before the
+    parser saw it, rendering nothing at all. Three of the review's own shapes
+    did that, and the assertion below names which."""
+    shared_check_says_header = [
+        name for name, text, _ in ODD_PIPE_SHAPES
+        if _is_table_header_entry(text, _ENTRY_HEADER_KEYWORDS)]
+    assert shared_check_says_header == [
+        "three awards", "extra whitespace", "odd number of parts"], \
+        shared_check_says_header
+    for name, text, _ in ODD_PIPE_SHAPES:
+        assert not _is_honors_header_entry(text), name
+
+
+def test_a_header_row_fused_into_a_multi_line_entry_does_not_reach_a_cell():
+    """The second. `_parse_honor_lines` drops a header LINE, but the
+    single-award record then fell back to the entry's RAW text -- that line
+    still in it -- so the source table's header rendered as the award name
+    (#733 review)."""
+    assert _render_honors([
+        _raw("Name of award\tDate awarded\nBest Award\t2020")]) == [
+        ["Best Award", "", "2020"]]
+
+
+# --- the odd pipe structures, named verbatim (ODD_PIPE_SHAPES, above) -------
+
+def test_odd_pipe_structures_render_the_rows_they_name():
+    """Three of these -- the three the assertion above names -- rendered no
+    rows at all before this round, whatever `_entry_parts` made of them."""
+    for name, text, expected in ODD_PIPE_SHAPES:
+        assert _render_honors([_raw(text)]) == expected, name
+
+
+def test_an_unpairable_pipe_shape_renders_as_its_own_text():
+    """The documented choice for "Award A | 2024 | Award B": two award-looking
+    parts and one date pair no year to an award, and nothing in the text says
+    which award 2024 belongs to. The line renders whole rather than guessed
+    at -- the property that matters is that no part of it is dropped."""
+    rows = _render_honors([_raw("Award A | 2024 | Award B")])
+    assert rows == [["Award A | 2024 | Award B", "", ""]]
+    assert "Award B" in rows[0][0] and "2024" in rows[0][0]
+
+
+# --- tabs, and the newline-and-pipe interaction -----------------------------
+
+def test_tab_plus_multiple_pipes_renders_one_award():
+    """Asserted through to the rendered row, not just `_entry_parts`. The tab
+    cells join because the last one is not a bare year, and the joined line is
+    then read as the three columns it now has. The leading "2020" stays inside
+    the award's name: peeling it would mean choosing between it and the 2019
+    the date column states, which nothing in the text settles."""
+    assert _entry_parts("2020\tAward A | Award B | 2019") == [
+        "2020\tAward A | Award B | 2019"]
+    assert _render_honors([_raw("2020\tAward A | Award B | 2019")]) == [
+        ["2020 Award A", "Award B", "2019"]]
+
+
+def test_each_newline_part_is_rendered_as_expected():
+    """`_entry_parts` returning the right structure does not prove
+    `_fill_honors` interprets it: this entry's parts were always correct and
+    it still rendered nothing, because the shared header check ate the whole
+    entry first."""
+    text = "Award A | 2024\nAward B | 2023"
+    assert _entry_parts(text) == ["Award A | 2024", "Award B | 2023"]
+    assert _render_honors([_raw(text)]) == [["Award A", "", "2024"],
+                                            ["Award B", "", "2023"]]
+
+
+def test_newline_separated_awards_keep_their_own_leading_years():
+    """The plainest multi-line shape: one award per line, each with its year
+    in front of it."""
+    assert _render_honors([
+        _raw("2020 Award A\n2018 Award B\n2016 Award C")]) == [
+        ["Award A", "", "2020"], ["Award B", "", "2018"],
+        ["Award C", "", "2016"]]
+
+
+# --- the extracted-fields fallback matrix -----------------------------------
+
+# One raw text carrying all three fields, against every combination of what
+# stage 4 may or may not have extracted from it.
+_MATRIX_TEXT = "2018 Fictional Merit Award, Imaginary University"
+
+FALLBACK_MATRIX = [
+    ({},
+     HonorRecord("Fictional Merit Award", "Imaginary University", "2018")),
+    ({"award_name": "Fictional Merit Award"},
+     HonorRecord("Fictional Merit Award", "", "2018")),
+    ({"granting_body": "Imaginary University"},
+     HonorRecord("Fictional Merit Award", "Imaginary University", "2018")),
+    ({"date": "2018"},
+     HonorRecord("2018 Fictional Merit Award", "Imaginary University", "2018")),
+    ({"award_name": "Fictional Merit Award", "date": "2018"},
+     HonorRecord("Fictional Merit Award", "", "2018")),
+    ({"award_name": "Fictional Merit Award",
+      "granting_body": "Imaginary University"},
+     HonorRecord("Fictional Merit Award", "Imaginary University", "2018")),
+    ({"granting_body": "Imaginary University", "date": "2018"},
+     HonorRecord("2018 Fictional Merit Award", "Imaginary University", "2018")),
+    ({"award_name": "Fictional Merit Award",
+      "granting_body": "Imaginary University", "date": "2018"},
+     HonorRecord("Fictional Merit Award", "Imaginary University", "2018")),
+]
+
+
+def test_extracted_fields_fallback_matrix():
+    """Each extracted field replaces the corresponding piece of the parse, and
+    only that piece; what stage 4 left out is still parsed out of the text.
+    Note row 2: the organization is extracted from the award NAME, so an
+    entry that supplies the name and nothing else loses the granting body the
+    raw text names -- pinned here because it is the one asymmetry in the
+    matrix."""
+    for fields, expected in FALLBACK_MATRIX:
+        assert parse_honor_entry({"text": _MATRIX_TEXT,
+                                  "extracted_fields": fields}) == [expected], \
+            fields
+
+
+def test_an_extracted_date_leaves_the_name_s_own_leading_year_in_place():
+    """A residual, pinned rather than fixed. `_split_award_year` runs only
+    when stage 4 extracted no date, so a text that leads with a year plus an
+    extracted date renders the year twice -- once in the award cell, once in
+    the date cell. No farm honors entry has that combination (0 of 361), and
+    peeling the year would mean deciding what to do when it disagrees with the
+    extracted date, so it is left where the source wrote it."""
+    assert parse_honor_entry({
+        "text": _MATRIX_TEXT, "extracted_fields": {"date": "2018"}}) == [
+        HonorRecord("2018 Fictional Merit Award", "Imaginary University",
+                    "2018")]
+
+
+def test_alternate_field_key_names_are_read():
+    """`organization` stands in for `granting_body` and `year` for `date`."""
+    assert parse_honor_entry({
+        "text": "ignored",
+        "extracted_fields": {"award_name": "A Prize",
+                             "organization": "Imaginary University",
+                             "year": "2001"},
+    }) == [HonorRecord("A Prize", "Imaginary University", "2001")]
+
+
+def test_a_falsy_extracted_fields_is_treated_as_absent():
+    """`entry.get('extracted_fields') or {}` covers every falsy malformation
+    the upstream record can carry -- the key missing, None, an empty dict, an
+    empty list, an empty string -- and the entry falls back to its raw text
+    rather than raising on one of them."""
+    for fields in [None, {}, [], ""]:
+        assert parse_honor_entry({"text": "2020 Some Award",
+                                  "extracted_fields": fields}) == [
+            HonorRecord("Some Award", "", "2020")], fields
+
+
+# --- date formats -----------------------------------------------------------
+
+DATE_CASES = [
+    ("2020", "2020"),
+    ("March 2019", "2019"),
+    ("2019-03-01", "2019"),
+    ("03/2019", "2019"),
+    ("2015-2017", "2015-2017"),
+    ("2015–2017", "2015–2017"),
+    ("present", "Present"),
+    ("n.d.", "n.d."),
+]
+
+
+def test_every_date_shape_reduces_to_the_templates_year_column():
+    """H's column is "Date awarded (yyyy)", so `format_date_for_section`
+    reduces a month or a full date to its year. A range keeps both ends in
+    whichever dash the source used, and a string it cannot parse is passed
+    through rather than blanked -- an unparseable date is still information."""
+    for given, expected in DATE_CASES:
+        assert _render_honors([{
+            "text": "X Award",
+            "extracted_fields": {"award_name": "X Award", "date": given},
+        }]) == [["X Award", "", expected]], given
+
+
+# --- sorting, multiple entries, duplicates ----------------------------------
+
+def test_entries_render_most_recent_first():
+    """`sort_entries_reverse_chronological` orders the ENTRIES, before any of
+    them is parsed into rows."""
+    entry = lambda name, date: {                          # noqa: E731
+        "text": name, "extracted_fields": {"award_name": name, "date": date}}
+    assert _render_honors([entry("Older Award", "2015"),
+                           entry("Newest Award", "2024"),
+                           entry("Middle Award", "2019")]) == [
+        ["Newest Award", "", "2024"], ["Middle Award", "", "2019"],
+        ["Older Award", "", "2015"]]
+
+
+def test_undated_entries_keep_the_order_they_arrived_in():
+    """Nothing to sort by, so the sort is stable and the CV's own order
+    survives -- an undated honors list is not silently reshuffled."""
+    assert _render_honors([_raw("Alpha Award"), _raw("Beta Award"),
+                           _raw("Gamma Award")]) == [
+        ["Alpha Award", "", ""], ["Beta Award", "", ""],
+        ["Gamma Award", "", ""]]
+
+
+def test_multiple_entries_of_different_shapes_all_render():
+    """A fused list, a column tuple and a plain extracted entry in one
+    document: four rows from three entries, and `entries_inserted` counts
+    rows, not entries."""
+    rows, gen = _fill_honors_into([
+        _raw("Award A | 2024 | Award B | 2023"),
+        _raw("Solo Award | Imaginary University | 2022"),
+        {"text": "Plain Award",
+         "extracted_fields": {"award_name": "Plain Award", "date": "2021"}},
+    ])
+    assert rows == [["Plain Award", "", "2021"],
+                    ["Award A", "", "2024"],
+                    ["Award B", "", "2023"],
+                    ["Solo Award", "Imaginary University", "2022"]]
+    assert gen.stats['entries_inserted'] == 4
+
+
+def test_duplicate_awards_both_render():
+    """Deduplication is not this section's job: two identical entries render
+    two identical rows, so a duplicate that reached stage 6 stays visible
+    rather than being quietly halved."""
+    rows, gen = _fill_honors_into([dict(_ORG_ENTRY), dict(_ORG_ENTRY)])
+    assert rows == [["Best Teaching Award", "Purdue University", "2020"]] * 2
+    assert gen.stats['entries_inserted'] == 2
+
+
+# --- annotations ------------------------------------------------------------
+
+def test_annotations_inside_an_award_name_are_kept():
+    """A parenthetical is part of the award's name, not a delimiter -- 44 of
+    the farm's 361 honors entries carry one, and a trailing year is still
+    peeled off from behind it."""
+    assert _render_honors([_raw(
+        "Best Teaching Award (nominated), Purdue University, 2020")]) == [
+        ["Best Teaching Award (nominated)", "Purdue University", "2020"]]
+    assert _render_honors([_raw("Dean's List (Fall semester) 2019")]) == [
+        ["Dean's List (Fall semester)", "", "2019"]]
+
+
+def test_an_annotation_after_the_year_keeps_the_year_in_the_name():
+    """A residual, pinned rather than fixed. `_TRAILING_YEAR_RE` allows a
+    closing bracket or a full stop after the year, not a whole trailing
+    annotation, so the date cell stays empty and the year stays in the award
+    cell. No farm honors entry has an annotation after a trailing year (0 of
+    361); the 44 that carry one carry it inside the name, above."""
+    assert _render_honors([_raw(
+        "Best Award, Purdue University, 2020 [declined]")]) == [
+        ["Best Award, Purdue University, 2020 [declined]",
+         "Purdue University", ""]]
+
+
+# --- table accuracy, table lookup, the long-raw-text cap --------------------
+
+def test_the_header_row_survives_and_stale_rows_do_not():
+    """`_clear_table_data(keep_header=True)`: the template's own header row
+    stays, and rows a previous run left behind are removed rather than
+    appended to."""
+    rows, gen = _fill_honors_into([_ORG_ENTRY], stale_rows=2)
+    assert rows == [["Best Teaching Award", "Purdue University", "2020"]]
+    assert gen.stats['tables_populated'] == 1
+    assert gen.stats['entries_inserted'] == 1
+
+
+def test_every_rendered_cell_is_arial_11():
+    """`_add_honors_row` fonts every run of every cell it writes, including
+    the two it may have left empty."""
+    gen, table = _honors_document()
+    gen._fill_honors([_ORG_ENTRY])
+    runs = [run for cell in table.rows[1].cells
+            for para in cell.paragraphs for run in para.runs]
+    assert len(runs) == 3
+    for run in runs:
+        assert run.font.name == "Arial"
+        assert run.font.size == Pt(11)
+        assert run.bold is False
+        assert run.italic is False
+
+
+def test_the_table_filled_is_the_one_after_the_heading():
+    """`_find_table_after_paragraph`: a table earlier in the document is not
+    the honors table, however much it looks like one."""
+    rows, gen = _fill_honors_into([_ORG_ENTRY], table_before_heading=True)
+    assert rows == [["Best Teaching Award", "Purdue University", "2020"]]
+    decoy = gen.doc.tables[0]
+    assert len(decoy.rows) == 1
+    assert [c.text for c in decoy.rows[0].cells] == ["decoy", ""]
+
+
+def test_a_long_raw_entry_is_capped_not_spilled():
+    """An entry stage 4 extracted nothing from renders as its own text, so
+    the cap is the only thing stopping a runaway blob filling the cell."""
+    text = "Recognition of Sustained Contribution " * 8
+    rows = _render_honors([_raw(text)])
+    assert len(rows) == 1
+    assert rows[0][0] == text.strip()[:_MAX_RAW_AWARD_CHARS]
+    assert len(rows[0][0]) == _MAX_RAW_AWARD_CHARS
+
+
+# --- verbose mode -----------------------------------------------------------
+
+def test_verbose_mode_reports_the_entry_count_and_each_skipped_header():
+    """The two `print()`s in `_fill_honors`. Neither is read by
+    `orchestrator.py`'s progress regexes nor by `run_corpus_batch.sh`'s
+    summary greps, so neither is a parsed contract -- but both are pinned here
+    so that rewording one is a test failure rather than a silent change."""
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        gen, _ = _honors_document(verbose=True)
+        gen._fill_honors([
+            _ORG_ENTRY,
+            _raw("Name of award | Organization | Date awarded")])
+    out = buf.getvalue()
+    assert "Filling Honors (2 entries)..." in out
+    assert ("Skipping header entry: 'Name of award | Organization | "
+            "Date awarded") in out
+
+
+def test_quiet_mode_prints_nothing():
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        gen, _ = _honors_document(verbose=False)
+        gen._fill_honors([_ORG_ENTRY])
+    assert buf.getvalue() == ""
+
+
+# --- production-template integration ----------------------------------------
+
+def test_production_template_fills_its_own_honors_table():
+    """The bundled WCM template rather than a hand-built document: its honors
+    heading is found by substring ("HONORS, AWARDS"), the table after it is
+    the template's own three-column one, and both a plain entry and a fused
+    multi-award list land in it -- so no schema fallback is recorded."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_honors([
+        _ORG_ENTRY,
+        _raw("Award A | 2024 | Award B | 2023 | Award C | 2022")])
+
+    table = gen._find_table_after_paragraph(
+        gen._find_paragraph_with_text("HONORS"))
+    rows = [[c.text for c in row.cells] for row in table.rows]
+    assert rows[0] == _TEMPLATE_HEADERS
+    assert rows[1:] == [["Best Teaching Award", "Purdue University", "2020"],
+                        ["Award A", "", "2024"],
+                        ["Award B", "", "2023"],
+                        ["Award C", "", "2022"]]
+    assert gen.stats.get(_FALLBACK_SCHEMA_STAT, 0) == 0
+    assert gen.stats['tables_populated'] == 1
+    assert gen.stats['entries_inserted'] == 4
 
 
 if __name__ == "__main__":
