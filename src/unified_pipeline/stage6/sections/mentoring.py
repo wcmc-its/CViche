@@ -120,7 +120,7 @@ class MentoringPartition:
         return self.mentee_count + self.line_count == 0
 
 
-def _text(value: Any) -> str:
+def _text(value: object) -> str:
     """A field value as the string that will appear in a cell: '' for any
     falsy value (None, '', 0), `str()` of anything else."""
     return str(value) if value else ''
