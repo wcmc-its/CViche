@@ -18,6 +18,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
+
 _ROOT = Path(__file__).resolve().parents[3]
 _SRC = _ROOT / "src"
 if str(_SRC) not in sys.path:
@@ -171,6 +173,7 @@ def test_sweep_records_failure_when_source_docx_candidates_are_ambiguous(tmp_pat
     assert reports == {}
     assert skipped == []
     assert "amb1" in failures
+    assert failures["amb1"]["exception"] == "AmbiguousSourceDocxError"
     assert "AmbiguousSourceDocxError" in failures["amb1"]["traceback"]
     assert f"{uid}_v1.docx" in failures["amb1"]["error"]
     assert f"{uid}_v2.docx" in failures["amb1"]["error"]
@@ -213,6 +216,7 @@ def test_sweep_records_failure_for_a_run_id_escaping_corpus_dir(tmp_path):
     assert reports == {}
     assert skipped == []
     assert "../x" in failures
+    assert failures["../x"]["exception"] == "RunIdEscapesCorpusError"
     assert "RunIdEscapesCorpusError" in failures["../x"]["traceback"]
 
 
@@ -330,11 +334,93 @@ def test_sweep_failure_carries_traceback_and_good_run_still_reported(tmp_path, m
     assert "good1" in reports, "the good run's report must still be produced"
     assert skipped == []
     assert set(failures) == {"bad1"}
+    assert failures["bad1"]["exception"] == "ValueError"
     assert failures["bad1"]["error"] == "boom: lint_x could not read artifact"
     assert "ValueError" in failures["bad1"]["traceback"]
     assert "boom: lint_x could not read artifact" in failures["bad1"]["traceback"]
     assert "in fake_run_doctor" in failures["bad1"]["traceback"], (
         "must be a real stack trace, not just the message repeated")
+
+
+def test_sweep_lets_a_bug_in_its_own_staging_code_propagate(tmp_path, monkeypatch):
+    """T1.6: the per-run catch around staging is for expected failures
+    (typed SweepRunError, OSError). A TypeError raised by stage() itself is
+    a bug in this script -- it must fail loudly, not be filed under
+    failures[run_id] as if the run were bad.
+    """
+    cli = _load_cli()
+    corpus = tmp_path / "corpus"
+    _make_run(corpus, "run1", "aaa111")
+    _make_run(corpus, "run2", "bbb222")
+    doctored = []
+
+    def broken_stage(run_root, uid, work):
+        raise TypeError("unsupported operand: a bug in stage()")
+
+    monkeypatch.setattr(cli, "stage", broken_stage)
+    monkeypatch.setattr(cli, "run_doctor",
+                         lambda root, uid: doctored.append(uid) or {"findings": []})
+
+    with pytest.raises(TypeError, match="a bug in stage"):
+        cli.sweep(corpus, ["run1", "run2"], tmp_path / "work")
+    assert doctored == [], "the bug must abort before any run is doctored"
+
+
+def test_sweep_records_an_oserror_from_staging_and_continues(tmp_path, monkeypatch):
+    """T1.6: a filesystem failure while staging one run is that run's
+    problem -- recorded with its class name, and the next run still runs.
+    """
+    cli = _load_cli()
+    corpus = tmp_path / "corpus"
+    _make_run(corpus, "locked", "aaa111")
+    _make_run(corpus, "good1", "bbb222")
+    work = tmp_path / "work"
+
+    def stage_or_deny(run_root, uid, work):
+        if uid == "aaa111":
+            raise PermissionError(13, "Permission denied", str(work / uid))
+        return work / uid
+
+    monkeypatch.setattr(cli, "stage", stage_or_deny)
+    monkeypatch.setattr(cli, "run_doctor", lambda root, uid: {"findings": []})
+
+    reports, failures, skipped, duplicates = cli.sweep(corpus, ["locked", "good1"], work)
+
+    assert set(reports) == {"good1"}
+    assert set(failures) == {"locked"}
+    assert failures["locked"]["exception"] == "PermissionError"
+    assert "Permission denied" in failures["locked"]["error"]
+    assert "in stage_or_deny" in failures["locked"]["traceback"]
+
+
+@pytest.mark.parametrize("exc", [
+    TypeError("lint_x: 'NoneType' object is not subscriptable"),
+    KeyError("stage_4"),
+    RuntimeError("doctor exploded"),
+], ids=lambda e: type(e).__name__)
+def test_sweep_records_a_run_doctor_crash_of_any_class(tmp_path, monkeypatch, exc):
+    """#563's own case, kept broad on purpose: a lint crashing on one CV's
+    artifacts -- whatever the exception class -- is that run's failure and
+    the other runs' reports survive. Only the sweep's own staging code is
+    held to the narrow catch.
+    """
+    cli = _load_cli()
+    corpus = tmp_path / "corpus"
+    _make_run(corpus, "bad1", "aaa111")
+    _make_run(corpus, "good1", "bbb222")
+
+    def fake_run_doctor(root, uid):
+        if uid == "aaa111":
+            raise exc
+        return {"findings": []}
+
+    monkeypatch.setattr(cli, "run_doctor", fake_run_doctor)
+
+    reports, failures, skipped, duplicates = cli.sweep(corpus, ["bad1", "good1"], tmp_path / "work")
+
+    assert set(reports) == {"good1"}
+    assert failures["bad1"]["exception"] == type(exc).__name__
+    assert "in fake_run_doctor" in failures["bad1"]["traceback"]
 
 
 def test_main_returns_nonzero_on_partial_failure_by_default(tmp_path, monkeypatch):

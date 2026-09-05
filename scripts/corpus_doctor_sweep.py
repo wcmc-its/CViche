@@ -28,6 +28,7 @@ import sys
 import traceback
 from collections import Counter
 from pathlib import Path
+from typing import TypedDict
 
 from unified_pipeline.run_doctor import KNOWN_LINTS, SEVERITY_ORDER, _uid_owns, run_doctor
 
@@ -46,7 +47,27 @@ SUFFIX_DIR = {
 }
 
 
-class MultipleUidsInRunError(Exception):
+# --- records this script hands to its callers and to --out (§8.1) ---------
+
+class RunFailure(TypedDict):
+    """What `sweep()` records under `failures[run_id]` for a run it could not
+    doctor. `exception` is the class name, so an operator (or a test) can
+    tell a `PermissionError` from an `AmbiguousSourceDocxError` without
+    parsing `traceback`."""
+    exception: str
+    error: str
+    traceback: str
+
+
+class SweepRunError(Exception):
+    """Base for the operational per-run failures `sweep()` records and moves
+    past (T1.6): a run whose layout, uid, or source docx is wrong is that
+    run's problem, not the sweep's. Anything else the sweep's own staging
+    code raises -- a `TypeError`, a `KeyError` -- is a bug in this script
+    and propagates."""
+
+
+class MultipleUidsInRunError(SweepRunError):
     """A run directory's artifacts name more than one distinct uid."""
 
 
@@ -97,7 +118,7 @@ def _relink(link: Path, src: Path) -> None:
     link.symlink_to(src.resolve())
 
 
-class AmbiguousSourceDocxError(Exception):
+class AmbiguousSourceDocxError(SweepRunError):
     """More than one file in a candidate dir passes `_uid_owns` for a uid,
     and none is named exactly `<uid>.docx`."""
 
@@ -126,7 +147,7 @@ def _find_source_docx(cand_dir: Path, uid: str):
     return cands[0] if cands else None
 
 
-class StagingRootNotOwnedError(Exception):
+class StagingRootNotOwnedError(SweepRunError):
     """`work/<uid>` contains an entry this script did not create as a symlink."""
 
 
@@ -189,7 +210,7 @@ def stage(run_root: Path, uid: str, work: Path) -> Path:
     return root
 
 
-class RunIdEscapesCorpusError(Exception):
+class RunIdEscapesCorpusError(SweepRunError):
     """`run_id` resolves outside `corpus_dir` (e.g. contains `..`)."""
 
 
@@ -208,16 +229,38 @@ def _resolve_run_root(corpus_dir: Path, run_id: str) -> Path:
     return root
 
 
+def _record_failure(failures: dict[str, RunFailure], run_id: str, phase: str,
+                    e: BaseException) -> None:
+    """Log `e` with its traceback and file it under `failures[run_id]`.
+
+    Called from inside an `except` block only: `logger.exception` and
+    `traceback.format_exc()` both read the exception being handled.
+    """
+    logger.exception("%s failed for run_id=%s", phase, run_id)
+    failures[run_id] = {"exception": type(e).__name__, "error": str(e),
+                        "traceback": traceback.format_exc()}
+
+
 def sweep(corpus_dir: Path, run_ids, work: Path):
     """Doctor each run; one bad run is reported and skipped, never aborts the rest.
 
     Returns (reports, failures, skipped, duplicates). `failures[run_id]`
-    carries both the exception message and the full traceback text -- the
-    operator's one lead into which lint raised, at which line, on which
-    artifact -- and is also logged via logger.exception so it survives in
-    the process log even when the caller does not persist --out. `skipped`
-    lists run_ids with no staged artifacts at all (a distinct, non-exceptional
-    case from a run_doctor crash).
+    carries the exception class name, its message, and the full traceback
+    text -- the operator's one lead into which lint raised, at which line,
+    on which artifact -- and is also logged via logger.exception so it
+    survives in the process log even when the caller does not persist
+    --out. `skipped` lists run_ids with no staged artifacts at all (a
+    distinct, non-exceptional case from a run_doctor crash).
+
+    Two catches, deliberately different in width (T1.6). Around staging,
+    only the failures that are THIS RUN's problem are recorded: the typed
+    `SweepRunError`s this script raises for a bad layout, uid, or source
+    docx, and `OSError` from the filesystem it symlinks through. A
+    `TypeError` or `KeyError` there is a bug in the sweep itself and
+    propagates so it is fixed, not filed as a run failure. Around
+    `run_doctor()` the catch is broad on purpose: a lint crashing on one
+    CV's artifacts is exactly what #563 is about, and it must not lose the
+    reports already computed for the other runs.
 
     Duplicate-uid policy (T2.2): the caller contract (module docstring) is
     ONE run per distinct CV, but nothing previously enforced it -- two
@@ -228,7 +271,7 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
     and never reaches `aggregate()`.
     """
     reports = {}
-    failures = {}
+    failures: dict[str, RunFailure] = {}
     skipped = []
     duplicates = {}
     run_id_by_uid = {}
@@ -246,11 +289,16 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
                                 "skipping duplicate", run_id, uid, first_run_id)
                 duplicates[run_id] = {"uid": uid, "first_run_id": first_run_id}
                 continue
-            reports[run_id] = run_doctor(stage(run_root, uid, work), uid)
-            run_id_by_uid[uid] = run_id
-        except Exception as e:  # noqa: BLE001 - one bad run must not lose the sweep
-            logger.exception("run_doctor failed for run_id=%s", run_id)
-            failures[run_id] = {"error": str(e), "traceback": traceback.format_exc()}
+            root = stage(run_root, uid, work)
+        except (SweepRunError, OSError) as e:
+            _record_failure(failures, run_id, "staging", e)
+            continue
+        try:
+            reports[run_id] = run_doctor(root, uid)
+        except Exception as e:  # noqa: BLE001 - one lint crash must not lose the sweep (#563)
+            _record_failure(failures, run_id, "run_doctor", e)
+            continue
+        run_id_by_uid[uid] = run_id
     if failures:
         logger.warning("%d run(s) failed and were dropped from the sweep: %s. "
                         "Prevalence counts are over the %d that succeeded.",
