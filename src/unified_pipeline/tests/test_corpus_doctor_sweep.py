@@ -16,6 +16,7 @@ import importlib.util
 import json
 import logging
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -102,7 +103,7 @@ def test_stage_finds_source_docx_under_flat_layout_input_dir(tmp_path):
     assert staged_source.resolve() == (input_dir / f"{uid}.docx").resolve()
 
 
-# The destinations run_doctor's own `_ARTIFACTS` (run_doctor.py:459-466)
+# The destinations run_doctor's own `_ARTIFACTS` (run_doctor.py:459-467)
 # actually globs, as literals -- not read back off `cli.SUFFIX_DIR`. A test
 # that builds its expectation from the same dict the code under test uses
 # passes even if that dict maps a suffix to a directory run_doctor never
@@ -552,7 +553,7 @@ def test_sweep_records_a_run_doctor_crash_of_any_class(tmp_path, monkeypatch, ex
     assert "in fake_run_doctor" in failures["bad1"]["traceback"]
 
 
-def _partial_setup_a_failure(corpus, cli, monkeypatch):
+def _partial_setup_a_failure(corpus: Path, cli: types.ModuleType, monkeypatch: pytest.MonkeyPatch) -> str:
     _make_run(corpus, "good1", "aaa111")
     _make_run(corpus, "bad1", "bbb222")
 
@@ -565,14 +566,14 @@ def _partial_setup_a_failure(corpus, cli, monkeypatch):
     return "good1,bad1"
 
 
-def _partial_setup_skipped_only(corpus, cli, monkeypatch):
+def _partial_setup_skipped_only(corpus: Path, cli: types.ModuleType, monkeypatch: pytest.MonkeyPatch) -> str:
     _make_run(corpus, "good1", "aaa111")
     _make_skipped_run(corpus, "skip1")
     monkeypatch.setattr(cli, "run_doctor", lambda root, uid: {"findings": []})
     return "good1,skip1"
 
 
-def _partial_setup_duplicate_only(corpus, cli, monkeypatch):
+def _partial_setup_duplicate_only(corpus: Path, cli: types.ModuleType, monkeypatch: pytest.MonkeyPatch) -> str:
     _make_run(corpus, "good1", "aaa111")
     _make_run(corpus, "dup1", "aaa111")
     monkeypatch.setattr(cli, "run_doctor", lambda root, uid: {"findings": []})
