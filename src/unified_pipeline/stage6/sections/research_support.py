@@ -46,6 +46,7 @@ from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import TypedDict, cast
 
 try:
+    from docx.oxml.xmlchemy import BaseOxmlElement
     from docx.table import Table
 except ImportError as exc:
     raise ImportError(
@@ -549,7 +550,7 @@ class ResearchSupportSection:
         cv_owner: dict | None = None,
         document_uid: str = '',
         current_year: int | None = None,
-    ):
+    ) -> None:
         """Fill research support section with individual tables per grant.
 
         Creates a table for each grant with the WCM data model:
@@ -676,7 +677,7 @@ class ResearchSupportSection:
         fields: GrantFields,
         code: str,
         entry: dict | None = None,
-        insert_after_element=None,
+        insert_after_element: BaseOxmlElement | None = None,
         owner_name: str = '',
     ) -> Table | None:
         """Create an individual grant table with the WCM data model.

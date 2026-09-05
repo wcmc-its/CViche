@@ -2915,7 +2915,7 @@ Now analyze the text above:"""
         return issues
 
 
-def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
+def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = True,
                emit_track_changes: bool = True, emit_comments: bool = False,
                strip_template_instructions: bool = True,
                recover_unrendered_records: bool = True) -> str:
