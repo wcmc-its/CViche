@@ -288,7 +288,14 @@ def _names_match(a: str, b: str) -> bool:
     matching an unrelated, genuinely empty 'Research Administration' output
     section fires a WARN even when the real content rendered correctly
     under a differently-named section, since nothing else was checked).
-    lint_dead_sections guards against exactly that case; see its docstring."""
+    lint_dead_sections guards against exactly that case; see its docstring.
+
+    Since 13e9e0d, lint_dead_sections consults this function at all only for
+    a multi-word source name -- a single-word source name matches only on an
+    exact normalized name, never on this token-containment fallback. So the
+    'Honors' inside 'B. Honors and Awards' pair above no longer counts for
+    dead_sections: a single-word source whose only output candidate is that
+    kind of compound heading is not reported dead through this path."""
     if not a or not b:
         return False
     if a == b:
