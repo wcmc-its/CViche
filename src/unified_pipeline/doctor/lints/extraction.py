@@ -84,7 +84,7 @@ def _entry_status(entry: Dict) -> Optional[str]:
     return match.group(1).strip() if match else None
 
 
-def _funding_haystacks(blocks: List[Tuple[str, str]]) -> Dict[str, Haystack]:
+def _funding_haystacks(blocks: list[tuple[str, str]]) -> dict[str, Haystack]:
     """Per-bucket Haystack of everything rendered under each of stage 6's
     funding subsection headers."""
     segments: Dict[str, List[Tuple[str, str]]] = {c: [] for c, _ in _FUNDING_SECTIONS}
@@ -195,7 +195,7 @@ def lint_under_extraction(stage4: Dict) -> List[Dict]:
 CLASSIFIED_UNRENDERED_WARN_ENTRIES = 2
 
 
-def _entry_rendered(text, haystack: str, haystack_tokens: set) -> Optional[bool]:
+def _entry_rendered(text: str | None, haystack: str, haystack_tokens: set) -> bool | None:
     """Whether an entry's text surfaces in the output: verbatim piece
     containment first, then distinctive-token overlap over the whole text and
     each fragment (stages 4-6 re-render entries from extracted fields, so no
