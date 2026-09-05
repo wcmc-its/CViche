@@ -73,7 +73,7 @@ _NAME_ENTRY = {"text": "Name: Jane Q. Public, MD", "taxonomy_code": "A",
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 
 
-def _t_entry(text, hierarchy, idx):
+def _t_entry(text: str, hierarchy: list[str], idx: int) -> dict[str, object]:
     return {"text": text, "taxonomy_code": "T", "extracted_fields": {},
             "hierarchy": hierarchy, "element_idx_start": idx}
 
@@ -85,7 +85,7 @@ def _output_text(docx_path) -> str:
     return "\n".join(parts)
 
 
-def _appendix_paragraphs(docx_path) -> list:
+def _appendix_paragraphs(docx_path: Path) -> list[str]:
     """Body paragraph texts from the first `From "...":` label to the end --
     the appendix is the last thing `generate()` writes."""
     paragraphs = [p.text for p in Document(str(docx_path)).paragraphs]
@@ -93,7 +93,7 @@ def _appendix_paragraphs(docx_path) -> list:
     return paragraphs[starts[0]:] if starts else []
 
 
-def _comment_texts(docx_path) -> list:
+def _comment_texts(docx_path: Path) -> list[str]:
     """Every Word comment's text, read from word/comments.xml directly -- the
     generator writes that part itself, so python-docx's own comments API is
     not the thing under test."""
@@ -105,14 +105,15 @@ def _comment_texts(docx_path) -> list:
             for c in root.iter(f"{_W}comment")]
 
 
-def _appendix_log(caplog) -> str:
+def _appendix_log(caplog: pytest.LogCaptureFixture) -> str:
     """Only the appendix module's own log lines, so a record from any other
     logger can neither satisfy nor spoil an assertion."""
     return "\n".join(r.getMessage() for r in caplog.records
                      if r.name == appendix_module.logger.name)
 
 
-def _render(tmp_path, entries, caplog, emit_comments=False):
+def _render(tmp_path: Path, entries: list[dict[str, object]],
+            caplog: pytest.LogCaptureFixture, emit_comments: bool = False) -> Path:
     # recover_unrendered_records=False: isolates _fill_appendix's own filter
     # chain from the separate #221 post-render recovery pass, which can pull
     # unconsumed personal-data entries (our 'A' name entry, used only to give
