@@ -113,9 +113,9 @@ DROP_REASONS = (
 class UnmappedEntry(TypedDict, total=False):
     """One pipeline entry as the appendix reads it (review on #736) -- the
     contract behind the old `List[Dict]` signature. `text` and `hierarchy` are
-    what this module itself reads; the four named fields are not the whole
+    what this module itself reads; the five named fields are not the whole
     entry, only what this module needs -- `_add_entry_comments`
-    (stage_6_word_template.py:2407-2465) reads several more of an entry's
+    (stage_6_word_template.py:2407-2559) reads several more of an entry's
     fields for the per-line Word comment, among them `taxonomy_confidence`,
     `confidence`, `is_fragment`, `fragment_reasoning`, `fragment_of` and
     `t_validation_applied`. `total=False`: the stage-6 input JSON has no

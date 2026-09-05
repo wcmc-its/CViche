@@ -78,7 +78,7 @@ def _t_entry(text: str, hierarchy: list[str], idx: int) -> dict[str, object]:
             "hierarchy": hierarchy, "element_idx_start": idx}
 
 
-def _output_text(docx_path) -> str:
+def _output_text(docx_path: Path) -> str:
     doc = Document(str(docx_path))
     parts = [p.text for p in doc.paragraphs]
     parts += [c.text for tb in doc.tables for row in tb.rows for c in row.cells]
