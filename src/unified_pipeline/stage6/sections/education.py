@@ -60,7 +60,6 @@ import logging
 import re
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, Dict, List
 
 from ..formatting import (
     _clear_table_data,
@@ -75,7 +74,7 @@ from ..sorting import sort_entries_reverse_chronological
 logger = logging.getLogger(__name__)
 
 
-def _field_text(value: Any) -> str:
+def _field_text(value: object) -> str:
     """Coerce one raw stage-4 education field to plain text.
 
     Stage 4 sets `degree`/`major`/`institution` to an explicit ``None``
@@ -128,7 +127,7 @@ class EducationSection:
                 pass
         return False
 
-    def _fill_education(self, entries: List[Dict]):
+    def _fill_education(self, entries: list[dict]) -> None:
         """Fill education table with track changes for enriched content.
 
         Track changes are used for:
