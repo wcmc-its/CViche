@@ -54,13 +54,17 @@ Entries are grouped under the source CV heading they were found beneath, since
 "From ..." is usually enough for a reader to see what the pipeline missed and
 where it belonged. The key is the top-level heading text (`hierarchy[0]`), by
 design: the label the reader sees IS the heading text, so two source sections
-sharing a heading would be indistinguishable as separate groups anyway.
-Measured 2026-09-04 over the local corpus: none of the 111 stage-1b files
-carries the same top-level heading text at two positions, and none of the 384
-T-coded entries across the 66 stage-6 inputs has a colliding key. Numbering
-restarts under each heading. Bodies are capped at `APPENDIX_MAX_CHARS`
-characters, the marker that shows the cut included: the appendix is a pointer
-back to the original document, not a second copy of it.
+sharing a heading would be indistinguishable as separate groups anyway. That
+key is NOT proven collision-free: measured 2026-09-05 over the local corpus,
+3 of 111 stage-1b files carry a duplicated top-level heading (one, 2025_Denckla's
+"Conference Activities", at two genuinely distinct source positions -- the
+merge-and-renumber scenario this key risks). Only one of the three,
+2068_Yount ("GRANT SUPPORT", two synthetic nodes), is among the 66 stage-6
+inputs, and its current appendix has a single entry under that heading, so
+`_group_by_source_heading` has not yet been exercised on a real collision.
+Numbering restarts under each heading. Bodies are capped at
+`APPENDIX_MAX_CHARS` characters, the marker that shows the cut included: the
+appendix is a pointer back to the original document, not a second copy of it.
 """
 import logging
 from collections import Counter
@@ -109,9 +113,12 @@ DROP_REASONS = (
 class UnmappedEntry(TypedDict, total=False):
     """One pipeline entry as the appendix reads it (review on #736) -- the
     contract behind the old `List[Dict]` signature. `text` and `hierarchy` are
-    what this module itself reads; `taxonomy_code`, `extracted_fields` and
-    `classification_reasoning` are what `_add_entry_comments` reads to write
-    the per-line Word comment. `total=False`: the stage-6 input JSON has no
+    what this module itself reads; the four named fields are not the whole
+    entry, only what this module needs -- `_add_entry_comments`
+    (stage_6_word_template.py:2407-2465) reads several more of an entry's
+    fields for the per-line Word comment, among them `taxonomy_confidence`,
+    `confidence`, `is_fragment`, `fragment_reasoning`, `fragment_of` and
+    `t_validation_applied`. `total=False`: the stage-6 input JSON has no
     schema enforcing any key exists, so this documents the shape rather than
     validating it -- the read sites coerce a missing or None value to the
     empty case, as the rest of stage 6 does."""
