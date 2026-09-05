@@ -76,12 +76,12 @@ _PII_LABEL_VALUE_RE = re.compile(
 )
 
 
-def _squash(text) -> str:
+def _squash(text: object) -> str:
     """Whitespace-FREE normalization for verbatim containment checks."""
     return re.sub(r"\s+", "", str(text or "")).lower()
 
 
-def _collapse_whitespace(text) -> str:
+def _collapse_whitespace(text: object) -> str:
     """Whitespace-COLLAPSED, case-folded normalization.
 
     Deliberately not `_squash`: that one deletes whitespace outright, which
@@ -95,7 +95,7 @@ def _collapse_whitespace(text) -> str:
 _ALNUM_CHAR = r"[^\W_]"
 
 
-def _pii_containment_pattern(value) -> re.Pattern | None:
+def _pii_containment_pattern(value: object) -> re.Pattern | None:
     """A whitespace-insensitive, token-aligned matcher for one extracted value.
 
     None only when there is nothing to match -- an absent or blank value.
@@ -126,7 +126,7 @@ def _pii_fragments(text: str | None) -> list[str]:
     return colon_fragments + colonless_fragments
 
 
-def _from_pii_fragment(value, pii_fragments: list[str]) -> bool:
+def _from_pii_fragment(value: object, pii_fragments: list[str]) -> bool:
     """Whether an extracted value's text was taken out of a PII fragment.
 
     Deny by value PROVENANCE, not by entry. Dropping a whole entry that

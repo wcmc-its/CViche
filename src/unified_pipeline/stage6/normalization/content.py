@@ -30,7 +30,7 @@ def _deduplicate_repeated_content(text: str, separator: str = '|') -> str:
     first_part = parts[0]
 
     # Normalize for comparison (lowercase, remove extra whitespace)
-    def normalize(s):
+    def normalize(s: str) -> str:
         return ' '.join(s.lower().split())
 
     first_normalized = normalize(first_part)
