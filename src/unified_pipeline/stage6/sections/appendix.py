@@ -229,7 +229,7 @@ class AppendixSection:
             return
 
         if self.verbose:
-            print(f"Adding Appendix ({len(lines)} unmapped entries)...")
+            logger.info("Adding Appendix (%d unmapped entries)...", len(lines))
 
         self._write_appendix_intro(dropped)
         groups = _group_by_source_heading(lines)
