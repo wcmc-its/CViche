@@ -552,8 +552,11 @@ def _count_raw_tab_cells(
 #: "e.g.," -- every one legitimate content -- and it gains nothing the bare
 #: pattern missed (strict subset). Every one of the template's 20 body
 #: instruction paragraphs still matches (pinned by a test that reads the
-#: template). No farm score moves: all 65 docx carry >= 15 echoes under
-#: either pattern, so the echo term is saturated on both.
+#: template). Score effect, measured with score_run over all 66 farm uids:
+#: the dimension's fraction is clamp(0.6 * tabs/20 + 0.4 * echoes/15) with
+#: the clamp on the sum, so an echo count above 15 still counts; the six
+#: docx that lost 1-3 false positives drop 0.027-0.080 on this dimension,
+#: three totals rise by one point (77->78, 78->79 twice), no band changes.
 INSTRUCTION_MARKERS = re.compile(
     r"(please (?:include|list|summarize|annotate|provide|choose|keep|do not|also include)"
     r"|delete the others|list here|choose one"
