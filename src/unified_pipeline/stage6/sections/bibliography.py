@@ -42,7 +42,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 try:
     from docx.oxml import OxmlElement
@@ -136,7 +136,7 @@ class _CitationEnrichment:
         )
 
 
-def _citation_author_split(citation: str, target_name: Optional[str],
+def _citation_author_split(citation: str, target_name: str | None,
                            cv_owner_last_name: str) -> tuple[str, str, str]:
     """Split a citation around the author name that should render bold.
 
@@ -303,7 +303,7 @@ class BibliographySection:
 
                 self.stats['entries_inserted'] += 1
 
-    def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: Optional[str], cv_owner_last_name: str = ''):
+    def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: str | None, cv_owner_last_name: str = '') -> None:
         """
         Add citation text to paragraph, bolding the target author name.
 
@@ -347,8 +347,8 @@ class BibliographySection:
             _set_font(run)
 
     def _add_citation_with_bold_author_as_insertion(self, para: Paragraph, citation: str,
-                                                     target_name: Optional[str], cv_owner_last_name: str = '',
-                                                     author: str = "PubMed Enrichment"):
+                                                     target_name: str | None, cv_owner_last_name: str = '',
+                                                     author: str = "PubMed Enrichment") -> None:
         """
         Add citation as a track change insertion, bolding the target author name.
 
