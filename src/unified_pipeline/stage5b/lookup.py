@@ -79,7 +79,7 @@ that and resolve it as ordinary institution text.
 Return ONLY a JSON object with institution IDs as keys. No markdown fences, no extra text."""
 
 
-def _build_context_string(entry: Dict) -> str:
+def _build_context_string(entry: dict) -> str:
     """Build a context string for an entry to help LLM disambiguate."""
     fields = entry.get('extracted_fields', {})
     if not isinstance(fields, dict):
@@ -107,7 +107,7 @@ def _build_context_string(entry: Dict) -> str:
     return ', '.join(parts) if parts else ''
 
 
-def _build_owner_context(cv_owner_location: Optional[Dict]) -> str:
+def _build_owner_context(cv_owner_location: dict | None) -> str:
     """Build a CV owner context string for the LLM prompt."""
     if not cv_owner_location or not cv_owner_location.get('inference_success'):
         return "No location context available for CV owner."
@@ -155,11 +155,11 @@ def _build_owner_context(cv_owner_location: Optional[Dict]) -> str:
 
 
 def lookup_institutions_llm(
-    batch: List[Tuple[str, str, str]],
-    cv_owner_location: Optional[Dict],
+    batch: list[tuple[str, str, str]],
+    cv_owner_location: dict | None,
     model: str = "gpt-5.1",
     verbose: bool = False
-) -> Tuple[Optional[Dict[str, Dict]], float, Optional[str]]:
+) -> tuple[dict[str, dict] | None, float, str | None]:
     """
     Look up a batch of institutions using an LLM.
 

@@ -59,7 +59,7 @@ class BulkPubMedFetcher:
         # E-utilities endpoints
         self.efetch_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
-    def fetch_records_bulk(self, pmids: List[str], force_refresh: bool = False) -> Dict[str, Dict]:
+    def fetch_records_bulk(self, pmids: list[str], force_refresh: bool = False) -> dict[str, dict]:
         """
         Fetch multiple PubMed records efficiently.
 
@@ -133,7 +133,7 @@ class BulkPubMedFetcher:
 
         return results
 
-    def _fetch_batch_from_pubmed(self, pmids: List[str]) -> Dict[str, Dict]:
+    def _fetch_batch_from_pubmed(self, pmids: list[str]) -> dict[str, dict]:
         """
         Single batch fetch from PubMed efetch API.
 
@@ -193,7 +193,7 @@ class BulkPubMedFetcher:
             print(f"      ❌ Unexpected error: {e}")
             return {}
 
-    def _parse_pubmed_article(self, article: ET.Element) -> Tuple[Optional[str], Optional[Dict]]:
+    def _parse_pubmed_article(self, article: ET.Element) -> tuple[str | None, dict | None]:
         """
         Parse a single PubmedArticle XML element.
 
@@ -321,7 +321,7 @@ class BulkPubMedFetcher:
                 print(f"      ⚠️  Parse error for article: {e}")
             return None, None
 
-    def _load_from_cache(self, pmids: List[str]) -> Dict[str, Dict]:
+    def _load_from_cache(self, pmids: list[str]) -> dict[str, dict]:
         """
         Load cached PubMed records from database.
 
@@ -368,7 +368,7 @@ class BulkPubMedFetcher:
             print(f"  ⚠️  Cache load error: {e}")
             return {}
 
-    def _save_to_cache(self, records: Dict[str, Dict]):
+    def _save_to_cache(self, records: dict[str, dict]):
         """
         Save fetched PubMed records to database cache.
 
@@ -417,7 +417,7 @@ class BulkPubMedFetcher:
             print(f"  ⚠️  Cache save error: {e}")
             # Don't fail the entire operation if cache write fails
 
-    def _should_refresh_cache(self, cached_record: Dict) -> bool:
+    def _should_refresh_cache(self, cached_record: dict) -> bool:
         """
         Decide if cached PubMed record needs refreshing.
 
@@ -471,7 +471,7 @@ class BulkPubMedFetcher:
             return True
 
 
-def get_cache_stats(db_connection) -> Dict:
+def get_cache_stats(db_connection) -> dict:
     """
     Get PubMed cache statistics.
 

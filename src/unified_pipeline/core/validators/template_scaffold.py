@@ -39,14 +39,14 @@ def _norm(s: str) -> str:
     return _norm_re.sub(" ", (s or "").strip()).lower()
 
 
-def _load_scaffold_strings() -> Set[str]:
+def _load_scaffold_strings() -> set[str]:
     try:
         return {_norm(s) for s in json.loads(_STRINGS_PATH.read_text())}
     except Exception:
         return set()
 
 
-_SCAFFOLD: Set[str] = _load_scaffold_strings()
+_SCAFFOLD: set[str] = _load_scaffold_strings()
 _SCAFFOLD_LONG = [s for s in _SCAFFOLD if len(s) >= _FUZZY_MIN_LEN]
 
 
@@ -64,7 +64,7 @@ def _is_scaffold(text: str) -> bool:
     return False
 
 
-def apply_template_scaffold_corrections(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
+def apply_template_scaffold_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
     """Recode blank-template scaffold entries to T. Returns (entries, stats)."""
     if not _SCAFFOLD:
         return entries, {"entries_checked": len(entries), "corrections_made": 0,

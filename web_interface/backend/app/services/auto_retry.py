@@ -52,7 +52,7 @@ DEFAULT_BACKOFF_SECONDS = 30
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
-def is_retryable_error_type(error_type: Optional[str]) -> bool:
+def is_retryable_error_type(error_type: str | None) -> bool:
     """True iff *error_type* is a known transient/infra failure worth retrying.
 
     None, "unknown", and any unrecognized value return False -- we fail safe on
@@ -110,7 +110,7 @@ def auto_retry_backoff_seconds() -> int:
         return DEFAULT_BACKOFF_SECONDS
 
 
-def eligible_for_resume(run, *, last_error_type: Optional[str], is_interruption: bool) -> bool:
+def eligible_for_resume(run, *, last_error_type: str | None, is_interruption: bool) -> bool:
     """Pure decision: should this run be auto-retried?
 
     A run is eligible iff ALL of:

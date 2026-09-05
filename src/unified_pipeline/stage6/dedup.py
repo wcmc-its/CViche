@@ -31,12 +31,12 @@ def _significant_words(text: str) -> set:
     return {t for t in tokens if t not in _STOP_WORDS and len(t) > 1}
 
 
-def _entry_signature_words(entry: Dict) -> set:
+def _entry_signature_words(entry: dict) -> set:
     """Extract significant words from an entry's full text."""
     return _significant_words(entry.get('text') or '')
 
 
-def _entry_title_words(entry: Dict) -> set:
+def _entry_title_words(entry: dict) -> set:
     """Extract significant words from the title/activity portion of an entry.
 
     Tries multiple strategies to isolate the meaningful title:
@@ -83,7 +83,7 @@ DEDUP_FULL_CONTAINMENT_MIN_TOKENS = 5
 DEDUP_FUSED_BLOB_RECORD_LINES = 5
 
 
-def _drop_is_safe(dropped_entry: Dict, kept_entry: Dict) -> bool:
+def _drop_is_safe(dropped_entry: dict, kept_entry: dict) -> bool:
     """#227 guard: only drop an entry when the loss is provably recoverable.
 
     Safe when the dropped text is verbatim-contained in the kept entry, or
@@ -128,9 +128,9 @@ def _drop_is_safe(dropped_entry: Dict, kept_entry: Dict) -> bool:
     return len(_record_lines(dropped_entry.get('text', ''))) >= UNRENDERED_MIN_RECORD_LINES
 
 
-def deduplicate_entries(entries: List[Dict], verbose: bool = False,
+def deduplicate_entries(entries: list[dict], verbose: bool = False,
                         require_date_overlap: bool = False,
-                        decisions: Optional[List[Dict]] = None) -> List[Dict]:
+                        decisions: list[dict] | None = None) -> list[dict]:
     """Remove near-duplicate entries within a code group.
 
     Uses two metrics to catch duplicates:

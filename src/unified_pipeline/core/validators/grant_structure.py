@@ -26,7 +26,7 @@ class GrantStructureValidator(BaseValidator):
 
     name = "GrantStructureValidator"
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to sections that might contain grants."""
         return ['M', 'research_overview', 'H', 'honors_awards', 'N', 'mentoring']
 

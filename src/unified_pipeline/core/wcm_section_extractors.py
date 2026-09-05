@@ -18,7 +18,8 @@ Usage:
 
 import sys
 from pathlib import Path
-from typing import Dict, Callable, Optional, List
+from typing import Dict, Optional, List
+from collections.abc import Callable
 from dataclasses import dataclass
 
 # Add legacy production scripts to path
@@ -33,7 +34,7 @@ class WCMSection:
     section_name: str
     extractor_module: str
     extractor_function: str
-    parent_section: Optional[str] = None  # For subsections (e.g., B1 parent is B)
+    parent_section: str | None = None  # For subsections (e.g., B1 parent is B)
 
 
 # Complete mapping of all 71 WCM sections to their extractors
@@ -85,7 +86,7 @@ WCM_SECTIONS = {
 }
 
 
-def get_extractor(section_id: str) -> Optional[Callable]:
+def get_extractor(section_id: str) -> Callable | None:
     """
     Get the extraction function for a WCM section ID.
 
@@ -111,7 +112,7 @@ def get_extractor(section_id: str) -> Optional[Callable]:
         return None
 
 
-def get_all_extractors() -> Dict[str, Callable]:
+def get_all_extractors() -> dict[str, Callable]:
     """
     Get all available extraction functions.
 
@@ -131,18 +132,18 @@ def get_all_extractors() -> Dict[str, Callable]:
     return extractors
 
 
-def get_section_name(section_id: str) -> Optional[str]:
+def get_section_name(section_id: str) -> str | None:
     """Get the descriptive name for a section ID."""
     section = WCM_SECTIONS.get(section_id.upper())
     return section.section_name if section else None
 
 
-def get_parent_sections() -> List[str]:
+def get_parent_sections() -> list[str]:
     """Get list of parent section IDs (sections without subsections)."""
     return [sid for sid, s in WCM_SECTIONS.items() if s.parent_section is None]
 
 
-def get_subsections(parent_id: str) -> List[str]:
+def get_subsections(parent_id: str) -> list[str]:
     """Get list of subsection IDs for a parent section."""
     return [sid for sid, s in WCM_SECTIONS.items() if s.parent_section == parent_id]
 

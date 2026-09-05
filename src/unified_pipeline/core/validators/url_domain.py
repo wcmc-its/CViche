@@ -32,7 +32,7 @@ class URLDomainValidator(BaseValidator):
     # URL extraction pattern
     URL_PATTERN = r'https?://[^\s<>"\'\)]+|www\.[^\s<>"\'\)]+|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/[^\s<>"\'\)]*)?'
 
-    def __init__(self, config_path: Optional[str] = None):
+    def __init__(self, config_path: str | None = None):
         """
         Initialize validator with domain configuration.
 
@@ -46,7 +46,7 @@ class URLDomainValidator(BaseValidator):
         self.config = self._load_config(config_path)
         self.domain_mappings = self.config.get('domain_mappings', {})
 
-    def _load_config(self, config_path: Path) -> Dict:
+    def _load_config(self, config_path: Path) -> dict:
         """Load domain mapping configuration from JSON."""
         try:
             with open(config_path, 'r') as f:
@@ -55,7 +55,7 @@ class URLDomainValidator(BaseValidator):
             # Return empty config if file doesn't exist
             return {'domain_mappings': {}}
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """
         Applies to all parent sections.
 
@@ -72,7 +72,7 @@ class URLDomainValidator(BaseValidator):
         """
         return 35
 
-    def analyze(self, entry_text: str, section_position: Optional[float] = None) -> ValidatorGuidance:
+    def analyze(self, entry_text: str, section_position: float | None = None) -> ValidatorGuidance:
         """
         Analyze entry for URL domains and provide guidance.
 
@@ -97,7 +97,7 @@ class URLDomainValidator(BaseValidator):
             return ValidatorGuidance.no_guidance()
 
         # Aggregate signals from all domains
-        section_votes: Dict[str, List[float]] = {}  # section_id -> list of confidence scores
+        section_votes: dict[str, list[float]] = {}  # section_id -> list of confidence scores
         all_hints = []
         all_signals = []
 
@@ -181,7 +181,7 @@ class URLDomainValidator(BaseValidator):
             deterministic_signals=list(set(all_signals))[:5]  # Unique signals, limit 5
         )
 
-    def _extract_urls(self, text: str) -> List[str]:
+    def _extract_urls(self, text: str) -> list[str]:
         """
         Extract all URLs from text, excluding email addresses.
 
@@ -205,7 +205,7 @@ class URLDomainValidator(BaseValidator):
 
         return urls
 
-    def _extract_domain(self, url: str) -> Optional[str]:
+    def _extract_domain(self, url: str) -> str | None:
         """
         Extract domain from URL.
 
@@ -230,7 +230,7 @@ class URLDomainValidator(BaseValidator):
 
         return None
 
-    def _find_domain_mapping(self, domain: str) -> Optional[Dict]:
+    def _find_domain_mapping(self, domain: str) -> dict | None:
         """
         Find mapping for domain, checking exact match and pattern match.
 
@@ -283,7 +283,7 @@ class URLDomainValidator(BaseValidator):
         base_confidence: float,
         tier: int,
         section_id: str,
-        section_position: Optional[float]
+        section_position: float | None
     ) -> float:
         """
         Apply position-based confidence adjustment.

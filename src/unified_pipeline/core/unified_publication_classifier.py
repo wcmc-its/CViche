@@ -37,14 +37,14 @@ class Features:
     pages: str = ''
     volume: str = ''
     issue: str = ''
-    year: Optional[int] = None
+    year: int | None = None
     doi: str = ''
 
     # Rich fields (from PubMed)
     has_abstract: bool = False
-    pub_types: Set[str] = None  # Set of PubMed publication types
-    mesh_terms: Set[str] = None
-    statuses: Set[str] = None
+    pub_types: set[str] = None  # Set of PubMed publication types
+    mesh_terms: set[str] = None
+    statuses: set[str] = None
 
     # Derived boolean flags
     is_preprint: bool = False
@@ -82,13 +82,13 @@ class ClassificationResult:
     Classification output with debugging info.
     """
     assignment: str  # S1-S9 or "Low confidence / No assignment"
-    subtype: Optional[str] = None  # S10-S30 (detailed subsection)
+    subtype: str | None = None  # S10-S30 (detailed subsection)
     confidence_pct: int = 0  # 0-100
-    note: Optional[str] = None
+    note: str | None = None
 
     # Debugging
-    signals: Optional[Dict] = None
-    applied_rules: Optional[List[str]] = None
+    signals: dict | None = None
+    applied_rules: list[str] | None = None
 
     def to_dict(self):
         """Convert to dict for JSON serialization."""
@@ -123,7 +123,7 @@ EDITORIAL_TYPES = {'Editorial', 'Comment', 'Letter'}
 # ENTRYPOINT: UNIFIED CLASSIFIER
 # =============================================================================
 
-def classify_publication_any(input_payload: Dict) -> ClassificationResult:
+def classify_publication_any(input_payload: dict) -> ClassificationResult:
     """
     Classify a publication using available information.
 
@@ -169,7 +169,7 @@ def classify_publication_any(input_payload: Dict) -> ClassificationResult:
 # FEATURE EXTRACTION: PUBMED MODE
 # =============================================================================
 
-def build_features_from_pubmed(pubmed_record: Dict) -> Features:
+def build_features_from_pubmed(pubmed_record: dict) -> Features:
     """
     Build features from a rich PubMed record.
 
@@ -300,7 +300,7 @@ def regex_find_issue(text: str) -> str:
     return ''
 
 
-def regex_find_year(text: str) -> Optional[int]:
+def regex_find_year(text: str) -> int | None:
     """Find publication year."""
     match = re.search(r'\b(19|20)\d{2}\b', text)
     if match:
@@ -321,7 +321,7 @@ def regex_find_doi(text: str) -> str:
     return ''
 
 
-def infer_pub_types_from_text(citation_text: str, title: str) -> Set[str]:
+def infer_pub_types_from_text(citation_text: str, title: str) -> set[str]:
     """
     Infer PubMed-like publication types from text.
 
@@ -543,8 +543,8 @@ def classify_with_shared_logic(feat: Features) -> ClassificationResult:
     return low_confidence(applied_rules, feat)
 
 
-def rollup(subtype: str, confidence: int, note: Optional[str],
-          applied_rules: List[str], feat: Features) -> ClassificationResult:
+def rollup(subtype: str, confidence: int, note: str | None,
+          applied_rules: list[str], feat: Features) -> ClassificationResult:
     """
     Create classification result with rollup logic.
 
@@ -581,7 +581,7 @@ def rollup(subtype: str, confidence: int, note: Optional[str],
     )
 
 
-def low_confidence(applied_rules: List[str], feat: Features) -> ClassificationResult:
+def low_confidence(applied_rules: list[str], feat: Features) -> ClassificationResult:
     """Return low confidence result."""
     return ClassificationResult(
         assignment="Low confidence / No assignment",
@@ -593,7 +593,7 @@ def low_confidence(applied_rules: List[str], feat: Features) -> ClassificationRe
     )
 
 
-def build_signals_dict(feat: Features) -> Dict:
+def build_signals_dict(feat: Features) -> dict:
     """Build signals dict for debugging."""
     return {
         'is_preprint': feat.is_preprint,

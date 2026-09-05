@@ -32,7 +32,7 @@ from ..sorting import sort_entries_reverse_chronological
 class PresentationsSection:
     """Section R writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_presentations(self, entries: List[Dict]):
+    def _fill_presentations(self, entries: list[dict]):
         """Fill R. INVITATIONS TO SPEAK/PRESENT section.
 
         WCM template has tables for Regional/National/International:

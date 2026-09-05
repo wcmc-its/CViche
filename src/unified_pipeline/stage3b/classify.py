@@ -50,11 +50,11 @@ class _BatchStats:
     output_tokens: int = 0
     cost: float = 0.0
     llm_batches: int = 0  # 1 if this batch attempted an LLM call, else 0
-    observed_model: Optional[str] = None  # model id the API actually served (#459)
+    observed_model: str | None = None  # model id the API actually served (#459)
     failed_batches: int = 0  # 1 if this batch's LLM call raised, else 0
 
 
-def _valid_taxonomy_codes(taxonomy: Dict) -> Set[str]:
+def _valid_taxonomy_codes(taxonomy: dict) -> set[str]:
     """The set of codes `taxonomy` actually defines.
 
     Every classification below comes from an LLM call made with
@@ -84,7 +84,7 @@ def _normalize_confidence(value: object, default: float = 0.5) -> float:
     return confidence if 0.0 <= confidence <= 1.0 else default
 
 
-def _entry_text(entry: Dict) -> str:
+def _entry_text(entry: dict) -> str:
     """Coerce an entry's "text" field to a string.
 
     `entry.get("text", "")` only substitutes when the key is ABSENT -- an
@@ -116,8 +116,8 @@ def _hierarchy_path(hierarchy: object, default: str) -> str:
 
 def _build_taxonomy_ref_for_batch(
     taxonomy_context: TaxonomyContext,
-    taxonomy: Dict,
-) -> Tuple[List[str], str]:
+    taxonomy: dict,
+) -> tuple[list[str], str]:
     """Resolve the suggested codes and taxonomy reference text shared by every
     batch in one classify_entries_batch call.
 
@@ -153,13 +153,13 @@ def _build_taxonomy_ref_for_batch(
 
 
 def _classify_one_batch(
-    batch_entries: List[Dict],
+    batch_entries: list[dict],
     batch_start: int,
     taxonomy_context: TaxonomyContext,
-    all_suggested_codes: List[str],
+    all_suggested_codes: list[str],
     taxonomy_ref: str,
-    valid_codes: Set[str],
-) -> Tuple[List[Dict], _BatchStats]:
+    valid_codes: set[str],
+) -> tuple[list[dict], _BatchStats]:
     """Classify a single batch against a taxonomy_ref built once by the caller.
 
     Returns this batch's own results list and its own stats contribution --
@@ -376,11 +376,11 @@ Return ONLY valid JSON with the classifications array."""
 
 
 def classify_entries_batch(
-    entries: List[Dict],
+    entries: list[dict],
     taxonomy_context: TaxonomyContext,
-    taxonomy: Dict,
+    taxonomy: dict,
     batch_size: int = 15
-) -> Tuple[List[Dict], Dict]:
+) -> tuple[list[dict], dict]:
     """
     Classify a batch of entries with the same taxonomy context.
 
@@ -460,7 +460,7 @@ def classify_entries_batch(
     return all_results, stats
 
 
-def group_entries_by_hierarchy(entries: List[Dict]) -> Dict[str, List[Dict]]:
+def group_entries_by_hierarchy(entries: list[dict]) -> dict[str, list[dict]]:
     """
     Group entries by their hierarchy path (for batching).
 
@@ -484,9 +484,9 @@ def group_entries_by_hierarchy(entries: List[Dict]) -> Dict[str, List[Dict]]:
 
 
 def validate_t_classifications(
-    entries: List[Dict],
-    taxonomy: Dict
-) -> Tuple[List[Dict], Dict]:
+    entries: list[dict],
+    taxonomy: dict
+) -> tuple[list[dict], dict]:
     """
     T-validation gate: Re-evaluate any entries classified as T (miscellaneous).
 
@@ -692,8 +692,8 @@ Respond with a JSON array of objects, one per entry:
 
 
 def reconnect_fragments(
-    entries: List[Dict]
-) -> Tuple[List[Dict], Dict]:
+    entries: list[dict]
+) -> tuple[list[dict], dict]:
     """
     Reconnect fragment entries (classified as T) to their adjacent entries.
 
@@ -884,7 +884,7 @@ Fragment at index {idx}:
         return entries, {"fragments_reviewed": len(fragment_candidates), "fragments_reconnected": locals().get("reconnected_count", 0), "cost": 0.0, "error": str(e)}
 
 
-def detect_duplicates(entries: List[Dict], similarity_threshold: float = 0.9) -> Tuple[List[Dict], List[Dict]]:
+def detect_duplicates(entries: list[dict], similarity_threshold: float = 0.9) -> tuple[list[dict], list[dict]]:
     """
     Detect and flag duplicate entries based on text similarity.
 

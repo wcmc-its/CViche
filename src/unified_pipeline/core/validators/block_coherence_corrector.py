@@ -26,7 +26,8 @@ Two structural smells (no thresholds):
 
 import json
 import re
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
+from collections.abc import Callable
 
 _YEAR_RANGE = re.compile(r"(19|20)\d{2}\s*[-–—]\s*((present|current|ongoing)\b|(19|20)\d{2})", re.I)
 _NAME_OPENER = re.compile(r"^\s*(?:\d{1,2}[.\)]\s*)?[A-Z][a-z]+\s+(?:[A-Z][a-z'’\-]+|[A-Z]\.)")
@@ -40,14 +41,14 @@ def _family(code: str) -> str:
     return m.group(0) if m else "?"
 
 
-def _idx(e: Dict) -> int:
+def _idx(e: dict) -> int:
     try:
         return int(e.get("element_idx_start", 0) or 0)
     except (TypeError, ValueError):
         return 0
 
 
-def _hkey(e: Dict) -> str:
+def _hkey(e: dict) -> str:
     return " > ".join(str(x) for x in (e.get("hierarchy") or []))
 
 
@@ -56,7 +57,7 @@ def _is_person_record(text: str) -> bool:
     return bool(_NAME_OPENER.match(t) and _YEAR_RANGE.search(t))
 
 
-def _is_header_like(e: Dict) -> bool:
+def _is_header_like(e: dict) -> bool:
     """Short, low-structure row that reads like a (mis-bucketed) sub-heading."""
     t = (e.get("text") or "").strip()
     if not t or _is_person_record(t):
@@ -66,14 +67,14 @@ def _is_header_like(e: Dict) -> bool:
     )
 
 
-def _detect(entries: List[Dict]) -> List[Dict]:
+def _detect(entries: list[dict]) -> list[dict]:
     """Return suspect blocks: {reason, entries, families, hierarchy}."""
     ordered = sorted(entries, key=_idx)
-    blocks: List[Dict] = []
+    blocks: list[dict] = []
     seen = set()  # (start_idx, end_idx) to dedupe overlap between smells
 
     # (a) sibling-incoherence over contiguous person-record runs
-    run: List[Dict] = []
+    run: list[dict] = []
     def flush(run):
         if len(run) >= _MIN_RUN:
             fams = {_family(e.get("taxonomy_code")) for e in run}
@@ -116,7 +117,7 @@ def _detect(entries: List[Dict]) -> List[Dict]:
     # one punt per region: drop a block whose idx span overlaps a kept one
     # (the mentee block is caught by both smells). Prefer earliest start, then largest.
     blocks.sort(key=lambda b: (_idx(b["entries"][0]), -len(b["entries"])))
-    kept: List[Dict] = []
+    kept: list[dict] = []
     for b in blocks:
         s, e = _idx(b["entries"][0]), _idx(b["entries"][-1])
         if any(not (e < _idx(k["entries"][0]) or s > _idx(k["entries"][-1])) for k in kept):
@@ -125,7 +126,7 @@ def _detect(entries: List[Dict]) -> List[Dict]:
     return kept
 
 
-def build_punt_package(entries: List[Dict], block: Dict, subject_name: Optional[str] = None) -> str:
+def build_punt_package(entries: list[dict], block: dict, subject_name: str | None = None) -> str:
     """Restore the context the per-entry classifier never saw, for the LLM judge:
     the profile subject's identity, the subject's own education (a self-vs-other
     anchor), the recovered sub-header ancestry, and the block at full width."""
@@ -145,7 +146,7 @@ def build_punt_package(entries: List[Dict], block: Dict, subject_name: Optional[
     # "these ARE the subject" against the third parties in the block.
     education = [e for e in ordered if _family(e.get("taxonomy_code")) == "B"][:3]
 
-    lines: List[str] = []
+    lines: list[str] = []
     if subject_name:
         lines.append(f"PROFILE SUBJECT: {subject_name}")
     section = " > ".join(str(x) for x in (block["entries"][0].get("hierarchy") or []))
@@ -206,7 +207,7 @@ def _build_repair_prompt(punt: str) -> str:
     )
 
 
-def _parse_repair_response(text: str) -> Dict:
+def _parse_repair_response(text: str) -> dict:
     """Tolerant parse: strip code fences, grab the outermost JSON object."""
     t = (text or "").strip()
     if "```" in t:
@@ -220,7 +221,7 @@ def _parse_repair_response(text: str) -> Dict:
         return {}
 
 
-def repair_block(block: Dict, punt: str, llm: Callable[[str], str], min_confidence: float) -> Dict:
+def repair_block(block: dict, punt: str, llm: Callable[[str], str], min_confidence: float) -> dict:
     """Ask the judge; return a verdict with an ``applied`` flag. Conservative:
     only apply when coherent, confident, one valid code per row."""
     parsed = _parse_repair_response(llm(_build_repair_prompt(punt)))
@@ -237,12 +238,12 @@ def repair_block(block: Dict, punt: str, llm: Callable[[str], str], min_confiden
 
 
 def apply_block_coherence_corrections(
-    entries: List[Dict],
-    llm: Optional[Callable[[str], str]] = None,
+    entries: list[dict],
+    llm: Callable[[str], str] | None = None,
     apply: bool = False,
     min_confidence: float = 0.8,
-    subject_name: Optional[str] = None,
-) -> Tuple[List[Dict], Dict]:
+    subject_name: str | None = None,
+) -> tuple[list[dict], dict]:
     """Notice incoherent / orphaned-header blocks; repair via LLM when ``apply``.
 
     With ``apply=False`` (default) this is a pure no-op on ``entries`` -- it only

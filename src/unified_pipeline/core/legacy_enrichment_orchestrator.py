@@ -51,7 +51,7 @@ class LegacyEnrichmentOrchestrator:
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def enrich_publications(self, max_workers: int = 10) -> Dict[str, Any]:
+    def enrich_publications(self, max_workers: int = 10) -> dict[str, Any]:
         """
         Enrich publication sections with PubMed API lookups.
 
@@ -150,7 +150,7 @@ class LegacyEnrichmentOrchestrator:
             'total_enriched': total_enriched
         }
 
-    def enrich_institutions(self) -> Dict[str, Any]:
+    def enrich_institutions(self) -> dict[str, Any]:
         """
         Enrich institution data with ROR IDs.
 
@@ -207,7 +207,7 @@ class LegacyEnrichmentOrchestrator:
                 if self.verbose:
                     print(f"  ✗ Error copying {extracted_file.name}: {e}")
 
-    def run_all_enrichment(self, max_workers: int = 10) -> Dict[str, Any]:
+    def run_all_enrichment(self, max_workers: int = 10) -> dict[str, Any]:
         """
         Run all enrichment steps.
 
@@ -263,7 +263,7 @@ def run_legacy_enrichment(
     output_dir: Path,
     max_workers: int = 10,
     verbose: bool = True
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Convenience function to run legacy enrichment.
 

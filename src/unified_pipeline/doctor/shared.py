@@ -56,7 +56,7 @@ def _long_word_tokens(text) -> set:
 _SECTION_HEADER_RE = re.compile(r"^[A-Z]\.\s+\S")
 
 
-def _output_section_header(text: str) -> Optional[str]:
+def _output_section_header(text: str) -> str | None:
     """Normalized section name when a paragraph is a WCM output section
     header (either form above), else None."""
     stripped = str(text or "").strip()
@@ -70,7 +70,7 @@ def _output_section_header(text: str) -> Optional[str]:
 
 
 def _finding(lint: str, severity: str, message: str,
-             evidence: Optional[List[str]] = None) -> Dict:
+             evidence: list[str] | None = None) -> dict:
     return {"lint": lint, "severity": severity, "message": message,
             "evidence": evidence or []}
 
@@ -87,11 +87,11 @@ class Haystack(NamedTuple):
     text: str    # squashed containment haystack, _LINE_SENTINEL-joined
     tokens: set  # distinctive long-word token set
 
-def _haystacks(blocks: List[Tuple[str, str]]) -> Haystack:
+def _haystacks(blocks: list[tuple[str, str]]) -> Haystack:
     """Containment haystack + distinctive-token set for the output blocks.
     Read the result via its named fields (``h.text`` / ``h.tokens``), not
     positional unpacking."""
-    pieces: List[str] = []
+    pieces: list[str] = []
     tokens: set = set()
     for _, text in blocks:
         for line in str(text).split("\n"):
@@ -101,7 +101,7 @@ def _haystacks(blocks: List[Tuple[str, str]]) -> Haystack:
     return Haystack(_LINE_SENTINEL.join(pieces), tokens)
 
 
-def _entry_pieces(text) -> List[str]:
+def _entry_pieces(text) -> list[str]:
     """Squashed fragments of an entry long enough to be looked up in the
     output haystack."""
     pieces = []

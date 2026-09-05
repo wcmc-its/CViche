@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _run_duration_seconds(run) -> Optional[int]:
+def _run_duration_seconds(run) -> int | None:
     """Total pipeline time for a run, in whole seconds.
 
     Prefers the authoritative value persisted by the orchestrator at terminal

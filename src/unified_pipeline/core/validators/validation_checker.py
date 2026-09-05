@@ -9,9 +9,9 @@ from .base_validator import GuidanceResult
 
 
 def check_violations(
-    llm_result: Dict,
+    llm_result: dict,
     guidance: GuidanceResult
-) -> Dict:
+) -> dict:
     """
     Check if LLM violated guidance rules.
 
@@ -85,9 +85,9 @@ def check_violations(
 
 
 def apply_correction(
-    llm_result: Dict,
+    llm_result: dict,
     guidance: GuidanceResult
-) -> Dict:
+) -> dict:
     """
     Apply correction to LLM result based on guidance.
 

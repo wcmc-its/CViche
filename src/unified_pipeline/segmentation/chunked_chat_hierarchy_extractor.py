@@ -30,7 +30,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from signature_based_segmentation import normalize_hierarchy_with_llm, validate_headers_vs_entries, ensure_personal_data_first
 
 
-def format_hierarchy_outline(hierarchy: List[Dict]) -> str:
+def format_hierarchy_outline(hierarchy: list[dict]) -> str:
     """
     Format a hierarchy tree as an indented outline string.
 
@@ -42,7 +42,7 @@ def format_hierarchy_outline(hierarchy: List[Dict]) -> str:
     """
     lines = []
 
-    def walk(node: Dict, indent_level: int = 0):
+    def walk(node: dict, indent_level: int = 0):
         """Recursively walk the tree and format each node."""
         level = node['level']
         text = node['text']
@@ -69,9 +69,9 @@ class HeaderNode:
     """Represents a header in the CV hierarchy."""
     level: int  # 1, 2, or 3
     text: str
-    children: List["HeaderNode"] = field(default_factory=list)
+    children: list[HeaderNode] = field(default_factory=list)
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         """Convert to dictionary for JSON serialization."""
         return {
             'level': f'H{self.level}',
@@ -85,7 +85,7 @@ def count_tokens(text: str) -> int:
     return len(encoder.encode(text))
 
 
-def extract_text_from_docx(docx_path: str) -> List[str]:
+def extract_text_from_docx(docx_path: str) -> list[str]:
     """
     Extract document text as a list of lines, in document order.
 
@@ -114,7 +114,7 @@ def extract_text_from_docx(docx_path: str) -> List[str]:
     return lines
 
 
-def split_into_chunks(paragraphs: List[str], max_tokens: int = 10000) -> List[str]:
+def split_into_chunks(paragraphs: list[str], max_tokens: int = 10000) -> list[str]:
     """
     Split paragraphs into chunks of approximately max_tokens each.
 
@@ -222,7 +222,7 @@ CHUNK CONTENT:
     return outline_text
 
 
-def parse_outline_to_hierarchy(outline_text: str) -> List[Dict]:
+def parse_outline_to_hierarchy(outline_text: str) -> list[dict]:
     """
     Parse [H1]/[H2]/[H3] outline text into hierarchy format expected by normalization.
 
@@ -256,7 +256,7 @@ def parse_outline_to_hierarchy(outline_text: str) -> List[Dict]:
     return hierarchy
 
 
-def get_cv_hierarchy_chunked(cv_path: str, max_chunk_tokens: int = 10000) -> Tuple[List[Dict], Dict]:
+def get_cv_hierarchy_chunked(cv_path: str, max_chunk_tokens: int = 10000) -> tuple[list[dict], dict]:
     """
     Extract CV header hierarchy from a DOCX file using chunked processing and normalization.
 

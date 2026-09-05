@@ -30,7 +30,7 @@ class TemporalPatternValidator(BaseValidator):
 
     name = "TemporalPatternValidator"
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Universal validator - temporal context useful everywhere."""
         return ['*']
 
@@ -56,7 +56,7 @@ class TemporalPatternValidator(BaseValidator):
         r'\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(19|20)\d{2}\b',
     ]
 
-    def extract_year_range(self, entry_text: str) -> Optional[Tuple[int, Optional[int]]]:
+    def extract_year_range(self, entry_text: str) -> tuple[int, int | None] | None:
         """
         Extract year range from entry.
 
@@ -97,7 +97,7 @@ class TemporalPatternValidator(BaseValidator):
 
         return None
 
-    def calculate_duration(self, year_range: Tuple[int, Optional[int]]) -> Optional[int]:
+    def calculate_duration(self, year_range: tuple[int, int | None]) -> int | None:
         """
         Calculate duration in years.
 

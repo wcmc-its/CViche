@@ -21,7 +21,7 @@ except ImportError:
 class LeadershipCommitteeValidator(BaseValidator):
     """Detect leadership authority vs committee membership."""
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         return [
             'institutional_leadership',  # O
             'institutional_administration',  # P
@@ -33,7 +33,7 @@ class LeadershipCommitteeValidator(BaseValidator):
         """Higher priority - should run before less specific validators."""
         return 20
 
-    def analyze(self, group: Dict, parent_section: str) -> ValidatorGuidance:
+    def analyze(self, group: dict, parent_section: str) -> ValidatorGuidance:
         """Analyze for leadership keywords and context."""
 
         entries = group.get('entries', [])

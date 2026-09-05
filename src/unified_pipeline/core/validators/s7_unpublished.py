@@ -92,7 +92,7 @@ class S7UnpublishedValidator(BaseValidator):
         'Recommendations for',
     ]
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to Publications parent section."""
         return ['S', 'bibliography']
 

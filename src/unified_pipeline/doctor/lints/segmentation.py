@@ -30,8 +30,8 @@ from ..shared import _finding, _magnitude_severity
 # Coverage, lost lines, mega-entries and dups, via the regression metrics.
 
 
-def lint_segmentation(source_lines: List[str], stage1a: Dict,
-                      stage2: Dict) -> List[Dict]:
+def lint_segmentation(source_lines: list[str], stage1a: dict,
+                      stage2: dict) -> list[dict]:
     """Coverage / lost lines / mega-entries / dups / empties, reusing the
     segmentation_regression metrics (source docx + stage 1a + stage 2)."""
     metrics = compute_metrics(source_lines, stage1a, stage2)
@@ -54,8 +54,8 @@ def lint_segmentation(source_lines: List[str], stage1a: Dict,
 MISSED_HEADERS_WARN_COUNT = 6
 
 
-def _hierarchy_titles(stage1a: Dict) -> List[str]:
-    titles: List[str] = []
+def _hierarchy_titles(stage1a: dict) -> list[str]:
+    titles: list[str] = []
 
     def walk(nodes):
         for node in nodes or []:
@@ -80,8 +80,8 @@ def _header_key(text: str) -> str:
     return _norm(text).rstrip(":").strip()
 
 
-def lint_missed_headers(candidates: List[str], stage1a: Dict,
-                        stage2: Dict) -> List[Dict]:
+def lint_missed_headers(candidates: list[str], stage1a: dict,
+                        stage2: dict) -> list[dict]:
     """Header-looking source lines absent from the 1a hierarchy AND from
     every entry hierarchy path: a header demoted to content misroutes
     everything filed under it."""

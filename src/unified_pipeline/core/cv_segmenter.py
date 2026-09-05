@@ -30,7 +30,7 @@ class CVSegmenter:
 
     SUPPORTED_FORMATS = {'.pdf', '.docx'}
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: str | None = None):
         """
         Initialize segmenter.
 
@@ -65,7 +65,7 @@ class CVSegmenter:
 
         return ext
 
-    def segment(self, file_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
+    def segment(self, file_path: str, output_dir: str | None = None) -> dict[str, Any]:
         """
         Segment CV into hierarchical sections and entries.
 

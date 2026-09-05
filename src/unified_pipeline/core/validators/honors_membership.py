@@ -30,7 +30,7 @@ class HonorsMembershipValidator(BaseValidator):
 
     name = "HonorsMembershipValidator"
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to honors and membership sections."""
         return ['H', 'honors_awards', 'I', 'memberships', 'professional_societies']
 

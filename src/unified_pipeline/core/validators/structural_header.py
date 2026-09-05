@@ -76,7 +76,7 @@ class StructuralHeaderValidator(BaseValidator):
         r'^\s*$',                          # Empty/whitespace only
     ]
 
-    def __init__(self, document_name: Optional[str] = None):
+    def __init__(self, document_name: str | None = None):
         """
         Initialize with optional document name for name-matching.
 
@@ -115,7 +115,7 @@ class StructuralHeaderValidator(BaseValidator):
         self.document_name = name
         self._build_name_patterns(name)
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """This validator applies to all sections (post-classification)."""
         return ['*']
 
@@ -216,8 +216,8 @@ class StructuralHeaderValidator(BaseValidator):
 
     def check_and_correct(
         self,
-        entry: Dict,
-        document_name: Optional[str] = None
+        entry: dict,
+        document_name: str | None = None
     ) -> CorrectionResult:
         """
         Check a classified entry and auto-correct if it's a structural element.
@@ -315,9 +315,9 @@ class StructuralHeaderValidator(BaseValidator):
 
 
 def apply_structural_corrections(
-    entries: List[Dict],
-    document_name: Optional[str] = None
-) -> Tuple[List[Dict], Dict]:
+    entries: list[dict],
+    document_name: str | None = None
+) -> tuple[list[dict], dict]:
     """
     Apply structural header corrections to a list of classified entries.
 

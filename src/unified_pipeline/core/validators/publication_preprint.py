@@ -69,7 +69,7 @@ class PublicationPreprintValidator(BaseValidator):
         r'preprint version',
     ]
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to Publications parent section (S)."""
         return ['S', 'scholarly_outputs', 'bibliography']
 

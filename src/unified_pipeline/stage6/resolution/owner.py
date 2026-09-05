@@ -8,7 +8,7 @@ import re
 from typing import Dict
 
 
-def _get_cv_owner_name(cv_owner: Dict = None, document_uid: str = '') -> str:
+def _get_cv_owner_name(cv_owner: dict = None, document_uid: str = '') -> str:
     """Extract the CV owner's full name for auto-filling PI fields.
 
     Args:

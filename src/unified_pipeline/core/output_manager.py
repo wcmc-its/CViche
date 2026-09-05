@@ -28,7 +28,7 @@ class OutputManager:
     Ensures all stages use consistent file handles and organized directory structure.
     """
 
-    def __init__(self, input_path: str, base_output_dir: Optional[Path] = None):
+    def __init__(self, input_path: str, base_output_dir: Path | None = None):
         """
         Initialize output manager with input CV file.
 
@@ -213,7 +213,7 @@ class OutputManager:
         output_path = stage_to_method[stage_name]()
         return output_path.exists()
 
-    def get_all_stage_paths(self) -> Dict[str, Path]:
+    def get_all_stage_paths(self) -> dict[str, Path]:
         """
         Get dictionary of all stage output paths.
 
@@ -267,7 +267,7 @@ class OutputManager:
 
 
 # Convenience functions for backward compatibility
-def get_output_path(input_path: str, stage: str, base_dir: Optional[Path] = None) -> Path:
+def get_output_path(input_path: str, stage: str, base_dir: Path | None = None) -> Path:
     """
     Get output path for a specific stage given an input file.
 

@@ -34,7 +34,7 @@ from ..shared import _finding
 # Stage-5 PubMed enrichment: citations that fell back to CV-extracted fields.
 
 
-def lint_enrichment_failures(stage5e: Dict) -> List[Dict]:
+def lint_enrichment_failures(stage5e: dict) -> list[dict]:
     """Publications whose stage-5 PubMed enrichment ended in a *_failed status
     (lookup_failed, pmcid_conversion_failed, doi_found_but_fetch_failed):
     their citations degrade to CV-extracted fields. Non-failure outcomes
@@ -43,7 +43,7 @@ def lint_enrichment_failures(stage5e: Dict) -> List[Dict]:
               if str(e.get("enrichment_status") or "").endswith("_failed")]
     if not failed:
         return []
-    counts: Dict[str, int] = {}
+    counts: dict[str, int] = {}
     for e in failed:
         status = str(e.get("enrichment_status"))
         counts[status] = counts.get(status, 0) + 1
@@ -63,8 +63,8 @@ _OWNER_GATE = "HARD-FAIL gate 'CV owner name / contact populated'"
 _OWNER_CAP = "the quality score is capped at 25 (RED, do not deliver)"
 
 
-def lint_owner_contact_missing(stage4: Optional[Dict], uid: str,
-                               unreadable: Optional[str] = None) -> List[Dict]:
+def lint_owner_contact_missing(stage4: dict | None, uid: str,
+                               unreadable: str | None = None) -> list[dict]:
     """The quality score's cap-25 hard-fail gate: the document cannot be
     delivered under anyone's name. The predicate is the scorer's own
     (quality_score.cv_owner_name_missing), applied to the stage-4 artifact the

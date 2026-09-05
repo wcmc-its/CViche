@@ -91,10 +91,10 @@ logger = logging.getLogger(__name__)
 
 def run_stage_3b(
     document_uid: str,
-    stage_2_path: Optional[str] = None,
-    stage_3a_path: Optional[str] = None,
-    output_dir: Optional[str] = None
-) -> Dict:
+    stage_2_path: str | None = None,
+    stage_3a_path: str | None = None,
+    output_dir: str | None = None
+) -> dict:
     """
     Run Stage 3b entry classification.
 

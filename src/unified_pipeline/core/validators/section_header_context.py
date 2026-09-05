@@ -23,7 +23,7 @@ class SectionHeaderContextValidator(BaseValidator):
 
     name = "SectionHeaderContextValidator"
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to all parent sections."""
         return ['*']  # Universal validator
 

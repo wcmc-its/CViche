@@ -154,9 +154,9 @@ def build_taxonomy_options_string() -> str:
 
 def map_section_to_taxonomy(
     section_label: str,
-    sample_entries: List[str],
+    sample_entries: list[str],
     taxonomy_options: str
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Map a CV section to WCM taxonomy using GPT-4o-mini.
 
@@ -274,7 +274,7 @@ Return structured JSON with your classification and confidence score."""
     return mapping
 
 
-def map_cv_sections(segmented_cv_path: str, output_path: Optional[str] = None) -> Dict[str, Any]:
+def map_cv_sections(segmented_cv_path: str, output_path: str | None = None) -> dict[str, Any]:
     """
     Map all sections from a segmented CV to WCM taxonomy.
 

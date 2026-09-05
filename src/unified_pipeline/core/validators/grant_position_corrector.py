@@ -82,7 +82,7 @@ POSITION_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in POSITION_LEA
 GRANT_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in GRANT_PATTERNS]
 
 
-def has_position_indicators(text: str) -> Tuple[bool, str]:
+def has_position_indicators(text: str) -> tuple[bool, str]:
     """Check if text contains position/leadership signals."""
     for pattern in POSITION_PATTERNS_COMPILED:
         match = pattern.search(text)
@@ -91,7 +91,7 @@ def has_position_indicators(text: str) -> Tuple[bool, str]:
     return False, ""
 
 
-def has_grant_indicators(text: str) -> Tuple[bool, str]:
+def has_grant_indicators(text: str) -> tuple[bool, str]:
     """Check if text contains grant/funding signals."""
     for pattern in GRANT_PATTERNS_COMPILED:
         match = pattern.search(text)
@@ -135,7 +135,7 @@ def determine_correct_code(text: str) -> str:
     return 'D2'
 
 
-def correct_grant_to_position(entry: Dict) -> Dict:
+def correct_grant_to_position(entry: dict) -> dict:
     """
     Correct M2A/M2B to position/leadership code if the entry is actually a position.
 
@@ -180,7 +180,7 @@ def correct_grant_to_position(entry: Dict) -> Dict:
     return entry
 
 
-def apply_grant_position_corrections(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
+def apply_grant_position_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
     """
     Apply grant→position corrections to all entries.
 

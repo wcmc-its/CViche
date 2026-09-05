@@ -54,7 +54,7 @@ class PublicationClassificationService:
             verbose=verbose
         )
 
-    def classify_publications_bulk(self, publications: List[Dict]) -> List[ClassificationResult]:
+    def classify_publications_bulk(self, publications: list[dict]) -> list[ClassificationResult]:
         """
         Classify a batch of publications efficiently.
 
@@ -132,7 +132,7 @@ class PublicationClassificationService:
 
         return results
 
-    def _store_classification_history(self, publication_id: str, input_payload: Dict, result: ClassificationResult):
+    def _store_classification_history(self, publication_id: str, input_payload: dict, result: ClassificationResult):
         """
         Record classification in history table.
 
@@ -186,7 +186,7 @@ class PublicationClassificationService:
                 print(f"  ⚠️  History storage error: {e}")
             # Don't fail classification if history fails
 
-    def _print_classification_stats(self, results: List[ClassificationResult]):
+    def _print_classification_stats(self, results: list[ClassificationResult]):
         """Print summary statistics."""
         print(f"\n{'='*80}")
         print(f"CLASSIFICATION RESULTS")
@@ -218,7 +218,7 @@ class PublicationClassificationService:
 
         print(f"{'='*80}\n")
 
-    def get_classification_performance(self, days: int = 7) -> Dict:
+    def get_classification_performance(self, days: int = 7) -> dict:
         """
         Get classification performance metrics for the last N days.
 
@@ -309,7 +309,7 @@ class PublicationClassificationService:
 # UTILITY FUNCTIONS
 # =============================================================================
 
-def get_classification_accuracy(db_connection, classifier_version: str) -> Dict:
+def get_classification_accuracy(db_connection, classifier_version: str) -> dict:
     """
     Calculate classification accuracy based on user corrections.
 

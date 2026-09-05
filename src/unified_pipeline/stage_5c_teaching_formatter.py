@@ -148,7 +148,7 @@ Now format the following raw content:
 RAW_CV>>>'''
 
 
-def build_raw_content(entries_by_k_code: Dict[str, List[Dict]]) -> Tuple[str, Dict[str, Dict]]:
+def build_raw_content(entries_by_k_code: dict[str, list[dict]]) -> tuple[str, dict[str, dict]]:
     """
     Build raw content string for LLM prompt and a mapping of entry IDs to entries.
 
@@ -229,7 +229,7 @@ def build_raw_content(entries_by_k_code: Dict[str, List[Dict]]) -> Tuple[str, Di
     return '\n'.join(lines), id_to_entry
 
 
-def parse_llm_output(llm_output: str, id_to_entry: Dict[str, Dict]) -> Dict[str, str]:
+def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict]) -> dict[str, str]:
     """
     Parse LLM formatted output and extract formatted text per entry ID.
 
@@ -327,7 +327,7 @@ def run_stage_5c(input_path: str, output_path: str = None, model: str = "gpt-4o-
         print(f"Document: {document_uid}")
 
     # Group entries by K-code
-    entries_by_k_code: Dict[str, List[Dict]] = {}
+    entries_by_k_code: dict[str, list[dict]] = {}
     for entry in entries:
         code = entry.get('taxonomy_code', '')
         if code in TEACHING_CODES:

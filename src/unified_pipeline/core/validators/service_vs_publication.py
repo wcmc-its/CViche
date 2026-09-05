@@ -58,7 +58,7 @@ class ServiceVsPublicationValidator(BaseValidator):
         r'\bdoi:',  # DOI
     ]
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to S (Bibliography) and Q (Professional Service)."""
         return ['S', 'Q']
 

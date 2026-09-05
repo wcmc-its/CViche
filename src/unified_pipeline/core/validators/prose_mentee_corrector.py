@@ -86,7 +86,7 @@ def _named_mentee(text: str) -> bool:
     return False
 
 
-def _correct(entry: Dict):
+def _correct(entry: dict):
     """Return (new_code, reason) or (None, None) if no correction applies."""
     code = entry.get("taxonomy_code", "") or ""
     if code not in _MENTEE_FROM:
@@ -105,7 +105,7 @@ def _correct(entry: Dict):
     return ("N3B" if is_past else "N3A"), "prose named-mentee under advising/mentoring section"
 
 
-def apply_prose_mentee_corrections(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
+def apply_prose_mentee_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
     """Apply prose named-mentee corrections in place. Returns (entries, stats)."""
     corrections_made = 0
     details = []

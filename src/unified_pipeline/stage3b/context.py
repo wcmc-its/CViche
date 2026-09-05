@@ -23,11 +23,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class TaxonomyContext:
     """Taxonomy suggestions for a hierarchy path."""
-    subsection: Optional[Dict] = None  # Most specific (H3)
-    section: Optional[Dict] = None      # Parent (H2)
-    meta_section: Optional[Dict] = None # Top-level (H1)
+    subsection: dict | None = None  # Most specific (H3)
+    section: dict | None = None      # Parent (H2)
+    meta_section: dict | None = None # Top-level (H1)
 
-    def get_primary_codes(self) -> List[str]:
+    def get_primary_codes(self) -> list[str]:
         """Get primary suggested codes from most specific level."""
         if self.subsection and self.subsection.get("taxonomy_options"):
             return [o["code"] for o in self.subsection["taxonomy_options"]]
@@ -37,7 +37,7 @@ class TaxonomyContext:
             return [o["code"] for o in self.meta_section["taxonomy_options"]]
         return []
 
-    def get_all_suggested_codes(self) -> List[str]:
+    def get_all_suggested_codes(self) -> list[str]:
         """Get ALL suggested codes from ALL hierarchy levels (for taxonomy filtering).
 
         Order matters: classify.py's `_classify_one_batch` falls back to
@@ -47,7 +47,7 @@ class TaxonomyContext:
         disturbing that order. A `set` iterates in an implementation-
         dependent order and would make that fallback code nondeterministic.
         """
-        codes: List[str] = []
+        codes: list[str] = []
         for level in (self.subsection, self.section, self.meta_section):
             if level and level.get("taxonomy_options"):
                 for o in level["taxonomy_options"]:
@@ -90,7 +90,7 @@ class TaxonomyContext:
         return "\n".join(lines) if lines else "  (No hierarchy context available)"
 
 
-def build_mapping_index(mappings: List[Dict], index: Dict = None, path: List[str] = None) -> Dict:
+def build_mapping_index(mappings: list[dict], index: dict = None, path: list[str] = None) -> dict:
     """
     Build an index from header title to taxonomy mapping.
 
@@ -128,7 +128,7 @@ def build_mapping_index(mappings: List[Dict], index: Dict = None, path: List[str
     return index
 
 
-def get_taxonomy_context(hierarchy: List[str], mapping_index: Dict) -> TaxonomyContext:
+def get_taxonomy_context(hierarchy: list[str], mapping_index: dict) -> TaxonomyContext:
     """
     Get taxonomy context for an entry's hierarchy path.
 

@@ -15,8 +15,8 @@ class GuidanceEngine:
     """
 
     def __init__(self):
-        self.validators: List[BaseValidator] = []
-        self._validators_by_parent: Dict[str, List[BaseValidator]] = {}
+        self.validators: list[BaseValidator] = []
+        self._validators_by_parent: dict[str, list[BaseValidator]] = {}
 
     def register_validator(self, validator: BaseValidator):
         """
@@ -42,7 +42,7 @@ class GuidanceEngine:
     def get_applicable_validators(
         self,
         parent_section_id: str
-    ) -> List[BaseValidator]:
+    ) -> list[BaseValidator]:
         """
         Get validators applicable to parent section.
 
@@ -67,7 +67,7 @@ class GuidanceEngine:
     def analyze_entries_for_guidance(
         self,
         parent_section_id: str,
-        entries: List[str],
+        entries: list[str],
         section_label: str = ""
     ) -> GuidanceResult:
         """
@@ -89,8 +89,8 @@ class GuidanceEngine:
             return GuidanceResult()
 
         # Collect guidance from all validators
-        all_guidance: List[ValidatorGuidance] = []
-        validators_applied: List[str] = []
+        all_guidance: list[ValidatorGuidance] = []
+        validators_applied: list[str] = []
 
         for validator in validators:
             # Check if validator has section-level analysis
@@ -122,8 +122,8 @@ class GuidanceEngine:
 
     def _combine_guidance(
         self,
-        all_guidance: List[ValidatorGuidance],
-        validators_applied: List[str]
+        all_guidance: list[ValidatorGuidance],
+        validators_applied: list[str]
     ) -> GuidanceResult:
         """
         Combine guidance from multiple validators.
@@ -200,7 +200,7 @@ def register_validator(validator: BaseValidator):
 
 def analyze_entries_for_guidance(
     parent_section_id: str,
-    entries: List[str],
+    entries: list[str],
     section_label: str = ""
 ) -> GuidanceResult:
     """

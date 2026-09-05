@@ -31,7 +31,7 @@ from ..normalization import _clean_inline_tabs, _strip_taxonomy_code
 class ResearcherProfilesSection:
     """Section S0 writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_researcher_profiles(self, s0_entries: List[Dict]):
+    def _fill_researcher_profiles(self, s0_entries: list[dict]):
         """Fill S0 researcher profile info (ORCID, Google Scholar, etc).
 
         Inserts right before "Peer-reviewed Research Articles" without a header.

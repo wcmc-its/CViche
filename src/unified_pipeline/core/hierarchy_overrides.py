@@ -16,9 +16,9 @@ from typing import Dict, List, Optional, Tuple
 def detect_cross_category_override(
     section_header: str,
     subsection_header: str,
-    hierarchy: List[str],
+    hierarchy: list[str],
     parent_code: str
-) -> Optional[Tuple[str, str, str]]:
+) -> tuple[str, str, str] | None:
     """
     Detect if a subsection should map to a different parent category than expected.
 
@@ -298,10 +298,10 @@ outcomes, they should stay in K (Teaching).
 def apply_hierarchy_overrides(
     section_header: str,
     subsection_header: str,
-    section_entries: List[Dict],
+    section_entries: list[dict],
     parent_code: str,
     parent_label: str
-) -> Tuple[str, str, Optional[str]]:
+) -> tuple[str, str, str | None]:
     """
     Apply hierarchy-based overrides to determine the correct parent code for a section.
 

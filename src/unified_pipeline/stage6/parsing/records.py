@@ -10,7 +10,7 @@ possible statement that they were never methods.
 """
 from typing import Dict
 
-def _is_orphan_fragment(fields: Dict, formatted_text: str, original_text: str) -> bool:
+def _is_orphan_fragment(fields: dict, formatted_text: str, original_text: str) -> bool:
     """True if a teaching entry is a stray sub-header rather than real content.
 
     Such fragments carry no date, audience, location, formatted_text, or title.
@@ -28,7 +28,7 @@ def _is_orphan_fragment(fields: Dict, formatted_text: str, original_text: str) -
             and not has_formatted and not has_title and len(original_text) < 80)
 
 
-def _is_mentee_record(entry: Dict) -> bool:
+def _is_mentee_record(entry: dict) -> bool:
     """True if the entry names a person, i.e. a per-mentee table can be built.
 
     N3A/N3B also carry aggregate summaries ("Ph.D. Graduated: 38") that name no
@@ -38,7 +38,7 @@ def _is_mentee_record(entry: Dict) -> bool:
     return bool((fields.get('name') or fields.get('mentee_name') or '').strip())
 
 
-def _is_mentoring_outcome(entry: Dict) -> bool:
+def _is_mentoring_outcome(entry: dict) -> bool:
     """True if the entry is N4 mentoring-outcome narrative.
 
     _correct_mismatch_if_needed rewrites an unmapped N4 to N3A, stashing the

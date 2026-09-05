@@ -30,7 +30,7 @@ CACHE_FILE = Path(__file__).parent.parent / "config" / "institution_cache.json"
 OLD_CACHE_FILE = Path(__file__).parent.parent / "config" / "ror_cache.json"
 
 # Global cache for institution lookups
-INSTITUTION_CACHE: Dict[str, Optional[Dict]] = {}
+INSTITUTION_CACHE: dict[str, dict | None] = {}
 
 
 def load_institution_cache():
@@ -105,7 +105,7 @@ def lookup(cache_key: str, raw_key: str = None):
     return False, None
 
 
-def set_cached(key: str, value: Optional[Dict]) -> None:
+def set_cached(key: str, value: dict | None) -> None:
     INSTITUTION_CACHE[key] = value
 
 

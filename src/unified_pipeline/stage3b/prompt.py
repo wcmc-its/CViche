@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def build_taxonomy_codes_for_prompt(
-    taxonomy: Dict,
+    taxonomy: dict,
     relevant_codes_or_families: Collection[str] | None = None,
     context_codes: Collection[str] | None = None
 ) -> str:

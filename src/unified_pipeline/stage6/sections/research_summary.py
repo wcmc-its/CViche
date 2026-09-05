@@ -39,7 +39,7 @@ except ImportError as exc:
 class ResearchSummarySection:
     """Section M1 writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_research_summary(self, research_summary_data: Optional[Dict]) -> bool:
+    def _fill_research_summary(self, research_summary_data: dict | None) -> bool:
         """Fill Research Summary section from Stage 4.5 output.
 
         Inserts a RESEARCH SUMMARY section before RESEARCH SUPPORT with

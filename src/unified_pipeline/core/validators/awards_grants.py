@@ -23,7 +23,7 @@ class AwardsGrantsValidator(BaseValidator):
 
     name = "AwardsGrantsValidator"
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """This validator helps distinguish between M (Research) and H (Honors)."""
         return ['research', 'honors_awards']
 
@@ -31,7 +31,7 @@ class AwardsGrantsValidator(BaseValidator):
         """Medium priority - runs after specialized validators."""
         return 50
 
-    def analyze(self, entry_text: str) -> Optional[ValidatorGuidance]:
+    def analyze(self, entry_text: str) -> ValidatorGuidance | None:
         """Per-entry analysis - use analyze_section for better results."""
         # This validator is designed for section-level analysis
         # Return None for per-entry calls
@@ -105,8 +105,8 @@ class AwardsGrantsValidator(BaseValidator):
     def analyze_section(
         self,
         section_label: str,
-        entries: List[str]
-    ) -> Optional[ValidatorGuidance]:
+        entries: list[str]
+    ) -> ValidatorGuidance | None:
         """
         Analyze a section that might contain awards/grants/honors.
 
@@ -215,7 +215,7 @@ class AwardsGrantsValidator(BaseValidator):
     def _classify_award_entry(
         self,
         text: str,
-        section_hint: Optional[str] = None
+        section_hint: str | None = None
     ) -> tuple:
         """
         Classify a single entry as GRANT or HONOR using deterministic cascade.

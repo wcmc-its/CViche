@@ -18,13 +18,13 @@ class ValidatorGuidance:
     Guidance provided by a validator to narrow classification options.
     """
     # Sections to exclude from consideration
-    exclude_sections: List[str] = field(default_factory=list)
+    exclude_sections: list[str] = field(default_factory=list)
 
     # Sections to recommend (narrowed options)
-    recommend_sections: List[str] = field(default_factory=list)
+    recommend_sections: list[str] = field(default_factory=list)
 
     # Hints/explanations for LLM prompt
-    hints: List[str] = field(default_factory=list)
+    hints: list[str] = field(default_factory=list)
 
     # Confidence in this guidance (0.0-1.0)
     confidence: float = 0.0
@@ -36,13 +36,13 @@ class ValidatorGuidance:
     allow_override: bool = True
 
     # Reasons for exclusions (section_id -> reason)
-    exclusion_reasons: Dict[str, str] = field(default_factory=dict)
+    exclusion_reasons: dict[str, str] = field(default_factory=dict)
 
     # Deterministic signals detected (for logging)
-    deterministic_signals: List[str] = field(default_factory=list)
+    deterministic_signals: list[str] = field(default_factory=list)
 
     @classmethod
-    def no_guidance(cls) -> 'ValidatorGuidance':
+    def no_guidance(cls) -> ValidatorGuidance:
         """Return empty guidance (no signals detected)."""
         return cls()
 
@@ -61,28 +61,28 @@ class GuidanceResult:
     Combined guidance from all applicable validators.
     """
     # Narrowed subsection options
-    recommended_subsections: List[str] = field(default_factory=list)
+    recommended_subsections: list[str] = field(default_factory=list)
 
     # Sections to exclude
-    excluded_subsections: List[str] = field(default_factory=list)
+    excluded_subsections: list[str] = field(default_factory=list)
 
     # Reasons for exclusions
-    exclusion_reasons: Dict[str, str] = field(default_factory=dict)
+    exclusion_reasons: dict[str, str] = field(default_factory=dict)
 
     # Hints for LLM prompt
-    hints: List[str] = field(default_factory=list)
+    hints: list[str] = field(default_factory=list)
 
     # Overall confidence in guidance (0.0-1.0)
     confidence_in_guidance: float = 0.0
 
     # Deterministic signals detected
-    deterministic_signals: List[str] = field(default_factory=list)
+    deterministic_signals: list[str] = field(default_factory=list)
 
     # Can LLM override this guidance?
     allow_override: bool = True
 
     # Validator IDs that contributed
-    validators_applied: List[str] = field(default_factory=list)
+    validators_applied: list[str] = field(default_factory=list)
 
     def has_guidance(self) -> bool:
         """Check if any guidance was provided."""
@@ -102,7 +102,7 @@ class BaseValidator(ABC):
     """
 
     @abstractmethod
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """
         Which parent sections this validator checks.
 

@@ -102,7 +102,7 @@ class LegacyExtractorOrchestrator:
 
         return cv_id
 
-    def determine_extractors_to_run(self) -> Set[str]:
+    def determine_extractors_to_run(self) -> set[str]:
         """
         Determine which extractors to run based on wcm_section_types in classified data.
 
@@ -112,7 +112,7 @@ class LegacyExtractorOrchestrator:
         section_ids = set()
 
         # Recursively find all wcm_section_types
-        def find_types(group: Dict) -> Set[str]:
+        def find_types(group: dict) -> set[str]:
             types = set()
             wcm_type = group.get('wcm_section_type')
             if wcm_type:
@@ -170,7 +170,7 @@ class LegacyExtractorOrchestrator:
 
         return False
 
-    def _run_extractor(self, section_id: str) -> Dict[str, Any]:
+    def _run_extractor(self, section_id: str) -> dict[str, Any]:
         """
         Run a single extractor script.
 
@@ -262,7 +262,7 @@ class LegacyExtractorOrchestrator:
 
         return result
 
-    def run_all_extractors(self, max_workers: int = 5) -> Dict[str, Any]:
+    def run_all_extractors(self, max_workers: int = 5) -> dict[str, Any]:
         """
         Run all relevant extractors in parallel.
 
@@ -350,7 +350,7 @@ class LegacyExtractorOrchestrator:
             'results': results
         }
 
-    async def run_all_extractors_async(self, max_workers: int = 10) -> Dict[str, Any]:
+    async def run_all_extractors_async(self, max_workers: int = 10) -> dict[str, Any]:
         """
         Async wrapper for run_all_extractors.
 
@@ -365,7 +365,7 @@ def run_legacy_extractors(
     output_dir: Path,
     max_workers: int = 10,
     verbose: bool = True
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Convenience function to run legacy extractors.
 

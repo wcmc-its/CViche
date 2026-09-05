@@ -81,7 +81,7 @@ INVITED_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in INVITED_TALK_
 S8_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in S8_PATTERNS]
 
 
-def is_invited_talk(text: str) -> Tuple[bool, str]:
+def is_invited_talk(text: str) -> tuple[bool, str]:
     """Check if text indicates an invited talk."""
     for pattern in INVITED_PATTERNS_COMPILED:
         match = pattern.search(text)
@@ -98,7 +98,7 @@ def is_contributed_abstract(text: str) -> bool:
     return False
 
 
-def correct_invited_talk(entry: Dict) -> Dict:
+def correct_invited_talk(entry: dict) -> dict:
     """
     Correct S8 to R if the entry is an invited talk at a conference.
 
@@ -134,7 +134,7 @@ def correct_invited_talk(entry: Dict) -> Dict:
     return entry
 
 
-def apply_invited_talk_corrections(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
+def apply_invited_talk_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
     """
     Apply invited talk corrections to all entries.
 

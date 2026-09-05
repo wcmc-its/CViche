@@ -82,7 +82,7 @@ def _employment_row_key(label: str) -> str | None:
 class PassthroughSection:
     """Section E and G writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_passthrough_sections(self, all_entries: List[Dict]):
+    def _fill_passthrough_sections(self, all_entries: list[dict]):
         """Fill sections that can be copied directly from source CV when format matches.
 
         These are short, structured sections in the WCM template that may already exist
@@ -100,7 +100,7 @@ class PassthroughSection:
         self._fill_employment_status(all_entries)
         self._fill_hospital_affiliation(all_entries)
 
-    def _fill_employment_status(self, all_entries: List[Dict]):
+    def _fill_employment_status(self, all_entries: list[dict]):
         """Fill E. EMPLOYMENT STATUS section.
 
         Looks for entries with hierarchy containing 'EMPLOYMENT STATUS' and
@@ -194,7 +194,7 @@ class PassthroughSection:
             return True
         return False
 
-    def _fill_hospital_affiliation(self, all_entries: List[Dict]):
+    def _fill_hospital_affiliation(self, all_entries: list[dict]):
         """Fill G. INSTITUTIONAL/HOSPITAL AFFILIATION section.
 
         Looks for dedicated hospital affiliation entries or extracts from D2 positions.

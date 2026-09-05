@@ -65,7 +65,7 @@ D3_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in D3_POSITION_PATTER
 D1_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in D1_POSITION_PATTERNS]
 
 
-def is_d3_position(text: str) -> Tuple[bool, str]:
+def is_d3_position(text: str) -> tuple[bool, str]:
     """Check if text indicates a D3 (non-faculty) position."""
     for pattern in D3_PATTERNS_COMPILED:
         match = pattern.search(text)
@@ -74,7 +74,7 @@ def is_d3_position(text: str) -> Tuple[bool, str]:
     return False, ""
 
 
-def is_d1_position(text: str) -> Tuple[bool, str]:
+def is_d1_position(text: str) -> tuple[bool, str]:
     """Check if text indicates a D1 (faculty) position."""
     for pattern in D1_PATTERNS_COMPILED:
         match = pattern.search(text)
@@ -83,7 +83,7 @@ def is_d1_position(text: str) -> Tuple[bool, str]:
     return False, ""
 
 
-def correct_adjunct_position(entry: Dict) -> Dict:
+def correct_adjunct_position(entry: dict) -> dict:
     """
     Correct D1 to D3 if the position is adjunct/instructor at non-faculty level.
 
@@ -120,7 +120,7 @@ def correct_adjunct_position(entry: Dict) -> Dict:
     return entry
 
 
-def apply_adjunct_position_corrections(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
+def apply_adjunct_position_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
     """
     Apply adjunct position corrections to all entries.
 

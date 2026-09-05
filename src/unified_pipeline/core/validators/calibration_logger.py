@@ -22,7 +22,7 @@ def ensure_logs_dir():
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-def log_classification_event(result: Dict):
+def log_classification_event(result: dict):
     """
     Log every classification for later calibration analysis.
 
@@ -55,7 +55,7 @@ def log_classification_event(result: Dict):
         f.write(json.dumps(event) + '\n')
 
 
-def log_calibration_issue(llm_result: Dict, validation_check: Dict):
+def log_calibration_issue(llm_result: dict, validation_check: dict):
     """
     Log when LLM has high confidence but violates clear rules.
 
@@ -86,9 +86,9 @@ def log_calibration_issue(llm_result: Dict, validation_check: Dict):
 
 def log_validation_event(
     event_type: str,
-    llm_result: Dict,
-    guidance: Dict,
-    validation_check: Dict
+    llm_result: dict,
+    guidance: dict,
+    validation_check: dict
 ):
     """
     Log validation events for monitoring.

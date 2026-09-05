@@ -227,7 +227,7 @@ def convert_unified_to_classified(
     mapped_file: Path,
     output_file: Path,
     verbose: bool = True
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Convert unified Stage 1+2 output to legacy classified format.
 
@@ -273,7 +273,7 @@ def convert_unified_to_classified(
             }
 
     # Recursively add wcm_section_type to all groups
-    def classify_group(group: Dict) -> Dict:
+    def classify_group(group: dict) -> dict:
         """Add wcm_section_type to a group and its subgroups."""
         group_id = group.get('id')  # Segmented data uses 'id' not 'group_id'
 
@@ -308,7 +308,7 @@ def convert_unified_to_classified(
     sections = segmented_data.get('groups', [])
 
     # Flatten the hierarchy - extract all subgroups as top-level groups
-    def flatten_groups(group: Dict) -> List[Dict]:
+    def flatten_groups(group: dict) -> list[dict]:
         """Recursively flatten group hierarchy."""
         # Make a copy to avoid mutating original
         import copy
@@ -366,7 +366,7 @@ def convert_unified_to_classified(
     return classified_data
 
 
-def extract_cv_owner_from_classified(classified_data: Dict) -> str:
+def extract_cv_owner_from_classified(classified_data: dict) -> str:
     """
     Extract CV owner name from classified data.
 
@@ -375,7 +375,7 @@ def extract_cv_owner_from_classified(classified_data: Dict) -> str:
     Returns:
         Name in "LastName, FirstName" format, or empty string
     """
-    def find_name_in_group(group: Dict) -> str:
+    def find_name_in_group(group: dict) -> str:
         """Recursively search for name in group."""
         # Check if this is a personal data group
         wcm_type = group.get('wcm_section_type', '')

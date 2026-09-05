@@ -42,7 +42,7 @@ class StepDefinition:
 # (enforced by test_step_registry_contract.py, see module docstring above).
 # Weights and estimated_seconds based on empirical observation (~8 min total processing)
 # Total weight = 100, distributed proportionally to typical duration
-STEP_REGISTRY: Tuple[StepDefinition, ...] = (
+STEP_REGISTRY: tuple[StepDefinition, ...] = (
     StepDefinition(
         number=1,
         stage_id='1a',
@@ -174,7 +174,7 @@ STEP_REGISTRY: Tuple[StepDefinition, ...] = (
 )
 
 
-def validate_registry(steps: Tuple[StepDefinition, ...]) -> None:
+def validate_registry(steps: tuple[StepDefinition, ...]) -> None:
     """Fail fast on a malformed registry.
 
     Checks the invariants documented on STEP_REGISTRY above: stage_id and
@@ -227,7 +227,7 @@ def get_step_by_stage_id(stage_id: str) -> StepDefinition:
     raise ValueError(f"Unknown stage ID: {stage_id}")
 
 
-def get_stage_order() -> List[str]:
+def get_stage_order() -> list[str]:
     """Return ordered list of stage IDs."""
     return [step.stage_id for step in STEP_REGISTRY]
 
@@ -246,7 +246,7 @@ class StepWeights(TypedDict):
     can validate the response instead of treating it as an untyped dict."""
     total_weight: float
     total_estimated_seconds: int
-    steps: Dict[str, StepWeightEntry]
+    steps: dict[str, StepWeightEntry]
 
 
 def get_step_weights() -> StepWeights:
@@ -254,7 +254,7 @@ def get_step_weights() -> StepWeights:
     total_weight = sum(step.weight for step in STEP_REGISTRY)
     total_estimated_seconds = sum(step.estimated_seconds for step in STEP_REGISTRY)
 
-    steps: Dict[str, StepWeightEntry] = {}
+    steps: dict[str, StepWeightEntry] = {}
     cumulative_weight_before = 0.0
     for step in STEP_REGISTRY:
         # Running total, not sum(STEP_REGISTRY[:i]) recomputed per stage:

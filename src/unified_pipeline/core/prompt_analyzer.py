@@ -37,7 +37,7 @@ class PromptAnalyzer:
         self.responses = []
         self.prompt_response_pairs = []
 
-    def load_logs(self, purpose_filter: Optional[str] = None) -> int:
+    def load_logs(self, purpose_filter: str | None = None) -> int:
         """
         Load all prompt logs from directory.
 
@@ -89,7 +89,7 @@ class PromptAnalyzer:
 
         return len(self.prompts)
 
-    def analyze_by_purpose(self) -> Dict:
+    def analyze_by_purpose(self) -> dict:
         """Analyze prompts grouped by purpose."""
         by_purpose = defaultdict(list)
 
@@ -108,7 +108,7 @@ class PromptAnalyzer:
 
         return stats
 
-    def analyze_token_usage(self) -> Dict:
+    def analyze_token_usage(self) -> dict:
         """Analyze token usage patterns from responses."""
         if not self.responses:
             return {}
@@ -143,7 +143,7 @@ class PromptAnalyzer:
             'by_purpose': dict(by_purpose)
         }
 
-    def find_low_confidence_patterns(self, threshold: float = 0.7) -> List[Dict]:
+    def find_low_confidence_patterns(self, threshold: float = 0.7) -> list[dict]:
         """
         Find patterns in low-confidence results.
 
@@ -180,7 +180,7 @@ class PromptAnalyzer:
 
         return sorted(low_confidence_cases, key=lambda x: x['confidence'])
 
-    def find_parse_errors(self) -> List[Dict]:
+    def find_parse_errors(self) -> list[dict]:
         """Find prompts that resulted in parse errors or malformed responses."""
         errors = []
 
@@ -238,7 +238,7 @@ class PromptAnalyzer:
 
         return errors
 
-    def analyze_prompt_length_vs_quality(self) -> Dict:
+    def analyze_prompt_length_vs_quality(self) -> dict:
         """Analyze correlation between prompt length and result quality."""
         length_buckets = {
             'short': {'range': (0, 1000), 'confidences': [], 'count': 0},
@@ -281,7 +281,7 @@ class PromptAnalyzer:
 
         return stats
 
-    def generate_report(self, min_confidence: Optional[float] = None, show_failures: bool = False) -> str:
+    def generate_report(self, min_confidence: float | None = None, show_failures: bool = False) -> str:
         """Generate comprehensive analysis report."""
         report = []
         report.append("=" * 80)

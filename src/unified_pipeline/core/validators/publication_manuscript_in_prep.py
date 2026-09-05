@@ -31,7 +31,7 @@ class ManuscriptInPrepValidator(BaseValidator):
 
     name = "ManuscriptInPrepValidator"
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """This validator applies to publication sections."""
         return ['S', 'bibliography']
 
