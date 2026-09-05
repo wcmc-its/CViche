@@ -24,7 +24,6 @@ scorer names, all of which already live outside `run_doctor.py`. Nothing moved
 to `doctor.shared`. Bodies are unmodified; `run_doctor` re-exports the name it
 exported before.
 """
-from typing import Dict, List
 
 from unified_pipeline.quality_score import FATAL_ERROR_PATTERN, iter_error_fields
 

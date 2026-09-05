@@ -22,7 +22,6 @@ because these entries arrive from the classifier still carrying their "S0:"
 prefix more often than most -- an identifier line is short enough that the code
 is a visible fraction of it.
 """
-from typing import Dict, List
 
 from ..formatting import _set_font
 from ..normalization import _clean_inline_tabs, _strip_taxonomy_code

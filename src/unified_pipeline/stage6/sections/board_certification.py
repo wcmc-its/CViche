@@ -50,7 +50,7 @@ unambiguous, independent of why the row came up short.
 """
 import logging
 import re
-from typing import Dict, List, Literal, Optional
+from typing import Literal
 
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from ..sorting import sort_entries_reverse_chronological
@@ -84,7 +84,7 @@ _HAS_LETTER = re.compile(r'[A-Za-z]')
 # misclassified as a certification year (#625 thread 3850184512).
 _MOC_TOKEN_PATTERN = re.compile(r'^MOC(?:[\s:.\-]*\d{4})?$', re.IGNORECASE)
 
-CertTokenType = Optional[Literal['year', 'cert_number', 'specialty']]
+CertTokenType = Literal['year', 'cert_number', 'specialty'] | None
 
 
 def _classify_cert_token(token: str) -> CertTokenType:

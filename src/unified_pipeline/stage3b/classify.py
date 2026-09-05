@@ -17,7 +17,6 @@ stage3b module.
 import json
 import logging
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Set, Tuple
 
 from ..llm_client import call_llm
 from .context import TaxonomyContext

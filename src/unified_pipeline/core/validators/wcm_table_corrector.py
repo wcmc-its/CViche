@@ -28,7 +28,6 @@ codes are made to agree with how the content is ultimately laid out.
 """
 
 import re
-from typing import List, Dict, Tuple
 
 # --- detection signatures ---------------------------------------------------
 _MENTEE_PERIOD = re.compile(r"mentoring\s*period", re.I)

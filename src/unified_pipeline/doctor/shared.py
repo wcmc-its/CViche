@@ -10,7 +10,7 @@ line -- run_doctor and every lint module depend on this, and it depends on
 neither.
 """
 import re
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import NamedTuple
 
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.segmentation_regression import _norm, _squash

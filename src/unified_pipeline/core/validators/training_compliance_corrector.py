@@ -15,7 +15,6 @@ Rule: Required institutional trainings and compliance courses are B2,
 """
 
 import re
-from typing import Dict, List, Tuple
 
 
 # Patterns indicating B2 (training/compliance courses)

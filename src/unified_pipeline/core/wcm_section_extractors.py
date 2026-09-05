@@ -18,7 +18,6 @@ Usage:
 
 import sys
 from pathlib import Path
-from typing import Dict, Optional, List
 from collections.abc import Callable
 from dataclasses import dataclass
 

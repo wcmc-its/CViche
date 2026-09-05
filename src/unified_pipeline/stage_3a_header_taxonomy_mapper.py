@@ -15,7 +15,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 # Add parent to path for imports

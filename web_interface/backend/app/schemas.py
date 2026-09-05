@@ -1,6 +1,6 @@
 """Pydantic schemas for API request/response validation."""
 from pydantic import BaseModel, PlainSerializer
-from typing import Optional, List, Annotated, Literal
+from typing import Annotated, Literal
 from datetime import datetime
 
 

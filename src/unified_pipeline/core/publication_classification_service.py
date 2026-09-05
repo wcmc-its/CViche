@@ -11,7 +11,6 @@ Date: 2025-11-09
 
 import hashlib
 import json
-from typing import List, Dict, Optional
 from datetime import datetime
 
 from .bulk_pubmed_fetcher import BulkPubMedFetcher

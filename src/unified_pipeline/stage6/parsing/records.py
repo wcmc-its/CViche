@@ -8,7 +8,6 @@ writer can route it without re-deriving the taxonomy rules inline.
 All three were `@staticmethod` on the generator already, which is the clearest
 possible statement that they were never methods.
 """
-from typing import Dict
 
 def _is_orphan_fragment(fields: dict, formatted_text: str, original_text: str) -> bool:
     """True if a teaching entry is a stray sub-header rather than real content.

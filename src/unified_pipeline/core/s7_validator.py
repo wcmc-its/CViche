@@ -9,7 +9,6 @@ This validator implements hard validation rules to prevent S7 misclassification.
 """
 
 import re
-from typing import Dict, List, Tuple, Optional
 
 
 # Known published indicators

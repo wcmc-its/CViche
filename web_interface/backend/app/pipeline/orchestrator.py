@@ -17,7 +17,7 @@ import threading
 import io
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)

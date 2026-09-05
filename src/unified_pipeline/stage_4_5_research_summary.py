@@ -17,7 +17,6 @@ import re
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
 
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_4_5_research_summary"

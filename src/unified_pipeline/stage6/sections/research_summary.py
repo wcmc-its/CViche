@@ -26,7 +26,6 @@ The floor is 50 characters rather than a word count because the failure it
 catches is a stub -- an empty string, a header echo, a refusal -- not a short
 but real summary.
 """
-from typing import Dict, Optional
 
 try:
     from docx.shared import Pt

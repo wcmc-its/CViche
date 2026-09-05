@@ -18,7 +18,6 @@ Output: Hierarchy with element indices (the "fenceposts" for sections)
 import sys
 import json
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
 
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))

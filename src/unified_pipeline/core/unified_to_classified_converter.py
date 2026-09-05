@@ -16,7 +16,7 @@ Output:
 
 import json
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Any
 
 
 # Map unified taxonomy IDs to legacy wcm_section_type values

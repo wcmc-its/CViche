@@ -14,7 +14,6 @@ Solution: Detect mixed content and provide guidance to LLM.
 """
 
 import re
-from typing import List, Dict
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

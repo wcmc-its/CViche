@@ -4,7 +4,6 @@ Validation Checker - Post-Validation Safety Net
 Checks if LLM violated guidance rules after classification.
 """
 
-from typing import Dict, List
 from .base_validator import GuidanceResult
 
 

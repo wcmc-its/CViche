@@ -9,7 +9,6 @@ The key is total on purpose. A record with no parseable date sorts to (0, 0, 0)
 a section that raises mid-render loses the whole document.
 """
 from collections.abc import Mapping
-from typing import Dict, List
 
 from ..parsing.dates import _parse_date_components
 

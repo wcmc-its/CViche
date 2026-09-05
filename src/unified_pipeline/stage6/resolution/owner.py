@@ -5,7 +5,6 @@ needed to auto-fill PI fields, and it may arrive as a structured record, or only
 as a document uid like "2015_Wende", or not at all.
 """
 import re
-from typing import Dict
 
 
 def _get_cv_owner_name(cv_owner: dict = None, document_uid: str = '') -> str:

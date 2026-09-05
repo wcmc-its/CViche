@@ -20,7 +20,6 @@ header could disturb downstream structure.
 import json
 import re
 from pathlib import Path
-from typing import List
 
 # Resolve the JSON relative to THIS file so it works regardless of cwd.
 _JSON_PATH = Path(__file__).resolve().parent / "template_boilerplate_phrases.json"

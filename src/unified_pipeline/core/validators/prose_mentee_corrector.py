@@ -29,7 +29,6 @@ already N3A/N3B by the time this runs.
 """
 
 import re
-from typing import List, Dict, Tuple
 
 # --- section signal ---------------------------------------------------------
 # The entry must sit under an advising/mentoring section. Same keyword family

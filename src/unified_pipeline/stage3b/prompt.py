@@ -10,7 +10,6 @@ slot. Changing a byte of either changes what the model sees on every batch;
 
 import logging
 from collections.abc import Collection
-from typing import Dict
 
 logger = logging.getLogger(__name__)
 

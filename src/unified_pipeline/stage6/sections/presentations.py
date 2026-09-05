@@ -23,7 +23,6 @@ and the `start_date` fallback; a literal "None" in the year column is worse than
 a blank one. A title-less entry falls back to its first 150 characters of raw
 text.
 """
-from typing import Dict, List
 
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from ..sorting import sort_entries_reverse_chronological

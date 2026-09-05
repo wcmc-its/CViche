@@ -14,7 +14,6 @@ import sys
 import json
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
 from collections.abc import Callable
 from docx import Document
 

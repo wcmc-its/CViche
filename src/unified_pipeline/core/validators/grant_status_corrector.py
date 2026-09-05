@@ -12,7 +12,6 @@ Solution: Parse date ranges from grant text and compare to current date.
 
 import re
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
 
 
 # Current year for comparison

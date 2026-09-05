@@ -12,7 +12,6 @@ fused-multi-record threshold) because "is this a fused blob" is the same
 question both answer. Nothing here may import `stage_6_word_template`.
 """
 import re
-from typing import Dict, List, Optional
 
 from .normalization import _squash
 from .parsing import _dates_overlap_or_match

@@ -6,7 +6,6 @@ Critical for entries like "Research Fellow" or "Postdoctoral Fellow" that could 
 """
 
 import re
-from typing import List
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

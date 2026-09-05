@@ -10,7 +10,6 @@ Based on ChatGPT feedback for CV 2036 Hoffman:
 - Rule 10: "MENTEES" in group label → N3/N4, not D/K
 """
 
-from typing import Dict, List
 import re
 
 try:

@@ -14,7 +14,6 @@ This validator runs POST-classification and AUTO-CORRECTS misclassifications.
 """
 
 import re
-from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 
 try:

@@ -23,7 +23,6 @@ name needed to move to `doctor.shared`: nothing in this domain is used by
 another. Bodies are unmodified; `run_doctor` re-exports every name it exported
 before.
 """
-from typing import Dict, List, Optional
 
 from unified_pipeline.quality_score import cv_owner_name_missing
 

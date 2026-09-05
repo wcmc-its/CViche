@@ -12,7 +12,6 @@ and prevent research resources from being misclassified.
 """
 
 import re
-from typing import List, Dict, Optional, Tuple
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

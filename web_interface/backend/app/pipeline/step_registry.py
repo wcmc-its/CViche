@@ -22,7 +22,7 @@ adding/reordering/removing a stage without the other fails that test instead
 of silently drifting progress reporting.
 """
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, TypedDict
+from typing import TypedDict
 
 
 @dataclass(frozen=True, slots=True)

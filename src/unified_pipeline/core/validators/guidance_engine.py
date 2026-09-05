@@ -5,7 +5,6 @@ Orchestrates all validators to provide combined guidance
 for classification narrowing before LLM sees entries.
 """
 
-from typing import List, Dict, Optional
 from .base_validator import BaseValidator, ValidatorGuidance, GuidanceResult
 
 

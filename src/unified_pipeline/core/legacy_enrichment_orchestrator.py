@@ -19,7 +19,7 @@ Date: November 4, 2025
 import json
 import sys
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any
 
 # Add legacy scripts to path
 LEGACY_SCRIPTS_DIR = Path(__file__).parent.parent.parent / "legacy" / "stage_based_extraction" / "scripts" / "production"

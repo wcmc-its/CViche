@@ -24,7 +24,6 @@ Signals for COMMITTEE (not position):
 """
 
 import re
-from typing import List, Dict, Tuple
 from dataclasses import dataclass
 
 try:

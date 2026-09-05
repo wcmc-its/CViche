@@ -13,7 +13,6 @@ Rule: If the teaching entry contains leadership signals (Director,
 """
 
 import re
-from typing import Dict, List, Tuple
 
 
 # Leadership signals that indicate K3 (program leadership) not K1 (didactic)

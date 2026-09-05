@@ -11,7 +11,6 @@ plus, in the first case, whether it came from enrichment, because an enriched
 value is rendered as a tracked change and an extracted one is not.
 """
 import re
-from typing import Dict, List, Tuple
 
 
 def _get_institution_location(entry: dict) -> tuple[str, bool]:

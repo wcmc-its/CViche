@@ -22,7 +22,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any
 from docx import Document
 
 from unified_pipeline.llm_client import call_llm

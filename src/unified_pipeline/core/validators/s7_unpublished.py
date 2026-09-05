@@ -8,7 +8,6 @@ Rule: If DOI/PMID present → NOT unpublished
 """
 
 import re
-from typing import List
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

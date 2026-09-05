@@ -15,7 +15,6 @@ Position-Aware: Considers section position in document.
 import re
 import json
 from pathlib import Path
-from typing import List, Dict, Set, Tuple, Optional
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

@@ -15,7 +15,6 @@ module-global. `_magnitude_severity` is shared with the extraction domain and
 stays in `doctor.shared`. Bodies are unmodified; `run_doctor` re-exports every
 name it exported before.
 """
-from typing import Dict, List
 
 from unified_pipeline.segmentation_regression import (
     _norm,

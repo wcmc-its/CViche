@@ -16,7 +16,6 @@ These may be CORRECT (content overrides hierarchy), but warrant review.
 """
 
 import re
-from typing import Dict, List, Tuple, Optional
 
 
 # Map hierarchy keywords to expected taxonomy code families

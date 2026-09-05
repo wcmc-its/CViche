@@ -34,7 +34,6 @@ Percent effort is deliberately absent. It is in the same part of the template
 and looks like it belongs, but it is filled by hand.
 """
 import logging
-from typing import Dict, List
 
 from ..formatting import _clear_table_data, _set_font
 from ..normalization import _squash

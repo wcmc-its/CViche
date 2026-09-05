@@ -18,7 +18,6 @@ Everything else is P (or Q2 if external).
 """
 
 import re
-from typing import Dict, List, Tuple
 
 
 # Patterns that indicate TRUE executive leadership (should stay O)

@@ -15,7 +15,6 @@ Rule: D1 = Faculty OR research staff positions at academic institutions
 """
 
 import re
-from typing import Dict, List, Tuple
 
 
 # Patterns indicating D3 (non-faculty positions)

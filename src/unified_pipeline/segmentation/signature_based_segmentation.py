@@ -15,7 +15,7 @@ Key insight: Let the LLM classify ~10-20 format signature groups, not 200+ parag
 import json
 import hashlib
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Any
 from dataclasses import dataclass, asdict
 from docx import Document
 from docx.shared import RGBColor, Pt

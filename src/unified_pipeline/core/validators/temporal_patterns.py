@@ -7,7 +7,6 @@ Critical for distinguishing one-time events from ongoing activities.
 
 import re
 from datetime import datetime
-from typing import List, Optional, Tuple
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

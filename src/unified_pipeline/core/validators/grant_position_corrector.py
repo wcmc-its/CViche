@@ -20,7 +20,6 @@ Detection logic:
 """
 
 import re
-from typing import Dict, List, Tuple
 
 
 # Patterns that indicate position/leadership (should NOT be M2A/M2B)

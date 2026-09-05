@@ -26,7 +26,6 @@ import json
 import re
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import List, Dict, Tuple, Set
 
 _STRINGS_PATH = Path(__file__).with_name("wcm_template_scaffold_strings.json")
 _FUZZY_MIN_LEN = 30      # only fuzzy-match longer instruction sentences

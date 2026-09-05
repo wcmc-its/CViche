@@ -30,7 +30,7 @@ import time
 import requests
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any
 from datetime import datetime
 
 logger = logging.getLogger(__name__)

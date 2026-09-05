@@ -10,7 +10,6 @@ Distinguishes:
 Based on ChatGPT feedback - Rule 5 (high confusion risk area)
 """
 
-from typing import Dict, List
 
 try:
     from .base_validator import BaseValidator, ValidatorGuidance

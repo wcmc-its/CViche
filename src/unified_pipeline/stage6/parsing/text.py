@@ -17,7 +17,7 @@ separate, mechanical follow-up.
 """
 import logging
 import re
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 

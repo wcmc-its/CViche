@@ -12,7 +12,6 @@ that were unmapped or misclassified.
 """
 
 import re
-from typing import List, Dict
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

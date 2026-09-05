@@ -10,7 +10,6 @@ Examples:
 """
 
 import re
-from typing import Dict, List, Optional, Tuple
 
 
 def detect_cross_category_override(

@@ -6,7 +6,6 @@ instead of S1 (published original research).
 """
 
 import re
-from typing import List
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

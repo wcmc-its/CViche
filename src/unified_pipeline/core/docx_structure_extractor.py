@@ -10,7 +10,7 @@ This is significantly cheaper and faster than vision-based approaches.
 
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any
 from docx import Document
 from docx.shared import RGBColor, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH

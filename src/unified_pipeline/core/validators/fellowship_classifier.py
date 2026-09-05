@@ -12,7 +12,6 @@ Based on Haendel CV analysis showing 0.85 confidence is correct <50% of time.
 """
 
 import re
-from typing import Dict, List
 
 try:
     from .base_validator import BaseValidator, ValidatorGuidance

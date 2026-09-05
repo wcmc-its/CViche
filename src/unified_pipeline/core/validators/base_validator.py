@@ -9,7 +9,6 @@ All validators must inherit from BaseValidator and implement:
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
 
 
 @dataclass

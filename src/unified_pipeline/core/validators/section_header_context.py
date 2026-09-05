@@ -6,7 +6,6 @@ Critical for disambiguating entries that appear in unexpected sections.
 """
 
 import re
-from typing import List, Set
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

@@ -19,7 +19,6 @@ Cost estimate: ~$0.05-$0.15 per CV for most CVs, ~$0.30-$0.50 for very large CVs
 
 import os
 import sys
-from typing import List, Dict, Tuple
 from dataclasses import dataclass, field
 from unified_pipeline.llm_client import call_llm
 import re

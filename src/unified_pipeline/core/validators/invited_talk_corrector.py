@@ -15,7 +15,6 @@ Rule: If a talk is explicitly "invited" at a conference, or is a
 """
 
 import re
-from typing import Dict, List, Tuple
 
 
 # Patterns indicating R (invited talk) even at a conference

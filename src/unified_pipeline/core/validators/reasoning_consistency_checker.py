@@ -21,7 +21,6 @@ When a conflict is detected with high confidence, auto-correct the code.
 """
 
 import re
-from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 
 

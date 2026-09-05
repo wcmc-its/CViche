@@ -37,7 +37,6 @@ are left untouched.
 """
 
 import re
-from typing import Dict, List, Optional, Tuple
 
 POSITION_CODES = {"D1", "D2", "D3"}
 

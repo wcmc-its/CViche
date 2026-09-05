@@ -6,7 +6,6 @@ Critical for entries like "Introduction to Statistics" that could be either.
 """
 
 import re
-from typing import List
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

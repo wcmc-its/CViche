@@ -3,7 +3,6 @@ import hashlib
 import json
 import logging
 import shutil
-from typing import Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session, selectinload

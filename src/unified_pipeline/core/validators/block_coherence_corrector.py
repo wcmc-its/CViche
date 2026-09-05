@@ -26,7 +26,6 @@ Two structural smells (no thresholds):
 
 import json
 import re
-from typing import Dict, List, Optional, Tuple
 from collections.abc import Callable
 
 _YEAR_RANGE = re.compile(r"(19|20)\d{2}\s*[-–—]\s*((present|current|ongoing)\b|(19|20)\d{2})", re.I)

@@ -10,7 +10,6 @@ Case Study: CV 2032 had groups with bare journal names mapped incorrectly.
 """
 
 import re
-from typing import List
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

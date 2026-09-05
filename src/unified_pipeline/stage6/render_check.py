@@ -21,7 +21,6 @@ in sync by name, not by import.
 """
 import re
 from types import MappingProxyType
-from typing import Dict, List, Optional
 
 from unified_pipeline.core.render_check import entry_fragments
 

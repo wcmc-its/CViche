@@ -21,7 +21,6 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Optional
 from datetime import datetime
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))

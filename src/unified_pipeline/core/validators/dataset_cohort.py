@@ -6,7 +6,6 @@ Critical for entries about datasets that could be either publications or researc
 """
 
 import re
-from typing import List
 from .base_validator import BaseValidator, ValidatorGuidance
 
 

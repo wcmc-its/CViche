@@ -8,7 +8,6 @@ Based on ChatGPT feedback for CV 2036 Hoffman:
   Pattern: "Reviewer for the following journals", "External referee"
 """
 
-from typing import Dict, List
 
 try:
     from .base_validator import BaseValidator, ValidatorGuidance

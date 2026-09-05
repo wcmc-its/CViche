@@ -14,7 +14,7 @@ Both approaches output identical schema with metadata:
 import os
 import sys
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Any
 
 # Import segmentation functions
 from ..segmentation.pdf_vision import segment_cv_three_pass

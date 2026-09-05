@@ -22,7 +22,6 @@ When in doubt we fail safe toward NOT retrying (unknown error types are treated
 as terminal) so an unclassified failure can never silently loop and rack up cost.
 The error_type vocabulary mirrors ``Step.error_type`` in app.models.
 """
-from typing import Optional
 
 from app.config_loader import get_config
 
