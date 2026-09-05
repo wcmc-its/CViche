@@ -629,10 +629,9 @@ def test_run_doctor_dispatches_duplicate_records_and_skips_without_docx(tmp_path
 def test_record_lines_keeps_every_farm_record_shape(line):
     """T1.6 positive controls: every date-prefixed record shape the 66-CV
     farm's stage-4 text carries is still a record under the tightened rule.
-    Measured on the farm (#725 review r3923589271 pt 6, re-measured
-    2026-09-05): the old length-plus-prefix rule admits 567 lines, the new
-    one keeps 544, and the 23 it drops are all bare date lists (next test)
-    -- no worded record changes class."""
+    Measured on the farm: the old length-plus-prefix rule admits 226 lines,
+    the new one keeps 203, and the 23 it drops are all bare date lists (next
+    test) -- no worded record changes class."""
     assert _record_lines(line) == [line]
 
 

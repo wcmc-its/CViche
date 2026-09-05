@@ -74,7 +74,7 @@ _RECORD_DATE_PREFIX_RE = re.compile(r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]")
 # lowercase ('2020 - the year our program expanded ...'), which is what a
 # length-only rule admits. Measured over the 66-CV farm's stage-4 text
 # (#725 review r3923589271 pt 6, re-measured 2026-09-05): the length-only
-# rule admits 567 date-prefixed lines; this one keeps 544 and drops
+# rule admits 226 date-prefixed lines; this one keeps 203 and drops
 # exactly the 23 that carry no worded payload at all -- every one a bare
 # date list ('February 2018 – Present', '2004 –2020 2004-2010').
 # ponytail: a prose sentence whose first word after the dash is
