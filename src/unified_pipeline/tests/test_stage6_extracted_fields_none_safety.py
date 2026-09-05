@@ -41,6 +41,9 @@ from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
     _normalize_mentee,
     _partition_mentoring_entries,
 )
+from unified_pipeline.stage6.sections.other_education import (  # noqa: E402
+    _normalize_other_education_entry,
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
@@ -256,3 +259,106 @@ def test_patents_none_extracted_fields_does_not_raise():
     gen._fill_patents(entries)  # must not raise AttributeError
 
     assert len(gen.doc.tables) == 0
+
+
+# --- other education: date precedence and attribution ----------------------------
+
+def _b2_doc() -> WCMTemplateGenerator:
+    gen = _new_generator()
+    gen.doc.add_paragraph("OTHER EDUCATIONAL")
+    header = gen.doc.add_table(rows=1, cols=3).rows[0].cells
+    header[0].text, header[1].text, header[2].text = "Description", "Institution", "Dates"
+    return gen
+
+
+def _insertions(cell) -> list[tuple[str, str]]:
+    """(author, text) of every tracked insertion in a cell, in order."""
+    return [(ins.get(qn('w:author')),
+             ''.join(t.text or '' for t in ins.iter(qn('w:t'))))
+            for ins in cell._tc.iter(qn('w:ins'))]
+
+
+@pytest.mark.parametrize("fields, text, dates, from_text", [
+    ({'start_date': '2017-08', 'end_date': '2021-07', 'year': '2019'},
+     'Certificate, August 2020', '08/17-07/21', False),
+    ({'start_date': '2017-08', 'year': '2019'}, 'Certificate, August 2020',
+     '08/17-Present', False),
+    ({'end_date': '2021-07', 'year': '2019'}, 'Certificate, August 2020',
+     '07/21', False),
+    ({'year': '2019'}, 'Certificate, August 2020', '2019', False),
+    ({'year_awarded': '2018'}, 'Certificate, August 2020', '2018', False),
+    ({}, 'Certificate in Epidemiology, August 2020', '2020', True),
+    ({}, 'Certificate 2019-2021', '2021', True),
+    ({}, 'Certificate in Epidemiology', '', False),
+], ids=['range-beats-year-and-text', 'start-only-beats-year', 'end-only-beats-year',
+        'year-beats-text', 'year_awarded-beats-text', 'text-month-year',
+        'text-range-takes-end-year', 'nothing'])
+def test_b2_date_precedence(fields, text, dates, from_text):
+    """start/end -> year (year, then year_awarded) -> raw text, each step
+    winning outright; only the raw-text step is marked as inferred."""
+    record = _normalize_other_education_entry(
+        {'taxonomy_code': 'B2', 'text': text,
+         'extracted_fields': {'program_name': 'Certificate', **fields}})
+    assert (record.dates, record.dates_from_text) == (dates, from_text)
+
+
+def test_b2_text_extracted_year_renders_as_a_tracked_insertion():
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Certificate in Epidemiology, August 2020',
+         'extracted_fields': {'program_name': 'Certificate in Epidemiology'}}])
+
+    row = gen.doc.tables[0].rows[1]
+    assert row.cells[0].text == 'Certificate in Epidemiology'
+    assert _insertions(row.cells[2]) == [('Text Extraction', '2020')]
+    assert _insertions(row.cells[0]) == []
+
+
+def test_b2_field_year_renders_as_plain_text():
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Certificate in Epidemiology, August 2020',
+         'extracted_fields': {'program_name': 'Certificate in Epidemiology',
+                              'year': '2019'}}])
+
+    row = gen.doc.tables[0].rows[1]
+    assert row.cells[2].text == '2019'
+    assert _insertions(row.cells[2]) == []
+
+
+def test_b2_enriched_location_is_attributed_inside_the_institution_cell():
+    """Stage-5b enrichment supplies the cleaned name (plain text) and the
+    city/state, which is appended as a tracked insertion after it."""
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Certificate in Biostatistics, Duke University, 2019',
+         'extracted_fields': {'program_name': 'Certificate in Biostatistics',
+                              'institution': 'Duke University, Durham', 'year': '2019'},
+         'institution_enrichment': {'cleaned_name': 'Duke University', 'city': 'Durham',
+                                    'state': 'North Carolina', 'country_code': 'US'}}])
+
+    cell = gen.doc.tables[0].rows[1].cells[1]
+    plain_runs = ''.join(r.text for r in cell.paragraphs[0].runs)
+    assert plain_runs == 'Duke University'
+    assert _insertions(cell) == [('Institution Enrichment', ', Durham, NC')]
+
+
+def test_b2_extracted_location_is_plain_text():
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Certificate, Some College',
+         'extracted_fields': {'program_name': 'Certificate', 'institution': 'Some College',
+                              'location': 'Boston, MA'}}])
+
+    cell = gen.doc.tables[0].rows[1].cells[1]
+    assert cell.text == 'Some College, Boston, MA'
+    assert _insertions(cell) == []
+
+
+def test_b2_institution_none_sentinel_is_blank():
+    gen = _b2_doc()
+    gen._fill_other_education([
+        {'taxonomy_code': 'B2', 'text': 'Certificate',
+         'extracted_fields': {'program_name': 'Certificate', 'institution': 'none'}}])
+
+    assert gen.doc.tables[0].rows[1].cells[1].text == ''

@@ -306,6 +306,94 @@ def test_mentoring_real_template_body_order():
     assert gen.stats['entries_inserted'] == 5
 
 
+# --- other education: template structure, three-column rendering -----------------
+
+OTHER_EDUCATION_LOGGER = 'unified_pipeline.stage6.sections.other_education'
+
+
+def _b2(program: str, **fields) -> dict:
+    return {'taxonomy_code': 'B2', 'text': f"{program} entry",
+            'extracted_fields': {'program_name': program, **fields}}
+
+
+def test_other_education_missing_heading_logs_warning_with_count(caplog):
+    gen = _new_generator()
+    gen.doc.add_paragraph("Some Unrelated Section")
+
+    with caplog.at_level(logging.WARNING, logger=OTHER_EDUCATION_LOGGER):
+        gen._fill_other_education([_b2('Certificate A'), _b2('Certificate B')])
+
+    assert [w.getMessage() for w in _warnings(caplog, OTHER_EDUCATION_LOGGER)] == [
+        "Other Educational Experiences: section heading not found in template; "
+        "2 entries not rendered"]
+    assert gen.stats['tables_populated'] == 0
+    assert gen.stats['entries_inserted'] == 0
+
+
+def test_other_education_missing_table_logs_warning_with_count(caplog):
+    """The heading exists but no table follows it: template structure,
+    not empty data, and reported as such."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("OTHER EDUCATIONAL")
+    gen.doc.add_paragraph("No table follows this heading.")
+
+    with caplog.at_level(logging.WARNING, logger=OTHER_EDUCATION_LOGGER):
+        gen._fill_other_education([_b2('Certificate A')])
+
+    assert [w.getMessage() for w in _warnings(caplog, OTHER_EDUCATION_LOGGER)] == [
+        "Other Educational Experiences: table not found after section heading; "
+        "1 entries not rendered"]
+    assert gen.stats['tables_populated'] == 0
+
+
+@pytest.mark.parametrize("columns", [2, 4])
+def test_other_education_wrong_column_count_logs_warning_and_writes_nothing(caplog, columns):
+    """The writer always builds program | institution | dates; a grid of any
+    other width would land content in the wrong column, so it is refused."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("OTHER EDUCATIONAL")
+    table = gen.doc.add_table(rows=1, cols=columns)
+
+    with caplog.at_level(logging.WARNING, logger=OTHER_EDUCATION_LOGGER):
+        gen._fill_other_education([_b2('Certificate A')])
+
+    assert [w.getMessage() for w in _warnings(caplog, OTHER_EDUCATION_LOGGER)] == [
+        f"Other Educational Experiences: expected a 3-column table, found "
+        f"{columns} columns; 1 entries not rendered"]
+    assert len(table.rows) == 1
+    assert gen.stats['tables_populated'] == 0
+    assert gen.stats['entries_inserted'] == 0
+
+
+def test_other_education_real_template_three_column_rows():
+    """Real template: the B2 table has three columns; the header row survives,
+    the placeholder row is cleared, entries land most-recent-first with
+    program | institution, location | dates, and a sparse entry (no program,
+    no institution) is skipped and not counted."""
+    gen = _template_generator()
+    entries = [
+        _b2('Certificate in Epidemiology', institution='Some College',
+            location='Boston, MA', start_date='2017-08', end_date='2018-05'),
+        _b2('Workshop on Grant Writing', institution='Another Institute', year='2021'),
+        {'taxonomy_code': 'B2', 'text': 'stray line', 'extracted_fields': {'year': '2020'}},
+    ]
+
+    gen._fill_other_education(entries)
+
+    table = gen._find_table_after_paragraph(
+        gen._find_paragraph_with_text("OTHER EDUCATIONAL"))
+    assert len(table.columns) == 3
+    assert [c.text for c in table.rows[0].cells] == [
+        'Description', 'Institution, city and state',
+        'Dates attended (mm/yy – mm/yy)']
+    assert [[c.text for c in row.cells] for row in table.rows[1:]] == [
+        ['Workshop on Grant Writing', 'Another Institute', '2021'],
+        ['Certificate in Epidemiology', 'Some College, Boston, MA', '08/17-05/18'],
+    ]
+    assert gen.stats['tables_populated'] == 1
+    assert gen.stats['entries_inserted'] == 2
+
+
 # --- patents: reposition failure ------------------------------------------------
 
 def test_patents_reposition_failure_logs_warning(caplog):
