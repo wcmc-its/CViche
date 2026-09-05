@@ -102,6 +102,22 @@ def test_stage_finds_source_docx_under_flat_layout_input_dir(tmp_path):
     assert staged_source.resolve() == (input_dir / f"{uid}.docx").resolve()
 
 
+# The destinations run_doctor's own `_ARTIFACTS` (run_doctor.py:459-466)
+# actually globs, as literals -- not read back off `cli.SUFFIX_DIR`. A test
+# that builds its expectation from the same dict the code under test uses
+# passes even if that dict maps a suffix to a directory run_doctor never
+# looks at; only a literal, independently-sourced expectation catches that.
+_EXPECTED_SUFFIX_DIRS = {
+    "_segmented.json": "stage_1a_segmentation",
+    "_entries.json": "stage_2_entry_extraction",
+    "_classified.json": "stage_3b_classified_entries",
+    "_fields.json": "stage_4_field_extraction",
+    "_enriched.json": "stage_5_enrichment",
+    "_wcm.docx": "stage_6_wcm_documents",
+    "_render_warnings.json": "stage_6_wcm_documents",
+}
+
+
 def test_stage_links_every_suffix_and_the_source_docx(tmp_path):
     """T2.3/T2.9: the central integration point between the S3-flat corpus
     and run_doctor -- one call to stage() covering every registered
@@ -110,6 +126,8 @@ def test_stage_links_every_suffix_and_the_source_docx(tmp_path):
     other tests in this file exercise stage()'s full suffix loop.
     """
     cli = _load_cli()
+    assert set(cli.SUFFIX_DIR) == set(_EXPECTED_SUFFIX_DIRS), (
+        "this test does not cover every suffix SUFFIX_DIR registers")
     uid = "aaa111"
     run_root = tmp_path / "corpus" / "run1"
     outputs = run_root / "outputs"
@@ -123,7 +141,7 @@ def test_stage_links_every_suffix_and_the_source_docx(tmp_path):
 
     root = cli.stage(run_root, uid, work)
 
-    for suffix, stagedir in cli.SUFFIX_DIR.items():
+    for suffix, stagedir in _EXPECTED_SUFFIX_DIRS.items():
         dest = root / stagedir / f"{uid}{suffix}"
         assert dest.is_symlink(), f"missing staged link for suffix {suffix!r}"
         assert dest.resolve() == (outputs / f"{uid}{suffix}").resolve()
@@ -182,6 +200,34 @@ def test_sweep_records_failure_when_source_docx_candidates_are_ambiguous(tmp_pat
     assert "AmbiguousSourceDocxError" in failures["amb1"]["traceback"]
     assert f"{uid}_v1.docx" in failures["amb1"]["error"]
     assert f"{uid}_v2.docx" in failures["amb1"]["error"]
+
+
+def test_clear_staged_root_refuses_a_stray_regular_file(tmp_path):
+    """r3924634631 item 1 (correction): `_clear_staged_root`'s refusal
+    fires on ANY entry under `work/<uid>` that is not a symlink or a
+    directory -- not only a directory this script itself created. A stray
+    regular file left there by something else must abort staging with
+    `StagingRootNotOwnedError`, recorded as that run's failure, and the
+    file itself must be left in place, not removed.
+    """
+    cli = _load_cli()
+    corpus = tmp_path / "corpus"
+    uid = "aaa111"
+    _make_run(corpus, "run1", uid)
+    work = tmp_path / "work"
+    root = work / uid
+    root.mkdir(parents=True)
+    stray = root / "not_mine.txt"
+    stray.write_text("someone else wrote this", encoding="utf-8")
+
+    reports, failures, skipped, duplicates = cli.sweep(corpus, ["run1"], work)
+
+    assert reports == {}
+    assert skipped == []
+    assert "run1" in failures
+    assert failures["run1"]["exception"] == "StagingRootNotOwnedError"
+    assert stray.exists() and stray.read_text(encoding="utf-8") == "someone else wrote this", (
+        "the stray file must be left in place, not removed")
 
 
 def test_find_uid_is_found_via_an_early_stage_only_suffix(tmp_path):
@@ -342,6 +388,20 @@ def test_skip_detection_matches_what_run_doctor_actually_emits(tmp_path):
     assert {r["cvs_affected"] for r in rows} == {0}
 
 
+def test_skip_detection_requires_prefix_not_mere_substring():
+    """Pins SKIPPED_MISSING_PREFIX matching to `.startswith`, not `in`: a
+    message that merely CONTAINS the prefix mid-string is not a skip.
+    """
+    cli = _load_cli()
+    reports = {"r1": {"findings": [
+        _finding("pipe_leaks", "INFO", "not skipped: missing anything, ran fine"),
+    ]}}
+    rank = {r["lint"]: r for r in cli.aggregate(reports)}
+    assert rank["pipe_leaks"]["cvs_ran"] == 1, (
+        "a message carrying the prefix mid-string must not be counted as skipped")
+    assert rank["pipe_leaks"]["cvs_affected"] == 0
+
+
 def test_resolve_outputs_dir_tolerates_nested_and_flat_layouts_and_never_raises(tmp_path):
     """Ported from the deleted _selftest (T2.9)."""
     cli = _load_cli()
@@ -492,13 +552,7 @@ def test_sweep_records_a_run_doctor_crash_of_any_class(tmp_path, monkeypatch, ex
     assert "in fake_run_doctor" in failures["bad1"]["traceback"]
 
 
-def test_main_returns_nonzero_on_partial_failure_by_default(tmp_path, monkeypatch):
-    """T2.4: main() used to return 0 whenever at least one run succeeded,
-    even with other requested runs failed -- CI could report success on an
-    incomplete corpus. Fail closed by default now.
-    """
-    cli = _load_cli()
-    corpus = tmp_path / "corpus"
+def _partial_setup_a_failure(corpus, cli, monkeypatch):
     _make_run(corpus, "good1", "aaa111")
     _make_run(corpus, "bad1", "bbb222")
 
@@ -508,8 +562,42 @@ def test_main_returns_nonzero_on_partial_failure_by_default(tmp_path, monkeypatc
         return {"findings": []}
 
     monkeypatch.setattr(cli, "run_doctor", fake_run_doctor)
+    return "good1,bad1"
 
-    assert cli.main([str(corpus), "good1,bad1"]) != 0
+
+def _partial_setup_skipped_only(corpus, cli, monkeypatch):
+    _make_run(corpus, "good1", "aaa111")
+    _make_skipped_run(corpus, "skip1")
+    monkeypatch.setattr(cli, "run_doctor", lambda root, uid: {"findings": []})
+    return "good1,skip1"
+
+
+def _partial_setup_duplicate_only(corpus, cli, monkeypatch):
+    _make_run(corpus, "good1", "aaa111")
+    _make_run(corpus, "dup1", "aaa111")
+    monkeypatch.setattr(cli, "run_doctor", lambda root, uid: {"findings": []})
+    return "good1,dup1"
+
+
+@pytest.mark.parametrize("setup", [
+    _partial_setup_a_failure, _partial_setup_skipped_only, _partial_setup_duplicate_only,
+], ids=["failure", "skipped-only", "duplicate-only"])
+def test_main_returns_nonzero_on_partial_failure_by_default(tmp_path, monkeypatch, setup):
+    """T2.4: main() used to return 0 whenever at least one run succeeded,
+    even with other requested runs failed -- CI could report success on an
+    incomplete corpus. Fail closed by default now.
+
+    Parametrized over the three ways a sweep can be incomplete with no
+    outright failure: a failed run (positive control), a skipped-only run,
+    and a duplicate-only run -- a mutant reading only
+    `bool(result.failures)` still exits non-zero on the failure case but
+    wrongly exits 0 on the other two.
+    """
+    cli = _load_cli()
+    corpus = tmp_path / "corpus"
+    run_ids = setup(corpus, cli, monkeypatch)
+
+    assert cli.main([str(corpus), run_ids]) != 0
 
 
 def test_main_exits_zero_on_partial_failure_with_allow_partial(tmp_path, monkeypatch):
