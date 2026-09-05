@@ -25,11 +25,13 @@ if str(_SRC) not in sys.path:
 from unified_pipeline import quality_score as qs  # noqa: E402
 from unified_pipeline.quality_score import (  # noqa: E402
     FATAL_ERROR_PATTERN,
+    SCORED_ARTIFACT_COUNT,
     VALID_GATE_MODES,
     _load_docx,
     _load_first,
     band_for,
     linear_interp,
+    missing_evidence,
     quality_gate,
     score_broken_format,
     score_cv_owner,
@@ -638,3 +640,101 @@ def test_edge_cv_owner_whitespace_only_names(tmp_path):
     assert cap == 25
     assert fraction == 1.0
     assert detail == "cv_owner name empty; hard-fail cap=25", detail
+
+
+# --------------------------------------------------------------------- D18
+# score_run artifact health: data_complete / missing_evidence (#724 review
+# thread 2 item 2). The score does not move; the result says what evidence
+# it was computed without, distinguishing absent from unreadable from
+# ambiguous per artifact.
+# --------------------------------------------------------------------- D18
+
+
+def _complete_run_dir(tmp_path: Path) -> Path:
+    """Every artifact score_run reads, all loadable."""
+    _write_json(tmp_path, "X_fields.json", {
+        "cv_owner": {"full_name": "Jane Q. Public"},
+        "cv_owner_location": {"inference_success": True, "primary_location": "NY"},
+        "entries": [{"extracted_fields": {"email": "j@x.org"}, "extraction_success": True}],
+    })
+    _write_json(tmp_path, "X_classified.json",
+                _classified(total_entries=4, duplicate_entries=0,
+                            code_distribution={"A": 3, "T": 1}))
+    _write_json(tmp_path, "X_entries.json", {"coverage": {"coverage_percentage": 100}})
+    _make_docx(["clean"], tables=[[["a", "b"]]]).save(tmp_path / "X_wcm.docx")
+    return tmp_path
+
+
+def test_missing_evidence_empty_when_every_artifact_loads(tmp_path):
+    assert missing_evidence(_complete_run_dir(tmp_path)) == []
+
+
+def test_missing_evidence_names_every_absent_artifact_in_order(tmp_path):
+    assert missing_evidence(tmp_path) == [
+        "no fields.json found",
+        "no classified.json found",
+        "no entries.json found",
+        "docx: no docx found",
+    ]
+    assert SCORED_ARTIFACT_COUNT == 4
+
+
+def test_missing_evidence_distinguishes_unreadable_ambiguous_and_absent(tmp_path):
+    _complete_run_dir(tmp_path)
+    _truncate(tmp_path, "X_fields.json")                       # unreadable
+    _write_json(tmp_path, "Y_classified.json", {"meta": {}})   # now ambiguous
+    (tmp_path / "X_entries.json").unlink()                     # absent
+    missing = missing_evidence(tmp_path)
+    assert len(missing) == 3, missing
+    assert missing[0].startswith("fields.json unreadable (JSONDecodeError"), missing[0]
+    assert missing[1].startswith("classified.json unreadable (ambiguous: 2 files match"), missing[1]
+    assert missing[2] == "no entries.json found"
+
+
+def test_missing_evidence_names_corrupt_docx(tmp_path):
+    _complete_run_dir(tmp_path)
+    (tmp_path / "X_wcm.docx").write_bytes(b"garbage")
+    missing = missing_evidence(tmp_path)
+    assert len(missing) == 1, missing
+    assert missing[0].startswith("docx: docx open error:"), missing[0]
+
+
+def test_score_run_complete_evidence_is_flagged_complete(tmp_path):
+    result = score_run(_complete_run_dir(tmp_path))
+    assert result["data_complete"] is True
+    assert result["missing_evidence"] == []
+    assert not any(f.startswith("EVIDENCE INCOMPLETE") for f in result["flags"]), result["flags"]
+
+
+def test_score_run_incomplete_evidence_is_flagged_and_score_unchanged(tmp_path):
+    """The empty-directory score is still 25/RED (test_edge_empty_output_directory);
+    what changes is that the result now says the 25 was computed with no
+    evidence at all, as both a field and a flag after the hard-fail flag."""
+    result = score_run(tmp_path)
+    assert result["totalScore"] == 25 and result["band"].startswith("RED")
+    assert result["data_complete"] is False
+    assert result["missing_evidence"] == [
+        "no fields.json found", "no classified.json found",
+        "no entries.json found", "docx: no docx found",
+    ]
+    assert result["flags"][-1] == (
+        "EVIDENCE INCOMPLETE (4 of 4 artifacts): no fields.json found; "
+        "no classified.json found; no entries.json found; docx: no docx found")
+    assert result["flags"][0].startswith("HARD-FAIL cap=25")
+
+
+def test_score_run_one_missing_artifact_counts_one_of_four(tmp_path):
+    _complete_run_dir(tmp_path)
+    (tmp_path / "X_classified.json").unlink()
+    result = score_run(tmp_path)
+    assert result["data_complete"] is False
+    assert result["missing_evidence"] == ["no classified.json found"]
+    assert result["flags"] == [
+        "No hard-fail caps triggered",
+        "EVIDENCE INCOMPLETE (1 of 4 artifacts): no classified.json found",
+    ]
+
+
+def test_quality_gate_carries_data_complete_through(tmp_path):
+    result = quality_gate(_complete_run_dir(tmp_path), mode="advisory")
+    assert result["data_complete"] is True and result["missing_evidence"] == []

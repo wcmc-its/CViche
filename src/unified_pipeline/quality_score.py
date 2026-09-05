@@ -28,6 +28,13 @@ and a clean run scores 100::
 Two dimensions are hard-fail gates: a fatal pipeline error or a missing CV
 owner name caps the final score regardless of the other dimensions.
 
+The result also says what the score was computed *without*: ``data_complete``
+is False and ``missing_evidence`` names each scored artifact that was absent,
+unreadable, or ambiguous (and a ``EVIDENCE INCOMPLETE`` flag repeats it), so a
+score over an incomplete output directory is recognizable as missing evidence
+rather than read as a precise measurement (#724 review item 2). The score
+itself is unchanged by it.
+
 Bands (PROVISIONAL -- see calibration note below):
     >= 85  GREEN   ship
     >= 60  YELLOW  human cleanup needed
@@ -146,6 +153,51 @@ def _load_docx(outputs_dir: Path):
         return Document(docx_files[0]), None
     except Exception as e:
         return None, f"docx open error: {e}"
+
+
+#: Every artifact score_run reads, as (label, glob pattern). The evidence
+#: inventory behind ``data_complete`` (#724 review item 2) walks exactly this
+#: list plus the docx, so a new dimension that reads a new artifact must add
+#: it here or its absence will not be reported as missing evidence.
+SCORED_JSON_ARTIFACTS = (
+    ("fields.json", "*_fields.json"),
+    ("classified.json", "*_classified.json"),
+    ("entries.json", "*_entries.json"),
+)
+#: Number of artifacts the inventory checks: the JSON patterns above plus the docx.
+SCORED_ARTIFACT_COUNT = len(SCORED_JSON_ARTIFACTS) + 1
+
+
+def missing_evidence(outputs_dir: Path) -> list[str]:
+    """One entry per scored artifact that could not be loaded, in
+    SCORED_JSON_ARTIFACTS order then the docx; empty when every artifact
+    loaded (#724 review item 2).
+
+    Each entry is the same absent / unreadable / ambiguous wording the
+    dimension details use (`_missing_or_unreadable_detail`, `_load_docx`),
+    so a reader can tell a directory that genuinely has no stage-3b output
+    from a truncated classified.json from a scorer pointed at the wrong
+    directory. This is the artifact-health signal the score itself does not
+    carry: every dimension still scores a missing artifact the way it did
+    before (0.5 for a docx, 1.0 for a JSON), so a run with absent evidence
+    can look like a precisely measured bad run. score_run exposes this list
+    as ``missing_evidence`` and its emptiness as ``data_complete``; turning
+    it into a typed scoring_confidence field on the API schema, the Teams
+    card, and the frontend types is #745.
+
+    Loads each artifact once more, the way every dimension does (fields.json
+    and classified.json are each already read by two dimensions, the docx by
+    two); the scorer is offline and the artifacts are small.
+    """
+    missing: list[str] = []
+    for label, pattern in SCORED_JSON_ARTIFACTS:
+        data, reason = _load_first(outputs_dir, pattern)
+        if data is None:
+            missing.append(_missing_or_unreadable_detail(label, reason))
+    doc, reason = _load_docx(outputs_dir)
+    if doc is None:
+        missing.append(f"docx: {reason}")
+    return missing
 
 
 # ---------------------------------------------------------------------------
@@ -667,6 +719,16 @@ def score_run(run_output_dir, run_id: str = None) -> dict:
     if not flags:
         flags.append("No hard-fail caps triggered")
 
+    # Artifact health (#724 review item 2): does not move the score -- the
+    # dimensions already scored each absence -- but names what the score was
+    # computed without, so "25 RED" on an empty directory reads as missing
+    # evidence, not a measured result.
+    missing = missing_evidence(outputs_dir)
+    if missing:
+        flags.append(
+            f"EVIDENCE INCOMPLETE ({len(missing)} of {SCORED_ARTIFACT_COUNT} artifacts): "
+            + "; ".join(missing))
+
     return {
         "run_id": run_id,
         "totalScore": total_score,
@@ -676,6 +738,8 @@ def score_run(run_output_dir, run_id: str = None) -> dict:
         "total_weight": TOTAL_WEIGHT,
         "dimensionScores": dimension_scores,
         "flags": flags,
+        "data_complete": not missing,
+        "missing_evidence": missing,
     }
 
 
