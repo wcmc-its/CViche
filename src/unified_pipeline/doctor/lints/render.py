@@ -72,13 +72,15 @@ _RECORD_DATE_PREFIX_RE = re.compile(r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]")
 # a field separator, or a capitalised payload word (a role, a title, a
 # name). Running prose that merely opens with a date continues in
 # lowercase ('2020 - the year our program expanded ...'), which is what a
-# length-only rule admits. Measured over the 66-CV farm's stage-4 text:
-# the length-only rule admits 226 date-prefixed lines; this one keeps 224
-# and drops exactly the 2 that carry no worded payload at all ('February
-# 2018 – Present', '2004 –2020 2004-2010'). ponytail: a prose sentence
-# whose first word after the dash is capitalised still passes -- no corpus
-# instance yet, and the opposite failure (a real record no longer counted,
-# so never re-verified) is the worse one; revisit with a corpus instance.
+# length-only rule admits. Measured over the 66-CV farm's stage-4 text
+# (#725 review r3923589271 pt 6, re-measured 2026-09-05): the length-only
+# rule admits 567 date-prefixed lines; this one keeps 544 and drops
+# exactly the 23 that carry no worded payload at all -- every one a bare
+# date list ('February 2018 – Present', '2004 –2020 2004-2010').
+# ponytail: a prose sentence whose first word after the dash is
+# capitalised still passes -- no corpus instance yet, and the opposite
+# failure (a real record no longer counted, so never re-verified) is the
+# worse one; revisit with a corpus instance.
 _RECORD_DATE_CONTINUATION_RE = re.compile(
     r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]\s*"
     r"(?:\d{1,4}|(?i:present|current|ongoing|now|to date|date)(?![a-z])"
