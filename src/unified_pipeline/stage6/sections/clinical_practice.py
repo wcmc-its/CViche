@@ -65,7 +65,16 @@ recovering the same text twice, which a loss-only corpus census cannot see:
   sibling bullets it inserted to `_insert_bulleted_entry`, and the check in
   `_add_entry_comments` weighs the entry's whole rendered text.
 """
+import logging
 import re
+from collections.abc import Sequence
+
+try:
+    from docx.table import Table, _Cell, _Row
+except ImportError as exc:
+    raise ImportError(
+        "python-docx is required for stage 6. Install with: pip install python-docx lxml"
+    ) from exc
 
 from ..formatting import (
     _clear_table_data,
@@ -76,6 +85,8 @@ from ..formatting import (
 from ..normalization import _committee_cell_text
 from ..parsing import _is_structural_label
 from ..sorting import sort_entries_reverse_chronological
+
+logger = logging.getLogger(__name__)
 
 
 def _bullet_parts(text: str) -> list[str]:
@@ -180,7 +191,7 @@ _CLINICAL_TABLE_HEADER = ('Title', 'Institution/Location', 'Dates (yyyy)')
 _FUNDING_HEADER_INDICATORS = ('award source', 'funding')
 
 
-def _clinical_header_match(first_row_cells) -> bool | None:
+def _clinical_header_match(first_row_cells: Sequence[_Cell]) -> bool | None:
     """Classify a table's header row against the real subsection header.
 
     Returns True on a positive, tolerant match to `_CLINICAL_TABLE_HEADER`
@@ -212,7 +223,7 @@ def _clinical_header_match(first_row_cells) -> bool | None:
 class ClinicalPracticeSection:
     """Section L writers, mixed into `WCMTemplateGenerator`."""
 
-    def _add_clinical_table_row(self, table, three_col: list[str], two_col: list[str], one_col: list[str]):
+    def _add_clinical_table_row(self, table: Table, three_col: list[str], two_col: list[str], one_col: list[str]) -> _Row:
         """Add a row to `table`, populate it according to its actual column
         count, and apply the standard cell font to every run.
 
@@ -243,7 +254,7 @@ class ClinicalPracticeSection:
                     _set_font(run)
         return row
 
-    def _fill_clinical_practice(self, entries_by_code: dict[str, list[dict]]):
+    def _fill_clinical_practice(self, entries_by_code: dict[str, list[dict]]) -> None:
         """Fill L. CLINICAL PRACTICE, INNOVATION, and LEADERSHIP section.
 
         This section has three subsections:
@@ -271,7 +282,7 @@ class ClinicalPracticeSection:
         self._fill_clinical_practice_l2(l2_entries)
         self._fill_clinical_practice_l3(l3_entries)
 
-    def _fill_clinical_practice_l1(self, l1_entries: list[dict]):
+    def _fill_clinical_practice_l1(self, l1_entries: list[dict]) -> None:
         """Fill the L1 Clinical Practice subsection: table rows, or a bullet
         fallback when no valid table is found.
 
@@ -392,7 +403,7 @@ class ClinicalPracticeSection:
                         )
                         bullet_count += inserted
 
-    def _fill_clinical_practice_l2(self, l2_entries: list[dict]):
+    def _fill_clinical_practice_l2(self, l2_entries: list[dict]) -> None:
         """Fill the L2 Clinical Innovations subsection: table rows, or a
         bullet fallback when no valid table is found.
 
@@ -474,7 +485,7 @@ class ClinicalPracticeSection:
                         )
                         bullet_count += inserted
 
-    def _fill_clinical_practice_l3(self, l3_entries: list[dict]):
+    def _fill_clinical_practice_l3(self, l3_entries: list[dict]) -> None:
         """Fill the L3 Clinical Leadership subsection: table rows, or a
         bullet fallback when no valid table is found.
 
@@ -594,7 +605,7 @@ class ClinicalPracticeSection:
                     if new_fragments:
                         bullet_text = '\t'.join([bullet_text, *new_fragments])
                     elif role_remainder.strip() and self.verbose:
-                        print("  L3 bullet already carries every fragment after the role")
+                        logger.info("L3 bullet already carries every fragment after the role")
 
                     if bullet_text:
                         # Use multiline helper to properly split entries with multiple lines

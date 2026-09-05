@@ -852,7 +852,7 @@ def _rule_2_pair_with_matching_employers():
 
 @pytest.mark.parametrize("build_entries", [_rule_1_pair_resting_on_inheritance,
                                            _rule_2_pair_resting_on_inheritance])
-def test_a_merge_resting_on_inheritance_alone_is_counted(build_entries, capsys):
+def test_a_merge_resting_on_inheritance_alone_is_counted(build_entries, caplog):
     """Pins the one merge rule that still fires without a matching employer,
     and the tally that makes it visible, at both merge sites.
 
@@ -868,13 +868,14 @@ def test_a_merge_resting_on_inheritance_alone_is_counted(build_entries, capsys):
     entries = build_entries()
     WCMTemplateGenerator._propagate_institution_to_subentries(entries)
 
-    merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
+    with caplog.at_level("DEBUG", logger="unified_pipeline.stage6.sections.positions"):
+        merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
 
     assert len(merged) == len(entries) - 1
-    assert "1 merged row(s) matched no employer name" in capsys.readouterr().out
+    assert "1 merged row(s) matched no employer name" in caplog.text
 
 
-def test_the_unmatched_employer_tally_counts_every_such_merge(capsys):
+def test_the_unmatched_employer_tally_counts_every_such_merge(caplog):
     """The tally is a count, not a flag.
 
     A header that inherited one employer over two roles that both name another
@@ -893,15 +894,16 @@ def test_the_unmatched_employer_tally_counts_every_such_merge(capsys):
     ]
     WCMTemplateGenerator._propagate_institution_to_subentries(entries)
 
-    merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
+    with caplog.at_level("DEBUG", logger="unified_pipeline.stage6.sections.positions"):
+        merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
 
     assert len(merged) == 3
-    assert "2 merged row(s) matched no employer name" in capsys.readouterr().out
+    assert "2 merged row(s) matched no employer name" in caplog.text
 
 
 @pytest.mark.parametrize("build_entries", [_rule_1_pair_with_matching_employers,
                                            _rule_2_pair_with_matching_employers])
-def test_a_merge_whose_employers_match_is_not_counted(build_entries, capsys):
+def test_a_merge_whose_employers_match_is_not_counted(build_entries, caplog):
     """The tally's other half, at both merge sites: a row merging with an
     employer it matches -- a sub-unit of it, or one it inherited from that
     very row -- is not reported, so the count measures the thin-evidence
@@ -909,10 +911,11 @@ def test_a_merge_whose_employers_match_is_not_counted(build_entries, capsys):
     entries = build_entries()
     WCMTemplateGenerator._propagate_institution_to_subentries(entries)
 
-    merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
+    with caplog.at_level("DEBUG", logger="unified_pipeline.stage6.sections.positions"):
+        merged = WCMTemplateGenerator._merge_grouped_appointments(entries, verbose=True)
 
     assert len(merged) == len(entries) - 1
-    assert "matched no employer name" not in capsys.readouterr().out
+    assert "matched no employer name" not in caplog.text
 
 
 def test_merge_still_joins_a_sub_unit_of_the_same_employer():

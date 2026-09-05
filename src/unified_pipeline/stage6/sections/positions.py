@@ -34,6 +34,13 @@ reached only from this module.
 import logging
 import re
 
+try:
+    from docx.table import Table
+except ImportError as exc:
+    raise ImportError(
+        "python-docx is required for stage 6. Install with: pip install python-docx lxml"
+    ) from exc
+
 from unified_pipeline.core.render_check import entry_fragments
 
 from ..formatting import _clear_table_data, format_date_range
@@ -569,9 +576,9 @@ class PositionsSection:
                 entry['institution_enrichment'] = dict(last_enrichment)
             propagated += 1
         if verbose and propagated > 0:
-            print(f"    Propagated institution to {propagated} sub-entries")
+            logger.info("Propagated institution to %d sub-entries", propagated)
         if verbose and stopped > 0:
-            print(f"    Stopped institution propagation at {stopped} source-structure boundaries")
+            logger.info("Stopped institution propagation at %d source-structure boundaries", stopped)
         return entries
 
     # Title strings that field extraction sometimes emits when the source CV had
@@ -772,8 +779,8 @@ class PositionsSection:
                     break
 
         if verbose and unmatched_employer:
-            print(f"    {unmatched_employer} merged row(s) matched no employer "
-                  f"name; one row had inherited its employer from a parent row")
+            logger.info("%d merged row(s) matched no employer name; one row "
+                         "had inherited its employer from a parent row", unmatched_employer)
         if not dropped:
             if verbose and merged:
                 print(f"    Merged dates into {merged} fragmented appointment rows")
@@ -785,7 +792,7 @@ class PositionsSection:
                   f"propagated dates to {merged} role row(s)")
         return result
 
-    def _fill_positions(self, entries_by_code: dict[str, list[dict]]):
+    def _fill_positions(self, entries_by_code: dict[str, list[dict]]) -> None:
         """Fill positions tables with track changes for enriched content.
 
         The WCM template has THREE separate position tables:
@@ -890,7 +897,7 @@ class PositionsSection:
         if not _is_table_header_entry(original_text, ['title', 'institution', 'organization', 'dates', 'city', 'state', 'position']):
             return False
         if self.verbose:
-            print(f"  Skipping position header entry: '{original_text[:50]}...'")
+            logger.info("Skipping position header entry: '%s...'", original_text[:50])
         return True
 
     def _normalized_positions(self, entries: list[dict]) -> list[dict]:
@@ -955,11 +962,11 @@ class PositionsSection:
             self.stats['blank_position_rows_skipped'] = (
                 self.stats.get('blank_position_rows_skipped', 0) + blank)
             if self.verbose:
-                print(f"  Dropped {blank} position record(s) with no title, "
-                      f"employer or dates")
+                logger.info("Dropped %d position record(s) with no title, "
+                             "employer or dates", blank)
         return positions
 
-    def _add_position_row(self, table, entry: dict):
+    def _add_position_row(self, table: Table, entry: dict) -> None:
         """Render one normalized position record as one table row.
 
         Renders unconditionally: every record `_normalized_positions` yields

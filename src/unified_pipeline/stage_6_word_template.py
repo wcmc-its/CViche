@@ -1103,10 +1103,10 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
 
 
-    def _insert_bulleted_entry(self, insert_idx: int, text: str, entry: Dict = None,
+    def _insert_bulleted_entry(self, insert_idx: int, text: str, entry: dict | None = None,
                                 add_blank_before: bool = False,
-                                list_level: Optional[int] = None,
-                                entry_sibling_paras: list[Paragraph] | None = None) -> Optional[Paragraph]:
+                                list_level: int | None = None,
+                                entry_sibling_paras: list[Paragraph] | None = None) -> Paragraph | None:
         """Insert a SINGLE bulleted entry paragraph with a bullet character prefix.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
@@ -2413,8 +2413,8 @@ Now analyze the text above:"""
         return batch
 
 
-    def _add_entry_comments(self, para: Paragraph, entry: Dict,
-                            entry_paras: list[Paragraph] | None = None):
+    def _add_entry_comments(self, para: Paragraph, entry: dict,
+                            entry_paras: list[Paragraph] | None = None) -> None:
         """Add all relevant comments from an entry to the paragraph.
 
         Collects comments from various upstream pipeline stages:

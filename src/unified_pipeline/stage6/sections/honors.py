@@ -83,6 +83,13 @@ import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+try:
+    from docx.table import Table
+except ImportError as exc:
+    raise ImportError(
+        "python-docx is required for stage 6. Install with: pip install python-docx lxml"
+    ) from exc
+
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from ..normalization import _strip_org_tail
 from ..parsing import _is_table_header_entry
@@ -801,7 +808,7 @@ def _extract_organization_from_award(text: str) -> str:
 class HonorsSection:
     """Section H writers, mixed into `WCMTemplateGenerator`."""
 
-    def _note_honors_schema_fallback(self, num_cols: int):
+    def _note_honors_schema_fallback(self, num_cols: int) -> None:
         """Record that the honors table is not the template's three columns.
 
         Counted per row so the shortfall is measurable, warned once per
@@ -824,7 +831,7 @@ class HonorsSection:
         """Pinned class surface for the module-level parser of the same name."""
         return _extract_organization_from_award(text)
 
-    def _fill_honors(self, entries: list[dict]):
+    def _fill_honors(self, entries: list[dict]) -> None:
         """Fill H. HONORS, AWARDS section.
 
         WCM template has table with columns: Name of award | Organization | Date awarded (yyyy)
@@ -870,7 +877,7 @@ class HonorsSection:
                     continue
                 self._add_honors_row(table, record)
 
-    def _add_honors_row(self, table, record: HonorRecord):
+    def _add_honors_row(self, table: Table, record: HonorRecord) -> None:
         """Add a single row to the honors table.
 
         The WCM template's H table is three columns -- award, organization,

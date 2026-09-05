@@ -567,7 +567,7 @@ def _single_membership_row(fields: dict, original_text: str) -> tuple[str, str, 
 class MembershipsSection:
     """Section I writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_memberships(self, entries: list[dict]):
+    def _fill_memberships(self, entries: list[dict]) -> None:
         """Fill I. PROFESSIONAL ORGANIZATIONS AND SOCIETY MEMBERSHIPS section.
 
         Entries have fields: organization, membership_type, start_date, end_date
@@ -694,7 +694,7 @@ class MembershipsSection:
             self._add_table_row(table, [org_text, date_str], entry=entry)
 
     def _add_table_row(self, table: Table, data: list[str], is_header: bool = False,
-                       entry: dict | None = None):
+                       entry: dict | None = None) -> None:
         """Add a row to a table with proper formatting.
 
         Owns `stats['entries_inserted']`: incremented here, once per row
