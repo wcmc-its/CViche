@@ -10,11 +10,11 @@ row rendered as "1. Title — Institution/Location — Dates", pushing the
 numbering of genuine entries that followed it.
 
 The fix adds `_is_column_header_row` (already used by the #221 unrendered-
-record recovery pass, `stage_6_word_template.py:2309`) as a fourth filter in
-the same pre-filter comprehension, folded into the existing
-"Filtered N boilerplate/empty entries from Appendix" count/print (#7.1: that
-print is a parsed contract -- `run_corpus_batch.sh` greps stage prints by
-literal text, so its wording is unchanged here).
+record recovery pass, `stage_6_word_template.py:2309`) to the filter chain,
+now `_appendix_drop_reason`, which names the check that fired; the drop is
+reported on the module logger and in the appendix's summary comment as
+"column-header", not folded into an undifferentiated "boilerplate/empty"
+count (review on #736).
 
 Self-contained: no DB, no network, no PII. Uses the bundled WCM template and
 python-docx, with the LLM-driven appendix-reconsider pass neutralized (as
@@ -25,6 +25,7 @@ credential-free. Run with:
 """
 
 import json
+import logging
 import sys
 from pathlib import Path
 
@@ -35,6 +36,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.render_check import _is_column_header_row  # noqa: E402
+from unified_pipeline.stage6.sections import appendix as appendix_module  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 REAL_SENTENCE_TOKEN = "DISTINCTIVE_REAL_SENTENCE_TOKEN"
@@ -47,7 +49,13 @@ def _output_text(docx_path) -> str:
     return "\n".join(parts)
 
 
-def _render(tmp_path, entries, capsys=None):
+def _appendix_log(caplog) -> str:
+    """Only the appendix module's own log lines."""
+    return "\n".join(r.getMessage() for r in caplog.records
+                     if r.name == appendix_module.logger.name)
+
+
+def _render(tmp_path, entries, caplog):
     # recover_unrendered_records=False: isolates _fill_appendix's own filter
     # chain from the separate #221 post-render recovery pass, which can pull
     # unconsumed personal-data entries (our 'A' name entry, used only to give
@@ -61,10 +69,9 @@ def _render(tmp_path, entries, capsys=None):
     ip = tmp_path / "in.json"
     op = tmp_path / "out.docx"
     ip.write_text(json.dumps(data))
+    caplog.set_level(logging.INFO, logger=appendix_module.logger.name)
     gen.generate(str(ip), str(op), research_summary_path=None)
-    text = _output_text(op)
-    printed = capsys.readouterr().out if capsys is not None else ""
-    return text, printed
+    return _output_text(op), _appendix_log(caplog)
 
 
 # ---------------------------------------------------------------- unit-level
@@ -88,7 +95,7 @@ def test_is_column_header_row_does_not_flag_real_content():
 
 # ------------------------------------------------------------ render-level
 
-def test_degree_table_header_row_dropped_from_appendix(tmp_path, capsys):
+def test_degree_table_header_row_dropped_from_appendix(tmp_path, caplog):
     """Positive control 1 (2071_Zuschlag_Cv shape): a T-coded degree-table
     header row produces no appendix paragraph."""
     entries = [
@@ -98,7 +105,7 @@ def test_degree_table_header_row_dropped_from_appendix(tmp_path, capsys):
          "taxonomy_code": "T", "extracted_fields": {},
          "hierarchy": ["Education"], "element_idx_start": 1},
     ]
-    text, printed = _render(tmp_path, entries, capsys)
+    text, printed = _render(tmp_path, entries, caplog)
     # The raw pipe-joined form never reaches the document -- _clean_inline_tabs
     # collapses " | " to " — " before anything is written, so a literal-pipe
     # assertion here would be vacuous. Assert the actual rendered em-dash form
@@ -106,10 +113,10 @@ def test_degree_table_header_row_dropped_from_appendix(tmp_path, capsys):
     assert "1. Year: Degree — Discipline — Institution/Location" not in text
     assert "Year: Degree" not in text
     assert "T. APPENDIX" not in text, "no other unmapped entries -- appendix should be empty"
-    assert "Filtered 1 boilerplate/empty entries from Appendix" in printed
+    assert "1 non-content block removed (column-header 1)" in printed
 
 
-def test_bare_name_header_row_dropped_from_appendix(tmp_path, capsys):
+def test_bare_name_header_row_dropped_from_appendix(tmp_path, caplog):
     """Positive control 2 (2054_Opresko_Cv shape): a bare 'NAME:' row that
     would otherwise render as the appendix's '1. NAME:' line is dropped."""
     entries = [
@@ -118,13 +125,13 @@ def test_bare_name_header_row_dropped_from_appendix(tmp_path, capsys):
         {"text": "NAME:", "taxonomy_code": "T", "extracted_fields": {},
          "hierarchy": ["Committee Membership"], "element_idx_start": 1},
     ]
-    text, printed = _render(tmp_path, entries, capsys)
+    text, printed = _render(tmp_path, entries, caplog)
     assert "1. NAME:" not in text
     assert "T. APPENDIX" not in text, "no other unmapped entries -- appendix should be empty"
-    assert "Filtered 1 boilerplate/empty entries from Appendix" in printed
+    assert "1 non-content block removed (column-header 1)" in printed
 
 
-def test_real_sentence_entry_still_renders(tmp_path, capsys):
+def test_real_sentence_entry_still_renders(tmp_path, caplog):
     """Negative control: a T-coded entry that is genuine (non-header) prose
     still reaches the Appendix -- the new filter must not be overbroad."""
     entries = [
@@ -135,7 +142,7 @@ def test_real_sentence_entry_still_renders(tmp_path, capsys):
          "taxonomy_code": "T", "extracted_fields": {},
          "hierarchy": ["Service"], "element_idx_start": 1},
     ]
-    text, printed = _render(tmp_path, entries, capsys)
+    text, printed = _render(tmp_path, entries, caplog)
     assert REAL_SENTENCE_TOKEN in text
     assert "T. APPENDIX" in text
-    assert "Filtered 1 boilerplate/empty entries from Appendix" not in printed
+    assert "removed" not in printed
