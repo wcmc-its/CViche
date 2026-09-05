@@ -13,7 +13,7 @@ Bodies are unmodified. `run_doctor` re-exports every name it exported before.
 """
 import re
 from collections import Counter
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.template_boilerplate import (
@@ -184,7 +184,7 @@ def _is_appendix_noise(text: str) -> bool:
     return is_source_boilerplate(normed)
 
 
-def lint_output_hygiene(blocks: List[Tuple[str, str]]) -> List[Dict]:
+def lint_output_hygiene(blocks: list[tuple[str, str]]) -> list[dict]:
     """Bracketed taxonomy-code leaks anywhere in the output, plus appendix
     size and boilerplate lines rendered as appendix entries."""
     findings = []
@@ -307,8 +307,8 @@ def _names_match(a: str, b: str) -> bool:
     return shorter <= longer
 
 
-def lint_dead_sections(stage2: Dict,
-                       blocks: List[Tuple[str, str]]) -> List[Dict]:
+def lint_dead_sections(stage2: dict,
+                       blocks: list[tuple[str, str]]) -> list[dict]:
     """A source section with several substantive lines (grouped by each
     entry's top-level hierarchy header, stage 2) whose name-matched WCM
     output section holds nothing beyond template scaffolding — neither
@@ -379,14 +379,14 @@ def lint_dead_sections(stage2: Dict,
     return findings
 
 
-def _record_lines(text) -> List[str]:
+def _record_lines(text: object) -> list[str]:
     """Record-like lines of an entry: pipe/tab rows, plus date-prefixed lines
     that pass `_is_date_record_line` (a record, not prose or a bare range)."""
     return [line.strip() for line in str(text or "").split("\n")
             if _looks_like_record(line) or _is_date_record_line(line.strip())]
 
 
-def _bare_date_lines(text) -> int:
+def _bare_date_lines(text: object) -> int:
     """How many lines of an entry are a bare date column (see
     `_is_bare_date_line`)."""
     return sum(1 for line in str(text or "").split("\n")
@@ -489,8 +489,8 @@ def _record_rendered(line: str, haystack: str,
     return rendered
 
 
-def lint_unrendered_records(stage4: Dict,
-                            blocks: List[Tuple[str, str]]) -> List[Dict]:
+def lint_unrendered_records(stage4: dict,
+                            blocks: list[tuple[str, str]]) -> list[dict]:
     """Per-record render check over fused multi-record stage-4 entries: the
     structured-fields-only render paths keep the extracted record and drop
     the unextracted remainder lines with no bullet fallback (#221). No
@@ -644,7 +644,7 @@ _AWARD_ORG_ALIASES = ("organization", "granting")
 _AWARD_DATE_ALIASES = ("date awarded", "date", "yyyy", "year")
 
 
-def _alias_col(header: List[str], aliases: Tuple[str, ...]) -> Optional[int]:
+def _alias_col(header: list[str], aliases: tuple[str, ...]) -> int | None:
     """First header column whose text contains one of `aliases` as a whole
     word/phrase, in alias order -- the first alias that matches ANY column
     wins, same first-match precedence as the substring rule it replaces."""
@@ -656,7 +656,7 @@ def _alias_col(header: List[str], aliases: Tuple[str, ...]) -> Optional[int]:
     return None
 
 
-def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
+def lint_table_shape(tables: list[list[list[str]]]) -> list[dict]:
     """Honors-like tables whose rows are mis-shaped (#229): the stage-6
     multi-award fallback puts citation blobs in the name cell, leaks state
     abbreviations into the organization column, leaves the date column empty
@@ -771,7 +771,7 @@ def _passage_key(text) -> str:
     return " ".join(_PASSAGE_PUNCT_RE.sub(" ", _norm("\n".join(lines))).split())
 
 
-def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
+def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
     """Stretches of DUPLICATE_PASSAGE_MIN_BLOCKS+ consecutive rendered blocks
     that appear twice in the output document — one source record reaching the
     faculty-facing docx more than once (#439).
@@ -819,7 +819,7 @@ def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
     # occurrence range in index space and skip a match that overlaps a range
     # already charged, so each redundant copy is counted once regardless of
     # how many distances re-derive it (#446 review, fb73705 rework).
-    charged_second_ranges: List[Tuple[int, int]] = []
+    charged_second_ranges: list[tuple[int, int]] = []
     passages: List[Tuple[int, int, int]] = []
     for distance in sorted(distances):
         i = 0
@@ -883,7 +883,7 @@ DUPLICATE_RECORD_MIN_CHARS = 20
 DUPLICATE_RECORD_WARN_COUNT = 1
 
 
-def lint_duplicate_records(blocks: List[Tuple[str, str]]) -> List[Dict]:
+def lint_duplicate_records(blocks: list[tuple[str, str]]) -> list[dict]:
     """A single numbered/bulleted paragraph block whose normalized body
     repeats at a different list position within DUPLICATE_RECORD_WINDOW
     enumerated blocks of its first occurrence, in the SAME output section
@@ -898,10 +898,10 @@ def lint_duplicate_records(blocks: List[Tuple[str, str]]) -> List[Dict]:
     not match the enumerator prefix, so it is skipped rather than consuming a
     window slot or breaking one, same as `lint_duplicate_passages`.
     """
-    current_section: Optional[str] = None
-    recent: List[Tuple[str, int, int]] = []  # (key, enum_index, block_index)
+    current_section: str | None = None
+    recent: list[tuple[str, int, int]] = []  # (key, enum_index, block_index)
     enum_index = 0
-    pairs: List[Tuple[int, int]] = []
+    pairs: list[tuple[int, int]] = []
 
     for i, (kind, text) in enumerate(blocks):
         header = _output_section_header(text) if kind == "p" else None

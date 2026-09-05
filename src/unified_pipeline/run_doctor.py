@@ -367,7 +367,7 @@ def _is_single_column(tbl) -> bool:
     return all(len(_logical_cells(row)) == 1 for row in tbl.rows)
 
 
-def iter_header_candidates(docx_path: str) -> List[str]:
+def iter_header_candidates(docx_path: str) -> list[str]:
     """Header-looking source lines: short, letters-only, ALL-CAPS bold (or
     styled as a Heading), from top-level paragraphs and single-column table
     cells (the 1x1 layout tables CVs use as section containers; see
@@ -410,7 +410,7 @@ def iter_header_candidates(docx_path: str) -> List[str]:
         if runs and all(r.bold for r in runs):
             candidates.append(text)
 
-    def walk_table(tbl):
+    def walk_table(tbl) -> None:
         if not _is_single_column(tbl):
             return
         for row in tbl.rows:
@@ -618,9 +618,9 @@ def _find_source(root: Path, uid: str) -> Optional[Path]:
     return None
 
 
-def _load_json(path: Optional[Path], label: str = None,
-               on_unreadable=None,
-               spec: ArtifactSpec | None = None) -> Optional[Dict]:
+def _load_json(path: Path | None, label: str | None = None,
+               on_unreadable: Callable[[str, str], None] | None = None,
+               spec: ArtifactSpec | None = None) -> dict | None:
     """Load an artifact JSON, or None if it is absent.
 
     `path` comes from _find_artifact/_find_source, which glob -- so a non-None
@@ -699,8 +699,8 @@ def _ready(lint_id: str, *, unreadable: Dict[str, str], findings: List[Dict],
     return False
 
 
-def _run_lint(lint_id: str, rule: Callable[..., List[Dict]],
-              args: Sequence[object], findings: List[Dict]) -> None:
+def _run_lint(lint_id: str, rule: Callable[..., list[dict]],
+              args: Sequence[object], findings: list[dict]) -> None:
     """Run one lint inside its own fault boundary (#446 review, run_doctor.py
     thread item 3 / #748). A lint that raises becomes ONE ERROR finding
     under its own key -- logged with the traceback, never swallowed -- and
@@ -720,7 +720,7 @@ class LintSpec(NamedTuple):
     emits it, and the loaded-input views it takes, in the rule's positional
     order."""
     lint_id: str
-    rule: Callable[..., List[Dict]]
+    rule: Callable[..., list[dict]]
     inputs: tuple[str, ...]
 
 
@@ -774,7 +774,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
 )
 
 
-def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
+def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
     """Run every lint whose artifacts exist under root for this document uid.
     Never raises on missing/unreadable artifacts, never raises out of a lint
     (`_run_lint` turns that into an ERROR finding) and never calls sys.exit
