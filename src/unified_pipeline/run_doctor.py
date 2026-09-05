@@ -471,16 +471,72 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
 class ArtifactSpec(NamedTuple):
     stage_dir: str
     suffix: str
+    #: Top-level keys that must be present and hold a list of objects -- the
+    #: records every lint on this artifact iterates.
+    record_lists: tuple[str, ...] = ()
+    #: Top-level keys that, when present, must hold a list of objects; absent
+    #: is a valid (empty) artifact of this kind.
+    optional_lists: tuple[str, ...] = ()
+    #: Top-level keys that, when present and not null, must hold an object.
+    object_fields: tuple[str, ...] = ()
 
+
+#: What "a valid artifact of this kind" means at the loading boundary (#446
+#: review, run_doctor.py thread item 2 / #747): the top-level shape every
+#: lint that reads the artifact indexes into, measured over the farm's
+#: 115/106/98/66/62 files of each JSON kind. Every one is an object; every
+#: stage-1a carries a `hierarchy` list of nodes; every stage-2/3b/4/5
+#: carries an `entries` list of objects; stage-4's `cv_owner` is an object
+#: where present (absent on 2 of 66, which the owner gate scores as missing,
+#: not invalid); the render sidecar's `warnings`/`dedup_decisions` are lists
+#: of objects where present. Nested shapes stay the lints' business -- this
+#: is the boundary check, not a schema.
 _ARTIFACTS = {
-    "stage_1a": ArtifactSpec("stage_1a_segmentation", "_segmented.json"),
-    "stage_2": ArtifactSpec("stage_2_entry_extraction", "_entries.json"),
-    "stage_3b": ArtifactSpec("stage_3b_classified_entries", "_classified.json"),
-    "stage_4": ArtifactSpec("stage_4_field_extraction", "_fields.json"),
-    "stage_5_enrichment": ArtifactSpec("stage_5_enrichment", "_enriched.json"),
+    "stage_1a": ArtifactSpec("stage_1a_segmentation", "_segmented.json",
+                             record_lists=("hierarchy",)),
+    "stage_2": ArtifactSpec("stage_2_entry_extraction", "_entries.json",
+                            record_lists=("entries",)),
+    "stage_3b": ArtifactSpec("stage_3b_classified_entries", "_classified.json",
+                             record_lists=("entries",)),
+    "stage_4": ArtifactSpec("stage_4_field_extraction", "_fields.json",
+                            record_lists=("entries",), object_fields=("cv_owner",)),
+    "stage_5_enrichment": ArtifactSpec("stage_5_enrichment", "_enriched.json",
+                                       record_lists=("entries",)),
     "stage_6_docx": ArtifactSpec("stage_6_wcm_documents", "_wcm.docx"),
-    "stage_6_report": ArtifactSpec("stage_6_wcm_documents", "_render_warnings.json"),
+    "stage_6_report": ArtifactSpec("stage_6_wcm_documents", "_render_warnings.json",
+                                   optional_lists=("warnings", "dedup_decisions")),
 }
+
+#: The artifacts `_load_json` reads, in load order; the docx is read by its
+#: own views.
+_JSON_ARTIFACTS = tuple(key for key, spec in _ARTIFACTS.items()
+                        if spec.suffix.endswith(".json"))
+
+
+def _artifact_shape_error(data: object, spec: ArtifactSpec) -> str | None:
+    """The first way `data` fails to be a valid artifact of `spec`'s kind, or
+    None when it is one. Names the offending field, so the ERROR finding a
+    reader sees says what is wrong with the file rather than which lint
+    happened to trip over it first."""
+    if not isinstance(data, dict):
+        return f"top level is {type(data).__name__}, not an object"
+    for key in spec.record_lists:
+        if key not in data:
+            return f"missing '{key}'"
+    for key in spec.record_lists + spec.optional_lists:
+        if key not in data:
+            continue
+        value = data[key]
+        if not isinstance(value, list):
+            return f"'{key}' is {type(value).__name__}, not a list"
+        for i, item in enumerate(value):
+            if not isinstance(item, dict):
+                return f"'{key}[{i}]' is {type(item).__name__}, not an object"
+    for key in spec.object_fields:
+        value = data.get(key)
+        if value is not None and not isinstance(value, dict):
+            return f"'{key}' is {type(value).__name__}, not an object"
+    return None
 
 #: The owner gate reports an ABSENT *_fields.json only for a run that got as
 #: far as rendering a deliverable, or whose stage-4 file exists but will not
@@ -529,7 +585,8 @@ def _find_source(root: Path, uid: str) -> Optional[Path]:
 
 
 def _load_json(path: Optional[Path], label: str = None,
-               on_unreadable=None) -> Optional[Dict]:
+               on_unreadable=None,
+               spec: ArtifactSpec | None = None) -> Optional[Dict]:
     """Load an artifact JSON, or None if it is absent.
 
     `path` comes from _find_artifact/_find_source, which glob -- so a non-None
@@ -537,17 +594,32 @@ def _load_json(path: Optional[Path], label: str = None,
     present-but-unreadable (corrupt JSON, permission error), which is NOT the
     same as absent: report it via on_unreadable so a lint does not silently
     degrade to "skipped: missing <stage>". Absent (path is None) stays quiet.
+
+    With `spec`, the parsed JSON must also be a valid artifact of that kind
+    (`_artifact_shape_error`): a file that parses but is not the shape its
+    lints index into is reported through the same on_unreadable path as
+    corrupt JSON, naming the offending field, instead of failing later inside
+    whichever lint reaches it first (#446 review, run_doctor.py thread item
+    2 / #747). "JSON parsed" is not "this is a stage-4 artifact".
     """
     if not path:
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
         logger.warning("run_doctor could not read %s (%s): %s",
                        label or path, type(e).__name__, e)
         if on_unreadable is not None:
             on_unreadable(label or str(path), f"{type(e).__name__}: {e}")
         return None
+    problem = _artifact_shape_error(data, spec) if spec is not None else None
+    if problem is None:
+        return data
+    logger.warning("run_doctor: %s is not a valid %s artifact: %s",
+                   path, label or "stage", problem)
+    if on_unreadable is not None:
+        on_unreadable(label or str(path), f"invalid artifact: {problem}")
+    return None
 
 
 def _try(fn, label: str = None, on_unreadable=None):
@@ -601,8 +673,8 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     paths = {key: _find_artifact(root, uid, key) for key in _ARTIFACTS}
     source_path = Path(source) if source else _find_source(root, uid)
 
-    # Artifacts that exist but failed to load, keyed by the label their loader
-    # passed to _note -- which MUST match the input kwarg name _ready() checks
+    # Artifacts that exist but failed to load or validate, keyed by the label
+    # their loader passed to _note -- which MUST match the input kwarg name _ready() checks
     # (so a None input is traced back to a broken file vs a genuinely absent
     # one). The source docx feeds two independent readers; they take separate
     # labels so a reader that fails alone is attributed to the right lint.
@@ -610,12 +682,14 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     def _note(label, detail):
         unreadable[label] = detail
 
-    stage_1a = _load_json(paths["stage_1a"], "stage_1a", _note)
-    stage_2 = _load_json(paths["stage_2"], "stage_2", _note)
-    stage_3b = _load_json(paths["stage_3b"], "stage_3b", _note)
-    stage_4 = _load_json(paths["stage_4"], "stage_4", _note)
-    stage_5e = _load_json(paths["stage_5_enrichment"], "stage_5_enrichment", _note)
-    stage_6_report = _load_json(paths["stage_6_report"], "stage_6_report", _note)
+    stage_1a = _load_json(paths["stage_1a"], "stage_1a", _note, _ARTIFACTS["stage_1a"])
+    stage_2 = _load_json(paths["stage_2"], "stage_2", _note, _ARTIFACTS["stage_2"])
+    stage_3b = _load_json(paths["stage_3b"], "stage_3b", _note, _ARTIFACTS["stage_3b"])
+    stage_4 = _load_json(paths["stage_4"], "stage_4", _note, _ARTIFACTS["stage_4"])
+    stage_5e = _load_json(paths["stage_5_enrichment"], "stage_5_enrichment", _note,
+                          _ARTIFACTS["stage_5_enrichment"])
+    stage_6_report = _load_json(paths["stage_6_report"], "stage_6_report", _note,
+                                _ARTIFACTS["stage_6_report"])
     source_lines = _try(lambda: iter_source_lines(str(source_path)), "source", _note) if source_path else None
     candidates = _try(lambda: iter_header_candidates(str(source_path)), "candidates", _note) if source_path else None
     blocks = _try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note) if paths["stage_6_docx"] else None

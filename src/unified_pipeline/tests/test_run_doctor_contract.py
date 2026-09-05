@@ -364,6 +364,89 @@ def test_run_doctor_report_shape_and_values(tmp_path):
     assert set(payload["counts"]) == {"ERROR", "WARN", "INFO"}
 
 
+# --- contract 4: review round 2 on #725 (run_doctor.py thread) ---------------
+
+# One malformed-but-parseable artifact per JSON kind: (loader label, stage
+# dir, filename, file content, the shape problem the loader must name, a lint
+# gated on that artifact). Each of these used to reach its lints as a valid
+# input and fail inside them -- `'str'.get`, iterating None -- instead of
+# being rejected once at the loading boundary.
+_MALFORMED_ARTIFACTS = [
+    ("stage_1a", "stage_1a_segmentation", "ABC_segmented.json",
+     "[]", "top level is list, not an object", "missed_headers"),
+    ("stage_1a", "stage_1a_segmentation", "ABC_segmented.json",
+     '{"document_uid": "ABC"}', "missing 'hierarchy'", "segmentation"),
+    ("stage_2", "stage_2_entry_extraction", "ABC_entries.json",
+     '{"entries": "oops"}', "'entries' is str, not a list", "dead_sections"),
+    ("stage_3b", "stage_3b_classified_entries", "ABC_classified.json",
+     '{"entries": [1]}', "'entries[0]' is int, not an object",
+     "taxonomy_code_coverage"),
+    ("stage_4", "stage_4_field_extraction", "ABC_fields.json",
+     '{"entries": [], "cv_owner": []}', "'cv_owner' is list, not an object",
+     "under_extraction"),
+    ("stage_5_enrichment", "stage_5_enrichment", "ABC_enriched.json",
+     '{"entries": null}', "'entries' is NoneType, not a list",
+     "enrichment_failures"),
+    ("stage_6_report", "stage_6_wcm_documents", "ABC_render_warnings.json",
+     '{"warnings": {}}', "'warnings' is dict, not a list",
+     "stage6_render_warnings"),
+]
+
+
+@pytest.mark.parametrize("label, stage_dir, filename, content, problem, lint",
+                         _MALFORMED_ARTIFACTS)
+def test_a_malformed_but_parseable_artifact_is_rejected_at_the_loading_boundary(
+        tmp_path, label, stage_dir, filename, content, problem, lint):
+    """Item 2 / #747: the loader turns "JSON parsed" into "this is a valid
+    <stage> artifact". A shape violation takes the same ERROR 'unreadable'
+    path a corrupt file takes, names the offending field, is never reported
+    as the benign 'missing', and no lint crashes on it."""
+    root = tmp_path / "outputs"
+    (root / stage_dir).mkdir(parents=True)
+    (root / stage_dir / filename).write_text(content)
+
+    payload = _module().run_doctor(root, "ABC")
+    hit = [f for f in payload["findings"] if f["lint"] == lint]
+    assert any(f["severity"] == "ERROR"
+               and f"unreadable {label} (invalid artifact: {problem})" in f["message"]
+               for f in hit), hit
+    assert not any(f"missing {label}" in f["message"] for f in hit), hit
+    assert not any("crashed" in f["message"] for f in payload["findings"])
+    assert payload["worst_severity"] == "ERROR"
+
+
+@pytest.mark.parametrize("data, problem", [
+    ({"entries": [{"text": "x"}], "cv_owner": {"full_name": "M. Shapiro"}}, None),
+    ({"entries": []}, None),
+    # a null cv_owner is tolerated: the owner gate scores it as missing
+    ({"entries": [], "cv_owner": None}, None),
+    ([], "top level is list, not an object"),
+    ("{}", "top level is str, not an object"),
+    ({}, "missing 'entries'"),
+    ({"entries": {}}, "'entries' is dict, not a list"),
+    ({"entries": ["x"]}, "'entries[0]' is str, not an object"),
+    ({"entries": [], "cv_owner": "Dr X"}, "'cv_owner' is str, not an object"),
+])
+def test_artifact_shape_error_names_the_offending_field(data, problem):
+    """The validator itself, on the stage-4 spec (records + an object field):
+    the first violation, named; None for a valid artifact."""
+    mod = _module()
+    assert mod._artifact_shape_error(data, mod._ARTIFACTS["stage_4"]) == problem
+
+
+def test_every_json_artifact_kind_declares_its_record_shape():
+    """The boundary check is only as good as the specs: every JSON artifact
+    kind names at least one required or optional record list, so no kind
+    silently degrades back to "any object passes"."""
+    mod = _module()
+    for key in mod._JSON_ARTIFACTS:
+        spec = mod._ARTIFACTS[key]
+        assert spec.record_lists or spec.optional_lists, key
+    assert set(mod._JSON_ARTIFACTS) == {
+        "stage_1a", "stage_2", "stage_3b", "stage_4", "stage_5_enrichment",
+        "stage_6_report"}
+
+
 def test_ten_of_the_surface_is_private():
     """Most of what consumers reach for is underscore-private. That is the point.
 
