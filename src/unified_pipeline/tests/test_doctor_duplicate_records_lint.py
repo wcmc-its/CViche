@@ -210,18 +210,55 @@ def test_names_match_whole_word_token_containment_not_bare_substring():
     passed the synthetic test but caused a REAL regression on the doctor
     A/B gate: the 65-doc farm's 2100_Mocco lost a genuine dead_sections
     true positive ('Research Presentations' / empty output 'RESEARCH')
-    because the two no longer matched. A spurious match here can only
-    SUPPRESS a real finding, never fabricate one, so a same-word match is
-    the safer failure direction -- whole-word TOKEN CONTAINMENT keeps
-    'Research' matching 'Research Administration' (no corpus regression)
-    while still closing the confirmed real defect: 'education' as a
-    fragment inside the single word 'educational' no longer matches
-    'educational contributions' at all (different tokens, not a shared
-    substring across a word boundary)."""
+    because the two no longer matched. Keeping a same-word match here (a
+    same-word match can SUPPRESS a real finding but, on its own, can also
+    fabricate one -- see
+    test_dead_sections_does_not_fabricate_a_warn_via_an_unrelated_partial_name_match
+    below, #725 review r3923589271 pt 3) is still the right trade at the
+    `_names_match` level: whole-word TOKEN CONTAINMENT keeps 'Research'
+    matching 'Research Administration' (no corpus regression) while still
+    closing the confirmed real defect: 'education' as a fragment inside the
+    single word 'educational' no longer matches 'educational contributions'
+    at all (different tokens, not a shared substring across a word
+    boundary). `lint_dead_sections` is where the fabrication risk actually
+    gets closed, by requiring an exact match before it will trust a
+    single-word source name on containment alone."""
     from unified_pipeline.doctor.lints.render import _names_match
     assert _names_match("research", "research administration")
     assert not _names_match("education", "educational contributions")
     assert _names_match("honors", "b. honors and awards")
+
+
+def test_dead_sections_does_not_fabricate_a_warn_via_an_unrelated_partial_name_match():
+    """#725 review r3923589271 pt 3: render.py's own `_names_match`
+    docstring used to claim a spurious match here can only SUPPRESS a real
+    dead_sections finding, never fabricate one. False: lint_dead_sections
+    fires whenever some name-matched output section exists and every
+    matched one is empty, so a bare single-word source name ('Research')
+    with NO exact output counterpart can still coincidentally token-match a
+    genuinely unrelated, and genuinely empty, compound section name
+    ('Research Administration') while the real content renders correctly
+    under a third, differently-named section ('SCHOLARSHIP') -- the lone
+    coincidental match alone used to be enough to fire a WARN even though
+    nothing is actually missing. lint_dead_sections now requires an exact
+    normalized-name match before it trusts a single-word source name;
+    'Research Administration' no longer counts as evidence for 'Research'
+    on its own."""
+    from unified_pipeline.doctor.lints.render import lint_dead_sections
+    stage2 = {"entries": [
+        {"element_type": "entry", "hierarchy": ["Research"],
+         "text": "Studies host-pathogen interactions in the lab setting."},
+        {"element_type": "entry", "hierarchy": ["Research"],
+         "text": "Published three papers on this topic in the last year."},
+        {"element_type": "entry", "hierarchy": ["Research"],
+         "text": "Presented preliminary findings at two national meetings."},
+    ]}
+    blocks = [
+        ("p", "SCHOLARSHIP"),
+        ("table", "Studies host-pathogen interactions across three papers."),
+        ("p", "E. RESEARCH ADMINISTRATION"),
+    ]
+    assert lint_dead_sections(stage2, blocks) == []
 
 
 def test_dead_sections_counts_a_non_blank_table_cell_as_content():

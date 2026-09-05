@@ -260,9 +260,13 @@ def _names_match(a: str, b: str) -> bool:
     see the D1(b) note in the PR body -- 'Research Presentations' inside a
     'RESEARCH' output section it must still be recognized as belonging to.
 
-    A spurious match here can only SUPPRESS a real dead_sections finding
-    (the matched section still has to be found EMPTY to fire), never
-    fabricate one against unrelated content."""
+    This alone does not decide dead_sections: a spurious match CAN fabricate
+    a finding when it is the only candidate a bare single-word source name
+    picks up (#725 review r3923589271 pt 3 -- 'Research' coincidentally
+    matching an unrelated, genuinely empty 'Research Administration' output
+    section fires a WARN even when the real content rendered correctly
+    under a differently-named section, since nothing else was checked).
+    lint_dead_sections guards against exactly that case; see its docstring."""
     if not a or not b:
         return False
     if a == b:
@@ -279,7 +283,20 @@ def lint_dead_sections(stage2: Dict,
     """A source section with several substantive lines (grouped by each
     entry's top-level hierarchy header, stage 2) whose name-matched WCM
     output section holds nothing beyond template scaffolding — neither
-    paragraphs nor tables."""
+    paragraphs nor tables.
+
+    Candidate selection (#725 review r3923589271 pt 3): an exact
+    normalized-name match is used alone when one exists. Absent that, a
+    bare single-word source name (one token: 'Research', 'Honors') is too
+    generic to trust on fuzzy token containment by itself -- it can
+    coincidentally hit an unrelated, genuinely empty compound section name
+    ('Research Administration') while the real content renders correctly
+    under a third, differently-named section, fabricating a WARN with
+    nothing actually missing -- so a single-word name only matches
+    exactly. A multi-word source name ('Research Presentations') still
+    falls back to `_names_match`'s token containment, which is what the
+    farm's 2100_Mocco true positive (matching the shorter 'RESEARCH' output
+    section) needs."""
     per_h1: Dict[str, int] = {}
     for e in stage2.get("entries", []):
         if e.get("element_type") in ("header", "break"):
@@ -318,7 +335,13 @@ def lint_dead_sections(stage2: Dict,
     for h1, n_lines in sorted(per_h1.items()):
         if h1 == "(none)" or n_lines < DEAD_SECTION_MIN_LINES:
             continue
-        matched = [s for s in sections if _names_match(h1, s[1])]
+        exact = [s for s in sections if s[1] == h1]
+        if exact:
+            matched = exact
+        elif len(_name_tokens(h1)) > 1:
+            matched = [s for s in sections if _names_match(h1, s[1])]
+        else:
+            matched = []
         if matched and all(s[2] == 0 for s in matched):
             findings.append(_finding(
                 "dead_sections", "WARN",
