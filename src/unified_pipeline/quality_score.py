@@ -509,6 +509,34 @@ def _count_raw_tab_cells(tables, _depth: int = 0, _seen_tc=None) -> int:
     return count
 
 
+#: Template instruction text left standing in a rendered CV ("prompt echo").
+#: Each alternation is a phrase the pristine WCM template
+#: (`key_files/wcm_cv_template_faculty_october_2022_final.docx`) itself uses
+#: in an instruction line -- every "please" there is "Please include / list /
+#: summarize / annotate / provide / choose / keep / do not / also include",
+#: every "e.g.," is "e.g., 50%" / "(e.g., sessions" / "(e.g., drugs", and
+#: "bedside" appears only as "(bedside teaching, teaching rounds, ...)" --
+#: rather than the bare words. The bare words were the #724 review's item 8:
+#: "please" and "e.g.," occur in ordinary academic prose and "bedside" in
+#: citation titles. Measured on the 65-docx farm (22,546 body paragraphs)
+#: before narrowing: the bare pattern hit 1,312 paragraphs, this one 1,300;
+#: the 12 dropped are 10 citation titles containing "bedside", one teaching
+#: bullet ("including Bedside Teaching") and one research summary with
+#: "e.g.," -- every one legitimate content -- and it gains nothing the bare
+#: pattern missed (strict subset). Every one of the template's 20 body
+#: instruction paragraphs still matches (pinned by a test that reads the
+#: template). No farm score moves: all 65 docx carry >= 15 echoes under
+#: either pattern, so the echo term is saturated on both.
+INSTRUCTION_MARKERS = re.compile(
+    r"(please (?:include|list|summarize|annotate|provide|choose|keep|do not|also include)"
+    r"|delete the others|list here|choose one"
+    r"|bedside teaching, teaching rounds"
+    r"|e\.g\., (?:50%|sessions|drugs)"
+    r"|yyyy-yyyy|\(optional\)|\(Research, clinical)",
+    re.IGNORECASE,
+)
+
+
 def score_broken_format(outputs_dir: Path):
     """Raw-tab and prompt-echo (template instruction) artifacts in the docx.
 
@@ -516,8 +544,8 @@ def score_broken_format(outputs_dir: Path):
 
     - Prompt-echo (``INSTRUCTION_MARKERS``) scans body paragraphs ONLY. A
       #724 follow-up review probe confirmed every marker this pattern
-      checks ("please", "yyyy-yyyy", "(optional)", "(Research, clinical")
-      occurs verbatim in the pristine WCM template's own table cells --
+      checks ("please provide", "yyyy-yyyy", "(optional)", "(Research,
+      clinical") occurs verbatim in the pristine WCM template's own table cells --
       table 1 row 7 col 0 "If yes, please provide Visa type (Examples: J-1,
       H-1B, E-3, TN, etc.):", table 9 rows 0-1 col 0 "DEA number:
       (optional)" / "NPI number: (optional)", table 13 row 0 col 1 "Date
@@ -546,10 +574,6 @@ def score_broken_format(outputs_dir: Path):
     if doc is None:
         return 0.5, reason, None
 
-    INSTRUCTION_MARKERS = re.compile(
-        r"(please|delete the others|list here|choose one|bedside|e\.g\.,|yyyy-yyyy|\(optional\)|\(Research, clinical)",
-        re.IGNORECASE,
-    )
     raw_tab_paragraphs = echo_count = 0
     for p in doc.paragraphs:
         text = p.text

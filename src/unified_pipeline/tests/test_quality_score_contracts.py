@@ -455,16 +455,63 @@ def test_broken_format_prompt_echo_in_table_cell_not_detected(tmp_path):
     assert "echo_paragraphs=0" in detail, detail
 
 
-def test_broken_format_legitimate_please_sentence_still_matches(tmp_path):
-    """D8: no pattern change -- pins the current (intentionally broad) match
-    rather than silently narrowing it. Farm sample (T2.8): 19 of 20 sampled
-    'please' hits were true prompt-echo positives; the one false positive was
-    'bedside' (a citation title), not 'please'. This sentence is legitimate
-    academic prose and still matches -- expected, not a bug to fix here."""
-    _make_docx(["Please note the patient responded well to treatment."]).save(
-        tmp_path / "out.docx")
+@pytest.mark.parametrize("prose", [
+    # D8 (#724 review thread 2 item 8): the bare words "please", "e.g.," and
+    # "bedside" are ordinary academic prose; only the template's own
+    # instruction phrases count as an echo now.
+    "Please note the patient responded well to treatment.",
+    "Emergency physician diagnosis of an atrial septal defect: the bedside "
+    "bubble study. Academic Emergency Medicine. 2010 May.",
+    "Research examines how built environments shape outcomes, e.g., obesity "
+    "risk in rural counties.",
+    "Clinical Teaching - Inpatient Rheumatology Teaching, including Bedside "
+    "Teaching and Clinic Supervision",
+])
+def test_broken_format_legitimate_prose_not_counted_as_echo(tmp_path, prose):
+    _make_docx([prose]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "echo_paragraphs=0" in detail, detail
+
+
+@pytest.mark.parametrize("instruction", [
+    # Verbatim body-paragraph instruction lines from the pristine WCM
+    # template, one per alternation the narrowed pattern keeps.
+    "Current Employment Status (Please choose one, list here, delete the others):",
+    "Part-time salaried by Cornell (show percentage of full time effort, e.g., 50%)",
+    "Please include medical and scientific societies.)",
+    "Clinical teaching (bedside teaching, teaching rounds, teaching in operating "
+    "room, precepting in clinic, morning report, etc.)",
+    "Duplicate table below as needed. For each funding vehicle, please include the following:",
+    "*Please annotate multi-investigator, program project, center grants (P50 etc.)",
+    "Please summarize as for current projects: source-type, project title, dates, your role.",
+    "Please list trainees and faculty that you have formally supervised",
+    "Entries should follow standard journal format. Please also include PMCID: PMC",
+    "If yes, please provide Visa type (Examples: J-1, H-1B, E-3, TN, etc.):",
+    "Date (yyyy-yyyy)",
+    "DEA number: (optional)",
+    "Type of Supervision (research, clinical, teaching, leadership)",
+])
+def test_broken_format_template_instruction_line_counted_as_echo(tmp_path, instruction):
+    _make_docx([instruction]).save(tmp_path / "out.docx")
     fraction, detail, cap = score_broken_format(tmp_path)
     assert "echo_paragraphs=1" in detail, detail
+
+
+_TEMPLATE = Path(__file__).resolve().parents[3] / "key_files" / \
+    "wcm_cv_template_faculty_october_2022_final.docx"
+
+
+@pytest.mark.skipif(not _TEMPLATE.exists(), reason="pristine WCM template not checked out")
+def test_broken_format_narrowed_pattern_still_matches_every_template_instruction():
+    """The narrowed INSTRUCTION_MARKERS must keep matching every instruction
+    paragraph in the template it is derived from: 20 body paragraphs matched
+    the bare-word pattern before narrowing (scouted 2026-09-04), and the
+    narrowed pattern matches the same 20 -- a drop here means a template
+    instruction line can now echo into a rendered CV unseen."""
+    doc = Document(_TEMPLATE)
+    matched = [p.text for p in doc.paragraphs if qs.INSTRUCTION_MARKERS.search(p.text)]
+    assert len(matched) == 20, matched
+    assert all(p.strip() for p in matched)
 
 
 # --------------------------------------------------------------------- D16
