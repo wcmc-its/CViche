@@ -193,7 +193,7 @@ def _format_citation(entry: dict, num: int) -> tuple[str, str | None, list[str]]
     return f"{num}. " + " ".join(parts), pub.target_name, list(pub.enriched_fields)
 
 
-def _format_currency(value) -> str:
+def _format_currency(value: object) -> str:
     """Format a value as US currency ($).
 
     Args:

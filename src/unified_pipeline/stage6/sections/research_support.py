@@ -20,7 +20,7 @@ editing this file, not just stage 4 (CODING_STANDARDS.md §7.3).
 """
 import re
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 try:
     from docx.table import Table
@@ -252,7 +252,7 @@ class ResearchSupportSection:
                         if spacing_para is not None:
                             last_element = spacing_para
 
-    def _create_grant_table(self, fields: Dict, code: str, entry: Dict = None, insert_after_element=None, owner_name: str = '') -> Optional[Table]:
+    def _create_grant_table(self, fields: dict, code: str, entry: dict | None = None, insert_after_element: object | None = None, owner_name: str = '') -> Table | None:
         """Create an individual grant table with the WCM data model.
 
         Args:
