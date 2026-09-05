@@ -3,29 +3,42 @@
 The WCM template gives each mentee an individual table rather than one row in a
 shared table, so this section builds document structure instead of filling it,
 and the insert order is inverted throughout: every table goes in immediately
-after its header and pushes the previous one down, so the writers iterate
+after its heading and pushes the previous one down, so the writers iterate
 `reversed(...)` to end up in the intended order.
 
-Before any of that it re-partitions its own input, three times, and each pass
-exists because rendering the stage-4 codes literally lost content (#261):
+The section is two layers (#739 review):
 
-- an N3B (past) mentee whose end date says "present", or that has a start date
-  and no end date at all, is really current -- rendered as-is it reads
-  "2019-present" under Past Mentees.
-- an N3A/N3B entry that names no mentee is an aggregate count, not a mentee.
-  `_create_mentee_table` returns None for it, so before this partition it
-  vanished; it now renders as a plain line via `_insert_mentoring_line`.
-- N4 outcome narrative arrives disguised as a current mentee and has no table in
-  the template at all. It is reclaimed here and written under the section header.
+- `_partition_mentoring_entries` decides WHAT renders where and touches no
+  document. It re-partitions the stage-4 codes three times, and each pass
+  exists because rendering the codes literally lost content (#261): an N3B
+  (past) mentee whose end date says "present", or that has a start date and no
+  end date at all, is really current (`_is_ongoing_mentorship`); an N3A/N3B
+  entry that names no mentee is an aggregate count, not a mentee, and renders
+  as a plain line; N4 outcome narrative arrives disguised as a current mentee
+  and is reclaimed for the section header. `_normalize_mentee` then resolves
+  one entry's field aliases into a `MenteeRecord`, so the table renderer reads
+  no `extracted_fields` at all.
+- The `MentoringSection` methods render. Every insert goes through
+  `_insert_after` against an anchor ELEMENT resolved once per heading -- never
+  a paragraph index, which the inserts themselves shift. A detached anchor
+  raises `DetachedAnchorError` out of the section rather than leaving the
+  content at the end of the document unreported.
 
 `_create_mentee_table_with_spacing` is the one the writer actually calls;
 `_create_mentee_table` is the table itself, kept separate because the spacing
-paragraph has to be inserted between the header and the table.
+paragraph has to be inserted between the heading and the table.
 """
-from typing import Dict, List, Optional
+import logging
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
 
 try:
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    from docx.oxml.xmlchemy import BaseOxmlElement
     from docx.table import Table
+    from docx.text.paragraph import Paragraph
 except ImportError as exc:
     raise ImportError(
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
@@ -33,6 +46,7 @@ except ImportError as exc:
 
 from ..formatting import (
     _format_mentee_duration,
+    _insert_after,
     _set_cell_vertical_alignment,
     _set_font,
     _set_table_border,
@@ -40,244 +54,412 @@ from ..formatting import (
 from ..normalization import _clean_inline_tabs
 from ..parsing import _is_mentee_record, _is_mentoring_outcome
 
+logger = logging.getLogger(__name__)
+
+# Template paragraphs the section anchors on, exact text (case-insensitive,
+# stripped). "MENTORING" doubles as the N4 outcome anchor and, with the
+# "Mentees" substring, as the fallback when neither mentee heading exists.
+CURRENT_MENTEES_HEADING = "Current Mentees:"
+PAST_MENTEES_HEADING = "Past Mentees:"
+MENTORING_HEADING = "MENTORING"
+MENTEES_FALLBACK_TEXT = "Mentees"
+
+# Spacing paragraph between mentee tables: 6pt before and after, in
+# twentieths of a point (w:spacing units).
+MENTEE_TABLE_SPACING_TWIPS = '120'
+
+
+@dataclass(frozen=True)
+class MenteeRecord:
+    """One per-mentee table, fully resolved.
+
+    Built only by `_normalize_mentee`, so 'name' vs 'mentee_name', how
+    mentee_level and site_position combine, and where the mentee's awards
+    go are each decided in one place. `source_entry` is the stage-4 dict,
+    carried through only so `_add_entry_comments` can attach the upstream
+    pipeline comments to the table.
+    """
+
+    name: str = ''
+    site_position: str = ''
+    mentoring_period: str = ''
+    project: str = ''
+    current_position: str = ''
+    supervision_type: str = ''
+    source_entry: Mapping[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class MentoringPartition:
+    """Where each section-N entry renders, decided without a document.
+
+    `current`/`past` are mentee entries (one table each); the two summary
+    tuples are the aggregate lines under the same two headings; `outcomes`
+    are the N4 lines under the section header. `moved_to_current` is how
+    many N3B entries the ongoing-mentorship rule reclassified.
+    """
+
+    current: tuple[Mapping[str, Any], ...] = ()
+    past: tuple[Mapping[str, Any], ...] = ()
+    current_summaries: tuple[Mapping[str, Any], ...] = ()
+    past_summaries: tuple[Mapping[str, Any], ...] = ()
+    outcomes: tuple[Mapping[str, Any], ...] = ()
+    moved_to_current: int = 0
+
+    @property
+    def mentee_count(self) -> int:
+        return len(self.current) + len(self.past)
+
+    @property
+    def line_count(self) -> int:
+        return (len(self.current_summaries) + len(self.past_summaries)
+                + len(self.outcomes))
+
+    @property
+    def is_empty(self) -> bool:
+        return self.mentee_count + self.line_count == 0
+
+
+def _text(value: Any) -> str:
+    """A field value as the string that will appear in a cell: '' for any
+    falsy value (None, '', 0), `str()` of anything else."""
+    return str(value) if value else ''
+
+
+def _is_ongoing_mentorship(fields: Mapping[str, Any]) -> bool:
+    """The "N3B + present = current" rule: an end date that says the
+    relationship is still running, or a start date with no end date at all
+    (which would otherwise display as "2019-present" under Past Mentees).
+    """
+    end_date = str(fields.get('end_date', '') or '').strip()
+    start_date = str(fields.get('start_date', '') or '').strip()
+    end_lower = end_date.lower()
+    if 'present' in end_lower or end_lower in ('ongoing', 'current', 'now'):
+        return True
+    return bool(start_date and not end_date)
+
+
+def _partition_mentoring_entries(
+    entries_by_code: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> MentoringPartition:
+    """Decide the whole of section N without touching a document.
+
+    Order matters: the ongoing-mentorship reshuffle runs first because it keys
+    off dates a summary never has, so the mentee/summary split cannot change
+    its outcome; the N4 reclaim runs last because `_is_mentoring_outcome`
+    matches entries the mismatch-corrector rewrote to N3A, which only the
+    summary split has isolated by then.
+    """
+    n3a_entries = list(entries_by_code.get('N3A', []))
+    n3b_entries = list(entries_by_code.get('N3B', []))
+    n4_entries = list(entries_by_code.get('N4', []))
+
+    moved = [entry for entry in n3b_entries
+             if _is_ongoing_mentorship(entry.get('extracted_fields') or {})]
+    n3b_entries = [entry for entry in n3b_entries
+                   if not _is_ongoing_mentorship(entry.get('extracted_fields') or {})]
+    n3a_entries.extend(moved)
+
+    # Aggregate summaries (no mentee named) get a line, not a table.
+    n3a_summaries = [e for e in n3a_entries if not _is_mentee_record(e)]
+    n3b_summaries = [e for e in n3b_entries if not _is_mentee_record(e)]
+    n3a_entries = [e for e in n3a_entries if _is_mentee_record(e)]
+    n3b_entries = [e for e in n3b_entries if _is_mentee_record(e)]
+
+    # Outcome narrative arrives disguised as a current mentee (see
+    # _is_mentoring_outcome). Reclaim it for the section header rather than
+    # "Current Mentees:", where it does not belong.
+    n4_entries += [e for e in n3a_summaries + n3b_summaries
+                   if _is_mentoring_outcome(e)]
+    n3a_summaries = [e for e in n3a_summaries if not _is_mentoring_outcome(e)]
+    n3b_summaries = [e for e in n3b_summaries if not _is_mentoring_outcome(e)]
+
+    return MentoringPartition(
+        current=tuple(n3a_entries),
+        past=tuple(n3b_entries),
+        current_summaries=tuple(n3a_summaries),
+        past_summaries=tuple(n3b_summaries),
+        outcomes=tuple(n4_entries),
+        moved_to_current=len(moved),
+    )
+
+
+def _infer_supervision_type(level_text: str) -> str:
+    """Supervision type from the mentee's level/position when stage 4 gave
+    none. Checked in this order on purpose: a "clinical fellow" is Research
+    (fellow) before it is Clinical, and the short 'ms'/'ma' tokens are tried
+    last so they cannot pre-empt 'resident' inside a longer word."""
+    level_lower = level_text.lower()
+    if any(x in level_lower for x in ['phd', 'thesis', 'dissertation', 'doctoral']):
+        return 'Research'
+    if any(x in level_lower for x in ['postdoc', 'fellow']):
+        return 'Research'
+    if any(x in level_lower for x in ['resident', 'clinical']):
+        return 'Clinical'
+    if any(x in level_lower for x in ['master', 'ms', 'ma']):
+        return 'Research'
+    return ''
+
+
+def _normalize_mentee(entry: Mapping[str, Any]) -> MenteeRecord:
+    """Resolve one raw stage-4 mentee dict into a `MenteeRecord`.
+
+    `extracted_fields` is sometimes explicitly `None` rather than absent
+    (#659), which a bare `.get('extracted_fields', {})` does not cover.
+
+    Site/Position prefers mentee_level (degree type) combined with
+    site_position when they differ. Awards and fellowships the mentee won
+    belong in Project/Accomplishments: the WCM template's footnote for that
+    row reads "Optional: List publications, awards, grants ... arising
+    directly from the mentoring activity", and stage 4 writes them to
+    awards/funding_source, which nothing read before -- 133 corpus values
+    were extracted and then dropped.
+    """
+    fields = entry.get('extracted_fields') or {}
+
+    mentee_level = _text(fields.get('mentee_level'))       # e.g. "PhD, MBSB"
+    site_pos_raw = _text(fields.get('site_position'))      # e.g. "Thesis"
+    if mentee_level and site_pos_raw and mentee_level.lower() not in site_pos_raw.lower():
+        site_position = f"{mentee_level} - {site_pos_raw}"
+    else:
+        site_position = mentee_level or site_pos_raw
+
+    project = _text(fields.get('research_focus') or fields.get('dissertation_title'))
+    mentee_awards = _text(fields.get('awards') or fields.get('funding_source')).strip()
+    if mentee_awards and mentee_awards.casefold() not in project.casefold():
+        project = f"{project}\nAwards: {mentee_awards}" if project else f"Awards: {mentee_awards}"
+
+    supervision_type = _text(fields.get('supervision_type'))
+    if not supervision_type:
+        supervision_type = _infer_supervision_type(mentee_level or site_pos_raw)
+
+    return MenteeRecord(
+        name=_text(fields.get('name') or fields.get('mentee_name')),
+        site_position=site_position,
+        mentoring_period=_format_mentee_duration(fields),
+        project=project,
+        current_position=_text(fields.get('current_position')),
+        supervision_type=supervision_type,
+        source_entry=entry,
+    )
+
+
+def _mentee_table_rows(record: MenteeRecord) -> tuple[tuple[str, str], ...]:
+    """The six (label, value) rows of a mentee table, in template order.
+    Blank values are kept so every table has the same shape."""
+    return (
+        ('Name:', record.name),
+        ('Site/Position:', record.site_position),
+        ('Mentoring Period:', record.mentoring_period),
+        ('Project/Accomplishments:', record.project),
+        ('Current Position:', record.current_position),
+        ('Type of Supervision:', record.supervision_type),
+    )
+
+
+def _first_table_after(anchor: BaseOxmlElement) -> BaseOxmlElement | None:
+    """The first `w:tbl` among the anchor's following siblings, or None."""
+    for sibling in anchor.itersiblings():
+        if sibling.tag == qn('w:tbl'):
+            return sibling
+    return None
+
+
+def _mentee_spacing_paragraph() -> BaseOxmlElement:
+    """A blank paragraph with 6pt spacing before and after, for the gap
+    between consecutive mentee tables."""
+    spacing_para = OxmlElement('w:p')
+    pPr = OxmlElement('w:pPr')
+    spacing = OxmlElement('w:spacing')
+    spacing.set(qn('w:before'), MENTEE_TABLE_SPACING_TWIPS)
+    spacing.set(qn('w:after'), MENTEE_TABLE_SPACING_TWIPS)
+    pPr.append(spacing)
+    spacing_para.append(pPr)
+    return spacing_para
+
 
 class MentoringSection:
     """Section N writers, mixed into `WCMTemplateGenerator`."""
 
-    def _insert_mentoring_line(self, text: str, insert_after_idx: int, entry: Dict = None):
-        """Insert a plain mentoring paragraph directly after ``insert_after_idx``.
+    def _fill_mentoring(
+        self,
+        entries_by_code: Mapping[str, Sequence[Mapping[str, Any]]],
+    ) -> None:
+        """Render section N: a table per mentee under "Current Mentees:" and
+        "Past Mentees:", aggregate lines under the same headings, and N4
+        outcome lines under the MENTORING header.
+
+        Rendering only -- `_partition_mentoring_entries` has already decided
+        which entry goes where. A heading the template lacks is logged with
+        the count it drops; nothing returns silently.
+        """
+        partition = _partition_mentoring_entries(entries_by_code)
+        if partition.is_empty:
+            return
+
+        logger.info("Filling Mentoring (%d mentees, %d summary/outcome lines)...",
+                    partition.mentee_count, partition.line_count)
+        if partition.moved_to_current:
+            logger.info("  Moved %d mentees from Past to Current (end_date=present)",
+                        partition.moved_to_current)
+
+        current_anchor, past_anchor = self._mentoring_anchors()
+        if current_anchor is None and past_anchor is None:
+            logger.warning(
+                "Mentoring: none of '%s', '%s' or %s found in template; "
+                "%d entries not rendered", CURRENT_MENTEES_HEADING,
+                PAST_MENTEES_HEADING, MENTORING_HEADING,
+                partition.mentee_count + partition.line_count)
+            return
+
+        # Past before current: in the single-heading fallback both groups
+        # share one anchor and every insert lands directly under it, so the
+        # group rendered last is the one that ends up on top.
+        groups = [
+            (mentees, summaries, anchor, heading)
+            for mentees, summaries, anchor, heading in (
+                (partition.past, partition.past_summaries, past_anchor,
+                 PAST_MENTEES_HEADING),
+                (partition.current, partition.current_summaries, current_anchor,
+                 CURRENT_MENTEES_HEADING),
+            )
+            if mentees or summaries
+        ]
+
+        # Placeholder tables first, all of them, before anything renders:
+        # `_first_table_after` scans to the next table anywhere below its
+        # heading, so once one group has rendered, the other heading's scan
+        # would find those new tables instead of the template's. Once per
+        # anchor, for the same reason under a shared fallback anchor.
+        cleared: list[BaseOxmlElement] = []
+        for mentees, summaries, anchor, heading in groups:
+            if anchor is None:
+                logger.warning(
+                    "Mentoring: '%s' heading not found in template; "
+                    "%d entries not rendered", heading, len(mentees) + len(summaries))
+            elif not any(anchor is seen for seen in cleared):
+                self._remove_template_table_after(anchor)
+                cleared.append(anchor)
+
+        for mentees, summaries, anchor, _heading in groups:
+            if anchor is not None:
+                self._render_mentee_group(mentees, summaries, anchor)
+
+        # Mentoring outcomes (N4) have no table in the WCM template; they go
+        # under the section header.
+        if partition.outcomes:
+            mentoring_anchor = self._paragraph_element(
+                self._find_paragraph_exact(MENTORING_HEADING))
+            if mentoring_anchor is None:
+                logger.warning(
+                    "Mentoring: %s heading not found in template; "
+                    "%d outcome lines not rendered", MENTORING_HEADING,
+                    len(partition.outcomes))
+            else:
+                self._insert_mentoring_summaries(partition.outcomes, mentoring_anchor)
+
+    def _paragraph_element(self, index: int | None) -> BaseOxmlElement | None:
+        """The body element behind a `_find_paragraph_*` result, or None.
+        Resolved once and carried as the anchor: the element stays valid
+        across inserts, the index does not."""
+        if index is None:
+            return None
+        return self.doc.paragraphs[index]._element
+
+    def _mentoring_anchors(self) -> tuple[BaseOxmlElement | None, BaseOxmlElement | None]:
+        """(current anchor, past anchor). The exact mentee headings are
+        preferred -- "MENTORING" as a substring matches other content. When
+        neither exists both groups anchor on the section header, or on the
+        first paragraph mentioning "Mentees"."""
+        current = self._paragraph_element(self._find_paragraph_exact(CURRENT_MENTEES_HEADING))
+        past = self._paragraph_element(self._find_paragraph_exact(PAST_MENTEES_HEADING))
+        if current is not None or past is not None:
+            return current, past
+        fallback_idx = self._find_paragraph_exact(MENTORING_HEADING)
+        if fallback_idx is None:
+            fallback_idx = self._find_paragraph_with_text(MENTEES_FALLBACK_TEXT)
+        fallback = self._paragraph_element(fallback_idx)
+        return fallback, fallback
+
+    def _remove_template_table_after(self, anchor: BaseOxmlElement) -> None:
+        """Drop the template's placeholder mentee table under a heading, if
+        one is there, before the real tables go in."""
+        table_element = _first_table_after(anchor)
+        if table_element is not None:
+            table_element.getparent().remove(table_element)
+
+    def _render_mentee_group(
+        self,
+        mentees: Sequence[Mapping[str, Any]],
+        summaries: Sequence[Mapping[str, Any]],
+        anchor: BaseOxmlElement,
+    ) -> None:
+        """One heading's worth of content: the mentee tables in reverse so the
+        document order matches `mentees`, then the summary lines, which go in
+        last so they land directly under the heading, above the tables."""
+        for entry in reversed(mentees):
+            self._create_mentee_table_with_spacing(_normalize_mentee(entry), anchor)
+        self._insert_mentoring_summaries(summaries, anchor)
+
+    def _insert_mentoring_summaries(
+        self,
+        entries: Sequence[Mapping[str, Any]],
+        anchor: BaseOxmlElement,
+    ) -> None:
+        """Render summary/outcome entries as plain lines after ``anchor``.
+
+        Reversed so that, with each insert landing immediately after the anchor
+        and pushing the previous one down, the final document order matches
+        ``entries``.
+        """
+        for entry in reversed(entries):
+            text = _clean_inline_tabs((entry.get('text') or '').strip())
+            if text:
+                self._insert_mentoring_line(text, anchor, entry)
+
+    def _insert_mentoring_line(
+        self,
+        text: str,
+        anchor: BaseOxmlElement,
+        entry: Mapping[str, Any] | None = None,
+    ) -> Paragraph:
+        """Insert a plain mentoring paragraph directly after ``anchor``.
 
         Used for content that belongs in MENTORING but has no per-mentee table to
         live in: aggregate counts (N3A/N3B with no name) and outcome narrative (N4).
-        Positioned with the same body-splice the mentee tables use.
         """
         para = self.doc.add_paragraph()
         run = para.add_run(text)
         _set_font(run)
         if entry:
             self._add_entry_comments(para, entry)
-
-        body = self.doc.element.body
-        try:
-            target = self.doc.paragraphs[insert_after_idx]._element
-            body.insert(list(body).index(target) + 1, para._element)
-        except (ValueError, IndexError):
-            pass
+        _insert_after(anchor, para._element)
         self.stats['entries_inserted'] += 1
         return para
 
-    def _fill_mentoring(self, entries_by_code: Dict[str, List[Dict]]):
-        """Fill mentoring section with individual tables per mentee.
+    def _create_mentee_table(
+        self,
+        record: MenteeRecord,
+        anchor: BaseOxmlElement,
+    ) -> Table | None:
+        """Build one mentee's 2-column table and place it directly after
+        ``anchor``. None when the record names no mentee -- there is nothing
+        to head the table with. Counts nothing; the caller that owns the
+        spacing paragraph owns the stats too.
 
-        Creates tables for N3A (current mentees) and N3B (past mentees).
-        Overrides: If end_date contains 'present', mentee is treated as current.
-
-        N3A/N3B entries that name no mentee are aggregate summaries and render as
-        plain lines instead of tables; N4 (mentoring outcomes) has no table at all
-        and renders under the section header (#261). Without this, all three were
-        dropped silently: _create_mentee_table returns None with no name, and N4 has
-        no entry in TAXONOMY_TO_SECTION.
+        WCM Template rows: Name; Site/Position; Mentoring Period;
+        Project/Accomplishments; Current Position; Type of Supervision.
         """
-        n3a_entries = list(entries_by_code.get('N3A', []))
-        n3b_entries = list(entries_by_code.get('N3B', []))
-        n4_entries = list(entries_by_code.get('N4', []))
-
-        # Override: Move N3B entries to current if the relationship appears ongoing
-        # If end_date contains "present" OR (has start_date but no end_date), treat as current
-        # Rationale: If there's no end date, the displayed duration would show "-present"
-        entries_to_move = []
-        for entry in n3b_entries:
-            fields = entry.get('extracted_fields') or {}
-            end_date = str(fields.get('end_date', '') or '').strip()
-            start_date = str(fields.get('start_date', '') or '').strip()
-
-            # Check if end_date indicates ongoing
-            end_lower = end_date.lower()
-            is_ongoing = ('present' in end_lower or end_lower in ('ongoing', 'current', 'now'))
-
-            # Also treat as ongoing if there's a start but no end (would display as "-present")
-            if not is_ongoing and start_date and not end_date:
-                is_ongoing = True
-
-            if is_ongoing:
-                entries_to_move.append(entry)
-
-        for entry in entries_to_move:
-            n3b_entries.remove(entry)
-            n3a_entries.append(entry)
-
-        # Split off aggregate summaries (no mentee named) — they get a line, not a
-        # table. Done after the ongoing-reshuffle above, which keys off dates a
-        # summary never has, so the partition cannot change that outcome.
-        n3a_summaries = [e for e in n3a_entries if not _is_mentee_record(e)]
-        n3b_summaries = [e for e in n3b_entries if not _is_mentee_record(e)]
-        n3a_entries = [e for e in n3a_entries if _is_mentee_record(e)]
-        n3b_entries = [e for e in n3b_entries if _is_mentee_record(e)]
-
-        # Outcome narrative arrives disguised as a current mentee (see
-        # _is_mentoring_outcome). Reclaim it and render it under the section header
-        # rather than beneath "Current Mentees:", where it does not belong.
-        n4_entries += [e for e in n3a_summaries + n3b_summaries
-                       if _is_mentoring_outcome(e)]
-        n3a_summaries = [e for e in n3a_summaries if not _is_mentoring_outcome(e)]
-        n3b_summaries = [e for e in n3b_summaries if not _is_mentoring_outcome(e)]
-
-        total_mentees = len(n3a_entries) + len(n3b_entries)
-        total_extra = len(n3a_summaries) + len(n3b_summaries) + len(n4_entries)
-        if total_mentees + total_extra == 0:
-            return
-
-        if self.verbose:
-            print(f"Filling Mentoring ({total_mentees} mentees, {total_extra} summary/outcome lines)...")
-            if entries_to_move:
-                print(f"  Moved {len(entries_to_move)} mentees from Past to Current (end_date=present)")
-
-        # Find "Current Mentees:" and "Past Mentees:" insertion points
-        # These are more specific than "MENTORING" which can match other content
-        current_mentees_idx = self._find_paragraph_exact("Current Mentees:")
-        past_mentees_idx = self._find_paragraph_exact("Past Mentees:")
-
-        # Fallback to section header if specific markers not found
-        if current_mentees_idx is None and past_mentees_idx is None:
-            mentoring_idx = self._find_paragraph_exact("MENTORING")
-            if mentoring_idx is None:
-                mentoring_idx = self._find_paragraph_with_text("Mentees")
-            if mentoring_idx is None:
-                return
-            # Insert both current and past after the section header
-            current_mentees_idx = mentoring_idx
-            past_mentees_idx = mentoring_idx
-
-        # Fill Current Mentees (N3A)
-        if (n3a_entries or n3a_summaries) and current_mentees_idx is not None:
-            # Remove any existing template table after "Current Mentees:"
-            existing_table = self._find_table_after_paragraph(current_mentees_idx)
-            if existing_table:
-                existing_table._element.getparent().remove(existing_table._element)
-
-            # Create tables for each current mentee (in REVERSE order so final order is correct)
-            # Each table is inserted right after the header, pushing earlier ones down
-            for entry in reversed(n3a_entries):
-                fields = entry.get('extracted_fields') or {}
-                self._create_mentee_table_with_spacing(fields, current_mentees_idx, entry)
-                self.stats['tables_populated'] += 1
-                self.stats['entries_inserted'] += 1
-
-            # Summaries go in last so they land directly under the header, above the
-            # tables (each insert pushes the previous one down).
-            self._insert_mentoring_summaries(n3a_summaries, current_mentees_idx)
-
-        # Fill Past Mentees (N3B)
-        if n3b_entries or n3b_summaries:
-            # Re-find Past Mentees index since it may have shifted after current mentee insertion
-            past_mentees_idx = self._find_paragraph_exact("Past Mentees:")
-            if past_mentees_idx is not None:
-                # Remove any existing template table after "Past Mentees:"
-                existing_table = self._find_table_after_paragraph(past_mentees_idx)
-                if existing_table:
-                    existing_table._element.getparent().remove(existing_table._element)
-
-                # Create tables for each past mentee (in REVERSE order so final order is correct)
-                for entry in reversed(n3b_entries):
-                    fields = entry.get('extracted_fields') or {}
-                    self._create_mentee_table_with_spacing(fields, past_mentees_idx, entry)
-                    self.stats['tables_populated'] += 1
-                    self.stats['entries_inserted'] += 1
-
-                self._insert_mentoring_summaries(n3b_summaries, past_mentees_idx)
-
-        # Mentoring outcomes (N4) have no table in the WCM template. Render them
-        # under the section header, re-found because the inserts above shifted it.
-        if n4_entries:
-            mentoring_idx = self._find_paragraph_exact("MENTORING")
-            if mentoring_idx is not None:
-                self._insert_mentoring_summaries(n4_entries, mentoring_idx)
-
-    def _insert_mentoring_summaries(self, entries: List[Dict], insert_after_idx: int):
-        """Render summary/outcome entries as plain lines after ``insert_after_idx``.
-
-        Reversed so that, with each insert landing immediately after the header and
-        pushing the previous one down, the final document order matches ``entries``.
-        """
-        for entry in reversed(entries):
-            text = _clean_inline_tabs((entry.get('text') or '').strip())
-            if text:
-                self._insert_mentoring_line(text, insert_after_idx, entry)
-
-    def _create_mentee_table(self, fields: Dict, insert_after_idx: int, entry: Dict = None) -> Optional[Table]:
-        """Create an individual mentee table matching WCM template structure.
-
-        WCM Template expects:
-        - Name
-        - Site/Position (your role/title during mentorship, or degree program)
-        - Mentoring Period (mm/yyyy-mm/yyyy)
-        - Project/Accomplishments (dissertation title, research focus)
-        - Current Position
-        - Type of Supervision (research, clinical, teaching, leadership)
-        """
-        # Build Site/Position from available data
-        # Prefer mentee_level (degree type) + site_position if both available
-        site_position = ''
-        mentee_level = fields.get('mentee_level', '')  # e.g., "PhD, MBSB"
-        site_pos_raw = fields.get('site_position', '')  # e.g., "Thesis" or "Ph.D., Human Genetics"
-
-        if mentee_level and site_pos_raw:
-            # Combine if they're different
-            if mentee_level.lower() not in site_pos_raw.lower():
-                site_position = f"{mentee_level} - {site_pos_raw}"
-            else:
-                site_position = mentee_level or site_pos_raw
-        else:
-            site_position = mentee_level or site_pos_raw
-
-        # Build Project/Accomplishments from research_focus (dissertation title)
-        project = fields.get('research_focus', '') or fields.get('dissertation_title', '')
-
-        # Awards and fellowships the mentee won belong in this row: the WCM template's
-        # footnote for Project/Accomplishments reads "Optional: List publications,
-        # awards, grants ... arising directly from the mentoring activity." Stage 4
-        # writes them to awards/funding_source, which nothing in this file read, so
-        # 133 corpus values were extracted and then dropped.
-        mentee_awards = (fields.get('awards') or fields.get('funding_source') or '').strip()
-        if mentee_awards and mentee_awards.casefold() not in project.casefold():
-            project = f"{project}\nAwards: {mentee_awards}" if project else f"Awards: {mentee_awards}"
-
-        # Determine supervision type - default to "Research" for thesis/dissertation mentees
-        supervision_type = fields.get('supervision_type', '')
-        if not supervision_type:
-            # Infer from site_position or mentee_level
-            level_lower = (mentee_level or site_pos_raw or '').lower()
-            if any(x in level_lower for x in ['phd', 'thesis', 'dissertation', 'doctoral']):
-                supervision_type = 'Research'
-            elif any(x in level_lower for x in ['postdoc', 'fellow']):
-                supervision_type = 'Research'
-            elif any(x in level_lower for x in ['resident', 'clinical']):
-                supervision_type = 'Clinical'
-            elif any(x in level_lower for x in ['master', 'ms', 'ma']):
-                supervision_type = 'Research'
-
-        # Build all rows - include blank values for consistency with other sections
-        rows = [
-            ('Name:', fields.get('name') or fields.get('mentee_name', '')),
-            ('Site/Position:', site_position),
-            ('Mentoring Period:', _format_mentee_duration(fields)),
-            ('Project/Accomplishments:', project),
-            ('Current Position:', fields.get('current_position', '')),
-            ('Type of Supervision:', supervision_type),
-        ]
-
-        # Must have at least a name
-        if not rows[0][1]:
+        if not record.name:
             return None
 
-        # Create table
+        rows = _mentee_table_rows(record)
         table = self.doc.add_table(rows=len(rows), cols=2)
         _set_table_border(table, color='808080', size=4)
 
         first_cell_para = None
         for i, (label, value) in enumerate(rows):
             row = table.rows[i]
-            # Label cell (bold)
             label_cell = row.cells[0]
             label_cell.text = label
             _set_cell_vertical_alignment(label_cell, 'center')
@@ -287,69 +469,38 @@ class MentoringSection:
                 for run in para.runs:
                     _set_font(run, bold=True)
 
-            # Value cell
             value_cell = row.cells[1]
-            value_cell.text = str(value) if value else ''
+            value_cell.text = _text(value)
             _set_cell_vertical_alignment(value_cell, 'center')
             for para in value_cell.paragraphs:
                 for run in para.runs:
                     _set_font(run)
 
-        # Add comments from entry
-        if entry and first_cell_para:
-            self._add_entry_comments(first_cell_para, entry)
+        if record.source_entry and first_cell_para:
+            self._add_entry_comments(first_cell_para, record.source_entry)
 
-        # Position table in document
-        body = self.doc.element.body
-        if insert_after_idx < len(self.doc.paragraphs):
-            target_para = self.doc.paragraphs[insert_after_idx]._element
-            body_elements = list(body)
-            try:
-                para_idx = body_elements.index(target_para)
-                body.insert(para_idx + 1, table._tbl)
-            except (ValueError, IndexError):
-                pass
-
+        _insert_after(anchor, table._tbl)
         return table
 
-    def _create_mentee_table_with_spacing(self, fields: Dict, insert_after_idx: int, entry: Dict = None) -> Optional[Table]:
-        """Create an individual mentee table with spacing paragraph after it.
+    def _create_mentee_table_with_spacing(
+        self,
+        record: MenteeRecord,
+        anchor: BaseOxmlElement,
+    ) -> Table | None:
+        """Create an individual mentee table with a spacing paragraph after it,
+        and count it.
 
-        Inserts: [header para] -> [spacing para] -> [table]
-        Since we insert in reverse order, the final document shows:
-        [header para] -> [table] -> [spacing para] -> [table] -> [spacing para] ...
+        Inserts: [anchor] -> [table] -> [spacing para]. Since tables are
+        inserted in reverse order, the final document shows
+        [heading] -> [table] -> [spacing] -> [table] -> [spacing] ...
+
+        The stats move only on a table that was actually built: a record with
+        no name renders nothing and counts nothing.
         """
-        from docx.oxml.ns import qn
-        from docx.oxml import OxmlElement
-
-        # First create the table
-        table = self._create_mentee_table(fields, insert_after_idx, entry)
-        if not table:
+        table = self._create_mentee_table(record, anchor)
+        if table is None:
             return None
-
-        # Now insert a spacing paragraph AFTER the table (which means BEFORE in insertion order)
-        # Create a blank paragraph element
-        body = self.doc.element.body
-        spacing_para = OxmlElement('w:p')
-
-        # Add paragraph properties for spacing
-        pPr = OxmlElement('w:pPr')
-        spacing = OxmlElement('w:spacing')
-        spacing.set(qn('w:before'), '120')  # 6pt before
-        spacing.set(qn('w:after'), '120')   # 6pt after
-        pPr.append(spacing)
-        spacing_para.append(pPr)
-
-        # Insert the spacing paragraph right after the table
-        # The table was inserted at para_idx + 1, so spacing goes at para_idx + 2
-        if insert_after_idx < len(self.doc.paragraphs):
-            target_para = self.doc.paragraphs[insert_after_idx]._element
-            body_elements = list(body)
-            try:
-                para_idx = body_elements.index(target_para)
-                # Table is at para_idx + 1, so insert spacing at para_idx + 2
-                body.insert(para_idx + 2, spacing_para)
-            except (ValueError, IndexError):
-                pass
-
+        _insert_after(table._tbl, _mentee_spacing_paragraph())
+        self.stats['tables_populated'] += 1
+        self.stats['entries_inserted'] += 1
         return table

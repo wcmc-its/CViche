@@ -1,27 +1,24 @@
 """Regression guard for issue #659 (five of ten sites): entry.get('extracted_fields', {})
-crashes on an explicit None.
+crashes on an explicit None -- plus the behaviour each touched section
+writer is expected to produce once it no longer crashes (#739 review).
 
 `dict.get(key, default)` only substitutes `default` when the key is absent --
 an entry that carries `extracted_fields: None` explicitly still gets `None`
 back, and the very next `.get()` call on it raises `AttributeError: 'NoneType'
 object has no attribute 'get'`. `licensure.py` and `postdoc_training.py`
 already use the defended form `entry.get('extracted_fields') or {}`; this
-fixes the same idiom at:
-
-    mentoring.py:90   (the N3B "treat as current" override loop)
-    mentoring.py:161  (Current Mentees table-fill loop)
-    mentoring.py:182  (Past Mentees table-fill loop)
-    other_education.py:85
-    patents.py:80
+fixes the same idiom in mentoring.py (the N3B ongoing-mentorship rule and
+the mentee normalizer, which the two table-fill loops now go through),
+other_education.py and patents.py.
 
 research_support.py (4 sites) and formatting/values.py (1 site) are the
 remaining five of the ten sites #659 names; they land in sibling PRs (#659
 closes only once all three land -- see PR body).
 
-Each test drives the real `_fill_*` section-writer entrypoint on a minimal
-document -- the same pattern as test_stage6_classification_literals.py --
-with an entry whose `extracted_fields` is explicitly `None`, and asserts the
-call completes without raising. Fixtures are fictional.
+Every test drives the real `_fill_*` section-writer entrypoint (or the
+module-level classifier it delegates to) on a minimal document and asserts
+where the content landed, not merely that the call returned. Fixtures are
+fictional.
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_extracted_fields_none_safety.py -p no:cacheprovider
 """
@@ -29,12 +26,21 @@ call completes without raising. Fixtures are fictional.
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
+from docx.oxml.ns import qn  # noqa: E402
+from docx.table import Table  # noqa: E402
+from docx.text.paragraph import Paragraph  # noqa: E402
 
+from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
+    _normalize_mentee,
+    _partition_mentoring_entries,
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
@@ -44,27 +50,187 @@ def _new_generator() -> WCMTemplateGenerator:
     return gen
 
 
-def test_mentoring_none_extracted_fields_does_not_raise():
-    """A past-mentee entry with extracted_fields=None used to crash the
-    'treat as current' override loop at mentoring.py:90, before any section
-    heading is even looked up -- reached on dev regardless of template
-    content."""
+def _body_after(doc, heading_text: str, count: int) -> list[tuple[str, str]]:
+    """The `count` body elements following the paragraph whose stripped text
+    equals `heading_text`, as ('p', text) or ('tbl', text of row 0 cell 1) --
+    the cell that carries a mentee's name in a mentee table."""
+    body = list(doc.element.body)
+    for para in doc.paragraphs:
+        if para.text.strip().lower() == heading_text.lower():
+            start = body.index(para._element)
+            break
+    else:
+        raise AssertionError(f"no paragraph {heading_text!r} in document")
+    shape = []
+    for element in body[start + 1:start + 1 + count]:
+        if element.tag == qn('w:sectPr'):
+            break
+        if element.tag == qn('w:tbl'):
+            table = Table(element, doc)
+            shape.append(('tbl', table.rows[0].cells[1].text))
+        else:
+            shape.append(('p', Paragraph(element, doc).text))
+    return shape
+
+
+def _mentoring_doc() -> WCMTemplateGenerator:
     gen = _new_generator()
     gen.doc.add_paragraph("MENTORING")
     gen.doc.add_paragraph("Current Mentees:")
     gen.doc.add_paragraph("Past Mentees:")
+    return gen
 
+
+def _mentee(code: str, name: str, **fields) -> dict:
+    return {'taxonomy_code': code, 'text': f"{name} mentee entry",
+            'extracted_fields': {'mentee_name': name, **fields}}
+
+
+# --- mentoring: extracted_fields=None at every #659 site ------------------------
+
+@pytest.mark.parametrize("code, heading", [("N3A", "Current Mentees:"),
+                                           ("N3B", "Past Mentees:")])
+def test_mentoring_none_extracted_fields_renders_as_a_summary_line(code, heading):
+    """An N3A or N3B entry with extracted_fields=None used to crash -- N3B in
+    the ongoing-mentorship rule (mentoring.py:90 pre-fix), both codes in the
+    table-fill loops (:161/:182 pre-fix). With no fields it names no mentee,
+    so it is an aggregate summary: rendered as a plain line directly under
+    its heading, with its text intact."""
+    gen = _mentoring_doc()
+    entry = {'taxonomy_code': code, 'text': 'Ph.D. Graduated: 38',
+             'extracted_fields': None}
+
+    gen._fill_mentoring({code: [entry]})
+
+    assert _body_after(gen.doc, heading, 1) == [('p', 'Ph.D. Graduated: 38')]
+    assert len(gen.doc.tables) == 0
+    assert gen.stats['entries_inserted'] == 1
+
+
+def test_normalize_mentee_tolerates_none_extracted_fields():
+    """The table-fill loops read fields through `_normalize_mentee`; an
+    explicit None yields an empty record (no name), never an AttributeError."""
+    record = _normalize_mentee({'taxonomy_code': 'N3A', 'extracted_fields': None})
+    assert record.name == ''
+    assert record.site_position == ''
+    assert record.mentoring_period == ''
+
+
+def test_partition_tolerates_none_extracted_fields_in_ongoing_rule():
+    """The N3B ongoing-mentorship rule is the first #659 site reached; a None
+    entry is neither moved nor dropped -- it partitions as a past summary."""
+    entry = {'taxonomy_code': 'N3B', 'text': 'Completed: 27', 'extracted_fields': None}
+    partition = _partition_mentoring_entries({'N3B': [entry]})
+    assert partition.past_summaries == (entry,)
+    assert partition.moved_to_current == 0
+    assert partition.current == () and partition.past == ()
+
+
+# --- mentoring: Past -> Current migration ---------------------------------------
+
+@pytest.mark.parametrize("fields", [
+    {'start_date': '2019', 'end_date': 'present'},
+    {'start_date': '2019', 'end_date': 'Present'},
+    {'start_date': '2019', 'end_date': '2019-present'},
+    {'start_date': '2019', 'end_date': 'ongoing'},
+    {'start_date': '2019', 'end_date': 'current'},
+    {'start_date': '2019', 'end_date': 'now'},
+    {'start_date': '2019'},                    # start but no end at all
+    {'start_date': '2019', 'end_date': ''},    # start but empty end
+    {'start_date': '2019', 'end_date': None},  # start but null end
+], ids=lambda f: repr(f.get('end_date', '<absent>')))
+def test_partition_moves_ongoing_past_mentee_to_current(fields):
+    entry = _mentee('N3B', 'Ada Lovelace', **fields)
+    partition = _partition_mentoring_entries({'N3B': [entry]})
+    assert partition.current == (entry,)
+    assert partition.past == ()
+    assert partition.moved_to_current == 1
+
+
+@pytest.mark.parametrize("fields", [
+    {'start_date': '2015', 'end_date': '2019'},
+    {'end_date': '2019'},
+    {},                                        # no dates at all: not ongoing
+], ids=lambda f: repr(f))
+def test_partition_keeps_ended_or_undated_past_mentee_in_past(fields):
+    entry = _mentee('N3B', 'Ada Lovelace', **fields)
+    partition = _partition_mentoring_entries({'N3B': [entry]})
+    assert partition.past == (entry,)
+    assert partition.current == ()
+    assert partition.moved_to_current == 0
+
+
+def test_ongoing_past_mentee_renders_under_current_mentees():
+    """The migration is visible in the document: the N3B entry's table sits
+    under "Current Mentees:" and nothing sits under "Past Mentees:"."""
+    gen = _mentoring_doc()
     entries_by_code = {
-        'N3B': [{'taxonomy_code': 'N3B', 'text': 'A past mentee with no fields',
-                 'extracted_fields': None}],
+        'N3B': [_mentee('N3B', 'Ada Lovelace', start_date='2019', end_date='present'),
+                _mentee('N3B', 'Grace Hopper', start_date='2010', end_date='2014')],
     }
 
-    gen._fill_mentoring(entries_by_code)  # must not raise AttributeError
+    gen._fill_mentoring(entries_by_code)
 
+    assert _body_after(gen.doc, "Current Mentees:", 2) == [
+        ('tbl', 'Ada Lovelace'), ('p', '')]
+    assert _body_after(gen.doc, "Past Mentees:", 2) == [
+        ('tbl', 'Grace Hopper'), ('p', '')]
+
+
+# --- mentoring: summary and N4 outcome lines ------------------------------------
+
+def test_mentoring_summary_lines_sit_above_the_tables():
+    """Aggregate N3A/N3B lines land directly under their heading, above the
+    mentee tables, in input order."""
+    gen = _mentoring_doc()
+    entries_by_code = {
+        'N3A': [_mentee('N3A', 'Ada Lovelace'),
+                {'taxonomy_code': 'N3A', 'text': 'Current Ph.D. Students: 12',
+                 'extracted_fields': {'mentee_name': None}},
+                {'taxonomy_code': 'N3A', 'text': 'Current Postdocs: 3',
+                 'extracted_fields': {}}],
+    }
+
+    gen._fill_mentoring(entries_by_code)
+
+    assert _body_after(gen.doc, "Current Mentees:", 4) == [
+        ('p', 'Current Ph.D. Students: 12'),
+        ('p', 'Current Postdocs: 3'),
+        ('tbl', 'Ada Lovelace'),
+        ('p', ''),
+    ]
+    assert gen.stats['tables_populated'] == 1
+    assert gen.stats['entries_inserted'] == 3
+
+
+def test_n4_outcomes_render_under_the_mentoring_header():
+    """N4 lines -- routed as N4, or rewritten to N3A by the mismatch corrector
+    with the original stashed -- go under MENTORING, not under either mentee
+    heading, in input order (N4 first, then the reclaimed N3A)."""
+    gen = _mentoring_doc()
+    entries_by_code = {
+        'N4': [{'taxonomy_code': 'N4', 'text': 'Three mentees now hold faculty posts.',
+                'extracted_fields': {}}],
+        'N3A': [{'taxonomy_code': 'N3A', 'taxonomy_code_original': 'N4',
+                 'text': 'Two mentees won K awards.', 'extracted_fields': {}}],
+    }
+
+    gen._fill_mentoring(entries_by_code)
+
+    assert _body_after(gen.doc, "MENTORING", 2) == [
+        ('p', 'Three mentees now hold faculty posts.'),
+        ('p', 'Two mentees won K awards.'),
+    ]
+    assert _body_after(gen.doc, "Current Mentees:", 1) == [('p', 'Past Mentees:')]
+    assert len(gen.doc.tables) == 0
+
+
+# --- other education / patents: extracted_fields=None -------------------------
 
 def test_other_education_none_extracted_fields_does_not_raise():
     """A B2 entry with extracted_fields=None used to crash the fill loop at
-    other_education.py:85."""
+    other_education.py:85. With no fields it has no program and no
+    institution, so it is skipped and the table keeps only its header row."""
     gen = _new_generator()
     gen.doc.add_paragraph("OTHER EDUCATIONAL")
     gen.doc.add_table(rows=1, cols=3)
@@ -74,10 +240,13 @@ def test_other_education_none_extracted_fields_does_not_raise():
 
     gen._fill_other_education(entries)  # must not raise AttributeError
 
+    assert len(gen.doc.tables[0].rows) == 1
+
 
 def test_patents_none_extracted_fields_does_not_raise():
     """An M2D entry with extracted_fields=None used to crash the fill loop
-    at patents.py:80."""
+    at patents.py:80. With no title and no patent number it is sparse, so
+    no table is built."""
     gen = _new_generator()
     gen.doc.add_paragraph("Patents & Inventions")
 
@@ -85,3 +254,5 @@ def test_patents_none_extracted_fields_does_not_raise():
                 'extracted_fields': None}]
 
     gen._fill_patents(entries)  # must not raise AttributeError
+
+    assert len(gen.doc.tables) == 0

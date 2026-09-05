@@ -1,5 +1,8 @@
-"""Regression guard for issue #547 (the silent-failure half): a mispositioned
-patent table and a skipped postdoc section both used to report success.
+"""Regression guard for issue #547 (the silent-failure half) and the render
+contracts of the three section writers #739 reworked: a mispositioned patent
+table and a skipped postdoc section both used to report success, and the
+mentoring/other-education/patents writers had no test pinning where their
+content lands.
 
 `patents.py:157-164` (pre-fix line numbers) caught a repositioning failure
 with a bare ``except (ValueError, IndexError): pass`` and still incremented
@@ -13,14 +16,20 @@ postdoc entry with no record of any kind.
 
 Both now emit `logger.warning` naming the section and the entry count,
 mirroring `service.py`'s `_fill_journal_reviewing` pattern (:691-698, added
-by 993642bf). The fallback *behaviour* is unchanged in both cases -- these
-tests pin the new diagnostic, not a content change, so no corpus A/B is
-needed (issue text: "Behaviour-neutral for output content").
+by 993642bf). Every body splice now goes through one helper, `_insert_after`
+(stage6/formatting/docx.py), anchored on an element rather than a paragraph
+index; a detached anchor raises `DetachedAnchorError`.
 
 Judgement call (disclosed in the PR body): on a reposition failure, patents.py
-now increments a new `tables_misplaced` counter instead of `tables_populated`,
-so the latter keeps meaning "landed where it should have"; `entries_inserted`
-still increments either way because the content is present in the document.
+increments a `tables_misplaced` counter instead of `tables_populated`, so the
+latter keeps meaning "landed where it should have"; `entries_inserted` still
+increments either way because the content is present in the document. The
+cursor is advanced only when the table was placed.
+
+Tests marked "real template" open `key_files/wcm_cv_template_faculty_october_2022_final.docx`
+the way `generate()` does and assert on body order around the section
+headings, so the synthetic fixtures cannot drift from the shipped structure.
+Fixtures are fictional.
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_silent_render_failures.py -p no:cacheprovider
 """
@@ -29,13 +38,25 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
+from docx.oxml import OxmlElement  # noqa: E402
+from docx.oxml.ns import qn  # noqa: E402
+from docx.table import Table  # noqa: E402
+from docx.text.paragraph import Paragraph  # noqa: E402
 
+from unified_pipeline.stage6.formatting import DetachedAnchorError, _insert_after  # noqa: E402
+from unified_pipeline.stage6.sections.mentoring import MenteeRecord  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
+
+MENTORING_LOGGER = 'unified_pipeline.stage6.sections.mentoring'
+PATENTS_LOGGER = 'unified_pipeline.stage6.sections.patents'
+POSTDOC_LOGGER = 'unified_pipeline.stage6.sections.postdoc_training'
 
 
 def _new_generator() -> WCMTemplateGenerator:
@@ -43,6 +64,249 @@ def _new_generator() -> WCMTemplateGenerator:
     gen.doc = Document()
     return gen
 
+
+def _template_generator() -> WCMTemplateGenerator:
+    """A generator over the real WCM template, the way `generate()` opens it."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    return gen
+
+
+def _warnings(caplog, logger_name: str) -> list[logging.LogRecord]:
+    return [r for r in caplog.records
+            if r.levelno == logging.WARNING and r.name == logger_name]
+
+
+def _body_after(doc, heading_text: str, count: int) -> list[tuple[str, str]]:
+    """The `count` body elements following the paragraph whose stripped text
+    equals `heading_text` (case-insensitive), as ('p', text) or
+    ('tbl', text of row 0 cell 1) -- a mentee's name in a mentee table, a
+    patent's first value in a patent table."""
+    body = list(doc.element.body)
+    for para in doc.paragraphs:
+        if para.text.strip().lower() == heading_text.lower():
+            start = body.index(para._element)
+            break
+    else:
+        raise AssertionError(f"no paragraph {heading_text!r} in document")
+    shape = []
+    for element in body[start + 1:start + 1 + count]:
+        if element.tag == qn('w:sectPr'):
+            break
+        if element.tag == qn('w:tbl'):
+            table = Table(element, doc)
+            shape.append(('tbl', table.rows[0].cells[1].text))
+        else:
+            shape.append(('p', Paragraph(element, doc).text))
+    return shape
+
+
+def _mentee(code: str, name: str, **fields) -> dict:
+    return {'taxonomy_code': code, 'text': f"{name} mentee entry",
+            'extracted_fields': {'mentee_name': name, **fields}}
+
+
+# --- shared insertion helper ---------------------------------------------------
+
+def test_insert_after_moves_the_element_to_follow_the_anchor():
+    """`add_paragraph`/`add_table` append at the end of the body; the helper
+    MOVES the new element (one copy, no duplicate left behind)."""
+    doc = Document()
+    anchor = doc.add_paragraph("anchor")
+    doc.add_paragraph("between")
+    moved = doc.add_paragraph("moved")
+
+    _insert_after(anchor._p, moved._p)
+
+    assert [p.text for p in doc.paragraphs] == ["anchor", "moved", "between"]
+
+
+def test_insert_after_rejects_a_detached_anchor():
+    """An anchor removed from the body has nowhere for a sibling to go;
+    the helper says so by name rather than lxml's root-element TypeError."""
+    doc = Document()
+    anchor = doc.add_paragraph("anchor")
+    anchor._p.getparent().remove(anchor._p)
+
+    with pytest.raises(DetachedAnchorError):
+        _insert_after(anchor._p, OxmlElement('w:p'))
+
+
+# --- mentoring: ordering, anchors, stats ----------------------------------------
+
+def test_mentoring_tables_render_in_order_with_spacing_between():
+    """Reverse insertion is the fragile part: three current mentees must come
+    out as A -> spacing -> B -> spacing -> C under "Current Mentees:", each
+    table carrying its own mentee's name."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+    gen.doc.add_paragraph("Current Mentees:")
+    gen.doc.add_paragraph("Past Mentees:")
+    entries_by_code = {'N3A': [_mentee('N3A', 'Alice A'),
+                               _mentee('N3A', 'Bob B'),
+                               _mentee('N3A', 'Carol C')]}
+
+    gen._fill_mentoring(entries_by_code)
+
+    assert _body_after(gen.doc, "Current Mentees:", 7) == [
+        ('tbl', 'Alice A'), ('p', ''),
+        ('tbl', 'Bob B'), ('p', ''),
+        ('tbl', 'Carol C'), ('p', ''),
+        ('p', 'Past Mentees:'),
+    ]
+
+
+def test_mentoring_replaces_the_template_placeholder_tables():
+    """The template ships one placeholder table under each heading; each is
+    removed exactly once and only the rendered tables remain."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+    gen.doc.add_paragraph("Current Mentees:")
+    gen.doc.add_table(rows=6, cols=2).rows[0].cells[0].text = "Name"
+    gen.doc.add_paragraph("Past Mentees:")
+    gen.doc.add_table(rows=6, cols=2).rows[0].cells[0].text = "Name"
+
+    gen._fill_mentoring({'N3A': [_mentee('N3A', 'Alice A')],
+                         'N3B': [_mentee('N3B', 'Bob B', end_date='2014')]})
+
+    assert [t.rows[0].cells[1].text for t in gen.doc.tables] == ['Alice A', 'Bob B']
+    assert gen.stats['tables_populated'] == 2
+
+
+def test_mentoring_missing_every_heading_logs_warning_with_count(caplog):
+    gen = _new_generator()
+    gen.doc.add_paragraph("Some Unrelated Section")
+    entries_by_code = {'N3A': [_mentee('N3A', 'Alice A')],
+                       'N4': [{'taxonomy_code': 'N4', 'text': 'An outcome.',
+                               'extracted_fields': {}}]}
+
+    with caplog.at_level(logging.WARNING, logger=MENTORING_LOGGER):
+        gen._fill_mentoring(entries_by_code)
+
+    assert [w.getMessage() for w in _warnings(caplog, MENTORING_LOGGER)] == [
+        "Mentoring: none of 'Current Mentees:', 'Past Mentees:' or MENTORING "
+        "found in template; 2 entries not rendered"]
+    assert len(gen.doc.tables) == 0
+
+
+def test_mentoring_missing_one_heading_logs_warning_and_renders_the_other(caplog):
+    """Only "Current Mentees:" exists: the past group is reported with its
+    count, the current group still renders."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("Current Mentees:")
+    entries_by_code = {'N3A': [_mentee('N3A', 'Alice A')],
+                       'N3B': [_mentee('N3B', 'Bob B', end_date='2014'),
+                               {'taxonomy_code': 'N3B', 'text': 'Completed: 27',
+                                'extracted_fields': {}}]}
+
+    with caplog.at_level(logging.WARNING, logger=MENTORING_LOGGER):
+        gen._fill_mentoring(entries_by_code)
+
+    assert [w.getMessage() for w in _warnings(caplog, MENTORING_LOGGER)] == [
+        "Mentoring: 'Past Mentees:' heading not found in template; "
+        "2 entries not rendered"]
+    assert _body_after(gen.doc, "Current Mentees:", 2) == [('tbl', 'Alice A'), ('p', '')]
+
+
+def test_mentoring_missing_mentoring_header_logs_warning_for_outcomes(caplog):
+    gen = _new_generator()
+    gen.doc.add_paragraph("Current Mentees:")
+    gen.doc.add_paragraph("Past Mentees:")
+    entries_by_code = {'N4': [{'taxonomy_code': 'N4', 'text': 'An outcome.',
+                               'extracted_fields': {}}]}
+
+    with caplog.at_level(logging.WARNING, logger=MENTORING_LOGGER):
+        gen._fill_mentoring(entries_by_code)
+
+    assert [w.getMessage() for w in _warnings(caplog, MENTORING_LOGGER)] == [
+        "Mentoring: MENTORING heading not found in template; "
+        "1 outcome lines not rendered"]
+
+
+def test_mentoring_single_heading_fallback_renders_both_groups():
+    """A template with only a MENTORING header (neither mentee heading):
+    both groups land under it, current above past, nothing dropped."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+    entries_by_code = {'N3A': [_mentee('N3A', 'Alice A')],
+                       'N3B': [_mentee('N3B', 'Bob B', end_date='2014')]}
+
+    gen._fill_mentoring(entries_by_code)
+
+    assert _body_after(gen.doc, "MENTORING", 4) == [
+        ('tbl', 'Alice A'), ('p', ''), ('tbl', 'Bob B'), ('p', '')]
+
+
+def test_mentoring_stats_count_only_tables_that_were_built():
+    """A record with no name renders nothing and moves no counter; a named
+    one moves both. The line writer counts entries_inserted on its own."""
+    gen = _new_generator()
+    anchor = gen.doc.add_paragraph("Current Mentees:")._element
+
+    assert gen._create_mentee_table_with_spacing(MenteeRecord(name=''), anchor) is None
+    assert gen.stats['tables_populated'] == 0
+    assert gen.stats['entries_inserted'] == 0
+
+    assert gen._create_mentee_table_with_spacing(MenteeRecord(name='Alice A'), anchor) is not None
+    assert gen.stats['tables_populated'] == 1
+    assert gen.stats['entries_inserted'] == 1
+
+    gen._insert_mentoring_line("Completed: 27", anchor)
+    assert gen.stats['tables_populated'] == 1
+    assert gen.stats['entries_inserted'] == 2
+
+
+def test_mentoring_detached_anchor_raises_instead_of_stranding_content():
+    """The old `except (ValueError, IndexError): pass` left the paragraph at
+    the end of the document and still counted it. A cursor that no longer
+    points into the body is now a loud failure, and nothing is counted."""
+    gen = _new_generator()
+    anchor = gen.doc.add_paragraph("Current Mentees:")._element
+    anchor.getparent().remove(anchor)
+
+    with pytest.raises(DetachedAnchorError):
+        gen._insert_mentoring_line("Completed: 27", anchor)
+    with pytest.raises(DetachedAnchorError):
+        gen._create_mentee_table_with_spacing(MenteeRecord(name='Alice A'), anchor)
+    assert gen.stats['entries_inserted'] == 0
+    assert gen.stats['tables_populated'] == 0
+
+
+def test_mentoring_real_template_body_order():
+    """Real template: summary line, then the mentee tables with spacing,
+    directly under each heading and above the template's own "Duplicate
+    table below as needed" instruction; the two placeholder tables are gone;
+    N4 sits under MENTORING."""
+    gen = _template_generator()
+    template_tables = len(gen.doc.tables)
+    entries_by_code = {
+        'N3A': [_mentee('N3A', 'Alice A', start_date='2022'),
+                _mentee('N3A', 'Bob B', start_date='2023'),
+                {'taxonomy_code': 'N3A', 'text': 'Current Ph.D. Students: 2',
+                 'extracted_fields': {}}],
+        'N3B': [_mentee('N3B', 'Carol C', start_date='2015', end_date='2019')],
+        'N4': [{'taxonomy_code': 'N4', 'text': 'One mentee now leads a lab.',
+                'extracted_fields': {}}],
+    }
+
+    gen._fill_mentoring(entries_by_code)
+
+    current = _body_after(gen.doc, "Current Mentees:", 6)
+    assert current[:5] == [('p', 'Current Ph.D. Students: 2'),
+                           ('tbl', 'Alice A'), ('p', ''),
+                           ('tbl', 'Bob B'), ('p', '')]
+    assert current[5][0] == 'p' and current[5][1].startswith('Duplicate table below')
+    past = _body_after(gen.doc, "Past Mentees:", 3)
+    assert past[:2] == [('tbl', 'Carol C'), ('p', '')]
+    assert past[2][1].startswith('Duplicate table below')
+    assert _body_after(gen.doc, "MENTORING", 1) == [('p', 'One mentee now leads a lab.')]
+    # Two placeholders out, three mentee tables in.
+    assert len(gen.doc.tables) == template_tables - 2 + 3
+    assert gen.stats['tables_populated'] == 3
+    assert gen.stats['entries_inserted'] == 5
+
+
+# --- patents: reposition failure ------------------------------------------------
 
 def test_patents_reposition_failure_logs_warning(caplog):
     """Force the reposition's `body_elements.index(last_element)` to fail by
@@ -65,11 +329,10 @@ def test_patents_reposition_failure_logs_warning(caplog):
                              'patent_number': 'US1234567'},
     }]
 
-    with caplog.at_level(logging.WARNING,
-                          logger='unified_pipeline.stage6.sections.patents'):
+    with caplog.at_level(logging.WARNING, logger=PATENTS_LOGGER):
         gen._fill_patents(entries)  # must not raise
 
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    warnings = _warnings(caplog, PATENTS_LOGGER)
     assert len(warnings) == 1, "expected exactly one warning, got: %r" % (
         [r.message for r in warnings],)
     message = warnings[0].getMessage()
@@ -87,6 +350,8 @@ def test_patents_reposition_failure_logs_warning(caplog):
     assert gen.stats['entries_inserted'] == 1
 
 
+# --- postdoc training: missing template structure --------------------------------
+
 def test_postdoc_missing_heading_logs_warning(caplog):
     """A template with neither "POSTDOCTORAL" nor "TRAINING" anywhere used to
     return silently, dropping every entry with no diagnostic (postdoc_training.py,
@@ -99,12 +364,10 @@ def test_postdoc_missing_heading_logs_warning(caplog):
                 'extracted_fields': {'institution': 'Some Hospital'}}],
     }
 
-    with caplog.at_level(
-            logging.WARNING,
-            logger='unified_pipeline.stage6.sections.postdoc_training'):
+    with caplog.at_level(logging.WARNING, logger=POSTDOC_LOGGER):
         gen._fill_postdoc_training(entries_by_code)  # must not raise
 
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    warnings = _warnings(caplog, POSTDOC_LOGGER)
     assert len(warnings) == 1, "expected exactly one warning, got: %r" % (
         [r.message for r in warnings],)
     message = warnings[0].getMessage()
@@ -125,12 +388,10 @@ def test_postdoc_missing_table_logs_warning(caplog):
                 'extracted_fields': {'institution': 'Some Hospital'}}],
     }
 
-    with caplog.at_level(
-            logging.WARNING,
-            logger='unified_pipeline.stage6.sections.postdoc_training'):
+    with caplog.at_level(logging.WARNING, logger=POSTDOC_LOGGER):
         gen._fill_postdoc_training(entries_by_code)  # must not raise
 
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    warnings = _warnings(caplog, POSTDOC_LOGGER)
     assert len(warnings) == 1, "expected exactly one warning, got: %r" % (
         [r.message for r in warnings],)
     message = warnings[0].getMessage()
