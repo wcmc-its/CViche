@@ -49,6 +49,39 @@ SUFFIX_DIR = {
 
 # --- records this script hands to its callers and to --out (§8.1) ---------
 
+class Finding(TypedDict):
+    """One run_doctor finding, exactly as `doctor.shared._finding()` builds
+    it -- the contract `aggregate()` validates every finding against
+    (T2.10). Pinned to the real builder by
+    `test_finding_contract_matches_doctor_shared_finding`, so the two cannot
+    drift apart silently. `aggregate()` reads lint/severity/message;
+    `evidence` is required because the builder always sets it, and a
+    finding without it did not come from the builder."""
+    lint: str
+    severity: str
+    message: str
+    evidence: list[str]
+
+
+# Declaration order, for messages that name the missing key.
+FINDING_KEYS: tuple[str, ...] = tuple(Finding.__annotations__)
+
+
+class DoctorReport(TypedDict):
+    """The part of `run_doctor()`'s return this script reads. The real
+    report also carries document_uid/root/artifacts/counts/worst_severity,
+    which pass through to --out untouched."""
+    findings: list[Finding]
+
+
+class LintRow(TypedDict):
+    """One row of `aggregate()`'s ranking: distinct-CV counts for a lint."""
+    lint: str
+    cvs_affected: int
+    cvs_error: int
+    cvs_ran: int
+
+
 class RunFailure(TypedDict):
     """What `sweep()` records under `failures[run_id]` for a run it could not
     doctor. `exception` is the class name, so an operator (or a test) can
@@ -319,18 +352,28 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
 ALL_LINTS = list(KNOWN_LINTS)
 
 
-class MalformedFindingError(Exception):
-    """A report's finding is missing a required field, or a field's value
-    isn't in the registry it's supposed to come from."""
+class MalformedReportError(Exception):
+    """A report handed to aggregate() is not a dict carrying a `findings`
+    list -- the shape `DoctorReport` names."""
 
 
-def _validate_finding(run_id: str, f: dict) -> None:
+class MalformedFindingError(MalformedReportError):
+    """A report's finding is not a `Finding`: not a dict, missing a required
+    key, or a field's value isn't in the registry it's supposed to come
+    from."""
+
+
+def _validate_finding(run_id: str, f: object) -> None:
     """Fail loudly (T1.8/T2.6/T2.10) on a finding aggregate() cannot trust:
-    a required key absent, an unregistered severity, or a lint name outside
-    ALL_LINTS -- rather than either raising an opaque KeyError deeper in
-    aggregate() or silently mis-ranking/dropping the finding.
+    not a dict, a `Finding` key absent, an unregistered severity, or a lint
+    name outside ALL_LINTS -- rather than either raising an opaque
+    KeyError deeper in aggregate() or silently mis-ranking/dropping it.
     """
-    for field in ("lint", "severity", "message"):
+    if not isinstance(f, dict):
+        raise MalformedFindingError(
+            f"run_id={run_id!r}: finding is a {type(f).__name__}, not a "
+            f"dict: {f!r}")
+    for field in FINDING_KEYS:
         if field not in f:
             raise MalformedFindingError(
                 f"run_id={run_id!r}: finding missing required field "
@@ -345,15 +388,40 @@ def _validate_finding(run_id: str, f: dict) -> None:
             f"ALL_LINTS")
 
 
-def aggregate(reports):
+def _validate_report(run_id: str, rep: object) -> list[Finding]:
+    """The report's findings, validated (T2.10), or MalformedReportError.
+
+    A report is whatever `run_doctor` returned for one run -- or, under a
+    test's monkeypatch, whatever the fake returned -- so the boundary
+    checks it is a dict with a `findings` list before the loop in
+    `aggregate()` reads it, naming the run instead of raising a bare
+    KeyError mid-aggregation.
+    """
+    if not isinstance(rep, dict):
+        raise MalformedReportError(
+            f"run_id={run_id!r}: report is a {type(rep).__name__}, not a dict")
+    if "findings" not in rep:
+        raise MalformedReportError(
+            f"run_id={run_id!r}: report has no 'findings' key: "
+            f"keys={sorted(rep)}")
+    findings = rep["findings"]
+    if not isinstance(findings, list):
+        raise MalformedReportError(
+            f"run_id={run_id!r}: 'findings' is a {type(findings).__name__}, "
+            f"not a list")
+    for f in findings:
+        _validate_finding(run_id, f)
+    return findings
+
+
+def aggregate(reports: dict[str, DoctorReport]) -> list[LintRow]:
     """Per lint: how many distinct reps have a real (>=WARN) finding, and ERROR."""
     warn = Counter()
     error = Counter()
     ran = Counter()  # reps where the lint actually ran (input present, not skipped)
     for run_id, rep in reports.items():
         seen_warn, seen_err, skipped = set(), set(), set()
-        for f in rep["findings"]:
-            _validate_finding(run_id, f)
+        for f in _validate_report(run_id, rep):
             lint, sev = f["lint"], f["severity"]
             if sev == "INFO" and "skipped: missing" in f["message"]:
                 skipped.add(lint)

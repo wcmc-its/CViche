@@ -25,6 +25,11 @@ _SRC = _ROOT / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+# The REAL finding builder every doctor lint goes through -- fixtures below
+# are built with it so they are the production shape by construction, not a
+# hand-copy that can drift from it.
+from unified_pipeline.doctor.shared import _finding  # noqa: E402
+
 
 def _load_cli():
     spec = importlib.util.spec_from_file_location(
@@ -220,39 +225,73 @@ def test_sweep_records_failure_for_a_run_id_escaping_corpus_dir(tmp_path):
     assert "RunIdEscapesCorpusError" in failures["../x"]["traceback"]
 
 
-def test_aggregate_raises_on_missing_required_field():
+def test_finding_contract_matches_doctor_shared_finding():
+    """T2.10: the sweep's `Finding` record is the shape `_finding()` in
+    doctor/shared.py actually emits -- same keys, no more, no fewer -- so
+    a key added or dropped on either side fails here, not as a silent
+    `_validate_finding` rejection of every real report.
+    """
     cli = _load_cli()
-    reports = {"r1": {"findings": [{"lint": "pipe_leaks", "severity": "WARN"}]}}
-    try:
+    real = _finding("pipe_leaks", "WARN", "x")
+    assert set(cli.FINDING_KEYS) == set(real)
+    assert set(cli.Finding.__annotations__) == set(real)
+
+
+@pytest.mark.parametrize("missing", ["lint", "severity", "message", "evidence"])
+def test_aggregate_raises_on_missing_required_field(missing):
+    """Every `Finding` key is required -- including `evidence`, which
+    `_finding()` always sets, so its absence means the finding did not
+    come from the builder."""
+    cli = _load_cli()
+    f = _finding("pipe_leaks", "WARN", "x")
+    del f[missing]
+    reports = {"r1": {"findings": [f]}}
+    with pytest.raises(cli.MalformedFindingError, match=rf"run_id='r1'.*{missing}"):
         cli.aggregate(reports)
-    except cli.MalformedFindingError as e:
-        assert "r1" in str(e) and "message" in str(e)
-    else:
-        raise AssertionError("expected MalformedFindingError")
 
 
 def test_aggregate_raises_on_unknown_severity():
     cli = _load_cli()
-    reports = {"r1": {"findings": [
-        {"lint": "pipe_leaks", "severity": "CRITICAL", "message": "x"}]}}
-    try:
+    reports = {"r1": {"findings": [_finding("pipe_leaks", "CRITICAL", "x")]}}
+    with pytest.raises(cli.MalformedFindingError, match=r"run_id='r1'.*CRITICAL"):
         cli.aggregate(reports)
-    except cli.MalformedFindingError as e:
-        assert "r1" in str(e) and "CRITICAL" in str(e)
-    else:
-        raise AssertionError("expected MalformedFindingError")
 
 
 def test_aggregate_raises_on_unknown_lint():
     cli = _load_cli()
-    reports = {"r1": {"findings": [
-        {"lint": "not_a_real_lint", "severity": "WARN", "message": "x"}]}}
-    try:
+    reports = {"r1": {"findings": [_finding("not_a_real_lint", "WARN", "x")]}}
+    with pytest.raises(cli.MalformedFindingError, match=r"run_id='r1'.*not_a_real_lint"):
         cli.aggregate(reports)
-    except cli.MalformedFindingError as e:
-        assert "r1" in str(e) and "not_a_real_lint" in str(e)
-    else:
-        raise AssertionError("expected MalformedFindingError")
+
+
+def test_aggregate_raises_on_report_without_findings():
+    """T2.10: a report lacking `findings` (here: a fake run_doctor's return)
+    used to be a bare KeyError inside aggregate()'s loop. The boundary now
+    names the run and the keys it did see.
+    """
+    cli = _load_cli()
+    reports = {"r1": {"document_uid": "aaa111", "note": "café"}}
+    with pytest.raises(cli.MalformedReportError,
+                       match=r"run_id='r1'.*no 'findings' key.*document_uid"):
+        cli.aggregate(reports)
+
+
+@pytest.mark.parametrize("bad_report", [
+    "not a dict at all",
+    {"findings": {"lint": "pipe_leaks"}},
+    {"findings": None},
+], ids=["report-is-a-str", "findings-is-a-dict", "findings-is-None"])
+def test_aggregate_raises_when_report_or_findings_has_the_wrong_type(bad_report):
+    cli = _load_cli()
+    with pytest.raises(cli.MalformedReportError, match=r"run_id='r1'"):
+        cli.aggregate({"r1": bad_report})
+
+
+def test_aggregate_raises_on_a_non_dict_finding():
+    cli = _load_cli()
+    reports = {"r1": {"findings": ["pipe_leaks WARN x"]}}
+    with pytest.raises(cli.MalformedFindingError, match=r"run_id='r1'.*not a dict"):
+        cli.aggregate(reports)
 
 
 def test_aggregate_ranks_by_affected_count_and_tracks_skip_vs_ran():
@@ -263,11 +302,11 @@ def test_aggregate_ranks_by_affected_count_and_tracks_skip_vs_ran():
     cli = _load_cli()
     reports = {
         "A": {"findings": [
-            {"lint": "pipe_leaks", "severity": "WARN", "message": "x"},
-            {"lint": "segmentation", "severity": "INFO", "message": "skipped: missing source"},
+            _finding("pipe_leaks", "WARN", "x"),
+            _finding("segmentation", "INFO", "skipped: missing source"),
         ]},
         "B": {"findings": [
-            {"lint": "pipe_leaks", "severity": "ERROR", "message": "y"},
+            _finding("pipe_leaks", "ERROR", "y"),
         ]},
     }
     rank = {r["lint"]: r for r in cli.aggregate(reports)}
