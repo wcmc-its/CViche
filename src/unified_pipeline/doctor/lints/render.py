@@ -12,7 +12,8 @@ module, so they move together and stop being module-global.
 Bodies are unmodified. `run_doctor` re-exports every name it exported before.
 """
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from collections import Counter
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.template_boilerplate import (
@@ -48,8 +49,13 @@ DEAD_SECTION_MIN_LINES = 3
 # Lint 8: an entry is a fused multi-record candidate at this many record-like
 # lines. _looks_like_record only sees pipe/tab rows; employment/appointment
 # records are date-range-prefixed comma lines ("Jun 2020-Jun 2025, Assistant
-# Professor"), caught by the prefix pattern when the line carries a payload
-# beyond the bare date range.
+# Professor"), caught by `_is_date_record_line` when the line carries a
+# payload beyond the bare date range. A bare date line (`_is_bare_date_line`)
+# counts toward this floor too -- it is a split-off date column, so the entry
+# fuses several records -- but is not itself a record to verify (#446 review
+# T1.6 / #746: on the farm those lines used to be counted AND reported as
+# records, so a Bostwick committee entry read '1 of 3 records absent' when
+# two of the three were '2006-2010, 2012, 2013' and '2004 –2020 2004-2010').
 UNRENDERED_MIN_RECORD_LINES = 2
 
 
@@ -57,6 +63,70 @@ RECORD_DATE_LINE_MIN_CHARS = 20
 
 
 _RECORD_DATE_PREFIX_RE = re.compile(r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]")
+
+
+# What may follow the leading date's dash on a RECORD line (#446 review
+# T1.6 / #746): the end of the range -- a 1-4 digit year, because stage 2
+# glues the payload onto a two-digit end year ('2008-15Associate
+# Professor', '1996-8<TAB>Research Fellowship') -- or an open-ended word,
+# a field separator, or a capitalised payload word (a role, a title, a
+# name). Running prose that merely opens with a date continues in
+# lowercase ('2020 - the year our program expanded ...'), which is what a
+# length-only rule admits. Measured over the 66-CV farm's stage-4 text:
+# the length-only rule admits 226 date-prefixed lines; this one keeps 224
+# and drops exactly the 2 that carry no worded payload at all ('February
+# 2018 – Present', '2004 –2020 2004-2010'). ponytail: a prose sentence
+# whose first word after the dash is capitalised still passes -- no corpus
+# instance yet, and the opposite failure (a real record no longer counted,
+# so never re-verified) is the worse one; revisit with a corpus instance.
+_RECORD_DATE_CONTINUATION_RE = re.compile(
+    r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]\s*"
+    r"(?:\d{1,4}|(?i:present|current|ongoing|now|to date|date)(?![a-z])"
+    r"|[\t,:;|]|[A-Z])")
+
+
+# The leading date or date range of a record line, stripped before asking
+# whether a worded payload follows it.
+_RECORD_DATE_RANGE_RE = re.compile(
+    r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]\s*"
+    r"(?:(?:[A-Za-z]{3,9}\.? )?\d{1,4}"
+    r"|(?i:present|current|ongoing|now|to date|date)(?![a-z]))?")
+
+
+_RECORD_PAYLOAD_RE = re.compile(r"[A-Za-z]{2,}")
+
+
+def _date_payload(line: str) -> str | None:
+    """What follows the leading date range of a date-prefixed line of at
+    least RECORD_DATE_LINE_MIN_CHARS, or None when the line is not
+    date-prefixed at all."""
+    if len(line) < RECORD_DATE_LINE_MIN_CHARS:
+        return None
+    if not _RECORD_DATE_PREFIX_RE.match(line):
+        return None
+    date_range = _RECORD_DATE_RANGE_RE.match(line)
+    return line[date_range.end():] if date_range else line
+
+
+def _is_date_record_line(line: str) -> bool:
+    """A date-prefixed line that is a record rather than prose or a bare
+    date range: continuing past the dash the way a record does
+    (`_RECORD_DATE_CONTINUATION_RE`) and carrying a worded payload beyond
+    the date range itself."""
+    payload = _date_payload(line)
+    if payload is None or not _RECORD_DATE_CONTINUATION_RE.match(line):
+        return False
+    return bool(_RECORD_PAYLOAD_RE.search(payload))
+
+
+def _is_bare_date_line(line: str) -> bool:
+    """A date-prefixed line that is dates and nothing else ('2006-2010,
+    2012, 2013', 'February 2018 – Present'): a record's date column that
+    stage 2 split from its payload. Evidence that the entry fuses several
+    records -- so it counts toward the lint-8 floor -- but never a record
+    that can be verified against the output on its own."""
+    payload = _date_payload(line)
+    return payload is not None and not _RECORD_PAYLOAD_RE.search(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +241,7 @@ _NAME_LABEL_RE = re.compile(r"^[A-Za-z0-9]{1,3}[.)]\s+")
 _NAME_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
-def _name_tokens(text: str) -> Set[str]:
+def _name_tokens(text: str) -> set[str]:
     stripped = _NAME_LABEL_RE.sub("", _norm(text))
     return {tok for tok in _NAME_TOKEN_RE.findall(stripped) if len(tok) > 1}
 
@@ -258,10 +328,17 @@ def lint_dead_sections(stage2: Dict,
 
 
 def _record_lines(text) -> List[str]:
+    """Record-like lines of an entry: pipe/tab rows, plus date-prefixed lines
+    that pass `_is_date_record_line` (a record, not prose or a bare range)."""
     return [line.strip() for line in str(text or "").split("\n")
-            if _looks_like_record(line)
-            or (len(line.strip()) >= RECORD_DATE_LINE_MIN_CHARS
-                and _RECORD_DATE_PREFIX_RE.match(line.strip()))]
+            if _looks_like_record(line) or _is_date_record_line(line.strip())]
+
+
+def _bare_date_lines(text) -> int:
+    """How many lines of an entry are a bare date column (see
+    `_is_bare_date_line`)."""
+    return sum(1 for line in str(text or "").split("\n")
+               if _is_bare_date_line(line.strip()))
 
 
 def _line_token_sets(blocks: List[Tuple[str, str]]) -> List[set]:
@@ -275,21 +352,86 @@ def _line_token_sets(blocks: List[Tuple[str, str]]) -> List[set]:
             if line.strip()]
 
 
+# Lint 8, the token-overlap side (#446 review T1.5 / #746). Two records can
+# share most of their 5+-letter tokens and still be different records:
+# within one CV the owner's surname is on every citation line and the home
+# institution on most, so those tokens vouch for nothing, and two citations
+# by the same authors in the same journal differ in exactly their year. A
+# token on at least this share of the output's lines -- and on at least this
+# many lines, so a short document does not disqualify its own content -- is
+# UBIQUITOUS and is left out of the overlap. Measured over the 65 rendered
+# farm outputs the rule marks ~8 tokens per document: the template's own
+# column labels ('dates', 'institution', 'title'), the home institution
+# ('weill', 'cornell') and the owner's surname -- 541 of the 65,291
+# (token, document) pairs.
+RENDER_UBIQUITOUS_LINE_SHARE = 0.05
+
+
+RENDER_UBIQUITOUS_MIN_LINES = 10
+
+
+class RenderedLines(NamedTuple):
+    """Per-line views of the rendered output that lint 8 scores each record
+    against. Read the fields by name, not by position."""
+    tokens: list[set[str]]      # distinctive 5+-letter tokens per line
+    years: list[set[str]]       # years per line, for the date-agreement check
+    ubiquitous: frozenset[str]  # tokens on RENDER_UBIQUITOUS_LINE_SHARE+ of lines
+
+
+def _ubiquitous_tokens(line_token_sets: list[set[str]]) -> frozenset[str]:
+    """Tokens on at least RENDER_UBIQUITOUS_LINE_SHARE of the output lines
+    (and at least RENDER_UBIQUITOUS_MIN_LINES of them)."""
+    counts: Counter[str] = Counter()
+    for tokens in line_token_sets:
+        counts.update(tokens)
+    floor = max(RENDER_UBIQUITOUS_MIN_LINES,
+                RENDER_UBIQUITOUS_LINE_SHARE * len(line_token_sets))
+    return frozenset(tok for tok, n in counts.items() if n >= floor)
+
+
+def _rendered_lines(blocks: list[tuple[str, str]]) -> RenderedLines:
+    """The per-line token sets, per-line year sets and ubiquitous-token set
+    of the rendered output, built once per document."""
+    lines = [line for _, text in blocks for line in str(text).split("\n")
+             if line.strip()]
+    tokens = [_long_word_tokens(line) for line in lines]
+    years = [set(_YEAR_RE.findall(line)) for line in lines]
+    return RenderedLines(tokens, years, _ubiquitous_tokens(tokens))
+
+
+def _line_vouches(tokens: set[str], record_years: set[str],
+                  line_tokens: set[str], line_years: set[str]) -> bool:
+    """One output line vouches for a record chunk when it carries the
+    overlap share of the chunk's distinctive tokens AND does not carry a
+    different year: a dated line that disagrees on the year is a different
+    record sharing the same words, not this record reformatted. A line with
+    no year of its own (stage 5c/5d put the date on a separate bullet)
+    cannot disagree, and falls back to the token overlap alone."""
+    if len(tokens & line_tokens) / len(tokens) < RENDER_TOKEN_OVERLAP:
+        return False
+    if record_years and line_years and not (record_years & line_years):
+        return False
+    return True
+
+
 def _record_rendered(line: str, haystack: str,
-                     line_token_sets: List[set]) -> Optional[bool]:
+                     output: RenderedLines) -> bool | None:
     """Whether one record line surfaces in the output: verbatim piece first,
-    then per-output-line token overlap. Verbatim absence alone proves nothing
-    (stage 6 reformats dates/fields), so False requires a token-verifiable
-    miss; a line without enough distinctive tokens is None, not missing."""
+    then per-output-line overlap of the record's DISTINCTIVE tokens (the
+    output's ubiquitous tokens left out) on a line whose year does not
+    contradict the record's. Verbatim absence alone proves nothing (stage 6
+    reformats dates/fields), so False requires a token-verifiable miss; a
+    line without enough distinctive tokens is None, not missing."""
     if any(piece in haystack for piece in _entry_pieces(line)):
         return True
+    record_years = set(_YEAR_RE.findall(line))
     rendered = None
     for chunk in [line] + entry_fragments(line):
-        tokens = _long_word_tokens(chunk)
+        tokens = _long_word_tokens(chunk) - output.ubiquitous
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue
-        if any(len(tokens & line_tokens) / len(tokens) >= RENDER_TOKEN_OVERLAP
-               for line_tokens in line_token_sets):
+        if any(_line_vouches(tokens, record_years, line_tokens, line_years)
+               for line_tokens, line_years in zip(output.tokens, output.years)):
             return True
         rendered = False
     return rendered
@@ -307,17 +449,17 @@ def lint_unrendered_records(stage4: Dict,
     # each record against per-OUTPUT-LINE token sets so common academic words
     # scattered across unrelated sections can't vouch for a dropped record.
     h = _haystacks(blocks)
-    line_tokens = _line_token_sets(blocks)
+    output = _rendered_lines(blocks)
     findings = []
     for e in stage4.get("entries", []):
         code = e.get("taxonomy_code")
         if code == "T":
             continue
         records = _record_lines(e.get("text"))
-        if len(records) < UNRENDERED_MIN_RECORD_LINES:
+        if len(records) + _bare_date_lines(e.get("text")) < UNRENDERED_MIN_RECORD_LINES:
             continue
         absent = [r for r in records
-                  if _record_rendered(r, h.text, line_tokens) is False]
+                  if _record_rendered(r, h.text, output) is False]
         if not absent:
             continue
         findings.append(_finding(

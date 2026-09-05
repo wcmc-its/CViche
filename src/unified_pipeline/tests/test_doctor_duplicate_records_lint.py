@@ -30,8 +30,13 @@ from docx.oxml.ns import nsdecls  # noqa: E402
 from unified_pipeline.doctor.lints.render import (  # noqa: E402
     DUPLICATE_RECORD_MIN_CHARS,
     DUPLICATE_RECORD_WINDOW,
+    RENDER_UBIQUITOUS_MIN_LINES,
+    _record_lines,
+    _record_rendered,
+    _rendered_lines,
     lint_duplicate_passages,
     lint_duplicate_records,
+    lint_unrendered_records,
 )
 from unified_pipeline.run_doctor import _docx_text, read_docx_blocks, run_doctor  # noqa: E402
 
@@ -567,3 +572,138 @@ def test_run_doctor_dispatches_duplicate_records_and_skips_without_docx(tmp_path
     assert "skipped" in skipped[0]["message"]
     assert empty_payload["counts"]["WARN"] == 0
     assert empty_payload["worst_severity"] == "INFO"
+
+
+# --- #446 review T1.6 (#746): what counts as a record line in lint 8 --------
+
+@pytest.mark.parametrize("line", [
+    "Jun 2020-Jun 2025, Assistant Professor of Medicine, Weill Cornell",
+    "2018 - Present: Attending Physician, NewYork-Presbyterian Hospital",
+    "2015-2017\tResident, Internal Medicine, Mount Sinai Hospital",
+    # stage 2 glues the payload onto the end year (farm: 2068_Yount_Cv, web08)
+    "2008-15Associate Professor, Department of Behavioral Sciences",
+    "1996-8\tResearch Fellowship, Andrew Mellon Foundation",
+    "2008-presentAssistant Professor of Medicine, Division of Cardiology",
+    # open-ended range, single year, space-separated payload (farm shapes)
+    "2013-\tUniversity Course on Violence (U, G, spring)",
+    "2023 – Excellence in Undergraduate Teaching Award, Northern Illinois",
+    "1999-2002 Ilya Laufer, Stony Brook University Medical Student",
+])
+def test_record_lines_keeps_every_farm_record_shape(line):
+    """T1.6 positive controls: every date-prefixed record shape the 66-CV
+    farm's stage-4 text carries is still a record under the tightened rule.
+    Measured on the farm: the old length-plus-prefix rule admits 226 lines,
+    the new one keeps 203, and the 23 it drops are all bare date lists (next
+    test) -- no worded record changes class."""
+    assert _record_lines(line) == [line]
+
+
+@pytest.mark.parametrize("line", [
+    "2020 - the year our program expanded to three campuses and beyond",
+    "2019 – a period of rapid growth in the division that continued",
+    "2020 - nowadays the program runs across all three campuses",
+    "February 2018 – Present",
+    "2004 –2020 2004-2010",
+    "2006-2010, 2012, 2013",
+])
+def test_record_lines_rejects_date_prefixed_prose_and_bare_dates(line):
+    """T1.6 negative cases: date-prefixed running prose (lowercase after the
+    dash; 'nowadays' must not read as the open-ended word 'now') and bare
+    date lines with no worded payload (the farm's Bostwick date column) are
+    not records. The old rule admitted every one of these: each is long
+    enough for its length floor and opens with a date and a dash."""
+    assert len(line) >= 20
+    assert _record_lines(line) == []
+
+
+def test_bare_date_lines_count_toward_the_fused_floor_but_are_never_verified():
+    """T1.6: a bare date line is a split-off date column -- evidence that the
+    entry fuses several records, so the entry stays a lint-8 candidate -- but
+    not a record to verify, so it no longer inflates the denominator. Farm
+    shape: Bostwick entry 105 read '1 of 3 records absent' with two of the
+    three being date lists; it now reads '1 of 1', and the one real record
+    (genuinely absent from that output) is still reported."""
+    pipe_row = ("AAP Resident Grief and Loss Curriculum Development Workgroup "
+                "Member | 2002-2020")
+    text = f"{pipe_row}\n2004 –2020 2004-2010\n2006-2010, 2012, 2013"
+    blocks = [("p", "Q. COMMITTEE SERVICE"),
+              ("p", "Neonatal quality improvement board, institutional member")]
+    fused = {"entries": [{"element_idx_start": 105, "taxonomy_code": "Q1",
+                          "text": text}]}
+    findings = lint_unrendered_records(fused, blocks)
+    assert len(findings) == 1
+    assert "1 of 1 records absent" in findings[0]["message"]
+    assert findings[0]["evidence"] == [pipe_row]
+
+    single = {"entries": [{"element_idx_start": 105, "taxonomy_code": "Q1",
+                           "text": pipe_row}]}
+    assert lint_unrendered_records(single, blocks) == []
+
+
+# --- #446 review T1.5 (#746): which output line may vouch for a record -----
+
+_RECORD_2019 = ("Smith J, Jones K. Cardiac outcomes in elderly patients. "
+                "J Cardiol. 2019;12:45-50.")
+
+
+def test_record_rendered_rejects_the_same_title_under_a_different_year():
+    """T1.5 adversarial: shared surnames AND title tokens, different year.
+    Under the old per-line overlap the 2021 line vouched for the 2019 record
+    (7 of 7 tokens); a dated output line that disagrees on the year is a
+    different record sharing the words, so it must not."""
+    other_year = _rendered_lines([
+        ("p", "Smith J, Jones K. Cardiac outcomes in elderly patients. "
+              "J Cardiol. 2021;14:1-9.")])
+    assert _record_rendered(_RECORD_2019, "", other_year) is False
+
+
+def test_record_rendered_accepts_a_reformatted_same_year_or_undated_line():
+    """T1.5 positive controls: the 5d-reformatted citation with the same year
+    still vouches, and a line with no year of its own (5c puts the date on a
+    separate bullet) cannot disagree and falls back to token overlap."""
+    same_year = _rendered_lines([
+        ("p", "Smith J, Jones K (2019). Cardiac outcomes in elderly patients. "
+              "Journal of Cardiology, 12, 45-50.")])
+    undated = _rendered_lines([
+        ("p", "Smith J, Jones K. Cardiac outcomes in elderly patients. "
+              "Journal of Cardiology.")])
+    assert _record_rendered(_RECORD_2019, "", same_year) is True
+    assert _record_rendered(_RECORD_2019, "", undated) is True
+
+
+def test_record_rendered_farm_case_different_course_with_the_same_title_words():
+    """T1.5, the farm's own instance (2054_Opresko_Cv): a 2008 course record
+    was vouched for by the CV's 2006 course line, which shares 4 of its 5
+    tokens; the year veto turns that into the true 'absent' the doctor A/B
+    gained on that uid."""
+    record = "April 2008 | 2008 Course in Scientific Management and Leadership"
+    out = _rendered_lines([
+        ("p", "Spring 2006 - Nominated and selected to participate, 2.5 day "
+              "course on Scientific Management Leadership")])
+    assert _record_rendered(record, "", out) is False
+
+
+def test_record_rendered_ignores_tokens_ubiquitous_in_the_output():
+    """T1.5 adversarial: the owner's surname and home institution sit on
+    every citation line of their own CV, so they vouch for nothing. Twelve
+    filler lines make 'bostwick'/'weill'/'cornell'/'medicine' ubiquitous;
+    the old rule then let a DIFFERENT paper vouch at 8 of 10 tokens, while
+    the distinctive-token overlap (4 of 6) correctly does not. A record left
+    with fewer than RENDER_TOKEN_MIN_COUNT distinctive tokens is None
+    (unverifiable), never a manufactured absence."""
+    topics = ["asthma", "measles", "obesity", "anemia", "eczema", "scoliosis",
+              "autism", "diabetes", "epilepsy", "jaundice", "colic", "croup"]
+    assert len(topics) >= RENDER_UBIQUITOUS_MIN_LINES
+    filler = [("p", f"Bostwick S, Weill Cornell Medicine. Pediatric {t} clinic.")
+              for t in topics]
+    other_paper = ("p", "Bostwick S, Weill Cornell Medicine. Sleep apnea "
+                        "outcomes in adolescent athletes.")
+    out = _rendered_lines(filler + [other_paper])
+    assert {"bostwick", "weill", "cornell", "medicine"} <= out.ubiquitous
+    assert not {"sleep", "apnea"} & out.ubiquitous
+
+    record = ("Bostwick S, Weill Cornell Medicine. Sleep apnea screening in "
+              "adolescent athletes: a pilot.")
+    assert _record_rendered(record, "", out) is False
+    short = "Bostwick S, Weill Cornell Medicine. Sleep apnea."
+    assert _record_rendered(short, "", out) is None
