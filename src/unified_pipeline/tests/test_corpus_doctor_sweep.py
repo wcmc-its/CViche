@@ -318,6 +318,30 @@ def test_aggregate_ranks_by_affected_count_and_tracks_skip_vs_ran():
     assert cli.aggregate(reports)[0]["lint"] == "pipe_leaks", "ranked first by affected count"
 
 
+def test_skip_detection_matches_what_run_doctor_actually_emits(tmp_path):
+    """T1.7/T2.5: a finding has no structured skip status (#750), so
+    aggregate() depends on the wording `_ready()` in run_doctor.py emits.
+    This runs the REAL run_doctor on an empty root -- every registered lint
+    skips -- through aggregate(), so a rewording on either side fails here
+    instead of silently counting every skipped lint as 'ran clean'.
+    """
+    from unified_pipeline.run_doctor import run_doctor
+
+    cli = _load_cli()
+    rep = run_doctor(tmp_path, "aaa111")
+
+    assert {f["lint"] for f in rep["findings"]} == set(cli.ALL_LINTS), (
+        "every registered lint must skip on an empty root")
+    assert {f["severity"] for f in rep["findings"]} == {"INFO"}
+    assert all(f["message"].startswith(cli.SKIPPED_MISSING_PREFIX)
+               for f in rep["findings"]), "the sweep's prefix must be what _ready() emits"
+
+    rows = cli.aggregate({"r1": rep})
+    assert {r["lint"]: r["cvs_ran"] for r in rows} == {lint: 0 for lint in cli.ALL_LINTS}, (
+        "a skipped lint must not count as having run")
+    assert {r["cvs_affected"] for r in rows} == {0}
+
+
 def test_resolve_outputs_dir_tolerates_nested_and_flat_layouts_and_never_raises(tmp_path):
     """Ported from the deleted _selftest (T2.9)."""
     cli = _load_cli()

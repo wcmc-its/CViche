@@ -351,6 +351,16 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
 # it. Importing the canonical tuple removes both the copy and the heuristic.
 ALL_LINTS = list(KNOWN_LINTS)
 
+# `_ready()` in run_doctor.py records a lint it could not run as an INFO
+# finding whose message is "skipped: missing <inputs>" -- a finding carries
+# no structured status field yet (#750 tracks adding one to `_finding()` and
+# `_ready()`, at which point this constant goes away). Until then this is the
+# ONE place the sweep depends on that wording, and
+# `test_skip_detection_matches_what_run_doctor_actually_emits` runs the real
+# run_doctor through aggregate() so a rewording on either side fails CI
+# instead of silently turning every skipped lint into a "ran clean" one.
+SKIPPED_MISSING_PREFIX = "skipped: missing"
+
 
 class MalformedReportError(Exception):
     """A report handed to aggregate() is not a dict carrying a `findings`
@@ -423,7 +433,7 @@ def aggregate(reports: dict[str, DoctorReport]) -> list[LintRow]:
         seen_warn, seen_err, skipped = set(), set(), set()
         for f in _validate_report(run_id, rep):
             lint, sev = f["lint"], f["severity"]
-            if sev == "INFO" and "skipped: missing" in f["message"]:
+            if sev == "INFO" and f["message"].startswith(SKIPPED_MISSING_PREFIX):
                 skipped.add(lint)
             elif sev == "WARN":
                 seen_warn.add(lint)
