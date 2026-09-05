@@ -14,7 +14,7 @@ Both approaches output identical schema with metadata:
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Dict, Any, Optional
 
 # Import segmentation functions
 from ..segmentation.pdf_vision import segment_cv_three_pass
@@ -30,7 +30,7 @@ class CVSegmenter:
 
     SUPPORTED_FORMATS = {'.pdf', '.docx'}
 
-    def __init__(self, api_key: str | None = None):
+    def __init__(self, api_key: Optional[str] = None):
         """
         Initialize segmenter.
 
@@ -65,7 +65,7 @@ class CVSegmenter:
 
         return ext
 
-    def segment(self, file_path: str, output_dir: str | None = None) -> dict[str, Any]:
+    def segment(self, file_path: str, output_dir: Optional[str] = None) -> Dict[str, Any]:
         """
         Segment CV into hierarchical sections and entries.
 
