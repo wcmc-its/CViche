@@ -47,7 +47,7 @@ _SEASON_TOKENS = frozenset({'spring', 'summer', 'fall', 'autumn', 'winter'})
 CURRENT_DATE_VALUES = frozenset({'present', 'current', 'ongoing', 'now'})
 
 
-def _parse_date_components(date_str: str):
+def _parse_date_components(date_str: str) -> tuple[int | None, int | None, int | None]:
     """Parse a date string into (year, month, day) ints; any component absent
     from the input is None. Returns (None, None, None) when nothing parses.
 
@@ -108,7 +108,7 @@ def _parse_date_components(date_str: str):
     return (None, None, None)
 
 
-def _validate_full_date(year: int, month: int, day: int):
+def _validate_full_date(year: int, month: int, day: int) -> tuple[int | None, int | None, int | None]:
     """Calendar-check a full y/m/d triple parsed off a complete-date pattern.
 
     An invalid day (2024-04-31, a non-leap 2023-02-29) degrades to
@@ -134,7 +134,7 @@ def _get_entry_date_range(entry: Dict) -> tuple:
 _OPEN_ENDED = object()
 
 
-def _overlap_boundary(date_str: str, *, is_end: bool):
+def _overlap_boundary(date_str: str, *, is_end: bool) -> tuple[int, int | None] | object | None:
     """One range boundary for `_dates_overlap_or_match`, at the granularity the
     CV actually states: `(year, month-or-None)`, `_OPEN_ENDED`, or None.
 
@@ -157,7 +157,7 @@ def _overlap_boundary(date_str: str, *, is_end: bool):
     return (year, month)
 
 
-def _ends_strictly_before(end, start) -> bool:
+def _ends_strictly_before(end: tuple[int, int | None] | object, start: tuple[int, int | None] | object) -> bool:
     """True only when the stated data PROVES `end` precedes `start`.
 
     Decidable when the years differ, or when the years are equal and both
@@ -174,7 +174,7 @@ def _ends_strictly_before(end, start) -> bool:
             and end_month < start_month)
 
 
-def _dates_overlap_or_match(entry_a: Dict, entry_b: Dict) -> bool:
+def _dates_overlap_or_match(entry_a: dict, entry_b: dict) -> bool:
     """Return True if two entries have the same, overlapping, or unprovably
     distinct date ranges -- the dedup path's "these could be the same thing".
 
