@@ -299,9 +299,10 @@ def _invalid_metadata_result(
     """Shared (fraction, detail, cap) for a stage-metadata invariant
     violation (#724 review items 10/11): worst-case fraction rather than
     computing a ratio from numbers that cannot be trusted (e.g. negative
-    counts, or duplicate_entries exceeding total_entries). Farm: 0 of 66
-    classified.json files violate either invariant, so this never fires on
-    real output today.
+    counts, or duplicate_entries exceeding total_entries). Farm: 0 of 65
+    classified.json files in the scored population violate either invariant
+    (0 of 98 in the whole stage_3b_classified_entries dir), so this never
+    fires on real output today.
     """
     values_str = ", ".join(f"{k}={v}" for k, v in values.items())
     detail = f"invalid metadata: {invariant} ({values_str})"
@@ -524,9 +525,9 @@ def _count_raw_tab_cells(
     """Raw-tab paragraphs inside every cell of `tables`, nested tables one
     level deep via `cell.tables` (#724 follow-up review, D7'); the recursion
     is bounded by `_depth` so a table nested inside a table nested inside a
-    table is not walked a third level down, matching this docstring. A cell
-    whose text is exactly `_TEMPLATE_TAB_CELL_TEXT` is excluded: it is the
-    template's own boilerplate, not a rendering defect.
+    table is not walked a third level down, matching this docstring. A
+    paragraph whose text is exactly `_TEMPLATE_TAB_CELL_TEXT` is excluded:
+    it is the template's own boilerplate, not a rendering defect.
 
     A cell merged across columns (gridSpan) is repeated once per spanned
     column in `row.cells` -- python-docx does not collapse it -- so counting
