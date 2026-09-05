@@ -27,7 +27,7 @@ from typing import Literal
 _COMMITTEE_NAME_KEYS = ('committee_name', 'committee', 'activity', 'name', 'title')
 
 
-def _committee_cell_text(value) -> str:
+def _committee_cell_text(value: object) -> str:
     """Coerce a possibly-structured committee field to plain cell text.
 
     Stage 4 can emit a committee field as a dict or a list of record dicts for a
