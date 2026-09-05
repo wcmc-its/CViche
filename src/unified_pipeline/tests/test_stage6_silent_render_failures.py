@@ -405,21 +405,41 @@ def test_patents_detached_cursor_logs_warning_counts_misplaced_and_holds_cursor(
     generator) removes its paragraph from the body and re-inserts it with
     `body.insert`; when that insert fails it swallows the error and returns
     the now-DETACHED element, which the section had been adopting as its
-    cursor. Forcing `body.insert` to raise reproduces exactly that.
+    cursor. Forcing the FIRST `body.insert` call to raise (and only that
+    one) reproduces exactly that -- and, unlike an always-raising mock,
+    lets a second table's own insert succeed if the code ever hands it a
+    chance to. It must not get that chance: once the cursor is detached,
+    `_place_patent_table` must keep failing (and keep reporting) for every
+    later table instead of quietly recovering on the next placement it
+    happens to try.
 
-    The first table is placed (before any spacing exists). Every later table
-    finds a detached cursor: each is logged with its ordinal and the caught
-    exception, counted in tables_misplaced, and left at the document end.
-    The cursor is NOT advanced onto a misplaced table -- with the old code
-    the third patent would have been inserted after the second, silently,
-    with no warning at all."""
+    The first table is placed (before any spacing exists). The one forced
+    `body.insert` failure detaches the spacing paragraph after it, so every
+    later table finds a detached cursor: each is logged with its ordinal
+    and the caught exception, counted in tables_misplaced, and left at the
+    document end -- immediately after the previous one, with no spacing
+    paragraph between them, because the cursor never became attached again.
+
+    This pins the regression a cursor-advances-on-failure bug would cause:
+    if the guard were removed, the second table's own spacing attempt would
+    reach the now-unmocked `body.insert`, succeed, and the third table
+    would land correctly spaced after the second -- one warning and
+    `tables_populated == 2` instead of two warnings and `tables_populated
+    == 1`, with a spacing paragraph between Widget B and Widget C that must
+    not exist here."""
     gen = _new_generator()
     gen.doc.add_paragraph("Patents & Inventions")
 
-    def _raise_value_error(*_args, **_kwargs):
-        raise ValueError("forced for test")
+    real_insert = gen.doc.element.body.insert
+    calls = {'n': 0}
 
-    gen.doc.element.body.insert = _raise_value_error
+    def _raise_once(*args, **kwargs):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            raise ValueError("forced for test")
+        return real_insert(*args, **kwargs)
+
+    gen.doc.element.body.insert = _raise_once
 
     entries = [_patent('newest', title='Widget A', year='2021'),
                _patent('middle', title='Widget B', year='2020'),
@@ -444,6 +464,12 @@ def test_patents_detached_cursor_logs_warning_counts_misplaced_and_holds_cursor(
     assert [t.rows[0].cells[1].text for t in gen.doc.tables] == [
         'Widget A', 'Widget B', 'Widget C']
     assert _body_after(gen.doc, "Patents & Inventions", 1) == [('tbl', 'Widget A')]
+    # Widget C lands directly after Widget B with no spacing between them --
+    # the cursor never recovered, so no spacing insert was ever attempted
+    # for either. A guard that advanced the cursor on failure would let the
+    # forced insert fail once and then heal, spacing C correctly after B.
+    assert _body_after(gen.doc, "Patents & Inventions", 3) == [
+        ('tbl', 'Widget A'), ('tbl', 'Widget B'), ('tbl', 'Widget C')]
     # Failure stats: placed vs misplaced are distinct; entries_inserted counts both.
     assert gen.stats['tables_populated'] == 1
     assert gen.stats['tables_misplaced'] == 2
