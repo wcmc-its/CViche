@@ -441,6 +441,24 @@ def test_broken_format_raw_tab_gridspan_merged_cell_counted_once(tmp_path):
     assert "raw_tab_cells=1" in detail, detail
 
 
+def test_broken_format_template_tab_cell_not_counted(tmp_path):
+    """#724 follow-up review: the pristine template's own 'Project title:'
+    label cell contains a raw tab and IS reachable from rendered CV content
+    (27 of 65 farm docx carry it as their only raw-tab cell), so it must be
+    excluded by exact text match rather than counted as a defect."""
+    _make_docx(tables=[[["Project title:\t\t", "clean"]]]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_cells=0" in detail, detail
+
+
+def test_broken_format_non_template_tab_cell_still_counted(tmp_path):
+    """A raw tab in a cell that is NOT the template's boilerplate text
+    remains a genuine raw-formatting signal."""
+    _make_docx(tables=[[["Some other\ttext", "clean"]]]).save(tmp_path / "out.docx")
+    fraction, detail, cap = score_broken_format(tmp_path)
+    assert "raw_tab_cells=1" in detail, detail
+
+
 def test_broken_format_prompt_echo_in_paragraph(tmp_path):
     _make_docx(["Please list here your publications"]).save(tmp_path / "out.docx")
     fraction, detail, cap = score_broken_format(tmp_path)
