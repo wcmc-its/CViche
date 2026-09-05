@@ -29,6 +29,7 @@ Self-contained: AST and imports only, no DB, no network, no LLM, no PII.
 
 import ast
 import importlib
+import logging
 import sys
 from pathlib import Path
 
@@ -401,6 +402,65 @@ def test_registry_rows_name_real_views_and_rules():
         # the labels a row is gated on are exactly the ones its rule reads
         assert len({mod._VIEW_LABELS[v] for v in spec.inputs}) == len(spec.inputs), (
             spec.lint_id, "two views of one artifact under one row")
+
+
+def _registry_with(mod, **rules):
+    """LINT_REGISTRY with the named lints' rules swapped -- the registry is
+    read from the module at call time, so patching the tuple is enough."""
+    return tuple(spec._replace(rule=rules[spec.lint_id]) if spec.lint_id in rules
+                 else spec for spec in mod.LINT_REGISTRY)
+
+
+def _boom(*_args):
+    raise RuntimeError("synthetic lint failure")
+
+
+def test_a_crashing_lint_becomes_an_error_finding_and_the_rest_still_run(
+        tmp_path, monkeypatch, caplog):
+    """Item 3 / #748: one broken lint must not stop the other 17. The third
+    lint in dispatch order raises; the report still comes back, carries ONE
+    ERROR finding under that lint's key naming the exception, the sixteenth
+    lint (dispatched after it) demonstrably ran, the crash is logged with
+    its traceback rather than swallowed, and no other lint's outcome changed
+    on an otherwise clean run."""
+    from test_run_doctor import _UID, _build_clean_run  # noqa: E402 (path set above)
+    mod = _module()
+    ran_after = []
+    monkeypatch.setattr(mod, "LINT_REGISTRY", _registry_with(
+        mod, bucket_status=_boom,
+        duplicate_records=lambda *args: ran_after.append(args) or []))
+
+    with caplog.at_level(logging.ERROR, logger="unified_pipeline.run_doctor"):
+        payload = mod.run_doctor(_build_clean_run(tmp_path), _UID)
+
+    assert [f for f in payload["findings"] if f["lint"] == "bucket_status"] == [{
+        "lint": "bucket_status", "severity": "ERROR",
+        "message": "lint bucket_status crashed: RuntimeError: synthetic lint failure",
+        "evidence": []}]
+    assert ran_after, "duplicate_records, dispatched after the crash, never ran"
+    assert payload["counts"]["ERROR"] == 1
+    assert payload["worst_severity"] == "ERROR"
+    assert not any(f["severity"] == "ERROR" for f in payload["findings"]
+                   if f["lint"] != "bucket_status")
+    logged = [r for r in caplog.records if "bucket_status" in r.getMessage()]
+    assert logged and logged[0].exc_info, "the traceback must reach the log"
+
+
+def test_the_two_hard_fail_gates_run_inside_the_same_boundary(tmp_path, monkeypatch):
+    """The gates are dispatched by hand, not through the registry, so the
+    boundary has to be proven for them separately: a raising
+    pipeline_errors lint is an ERROR finding under its own key and the
+    report still returns."""
+    from test_run_doctor import _UID, _build_clean_run  # noqa: E402 (path set above)
+    mod = _module()
+    monkeypatch.setattr(mod, "lint_pipeline_errors", _boom)
+    payload = mod.run_doctor(_build_clean_run(tmp_path), _UID)
+    gate = [f for f in payload["findings"] if f["lint"] == "pipeline_errors_present"]
+    assert gate == [{
+        "lint": "pipeline_errors_present", "severity": "ERROR",
+        "message": "lint pipeline_errors_present crashed: RuntimeError: synthetic lint failure",
+        "evidence": []}]
+    assert payload["worst_severity"] == "ERROR"
 
 # One malformed-but-parseable artifact per JSON kind: (loader label, stage
 # dir, filename, file content, the shape problem the loader must name, a lint

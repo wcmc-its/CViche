@@ -81,7 +81,9 @@ Usage:
 The CLI writes <uid>_doctor.json into the root (or --out), prints a summary,
 and exits 1 if any finding is WARN or worse. The library entry point
 run_doctor(root, uid, source=None) -> dict never calls sys.exit; missing or
-unreadable artifacts skip their lints with an INFO note instead of crashing.
+unreadable artifacts skip their lints with an INFO note instead of crashing,
+and a lint that raises becomes one ERROR finding under its own key while the
+remaining lints still run (#748).
 """
 
 import argparse
@@ -91,7 +93,7 @@ import math
 import os
 import re
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
@@ -667,6 +669,22 @@ def _ready(lint_id: str, *, unreadable: Dict[str, str], findings: List[Dict],
     return False
 
 
+def _run_lint(lint_id: str, rule: Callable[..., List[Dict]],
+              args: Sequence[object], findings: List[Dict]) -> None:
+    """Run one lint inside its own fault boundary (#446 review, run_doctor.py
+    thread item 3 / #748). A lint that raises becomes ONE ERROR finding
+    under its own key -- logged with the traceback, never swallowed -- and
+    the lints after it still run. The doctor diagnoses failures; it must not
+    become one: the backend calls run_doctor in-process, so an uncaught lint
+    exception used to take the quality score and the Teams card with it."""
+    try:
+        findings.extend(rule(*args))
+    except Exception as e:
+        logger.exception("run_doctor: lint %s crashed", lint_id)
+        findings.append(_finding(
+            lint_id, "ERROR", f"lint {lint_id} crashed: {type(e).__name__}: {e}"))
+
+
 class LintSpec(NamedTuple):
     """One row of the lint registry: the key the lint emits, the rule that
     emits it, and the loaded-input views it takes, in the rule's positional
@@ -728,8 +746,9 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
 
 def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     """Run every lint whose artifacts exist under root for this document uid.
-    Never raises on missing/unreadable artifacts and never calls sys.exit —
-    the backend calls this in-process; the CLI wraps it."""
+    Never raises on missing/unreadable artifacts, never raises out of a lint
+    (`_run_lint` turns that into an ERROR finding) and never calls sys.exit
+    — the backend calls this in-process; the CLI wraps it."""
     root = Path(root)
     paths = {key: _find_artifact(root, uid, key) for key in _ARTIFACTS}
     source_path = Path(source) if source else _find_source(root, uid)
@@ -761,7 +780,8 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     for spec in LINT_REGISTRY:
         inputs = {_VIEW_LABELS[view]: views[view] for view in spec.inputs}
         if ready(spec.lint_id, **inputs):
-            findings.extend(spec.rule(*(views[view] for view in spec.inputs)))
+            _run_lint(spec.lint_id, spec.rule,
+                      [views[view] for view in spec.inputs], findings)
 
     stage_2, stage_3b, stage_4 = views["stage_2"], views["stage_3b"], views["stage_4"]
     # score_cv_owner caps at 25 for an ABSENT *_fields.json as well as an empty
@@ -771,8 +791,8 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     # -- an incomplete or wrong-uid run has no owner name yet, and the batch
     # runner doctors CVs whose pipeline returned rc!=0.
     if stage_4 is not None or any(paths[k] for k in _DELIVERABLE):
-        findings.extend(lint_owner_contact_missing(
-            stage_4, uid, unreadable.get("stage_4")))
+        _run_lint("owner_contact_missing", lint_owner_contact_missing,
+                  (stage_4, uid, unreadable.get("stage_4")), findings)
     else:
         ready("owner_contact_missing", stage_4=stage_4)
     # The error scan covers exactly the JSON the DEPLOYED scorer globs:
@@ -786,7 +806,8 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
         ("stage_2", stage_2), ("stage_3b", stage_3b), ("stage_4", stage_4))
         if data is not None}
     if scored_artifacts:
-        findings.extend(lint_pipeline_errors(scored_artifacts))
+        _run_lint("pipeline_errors_present", lint_pipeline_errors,
+                  (scored_artifacts,), findings)
     else:
         ready("pipeline_errors_present", stage_2=stage_2, stage_3b=stage_3b,
               stage_4=stage_4)
