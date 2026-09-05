@@ -14,6 +14,7 @@ files and python-docx-built fixtures.
 import json
 import logging
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -874,3 +875,103 @@ def test_field_sparseness_saturates_at_ten_percent_both_failing(tmp_path):
     tmp2.mkdir()
     two, _, _ = _sparseness(tmp2, [_BOTH] * 2 + [_CLEAN] * 8)
     assert one == pytest.approx(1.0) and two == pytest.approx(1.0)
+
+
+# --------------------------------------------------------------------- D20
+# _load_docx catches only what python-docx raises for a present-but-unreadable
+# file (the rule #724 review item 12 set for _load_first, applied to its
+# sibling); anything else propagates.
+# --------------------------------------------------------------------- D20
+
+
+def _zip_without(src: Path, dst: Path, drop: str, replace: bytes | None = None) -> Path:
+    """Copy docx zip `src` to `dst`, dropping member `drop` or, when `replace`
+    is given, writing those bytes in its place."""
+    with zipfile.ZipFile(src) as zin, zipfile.ZipFile(dst, "w") as zout:
+        for item in zin.infolist():
+            if item.filename == drop:
+                if replace is not None:
+                    zout.writestr(item, replace)
+                continue
+            zout.writestr(item, zin.read(item.filename))
+    return dst
+
+
+def _garbage(tmp_path: Path) -> Path:
+    p = tmp_path / "out.docx"
+    p.write_bytes(b"not a real docx, just garbage bytes")
+    return p
+
+
+def _empty(tmp_path: Path) -> Path:
+    p = tmp_path / "out.docx"
+    p.write_bytes(b"")
+    return p
+
+
+def _truncated(tmp_path: Path) -> Path:
+    real = tmp_path / "real.bin"
+    _make_docx(["x"]).save(real)
+    data = real.read_bytes()
+    p = tmp_path / "out.docx"
+    p.write_bytes(data[: len(data) // 2])
+    return p
+
+
+def _missing_document_xml(tmp_path: Path) -> Path:
+    real = tmp_path / "real.bin"
+    _make_docx(["x"]).save(real)
+    return _zip_without(real, tmp_path / "out.docx", "word/document.xml")
+
+
+def _corrupt_document_xml(tmp_path: Path) -> Path:
+    real = tmp_path / "real.bin"
+    _make_docx(["x"]).save(real)
+    return _zip_without(real, tmp_path / "out.docx", "word/document.xml",
+                        replace=b"<w:document><unclosed")
+
+
+def _directory(tmp_path: Path) -> Path:
+    p = tmp_path / "out.docx"
+    p.mkdir()
+    return p
+
+
+@pytest.mark.parametrize("build,exc_name", [
+    (_garbage, "BadZipFile"),
+    (_empty, "BadZipFile"),
+    (_truncated, "BadZipFile"),
+    (_missing_document_xml, "KeyError"),
+    (_corrupt_document_xml, "XMLSyntaxError"),
+    (_directory, "IsADirectoryError"),
+])
+def test_load_docx_unreadable_docx_names_exception_and_warns(tmp_path, caplog, build, exc_name):
+    build(tmp_path)
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.quality_score"):
+        doc, reason = _load_docx(tmp_path)
+    assert doc is None
+    assert reason.startswith(f"docx open error: {exc_name}:"), reason
+    assert any("out.docx" in r.message for r in caplog.records), caplog.records
+
+
+def test_load_docx_propagates_unexpected_exception_type(tmp_path, monkeypatch):
+    """A RuntimeError from python-docx is a programming error, not an
+    unreadable file, and is no longer swallowed into 'docx open error'."""
+    _make_docx(["x"]).save(tmp_path / "out.docx")
+
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("bug in the loader")
+
+    monkeypatch.setattr(docx, "Document", _boom)
+    with pytest.raises(RuntimeError, match="bug in the loader"):
+        _load_docx(tmp_path)
+
+
+def test_score_dimensions_over_corrupt_docx_still_half_penalty(tmp_path):
+    """The two docx dimensions keep their 0.5 'unavailable' fraction for a
+    corrupt docx and now carry the exception name in the reason."""
+    _garbage(tmp_path)
+    for scorer in (score_sparse_tables, score_broken_format):
+        fraction, reason, cap = scorer(tmp_path)
+        assert fraction == 0.5 and cap is None
+        assert reason.startswith("docx open error: BadZipFile:"), reason

@@ -57,11 +57,22 @@ one human-confirmed clean run exists. Treat GREEN as "no detected problems,"
 never "human-verified correct."
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import re
 import sys
+import zipfile
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from docx.document import Document as DocumentType
+    from docx.oxml.table import CT_Tc
+    from docx.table import Table
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +101,7 @@ def linear_interp(val, lo, hi, out_lo, out_hi):
     return clamp(result, min(out_lo, out_hi), max(out_lo, out_hi))
 
 
-def _load_first(outputs_dir: Path, pattern: str):
+def _load_first(outputs_dir: Path, pattern: str) -> tuple[dict | None, str | None]:
     """Load the first JSON artifact matching pattern.
 
     Returns ``(data, reason)``. ``data`` is ``None`` when nothing usable was
@@ -123,7 +134,7 @@ def _load_first(outputs_dir: Path, pattern: str):
         return None, reason
 
 
-def _missing_or_unreadable_detail(label: str, reason) -> str:
+def _missing_or_unreadable_detail(label: str, reason: str | None) -> str:
     """Detail-string fragment for a `_load_first` miss: names an unreadable
     artifact distinctly from a genuinely absent one (#497)."""
     if reason is not None:
@@ -131,14 +142,25 @@ def _missing_or_unreadable_detail(label: str, reason) -> str:
     return f"no {label} found"
 
 
-def _load_docx(outputs_dir: Path):
+def _load_docx(outputs_dir: Path) -> tuple[DocumentType | None, str | None]:
     """Return (Document, reason). Document is None if unavailable.
 
     Mirrors _load_first's ambiguous-match guard (#724 review): more than one
     *.docx in the directory is not loaded rather than silently picking one.
+
+    Catches only what python-docx raises for a file that is present but not
+    a readable Word document (each probed, 2026-09-04): ``BadZipFile`` for
+    garbage, truncated or empty bytes; ``KeyError`` for a zip missing
+    ``[Content_Types].xml`` or ``word/document.xml``; ``XMLSyntaxError``
+    for a corrupt ``document.xml``; ``ValueError`` for a package whose main
+    part is not a Word document (python-docx ``api.py``: "is not a Word
+    file"); ``OSError`` for a directory or an unreadable file. Anything
+    else is a programming error and propagates, the same rule #724 review
+    item 12 set for ``_load_first``.
     """
     try:
         from docx import Document
+        from lxml.etree import XMLSyntaxError
     except ImportError:
         return None, "python-docx not available"
     docx_files = sorted(outputs_dir.glob("*.docx"))
@@ -151,8 +173,10 @@ def _load_docx(outputs_dir: Path):
         return None, reason
     try:
         return Document(docx_files[0]), None
-    except Exception as e:
-        return None, f"docx open error: {e}"
+    except (OSError, zipfile.BadZipFile, KeyError, ValueError, XMLSyntaxError) as e:
+        reason = f"docx open error: {type(e).__name__}: {e}"
+        logger.warning("quality_score could not read %s (%s)", docx_files[0], reason)
+        return None, reason
 
 
 #: Every artifact score_run reads, as (label, glob pattern). The evidence
@@ -259,7 +283,8 @@ def iter_error_fields(obj, path=""):
     return results
 
 
-def _invalid_metadata_result(context: str, invariant: str, **values) -> tuple:
+def _invalid_metadata_result(
+        context: str, invariant: str, **values: int) -> tuple[float, str, None]:
     """Shared (fraction, detail, cap) for a stage-metadata invariant
     violation (#724 review items 10/11): worst-case fraction rather than
     computing a ratio from numbers that cannot be trusted (e.g. negative
@@ -470,7 +495,9 @@ def score_sparse_tables(outputs_dir: Path):
     return fraction, detail, None
 
 
-def _count_raw_tab_cells(tables, _depth: int = 0, _seen_tc=None) -> int:
+def _count_raw_tab_cells(
+        tables: Iterable[Table], _depth: int = 0,
+        _seen_tc: set[CT_Tc] | None = None) -> int:
     """Raw-tab paragraphs inside every cell of `tables`, nested tables one
     level deep via `cell.tables` (#724 follow-up review, D7'); the recursion
     is bounded by `_depth` so a table nested inside a table nested inside a
