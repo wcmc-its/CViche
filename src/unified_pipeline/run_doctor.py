@@ -91,6 +91,7 @@ import math
 import os
 import re
 import sys
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
@@ -232,7 +233,8 @@ SEVERITY_ORDER = ("ERROR", "WARN", "INFO")  # most to least severe
 #:
 #: Order is load-bearing. The sweep breaks ranking ties on index, so reordering
 #: this changes its report even when every finding is identical. Keep it in
-#: dispatch order, matching `run_doctor()`.
+#: dispatch order: `LINT_REGISTRY`'s rows, then the two hard-fail gates
+#: `run_doctor()` dispatches by hand.
 #:
 #: `test_run_doctor_contract.py` checks this against the keys the lint
 #: bodies actually pass to `_finding`/`_ready`, so adding a lint without
@@ -665,6 +667,65 @@ def _ready(lint_id: str, *, unreadable: Dict[str, str], findings: List[Dict],
     return False
 
 
+class LintSpec(NamedTuple):
+    """One row of the lint registry: the key the lint emits, the rule that
+    emits it, and the loaded-input views it takes, in the rule's positional
+    order."""
+    lint_id: str
+    rule: Callable[..., List[Dict]]
+    inputs: tuple[str, ...]
+
+
+#: The loader LABEL each input view is checked under by `_ready` -- the key
+#: `_note` records an unreadable artifact by, so a None view is traced back
+#: to a broken file rather than an absent one. The stage-6 docx feeds two
+#: views (body blocks, raw table rows) under one label because they read one
+#: file; the source docx feeds two readers under two labels because either
+#: can fail alone.
+_VIEW_LABELS = {
+    "source_lines": "source",
+    "candidates": "candidates",
+    "stage_1a": "stage_1a",
+    "stage_2": "stage_2",
+    "stage_3b": "stage_3b",
+    "stage_4": "stage_4",
+    "stage_5_enrichment": "stage_5_enrichment",
+    "stage_6_report": "stage_6_report",
+    "blocks": "stage_6_docx",
+    "table_rows": "stage_6_docx",
+}
+
+
+#: The lint registry (#446 review, run_doctor.py thread item 5; the registry
+#: half of #493): one row per artifact-gated lint, in dispatch order,
+#: replacing the hand-written `if ready(...): findings.extend(...)` stanza
+#: per lint that `run_doctor()` used to grow by two lines per lint. Adding a
+#: lint is one row here plus its `KNOWN_LINTS` entry, and
+#: `test_run_doctor_contract.py` pins the two against each other. The two
+#: quality-score hard-fail gates (`owner_contact_missing`,
+#: `pipeline_errors_present`) are not rows: each breaks the "missing
+#: artifact -> skip" convention in its own way (see `run_doctor()`), and a
+#: row shape that could express both would be a second dispatch language.
+LINT_REGISTRY: tuple[LintSpec, ...] = (
+    LintSpec("segmentation", lint_segmentation, ("source_lines", "stage_1a", "stage_2")),
+    LintSpec("missed_headers", lint_missed_headers, ("candidates", "stage_1a", "stage_2")),
+    LintSpec("bucket_status", lint_bucket_status, ("stage_4", "blocks")),
+    LintSpec("under_extraction", lint_under_extraction, ("stage_4",)),
+    LintSpec("classified_unrendered", lint_classified_unrendered, ("stage_3b", "blocks")),
+    LintSpec("taxonomy_code_coverage", lint_taxonomy_code_coverage, ("stage_3b",)),
+    LintSpec("output_hygiene", lint_output_hygiene, ("blocks",)),
+    LintSpec("dead_sections", lint_dead_sections, ("stage_2", "blocks")),
+    LintSpec("unrendered_records", lint_unrendered_records, ("stage_4", "blocks")),
+    LintSpec("enrichment_failures", lint_enrichment_failures, ("stage_5_enrichment",)),
+    LintSpec("stage6_render_warnings", lint_stage6_warnings, ("stage_6_report",)),
+    LintSpec("dedup_drops", lint_dedup_drops, ("stage_6_report",)),
+    LintSpec("pipe_leaks", lint_pipe_leaks, ("blocks",)),
+    LintSpec("table_shape", lint_table_shape, ("table_rows",)),
+    LintSpec("duplicate_passages", lint_duplicate_passages, ("blocks",)),
+    LintSpec("duplicate_records", lint_duplicate_records, ("blocks",)),
+)
+
+
 def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     """Run every lint whose artifacts exist under root for this document uid.
     Never raises on missing/unreadable artifacts and never calls sys.exit —
@@ -682,54 +743,27 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     def _note(label, detail):
         unreadable[label] = detail
 
-    stage_1a = _load_json(paths["stage_1a"], "stage_1a", _note, _ARTIFACTS["stage_1a"])
-    stage_2 = _load_json(paths["stage_2"], "stage_2", _note, _ARTIFACTS["stage_2"])
-    stage_3b = _load_json(paths["stage_3b"], "stage_3b", _note, _ARTIFACTS["stage_3b"])
-    stage_4 = _load_json(paths["stage_4"], "stage_4", _note, _ARTIFACTS["stage_4"])
-    stage_5e = _load_json(paths["stage_5_enrichment"], "stage_5_enrichment", _note,
-                          _ARTIFACTS["stage_5_enrichment"])
-    stage_6_report = _load_json(paths["stage_6_report"], "stage_6_report", _note,
-                                _ARTIFACTS["stage_6_report"])
-    source_lines = _try(lambda: iter_source_lines(str(source_path)), "source", _note) if source_path else None
-    candidates = _try(lambda: iter_header_candidates(str(source_path)), "candidates", _note) if source_path else None
-    blocks = _try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note) if paths["stage_6_docx"] else None
-    table_rows = _try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note) if paths["stage_6_docx"] else None
+    views: dict[str, object] = {
+        key: _load_json(paths[key], key, _note, _ARTIFACTS[key])
+        for key in _JSON_ARTIFACTS}
+    views["source_lines"] = (_try(lambda: iter_source_lines(str(source_path)), "source", _note)
+                             if source_path else None)
+    views["candidates"] = (_try(lambda: iter_header_candidates(str(source_path)), "candidates", _note)
+                           if source_path else None)
+    views["blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note)
+                       if paths["stage_6_docx"] else None)
+    views["table_rows"] = (_try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note)
+                           if paths["stage_6_docx"] else None)
 
     findings: List[Dict] = []
     ready = partial(_ready, unreadable=unreadable, findings=findings)
 
-    if ready("segmentation", source=source_lines, stage_1a=stage_1a, stage_2=stage_2):
-        findings.extend(lint_segmentation(source_lines, stage_1a, stage_2))
-    if ready("missed_headers", candidates=candidates, stage_1a=stage_1a, stage_2=stage_2):
-        findings.extend(lint_missed_headers(candidates, stage_1a, stage_2))
-    if ready("bucket_status", stage_4=stage_4, stage_6_docx=blocks):
-        findings.extend(lint_bucket_status(stage_4, blocks))
-    if ready("under_extraction", stage_4=stage_4):
-        findings.extend(lint_under_extraction(stage_4))
-    if ready("classified_unrendered", stage_3b=stage_3b, stage_6_docx=blocks):
-        findings.extend(lint_classified_unrendered(stage_3b, blocks))
-    if ready("taxonomy_code_coverage", stage_3b=stage_3b):
-        findings.extend(lint_taxonomy_code_coverage(stage_3b))
-    if ready("output_hygiene", stage_6_docx=blocks):
-        findings.extend(lint_output_hygiene(blocks))
-    if ready("dead_sections", stage_2=stage_2, stage_6_docx=blocks):
-        findings.extend(lint_dead_sections(stage_2, blocks))
-    if ready("unrendered_records", stage_4=stage_4, stage_6_docx=blocks):
-        findings.extend(lint_unrendered_records(stage_4, blocks))
-    if ready("enrichment_failures", stage_5_enrichment=stage_5e):
-        findings.extend(lint_enrichment_failures(stage_5e))
-    if ready("stage6_render_warnings", stage_6_report=stage_6_report):
-        findings.extend(lint_stage6_warnings(stage_6_report))
-    if ready("dedup_drops", stage_6_report=stage_6_report):
-        findings.extend(lint_dedup_drops(stage_6_report))
-    if ready("pipe_leaks", stage_6_docx=blocks):
-        findings.extend(lint_pipe_leaks(blocks))
-    if ready("table_shape", stage_6_docx=table_rows):
-        findings.extend(lint_table_shape(table_rows))
-    if ready("duplicate_passages", stage_6_docx=blocks):
-        findings.extend(lint_duplicate_passages(blocks))
-    if ready("duplicate_records", stage_6_docx=blocks):
-        findings.extend(lint_duplicate_records(blocks))
+    for spec in LINT_REGISTRY:
+        inputs = {_VIEW_LABELS[view]: views[view] for view in spec.inputs}
+        if ready(spec.lint_id, **inputs):
+            findings.extend(spec.rule(*(views[view] for view in spec.inputs)))
+
+    stage_2, stage_3b, stage_4 = views["stage_2"], views["stage_3b"], views["stage_4"]
     # score_cv_owner caps at 25 for an ABSENT *_fields.json as well as an empty
     # cv_owner name, so this lint breaks the house "missing artifact -> skip"
     # convention: skipping the absent case would report the more broken run

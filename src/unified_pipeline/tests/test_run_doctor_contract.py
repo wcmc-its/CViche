@@ -98,23 +98,31 @@ def _emitted_keys():
 
 
 def _dispatch_order():
-    """Lint keys in the order `run_doctor()` calls them."""
+    """Lint keys in the order `run_doctor()` runs them, read from the source:
+    the `LintSpec("<key>", ...)` rows of LINT_REGISTRY in source order, then
+    the calls `run_doctor()` makes by hand for the two hard-fail gates --
+    `_run_lint("<key>", ...)` or a direct `findings.extend(lint_x(...))`
+    resolved through the key that lint body emits."""
     emitted = _emitted_keys()
+    calls = sorted((n for n in ast.walk(_tree()) if isinstance(n, ast.Call)),
+                   key=lambda n: (n.lineno, n.col_offset))
     order = []
-    for node in ast.walk(_tree()):
-        if not isinstance(node, ast.Call):
-            continue
-        fn = getattr(node.func, "attr", None)
-        if fn != "extend" or not node.args:
-            continue
-        inner = node.args[0]
-        if not isinstance(inner, ast.Call):
-            continue
-        name = getattr(inner.func, "id", None)
-        if name in emitted:
-            for key in sorted(emitted[name]):
-                if key not in order:
-                    order.append(key)
+    for node in calls:
+        keys = []
+        name = getattr(node.func, "id", None)
+        if name in ("LintSpec", "_run_lint") and node.args:
+            first = node.args[0]
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                keys = [first.value]
+        elif getattr(node.func, "attr", None) == "extend" and node.args:
+            inner = node.args[0]
+            if isinstance(inner, ast.Call):
+                inner_name = getattr(inner.func, "id", None)
+                if inner_name in emitted:
+                    keys = sorted(emitted[inner_name])
+        for key in keys:
+            if key not in order:
+                order.append(key)
     return order
 
 
@@ -365,6 +373,34 @@ def test_run_doctor_report_shape_and_values(tmp_path):
 
 
 # --- contract 4: review round 2 on #725 (run_doctor.py thread) ---------------
+
+def test_known_lints_is_the_registry_order_plus_the_two_gates():
+    """Item 5: the dispatch order is now an OBJECT (`LINT_REGISTRY`) rather
+    than a block of if-statements. KNOWN_LINTS must be that order followed
+    by the two hard-fail gates, which keep their hand-written dispatch; this
+    is the one place the two are pinned against each other at runtime, not
+    through the AST."""
+    mod = _module()
+    assert tuple(spec.lint_id for spec in mod.LINT_REGISTRY) + (
+        "owner_contact_missing", "pipeline_errors_present",
+    ) == tuple(mod.KNOWN_LINTS)
+
+
+def test_registry_rows_name_real_views_and_rules():
+    """A row is only dispatchable when its views exist in `_VIEW_LABELS`
+    (which is what `_ready` keys the missing/unreadable verdict on) and its
+    rule is a real callable; ids are unique."""
+    mod = _module()
+    ids = [spec.lint_id for spec in mod.LINT_REGISTRY]
+    assert len(ids) == len(set(ids))
+    for spec in mod.LINT_REGISTRY:
+        assert callable(spec.rule), spec.lint_id
+        assert spec.inputs, spec.lint_id
+        for view in spec.inputs:
+            assert view in mod._VIEW_LABELS, (spec.lint_id, view)
+        # the labels a row is gated on are exactly the ones its rule reads
+        assert len({mod._VIEW_LABELS[v] for v in spec.inputs}) == len(spec.inputs), (
+            spec.lint_id, "two views of one artifact under one row")
 
 # One malformed-but-parseable artifact per JSON kind: (loader label, stage
 # dir, filename, file content, the shape problem the loader must name, a lint
