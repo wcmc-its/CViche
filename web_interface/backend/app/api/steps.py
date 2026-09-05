@@ -498,7 +498,7 @@ STAGE_TO_PURPOSES = {
                      'taxonomy_mapping_pass2', 'taxonomy_mapping_pass2_batch'],
            'prefix': []},
     '4':  {'exact': ['stage_4', 'core_extraction_recovery', 'core_personal_info',
-                     'core_repair_segmentation', 'core_section_orchestrator',
+                     'core_section_orchestrator',
                      'core_candidate_surfacer', 'cv_parser_classifier',
                      'cv_parser_evaluator', 'cv_parser_structurer',
                      'validator_llm'],
