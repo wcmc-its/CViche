@@ -513,6 +513,28 @@ def test_output_hygiene_warns_on_oversized_appendix():
     assert count["severity"] == "WARN"
 
 
+def test_output_hygiene_flags_a_non_paragraph_block_inside_the_appendix():
+    """#725 review r3923589271 pt 9: the paragraph-only appendix invariant
+    used to be documented, not enforced -- the lint dropped every
+    non-paragraph block before locating and scanning the appendix, so a
+    table landing inside the appendix range was silently invisible to it.
+    Measured over the 65-doc farm none actually does this today, but a
+    table that DOES land there now gets its own finding instead of being
+    dropped."""
+    blocks = [
+        ("p", "T. APPENDIX"),
+        ("p", "The following content from the original CV was not "
+              "successfully mapped to this CV format:"),
+        ("table", "cell text that never gets scanned as an appendix entry"),
+        ("p", "• Real leftover grant content | Role: PI | Status: Under review"),
+    ]
+    findings = lint_output_hygiene(blocks)
+    non_paragraph = [f for f in findings if "non-paragraph" in f["message"]]
+    assert len(non_paragraph) == 1
+    assert non_paragraph[0]["severity"] == "WARN"
+    assert non_paragraph[0]["message"].startswith("1 ")
+
+
 def test_output_hygiene_quiet_on_clean_output():
     blocks = [
         ("p", "D. GRANTS"),
