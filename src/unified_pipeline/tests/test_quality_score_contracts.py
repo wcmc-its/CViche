@@ -785,3 +785,92 @@ def test_score_run_one_missing_artifact_counts_one_of_four(tmp_path):
 def test_quality_gate_carries_data_complete_through(tmp_path):
     result = quality_gate(_complete_run_dir(tmp_path), mode="advisory")
     assert result["data_complete"] is True and result["missing_evidence"] == []
+
+
+# --------------------------------------------------------------------- D19
+# score_field_sparseness scoring curve around overlapping failures (#724
+# review thread 2 item 9). The dimension is a deliberate double signal:
+#   a = 0.5 * (allnull_or_zerocov / total) / 0.10     (the entries)
+#   b = 0.5 * (1 - success_rate) / 0.10                (the extractor)
+#   fraction = clamp(a + b)
+# so an entry failing both weighs on both terms and the dimension saturates
+# once 10% of entries fail both, or 20% fail one each.
+# --------------------------------------------------------------------- D19
+
+
+def _entry(success: bool, fields_present: bool, coverage_pct=None) -> dict:
+    e = {
+        "extraction_success": success,
+        "extracted_fields": {"title": "x"} if fields_present else {"title": None},
+    }
+    if coverage_pct is not None:
+        e["extraction_coverage"] = {"extraction_coverage_percent": coverage_pct}
+    return e
+
+
+_CLEAN = _entry(success=True, fields_present=True)
+_ALLNULL_ONLY = _entry(success=True, fields_present=False)     # entries term only
+_FAILED_ONLY = _entry(success=False, fields_present=True)      # extractor term only
+_BOTH = _entry(success=False, fields_present=False)            # both terms
+
+
+def _sparseness(tmp_path: Path, entries: list) -> tuple:
+    _write_json(tmp_path, "X_fields.json", {"entries": entries})
+    return score_field_sparseness(tmp_path)
+
+
+@pytest.mark.parametrize("entries,expected,allnull,success_rate", [
+    # id: clean run
+    ([_CLEAN] * 10, 0.0, 0, "1.000"),
+    # one entry with null fields but the extractor claimed success: a only
+    ([_ALLNULL_ONLY] + [_CLEAN] * 9, 0.5, 1, "1.000"),
+    # one entry the extractor failed on but fields are present: b only
+    ([_FAILED_ONLY] + [_CLEAN] * 9, 0.5, 0, "0.900"),
+    # one entry failing both, of 10: both terms fire, dimension saturates
+    ([_BOTH] + [_CLEAN] * 9, 1.0, 1, "0.900"),
+    # the same overlap diluted: 1 of 20 and 1 of 40
+    ([_BOTH] + [_CLEAN] * 19, 0.5, 1, "0.950"),
+    ([_BOTH] + [_CLEAN] * 39, 0.25, 1, "0.975"),
+    # zero coverage counts on the entries term even with fields present
+    ([_entry(True, True, coverage_pct=0)] + [_CLEAN] * 9, 0.5, 1, "1.000"),
+    # 100% failure clamps at 1.0 (a = b = 5.0 before the clamp)
+    ([_BOTH] * 10, 1.0, 10, "0.000"),
+])
+def test_field_sparseness_curve(tmp_path, entries, expected, allnull, success_rate):
+    fraction, detail, cap = _sparseness(tmp_path, entries)
+    assert fraction == pytest.approx(expected), detail
+    assert f"allnull_or_zerocov={allnull}" in detail, detail
+    assert f"success_rate={success_rate}" in detail, detail
+    assert cap is None
+
+
+def test_field_sparseness_one_entry_failing_both_weighs_as_two_single_failures(tmp_path):
+    """The documented intent, pinned: one entry that is both all-null and
+    extractor-failed scores exactly like two different entries each failing
+    one way -- both are 0.5 + 0.5 = 1.0 out of 10 entries -- and twice a
+    single-failure entry (0.5). This is the double signal item 9 asked to
+    have established and tested; a change that de-duplicates the overlap
+    (counting the both-failing entry once, 0.5) fails here."""
+    overlap, _, _ = _sparseness(tmp_path, [_BOTH] + [_CLEAN] * 9)
+    tmp2 = tmp_path / "two_singles"
+    tmp2.mkdir()
+    two_singles, _, _ = _sparseness(tmp2, [_ALLNULL_ONLY, _FAILED_ONLY] + [_CLEAN] * 8)
+    tmp3 = tmp_path / "one_single"
+    tmp3.mkdir()
+    one_single, _, _ = _sparseness(tmp3, [_ALLNULL_ONLY] + [_CLEAN] * 9)
+    assert overlap == pytest.approx(1.0)
+    assert two_singles == pytest.approx(1.0)
+    assert one_single == pytest.approx(0.5)
+    assert overlap == pytest.approx(two_singles)
+    assert overlap == pytest.approx(2 * one_single)
+
+
+def test_field_sparseness_saturates_at_ten_percent_both_failing(tmp_path):
+    """Beyond 1 both-failing entry in 10 the curve is flat at 1.0 -- two such
+    entries score the same as one, so the dimension cannot rank a run with
+    20% dual failures below one with 10%."""
+    one, _, _ = _sparseness(tmp_path, [_BOTH] + [_CLEAN] * 9)
+    tmp2 = tmp_path / "two"
+    tmp2.mkdir()
+    two, _, _ = _sparseness(tmp2, [_BOTH] * 2 + [_CLEAN] * 8)
+    assert one == pytest.approx(1.0) and two == pytest.approx(1.0)
