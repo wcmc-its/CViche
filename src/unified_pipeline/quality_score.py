@@ -89,7 +89,7 @@ def clamp(val, lo=0.0, hi=1.0):
     return max(lo, min(hi, val))
 
 
-def linear_interp(val, lo, hi, out_lo, out_hi):
+def linear_interp(val: float, lo: float, hi: float, out_lo: float, out_hi: float) -> float:
     """Map val from [lo, hi] -> [out_lo, out_hi] linearly, clamped to the
     output range regardless of direction (out_lo may be > out_hi) -- a caller
     passing a val outside [lo, hi] gets a bounded result, not an extrapolated
@@ -266,7 +266,7 @@ FATAL_ERROR_PATTERN = re.compile(
 )
 
 
-def iter_error_fields(obj, path=""):
+def iter_error_fields(obj: object, path: str = "") -> list[tuple[str, str]]:
     """(dotted path, value) for every non-null ``error`` field anywhere in obj.
 
     Every non-null ``error`` key counts, with no allowlist for "benign"
@@ -324,7 +324,7 @@ def cv_owner_name_missing(fields_data) -> bool:
 # Dimension scorers  -- each returns (penalty_fraction, detail, hard_fail_cap)
 # ---------------------------------------------------------------------------
 
-def score_pipeline_errors(outputs_dir: Path):
+def score_pipeline_errors(outputs_dir: Path) -> tuple[float, str, int | None]:
     """Pipeline / API errors. Fatal patterns are a hard-fail (cap=40).
 
     An unreadable stage JSON is itself a pipeline-health signal (#724 review
@@ -383,7 +383,7 @@ _CONTACT_KEY_RE = re.compile(
     r"email|phone|address|\b(?:cell|fax|mobile|telephone)\b", re.IGNORECASE)
 
 
-def score_cv_owner(outputs_dir: Path):
+def score_cv_owner(outputs_dir: Path) -> tuple[float, str, int | None]:
     """CV owner name / contact. Missing name is a hard-fail (cap=25)."""
     data, reason = _load_first(outputs_dir, "*_fields.json")
     if data is None:
@@ -420,7 +420,7 @@ def score_cv_owner(outputs_dir: Path):
     return clamp(fraction), detail, None
 
 
-def score_t_bucket(outputs_dir: Path):
+def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
     """Share of entries in the stage_3b ``T`` catch-all ('nothing else fits')."""
     data, reason = _load_first(outputs_dir, "*_classified.json")
     if data is None:
@@ -465,7 +465,7 @@ def score_t_bucket(outputs_dir: Path):
     return fraction, detail, None
 
 
-def score_sparse_tables(outputs_dir: Path):
+def score_sparse_tables(outputs_dir: Path) -> tuple[float, str, None]:
     """Sparse / under-filled tables in the generated docx."""
     doc, reason = _load_docx(outputs_dir)
     if doc is None:
@@ -593,7 +593,7 @@ INSTRUCTION_MARKERS = re.compile(
 )
 
 
-def score_broken_format(outputs_dir: Path):
+def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
     """Raw-tab and prompt-echo (template instruction) artifacts in the docx.
 
     Two different scans, two different scopes, on purpose:
@@ -653,7 +653,7 @@ def score_broken_format(outputs_dir: Path):
     return fraction, detail, None
 
 
-def score_field_sparseness(outputs_dir: Path):
+def score_field_sparseness(outputs_dir: Path) -> tuple[float, str, None]:
     """Entry-level field-extraction sparseness.
 
     Deliberate double-signal, not an accident (#724 review item 9):
@@ -695,7 +695,7 @@ def score_field_sparseness(outputs_dir: Path):
     return fraction, detail, None
 
 
-def score_duplicate_ratio(outputs_dir: Path):
+def score_duplicate_ratio(outputs_dir: Path) -> tuple[float, str, None]:
     """Duplicate-entry ratio (de-dup / fragmentation health)."""
     data, reason = _load_first(outputs_dir, "*_classified.json")
     if data is None:
@@ -764,7 +764,7 @@ def band_for(score: int) -> str:
     return "RED (re-run / do-not-deliver)"
 
 
-def score_run(run_output_dir, run_id: str = None) -> dict:
+def score_run(run_output_dir: str | Path, run_id: str | None = None) -> dict:
     """Score a run's output directory. Returns the full breakdown dict."""
     outputs_dir = Path(run_output_dir)
     if not outputs_dir.exists():
@@ -834,7 +834,7 @@ def score_run(run_output_dir, run_id: str = None) -> dict:
 VALID_GATE_MODES = frozenset({"off", "advisory", "block"})
 
 
-def quality_gate(run_output_dir, run_id: str = None, mode: str = "advisory") -> dict:
+def quality_gate(run_output_dir: str | Path, run_id: str | None = None, mode: str = "advisory") -> dict:
     """
     Run the scorer and return a gate verdict.
 
