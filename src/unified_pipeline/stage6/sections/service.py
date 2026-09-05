@@ -25,6 +25,7 @@ of the four writers and by nothing outside the section.
 """
 import logging
 import re
+from collections.abc import Sequence
 from typing import Dict, List
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
@@ -114,7 +115,7 @@ _ROLE_STEM_SUFFIXES = ('s', 'es', 'ed', 'ing', 'ship', 'ships', 'man', 'men',
                        'or', 'ors', 'lor', 'lors')
 
 
-def _matches_bounded(text_lower: str, keywords) -> bool:
+def _matches_bounded(text_lower: str, keywords: Sequence[str]) -> bool:
     """True when any keyword/phrase in `keywords` matches `text_lower` as a
     whole word or phrase, not merely as a run of characters inside a larger
     word (#658).
@@ -128,7 +129,7 @@ def _matches_bounded(text_lower: str, keywords) -> bool:
     return any(re.search(rf'\b{re.escape(kw)}\b', text_lower) for kw in keywords)
 
 
-def _matches_word_start(text_lower: str, keywords) -> bool:
+def _matches_word_start(text_lower: str, keywords: Sequence[str]) -> bool:
     """True when `text_lower` contains one of `keywords` as a stem, at a
     word start, optionally followed by one of `_ROLE_STEM_SUFFIXES` and
     nothing else before the next word boundary (#658 rounds 2-4).
@@ -680,7 +681,7 @@ class ServiceSection:
                     # Single entry without extracted fields - use raw text
                     self._add_extramural_row(table, original_text[:100], '', '')
 
-    def _parse_extramural_leadership_lines(self, table, lines: List[str]):
+    def _parse_extramural_leadership_lines(self, table, lines: list[str]) -> None:
         """Parse multiple extramural leadership lines and add rows.
 
         Handles complex patterns like:
