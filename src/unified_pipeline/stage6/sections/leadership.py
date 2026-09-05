@@ -17,7 +17,7 @@ describes the flattened-table shapes it handles. O's own job is folding the
 parsed role titles back into the activity text, because its table has no role
 column for them.
 """
-from typing import Dict, List
+from typing import List
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
 from ..normalization import _committee_cell_text
@@ -58,7 +58,7 @@ def _looks_like_leadership_table(table) -> bool:
 class LeadershipSection:
     """Section O writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_leadership(self, entries: List[Dict]):
+    def _fill_leadership(self, entries: list[dict]) -> None:
         """Fill O. INSTITUTIONAL LEADERSHIP ACTIVITIES section.
 
         WCM template has table with: Role(s)/Position | Institution/Location | Dates
@@ -150,7 +150,7 @@ class LeadershipSection:
 
                 self._add_leadership_row(table, role, institution, dates)
 
-    def _add_leadership_row(self, table, role: str, institution: str, dates: str):
+    def _add_leadership_row(self, table, role: str, institution: str, dates: str) -> None:
         """Add a single row to leadership table."""
         # Defensive: never write a non-str (dict/list) into a Word cell -- it
         # raises deep in python-docx and aborts the whole document (#256).

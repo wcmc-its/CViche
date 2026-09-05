@@ -197,8 +197,8 @@ class AdministrativeActivitiesSection:
             self._add_committee_row(table, activity, role, dates)
 
     def _parse_administrative_activity_rows(
-        self, sorted_entries: List[_AdminActivityEntry]
-    ) -> List[Tuple[str, str, str]]:
+        self, sorted_entries: list[_AdminActivityEntry]
+    ) -> list[tuple[str, str, str]]:
         """Parse every entry into (activity, role, dates) rows.
 
         Pure with respect to the Word document -- nothing here touches a
