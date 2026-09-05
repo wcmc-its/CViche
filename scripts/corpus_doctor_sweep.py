@@ -27,8 +27,9 @@ import shutil
 import sys
 import traceback
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
-from typing import TypedDict
+from typing import NamedTuple, TypedDict
 
 from unified_pipeline.run_doctor import KNOWN_LINTS, SEVERITY_ORDER, _uid_owns, run_doctor
 
@@ -92,6 +93,22 @@ class RunFailure(TypedDict):
     traceback: str
 
 
+class DuplicateRun(TypedDict):
+    """What `sweep()` records under `duplicates[run_id]` for a later run
+    of a uid already reported by `first_run_id` (T2.2)."""
+    uid: str
+    first_run_id: str
+
+
+class SweepResult(NamedTuple):
+    """Everything `sweep()` learned, by name: `reports` feeds
+    `aggregate()`; the other three say why a requested run is not in it."""
+    reports: dict[str, DoctorReport]
+    failures: dict[str, RunFailure]
+    skipped: list[str]
+    duplicates: dict[str, DuplicateRun]
+
+
 class SweepRunError(Exception):
     """Base for the operational per-run failures `sweep()` records and moves
     past (T1.6): a run whose layout, uid, or source docx is wrong is that
@@ -104,7 +121,7 @@ class MultipleUidsInRunError(SweepRunError):
     """A run directory's artifacts name more than one distinct uid."""
 
 
-def _find_uid(outputs_dir: Path):
+def _find_uid(outputs_dir: Path) -> str | None:
     """The uid whose artifacts populate `outputs_dir`, or `None` if empty.
 
     Searched over every registered `SUFFIX_DIR` suffix (T1.4/T2.7), not just
@@ -156,7 +173,7 @@ class AmbiguousSourceDocxError(SweepRunError):
     and none is named exactly `<uid>.docx`."""
 
 
-def _find_source_docx(cand_dir: Path, uid: str):
+def _find_source_docx(cand_dir: Path, uid: str) -> Path | None:
     """The uid's original-upload docx in `cand_dir`, or `None` if absent.
 
     Prefers the canonical `<uid>.docx` name; otherwise the sole candidate
@@ -274,10 +291,10 @@ def _record_failure(failures: dict[str, RunFailure], run_id: str, phase: str,
                         "traceback": traceback.format_exc()}
 
 
-def sweep(corpus_dir: Path, run_ids, work: Path):
+def sweep(corpus_dir: Path, run_ids: Iterable[str], work: Path) -> SweepResult:
     """Doctor each run; one bad run is reported and skipped, never aborts the rest.
 
-    Returns (reports, failures, skipped, duplicates). `failures[run_id]`
+    Returns a `SweepResult` (reports, failures, skipped, duplicates). `failures[run_id]`
     carries the exception class name, its message, and the full traceback
     text -- the operator's one lead into which lint raised, at which line,
     on which artifact -- and is also logged via logger.exception so it
@@ -303,11 +320,11 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
     run_id sharing an already-reported uid; it is never added to `reports`
     and never reaches `aggregate()`.
     """
-    reports = {}
+    reports: dict[str, DoctorReport] = {}
     failures: dict[str, RunFailure] = {}
-    skipped = []
-    duplicates = {}
-    run_id_by_uid = {}
+    skipped: list[str] = []
+    duplicates: dict[str, DuplicateRun] = {}
+    run_id_by_uid: dict[str, str] = {}
     for run_id in run_ids:
         try:
             run_root = _resolve_run_root(corpus_dir, run_id)
@@ -336,7 +353,7 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
         logger.warning("%d run(s) failed and were dropped from the sweep: %s. "
                         "Prevalence counts are over the %d that succeeded.",
                         len(failures), list(failures), len(reports))
-    return reports, failures, skipped, duplicates
+    return SweepResult(reports, failures, skipped, duplicates)
 
 
 # The lints run_doctor always considers (skipped ones emit a "skipped: missing"
@@ -457,7 +474,7 @@ def aggregate(reports: dict[str, DoctorReport]) -> list[LintRow]:
     ]
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("corpus_dir")
@@ -483,9 +500,9 @@ def main(argv=None):
     work = Path(args.work) if args.work else corpus_dir / ".doctor_stage"
     work.mkdir(parents=True, exist_ok=True)
 
-    reports, failures, skipped, duplicates = sweep(corpus_dir, run_ids, work)
-    ranking = aggregate(reports)
-    n = len(reports)
+    result = sweep(corpus_dir, run_ids, work)
+    ranking = aggregate(result.reports)
+    n = len(result.reports)
 
     # stdout below is the human-readable ranking table -- the script's actual
     # product (see the module docstring) -- deliberately print(), not logger:
@@ -499,22 +516,22 @@ def main(argv=None):
 
     if args.out:
         Path(args.out).write_text(json.dumps(
-            {"n_cvs": n, "ranking": ranking, "reports": reports,
-             "failures": failures, "skipped": skipped,
-             "duplicates": duplicates}, indent=2, ensure_ascii=False),
+            {"n_cvs": n, "ranking": ranking, "reports": result.reports,
+             "failures": result.failures, "skipped": result.skipped,
+             "duplicates": result.duplicates}, indent=2, ensure_ascii=False),
             encoding="utf-8")
         print(f"\n-> {args.out}")
 
     # A sweep that doctored nothing is a failure, not a pass (§5.5) -- without
     # this, every run_id failing or being skipped still printed an all-zero
     # ranking table and exited 0.
-    if not reports:
+    if not result.reports:
         return 1
     # Fail closed by default (T2.4): any requested run that failed, was
     # skipped, or was a duplicate means the sweep is incomplete, so CI
     # should not report success on it. --allow-partial opts back into the
     # old "at least one report" tolerance for a deliberately partial corpus.
-    incomplete = bool(failures) or bool(skipped) or bool(duplicates)
+    incomplete = bool(result.failures) or bool(result.skipped) or bool(result.duplicates)
     if incomplete and not args.allow_partial:
         return 1
     return 0

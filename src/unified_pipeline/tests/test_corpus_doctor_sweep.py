@@ -364,12 +364,18 @@ def test_sweep_records_a_second_run_for_the_same_uid_as_a_duplicate(tmp_path, mo
 
     monkeypatch.setattr(cli, "run_doctor", lambda root, uid: {"findings": []})
 
-    reports, failures, skipped, duplicates = cli.sweep(corpus, ["run1", "run2"], work)
+    result = cli.sweep(corpus, ["run1", "run2"], work)
 
-    assert set(reports) == {"run1"}
-    assert failures == {}
-    assert skipped == []
-    assert duplicates == {"run2": {"uid": "aaa111", "first_run_id": "run1"}}
+    assert isinstance(result, cli.SweepResult)
+    assert result._fields == ("reports", "failures", "skipped", "duplicates"), (
+        "named fields, in the order main() and the --out payload use them")
+    assert set(result.reports) == {"run1"}
+    assert result.failures == {}
+    assert result.skipped == []
+    assert result.duplicates == {"run2": {"uid": "aaa111", "first_run_id": "run1"}}
+    reports, failures, skipped, duplicates = result
+    assert (reports, failures, skipped, duplicates) == tuple(result), (
+        "positional unpacking, which every other test here uses, still works")
 
 
 def test_sweep_failure_carries_traceback_and_good_run_still_reported(tmp_path, monkeypatch):
