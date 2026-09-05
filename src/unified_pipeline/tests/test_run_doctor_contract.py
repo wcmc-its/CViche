@@ -301,8 +301,9 @@ def test_run_doctor_reports_corrupt_stage2_as_unreadable_not_missing(tmp_path):
     """T5.4: a present-but-unparseable stage_2 artifact must surface the
     segmentation lint as ERROR with 'unreadable' in the message, not the
     benign INFO 'skipped: missing stage_2' -- the same missing-vs-unreadable
-    distinction test_run_doctor.py already proves for stage_4 (line ~1131),
-    pinned here for stage_2/segmentation specifically."""
+    distinction test_run_doctor.py already proves for stage_4 in
+    test_run_doctor_reports_corrupt_artifact_as_error_not_missing, pinned
+    here for stage_2/segmentation specifically."""
     root = tmp_path / "outputs"
     stage = root / "stage_2_entry_extraction"
     stage.mkdir(parents=True)
