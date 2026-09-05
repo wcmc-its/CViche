@@ -338,13 +338,43 @@ _NAME_CREDENTIAL_RE = re.compile(
 )
 
 
+def _logical_cells(row) -> list:
+    """The row's distinct cells. python-docx's ``row.cells`` repeats one
+    gridSpan-merged cell once per layout-grid column it spans, so a merged
+    row reads as several copies of the same cell; this collapses them on the
+    underlying ``<w:tc>`` element."""
+    cells: list = []
+    for cell in row.cells:
+        if not any(cell._tc is kept._tc for kept in cells):
+            cells.append(cell)
+    return cells
+
+
+def _is_single_column(tbl) -> bool:
+    """Is this table one LOGICAL column -- every row exactly one cell,
+    whatever the layout grid says?
+
+    ``len(tbl.columns)`` counts ``w:tblGrid`` layout columns, and CVs
+    routinely build a 1x1 section-container table on a two- or three-column
+    grid with each row's single cell gridSpan-merged across it (#446 review,
+    run_doctor.py thread item 6 / #749: 32 of 183 sample docx carry
+    gridSpan), so the grid count read such a table as a data table and the
+    section headers inside it were never candidates. The representation this
+    commits to: a row with two or more logical cells is a data row wherever
+    the grid puts it, so one such row makes the whole table multi-column --
+    including a variable-width table whose merged title row sits over data
+    rows, which a first-row-only count would misread as single-column."""
+    return all(len(_logical_cells(row)) == 1 for row in tbl.rows)
+
+
 def iter_header_candidates(docx_path: str) -> List[str]:
     """Header-looking source lines: short, letters-only, ALL-CAPS bold (or
     styled as a Heading), from top-level paragraphs and single-column table
-    cells (the 1x1 layout tables CVs use as section containers). Multi-column
-    tables are data tables — their bold cells are column headers — and
-    document furniture ('CURRICULUM VITAE', revision stamps) is not a header
-    either. These are what stage 1a should have promoted to hierarchy nodes."""
+    cells (the 1x1 layout tables CVs use as section containers; see
+    `_is_single_column` for what single-column means). Multi-column tables
+    are data tables — their bold cells are column headers — and document
+    furniture ('CURRICULUM VITAE', revision stamps) is not a header either.
+    These are what stage 1a should have promoted to hierarchy nodes."""
     Document = _get_docx_document()
 
     candidates: List[str] = []
@@ -381,10 +411,10 @@ def iter_header_candidates(docx_path: str) -> List[str]:
             candidates.append(text)
 
     def walk_table(tbl):
-        if len(tbl.columns) != 1:
+        if not _is_single_column(tbl):
             return
         for row in tbl.rows:
-            for cell in row.cells:
+            for cell in _logical_cells(row):
                 for para in cell.paragraphs:
                     consider(para)
                 for nested in cell.tables:

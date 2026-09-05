@@ -155,6 +155,75 @@ def test_iter_header_candidates_skips_bold_non_headers(tmp_path):
     assert iter_header_candidates(str(path)) == ["MENTORING"]
 
 
+def _merge_row(row):
+    """Merge every cell of a python-docx row into one (a gridSpan merge)."""
+    cells = row.cells
+    if len(cells) > 1:
+        cells[0].merge(cells[-1])
+
+
+def test_iter_header_candidates_sees_a_gridspan_merged_single_column_table(tmp_path):
+    """#749 / #446 review item 6: a section-container table built on a
+    two-column grid with every row merged into one cell is ONE logical
+    column. `len(tbl.columns)` says 2 and used to skip it, so the bold
+    ALL-CAPS header inside was never a candidate -- and a merged row must
+    yield the header once, not once per grid column it spans."""
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    for row in table.rows:
+        _merge_row(row)
+    table.rows[0].cells[0].paragraphs[0].add_run("PROFESSIONAL SOCIETIES").bold = True
+    table.rows[1].cells[0].paragraphs[0].add_run("Member, American College of Physicians")
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    assert len(table.columns) == 2, "the grid count the old rule keyed on"
+    assert iter_header_candidates(str(path)) == ["PROFESSIONAL SOCIETIES"]
+
+
+def test_iter_header_candidates_skips_a_data_table_with_a_merged_title_row(tmp_path):
+    """#749 discriminator, variable row widths: a three-column data table
+    whose FIRST row is merged into one title cell is still a data table --
+    its bold cells are column headers. Counting effective columns from the
+    first row alone (the issue's first suggestion) would read it as
+    single-column and promote 'YEARS TAUGHT' to a section header."""
+    doc = Document()
+    table = doc.add_table(rows=3, cols=3)
+    _merge_row(table.rows[0])
+    table.rows[0].cells[0].paragraphs[0].add_run("TEACHING").bold = True
+    for i, label in enumerate(["YEARS TAUGHT", "COURSE NUMBER", "ROLE IN COURSE"]):
+        table.rows[1].cells[i].paragraphs[0].add_run(label).bold = True
+    for i, value in enumerate(["2019-2021", "MED 101", "Lecturer"]):
+        table.rows[2].cells[i].paragraphs[0].add_run(value)
+    doc.add_paragraph("MENTORING").runs[0].bold = True
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    assert iter_header_candidates(str(path)) == ["MENTORING"]
+
+
+def test_is_single_column_is_the_logical_cell_count_not_the_grid():
+    """The document representation made explicit: single-column means every
+    row has exactly one logical cell, independent of the layout grid."""
+    from unified_pipeline.run_doctor import _is_single_column, _logical_cells
+    doc = Document()
+    plain = doc.add_table(rows=2, cols=1)
+    merged = doc.add_table(rows=2, cols=3)
+    for row in merged.rows:
+        _merge_row(row)
+    title_over_data = doc.add_table(rows=2, cols=2)
+    _merge_row(title_over_data.rows[0])
+    data = doc.add_table(rows=2, cols=2)
+
+    assert _is_single_column(plain)
+    assert _is_single_column(merged)
+    assert [len(_logical_cells(r)) for r in merged.rows] == [1, 1]
+    assert (len(merged.rows[0].cells), len(merged.columns)) == (3, 3), \
+        "what python-docx itself reports for the merged table"
+    assert not _is_single_column(title_over_data)
+    assert not _is_single_column(data)
+
+
 def test_missed_headers_fires_on_demoted_header():
     findings = lint_missed_headers(
         ["PROFESSIONAL EXPERIENCE"], _STAGE1A,
