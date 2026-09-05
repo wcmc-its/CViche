@@ -234,12 +234,13 @@ def missing_evidence(outputs_dir: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 #: Error text that means a stage broke, not that one lookup came back empty.
-#: The exception-type-name alternation was added for #724 (T2.5: the farm has
-#: 8 ValidationException hits the original three named patterns --
-#: NameError/UnboundLocalError/KeyError -- missed entirely; those three are
-#: now subsumed by the general alternation and kept implicitly). It was
-#: first written case-insensitive (`\b\w+(?:Error|Exception)\b`) but that
-#: matched ordinary prose containing a trailing "...error"/"...exception"
+#: The exception-type-name alternation was added for #724 (T2.5: the review
+#: named NameError/UnboundLocalError/KeyError as too narrow -- ValidationException
+#: was one of the review's suggested examples, not a measured farm count; the
+#: farm's scored artifacts have 0 ValidationException hits. Those three named
+#: patterns are now subsumed by the general alternation and kept implicitly).
+#: It was first written case-insensitive (`\b\w+(?:Error|Exception)\b`) but
+#: that matched ordinary prose containing a trailing "...error"/"...exception"
 #: substring case-insensitively -- on the farm it fired on the OpenAI API's
 #: own `'type': 'invalid_request_error'` envelope text inside
 #: meta.stats.t_validation.error (uid L7IAKW), a real stage failure but not
@@ -249,7 +250,12 @@ def missing_evidence(outputs_dir: Path) -> list[str]:
 #: war on terror" or a lowercase "keyerror" no longer matches it, and added
 #: an explicit, still case-insensitive, API-envelope branch so the
 #: genuine L7IAKW failure (an OpenAI 400) stays fatal by name rather than by
-#: accident of the broad heuristic.
+#: accident of the broad heuristic. Residual gap the pattern still cannot
+#: see: a stage failure recorded as a raw Python exception message with no
+#: type name in it, e.g. `'int' object is not iterable` (1 of the 66 scored
+#: farm uids, ODAWYA_2002_Holtz, carries exactly this in
+#: meta.stats.t_validation.error and stays non-fatal) -- driving this from
+#: structured stage error metadata instead of exception text is #745.
 FATAL_ERROR_PATTERN = re.compile(
     r"name '\w+' is not defined"
     r"|Traceback \(most recent call last\)"
@@ -264,11 +270,16 @@ def iter_error_fields(obj, path=""):
     """(dotted path, value) for every non-null ``error`` field anywhere in obj.
 
     Every non-null ``error`` key counts, with no allowlist for "benign"
-    metadata: scouted against the 66-CV farm (#724 review item 4), all 51
-    non-null error fields found are real stage errors (validation failures,
-    fragment_reconnection errors, ValidationException) -- no schema in this
-    pipeline emits an ``error`` key for anything else. If a stage ever adds
-    one, an allowlist belongs here, keyed on the dotted path's stage prefix.
+    metadata: scouted against the 66-CV farm (#724 review item 4), the 66
+    uids' scored artifacts (fields.json, classified.json, entries.json)
+    carry 5 non-null error fields, all at ``meta.stats.t_validation.error``
+    (6 across the whole stage_3b_classified_entries directory, which has 98
+    files, more than the 66 scored uids) -- every one a real stage error
+    (an LLM API error envelope, a `name 'response' is not defined`
+    NameError, or a bare `'int' object is not iterable` TypeError with no
+    exception-type name in the message) -- no schema in this pipeline emits
+    an ``error`` key for anything else. If a stage ever adds one, an
+    allowlist belongs here, keyed on the dotted path's stage prefix.
     """
     results = []
     if isinstance(obj, dict):
@@ -464,7 +475,7 @@ def score_sparse_tables(outputs_dir: Path):
     if total_tables == 0:
         # Not perfect quality (#724 review item 6): the WCM template always
         # renders tables, so a docx with none is not our template's output --
-        # worst-case fraction, not a false GREEN. Farm: 0 of 66 rendered docx
+        # worst-case fraction, not a false GREEN. Farm: 0 of 65 rendered docx
         # have zero tables, so this never fires on real output today.
         return 1.0, "no tables in docx (template always renders tables)", None
 
@@ -495,13 +506,27 @@ def score_sparse_tables(outputs_dir: Path):
     return fraction, detail, None
 
 
+#: The pristine WCM template's own incidental tab: table 16 row 1 col 0's
+#: "Project title:\t\t" label cell (confirmed by scanning
+#: `key_files/wcm_cv_template_faculty_october_2022_final.docx` directly). It
+#: IS reachable from rendered CV content -- 27 of 65 farm docx contain this
+#: exact cell text, and for all 27 it is their ONLY raw-tab cell (#724
+#: follow-up review) -- so it is excluded by exact text match, the smallest
+#: equivalent of the INSTRUCTION_MARKERS exclusion `score_broken_format`
+#: already applies for the same reason: penalizing the template's own
+#: boilerplate is not a genuine raw-formatting artifact.
+_TEMPLATE_TAB_CELL_TEXT = "Project title:\t\t"
+
+
 def _count_raw_tab_cells(
         tables: Iterable[Table], _depth: int = 0,
         _seen_tc: set[CT_Tc] | None = None) -> int:
     """Raw-tab paragraphs inside every cell of `tables`, nested tables one
     level deep via `cell.tables` (#724 follow-up review, D7'); the recursion
     is bounded by `_depth` so a table nested inside a table nested inside a
-    table is not walked a third level down, matching this docstring.
+    table is not walked a third level down, matching this docstring. A cell
+    whose text is exactly `_TEMPLATE_TAB_CELL_TEXT` is excluded: it is the
+    template's own boilerplate, not a rendering defect.
 
     A cell merged across columns (gridSpan) is repeated once per spanned
     column in `row.cells` -- python-docx does not collapse it -- so counting
@@ -529,7 +554,7 @@ def _count_raw_tab_cells(
                     continue
                 _seen_tc.add(tc)
                 for p in cell.paragraphs:
-                    if "\t" in p.text:
+                    if "\t" in p.text and p.text != _TEMPLATE_TAB_CELL_TEXT:
                         count += 1
                 if _depth < 1:
                     count += _count_raw_tab_cells(cell.tables, _depth + 1, _seen_tc)
@@ -585,17 +610,21 @@ def score_broken_format(outputs_dir: Path):
       `key_files/wcm_cv_template_faculty_october_2022_final.docx` directly,
       independent of any rendered CV. Scanning cells for these markers would
       therefore false-positive on the template's own label text in every
-      one of the 66 farm docx (66/66), not catch an echoed-into-content
+      one of the 65 farm docx (65/65), not catch an echoed-into-content
       defect, so the instruction-marker check stays paragraph-only and is
       deliberately never applied to cells.
     - The raw-tab check DOES scan every paragraph of every table cell
       (nested tables one level deep), in addition to body paragraphs. A raw
       ``\\t`` is not template boilerplate the way the instruction markers
-      are -- the pristine template contains exactly one incidental tab (an
-      unrelated static "Project title:" label row that is not reachable
-      from rendered CV content) versus the instruction markers' dozens of
-      legitimate hits -- so a tab inside a cell is still a meaningful signal
-      of a raw-formatting artifact leaking into the docx.
+      are -- the pristine template contains exactly one incidental tab, a
+      static "Project title:" label row, and it IS reachable from rendered
+      CV content: 27 of 65 farm docx contain that exact cell text as their
+      only raw-tab cell (#724 follow-up review), so `_count_raw_tab_cells`
+      excludes that one cell text by exact match (`_TEMPLATE_TAB_CELL_TEXT`)
+      the same way the instruction markers above are excluded from cells --
+      versus the instruction markers' dozens of legitimate hits -- so any
+      other tab inside a cell is still a meaningful signal of a
+      raw-formatting artifact leaking into the docx.
 
     Headers and footers are not scanned either way: stage 6 never writes to
     them.
