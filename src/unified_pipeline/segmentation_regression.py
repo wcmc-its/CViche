@@ -122,20 +122,20 @@ class Metrics(TypedDict):
     per_h1_content_counts: dict[str, int]  # informational only -- see above
 
 
-def _is_int_count(value: Any) -> bool:
+def _is_int_count(value: object) -> bool:
     # bool is an int subclass and would otherwise silently pass.
     return isinstance(value, int) and not isinstance(value, bool)
 
 
-def _is_coverage_pct(value: Any) -> bool:
+def _is_coverage_pct(value: object) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 100
 
 
-def _is_str_list(value: Any) -> bool:
+def _is_str_list(value: object) -> bool:
     return isinstance(value, list) and all(isinstance(item, str) for item in value)
 
 
-def _is_str_int_dict(value: Any) -> bool:
+def _is_str_int_dict(value: object) -> bool:
     return isinstance(value, dict) and all(
         isinstance(k, str) and _is_int_count(v) for k, v in value.items()
     )
@@ -228,7 +228,7 @@ def iter_source_lines(docx_path: str) -> list[str]:
     # below covers both entry points into walk_cell (#615 item 1).
     seen_cells: set = set()
 
-    def walk_cell(cell):
+    def walk_cell(cell) -> None:
         if cell._tc in seen_cells:
             return
         seen_cells.add(cell._tc)
@@ -561,12 +561,12 @@ def snapshot(label: str, cv_dir: str | None, uids: list[str] | None) -> Path:
     failed_uids: list[str] = []
 
     for docx in docx_files:
-        print(f"\n=== {docx.stem} ===")
+        logger.info("=== %s ===", docx.stem)
         result = _snapshot_cv(docx, snap)
         total_cost += result["cost"]
         if result["error"] is not None:
             failed_uids.append(result["uid"])
-            print(f"  FAILED: {result['error']}")
+            logger.warning("  FAILED: %s", result['error'])
             continue
         metrics = result["metrics"]
         if metrics is None:
