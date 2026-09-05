@@ -362,3 +362,104 @@ def test_b2_institution_none_sentinel_is_blank():
          'extracted_fields': {'program_name': 'Certificate', 'institution': 'none'}}])
 
     assert gen.doc.tables[0].rows[1].cells[1].text == ''
+
+
+# --- patents: row counts, ordering, instruction removal --------------------------
+
+def _patent(text: str, **fields) -> dict:
+    return {'taxonomy_code': 'M2D', 'text': text, 'extracted_fields': fields}
+
+
+def _patents_doc() -> WCMTemplateGenerator:
+    gen = _new_generator()
+    gen.doc.add_paragraph("Patents & Inventions")
+    gen.doc.add_paragraph("MENTORING")
+    return gen
+
+
+def _labels(table) -> list[str]:
+    return [row.cells[0].text for row in table.rows]
+
+
+def test_patents_all_eight_attributes_render_exactly_eight_rows_in_order():
+    gen = _patents_doc()
+    gen._fill_patents([_patent(
+        'full patent', title='Widget for Doing Things', patent_number='US1234567',
+        inventors='A. Inventor, B. Inventor', filing_date='2019-03-01',
+        issue_date='2021-07-15', status='Issued', assignee='Some University',
+        narrative='A device that does the things a widget should do.')])
+
+    table = gen.doc.tables[0]
+    assert _labels(table) == [
+        'Title of invention:', 'Patent number:', 'Inventors:', 'Status:',
+        'Filing date:', 'Issue date:', 'Assignee:', 'Description:']
+    assert [row.cells[1].text for row in table.rows] == [
+        'Widget for Doing Things', 'US1234567', 'A. Inventor, B. Inventor', 'Issued',
+        '03/2019', '07/2021', 'Some University',
+        'A device that does the things a widget should do.']
+
+
+@pytest.mark.parametrize("fields, labels", [
+    ({'title': 'Widget'}, ['Title of invention:']),
+    ({'patent_number': 'US1', 'inventors': 'A. Inventor'},
+     ['Patent number:', 'Inventors:']),
+    ({'title': 'Widget', 'narrative': 'too short'}, ['Title of invention:']),
+    ({'title': 'Widget', 'narrative': 'abcdefghij'}, ['Title of invention:']),
+    ({'title': 'Widget', 'narrative': 'abcdefghijk'},
+     ['Title of invention:', 'Description:']),
+    ({'title': 'Widget', 'status': 'Pending', 'assignee': 'Some University'},
+     ['Title of invention:', 'Status:', 'Assignee:']),
+], ids=['title-only', 'number-and-inventors', 'narrative-9-chars-dropped',
+        'narrative-10-chars-dropped', 'narrative-11-chars-kept', 'title-status-assignee'])
+def test_patents_sparse_records_render_only_the_rows_they_have(fields, labels):
+    gen = _patents_doc()
+    gen._fill_patents([_patent('sparse patent', **fields)])
+
+    assert len(gen.doc.tables) == 1
+    assert _labels(gen.doc.tables[0]) == labels
+
+
+@pytest.mark.parametrize("fields", [
+    {'inventors': 'A. Inventor'},
+    {'status': 'Pending', 'filing_date': '2019-03-01'},
+    {},
+], ids=['inventors-only', 'status-and-filing-only', 'no-fields'])
+def test_patents_without_title_or_number_render_no_table(fields):
+    gen = _patents_doc()
+    gen._fill_patents([_patent('sparse patent', **fields)])
+
+    assert len(gen.doc.tables) == 0
+    assert gen.stats['entries_inserted'] == 0
+
+
+def test_patents_multiple_records_keep_order_and_add_no_trailing_spacing():
+    """Three entries, the middle one sparse: the two rendered tables come out
+    most recent first with one spacing paragraph between them and none after
+    the last -- the spacing is counted against rendered patents, not input."""
+    gen = _patents_doc()
+    gen._fill_patents([
+        _patent('older', title='Older Widget', year='2019'),
+        _patent('sparse', inventors='Nobody Named', year='2020'),
+        _patent('newer', title='Newer Widget', year='2021'),
+    ])
+
+    assert _body_after(gen.doc, "Patents & Inventions", 4) == [
+        ('tbl', 'Newer Widget'), ('p', ''), ('tbl', 'Older Widget'), ('p', 'MENTORING')]
+    assert gen.stats['tables_populated'] == 2
+    assert gen.stats['entries_inserted'] == 2
+
+
+def test_patents_instruction_paragraph_is_blanked_and_left_below_the_tables():
+    gen = _new_generator()
+    gen.doc.add_paragraph("Patents & Inventions")
+    instruction = gen.doc.add_paragraph(
+        "Please include inventors, title of invention and patent number.")
+    gen.doc.add_paragraph("MENTORING")
+
+    gen._fill_patents([_patent('one', title='Widget')])
+
+    assert instruction.text == ''
+    body = list(gen.doc.element.body)
+    assert body.index(instruction._element) == body.index(gen.doc.tables[0]._tbl) + 1
+    assert _body_after(gen.doc, "Patents & Inventions", 3) == [
+        ('tbl', 'Widget'), ('p', ''), ('p', 'MENTORING')]

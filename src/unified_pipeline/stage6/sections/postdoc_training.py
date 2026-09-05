@@ -305,8 +305,7 @@ class PostdocTrainingSection:
         if not training_entries:
             return
 
-        if self.verbose:
-            print(f"Filling Postdoctoral Training ({len(training_entries)} entries)...")
+        logger.info("Filling Postdoctoral Training (%d entries)...", len(training_entries))
 
         # Try to find the POSTDOCTORAL section
         training_idx = self._find_paragraph_with_text("POSTDOCTORAL")

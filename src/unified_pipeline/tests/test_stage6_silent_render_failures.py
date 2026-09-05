@@ -396,12 +396,23 @@ def test_other_education_real_template_three_column_rows():
 
 # --- patents: reposition failure ------------------------------------------------
 
-def test_patents_reposition_failure_logs_warning(caplog):
-    """Force the reposition's `body_elements.index(last_element)` to fail by
-    making `body.insert` itself raise ValueError -- the same except clause
-    the real failure (last_element no longer present in the body) goes
-    through. The table still gets built (content not lost); only the
-    reposition is forced to fail."""
+def _patent(text: str, **fields) -> dict:
+    return {'taxonomy_code': 'M2D', 'text': text, 'extracted_fields': fields}
+
+
+def test_patents_detached_cursor_logs_warning_counts_misplaced_and_holds_cursor(caplog):
+    """The real failure mode: `_add_spacing_paragraph` (shared, on the
+    generator) removes its paragraph from the body and re-inserts it with
+    `body.insert`; when that insert fails it swallows the error and returns
+    the now-DETACHED element, which the section had been adopting as its
+    cursor. Forcing `body.insert` to raise reproduces exactly that.
+
+    The first table is placed (before any spacing exists). Every later table
+    finds a detached cursor: each is logged with its ordinal and the caught
+    exception, counted in tables_misplaced, and left at the document end.
+    The cursor is NOT advanced onto a misplaced table -- with the old code
+    the third patent would have been inserted after the second, silently,
+    with no warning at all."""
     gen = _new_generator()
     gen.doc.add_paragraph("Patents & Inventions")
 
@@ -410,32 +421,99 @@ def test_patents_reposition_failure_logs_warning(caplog):
 
     gen.doc.element.body.insert = _raise_value_error
 
-    entries = [{
-        'taxonomy_code': 'M2D',
-        'text': 'A real patent entry',
-        'extracted_fields': {'title': 'Widget for Doing Things',
-                             'patent_number': 'US1234567'},
-    }]
+    entries = [_patent('newest', title='Widget A', year='2021'),
+               _patent('middle', title='Widget B', year='2020'),
+               _patent('oldest', title='Widget C', year='2019')]
 
     with caplog.at_level(logging.WARNING, logger=PATENTS_LOGGER):
         gen._fill_patents(entries)  # must not raise
 
     warnings = _warnings(caplog, PATENTS_LOGGER)
-    assert len(warnings) == 1, "expected exactly one warning, got: %r" % (
-        [r.message for r in warnings],)
-    message = warnings[0].getMessage()
-    assert 'Patents' in message
-    assert 'entry 1 of 1' in message
-    # exc_info=True on the warning call -- the caught ValueError must reach
-    # the log, not just its message text.
-    assert warnings[0].exc_info is not None
+    assert [w.getMessage() for w in warnings] == [
+        "Patents & Inventions: table reposition failed for entry 2 of 3; "
+        "table left at document end instead of under the section heading",
+        "Patents & Inventions: table reposition failed for entry 3 of 3; "
+        "table left at document end instead of under the section heading",
+    ]
+    # exc_info=True on the warning call -- the caught DetachedAnchorError
+    # must reach the log, not just its message text.
+    assert all(w.exc_info is not None and isinstance(w.exc_info[1], DetachedAnchorError)
+               for w in warnings)
 
-    # Fallback behaviour unchanged: content still lands in the document.
-    assert len(gen.doc.tables) == 1
-    # The reposition failed, so it is counted separately from a normal fill.
-    assert gen.stats.get('tables_misplaced') == 1
-    assert gen.stats['tables_populated'] == 0
-    assert gen.stats['entries_inserted'] == 1
+    # Content not lost: all three tables exist, the first under the heading.
+    assert [t.rows[0].cells[1].text for t in gen.doc.tables] == [
+        'Widget A', 'Widget B', 'Widget C']
+    assert _body_after(gen.doc, "Patents & Inventions", 1) == [('tbl', 'Widget A')]
+    # Failure stats: placed vs misplaced are distinct; entries_inserted counts both.
+    assert gen.stats['tables_populated'] == 1
+    assert gen.stats['tables_misplaced'] == 2
+    assert gen.stats['entries_inserted'] == 3
+
+
+def test_patents_success_stats_have_no_misplaced_count():
+    gen = _new_generator()
+    gen.doc.add_paragraph("Patents & Inventions")
+
+    gen._fill_patents([_patent('a', title='Widget A', year='2021'),
+                       _patent('b', title='Widget B', year='2020')])
+
+    assert gen.stats['tables_populated'] == 2
+    assert gen.stats['entries_inserted'] == 2
+    assert gen.stats.get('tables_misplaced', 0) == 0
+
+
+def test_patents_missing_heading_logs_warning_with_count(caplog):
+    gen = _new_generator()
+    gen.doc.add_paragraph("Some Unrelated Section")
+
+    with caplog.at_level(logging.WARNING, logger=PATENTS_LOGGER):
+        gen._fill_patents([_patent('a', title='Widget A'), _patent('b', title='Widget B')])
+
+    assert [w.getMessage() for w in _warnings(caplog, PATENTS_LOGGER)] == [
+        "Patents & Inventions: section heading not found in template; "
+        "2 entries not rendered"]
+    assert len(gen.doc.tables) == 0
+
+
+def test_patents_render_twice_replaces_the_first_render():
+    """Rendering the section again into the same document used to append a
+    second set of tables; the previously rendered tables (and the spacing
+    between them) are now cleared first, so the body shape is identical."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("Patents & Inventions")
+    gen.doc.add_paragraph("Please include inventors, title of invention and patent number.")
+    gen.doc.add_paragraph("MENTORING")
+    entries = [_patent('a', title='Widget A', year='2021'),
+               _patent('b', title='Widget B', year='2020')]
+
+    gen._fill_patents(entries)
+    first = _body_after(gen.doc, "Patents & Inventions", 6)
+    gen._fill_patents(entries)
+
+    assert first == [('tbl', 'Widget A'), ('p', ''), ('tbl', 'Widget B'),
+                     ('p', ''), ('p', 'MENTORING')]
+    assert _body_after(gen.doc, "Patents & Inventions", 6) == first
+    assert len(gen.doc.tables) == 2
+
+
+def test_patents_real_template_body_order():
+    """Real template: the tables sit directly under the heading, most recent
+    first, one spacing paragraph between them, the blanked instruction line
+    and the template's two blank paragraphs below, then MENTORING."""
+    gen = _template_generator()
+    template_tables = len(gen.doc.tables)
+
+    gen._fill_patents([_patent('older', title='Older Widget', patent_number='US1',
+                               issue_date='2019-05-01', year='2019'),
+                       _patent('newer', title='Newer Widget', patent_number='US2',
+                               issue_date='2021-11-01', year='2021')])
+
+    assert _body_after(gen.doc, "Patents & Inventions", 7) == [
+        ('tbl', 'Newer Widget'), ('p', ''), ('tbl', 'Older Widget'),
+        ('p', ''), ('p', ''), ('p', ''), ('p', 'MENTORING')]
+    assert len(gen.doc.tables) == template_tables + 2
+    assert gen.stats['tables_populated'] == 2
+    assert gen.stats.get('tables_misplaced', 0) == 0
 
 
 # --- postdoc training: missing template structure --------------------------------
