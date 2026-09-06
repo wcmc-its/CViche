@@ -68,6 +68,8 @@ Outputs:
     - Stage 6:  src/unified_pipeline/outputs/stage_6_wcm_documents/{uid}_wcm.docx
 """
 
+import functools
+import hashlib
 import sys
 import json
 import logging
@@ -78,6 +80,7 @@ from datetime import timedelta
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
+from unified_pipeline.core.prompt_logger import reset_current_run_id, set_current_run_id
 from unified_pipeline.llm_client import format_models_used
 from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
 from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
@@ -226,6 +229,50 @@ def resolve_cv_path(cv_path_or_uid: str) -> tuple:
     return cv_path_or_uid, cv_path_or_uid
 
 
+# Set by resolve_cv_path_for_run(), consumed and cleared by
+# _reset_prompt_logger_scope_after()'s `finally` once main() returns or
+# raises -- a single-slot mailbox between them so neither has to grow
+# main()'s own body (frozen at 910 lines, #9's exact-match table).
+_PENDING_RUN_TOKEN = None
+
+# prompt_logger._RUN_ID_RE caps a run id at 10 chars of [A-Za-z0-9_-]; that
+# module is off limits for this ticket, so document_uid (routinely longer,
+# e.g. 'sample_vasquez_cv') is hashed down to this length rather than passed
+# through as-is.
+_RUN_SCOPE_ID_LEN = 10
+
+
+def resolve_cv_path_for_run(cv_path_or_uid: str) -> tuple:
+    """resolve_cv_path(), then scope this process's prompt-log writes to the
+    resolved document for the rest of the run (#686 -- the CLI never scoped
+    its writes, so every run's transcripts landed in one shared flat dir).
+    """
+    global _PENDING_RUN_TOKEN
+    cv_path, document_uid = resolve_cv_path(cv_path_or_uid)
+    run_scope_id = hashlib.sha256(document_uid.encode()).hexdigest()[:_RUN_SCOPE_ID_LEN]
+    _PENDING_RUN_TOKEN = set_current_run_id(run_scope_id)
+    return cv_path, document_uid
+
+
+def _reset_prompt_logger_scope_after(fn):
+    """Decorator: undo whatever resolve_cv_path_for_run() set up, once fn
+    returns OR raises (including sys.exit()'s SystemExit -- `finally` runs
+    for that too). Applied to main() itself rather than called inside it so
+    main()'s line count never changes: a decorator line is not part of a
+    FunctionDef node's own lineno..end_lineno span."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        global _PENDING_RUN_TOKEN
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            if _PENDING_RUN_TOKEN is not None:
+                reset_current_run_id(_PENDING_RUN_TOKEN)
+                _PENDING_RUN_TOKEN = None
+    return wrapper
+
+
+@_reset_prompt_logger_scope_after
 def main():
     # Parse arguments
     if len(sys.argv) < 2:
@@ -258,7 +305,7 @@ def main():
         sys.exit(1)
 
     # First positional argument is the CV path or UID
-    cv_path, document_uid = resolve_cv_path(sys.argv[1])
+    cv_path, document_uid = resolve_cv_path_for_run(sys.argv[1])
 
     # Parse optional flags
     target_stage = None  # None = run all stages; otherwise run only that stage

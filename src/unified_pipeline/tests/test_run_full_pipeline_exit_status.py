@@ -19,16 +19,20 @@ Self-contained: no DB, no network, no LLM.
 """
 
 import ast
+import hashlib
 import json
 import logging
 import sys
 from pathlib import Path
+
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[3]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 import run_full_pipeline  # noqa: E402
+from unified_pipeline.core import prompt_logger  # noqa: E402
 
 failed_stages = run_full_pipeline.failed_stages
 
@@ -345,3 +349,96 @@ def test_stage5b_missing_output_file_flags_cost_as_unknown(tmp_path, monkeypatch
     assert "Cost: unknown (failed to read institution enrichment stats)" in out
     assert "Stage 5b: unknown (institution enrichment stats unreadable)" in out
     assert any("stage 5b cost" in record.message.lower() for record in caplog.records)
+
+
+# ------------------------------------------------------------------ #686
+# The CLI never scoped its prompt-log writes: run_full_pipeline.py had zero
+# references to set_current_run_id/prompt_logger, so every CLI run's
+# transcripts landed in the same shared, flat prompt_logs/ directory.
+# resolve_cv_path_for_run() -- the setup helper main() calls once per run in
+# place of resolve_cv_path() -- scopes this process to the run, and
+# @_reset_prompt_logger_scope_after (applied to main() itself, not called
+# inside it, so main()'s own line count never changes) undoes that once
+# main() returns or raises.
+
+def _reset_pending_scope():
+    """Undo what a direct resolve_cv_path_for_run() call set up, the same
+    way main()'s decorator would -- these tests call the helper directly,
+    so nothing else will."""
+    token = run_full_pipeline._PENDING_RUN_TOKEN
+    assert token is not None, "resolve_cv_path_for_run did not stash a token"
+    prompt_logger.reset_current_run_id(token)
+    run_full_pipeline._PENDING_RUN_TOKEN = None
+
+
+def test_resolve_cv_path_for_run_scopes_prompt_logger_to_a_hashed_id(
+    tmp_path, monkeypatch
+):
+    """The scope id is a hash of document_uid, not document_uid itself --
+    see the next test for why."""
+    assert prompt_logger._current_run_id.get() is None, "leaked from another test"
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data/sample_cvs/word").mkdir(parents=True)
+    (tmp_path / f"data/sample_cvs/word/{UID}.docx").write_bytes(b"PK\x03\x04fake")
+
+    cv_path, document_uid = run_full_pipeline.resolve_cv_path_for_run(UID)
+    try:
+        assert document_uid == UID
+        scope_id = prompt_logger._current_run_id.get()
+        assert scope_id == hashlib.sha256(UID.encode()).hexdigest()[:run_full_pipeline._RUN_SCOPE_ID_LEN]
+        assert prompt_logger._RUN_ID_RE.match(scope_id)
+    finally:
+        _reset_pending_scope()
+    assert prompt_logger._current_run_id.get() is None
+
+
+def test_resolve_cv_path_for_run_survives_a_document_uid_too_long_for_the_regex(
+    tmp_path, monkeypatch
+):
+    """document_uid routinely exceeds prompt_logger._RUN_ID_RE's 10-character
+    cap -- this very module's own docstring uses '2097_Upton_Cv' (13 chars)
+    as the canonical example uid. Calling set_current_run_id(document_uid)
+    directly raises ValueError; resolve_cv_path_for_run must derive a scope
+    id that always satisfies the regex instead."""
+    long_uid = "2097_Upton_Cv"
+    assert not prompt_logger._RUN_ID_RE.match(long_uid), (
+        "fixture uid no longer exercises the length trap -- pick a longer one")
+    with pytest.raises(ValueError):
+        prompt_logger.set_current_run_id(long_uid)
+
+    monkeypatch.chdir(tmp_path)
+    cv_path, document_uid = run_full_pipeline.resolve_cv_path_for_run(long_uid)
+    try:
+        assert document_uid == long_uid
+        scope_id = prompt_logger._current_run_id.get()
+        assert prompt_logger._RUN_ID_RE.match(scope_id), (
+            f"derived scope id {scope_id!r} does not satisfy prompt_logger._RUN_ID_RE")
+    finally:
+        _reset_pending_scope()
+
+
+def test_full_run_scopes_prompt_logger_and_resets_it_when_main_finishes(
+    tmp_path, monkeypatch, capsys
+):
+    """End to end over main() itself -- not just the helper -- the same
+    argument this file already makes for failed_stages just above: a suite
+    that only unit-tests resolve_cv_path_for_run() could not notice the
+    @_reset_prompt_logger_scope_after decorator ever getting detached from
+    main()."""
+    calls = []
+    real_set = run_full_pipeline.set_current_run_id
+
+    def spy_set(run_id):
+        calls.append(run_id)
+        return real_set(run_id)
+
+    monkeypatch.setattr(run_full_pipeline, "set_current_run_id", spy_set)
+    assert prompt_logger._current_run_id.get() is None, "leaked from another test"
+
+    rc, out = _run_main(tmp_path, monkeypatch, capsys)
+
+    assert rc == 0
+    assert calls == [hashlib.sha256(UID.encode()).hexdigest()[:run_full_pipeline._RUN_SCOPE_ID_LEN]], (
+        "main() must scope prompt_logger to this run's document uid")
+    assert prompt_logger._current_run_id.get() is None, (
+        "main() did not reset prompt_logger's run scope after finishing")

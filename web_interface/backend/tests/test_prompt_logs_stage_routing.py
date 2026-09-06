@@ -6,6 +6,11 @@ dir). Closes #1.
 """
 from __future__ import annotations
 
+import shutil
+from datetime import datetime
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from app.api.steps import STAGE_TO_PURPOSES, STAGES_WITHOUT_PROMPT_LOGS
@@ -69,3 +74,60 @@ class TestStageTablesAreConsistent:
         assert not offenders, (
             f"Stages flagged non-LLM still have purposes: {offenders}"
         )
+
+
+class TestLegacyFlatDirFallbackRemoved:
+    """#686: get_prompt_logs used to fall back to the flat, process-shared
+    src/unified_pipeline/prompt_logs/ dir and admit any .txt file there by
+    mtime alone -- run_id appeared nowhere in that loop, so one run's
+    transcripts could be served to a request for a different run. That
+    fallback is now gone; only per-run storage (prompt_logs/ keys) is read.
+    """
+
+    LEGACY_DIR = (
+        Path(__file__).resolve().parents[3] / "src" / "unified_pipeline" / "prompt_logs"
+    )
+
+    def _seed_legacy_file(self, purpose: str = "stage_2") -> Path:
+        self.LEGACY_DIR.mkdir(parents=True, exist_ok=True)
+        path = self.LEGACY_DIR / f"2026-01-01_00-00-00_{purpose}_abcdef012345.txt"
+        path.write_text("this belongs to a different run's transcript")
+        return path
+
+    def teardown_method(self, method):
+        shutil.rmtree(self.LEGACY_DIR, ignore_errors=True)
+
+    def test_get_prompt_logs_ignores_the_legacy_flat_dir(self, client, db):
+        from app.main import app
+        from app.auth import get_current_user
+        from app.models import Run, Step
+
+        legacy_file = self._seed_legacy_file(purpose="stage_2")
+        # mtime well after the run's start -- under the old fallback this was
+        # exactly the file that would have been admitted.
+        run_start = datetime(2020, 1, 1, 0, 0, 0)
+
+        db.add(Run(
+            id="LEGACY1", filename="cv.docx", file_type="docx",
+            status="complete", started_at=run_start,
+        ))
+        db.add(Step(
+            run_id="LEGACY1", step_number=1, stage_id="2",
+            step_name="Entry Extraction", status="complete",
+        ))
+        db.commit()
+
+        app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(
+            role="admin", email="admin@example.com"
+        )
+        try:
+            resp = client.get("/api/run/LEGACY1/prompt-logs", params={"step": 1})
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        filenames = [log["filename"] for log in body["logs"]]
+        assert str(legacy_file) not in filenames
+        assert legacy_file.name not in filenames
+        assert body["logs"] == []

@@ -572,9 +572,6 @@ async def get_prompt_logs(
     if not run_record.started_at:
         return JSONResponse(content={"logs": [], "error": "Run has no start time"})
 
-    # Convert run start time to timestamp for comparison
-    run_start_timestamp = run_record.started_at.timestamp()
-
     # Get the step to find the stage_id
     step_record = db.query(Step).filter(
         Step.run_id == run_id,
@@ -634,35 +631,6 @@ async def get_prompt_logs(
                 "filename": filename,
                 "content": f"Error reading file: {exc}",
             })
-
-    # Fallback: legacy local-fs path. Picks up runs that completed before
-    # storage-replication landed, and lets dev "still works" while the
-    # backend pipeline runs on the same machine as the API.
-    project_root = Path(__file__).parent.parent.parent.parent.parent
-    legacy_prompt_logs_dir = project_root / "src" / "unified_pipeline" / "prompt_logs"
-    if legacy_prompt_logs_dir.exists():
-        for log_file in sorted(legacy_prompt_logs_dir.iterdir()):
-            if not log_file.name.endswith('.txt'):
-                continue
-            if log_file.name in seen_files:
-                continue
-            purpose = _purpose_from_filename(log_file.name)
-            if not purpose or not _purpose_matches_stage(purpose, purposes):
-                continue
-            if log_file.stat().st_mtime < run_start_timestamp:
-                continue
-            seen_files.add(log_file.name)
-            try:
-                content = log_file.read_text(encoding='utf-8', errors='replace')
-                logs.append({
-                    "filename": str(log_file),
-                    "content": content[:50000],
-                })
-            except Exception as exc:
-                logs.append({
-                    "filename": str(log_file),
-                    "content": f"Error reading file: {exc}",
-                })
 
     # Newest first.
     logs.sort(key=lambda x: x['filename'], reverse=True)

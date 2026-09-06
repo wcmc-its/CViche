@@ -38,6 +38,7 @@ data/test_cvs
 
 # Runtime-generated directories
 src/unified_pipeline/outputs
+src/unified_pipeline/prompt_logs
 web_interface/outputs
 web_interface/uploads
 web_interface/backend/prompt_logs
