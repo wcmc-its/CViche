@@ -19,6 +19,7 @@ os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 import logging
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -238,6 +239,32 @@ def test_payload_omits_doctor_when_unavailable(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
 
     assert "Doctor" not in _facts(notifications.build_teams_payload(_run(), None))
+
+
+@pytest.mark.parametrize(
+    "doctor",
+    [
+        {"counts": {"ERROR": "abc"}},
+        {"counts": {"ERROR": float("inf")}},
+        {"counts": ["not", "a", "dict"]},
+        {"counts": {"ERROR": 1}, "findings": [None]},
+    ],
+)
+def test_payload_doctor_line_omitted_and_warned_on_malformed_report(
+    monkeypatch, caplog, doctor
+):
+    """A malformed doctor dict must cost only the Doctor line, never the card
+    (CODING STANDARDS §5.4: narrowed except, but logged, never silently
+    swallowed)."""
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+
+    with caplog.at_level(logging.WARNING):
+        facts = _facts(notifications.build_teams_payload(_run(), None, doctor=doctor))
+
+    assert "Doctor" not in facts
+    assert any(
+        "Doctor report summary failed to parse" in r.message for r in caplog.records
+    )
 
 
 # --- notify_run_terminal --------------------------------------------------
@@ -475,35 +502,41 @@ def _fail_post(*args, **kwargs):  # pragma: no cover - must not be reached
 
 def test_webhook_rejects_non_https_scheme(monkeypatch, caplog):
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "http://webhook.example/teams")
-    monkeypatch.setattr(notifications.requests, "post", _fail_post)
+    mock_post = MagicMock()
+    monkeypatch.setattr(notifications.requests, "post", mock_post)
 
     with caplog.at_level(logging.WARNING):
         result = notifications.notify_run_terminal(_run(), None)
 
     assert result is None
+    mock_post.assert_not_called()
     assert any("not a valid https URL" in r.message for r in caplog.records)
 
 
 def test_webhook_rejects_malformed_url(monkeypatch, caplog):
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "not-a-url-at-all")
-    monkeypatch.setattr(notifications.requests, "post", _fail_post)
+    mock_post = MagicMock()
+    monkeypatch.setattr(notifications.requests, "post", mock_post)
 
     with caplog.at_level(logging.WARNING):
         result = notifications.notify_run_terminal(_run(), None)
 
     assert result is None
+    mock_post.assert_not_called()
     assert any("not a valid https URL" in r.message for r in caplog.records)
 
 
 def test_webhook_invalid_url_warns_once_not_per_call(monkeypatch, caplog):
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "ftp://webhook.example/teams")
-    monkeypatch.setattr(notifications.requests, "post", _fail_post)
+    mock_post = MagicMock()
+    monkeypatch.setattr(notifications.requests, "post", mock_post)
 
     with caplog.at_level(logging.WARNING):
         notifications.notify_run_terminal(_run(), None)
         notifications.notify_run_terminal(_run(), None)
         notifications.notify_run_started(_run())
 
+    mock_post.assert_not_called()
     warnings = [r for r in caplog.records if "not a valid https URL" in r.message]
     assert len(warnings) == 1
 
@@ -587,6 +620,22 @@ def test_submitter_control_chars_stripped_from_started_card(monkeypatch):
     submitted_by = _facts(payload)["Submitted by"]
     assert "\x07" not in submitted_by
     assert len(submitted_by) <= notifications._FACT_MAX_CHARS
+
+
+def test_feedback_card_control_chars_stripped_from_run_id_filename_and_submitter(
+    monkeypatch,
+):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    run = _run(id="run\x07id" + ("a" * 500), filename="cv\x07report" + ("x" * 500))
+
+    payload = notifications.build_feedback_payload(
+        _feedback(), run, submitter="Jane\x07Doe" + ("z" * 500)
+    )
+
+    facts = _facts(payload)
+    for value in (facts["Run ID"], facts["File"], facts["Submitted by"]):
+        assert "\x07" not in value
+        assert len(value) <= notifications._FACT_MAX_CHARS
 
 
 # --- #309: notify_* wrappers never raise (already pinned; named for #309) --

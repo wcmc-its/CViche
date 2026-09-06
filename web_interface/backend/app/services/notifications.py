@@ -151,7 +151,11 @@ def _adaptive_card(title, color, facts, run_id, summary) -> dict:
         title: the bold heading line.
         color: an Adaptive Card color enum ("good"/"attention"/"accent"/...).
         facts: list of {"name", "value"} dicts (rendered as an Adaptive FactSet).
-        run_id: used to build the optional "Open run" button link.
+        run_id: used to build the optional "Open run" button link. Callers
+            pass the already-sanitised (_card_text-truncated) run id here,
+            not the raw one -- harmless for real run ids (UUIDs, well under
+            _FACT_MAX_CHARS), but a run id over the limit would link to a
+            truncated, nonexistent run rather than the real one.
         summary: plain-text fallback/summary one-liner (see above).
     """
     card = {
@@ -239,12 +243,14 @@ def _doctor_text(doctor):
             None,
         )
         return f"{total} findings (top: {top})" if top else f"{total} findings"
-    except (TypeError, ValueError, AttributeError):
+    except (TypeError, ValueError, AttributeError, OverflowError):
         # A malformed report must cost only its own line, never the card --
         # but it should still be visible, not a silent drop (CODING STANDARDS
-        # §5.4). These three are what a doctor dict with the wrong shape can
-        # actually raise here: int() on a non-numeric count, .get() on a
-        # non-dict counts/finding value, or a non-iterable findings value.
+        # §5.4). These are what a doctor dict with the wrong shape can
+        # actually raise here: int() on a non-numeric count (TypeError/
+        # ValueError) or a non-finite float count such as float("inf")
+        # (OverflowError), .get() on a non-dict counts/finding value
+        # (AttributeError), or a non-iterable findings value (TypeError).
         logger.warning("Doctor report summary failed to parse; omitting Doctor line", exc_info=True)
         return None
 
