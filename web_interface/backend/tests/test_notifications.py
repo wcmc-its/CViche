@@ -496,10 +496,6 @@ def test_notify_feedback_swallows_post_exception(monkeypatch, caplog):
 
 # --- #309: webhook URL validation -------------------------------------------
 
-def _fail_post(*args, **kwargs):  # pragma: no cover - must not be reached
-    raise AssertionError("requests.post should not be called for an invalid webhook URL")
-
-
 def test_webhook_rejects_non_https_scheme(monkeypatch, caplog):
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "http://webhook.example/teams")
     mock_post = MagicMock()
@@ -636,6 +632,24 @@ def test_feedback_card_control_chars_stripped_from_run_id_filename_and_submitter
     for value in (facts["Run ID"], facts["File"], facts["Submitted by"]):
         assert "\x07" not in value
         assert len(value) <= notifications._FACT_MAX_CHARS
+
+
+def test_feedback_card_sanitises_reviewer_role(monkeypatch):
+    """reviewer_role is free text when the survey's "other" option is picked.
+
+    FeedbackForm.tsx submits `formData.reviewer_role_other.trim()` as
+    reviewer_role for "other", and schemas.FeedbackSubmit types it as a bare
+    `str`, so it is user-typed and must be sanitised like filename/submitter.
+    """
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    feedback = _feedback(reviewer_role="dept\x07admin\x9f" + ("r" * 500))
+
+    facts = _facts(notifications.build_feedback_payload(feedback, _run()))
+
+    assert "\x07" not in facts["Reviewer role"]
+    assert "\x9f" not in facts["Reviewer role"]
+    assert len(facts["Reviewer role"]) <= notifications._FACT_MAX_CHARS
+    assert facts["Reviewer role"].startswith("deptadmin")
 
 
 # --- #309: notify_* wrappers never raise (already pinned; named for #309) --

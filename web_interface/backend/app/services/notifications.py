@@ -325,6 +325,13 @@ def build_feedback_payload(feedback, run, submitter=None) -> dict:
     webhook outside the app's access controls; open the run in-app to read
     them.
 
+    ``reviewer_role`` is the one card fact here that is NOT a fixed pick: the
+    survey's "other" option submits the reviewer's own typed text as
+    reviewer_role (web_interface/frontend/src/components/FeedbackForm.tsx --
+    `formData.reviewer_role_other.trim()`), and app.schemas.FeedbackSubmit
+    types it as a bare ``str``. It is therefore run through _card_text like the
+    other user-supplied facts.
+
     Args:
         feedback: the Feedback ORM object (reviewer_role, overall_usefulness,
             likelihood_to_recommend, overall_accuracy).
@@ -344,7 +351,8 @@ def build_feedback_payload(feedback, run, submitter=None) -> dict:
     if submitter:
         facts.append({"name": "Submitted by", "value": _card_text(submitter, _FACT_MAX_CHARS)})
     facts += [
-        {"name": "Reviewer role", "value": str(getattr(feedback, "reviewer_role", None) or "n/a")},
+        {"name": "Reviewer role",
+         "value": _card_text(getattr(feedback, "reviewer_role", None) or "n/a", _FACT_MAX_CHARS)},
         {"name": "Overall usefulness", "value": f"{usefulness}/5" if usefulness is not None else "n/a"},
         {"name": "Likelihood to recommend", "value": f"{recommend}/5" if recommend is not None else "n/a"},
     ]
