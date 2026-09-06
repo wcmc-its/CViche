@@ -49,6 +49,7 @@ def test_restart_inherits_render_options(db):
          patch.object(runs_api, "check_rate_limit", return_value=None), \
          patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
          patch.object(runs_api, "get_storage", return_value=MagicMock()), \
+         patch("app.api.upload.get_storage", return_value=MagicMock()), \
          patch("shutil.copy2", return_value=None), \
          patch("pathlib.Path.read_bytes", return_value=b"PK\x03\x04fake-docx"), \
          patch("pathlib.Path.unlink", return_value=None), \

@@ -55,6 +55,7 @@ def test_restart_archives_input_to_storage(db):
          patch.object(runs_api, "check_rate_limit", return_value=None), \
          patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
          patch.object(runs_api, "get_storage", return_value=storage), \
+         patch("app.api.upload.get_storage", return_value=storage), \
          patch("shutil.copy2", return_value=None), \
          patch("pathlib.Path.read_bytes", return_value=b"PK\x03\x04fake-docx"), \
          patch("pathlib.Path.exists", return_value=True):
@@ -67,19 +68,20 @@ def test_restart_archives_input_to_storage(db):
 
     # The input doc and its manifest must be archived under the NEW run's
     # namespace so any pod can re-materialize it.
-    put_keys = {call.args[1] for call in storage.put_file.call_args_list}
+    put_keys = {call.args[1] for call in storage.put_file_exclusive.call_args_list}
     assert f"input/{new_run_id}.docx" in put_keys, (
         f"restart must archive the input under the new run; got {put_keys}"
     )
     assert "input/manifest.json" in put_keys
 
-    # put_file(run_id, key, data): the run_id is always the NEW run.
-    for call in storage.put_file.call_args_list:
+    # put_file_exclusive(run_id, key, data): the run_id is always the NEW run.
+    for call in storage.put_file_exclusive.call_args_list:
         assert call.args[0] == new_run_id
 
     # Manifest records provenance so a restarted run is traceable to its source.
     manifest_call = next(
-        c for c in storage.put_file.call_args_list if c.args[1] == "input/manifest.json"
+        c for c in storage.put_file_exclusive.call_args_list
+        if c.args[1] == "input/manifest.json"
     )
     manifest = json.loads(manifest_call.args[2].decode("utf-8"))
     assert manifest["restarted_from"] == "ORIGAR"
@@ -99,12 +101,13 @@ def test_restart_aborts_when_archive_fails(db):
     runs_before = db.query(Run).count()
 
     storage = MagicMock()
-    storage.put_file.side_effect = RuntimeError("S3 down")
+    storage.put_file_exclusive.side_effect = RuntimeError("S3 down")
 
     with patch.object(runs_api, "check_run_access", return_value=original), \
          patch.object(runs_api, "check_rate_limit", return_value=None), \
          patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
          patch.object(runs_api, "get_storage", return_value=storage), \
+         patch("app.api.upload.get_storage", return_value=storage), \
          patch("shutil.copy2", return_value=None), \
          patch("pathlib.Path.read_bytes", return_value=b"PK\x03\x04fake-docx"), \
          patch("pathlib.Path.unlink", return_value=None), \

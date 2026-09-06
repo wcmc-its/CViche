@@ -3,6 +3,15 @@
 from abc import ABC, abstractmethod
 
 
+class StorageKeyExists(Exception):
+    """Raised by put_file_exclusive when the target key already has an object.
+
+    Signals a run-id collision to the caller so it can regenerate the id and
+    retry, rather than silently overwriting another run's archived file
+    (#685). Never raised by put_file, which always overwrites.
+    """
+
+
 class RunStorage(ABC):
     """Interface for storing and retrieving run artifacts.
 
@@ -21,6 +30,28 @@ class RunStorage(ABC):
             key: Relative path within the run's storage (e.g., "input/cv.docx",
                  "steps/3a/output.json").
             data: File contents as bytes.
+        """
+        ...
+
+    @abstractmethod
+    def put_file_exclusive(self, run_id: str, key: str, data: bytes) -> None:
+        """Store a file for a run, but only if the key does not already exist.
+
+        Same contract as put_file, except a pre-existing key is a hard error
+        instead of a silent overwrite -- this is what closes the run-id
+        collision that let one user's upload overwrite another's (#685).
+        Callers that want "create fresh or fail" (allocating a new run id's
+        archive) use this instead of exists()-then-put_file, which is a
+        race, not a fix.
+
+        Args:
+            run_id: The run identifier.
+            key: Relative path within the run's storage (e.g., "input/cv.docx",
+                 "steps/3a/output.json").
+            data: File contents as bytes.
+
+        Raises:
+            StorageKeyExists: If an object already exists at run_id/key.
         """
         ...
 

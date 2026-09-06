@@ -14,7 +14,7 @@ from urllib.parse import quote
 
 import yaml
 
-from app.storage.base import RunStorage
+from app.storage.base import RunStorage, StorageKeyExists
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,26 @@ class S3RunStorage(RunStorage):
         s3_key = self._s3_key(run_id, key)
         self._s3.put_object(Bucket=self._bucket, Key=s3_key, Body=data)
         logger.debug("Uploaded s3://%s/%s (%d bytes)", self._bucket, s3_key, len(data))
+
+    def put_file_exclusive(self, run_id: str, key: str, data: bytes) -> None:
+        s3_key = self._s3_key(run_id, key)
+        try:
+            self._s3.put_object(
+                Bucket=self._bucket, Key=s3_key, Body=data, IfNoneMatch="*",
+            )
+        except self._s3.exceptions.ClientError as e:
+            # S3 answers a failed IfNoneMatch precondition with a 412 whose
+            # error code is PreconditionFailed -- that, and only that, means
+            # "the key already exists" (#685). Any other ClientError is a real
+            # outage/permissions fault and must propagate, not be mistaken for
+            # a collision.
+            code = e.response.get("Error", {}).get("Code", "")
+            if code == "PreconditionFailed":
+                raise StorageKeyExists(f"{run_id}/{key} already exists") from e
+            raise
+        logger.debug(
+            "Uploaded s3://%s/%s (%d bytes, exclusive)", self._bucket, s3_key, len(data),
+        )
 
     def put_global(self, key: str, data: bytes) -> None:
         s3_key = f"{self._prefix}/{key}"

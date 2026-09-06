@@ -69,7 +69,7 @@ def test_upload_aborts_and_creates_no_run_when_archive_fails(client, db, seed_si
     _auth(client, user)
 
     storage = MagicMock()
-    storage.put_file.side_effect = Exception("S3 unavailable")
+    storage.put_file_exclusive.side_effect = Exception("S3 unavailable")
 
     patches = _bypass_file_validation(tmp_path)
     patches.append(patch("app.api.upload.get_storage", return_value=storage))
@@ -85,7 +85,7 @@ def test_upload_aborts_and_creates_no_run_when_archive_fails(client, db, seed_si
     assert resp.json()["detail"]["error"] == "storage_unavailable"
     # The contract: nothing persisted.
     assert db.query(Run).count() == 0
-    storage.put_file.assert_called()  # we did attempt the durable write
+    storage.put_file_exclusive.assert_called()  # we did attempt the durable write
 
 
 def test_upload_succeeds_when_by_submitter_index_fails(client, db, seed_simple_mode, tmp_path):
@@ -95,7 +95,7 @@ def test_upload_succeeds_when_by_submitter_index_fails(client, db, seed_simple_m
     _auth(client, user)
 
     storage = MagicMock()
-    storage.put_file.return_value = None          # durable archive succeeds
+    storage.put_file_exclusive.return_value = None  # durable archive succeeds
     storage.put_global.side_effect = Exception("index write failed")
 
     patches = _bypass_file_validation(tmp_path)

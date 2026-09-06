@@ -14,6 +14,7 @@ boto3 = pytest.importorskip("boto3")
 from botocore.stub import Stubber
 from botocore.exceptions import ClientError
 
+from app.storage.base import StorageKeyExists
 from app.storage.s3_storage import S3RunStorage
 
 
@@ -51,6 +52,39 @@ def test_get_file_accessdenied_propagates():
     stub.add_client_error("get_object", service_error_code="AccessDenied", http_status_code=403)
     with stub, pytest.raises(ClientError):
         storage.get_file("run1", "input/cv.docx")
+
+
+def test_put_file_exclusive_sends_if_none_match_and_maps_412(monkeypatch):
+    """#685: an existing key must be reported as a collision, not silently
+    overwritten -- put_file_exclusive asks S3 to enforce that with
+    IfNoneMatch="*" and maps the resulting 412 PreconditionFailed to
+    StorageKeyExists so callers can regenerate the run id and retry."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error(
+        "put_object",
+        service_error_code="PreconditionFailed",
+        http_status_code=412,
+        expected_params={
+            "Bucket": "test-bucket",
+            "Key": "cviche/runs/run1/input/cv.docx",
+            "Body": b"dummy-bytes",
+            "IfNoneMatch": "*",
+        },
+    )
+    with stub, pytest.raises(StorageKeyExists):
+        storage.put_file_exclusive("run1", "input/cv.docx", b"dummy-bytes")
+    stub.assert_no_pending_responses()
+
+
+def test_put_file_exclusive_other_clienterror_propagates():
+    """A non-412 ClientError (outage, permissions) is a real fault, not a
+    collision, and must not be swallowed as StorageKeyExists."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error("put_object", service_error_code="AccessDenied", http_status_code=403)
+    with stub, pytest.raises(ClientError):
+        storage.put_file_exclusive("run1", "input/cv.docx", b"dummy-bytes")
 
 
 def test_download_name_is_percent_encoded_not_raw(monkeypatch):

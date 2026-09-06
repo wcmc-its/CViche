@@ -8,7 +8,7 @@ import os
 import shutil
 from pathlib import Path
 
-from app.storage.base import RunStorage
+from app.storage.base import RunStorage, StorageKeyExists
 
 
 class LocalRunStorage(RunStorage):
@@ -44,6 +44,15 @@ class LocalRunStorage(RunStorage):
         path = self._resolve(run_id, key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
+
+    def put_file_exclusive(self, run_id: str, key: str, data: bytes) -> None:
+        path = self._resolve(run_id, key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(path, "xb") as f:
+                f.write(data)
+        except FileExistsError as e:
+            raise StorageKeyExists(f"{run_id}/{key} already exists") from e
 
     def put_global(self, key: str, data: bytes) -> None:
         path = self._base / key

@@ -5,9 +5,11 @@ import json
 import logging
 import os
 import secrets
+import string
 import tempfile
 import zipfile
 from pathlib import Path
+from typing import Callable
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime
@@ -27,6 +29,7 @@ from app.services.config_service import (
 )
 from app.errors import bad_request
 from app.storage import get_storage
+from app.storage.base import StorageKeyExists
 from app.services.template_warning import detect_wcm_template
 
 logger = logging.getLogger(__name__)
@@ -145,9 +148,119 @@ def estimate_run_seconds(text_char_count: int) -> tuple[int, int]:
     return time_min, time_max
 
 
+_RUN_ID_ALPHABET = string.ascii_uppercase + string.digits
+
+
 def generate_run_id() -> str:
-    """Generate a unique 6-character run ID like 'A1B2C3'."""
-    return secrets.token_urlsafe(4)[:6].upper()
+    """Generate a unique 6-character run ID like 'A1B2C3'.
+
+    Draws each of the 6 characters uniformly from A-Z0-9 (36 symbols) via
+    secrets.choice, giving 36**6 ~= 2.18e9 equally-likely ids -- same format
+    (`^[A-Z0-9]{6}$`) as before, just uniform. The prior
+    `secrets.token_urlsafe(4)[:6].upper()` was not: token_urlsafe's base64url
+    alphabet folds 64 symbols onto 38 case-insensitively, and truncating to
+    6 chars from a 4-byte (32-bit) draw left the 6th character able to take
+    only 4 distinct values -- collapsing the last position to ~4 outcomes and
+    the whole id to ~2e8 effective values instead of the nominal 36**6 (#685).
+    """
+    return "".join(secrets.choice(_RUN_ID_ALPHABET) for _ in range(6))
+
+
+# Bound on how many times a fresh run id may be regenerated after a storage
+# collision before the request is failed outright (#685). Kept small and
+# named rather than inline: at ~2.18e9 uniform ids (see generate_run_id), a
+# single collision is already a ~1-in-2e9 event, so more than a couple of
+# regenerations would only ever fire under a genuine storage fault, not an
+# id collision -- in which case retrying further just delays surfacing it.
+_RUN_ID_ATTEMPTS = 5
+
+
+class RunIdAttemptsExhausted(Exception):
+    """Raised when every retry to allocate a collision-free run id failed."""
+
+
+def create_run_archive(
+    content: bytes,
+    file_ext: str,
+    build_manifest: Callable[[str, str], bytes],
+    write_local: Callable[[Path], None],
+) -> tuple[str, str, Path, bytes]:
+    """Allocate a fresh run id and durably archive `content` under it.
+
+    Exclusive-creates the durable archive (input/{stored_name} and
+    input/manifest.json, via put_file_exclusive) so a run-id collision can
+    never silently overwrite another run's archived input (#685) -- this is
+    what closes the overwrite, not the pod-local write below. On a collision
+    (StorageKeyExists, or FileExistsError from `write_local`) the id is
+    regenerated and the whole attempt retried, up to _RUN_ID_ATTEMPTS times;
+    a colliding attempt's own partial pod-local file is removed before the
+    retry so failed attempts never accumulate on disk.
+
+    Shared by /upload and restart_run so both close the same race the same
+    way (runs.py imports this rather than duplicating the retry loop).
+
+    Args:
+        content: the file bytes to archive (the raw upload, or the original
+            run's input being copied forward on restart).
+        file_ext: dotted extension, e.g. ".docx".
+        build_manifest: (run_id, stored_name) -> the manifest JSON to archive
+            alongside the file. Caller-supplied because /upload's and
+            restart_run's manifests carry different provenance fields.
+        write_local: writes the pod-local copy at the given path (an
+            exclusive `"xb"` open for /upload; a `shutil.copy2` for restart,
+            which does not itself detect a collision -- the archive above is
+            the authoritative check either way). May raise FileExistsError.
+
+    Returns:
+        (run_id, stored_name, file_path, manifest) for the archived file.
+
+    Raises:
+        RunIdAttemptsExhausted: every attempt collided.
+        Exception: a non-collision storage failure, propagated as-is (fatal,
+            not retried -- mirrors #170: no run is created on an archive
+            failure that isn't a collision).
+    """
+    storage = get_storage()
+    for _ in range(_RUN_ID_ATTEMPTS):
+        run_id = generate_run_id()
+        stored_name = f"{run_id}.{file_ext.lstrip('.')}"
+        file_path = UPLOAD_DIR / stored_name
+        try:
+            write_local(file_path)
+        except FileExistsError:
+            # Pod-local id collision (vanishingly rare -- see generate_run_id).
+            # Regenerate rather than overwrite another upload's local copy.
+            continue
+        manifest = build_manifest(run_id, stored_name)
+        try:
+            storage.put_file_exclusive(run_id, f"input/{stored_name}", content)
+            storage.put_file_exclusive(run_id, "input/manifest.json", manifest)
+        except StorageKeyExists:
+            # Same run id already has an archive: another request won the
+            # race. Discard this attempt's local file and try a fresh id.
+            _unlink_best_effort(file_path)
+            continue
+        except Exception:
+            # A real storage fault, not a collision -- fatal per #170: clean
+            # up and propagate, do not retry.
+            _unlink_best_effort(file_path)
+            raise
+        return run_id, stored_name, file_path, manifest
+    raise RunIdAttemptsExhausted(
+        f"could not allocate a collision-free run id after {_RUN_ID_ATTEMPTS} attempts"
+    )
+
+
+def _unlink_best_effort(path: Path) -> None:
+    """Remove a leftover pod-local file, never raising.
+
+    Cleanup after an aborted attempt -- an OSError here (permissions, a
+    concurrent delete) must not mask the original failure being handled.
+    """
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -230,47 +343,41 @@ async def upload_cv(
             current_user.email, wcm_template_match_ratio,
         )
 
-    # Generate run ID (after validation so rejected uploads don't waste IDs)
-    run_id = generate_run_id()
-
-    # Save with randomized filename (no user-provided text on filesystem)
-    stored_name = f"{run_id}.{file_ext.lstrip('.')}"
-    file_path = UPLOAD_DIR / stored_name
-    with open(file_path, "wb") as f:
-        f.write(content)
-
-    # Durably archive the ORIGINAL upload to the run's storage namespace BEFORE
-    # creating the run record. The pod-local copy above is ephemeral (lost on a
-    # pod recycle), so this S3 object is the run's only recoverable input. A
-    # failure here is therefore FATAL: we abort with an error and create NO run
-    # record, rather than commit a "created" run whose input can't be recovered
-    # and which would linger as an orphan in the DB and on the Runs dashboard
+    # Allocate a fresh run id and durably archive the ORIGINAL upload to the
+    # run's storage namespace BEFORE creating the run record. The pod-local
+    # copy is ephemeral (lost on a pod recycle), so the archive is the run's
+    # only recoverable input. Both the pod-local write and the archive are
+    # exclusive creates: a run-id collision on either regenerates the id and
+    # retries (#685) rather than silently overwriting another run's file. A
+    # failure here (a real storage fault, or every retry colliding) is
+    # therefore FATAL: we abort with an error and create NO run record,
+    # rather than commit a "created" run whose input can't be recovered and
+    # which would linger as an orphan in the DB and on the Runs dashboard
     # (and leave half-written objects in the store). Stop on error -- do not
     # proceed. (issue #170)
-    storage = get_storage()
-    manifest = json.dumps({
-        "run_id": run_id,
-        "original_filename": file.filename,  # only record of the real name
-        "stored_as": stored_name,
-        "file_type": file_ext[1:],
-        "size_bytes": len(content),
-        "sha256": hashlib.sha256(content).hexdigest(),
-        "content_type": file.content_type,
-        "uploaded_at": datetime.now().isoformat(),
-        "user_email": current_user.email,
-    }, indent=2).encode("utf-8")
+    def _build_manifest(run_id: str, stored_name: str) -> bytes:
+        return json.dumps({
+            "run_id": run_id,
+            "original_filename": file.filename,  # only record of the real name
+            "stored_as": stored_name,
+            "file_type": file_ext[1:],
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "content_type": file.content_type,
+            "uploaded_at": datetime.now().isoformat(),
+            "user_email": current_user.email,
+        }, indent=2).encode("utf-8")
+
+    def _write_local(path: Path) -> None:
+        with open(path, "xb") as f:
+            f.write(content)
+
     try:
-        storage.put_file(run_id, f"input/{stored_name}", content)
-        storage.put_file(run_id, "input/manifest.json", manifest)
+        run_id, stored_name, file_path, manifest = create_run_archive(
+            content, file_ext, _build_manifest, _write_local,
+        )
     except Exception as e:
-        logger.error("Durable archive of upload failed; aborting upload (run=%s): %s", run_id, e)
-        # Nothing has been committed to the DB yet, so there is no run to roll
-        # back. Remove the ephemeral pod-local copy so the failed attempt leaves
-        # nothing behind, then surface a clear error to the user.
-        try:
-            file_path.unlink(missing_ok=True)
-        except OSError:
-            pass
+        logger.error("Durable archive of upload failed; aborting upload: %s", e)
         raise HTTPException(
             status_code=502,
             detail={
@@ -281,6 +388,7 @@ async def upload_cv(
                 ),
             },
         )
+    storage = get_storage()
 
     # Cross-run, browsable-by-submitter index: the same manifest keyed under the
     # submitter so runs can be found by who uploaded them in S3 without opening
