@@ -21,7 +21,10 @@ Config (read via app.config_loader.get_config, never hardcoded):
     first origin), consistent with how the CORS layer resolves the app origin.
 """
 
+import functools
 import logging
+import re
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -43,6 +46,16 @@ _DEFAULT_COLOR = "default"
 # the orchestrator's executor thread for long; delivery is best-effort anyway.
 _POST_TIMEOUT = 10
 
+# Max characters kept in any single card fact/title built from a run- or
+# user-supplied string (filename, run id, submitter). Named per CODING
+# STANDARDS §8.2 rather than an inline literal in _card_text's call sites.
+_FACT_MAX_CHARS = 200
+
+# C0 and C1 control characters -- stripped from card text so a pathological
+# filename or run id can't inject formatting/control bytes into a rendered
+# Adaptive Card.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
 
 def _run_link_base() -> str:
     """Derive the app base URL for run links from the configured origins.
@@ -59,10 +72,52 @@ def _run_link_base() -> str:
     return first.rstrip("/")
 
 
+@functools.lru_cache(maxsize=1)
+def _validate_webhook_url(raw: str) -> str:
+    """Return `raw` unchanged if it is a plausible https webhook URL, else "".
+
+    Logs one warning per distinct invalid value rather than once per POST --
+    memoized (via lru_cache) instead of a module-level "already warned" flag,
+    so this doesn't add to CODING_STANDARDS §4.1's no-mutable-module-state
+    debt, and a corrected config value still gets validated (and, if still
+    wrong, warned about) on its own first use.
+
+    The webhook URL is operator configuration (env var or auth_config.yaml),
+    not user input, so this is defence in depth against a mis-set config --
+    not a security boundary against an attacker-controlled value. A
+    Microsoft-domain allowlist was considered and declined: Teams Workflows
+    webhooks live on tenant-specific `*.logic.azure.com` hosts, so an
+    allowlist would have to chase that rather than add real protection.
+    """
+    if not raw:
+        return ""
+    parsed = urlparse(raw)
+    if parsed.scheme != "https" or not parsed.netloc:
+        logger.warning(
+            "CVICHE_TEAMS_WEBHOOK_URL is not a valid https URL; "
+            "Teams notifications are disabled"
+        )
+        return ""
+    return raw
+
+
 def _webhook_url() -> str:
-    """Return the configured Teams webhook URL, or "" if not configured."""
+    """Return the configured Teams webhook URL, or "" if unset or invalid."""
     url, _ = get_config("notifications", "CVICHE_TEAMS_WEBHOOK_URL", default="")
-    return (url or "").strip()
+    return _validate_webhook_url((url or "").strip())
+
+
+def _card_text(value, limit: int) -> str:
+    """Sanitise a run- or user-supplied string for a Teams card.
+
+    Strips C0/C1 control characters and truncates to `limit` characters
+    (with a trailing ellipsis) so a pathological filename, run id, or
+    submitter name can't inject control bytes or blow up a card's size.
+    """
+    text = _CONTROL_CHARS.sub("", str(value))
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "…"
+    return text
 
 
 def _action_buttons(run_id) -> list:
@@ -77,7 +132,7 @@ def _action_buttons(run_id) -> list:
         {
             "type": "Action.OpenUrl",
             "title": "Open run",
-            "url": f"{base}/run/{run_id}",
+            "url": f"{base}/run/{quote(str(run_id), safe='')}",
         }
     ]
 
@@ -146,15 +201,15 @@ def build_started_payload(run, submitter=None) -> dict:
 
     submitter: display name/email of who submitted the run, or None to omit.
     """
-    run_id = getattr(run, "id", None) or "unknown"
-    filename = getattr(run, "filename", None) or "unknown"
+    run_id = _card_text(getattr(run, "id", None) or "unknown", _FACT_MAX_CHARS)
+    filename = _card_text(getattr(run, "filename", None) or "unknown", _FACT_MAX_CHARS)
 
     facts = [
-        {"name": "Run ID", "value": str(run_id)},
-        {"name": "File", "value": str(filename)},
+        {"name": "Run ID", "value": run_id},
+        {"name": "File", "value": filename},
     ]
     if submitter:
-        facts.append({"name": "Submitted by", "value": str(submitter)})
+        facts.append({"name": "Submitted by", "value": _card_text(submitter, _FACT_MAX_CHARS)})
     facts.append({"name": "Status", "value": "started"})
 
     return _adaptive_card(
@@ -184,8 +239,13 @@ def _doctor_text(doctor):
             None,
         )
         return f"{total} findings (top: {top})" if top else f"{total} findings"
-    except Exception:
-        # A malformed report must cost only its own line, never the card.
+    except (TypeError, ValueError, AttributeError):
+        # A malformed report must cost only its own line, never the card --
+        # but it should still be visible, not a silent drop (CODING STANDARDS
+        # §5.4). These three are what a doctor dict with the wrong shape can
+        # actually raise here: int() on a non-numeric count, .get() on a
+        # non-dict counts/finding value, or a non-iterable findings value.
+        logger.warning("Doctor report summary failed to parse; omitting Doctor line", exc_info=True)
         return None
 
 
@@ -202,8 +262,8 @@ def build_teams_payload(run, score=None, submitter=None, doctor=None) -> dict:
             the Doctor line (doctor disabled, failed, or a failed run).
     """
     status = getattr(run, "status", None) or "unknown"
-    run_id = getattr(run, "id", None) or "unknown"
-    filename = getattr(run, "filename", None) or "unknown"
+    run_id = _card_text(getattr(run, "id", None) or "unknown", _FACT_MAX_CHARS)
+    filename = _card_text(getattr(run, "filename", None) or "unknown", _FACT_MAX_CHARS)
 
     if score:
         total = score.get("totalScore")
@@ -219,11 +279,11 @@ def build_teams_payload(run, score=None, submitter=None, doctor=None) -> dict:
     duration_text = f"{duration}s" if isinstance(duration, int) else "n/a"
 
     facts = [
-        {"name": "Run ID", "value": str(run_id)},
-        {"name": "File", "value": str(filename)},
+        {"name": "Run ID", "value": run_id},
+        {"name": "File", "value": filename},
     ]
     if submitter:
-        facts.append({"name": "Submitted by", "value": str(submitter)})
+        facts.append({"name": "Submitted by", "value": _card_text(submitter, _FACT_MAX_CHARS)})
     facts += [
         {"name": "Status", "value": str(status)},
         {"name": "Quality score", "value": score_text},
@@ -266,17 +326,17 @@ def build_feedback_payload(feedback, run, submitter=None) -> dict:
         submitter: display name/email of who submitted the feedback, or None
             to omit.
     """
-    run_id = getattr(run, "id", None) or "unknown"
-    filename = getattr(run, "filename", None) or "unknown"
+    run_id = _card_text(getattr(run, "id", None) or "unknown", _FACT_MAX_CHARS)
+    filename = _card_text(getattr(run, "filename", None) or "unknown", _FACT_MAX_CHARS)
     usefulness = getattr(feedback, "overall_usefulness", None)
     recommend = getattr(feedback, "likelihood_to_recommend", None)
 
     facts = [
-        {"name": "Run ID", "value": str(run_id)},
-        {"name": "File", "value": str(filename)},
+        {"name": "Run ID", "value": run_id},
+        {"name": "File", "value": filename},
     ]
     if submitter:
-        facts.append({"name": "Submitted by", "value": str(submitter)})
+        facts.append({"name": "Submitted by", "value": _card_text(submitter, _FACT_MAX_CHARS)})
     facts += [
         {"name": "Reviewer role", "value": str(getattr(feedback, "reviewer_role", None) or "n/a")},
         {"name": "Overall usefulness", "value": f"{usefulness}/5" if usefulness is not None else "n/a"},
@@ -319,8 +379,18 @@ def _post(payload, run_id) -> None:
                 run_id,
                 resp.status_code,
             )
-    except Exception as e:  # noqa: BLE001 -- best-effort, must never raise
+    except requests.RequestException as e:
+        # Network/HTTP-layer failure (timeout, connection refused, ...): the
+        # expected best-effort failure mode, logged at WARNING without a
+        # traceback.
         logger.warning("Teams notification failed for run %s: %s", run_id, e)
+    except Exception:  # noqa: BLE001 -- best-effort, must never raise
+        # Anything else (e.g. a bad payload TypeError) is unexpected -- still
+        # swallowed per this function's contract, but with a traceback so it
+        # doesn't vanish silently.
+        logger.exception(
+            "Teams notification failed for run %s with an unexpected error", run_id
+        )
 
 
 def notify_run_started(run, submitter=None) -> None:

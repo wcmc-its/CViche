@@ -25,6 +25,15 @@ import pytest
 from app.services import notifications
 
 
+@pytest.fixture(autouse=True)
+def _clear_webhook_validation_cache():
+    """_validate_webhook_url (notifications.py) is memoized with lru_cache so
+    a misconfigured URL warns once, not per POST. Clear it before every test
+    so one test's cached validation result/warning can't leak into another's
+    assertions about a different URL value."""
+    notifications._validate_webhook_url.cache_clear()
+
+
 def _run(**overrides):
     """A Run-like stand-in; the service only reads attributes (matches the
     SimpleNamespace style used by the auto_retry tests)."""
@@ -456,3 +465,135 @@ def test_notify_feedback_swallows_post_exception(monkeypatch, caplog):
 
     assert result is None
     assert any("Teams notification failed" in r.message for r in caplog.records)
+
+
+# --- #309: webhook URL validation -------------------------------------------
+
+def _fail_post(*args, **kwargs):  # pragma: no cover - must not be reached
+    raise AssertionError("requests.post should not be called for an invalid webhook URL")
+
+
+def test_webhook_rejects_non_https_scheme(monkeypatch, caplog):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "http://webhook.example/teams")
+    monkeypatch.setattr(notifications.requests, "post", _fail_post)
+
+    with caplog.at_level(logging.WARNING):
+        result = notifications.notify_run_terminal(_run(), None)
+
+    assert result is None
+    assert any("not a valid https URL" in r.message for r in caplog.records)
+
+
+def test_webhook_rejects_malformed_url(monkeypatch, caplog):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "not-a-url-at-all")
+    monkeypatch.setattr(notifications.requests, "post", _fail_post)
+
+    with caplog.at_level(logging.WARNING):
+        result = notifications.notify_run_terminal(_run(), None)
+
+    assert result is None
+    assert any("not a valid https URL" in r.message for r in caplog.records)
+
+
+def test_webhook_invalid_url_warns_once_not_per_call(monkeypatch, caplog):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "ftp://webhook.example/teams")
+    monkeypatch.setattr(notifications.requests, "post", _fail_post)
+
+    with caplog.at_level(logging.WARNING):
+        notifications.notify_run_terminal(_run(), None)
+        notifications.notify_run_terminal(_run(), None)
+        notifications.notify_run_started(_run())
+
+    warnings = [r for r in caplog.records if "not a valid https URL" in r.message]
+    assert len(warnings) == 1
+
+
+# --- #309: run id is URL-encoded in the action button -----------------------
+
+def test_action_button_encodes_run_id(monkeypatch):
+    monkeypatch.setenv("CVICHE_ALLOWED_ORIGINS", "https://cviche.weill.cornell.edu")
+    run = _run(id="a/b?c")
+
+    payload = notifications.build_teams_payload(run, None)
+
+    action = _card(payload)["actions"][0]
+    assert action["url"] == "https://cviche.weill.cornell.edu/run/a%2Fb%3Fc"
+
+
+# --- #309: _post exception narrowing ----------------------------------------
+
+def test_notify_swallows_connection_error_with_warning(monkeypatch, caplog):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+
+    def _boom(*args, **kwargs):
+        raise notifications.requests.ConnectionError("network down")
+
+    monkeypatch.setattr(notifications.requests, "post", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        result = notifications.notify_run_terminal(_run(), None)
+
+    assert result is None
+    records = [r for r in caplog.records if "Teams notification failed" in r.message]
+    assert len(records) == 1
+    assert records[0].levelname == "WARNING"
+    assert records[0].exc_info is None
+
+
+def test_notify_swallows_type_error_with_exception_log(monkeypatch, caplog):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+
+    def _boom(*args, **kwargs):
+        raise TypeError("payload is not JSON-serialisable")
+
+    monkeypatch.setattr(notifications.requests, "post", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        result = notifications.notify_run_terminal(_run(), None)
+
+    assert result is None
+    records = [r for r in caplog.records if "unexpected error" in r.message]
+    assert len(records) == 1
+    assert records[0].levelname == "ERROR"
+    assert records[0].exc_info is not None
+
+
+# --- #309: card text sanitising ---------------------------------------------
+
+def test_card_text_strips_control_chars_and_truncates():
+    value = "cv\x07report" + ("x" * 500)
+
+    result = notifications._card_text(value, notifications._FACT_MAX_CHARS)
+
+    assert "\x07" not in result
+    assert len(result) <= notifications._FACT_MAX_CHARS
+
+
+def test_filename_control_chars_stripped_from_terminal_card(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    run = _run(filename="cv\x07report" + ("x" * 500))
+
+    facts = _facts(notifications.build_teams_payload(run, None))
+
+    assert "\x07" not in facts["File"]
+    assert len(facts["File"]) <= notifications._FACT_MAX_CHARS
+
+
+def test_submitter_control_chars_stripped_from_started_card(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+
+    payload = notifications.build_started_payload(_run(), submitter="Jane\x07Doe" + ("z" * 500))
+
+    submitted_by = _facts(payload)["Submitted by"]
+    assert "\x07" not in submitted_by
+    assert len(submitted_by) <= notifications._FACT_MAX_CHARS
+
+
+# --- #309: notify_* wrappers never raise (already pinned; named for #309) --
+# test_notify_swallows_post_exception, test_notify_feedback_swallows_post_exception
+# (above) and test_notify_swallows_connection_error_with_warning /
+# test_notify_swallows_type_error_with_exception_log (above) all assert
+# notify_run_terminal/notify_feedback_submitted return None despite the
+# underlying requests.post call raising. test_feedback_notification.py's
+# test_submit_feedback_succeeds_even_if_notification_raises additionally pins
+# this at the route call-site.
