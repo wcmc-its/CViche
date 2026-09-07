@@ -10,6 +10,7 @@ from datetime import datetime
 from fastapi import Request, HTTPException, Depends
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from sqlalchemy.orm import Session
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.exc import OperationalError
 
 from app.database import get_db
@@ -569,7 +570,15 @@ def _recheck_ed_membership(user: User, db: Session) -> None:
     new_role = "admin" if membership.in_admin_group else "user"
     if user.role != new_role:
         old_role = user.role
-        user.role = new_role
+        # Update the in-memory value WITHOUT marking the request session's
+        # instance dirty: the write goes through _best_effort_persist's own
+        # session, and a dirty instance would make the route's later
+        # db.commit() re-issue the same UPDATE from a snapshot taken before
+        # that side commit. MariaDB 11.6+ (innodb_snapshot_isolation=ON,
+        # REPEATABLE READ) rejects that with error 1020 "Record has changed
+        # since last read" -- every state-changing request after the 60s
+        # debounce 500'd in prod on 2026-09-03 (run CJZE8G feedback POST).
+        set_committed_value(user, "role", new_role)
         _best_effort_persist(user.id, "role sync", role=new_role)
         logger.info(
             ROLE_CHANGED,
@@ -581,7 +590,7 @@ def _bump_last_active(user: User) -> None:
     """Debounced last_active_at update (once per 60s)."""
     now = datetime.now()
     if not user.last_active_at or (now - user.last_active_at).total_seconds() > 60:
-        user.last_active_at = now
+        set_committed_value(user, "last_active_at", now)  # see role sync above
         _best_effort_persist(user.id, "last_active_at", last_active_at=now)
 
 
