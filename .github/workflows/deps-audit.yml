@@ -2,6 +2,12 @@ name: deps-audit
 
 # Fail closed if any pinned Python dependency has a known vulnerability.
 # This is the repo's first CI workflow (addresses #118; the never-built #34).
+
+# Least-privilege default (#684): every job here is checkout + read-only scan,
+# no repo/issue/PR writes, so repo-wide read is enough.
+permissions:
+  contents: read
+
 on:
   pull_request:
     branches: [dev, main]
@@ -14,13 +20,21 @@ on:
   push:
     branches: [dev, main]
   workflow_dispatch:
+  # Weekly full-history secret-scan baseline (#684). Lives on this workflow's
+  # trigger, not ci.yml's: a `schedule:` on ci.yml would also fire its 5
+  # build/test jobs weekly for no reason, since none of them scope themselves
+  # away from `schedule`. Here, pip-audit picking up a bonus weekly run is a
+  # feature, not noise -- it catches a freshly published CVE against deps that
+  # haven't otherwise changed since the last push/PR.
+  schedule:
+    - cron: '17 6 * * 1' # Monday ~06:17 UTC
 
 jobs:
   pip-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.14" # match the build image (python:3.14-slim)
       - run: pip install pip-audit
@@ -47,3 +61,21 @@ jobs:
             pip-audit --no-deps -r "$req" $IGNORE_FLAGS
             echo "::endgroup::"
           done
+
+  secret-scan-full-history:
+    # One-time-per-week full-history baseline scan (#684), separate from
+    # ci.yml's incremental secret-scan job so push/PR stays cheap (diff-only)
+    # while this still catches anything an incremental scan's shallow range
+    # could miss (e.g. a history rewrite). Guarded to schedule/dispatch only --
+    # it must NOT also run on pull_request/push, which ci.yml's job covers.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # full history, not just the default shallow clone
+      - name: Scan full git history for secrets
+        uses: trufflesecurity/trufflehog@363923b901c911a9164f50b6c423f47c15372b1c # v3.97.4
+        with:
+          version: 3.97.4
+          extra_args: --exclude-paths=.trufflehog-exclude.txt
