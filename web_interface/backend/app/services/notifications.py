@@ -153,9 +153,10 @@ def _adaptive_card(title, color, facts, run_id, summary) -> dict:
         facts: list of {"name", "value"} dicts (rendered as an Adaptive FactSet).
         run_id: used to build the optional "Open run" button link. Callers
             pass the already-sanitised (_card_text-truncated) run id here,
-            not the raw one -- harmless for real run ids (UUIDs, well under
-            _FACT_MAX_CHARS), but a run id over the limit would link to a
-            truncated, nonexistent run rather than the real one.
+            not the raw one -- harmless for real run ids (server-generated
+            6-char ids, well under _FACT_MAX_CHARS), but a run id over the
+            limit would link to a truncated, nonexistent run rather than the
+            real one.
         summary: plain-text fallback/summary one-liner (see above).
     """
     card = {

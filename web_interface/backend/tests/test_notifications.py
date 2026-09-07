@@ -600,22 +600,30 @@ def test_card_text_strips_control_chars_and_truncates():
 
 def test_filename_control_chars_stripped_from_terminal_card(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-    run = _run(filename="cv\x07report" + ("x" * 500))
+    run = _run(id="run\x07id" + ("a" * 500), filename="cv\x07report" + ("x" * 500))
 
     facts = _facts(notifications.build_teams_payload(run, None))
 
     assert "\x07" not in facts["File"]
     assert len(facts["File"]) <= notifications._FACT_MAX_CHARS
+    assert "\x07" not in facts["Run ID"]
+    assert len(facts["Run ID"]) <= notifications._FACT_MAX_CHARS
 
 
 def test_submitter_control_chars_stripped_from_started_card(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    run = _run(id="run\x07id" + ("a" * 500), filename="cv\x07" + ("x" * 500))
 
-    payload = notifications.build_started_payload(_run(), submitter="Jane\x07Doe" + ("z" * 500))
+    payload = notifications.build_started_payload(run, submitter="Jane\x07Doe" + ("z" * 500))
 
-    submitted_by = _facts(payload)["Submitted by"]
+    facts = _facts(payload)
+    submitted_by = facts["Submitted by"]
     assert "\x07" not in submitted_by
     assert len(submitted_by) <= notifications._FACT_MAX_CHARS
+    assert "\x07" not in facts["File"]
+    assert len(facts["File"]) <= notifications._FACT_MAX_CHARS
+    assert "\x07" not in facts["Run ID"]
+    assert len(facts["Run ID"]) <= notifications._FACT_MAX_CHARS
 
 
 def test_feedback_card_control_chars_stripped_from_run_id_filename_and_submitter(
