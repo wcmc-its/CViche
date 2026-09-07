@@ -20,5 +20,13 @@ Closes #
       chain and auto-closes no issue.
 - [ ] One `Closes #N` per issue — a comma list closes only the first.
 - [ ] CI green on this PR, not just locally.
-- [ ] New and touched code already meets the six recurring review asks in
-      `docs/DEV_WORKFLOW.md` ("What reviews here consistently ask for").
+- [ ] Every signature or import line I touched uses builtin generics and
+      `X | None` — no `typing.List` / `Dict` / `Optional` / `Tuple` / `Set`.
+- [ ] Every function I added has parameter and return annotations, with
+      `object` (not `Any`) for accept-anything helpers.
+- [ ] No `print()` added in library code (`src/unified_pipeline` outside
+      `scripts/` and `tests/`).
+- Say in the description, not as a tick: the `docs/CODING_STANDARDS.md` §8
+  judgement calls — a typed record at a boundary (§8.1), a named constant for
+  a classifying literal (§8.2) — and why, per "What a PR description must
+  contain".
