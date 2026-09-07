@@ -6,7 +6,7 @@ dir). Closes #1.
 """
 from __future__ import annotations
 
-import shutil
+import uuid
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -88,14 +88,50 @@ class TestLegacyFlatDirFallbackRemoved:
         Path(__file__).resolve().parents[3] / "src" / "unified_pipeline" / "prompt_logs"
     )
 
+    def setup_method(self, method):
+        self._seeded_files: list[Path] = []
+        # Record whether LEGACY_DIR predates this test, and its exact
+        # contents if so -- teardown_method uses both to prove it leaves the
+        # directory exactly as it found it (never rmtree: a full checkout
+        # can hold tens of thousands of real transcript files here).
+        self._dir_pre_existed = self.LEGACY_DIR.is_dir()
+        self._pre_listing = (
+            {p.name for p in self.LEGACY_DIR.iterdir()} if self._dir_pre_existed else set()
+        )
+
     def _seed_legacy_file(self, purpose: str = "stage_2") -> Path:
         self.LEGACY_DIR.mkdir(parents=True, exist_ok=True)
-        path = self.LEGACY_DIR / f"2026-01-01_00-00-00_{purpose}_abcdef012345.txt"
+        # uuid4 in the filename so this can never collide with (or be
+        # mistaken by a human diffing the dir for) a real transcript that
+        # predates the test.
+        unique = uuid.uuid4().hex
+        path = self.LEGACY_DIR / f"2026-01-01_00-00-00_{purpose}_{unique}.txt"
         path.write_text("this belongs to a different run's transcript")
+        self._seeded_files.append(path)
         return path
 
     def teardown_method(self, method):
-        shutil.rmtree(self.LEGACY_DIR, ignore_errors=True)
+        # LEGACY_DIR is the real, process-shared src/unified_pipeline/prompt_logs/
+        # directory -- in a full checkout it holds tens of thousands of files
+        # that predate this test and belong to unrelated runs. Delete only the
+        # file(s) this test itself seeded (unlink, never rmtree), and only
+        # remove the directory itself if this test is the one that created it.
+        for path in self._seeded_files:
+            path.unlink(missing_ok=True)
+
+        if self._dir_pre_existed:
+            post_listing = {p.name for p in self.LEGACY_DIR.iterdir()}
+            assert post_listing == self._pre_listing, (
+                "legacy dir's contents changed by this test beyond the file(s) "
+                f"it seeded: before={sorted(self._pre_listing)!r} "
+                f"after={sorted(post_listing)!r}"
+            )
+        elif self.LEGACY_DIR.is_dir():
+            remaining = list(self.LEGACY_DIR.iterdir())
+            assert not remaining, (
+                f"legacy dir has unexpected leftover files after cleanup: {remaining}"
+            )
+            self.LEGACY_DIR.rmdir()
 
     def test_get_prompt_logs_ignores_the_legacy_flat_dir(self, client, db):
         from app.main import app

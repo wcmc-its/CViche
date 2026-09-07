@@ -68,6 +68,7 @@ Outputs:
     - Stage 6:  src/unified_pipeline/outputs/stage_6_wcm_documents/{uid}_wcm.docx
 """
 
+import contextvars
 import functools
 import hashlib
 import sys
@@ -80,7 +81,7 @@ from datetime import timedelta
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
-from unified_pipeline.core.prompt_logger import reset_current_run_id, set_current_run_id
+from unified_pipeline.core.prompt_logger import set_current_run_id
 from unified_pipeline.llm_client import format_models_used
 from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
 from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
@@ -229,12 +230,6 @@ def resolve_cv_path(cv_path_or_uid: str) -> tuple:
     return cv_path_or_uid, cv_path_or_uid
 
 
-# Set by resolve_cv_path_for_run(), consumed and cleared by
-# _reset_prompt_logger_scope_after()'s `finally` once main() returns or
-# raises -- a single-slot mailbox between them so neither has to grow
-# main()'s own body (frozen at 910 lines, #9's exact-match table).
-_PENDING_RUN_TOKEN = None
-
 # prompt_logger._RUN_ID_RE caps a run id at 10 chars of [A-Za-z0-9_-]; that
 # module is off limits for this ticket, so document_uid (routinely longer,
 # e.g. 'sample_vasquez_cv') is hashed down to this length rather than passed
@@ -247,32 +242,29 @@ def resolve_cv_path_for_run(cv_path_or_uid: str) -> tuple:
     resolved document for the rest of the run (#686 -- the CLI never scoped
     its writes, so every run's transcripts landed in one shared flat dir).
     """
-    global _PENDING_RUN_TOKEN
     cv_path, document_uid = resolve_cv_path(cv_path_or_uid)
     run_scope_id = hashlib.sha256(document_uid.encode()).hexdigest()[:_RUN_SCOPE_ID_LEN]
-    _PENDING_RUN_TOKEN = set_current_run_id(run_scope_id)
+    set_current_run_id(run_scope_id)
     return cv_path, document_uid
 
 
-def _reset_prompt_logger_scope_after(fn):
-    """Decorator: undo whatever resolve_cv_path_for_run() set up, once fn
-    returns OR raises (including sys.exit()'s SystemExit -- `finally` runs
-    for that too). Applied to main() itself rather than called inside it so
-    main()'s line count never changes: a decorator line is not part of a
-    FunctionDef node's own lineno..end_lineno span."""
+def _scope_prompt_logger_per_run(fn):
+    """Decorator: run fn inside a fresh copy of the current contextvars
+    Context, so set_current_run_id() -- called deep inside fn, via
+    resolve_cv_path_for_run() -- only ever mutates that copy. No module-level
+    state is needed to undo it: the copy is discarded when fn returns OR
+    raises (including sys.exit()'s SystemExit), so prompt_logger's ContextVar
+    reverts on its own in the caller's real context -- no token, no global,
+    no explicit reset call. Applied to main() itself rather than called
+    inside it so main()'s line count never changes: a decorator line is not
+    part of a FunctionDef node's own lineno..end_lineno span."""
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
-        global _PENDING_RUN_TOKEN
-        try:
-            return fn(*args, **kwargs)
-        finally:
-            if _PENDING_RUN_TOKEN is not None:
-                reset_current_run_id(_PENDING_RUN_TOKEN)
-                _PENDING_RUN_TOKEN = None
+        return contextvars.copy_context().run(fn, *args, **kwargs)
     return wrapper
 
 
-@_reset_prompt_logger_scope_after
+@_scope_prompt_logger_per_run
 def main():
     # Parse arguments
     if len(sys.argv) < 2:

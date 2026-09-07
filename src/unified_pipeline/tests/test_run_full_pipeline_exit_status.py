@@ -19,6 +19,7 @@ Self-contained: no DB, no network, no LLM.
 """
 
 import ast
+import contextvars
 import hashlib
 import json
 import logging
@@ -357,18 +358,16 @@ def test_stage5b_missing_output_file_flags_cost_as_unknown(tmp_path, monkeypatch
 # transcripts landed in the same shared, flat prompt_logs/ directory.
 # resolve_cv_path_for_run() -- the setup helper main() calls once per run in
 # place of resolve_cv_path() -- scopes this process to the run, and
-# @_reset_prompt_logger_scope_after (applied to main() itself, not called
-# inside it, so main()'s own line count never changes) undoes that once
-# main() returns or raises.
-
-def _reset_pending_scope():
-    """Undo what a direct resolve_cv_path_for_run() call set up, the same
-    way main()'s decorator would -- these tests call the helper directly,
-    so nothing else will."""
-    token = run_full_pipeline._PENDING_RUN_TOKEN
-    assert token is not None, "resolve_cv_path_for_run did not stash a token"
-    prompt_logger.reset_current_run_id(token)
-    run_full_pipeline._PENDING_RUN_TOKEN = None
+# @_scope_prompt_logger_per_run (applied to main() itself, not called inside
+# it, so main()'s own line count never changes) runs main() inside a fresh
+# contextvars.Context copy so that scope is discarded -- no explicit reset,
+# no module-level state -- once main() returns or raises.
+#
+# The two helper-level tests below call resolve_cv_path_for_run() directly,
+# outside of any copied context, so (unlike a real run) the ContextVar.set()
+# it makes is NOT automatically undone when the test function returns --
+# each wraps its own assertions in a copied context of its own and resets
+# that context's token explicitly, so nothing leaks into later tests.
 
 
 def test_resolve_cv_path_for_run_scopes_prompt_logger_to_a_hashed_id(
@@ -381,14 +380,14 @@ def test_resolve_cv_path_for_run_scopes_prompt_logger_to_a_hashed_id(
     (tmp_path / "data/sample_cvs/word").mkdir(parents=True)
     (tmp_path / f"data/sample_cvs/word/{UID}.docx").write_bytes(b"PK\x03\x04fake")
 
-    cv_path, document_uid = run_full_pipeline.resolve_cv_path_for_run(UID)
-    try:
+    def _check():
+        cv_path, document_uid = run_full_pipeline.resolve_cv_path_for_run(UID)
         assert document_uid == UID
         scope_id = prompt_logger._current_run_id.get()
         assert scope_id == hashlib.sha256(UID.encode()).hexdigest()[:run_full_pipeline._RUN_SCOPE_ID_LEN]
         assert prompt_logger._RUN_ID_RE.match(scope_id)
-    finally:
-        _reset_pending_scope()
+
+    contextvars.copy_context().run(_check)
     assert prompt_logger._current_run_id.get() is None
 
 
@@ -407,14 +406,16 @@ def test_resolve_cv_path_for_run_survives_a_document_uid_too_long_for_the_regex(
         prompt_logger.set_current_run_id(long_uid)
 
     monkeypatch.chdir(tmp_path)
-    cv_path, document_uid = run_full_pipeline.resolve_cv_path_for_run(long_uid)
-    try:
+
+    def _check():
+        cv_path, document_uid = run_full_pipeline.resolve_cv_path_for_run(long_uid)
         assert document_uid == long_uid
         scope_id = prompt_logger._current_run_id.get()
         assert prompt_logger._RUN_ID_RE.match(scope_id), (
             f"derived scope id {scope_id!r} does not satisfy prompt_logger._RUN_ID_RE")
-    finally:
-        _reset_pending_scope()
+
+    contextvars.copy_context().run(_check)
+    assert prompt_logger._current_run_id.get() is None
 
 
 def test_full_run_scopes_prompt_logger_and_resets_it_when_main_finishes(
@@ -423,7 +424,7 @@ def test_full_run_scopes_prompt_logger_and_resets_it_when_main_finishes(
     """End to end over main() itself -- not just the helper -- the same
     argument this file already makes for failed_stages just above: a suite
     that only unit-tests resolve_cv_path_for_run() could not notice the
-    @_reset_prompt_logger_scope_after decorator ever getting detached from
+    @_scope_prompt_logger_per_run decorator ever getting detached from
     main()."""
     calls = []
     real_set = run_full_pipeline.set_current_run_id
