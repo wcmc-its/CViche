@@ -101,10 +101,13 @@ class TestLegacyFlatDirFallbackRemoved:
 
     def _seed_legacy_file(self, purpose: str = "stage_2") -> Path:
         self.LEGACY_DIR.mkdir(parents=True, exist_ok=True)
-        # uuid4 in the filename so this can never collide with (or be
-        # mistaken by a human diffing the dir for) a real transcript that
-        # predates the test.
-        unique = uuid.uuid4().hex
+        # The id slot must hold exactly 12 hex chars: that is what
+        # steps.py's _PROMPT_LOG_FILENAME_RE requires, and a name that does
+        # not match parses to purpose=None, which the removed fallback
+        # skipped too -- lengthening this would make the test vacuous.
+        # 48 random bits still make a collision with (or a human misreading
+        # of) a real transcript that predates the test impossible.
+        unique = uuid.uuid4().hex[:12]
         path = self.LEGACY_DIR / f"2026-01-01_00-00-00_{purpose}_{unique}.txt"
         path.write_text("this belongs to a different run's transcript")
         self._seeded_files.append(path)
