@@ -155,13 +155,16 @@ def generate_run_id() -> str:
     """Generate a unique 6-character run ID like 'A1B2C3'.
 
     Draws each of the 6 characters uniformly from A-Z0-9 (36 symbols) via
-    secrets.choice, giving 36**6 ~= 2.18e9 equally-likely ids -- same format
-    (`^[A-Z0-9]{6}$`) as before, just uniform. The prior
-    `secrets.token_urlsafe(4)[:6].upper()` was not: token_urlsafe's base64url
-    alphabet folds 64 symbols onto 38 case-insensitively, and truncating to
-    6 chars from a 4-byte (32-bit) draw left the 6th character able to take
-    only 4 distinct values -- collapsing the last position to ~4 outcomes and
-    the whole id to ~2e8 effective values instead of the nominal 36**6 (#685).
+    secrets.choice, giving 36**6 ~= 2.18e9 equally-likely ids. This narrows
+    the alphabet from the prior generator's: `secrets.token_urlsafe(4)[:6]
+    .upper()` emitted base64url output (which can include `-` and `_`)
+    case-folded onto 38 symbols, and truncating to 6 chars from a 4-byte
+    (32-bit) draw left the 6th character able to take only 4 distinct
+    values -- collapsing the last position to ~4 outcomes and the whole id
+    to ~2e8 effective values instead of the nominal 36**6 (#685). Every
+    existing consumer already accepts the narrower `^[A-Z0-9]{6}$` set --
+    steps.py's `_RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")` is a
+    superset -- so no consumer needed a change.
     """
     return "".join(secrets.choice(_RUN_ID_ALPHABET) for _ in range(6))
 
@@ -187,14 +190,37 @@ def create_run_archive(
 ) -> tuple[str, str, Path, bytes]:
     """Allocate a fresh run id and durably archive `content` under it.
 
-    Exclusive-creates the durable archive (input/{stored_name} and
-    input/manifest.json, via put_file_exclusive) so a run-id collision can
-    never silently overwrite another run's archived input (#685) -- this is
-    what closes the overwrite, not the pod-local write below. On a collision
-    (StorageKeyExists, or FileExistsError from `write_local`) the id is
-    regenerated and the whole attempt retried, up to _RUN_ID_ATTEMPTS times;
-    a colliding attempt's own partial pod-local file is removed before the
-    retry so failed attempts never accumulate on disk.
+    Exclusive-creates the durable archive via put_file_exclusive so a run-id
+    collision can never silently overwrite another run's archived input
+    (#685) -- this is what closes the overwrite, not the pod-local write
+    below. input/manifest.json is written BEFORE input/{stored_name}: the
+    manifest is the collision sentinel, so a colliding id is caught before
+    any CV content byte lands under another run's prefix (verifier finding,
+    round 2) -- writing content first could, on an extension mismatch (this
+    id already archived under a *different* extension), let the new file
+    land in the other run's namespace ahead of the manifest check catching
+    it. On a collision (StorageKeyExists, or FileExistsError from
+    `write_local`) the id is regenerated and the whole attempt retried, up
+    to _RUN_ID_ATTEMPTS times; a colliding attempt's own partial pod-local
+    file is removed before the retry so failed attempts never accumulate on
+    disk.
+
+    If the manifest write succeeds but the *content* write then fails, the
+    manifest is left orphaned under the abandoned id with no run row ever
+    created for it. This is harmless and not cleaned up: (1) if the content
+    write failed with StorageKeyExists, that would require this id's content
+    key to already exist while its manifest.json did not -- a state nothing
+    in this codebase can produce, since create_run_archive is the only
+    writer of any `input/` key (verified by grep) and always writes the
+    manifest first; (2) if it failed with a real storage fault, the request
+    is failing anyway (fatal per #170) and the orphaned manifest carries only
+    this same requesting user's own filename/email, so it is not a
+    cross-user disclosure -- just an unclaimed object nothing ever lists or
+    references. RunStorage has no single-key delete (only whole-run
+    delete_run, which in a genuine collision would risk deleting the OTHER
+    run's real files sharing that id -- unsafe to call here), so proactively
+    deleting it would need a new storage primitive for a branch that cannot
+    currently occur.
 
     Shared by /upload and restart_run so both close the same race the same
     way (runs.py imports this rather than duplicating the retry loop).
@@ -233,8 +259,10 @@ def create_run_archive(
             continue
         manifest = build_manifest(run_id, stored_name)
         try:
-            storage.put_file_exclusive(run_id, f"input/{stored_name}", content)
+            # Manifest first: it is the collision sentinel, so a colliding id
+            # is caught before any CV content byte is written (see docstring).
             storage.put_file_exclusive(run_id, "input/manifest.json", manifest)
+            storage.put_file_exclusive(run_id, f"input/{stored_name}", content)
         except StorageKeyExists:
             # Same run id already has an archive: another request won the
             # race. Discard this attempt's local file and try a fresh id.

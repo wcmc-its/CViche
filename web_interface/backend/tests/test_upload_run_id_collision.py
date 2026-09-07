@@ -91,6 +91,22 @@ def test_upload_regenerates_id_on_real_storage_collision(client, db, seed_simple
 
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
+    # Pre-seed the POD-LOCAL path too, with sentinel bytes distinct from
+    # anything this request writes. Round-2 verifier finding: the pod-local
+    # `open(path, "xb")` exclusive create (separate from the durable-storage
+    # one above) had no test -- flipping it to "wb" killed nothing, because
+    # nothing pre-created a local file for the first attempt to collide
+    # against. With this sentinel present, a real "xb" open raises
+    # FileExistsError on the first ("AAAAAA") attempt and the loop moves on
+    # to "BBBBBB" without touching the sentinel; a "wb" mutant instead
+    # silently overwrites it with this request's own upload bytes (and the
+    # storage collision on "AAAAAA"'s pre-seeded manifest then triggers a
+    # cleanup unlink of that clobbered file) -- either way the sentinel is
+    # gone, which the assertions below catch.
+    local_sentinel_path = upload_dir / "AAAAAA.docx"
+    local_sentinel_bytes = b"PK\x03\x04 pod-local-sentinel-untouched"
+    local_sentinel_path.write_bytes(local_sentinel_bytes)
+
     patches = _bypass_file_validation(upload_dir)
     patches.append(patch("app.api.upload.get_storage", return_value=storage))
     patches.append(patch("app.api.upload.generate_run_id", side_effect=["AAAAAA", "BBBBBB"]))
@@ -112,6 +128,65 @@ def test_upload_regenerates_id_on_real_storage_collision(client, db, seed_simple
     # The whole point: the first user's archive was never touched.
     assert storage.get_file("AAAAAA", "input/AAAAAA.docx") == other_bytes
     assert storage.exists("BBBBBB", "input/BBBBBB.docx")
+
+    # The pod-local sentinel survives byte-for-byte, and was never unlinked
+    # (a "wb" mutant would overwrite it; a stray cleanup call would delete it
+    # -- create_run_archive must do neither to a file it didn't create).
+    assert local_sentinel_path.exists(), "pod-local collision must not delete the other upload's file"
+    assert local_sentinel_path.read_bytes() == local_sentinel_bytes
+
+
+# --- (c2) manifest-first ordering blocks a partial write on an extension
+# mismatch (PROBE3, round-2 verifier finding) ------------------------------
+
+def test_upload_manifest_first_blocks_partial_write_on_extension_mismatch(client, db, seed_simple_mode, tmp_path):
+    """A collision on a run id already archived under a DIFFERENT extension
+    must be caught before any CV byte lands under that id's namespace.
+
+    Pre-seed AAAAAA with a .pdf archive plus its manifest.json -- so this
+    .docx upload's own content key (input/AAAAAA.docx) is NOT already
+    occupied and only the manifest write can detect the collision. Before
+    the round-2 fix, create_run_archive wrote the content key first, so a
+    same-id/different-extension collision would write input/AAAAAA.docx
+    into the other run's namespace before the manifest write ever collided.
+    Writing manifest.json first closes that: the collision is caught there,
+    before the .docx write is attempted at all.
+    """
+    user = _make_user(db, email="probe3@example.com")
+    _auth(client, user)
+
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))
+    other_pdf_bytes = b"%PDF-1.4 someone-elses-pdf-cv"
+    storage.put_file("AAAAAA", "input/AAAAAA.pdf", other_pdf_bytes)
+    storage.put_file("AAAAAA", "input/manifest.json", b'{"run_id": "AAAAAA", "file_type": "pdf"}')
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    patches = _bypass_file_validation(upload_dir)
+    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.api.upload.generate_run_id", side_effect=["AAAAAA", "BBBBBB"]))
+    for p in patches:
+        p.start()
+    try:
+        resp = _post_dummy_upload(client)
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["run_id"] == "BBBBBB"
+
+    # The whole point: the AAAAAA namespace gains NO .docx.
+    assert storage.exists("AAAAAA", "input/AAAAAA.docx") is False
+    assert storage.list_files("AAAAAA", prefix="input/") == [
+        "input/AAAAAA.pdf", "input/manifest.json",
+    ]
+    assert storage.get_file("AAAAAA", "input/AAAAAA.pdf") == other_pdf_bytes
+
+    # The fresh id got the real archive.
+    assert storage.exists("BBBBBB", "input/BBBBBB.docx")
+    assert db.query(Run).filter(Run.id == "BBBBBB").first() is not None
+    assert db.query(Run).filter(Run.id == "AAAAAA").first() is None
 
 
 # --- (d) restart_run regenerates the id on the same real collision ---------
@@ -183,9 +258,9 @@ def test_upload_fails_after_exhausting_run_id_attempts(client, db, seed_simple_m
     assert resp.status_code == 502, resp.text
     assert resp.json()["detail"]["error"] == "storage_unavailable"
     assert db.query(Run).count() == 0
-    # One put_file_exclusive call per attempt (each attempt's first put
-    # collides, so the manifest put is never reached); bounded by the named
-    # retry constant, not unbounded.
+    # One put_file_exclusive call per attempt (each attempt's manifest put
+    # goes first and collides, so the content put is never reached); bounded
+    # by the named retry constant, not unbounded.
     assert storage.put_file_exclusive.call_count == upload_module._RUN_ID_ATTEMPTS
 
 
