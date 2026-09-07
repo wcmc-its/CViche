@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 # certificate against this file instead of trusting any CA. See
 # rds_ca/README.md for source URL, sha256 and fetch date. This directory is
 # NOT web_interface/backend/certs/ -- that one is .gitignore'd (auto-generated
-# SAML SP private keys), and a public CA bundle needs to stay force-tracked.
+# SAML SP private keys); a public CA bundle must not live in the secrets dir.
 RDS_CA_PATH = Path(__file__).resolve().parent.parent / "rds_ca" / "rds-global-bundle.pem"
 
 # [SECURITY] a truthy PyMySQL `ssl` dict with no `ca` key falls back to
