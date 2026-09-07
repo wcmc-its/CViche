@@ -268,8 +268,11 @@ def _is_bullet_paragraph(para: Paragraph) -> bool:
 TEMPLATE_PATH = Path(__file__).parent.parent.parent / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_6_wcm_documents"
 # Local-dev only: where sample source CVs live, for the generate() fallback that
-# locates an original docx when the caller didn't pass one. Absent in the
-# deployed image (the server always passes original_doc_path explicitly).
+# locates an original docx when the caller didn't pass one. No production driver
+# passes original_doc_path -- the only callers that do are
+# scripts/render_gate.py --source-dir and stage 6's own tests -- so on a live
+# run this auto-discovery is the fallback's only feed, and it finds nothing in
+# the deployed image, where this directory is absent.
 SAMPLE_CV_DIR = Path(__file__).parent.parent.parent / "data" / "sample_cvs" / "word"
 
 # Fallback template paths
@@ -705,9 +708,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if primary:
                 print(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
-        # Try to find original document if not provided. Local-dev fallback
-        # only -- the server always passes original_doc_path, and SAMPLE_CV_DIR
-        # doesn't exist in the deployed image. Anchored on the module-relative
+        # Try to find original document if not provided -- which every live run
+        # is: only render_gate.py --source-dir and stage 6's tests pass one, and
+        # SAMPLE_CV_DIR is absent in the deployed image. Anchored on the module-relative
         # SAMPLE_CV_DIR constant plus the process CWD, instead of a stack of
         # brittle '..'/.parent chains that broke silently on any restructure.
         if not original_doc_path:
@@ -2918,7 +2921,8 @@ Now analyze the text above:"""
 def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
                emit_track_changes: bool = True, emit_comments: bool = False,
                strip_template_instructions: bool = True,
-               recover_unrendered_records: bool = True) -> str:
+               recover_unrendered_records: bool = True,
+               original_doc_path: str = None) -> str:
     """
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
@@ -2947,6 +2951,13 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
         recover_unrendered_records: Re-emit record lines of fused multi-record
             entries that the structured render provably dropped (#221;
             default True).
+        original_doc_path: Optional path to the original Word document, for the
+            personal-data fallback that recovers contact fields from it (#550).
+            Neither driver passes one today, so a live run keeps taking the
+            SAMPLE_CV_DIR auto-discovery branch in generate() and renders
+            exactly as before; scripts/render_gate.py --source-dir is what
+            supplies it, and it does so through here rather than constructing
+            its own generator, so the gate measures the production entry point.
 
     Returns:
         Path to generated document
@@ -2958,7 +2969,7 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
         strip_template_instructions=strip_template_instructions,
         recover_unrendered_records=recover_unrendered_records,
     )
-    return generator.generate(input_path, output_path)
+    return generator.generate(input_path, output_path, original_doc_path=original_doc_path)
 
 
 def main():
