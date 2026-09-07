@@ -66,8 +66,9 @@ def test_redis_partial_replay_rejected():
     assert cache.check_and_record(["id-1", "id-2"], 60) is False
 
 
-def test_fails_closed_by_default_when_redis_errors(caplog):
+def test_fails_closed_by_default_when_redis_errors(monkeypatch, caplog):
     """Default posture (no opt-out configured): reject, don't open."""
+    monkeypatch.delenv("CVICHE_SAML_REPLAY_FAIL_CLOSED", raising=False)
     cache = SamlReplayCache("redis://fake")
     client = MagicMock()
     client.set.side_effect = ConnectionError("valkey down")
@@ -298,11 +299,12 @@ class TestAcsReplayGate:
 
     @patch("app.api.saml_routes.get_saml_client")
     def test_stub_without_ids_fails_closed_by_default(
-        self, mock_get_client, client, db, seed_saml_mode, replay_cache
+        self, mock_get_client, client, db, seed_saml_mode, replay_cache, monkeypatch
     ):
         """Responses carrying no extractable assertion ID cannot have replay
         verified, so the default (fail closed, CVICHE_SAML_REPLAY_FAIL_CLOSED
         unset) rejects the login rather than skipping the gate."""
+        monkeypatch.delenv("CVICHE_SAML_REPLAY_FAIL_CLOSED", raising=False)
         mock_response = MagicMock()
         mock_response.get_identity.return_value = _IDENTITY
         mock_get_client.return_value = _mock_client(mock_response)
@@ -331,6 +333,7 @@ class TestAcsReplayGate:
     ):
         """Flag unset (default) + Valkey unreachable -> fail closed, reject
         the login rather than let it through."""
+        monkeypatch.delenv("CVICHE_SAML_REPLAY_FAIL_CLOSED", raising=False)
         cache = SamlReplayCache("redis://fake")
         broken_client = MagicMock()
         broken_client.set.side_effect = ConnectionError("valkey down")

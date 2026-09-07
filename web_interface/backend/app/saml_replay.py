@@ -132,7 +132,8 @@ class SamlReplayCache:
                 if self._client is None:
                     import redis
                     # Bound socket ops so a hung/black-holed Valkey raises
-                    # (and then fails open) instead of blocking the login.
+                    # (and then fails CLOSED by default; see replay_fail_closed())
+                    # instead of blocking the login.
                     self._client = redis.Redis.from_url(
                         self.url, socket_timeout=2, socket_connect_timeout=2
                     )
@@ -142,8 +143,10 @@ class SamlReplayCache:
         """Record the IDs; return True iff none of them was seen before.
 
         Returns False ONLY on a genuine replay (an ID already recorded within
-        its TTL). Errors reaching Valkey fail open with a loud log -- a Valkey
-        outage must not lock every SAML user out.
+        its TTL), or when Valkey is unreachable and ``replay_fail_closed()``
+        is True (the default): a loud log, then the login is rejected.
+        ``CVICHE_SAML_REPLAY_FAIL_CLOSED`` opts out (local dev only) to fail
+        open with a loud log instead of locking every SAML user out.
         """
         if not ids:
             return True
