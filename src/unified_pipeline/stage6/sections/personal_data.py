@@ -26,23 +26,27 @@ almost nothing about a CV's contact block is structured. The work is in order:
 This is the only section writer that reads the source document directly, which
 is why `Document` and `Path` are imported here and nowhere else in this package.
 
-Step 3 does not run on a live CV today, and the code around it says otherwise.
-`stage_6_word_template.py:272` and `:709` both assert "the server always
-passes original_doc_path"; neither is true on this ref. `run_stage6()` takes
-no `original_doc_path` parameter at all and calls
-`generator.generate(input_path, output_path)`
-(`stage_6_word_template.py:2918-2961`), and both pipeline drivers go through
-it -- `run_full_pipeline.py:994` and
-`web_interface/backend/app/pipeline/orchestrator.py:1370-1377`. The only
-callers that pass `original_doc_path` anywhere in the repo are
-`scripts/render_gate.py --source-dir` and this package's own tests, and
-`SAMPLE_CV_DIR` auto-discovery (`stage_6_word_template.py:709-718`) resolves
-for no farm uid in a fresh worktree. So of the two scans that can fill an
-empty `work_email` slot, only one is live: the
-all-entries JSON scan, which needs no source document. Step 3's table and
-paragraph scans are measurable by the render gate and unreachable in
-production until `run_stage6` forwards the path -- which is
-`stage_6_word_template.py`'s change, not this module's.
+Step 3 still does not run on a live CV, but the reason has moved, so read this
+paragraph rather than remembering it. `run_stage6()` now DOES take an
+`original_doc_path` parameter and forwards it
+(`stage_6_word_template.py:2921-2972`); what no longer happens is any driver
+passing one -- `run_full_pipeline.py:994` and
+`web_interface/backend/app/pipeline/orchestrator.py:1370-1377` both call
+`run_stage6` without it. So the callers that supply a source document anywhere
+in the repo are `scripts/render_gate.py --source-dir` and this package's own
+tests, and the `SAMPLE_CV_DIR` auto-discovery those drivers fall through to
+(`stage_6_word_template.py:711-727`) resolves for no farm uid in a fresh
+worktree and finds an empty directory in the deployed image. Of the two scans
+that can fill an empty `work_email` slot, only the all-entries JSON scan is
+live, because it needs no source document. Step 3's table and paragraph scans
+are measurable by the render gate and unreachable in production until a driver
+supplies the path.
+
+Three copies of the previous version of this paragraph asserted "the server
+always passes original_doc_path". All three were false, and #550 was
+originally diagnosed off them. If this one goes stale again, the two others
+are `stage_6_word_template.py`'s SAMPLE_CV_DIR constant and its `generate()`
+fallback.
 
 5. There is no step 5 any more, and that is the point. Steps 2, the
    all-entries email scan and 3 all store into the SAME three slot names --
@@ -97,23 +101,42 @@ _UNREADABLE_SOURCE_ERRORS = (PackageNotFoundError, KeyError, XMLSyntaxError, OSE
 # number beside it was assigned, so the entry rendered half its numbers. Named
 # once because both searches have to agree on it.
 #
+# The two boundary assertions are the point, not decoration. Without them the
+# groups still have to be 2-4 digits each, so "+91 98765 43210" -- the standard
+# Indian mobile grouping, one of the shapes this widening was asked for -- fails
+# at the "+91 " start, re.search slides forward, and the pattern matches
+# "91 9876" out of the middle of it. That renders a truncated number into the
+# Cell phone row, which is strictly worse than the US-only pattern it replaced:
+# that one matched nothing here and left the row blank. Same shape drops the
+# leading digit of "1-800-555-0199".
+#
 # Ceiling: this matches a digit-group shape, not a dialling plan, so a year
 # range or a long identifier standing between a Cell/Office label and its
-# number could be captured instead. The two searches bound that by scanning
-# lazily from the label and never crossing a ';' or a newline.
+# number could be captured instead -- reachable now in a way the US-only
+# pattern was not, and bounded only by the two searches scanning lazily from
+# their own label and never crossing a ';' or a newline. One A-entry in the
+# 66-CV corpus reaches this branch at all, and it carries two plain US numbers,
+# so the corpus cannot exercise either the widening or its ceiling (6.5).
 _PHONE_NUMBER_PATTERN = (
-    r'(?:\+\d{6,15}'                                  # +442079460958
-    r'|(?:\+\d{1,3}[-.\s]?)?(?:\(\d{1,4}\)|\d{2,4})'  # +44 20 / (212) / 212
-    r'(?:[-.\s]\d{2,4}){1,4})'                        # ... 7946 0958
+    r'(?<![\d-])'                                      # never start mid-number
+    r'(?:\+\d{6,15}'                                   # +442079460958
+    r'|(?:\+?\d{1,3}[-.\s])?(?:\(\d{1,4}\)|\d{2,5})'  # +44 20 / 1-800 / (212)
+    r'(?:[-.\s]\d{2,7}){1,4})'                         # ... 7946 0958 / 900123
+    r'(?!\d)'                                          # never stop mid-number
 )
 
 
 # The four contact fields a source-table label cell can name.
 # `_recover_contact_fields_from_docx` routes on these instead of on
-# `'business' in label` and `'name' in label`: 'business' read "Business
-# phone:" and "Business email:" as an address (and, because the address branch
-# ran first, the phone and email branches below it never saw either row), and
-# 'name' read "Username:" and "Department name:" as the person's name.
+# `'business' in label` and `'name' in label'`. Two defects, measured against
+# the pre-change code rather than assumed: 'business' ALSO read "Business
+# phone:" and "Business email:" as an address -- the four extraction blocks
+# were independent `if`s, not an `elif` chain, so the phone and email branches
+# did still fill their own slots, and the damage was office_address taking a
+# copy of the phone number or the email address on top. 'name' read
+# "Username:" and "Department name:" as the person's name. Routing on one
+# classifier makes the four branches mutually exclusive, which is what stops
+# the address branch taking a second copy.
 _FIELD_NAME = 'name'
 _FIELD_OFFICE_ADDRESS = 'office_address'
 _FIELD_OFFICE_PHONE = 'office_phone'
@@ -141,8 +164,18 @@ def _classify_contact_label(label: str) -> str | None:
     Reads only the part before the first colon, so a cell that carries its own
     value ("Address: 5117 Centre Avenue / Phone: 412-623-7764" in one cell) is
     classified by its label and not by what is embedded in the value. Email is
-    the one kind that does not require a colon at all -- a bare "E-mail" header
-    cell was accepted before this classifier existed and that is kept.
+    the one kind that does not require a colon at all, so a bare "E-mail"
+    header cell classifies.
+
+    Matching 'e-mail' as well as 'email' is NEW behaviour, not a preserved
+    one: the test this replaces was `'email' in label`, which cannot match
+    through the hyphen, so "E-mail:" and "E-Mail Address:" were read as an
+    address (the address branch accepted them on 'address', or on nothing) and
+    the email branch never saw them. It is also this change's only
+    corpus-visible effect -- the 66-CV render A/B reports exactly one changed
+    document, NSUJZG_2027_Eil_Robert gaining eil@ohsu.edu from its
+    "E-Mail Address: | eil@ohsu.edu" row, which is the half of #730 this
+    closes.
     """
     text = ' '.join(label.strip().lower().split())
     head = text.split(':', 1)[0].strip()

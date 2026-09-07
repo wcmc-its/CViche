@@ -271,8 +271,10 @@ OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_6_wcm_documents"
 # locates an original docx when the caller didn't pass one. No production driver
 # passes original_doc_path -- the only callers that do are
 # scripts/render_gate.py --source-dir and stage 6's own tests -- so on a live
-# run this auto-discovery is the fallback's only feed, and it finds nothing in
-# the deployed image, where this directory is absent.
+# run this auto-discovery is the fallback's only feed, and it finds nothing.
+# The directory itself DOES exist in the deployed image (the backend
+# Dockerfile mkdir -p's and chowns it); what is missing is its contents, which
+# no COPY brings in and .dockerignore excludes from the build context.
 SAMPLE_CV_DIR = Path(__file__).parent.parent.parent / "data" / "sample_cvs" / "word"
 
 # Fallback template paths
@@ -710,7 +712,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         # Try to find original document if not provided -- which every live run
         # is: only render_gate.py --source-dir and stage 6's tests pass one, and
-        # SAMPLE_CV_DIR is absent in the deployed image. Anchored on the module-relative
+        # SAMPLE_CV_DIR is an empty directory in the deployed image (see the
+        # constant). Anchored on the module-relative
         # SAMPLE_CV_DIR constant plus the process CWD, instead of a stack of
         # brittle '..'/.parent chains that broke silently on any restructure.
         if not original_doc_path:

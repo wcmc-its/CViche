@@ -60,7 +60,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.sections import personal_data as personal_data_module  # noqa: E402
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
+from unified_pipeline.stage_6_word_template import WCMTemplateGenerator, run_stage6  # noqa: E402
 
 W_T = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
 
@@ -688,3 +688,58 @@ def test_pii_fragment_values_never_reach_the_rendered_personal_data_table(tmp_pa
     assert rows.get("office address:", "") == ""
     assert rows.get("work email:", "") == ""
     assert rows.get("personal email:", "") == ""
+
+
+def test_run_stage6_forwards_original_doc_path_to_the_fallback(tmp_path):
+    """The one line that makes --source-dir do anything, driven end to end.
+
+    Every other test here calls ``WCMTemplateGenerator.generate`` directly and
+    scripts/test_render_gate_integration.py stubs stage 6 out, so between them
+    nothing exercised ``run_stage6``'s own forwarding: deleting the
+    ``original_doc_path=`` argument from its ``generate`` call left the whole
+    suite green while making --source-dir inert again, which is the exact
+    state #550 exists to fix. This drives the real ``run_stage6``.
+    """
+    source = tmp_path / "source.docx"
+    _make_source_docx(source)
+    payload = {"document_uid": "TESTPDWB", "entries": [_a("Personal Data")]}
+    ip = tmp_path / "in.json"
+    ip.write_text(json.dumps(payload))
+
+    without = tmp_path / "without.docx"
+    run_stage6(input_path=str(ip), output_path=str(without), verbose=False)
+    assert _personal_data_row_values(without)["work email:"] == "", (
+        "no source document was supplied, so the fallback has nothing to recover")
+
+    with_source = tmp_path / "with.docx"
+    run_stage6(input_path=str(ip), output_path=str(with_source), verbose=False,
+               original_doc_path=str(source))
+    rows = _personal_data_row_values(with_source)
+    assert rows["work email:"] == "plo4@pitt.edu"
+    assert rows["office telephone:"] == "412-623-7764"
+    assert "5117 Centre Avenue" in rows["office address:"]
+
+
+@pytest.mark.parametrize("raw, text, expected_cell, expected_office", [
+    # The Indian mobile grouping is 5+5. A pattern whose groups cap at 4
+    # digits fails at the "+91 " start, slides forward, and matches "91 9876"
+    # out of the middle -- a truncated number rendered as the person's phone.
+    ("+91 98765 43210; +91 22 6666 7777",
+     "Cell phone: +91 98765 43210; Office phone: +91 22 6666 7777",
+     "+91 98765 43210", "+91 22 6666 7777"),
+    ("+91-98765-43210; +91-22-6666-7777",
+     "Mobile: +91-98765-43210; Work: +91-22-6666-7777",
+     "+91-98765-43210", "+91-22-6666-7777"),
+    # Same failure without a '+': the leading country digit is dropped.
+    ("1-800-555-0199; (212) 555-9999",
+     "Mobile: 1-800-555-0199; Work: (212) 555-9999",
+     "1-800-555-0199", "(212) 555-9999"),
+    ("+44 7700 900123; +44 20 7946 0958",
+     "Cell: +44 7700 900123; Office: +44 20 7946 0958",
+     "+44 7700 900123", "+44 20 7946 0958"),
+])
+def test_split_phone_entry_never_renders_a_truncated_number(
+        tmp_path, raw, text, expected_cell, expected_office):
+    rows, _ = _render(tmp_path, [_a(text, {"phone": raw})])
+    assert rows["cell phone:"] == expected_cell
+    assert rows["office telephone:"] == expected_office

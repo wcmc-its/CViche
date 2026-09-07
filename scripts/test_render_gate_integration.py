@@ -47,6 +47,7 @@ import unified_pipeline.run_doctor  # noqa: F401,E402
 import render_gate as rg  # noqa: E402
 
 from docx import Document  # noqa: E402
+from docx.oxml.ns import qn  # noqa: E402
 
 _STAGE6_MODULE = "unified_pipeline.stage_6_word_template"
 
@@ -293,6 +294,64 @@ def test_one_uid_failing_does_not_stop_the_others():
         assert "rendered=2 failed=1" in output
 
 
+def test_a_uid_whose_output_validation_raises_does_not_kill_the_run():
+    """Isolation has to cover the post-render checks, not just the render.
+
+    test_one_uid_failing_does_not_stop_the_others only reaches a failure
+    raised by run_stage6 itself, which is inside the per-uid try by
+    construction. The checks that run AFTER a render read a document this arm
+    just wrote and can raise on a shape no fixture anticipated; if that raise
+    escapes the per-uid handler it aborts the whole gate at whichever uid hit
+    it and the index is never written, so every later uid is lost and one bad
+    CV reads as a crashed run. The validator is replaced here rather than fed
+    a shape that happens to raise today, because the guarantee under test is
+    the exception scope, not any particular malformed document.
+    """
+    real_validate = rg._validate_rendered_docx
+
+    def _raises_for_u2(path):
+        if "u2" in Path(path).name:
+            raise IndexError("tuple index out of range")
+        return real_validate(path)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        arm, out = _make_arm(root, ["u1", "u2", "u3"]), root / "out"
+        rg._validate_rendered_docx = _raises_for_u2
+        try:
+            with _stage6(_make_stub(_renders_a_good_docx)):
+                code, output = _run_main([str(arm), str(out)])
+        finally:
+            rg._validate_rendered_docx = real_validate
+
+        assert code == 1, "a uid whose validation raises must fail the gate"
+        index = _index(out)  # must survive a mid-run validation failure
+        assert set(index) == {"u1", "u2", "u3"}, "u3 must still be attempted"
+        assert "error" not in index["u1"] and "error" not in index["u3"]
+        assert index["u2"]["error"].startswith("IndexError")
+        assert "rendered=2 failed=1" in output
+
+
+def test_a_table_row_with_no_cells_is_tolerated_not_a_validation_failure():
+    # A <w:tr> carrying no <w:tc> is legal WordprocessingML. Indexing cells[0]
+    # on one raises, so the validator skips such rows rather than reporting a
+    # document that is actually fine as broken.
+    def _u1_gets_a_cellless_row(stub, input_path, output_path, original_doc_path):
+        _renders_a_good_docx(stub, input_path, output_path, original_doc_path)
+        doc = Document(str(output_path))
+        table = doc.tables[0]
+        table._tbl.append(table._tbl.makeelement(qn("w:tr"), {}))
+        doc.save(str(output_path))
+
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        arm, out = _make_arm(root, ["u1"]), root / "out"
+        with _stage6(_make_stub(_u1_gets_a_cellless_row)):
+            code, output = _run_main([str(arm), str(out)])
+        assert code == 0, output
+        assert "error" not in _index(out)["u1"]
+
+
 def test_an_unsafe_out_directory_is_rejected_before_anything_is_deleted():
     # The destructive half of this script is one shutil.rmtree; the check that
     # protects it has to run at argument-parse time, or it runs too late. The
@@ -374,6 +433,8 @@ if __name__ == "__main__":
     test_the_resolved_source_docx_is_forwarded_as_original_doc_path()
     test_a_uid_with_no_source_docx_still_renders_and_says_so()
     test_one_uid_failing_does_not_stop_the_others()
+    test_a_uid_whose_output_validation_raises_does_not_kill_the_run()
+    test_a_table_row_with_no_cells_is_tolerated_not_a_validation_failure()
     test_an_unsafe_out_directory_is_rejected_before_anything_is_deleted()
     test_the_llm_is_disabled_during_the_render()
     test_the_llm_is_restored_after_main_returns()

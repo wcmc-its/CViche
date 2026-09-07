@@ -262,7 +262,11 @@ def _validate_rendered_docx(path: Path) -> str | None:
     table = _find_personal_data_table(doc)
     if table is None:
         return f"no PERSONAL DATA table -- no cell contains {PERSONAL_DATA_ANCHOR!r}"
-    first_cells = [row.cells[0].text.strip().lower() for row in table.rows]
+    # `row.cells` can be empty -- a table row carrying no <w:tc> is legal
+    # WordprocessingML, and indexing [0] on one raises rather than reporting
+    # a validation failure.
+    first_cells = [row.cells[0].text.strip().lower()
+                   for row in table.rows if row.cells]
     missing = [label for label in PERSONAL_DATA_LABELS
                if not any(label in cell for cell in first_cells)]
     if missing:
@@ -308,26 +312,37 @@ def _render_uid(s6, src: Path, dest: Path, source_path) -> dict:
     succeeded -- because scoring any of the first three as a render is how a
     gate ends up comparing files that prove nothing (CODING_STANDARDS 5.5).
     """
+    # One try around the render AND the checks on what it produced. The checks
+    # read a document this arm just wrote and can raise on a shape no fixture
+    # anticipated; outside the try that would abort the whole gate run at
+    # whichever uid hit it, losing every later uid and the index with them --
+    # which is the reused-dir failure of defect 1 wearing a different hat. A
+    # uid is allowed to fail. A run is not allowed to disappear.
     try:
         s6.run_stage6(input_path=str(src), output_path=str(dest), verbose=False,
                       original_doc_path=str(source_path) if source_path else None)
+        # A renderer that returns without raising and without writing the
+        # output file is not a successful render -- "no exception" is not
+        # "rendered" (review on #589, same fail-closed guarantee this
+        # module's docstring claims for defect 1).
+        if not dest.is_file():
+            return {"error": "render returned without writing an output file"}
+        invalid = _validate_rendered_docx(dest)
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}",
                 "tb": traceback.format_exc()[-800:]}
-    # A renderer that returns without raising and without writing the
-    # output file is not a successful render -- "no exception" is not
-    # "rendered" (review on #589, same fail-closed guarantee this
-    # module's docstring claims for defect 1).
-    if not dest.is_file():
-        return {"error": "render returned without writing an output file"}
-    invalid = _validate_rendered_docx(dest)
     if invalid:
         return {"error": invalid}
     return {"input": src.name}
 
 
 def _render_all(s6, arm_outputs: Path, out: Path, source_dir, uids) -> dict:
-    """Render every uid in order, one progress line each, into the index dict."""
+    """Render every uid in order into the index dict.
+
+    A uid with no resolvable input artifact is recorded and skipped without a
+    progress line, which is how this loop has always behaved -- the summary
+    and the index still report it.
+    """
     results = {}
     with _llm_disabled(s6):
         for i, uid in enumerate(uids, 1):
@@ -358,6 +373,12 @@ def main(argv=None):
     args = _parse_args(argv)
     arm_outputs, out, source_dir = args.arm_outputs, args.out, args.source_dir
 
+    # Read the uid list BEFORE the rmtree below, not after. _validate_output_dir
+    # guards `out` against arm_outputs and --source-dir, but a --uids-file can
+    # name any path, including one under `out`; reading it second deletes the
+    # caller's list and then fails on it.
+    only = _uid_filter(args.uids, args.uids_file)
+
     # Fresh directory every run -- see defect 1 above. _parse_args has already
     # refused an `out` that is, sits inside, or contains an input tree, so this
     # can only reach the scratch directory the caller named for it.
@@ -366,7 +387,7 @@ def main(argv=None):
 
     import unified_pipeline.stage_6_word_template as s6
 
-    uids = _discover_uids(arm_outputs, _uid_filter(args.uids, args.uids_file))
+    uids = _discover_uids(arm_outputs, only)
     if not uids:
         print("no uids to render -- empty arm, or uid filter matched nothing", file=sys.stderr)
         return 1
