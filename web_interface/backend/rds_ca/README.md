@@ -1,0 +1,6 @@
+# RDS CA bundle
+
+Source: https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+sha256: e5bb2084ccf45087bda1c9bffdea0eb15ee67f0b91646106e466714f9de3c7e3
+Fetched: 2026-09-05
+Re-fetch when AWS rotates RDS CAs.
