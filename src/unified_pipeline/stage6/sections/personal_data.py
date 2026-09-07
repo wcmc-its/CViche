@@ -17,7 +17,9 @@ almost nothing about a CV's contact block is structured. The work is in order:
    `_recover_contact_fields_from_docx`. Contact data frequently lives in a
    source table ("NAME: | Patricia Opresko") that entry extraction never
    turned into entries, and business-address cells embed Phone/Fax/E-mail
-   lines that have to be pulled back out line by line.
+   lines that have to be pulled back out line by line. A record that already
+   has all four -- a complete name and all three contact values -- never
+   opens the document at all.
 4. Fill the template's PERSONAL DATA table, located by its "Work email:" cell
    rather than by index.
 
@@ -35,25 +37,24 @@ it -- `run_full_pipeline.py:994` and
 callers that pass `original_doc_path` anywhere in the repo are
 `scripts/render_gate.py --source-dir` and this package's own tests, and
 `SAMPLE_CV_DIR` auto-discovery (`stage_6_word_template.py:709-718`) resolves
-for no farm uid in a fresh worktree. So of the two feeds into the recovered
-`email` that step 5 below writes back (#550), only one is live: the
+for no farm uid in a fresh worktree. So of the two scans that can fill an
+empty `work_email` slot, only one is live: the
 all-entries JSON scan, which needs no source document. Step 3's table and
 paragraph scans are measurable by the render gate and unreachable in
 production until `run_stage6` forwards the path -- which is
 `stage_6_word_template.py`'s change, not this module's.
 
-5. Write the recovered values back into the slots step 4 reads. Steps 2 and 3
-   store into two different sets of names -- `work_email`/`office_phone`/
-   `office_address` for the entry classifier, the legacy `email`/`phone`/
-   `address` for the recovery -- and before #550 nothing bridged them, so
-   every value step 3 recovered was computed and discarded. `x = x or
-   recovered` fills an empty slot only. The operand order there is
-   unobservable rather than merely untested: `email`/`phone`/`address` are
-   initialised FROM the three slots and only ever reassigned under an
-   `if not <name>` guard, so a recovered value and an extracted one can never
-   both be present at the write-back. What a test can pin is that invariant
-   holding, which is what the negative control in
-   `tests/test_stage6_personal_data_fallback_writeback.py` does.
+5. There is no step 5 any more, and that is the point. Steps 2, the
+   all-entries email scan and 3 all store into the SAME three slot names --
+   `work_email`/`office_phone`/`office_address`, the ones step 4 reads.
+   Before #550 the recovery stored into a second `email`/`phone`/`address`
+   set that nothing bridged, so every value it recovered was computed and
+   discarded; #550 bridged the two with three `x = x or recovered` lines, and
+   the review that followed removed the second set of names rather than keep
+   the bridge. Each recovery is guarded by `if not <slot>`, so a value
+   already classified from the A entries is never overwritten by a weaker
+   later read -- which is the invariant the negative control in
+   `tests/test_stage6_personal_data_fallback_writeback.py` pins.
 """
 import logging
 import re
@@ -63,6 +64,8 @@ from typing import Dict, List, NamedTuple
 
 try:
     from docx import Document
+    from docx.opc.exceptions import PackageNotFoundError
+    from lxml.etree import XMLSyntaxError
 except ImportError as exc:
     raise ImportError(
         "python-docx is required for stage 6. Install with: pip install python-docx lxml"
@@ -75,18 +78,101 @@ from ..parsing import _extract_name_from_uid
 logger = logging.getLogger(__name__)
 
 
+# What opening a source path can raise when it is not a readable .docx.
+# Determined by feeding `Document()` each shape rather than guessed: a missing
+# file, an empty file, a text file renamed .docx and a truncated zip all raise
+# PackageNotFoundError; a valid zip that is not an OPC package raises KeyError
+# on '[Content_Types].xml'; a package whose document.xml is malformed raises
+# lxml's XMLSyntaxError; a directory named .docx raises FileNotFoundError.
+# Every one of them comes out of the OPEN -- none out of the scan that follows
+# it -- so only the open is guarded and a programming error in the scan fails
+# the run instead of being counted as a source-document problem.
+_UNREADABLE_SOURCE_ERRORS = (PackageNotFoundError, KeyError, XMLSyntaxError, OSError)
+
+
+# One phone number, in the shapes a CV actually carries. The two searches in
+# `_fill_personal_data` each inlined `(\(\d{3}\)\s*\d{3}[-.\s]?\d{4})`, which
+# recognises exactly one US form: a "+44 20 7946 0958" labelled Cell in an
+# entry that also carries an Office number went unassigned while the Office
+# number beside it was assigned, so the entry rendered half its numbers. Named
+# once because both searches have to agree on it.
+#
+# Ceiling: this matches a digit-group shape, not a dialling plan, so a year
+# range or a long identifier standing between a Cell/Office label and its
+# number could be captured instead. The two searches bound that by scanning
+# lazily from the label and never crossing a ';' or a newline.
+_PHONE_NUMBER_PATTERN = (
+    r'(?:\+\d{6,15}'                                  # +442079460958
+    r'|(?:\+\d{1,3}[-.\s]?)?(?:\(\d{1,4}\)|\d{2,4})'  # +44 20 / (212) / 212
+    r'(?:[-.\s]\d{2,4}){1,4})'                        # ... 7946 0958
+)
+
+
+# The four contact fields a source-table label cell can name.
+# `_recover_contact_fields_from_docx` routes on these instead of on
+# `'business' in label` and `'name' in label`: 'business' read "Business
+# phone:" and "Business email:" as an address (and, because the address branch
+# ran first, the phone and email branches below it never saw either row), and
+# 'name' read "Username:" and "Department name:" as the person's name.
+_FIELD_NAME = 'name'
+_FIELD_OFFICE_ADDRESS = 'office_address'
+_FIELD_OFFICE_PHONE = 'office_phone'
+_FIELD_WORK_EMAIL = 'work_email'
+
+_EMAIL_LABEL_WORDS = ('e-mail', 'email')
+_PHONE_LABEL_WORDS = ('phone', 'telephone')
+# 'business' stays an address word: a bare "BUSINESS:" cell holding the whole
+# business-address block is a real corpus shape. It is reached only after the
+# email and phone words have been ruled out, which is what makes it safe.
+_ADDRESS_LABEL_WORDS = ('address', 'business')
+
+# An allowlist, not a word match, because "name" ends far more metadata labels
+# than person labels. Widening it is a one-line edit when a corpus CV carries
+# a person label this misses; the substring test it replaces could not be
+# narrowed at all.
+_PERSON_NAME_LABELS = frozenset({
+    'name', 'full name', 'legal name', 'candidate name', 'applicant name',
+})
+
+
+def _classify_contact_label(label: str) -> str | None:
+    """Which contact field a source-table label cell names, or None.
+
+    Reads only the part before the first colon, so a cell that carries its own
+    value ("Address: 5117 Centre Avenue / Phone: 412-623-7764" in one cell) is
+    classified by its label and not by what is embedded in the value. Email is
+    the one kind that does not require a colon at all -- a bare "E-mail" header
+    cell was accepted before this classifier existed and that is kept.
+    """
+    text = ' '.join(label.strip().lower().split())
+    head = text.split(':', 1)[0].strip()
+    if any(word in head for word in _EMAIL_LABEL_WORDS):
+        return _FIELD_WORK_EMAIL
+    if ':' not in text:
+        return None
+    if any(word in head for word in _PHONE_LABEL_WORDS):
+        return _FIELD_OFFICE_PHONE
+    if any(word in head for word in _ADDRESS_LABEL_WORDS):
+        return _FIELD_OFFICE_ADDRESS
+    if head in _PERSON_NAME_LABELS:
+        return _FIELD_NAME
+    return None
+
+
 class _RecoveredContact(NamedTuple):
     """What `_recover_contact_fields_from_docx` found, or was given (#550).
 
     Five values in one return rather than five positional results a caller
     can silently transpose; `name_is_complete` rides along because the name
-    recovery and the contact recovery read the same table rows.
+    recovery and the contact recovery read the same table rows. The three
+    contact fields carry the template's own slot names, so the recovery and
+    the entry classifier name the same concept the same way.
     """
     name: str | None
     name_is_complete: bool
-    email: str | None
-    phone: str | None
-    address: str | None
+    work_email: str | None
+    office_phone: str | None
+    office_address: str | None
 
 
 class PersonalDataSection:
@@ -198,12 +284,18 @@ class PersonalDataSection:
                     cell_phone = cell_phone or _phone_cell_text(extracted_phone, 'cell')
                     office_phone = office_phone or _phone_cell_text(extracted_phone, 'office')
                 elif has_mobile and has_work and ';' in str(extracted_phone):
-                    # Both types in same entry — try to split them
-                    # Parse from original text to get correct assignment
-                    phones = [p.strip() for p in str(extracted_phone).split(';')]
-                    # Find phone numbers in order they appear in text
-                    mobile_match = re.search(r'(?:cell|mobile)[^(]*(\(\d{3}\)\s*\d{3}[-.\s]?\d{4})', text, re.IGNORECASE)
-                    work_match = re.search(r'(?:work|office)[^(]*(\(\d{3}\)\s*\d{3}[-.\s]?\d{4})', text, re.IGNORECASE)
+                    # Both types in the same entry -- only the original text
+                    # says which number carries which label. Each scan runs
+                    # lazily from its own label and never crosses a ';' or a
+                    # newline, so it takes the first number AFTER that label;
+                    # what it replaced could not cross a '(' instead, which
+                    # worked only because its one shape started with one.
+                    mobile_match = re.search(
+                        rf'(?:cell|mobile)[^;\n]*?({_PHONE_NUMBER_PATTERN})',
+                        text, re.IGNORECASE)
+                    work_match = re.search(
+                        rf'(?:work|office)[^;\n]*?({_PHONE_NUMBER_PATTERN})',
+                        text, re.IGNORECASE)
                     if mobile_match and not cell_phone:
                         cell_phone = mobile_match.group(1)
                     if work_match and not office_phone:
@@ -276,72 +368,66 @@ class PersonalDataSection:
         # which "did this content reach the document?" can actually be asked.
         self._unconsumed_personal_data = unconsumed
 
-        # Legacy variable names for compatibility with rest of function
-        email = work_email
-        phone = office_phone
-        address = office_address
+        # The duplicate-email guard below applies only to a value one of the
+        # two scans produced, and with every path writing the same slot this
+        # is the only thing left that tells them apart.
+        work_email_from_entries = bool(work_email)
 
         # If still no email, search all entries for email patterns.
         #
-        # Found while fixing #550: this loop's result feeds the same `email`
-        # local the write-back below now actually uses, and it applied no PII
-        # filter -- unlike the per-entry classification loop above (:126-132),
-        # which blocks exactly this shape. Before the write-back existed, a
-        # match here was discarded like everything else the fallback found, so
+        # Found while fixing #550: this loop feeds the same `work_email` slot
+        # the table fill reads and applied no PII filter, unlike the per-entry
+        # loop above (:126-132) which blocks exactly this shape. Before #550
+        # the value was discarded like everything else the fallback found, so
         # the gap was latent; test_email_regex_fallback_does_not_harvest_from_a_pii_fragment
-        # already pins the no-leak behaviour for the per-entry path and caught
-        # this one live the moment the write-back started reading `email`.
-        if not email and all_entries:
+        # already pins that path and caught this one the moment it went live.
+        if not work_email and all_entries:
             for entry in all_entries:
                 text = entry.get('text', '')
                 entry_pii_fragments = _pii_fragments(text)
                 # Look for email pattern
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', text)
                 if email_match and not _from_pii_fragment(email_match.group(0), entry_pii_fragments):
-                    email = email_match.group(0)
+                    work_email = email_match.group(0)
                     break
 
                 # Also check extracted fields
                 fields = entry.get('extracted_fields', {}) or {}
                 candidate = fields.get('email') or fields.get('primary_email')
                 if candidate and not _from_pii_fragment(candidate, entry_pii_fragments):
-                    email = candidate
+                    work_email = candidate
                     break
 
         # Fallback: read personal data from original Word document.
         # This handles cases where personal data is in tables
-        # (e.g., NAME: | Patricia Opresko). The scan itself lives in
-        # `_recover_contact_fields_from_docx` below; it returns the values it
-        # was given, unchanged, when there is no readable source document.
-        name, name_is_complete, email, phone, address = (
-            self._recover_contact_fields_from_docx(
-                original_doc_path, document_uid,
-                name, name_is_complete, email, phone, address))
+        # (e.g., NAME: | Patricia Opresko). The scan lives in
+        # `_recover_contact_fields_from_docx` below; it writes the same three
+        # slots this function has been filling all along, and returns them
+        # unchanged when there is nothing left to recover or nothing to read.
+        recovered = self._recover_contact_fields_from_docx(
+            original_doc_path, document_uid, name, name_is_complete,
+            work_email, office_phone, office_address)
+        name = recovered.name
+        name_is_complete = recovered.name_is_complete
+        work_email = recovered.work_email
+        office_phone = recovered.office_phone
+        office_address = recovered.office_address
 
-        # Write back the fallback's recovered values before the table fill
-        # below reads them (#550). The fallback above stores into the
-        # legacy-named `email`/`phone`/`address` locals, not into
-        # `work_email`/`office_phone`/`office_address`, which is what the
-        # PERSONAL DATA table fill at the end of this function reads -- so
-        # without this, everything the fallback recovers is discarded.
-        # `x = x or recovered` only fills an EMPTY slot: an entry already
-        # classified above from the A entries is never overwritten by a
-        # weaker fallback read.
-        #
-        # A recovered `email` that is already `personal_email` must not also
+        # A recovered email that is already `personal_email` must not also
         # duplicate into work_email (#550 round 1, XLYVYA_sample_vasquez_cv):
         # its sole address is routed to personal_email by the per-entry loop
         # above because that entry's text contains the "Personal Data"
-        # section header, not because the person actually gave two
-        # addresses. Every recovery path that feeds `email` -- the
-        # all-entries JSON scan above, and this fallback's table/paragraph
-        # scan -- rediscovers that same address, and without this guard the
-        # write-back below renders it twice.
-        if email and email == personal_email:
-            email = None
-        work_email = work_email or email
-        office_phone = office_phone or phone
-        office_address = office_address or address
+        # section header, not because the person gave two addresses. Both
+        # scans that can fill an empty work-email slot rediscover that same
+        # address, and without this guard it renders twice.
+        #
+        # `work_email_from_entries` keeps the guard off a value the per-entry
+        # classifier put there itself: a CV naming one address as both its
+        # personal and its work email renders it in both rows, which is what
+        # the trailing `work_email = work_email or email` restored before the
+        # two sets of names were collapsed into one.
+        if not work_email_from_entries and work_email and work_email == personal_email:
+            work_email = None
 
         # Fallback to document_uid for name
         if not name:
@@ -404,136 +490,180 @@ class PersonalDataSection:
                     self.stats['entries_inserted'] += 1
 
     def _recover_contact_fields_from_docx(self, original_doc_path, document_uid,
-                                          name, name_is_complete, email, phone,
-                                          address):
+                                          name, name_is_complete, work_email,
+                                          office_phone, office_address):
         """Re-open the ORIGINAL .docx and recover contact fields still missing.
 
-        Step 3 of the module docstring, lifted out of `_fill_personal_data`
-        verbatim so that function's length does not rise (§3): the body below
-        is the same statements at the same indentation, and the values flow in
-        and out as arguments instead of as enclosing locals. Each recovery is
-        guarded by `if not <field>`, so nothing already found by the entry
-        classifier is overwritten here, and a path that is absent or
-        unreadable returns every argument unchanged.
+        Step 3 of the module docstring, lifted out of `_fill_personal_data` so
+        that function's length does not rise (§3): the values flow in and out
+        as arguments instead of as enclosing locals, under the template's own
+        slot names. Each recovery is guarded by `if not <field>`, so nothing
+        already found by the entry classifier is overwritten here, and a
+        document that is complete, absent or unreadable returns every argument
+        unchanged.
 
         `original_doc_path` reaches this method only from
         `scripts/render_gate.py --source-dir` and this package's tests today
         -- see the module docstring for why no live driver passes one.
         """
-        if original_doc_path and Path(original_doc_path).exists():
-            try:
-                original_doc = Document(original_doc_path)
+        given = _RecoveredContact(name, name_is_complete, work_email,
+                                  office_phone, office_address)
 
-                # First check tables (common format: label in col 0, value in col 1)
-                for table in original_doc.tables[:3]:  # Only check first 3 tables
-                    for row in table.rows:
-                        if len(row.cells) >= 2:
-                            label_cell = row.cells[0]
-                            label = label_cell.text.strip().lower()
-                            # A gridSpan label cell repeats itself across
-                            # row.cells: python-docx hands back the SAME cell
-                            # object for every column a merge spans, so
-                            # cells[1] can equal cells[0] instead of holding
-                            # the value. NSUJZG_2027_Eil_Robert's "Professional
-                            # Address:" row is exactly this (label merged
-                            # across columns 0-1, value in column 2) -- read
-                            # past however many duplicate cells the merge
-                            # produced to the first one that actually differs.
-                            value_cell = row.cells[1]
-                            for candidate_cell in row.cells[1:]:
-                                if candidate_cell.text.strip() != label_cell.text.strip():
-                                    value_cell = candidate_cell
-                                    break
-                            value = value_cell.text.strip()
+        # Opening the document is the expensive part and there is no point
+        # paying it for a record this scan cannot add to. All four are
+        # checked, not just the three contact values: the table scan recovers
+        # a name too, so a record complete but for its name still opens.
+        if (name_is_complete and work_email and office_phone
+                and office_address):
+            return given
 
-                            # Extract name if not yet found (or only have last name)
-                            if not name_is_complete and 'name' in label and ':' in label:
-                                if value and len(value) > 2:
-                                    name = value
-                                    name_is_complete = True
-                                    if self.verbose:
-                                        print(f"  Found name from table: {name}")
+        # is_file(), not exists(): a directory named *.docx passes exists()
+        # and then fails inside python-docx with a FileNotFoundError for a
+        # part it could not read, which reads as a corrupt document rather
+        # than as the wrong kind of path.
+        if not original_doc_path or not Path(original_doc_path).is_file():
+            return given
 
-                            # Extract address if not yet found
-                            # Note: Business address cells often contain embedded phone/fax/email
-                            if not address and ('address' in label or 'business' in label) and ':' in label:
-                                if value and len(value) > 5:
-                                    # Parse the address block - it may contain Phone:, Fax:, E-mail: lines
-                                    address_lines = []
-                                    for line in value.split('\n'):
-                                        line = line.strip()
-                                        line_lower = line.lower()
+        try:
+            original_doc = Document(original_doc_path)
+        except _UNREADABLE_SOURCE_ERRORS as e:
+            # Ungated -- was verbose-only, so a parsing failure on this
+            # fallback left no trace at all outside a verbose run (#550).
+            # exc_info=True keeps the traceback out of the message string
+            # itself, which is what a downstream reader would otherwise be
+            # tempted to regex (#7.1 -- print() is a parsed contract; a
+            # logger record is not). Only the open is guarded: an exception
+            # out of the scan below is a defect in this method, and counting
+            # it as a source-document problem would hide it.
+            logger.warning(
+                "Could not read original document for personal data "
+                "fallback (uid=%s, path=%s): %s",
+                document_uid, original_doc_path, e, exc_info=True,
+            )
+            self.stats['personal_data_fallback_failed'] = (
+                self.stats.get('personal_data_fallback_failed', 0) + 1
+            )
+            return given
 
-                                        # Extract phone if embedded in address
-                                        if not phone and ('phone:' in line_lower or 'phone\t' in line_lower):
-                                            phone_match = re.search(r'(?:phone[:\s]+)(.+)', line, re.IGNORECASE)
-                                            if phone_match:
-                                                phone = phone_match.group(1).strip()
-                                                if self.verbose:
-                                                    print(f"  Found phone from address block: {phone}")
-                                            continue
+        # First check tables (common format: label in col 0, value in col 1).
+        # Every table, not the first three: which table holds the contact
+        # block is a layout property of the CV, and a cover or education table
+        # in front of it used to cost the whole block.
+        for table in original_doc.tables:
+            for row in table.rows:
+                if len(row.cells) < 2:
+                    continue
+                label_cell = row.cells[0]
+                # A gridSpan label cell repeats itself across row.cells:
+                # python-docx hands back the SAME cell object for every column
+                # a merge spans, so cells[1] can equal cells[0] instead of
+                # holding the value. NSUJZG_2027_Eil_Robert's "Professional
+                # Address:" row is exactly this (label merged across columns
+                # 0-1, value in column 2) -- read past however many duplicate
+                # cells the merge produced to the first one that differs.
+                value_cell = row.cells[1]
+                for candidate_cell in row.cells[1:]:
+                    if candidate_cell.text.strip() != label_cell.text.strip():
+                        value_cell = candidate_cell
+                        break
+                value = value_cell.text.strip()
+                field = _classify_contact_label(label_cell.text)
 
-                                        # Extract email if embedded in address
-                                        if not email and ('e-mail:' in line_lower or 'email:' in line_lower or 'e-mail\t' in line_lower):
-                                            email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', line)
-                                            if email_match:
-                                                email = email_match.group(0)
-                                                if self.verbose:
-                                                    print(f"  Found email from address block: {email}")
-                                            continue
+                # Extract name if not yet found (or only have last name)
+                if field == _FIELD_NAME and not name_is_complete:
+                    if value and len(value) > 2:
+                        name = value
+                        name_is_complete = True
+                        if self.verbose:
+                            print(f"  Found name from table: {name}")
 
-                                        # Skip fax lines
-                                        if 'fax:' in line_lower or 'fax\t' in line_lower:
-                                            continue
+                # Extract address if not yet found
+                # Note: Business address cells often contain embedded phone/fax/email
+                elif field == _FIELD_OFFICE_ADDRESS and not office_address:
+                    if value and len(value) > 5:
+                        office_address, office_phone, work_email = (
+                            self._parse_address_block(
+                                value, office_phone, work_email))
 
-                                        # Keep other lines as address
-                                        if line:
-                                            address_lines.append(line)
+                # Extract phone if not yet found
+                elif field == _FIELD_OFFICE_PHONE and not office_phone:
+                    if value and len(value) > 5:
+                        office_phone = value
+                        if self.verbose:
+                            print(f"  Found phone from table: {office_phone}")
 
-                                    address = '\n'.join(address_lines)
-                                    if self.verbose:
-                                        print(f"  Found address from table: {address[:50]}...")
+                # Extract email if not yet found
+                elif field == _FIELD_WORK_EMAIL and not work_email:
+                    email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', value)
+                    if email_match:
+                        work_email = email_match.group(0)
+                        if self.verbose:
+                            print(f"  Found email from table: {work_email}")
 
-                            # Extract phone if not yet found
-                            if not phone and ('phone' in label or 'telephone' in label) and ':' in label:
-                                if value and len(value) > 5:
-                                    phone = value
-                                    if self.verbose:
-                                        print(f"  Found phone from table: {phone}")
+        # Also check paragraphs for email (if not found in tables). Every
+        # paragraph, not the first twenty: where the contact block sits is a
+        # layout property, not a paragraph count, and an email in paragraph 21
+        # used to be lost.
+        if not work_email:
+            for para in original_doc.paragraphs:
+                email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+',
+                                        para.text.strip())
+                if email_match:
+                    work_email = email_match.group(0)
+                    if self.verbose:
+                        print(f"  Found email from paragraph: {work_email}")
+                    break
 
-                            # Extract email if not yet found
-                            if not email and 'email' in label:
-                                email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', value)
-                                if email_match:
-                                    email = email_match.group(0)
-                                    if self.verbose:
-                                        print(f"  Found email from table: {email}")
+        return _RecoveredContact(name, name_is_complete, work_email,
+                                 office_phone, office_address)
 
-                # Also check paragraphs for email (if not found in tables)
-                if not email:
-                    for para in original_doc.paragraphs[:20]:
-                        text = para.text.strip()
-                        email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', text)
-                        if email_match:
-                            email = email_match.group(0)
-                            if self.verbose:
-                                print(f"  Found email from paragraph: {email}")
-                            break
-            except Exception as e:
-                # Ungated -- was verbose-only, so a parsing failure on this
-                # fallback (which wraps the whole recovery: three tables plus
-                # the paragraph scan) left no trace at all outside a verbose
-                # run (#550). exc_info=True keeps the traceback out of the
-                # message string itself, which is what a downstream reader
-                # would otherwise be tempted to regex (#7.1 -- print() is a
-                # parsed contract; a logger record is not).
-                logger.warning(
-                    "Could not read original document for personal data "
-                    "fallback (uid=%s, path=%s): %s",
-                    document_uid, original_doc_path, e, exc_info=True,
-                )
-                self.stats['personal_data_fallback_failed'] = (
-                    self.stats.get('personal_data_fallback_failed', 0) + 1
-                )
+    def _parse_address_block(self, value, office_phone, work_email):
+        """Split a business-address cell into address / phone / email.
 
-        return _RecoveredContact(name, name_is_complete, email, phone, address)
+        A "BUSINESS ADDRESS:" cell is one cell, not three rows: it carries the
+        street address with Phone:, Fax: and E-mail: lines inside it. Every one
+        of those lines is consumed as metadata whatever else is already known,
+        and only the ASSIGNMENT is conditional -- keying the skip on "did we
+        take this value" left the E-mail line standing in the rendered Office
+        address whenever an email had already been found somewhere else, which
+        put an email address in an address field.
+
+        Returns the address and the two values it was given, each replaced
+        only if it was empty and the block supplied one.
+        """
+        address_lines = []
+        for line in value.split('\n'):
+            line = line.strip()
+            line_lower = line.lower()
+
+            # Extract phone if embedded in address
+            if 'phone:' in line_lower or 'phone\t' in line_lower:
+                phone_match = re.search(r'(?:phone[:\s]+)(.+)', line, re.IGNORECASE)
+                if phone_match and not office_phone:
+                    office_phone = phone_match.group(1).strip()
+                    if self.verbose:
+                        print(f"  Found phone from address block: {office_phone}")
+                continue
+
+            # Extract email if embedded in address
+            if ('e-mail:' in line_lower or 'email:' in line_lower
+                    or 'e-mail\t' in line_lower):
+                email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', line)
+                if email_match and not work_email:
+                    work_email = email_match.group(0)
+                    if self.verbose:
+                        print(f"  Found email from address block: {work_email}")
+                continue
+
+            # Skip fax lines
+            if 'fax:' in line_lower or 'fax\t' in line_lower:
+                continue
+
+            # Keep other lines as address
+            if line:
+                address_lines.append(line)
+
+        address = '\n'.join(address_lines)
+        if self.verbose:
+            print(f"  Found address from table: {address[:50]}...")
+        return address, office_phone, work_email
