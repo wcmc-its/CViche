@@ -66,14 +66,27 @@ def test_redis_partial_replay_rejected():
     assert cache.check_and_record(["id-1", "id-2"], 60) is False
 
 
-def test_fails_open_when_redis_errors(caplog):
+def test_fails_closed_by_default_when_redis_errors(caplog):
+    """Default posture (no opt-out configured): reject, don't open."""
     cache = SamlReplayCache("redis://fake")
     client = MagicMock()
     client.set.side_effect = ConnectionError("valkey down")
     cache._client = client
     with caplog.at_level(logging.ERROR, logger="app.saml_replay"):
-        assert cache.check_and_record(["id-1"], 60) is True
-        assert cache.check_and_record(["id-1"], 60) is True  # still open
+        assert cache.check_and_record(["id-1"], 60) is False
+        assert cache.check_and_record(["id-1"], 60) is False  # still closed
+    assert any("FAILING CLOSED" in r.getMessage() for r in caplog.records)
+
+
+def test_fails_open_when_explicitly_configured(monkeypatch, caplog):
+    """Explicit local-dev opt-out (CVICHE_SAML_REPLAY_FAIL_CLOSED=false, etc.)."""
+    monkeypatch.setattr(saml_replay, "replay_fail_closed", lambda: False)
+    cache = SamlReplayCache("redis://fake")
+    client = MagicMock()
+    client.set.side_effect = ConnectionError("valkey down")
+    cache._client = client
+    with caplog.at_level(logging.ERROR, logger="app.saml_replay"):
+        assert cache.check_and_record(["id-1"], 60) is True  # opted-out, stay open
     security_logs = [r for r in caplog.records if "[SECURITY]" in r.getMessage()]
     assert security_logs, "expected a loud [SECURITY] log on fail-open"
 
@@ -87,6 +100,32 @@ def test_fails_closed_when_configured(monkeypatch, caplog):
     with caplog.at_level(logging.ERROR, logger="app.saml_replay"):
         assert cache.check_and_record(["id-1"], 60) is False  # reject, not open
     assert any("FAILING CLOSED" in r.getMessage() for r in caplog.records)
+
+
+# --- replay_fail_closed() default interpretation ------------------------------
+
+def test_replay_fail_closed_defaults_true_when_unset(monkeypatch):
+    monkeypatch.delenv("CVICHE_SAML_REPLAY_FAIL_CLOSED", raising=False)
+    monkeypatch.setattr(
+        saml_replay, "get_config", lambda section, key, default="": (default, "default")
+    )
+    assert saml_replay.replay_fail_closed() is True
+
+
+@pytest.mark.parametrize("raw", ["", "1", "true", "TRUE", "anything-else"])
+def test_replay_fail_closed_true_for_non_opt_out_values(monkeypatch, raw):
+    monkeypatch.setattr(
+        saml_replay, "get_config", lambda section, key, default="": (raw, "env")
+    )
+    assert saml_replay.replay_fail_closed() is True
+
+
+@pytest.mark.parametrize("raw", ["0", "false", "FALSE", "no", "NO", "off", "OFF"])
+def test_replay_fail_closed_false_for_explicit_opt_out(monkeypatch, raw):
+    monkeypatch.setattr(
+        saml_replay, "get_config", lambda section, key, default="": (raw, "env")
+    )
+    assert saml_replay.replay_fail_closed() is False
 
 
 def test_redis_key_is_hashed_not_raw():
@@ -258,14 +297,53 @@ class TestAcsReplayGate:
             assert _post_acs(client).status_code == 302
 
     @patch("app.api.saml_routes.get_saml_client")
-    def test_stub_without_ids_fails_open(
+    def test_stub_without_ids_fails_closed_by_default(
         self, mock_get_client, client, db, seed_saml_mode, replay_cache
     ):
-        """Responses carrying no extractable assertion ID skip the gate (fail
-        open) -- this keeps the mocked SAML suite and exotic parsers working."""
+        """Responses carrying no extractable assertion ID cannot have replay
+        verified, so the default (fail closed, CVICHE_SAML_REPLAY_FAIL_CLOSED
+        unset) rejects the login rather than skipping the gate."""
+        mock_response = MagicMock()
+        mock_response.get_identity.return_value = _IDENTITY
+        mock_get_client.return_value = _mock_client(mock_response)
+        response = _post_acs(client)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/login?error=auth_failed"
+        assert replay_cache._local == {}
+
+    @patch("app.api.saml_routes.replay_fail_closed", return_value=False)
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_stub_without_ids_fails_open_when_opted_out(
+        self, mock_get_client, _fail_closed, client, db, seed_saml_mode, replay_cache
+    ):
+        """Explicit local-dev opt-out: no ID still skips the gate (fail open)
+        -- this keeps the mocked SAML suite and exotic parsers working."""
         mock_response = MagicMock()
         mock_response.get_identity.return_value = _IDENTITY
         mock_get_client.return_value = _mock_client(mock_response)
         assert _post_acs(client).status_code == 302
         assert _post_acs(client).status_code == 302
         assert replay_cache._local == {}
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_store_unreachable_with_flag_unset_rejects_login(
+        self, mock_get_client, client, db, seed_saml_mode, monkeypatch, caplog
+    ):
+        """Flag unset (default) + Valkey unreachable -> fail closed, reject
+        the login rather than let it through."""
+        cache = SamlReplayCache("redis://fake")
+        broken_client = MagicMock()
+        broken_client.set.side_effect = ConnectionError("valkey down")
+        cache._client = broken_client
+        monkeypatch.setattr(saml_replay, "_cache", cache)
+
+        resp = _AuthnResponse(
+            ["_store-down"], identity=_IDENTITY, not_on_or_after=time.time() + 300
+        )
+        mock_get_client.return_value = _mock_client(resp)
+
+        with caplog.at_level(logging.ERROR):
+            response = _post_acs(client)
+        assert response.status_code == 302
+        assert response.headers["location"] == "/login?error=auth_failed"
+        assert not any(c.name for c in response.cookies.jar)

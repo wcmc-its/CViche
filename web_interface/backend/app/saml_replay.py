@@ -9,17 +9,18 @@ IdP-initiated flows: every successfully parsed assertion ID is recorded once,
 and a second presentation of the same ID is rejected.
 
 Backed by the same ``CVICHE_REDIS_URL`` as the pipeline broker and the
-idle-session store, with the same fail-open posture:
+idle-session store. Its posture when replay cannot be verified is fail
+CLOSED by default (opt out for local dev; see ``CVICHE_SAML_REPLAY_FAIL_CLOSED``
+below), unlike the broker/session store's own fail-open behavior:
 
   - URL configured, Valkey reachable -> cross-pod protection via atomic
     ``SET NX EX``; the key TTL covers the assertion's own validity window
     (plus clock-skew slack), after which the ID can no longer be accepted
     by pysaml2 anyway.
-  - URL configured, Valkey unreachable -> fail open BY DEFAULT: log loudly and
-    let the login proceed. A Valkey outage must not lock everyone out; the
-    replay window this reopens is bounded by the assertion's validity window.
-    Set ``CVICHE_SAML_REPLAY_FAIL_CLOSED=1`` (prod) to reject logins instead
-    when replay cannot be verified -- safety over availability.
+  - URL configured, Valkey unreachable -> fail CLOSED BY DEFAULT: log loudly
+    and reject the login. Safety over availability is the default; set
+    ``CVICHE_SAML_REPLAY_FAIL_CLOSED=0`` (local dev only, when Valkey is not
+    running) to fail open instead and let the login proceed.
   - No URL configured -> in-process dict fallback. Per-pod best-effort only:
     replicas do not share it and it dies with the process. Deployments get
     cross-pod protection once CVICHE_REDIS_URL is set.
@@ -39,6 +40,11 @@ logger = logging.getLogger(__name__)
 # fixed, safe key shape regardless of its contents -- see _redis_key.
 _KEY = "cviche:saml:assertion:{aid}"
 
+# Explicit opt-out values for CVICHE_SAML_REPLAY_FAIL_CLOSED (case-insensitive).
+# Anything else -- unset, "", or any other string -- means fail closed; see
+# replay_fail_closed().
+_FAIL_OPEN_VALUES = frozenset({"0", "false", "no", "off"})
+
 
 def _redis_key(aid: str) -> str:
     return _KEY.format(aid=hashlib.sha256(aid.encode()).hexdigest())
@@ -48,12 +54,15 @@ def replay_fail_closed() -> bool:
     """Whether to REJECT a login when replay protection cannot be verified --
     Valkey unreachable, or an assertion carrying no ID.
 
-    Default False (fail open): a Valkey outage must not lock every SAML user
-    out. Set ``CVICHE_SAML_REPLAY_FAIL_CLOSED=1`` (env, or auth_config.yaml
-    under `auth`) in production to prefer safety over availability.
+    Default True (fail closed): unset, empty, or any value other than an
+    explicit opt-out means safety over availability (#111's precedent --
+    ``main.py``'s ``SECURE_AUTH_MODES`` allowlist fails closed on a missing
+    value the same way). Set ``CVICHE_SAML_REPLAY_FAIL_CLOSED`` to one of
+    ``_FAIL_OPEN_VALUES`` (env, or auth_config.yaml under `auth`) to fail open
+    instead -- local dev only, when Valkey is not running.
     """
     raw, _ = get_config("auth", "CVICHE_SAML_REPLAY_FAIL_CLOSED", default="")
-    return str(raw).strip().lower() in ("1", "true", "yes")
+    return str(raw).strip().lower() not in _FAIL_OPEN_VALUES
 
 # Fallback TTL when the response carries no NotOnOrAfter, and slack added on
 # top of the assertion window to absorb SP/IdP clock skew (matches pysaml2's
@@ -67,7 +76,9 @@ def assertion_ids(authn_response) -> list[str]:
     """Assertion IDs carried by a parsed pysaml2 AuthnResponse.
 
     Only string IDs are returned; a stubbed/mocked response without real IDs
-    yields [] and the caller is expected to skip the replay gate (fail open).
+    yields []. A real pysaml2 response always carries one, so the caller
+    treats an empty result as replay-unverifiable and defers to
+    ``replay_fail_closed()`` -- closed by default, opt out for local dev.
     """
     ids = []
     try:

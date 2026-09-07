@@ -7,8 +7,9 @@ auth:
   # accidental debug flag in prod cannot expose the API surface.
   CVICHE_ENABLE_DOCS: ""
   # SAML replay protection posture when it cannot be verified (Valkey down, or
-  # an assertion with no ID): "" fails open (default -- availability), "true"
-  # fails closed (prod -- reject the login). See app/saml_replay.py.
+  # an assertion with no ID): "" fails closed (default -- reject the login).
+  # Set to "false" (local dev only, when Valkey is not running) to fail open
+  # instead. See app/saml_replay.py.
   CVICHE_SAML_REPLAY_FAIL_CLOSED: ""
 
 saml:
