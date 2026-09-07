@@ -290,6 +290,14 @@ def build_teams_payload(run, score=None, submitter=None, doctor=None) -> dict:
     ]
     if submitter:
         facts.append({"name": "Submitted by", "value": _card_text(submitter, _FACT_MAX_CHARS)})
+    # These four are deliberately NOT run through _card_text: unlike run id,
+    # filename, submitter and (on the feedback card) reviewer_role, none is
+    # user-, LLM- or filename-derived. `status` is written only as a code
+    # literal (upload/runs/run_service/orchestrator), `band` is one of the
+    # three strings quality_score.band_for returns, and cost/duration are
+    # numbers guarded by isinstance above. Same for the Doctor line below: it
+    # uses a finding's `lint` id (a code literal) and an int() count, never
+    # its `message`/`evidence`, which do quote CV text.
     facts += [
         {"name": "Status", "value": str(status)},
         {"name": "Quality score", "value": score_text},
