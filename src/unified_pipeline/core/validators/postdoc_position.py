@@ -6,7 +6,6 @@ Critical for entries like "Research Fellow" or "Postdoctoral Fellow" that could 
 """
 
 import re
-from typing import List
 from .base_validator import BaseValidator, ValidatorGuidance
 
 
@@ -24,7 +23,7 @@ class PostdocPositionValidator(BaseValidator):
 
     name = "PostdocPositionValidator"
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to training, positions, and mentoring sections."""
         return ['C', 'postdoc', 'D', 'positions', 'N', 'mentoring']
 

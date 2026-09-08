@@ -15,7 +15,6 @@ Rule: Required institutional trainings and compliance courses are B2,
 """
 
 import re
-from typing import Dict, List, Tuple
 
 
 # Patterns indicating B2 (training/compliance courses)
@@ -80,7 +79,7 @@ TRAINING_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in TRAINING_PAT
 FACILITATOR_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in FACILITATOR_PATTERNS]
 
 
-def is_training_received(text: str) -> Tuple[bool, str]:
+def is_training_received(text: str) -> tuple[bool, str]:
     """Check if text indicates training/compliance course received."""
     for pattern in TRAINING_PATTERNS_COMPILED:
         match = pattern.search(text)
@@ -97,7 +96,7 @@ def is_training_facilitated(text: str) -> bool:
     return False
 
 
-def correct_training_compliance(entry: Dict) -> Dict:
+def correct_training_compliance(entry: dict) -> dict:
     """
     Correct P to B2 if the entry is a training/compliance course received.
 
@@ -133,7 +132,7 @@ def correct_training_compliance(entry: Dict) -> Dict:
     return entry
 
 
-def apply_training_compliance_corrections(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
+def apply_training_compliance_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
     """
     Apply training/compliance corrections to all entries.
 

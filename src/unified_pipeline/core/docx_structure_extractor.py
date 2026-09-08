@@ -10,7 +10,7 @@ This is significantly cheaper and faster than vision-based approaches.
 
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import Any
 from docx import Document
 from docx.shared import RGBColor, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -20,14 +20,14 @@ from docx.table import _Cell, Table
 from docx.text.paragraph import Paragraph
 
 
-def rgb_to_hex(rgb: Optional[RGBColor]) -> str:
+def rgb_to_hex(rgb: RGBColor | None) -> str:
     """Convert RGBColor to hex string."""
     if rgb is None:
         return "#000000"
     return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
 
 
-def pt_to_inches(pt: Optional[Pt]) -> float:
+def pt_to_inches(pt: Pt | None) -> float:
     """Convert points to inches."""
     if pt is None:
         return 0.0
@@ -80,7 +80,7 @@ def get_cell_text(cell, tab_char: str = ' ') -> str:
     return '\n'.join(get_paragraph_text(p, tab_char=tab_char) for p in cell.paragraphs)
 
 
-def extract_paragraph_metadata(para: Paragraph, idx: int) -> Dict[str, Any]:
+def extract_paragraph_metadata(para: Paragraph, idx: int) -> dict[str, Any]:
     """
     Extract comprehensive metadata from a paragraph.
 
@@ -180,7 +180,7 @@ def extract_paragraph_metadata(para: Paragraph, idx: int) -> Dict[str, Any]:
     }
 
 
-def _is_date_column(lines: List[str]) -> bool:
+def _is_date_column(lines: list[str]) -> bool:
     """
     Check if a list of lines looks like a date column.
 
@@ -206,7 +206,7 @@ def _is_date_column(lines: List[str]) -> bool:
     return date_lines >= len(lines) * 0.5 and date_lines >= 1
 
 
-def split_merged_cells_in_row(row: List[Dict[str, Any]], min_chars: int = 50, min_newlines: int = 2) -> List[List[Dict[str, Any]]]:
+def split_merged_cells_in_row(row: list[dict[str, Any]], min_chars: int = 50, min_newlines: int = 2) -> list[list[dict[str, Any]]]:
     """
     Split a table row into multiple rows if any cell contains merged content.
 
@@ -338,7 +338,7 @@ def split_merged_cells_in_row(row: List[Dict[str, Any]], min_chars: int = 50, mi
     return split_rows
 
 
-def extract_table_metadata(table: Table, idx: int) -> Dict[str, Any]:
+def extract_table_metadata(table: Table, idx: int) -> dict[str, Any]:
     """
     Extract table structure and content.
 
@@ -531,7 +531,7 @@ def get_table_first_cell_text(table: Table) -> str:
     return cell_text
 
 
-def flatten_table_to_text(table_data: Dict[str, Any], skip_first_row: bool = False) -> str:
+def flatten_table_to_text(table_data: dict[str, Any], skip_first_row: bool = False) -> str:
     """
     Flatten table data to plain text.
 
@@ -556,7 +556,7 @@ def flatten_table_to_text(table_data: Dict[str, Any], skip_first_row: bool = Fal
     return "\n".join(row_texts)
 
 
-def extract_unified_elements(docx_path: str) -> Dict[str, Any]:
+def extract_unified_elements(docx_path: str) -> dict[str, Any]:
     """
     Extract document elements with table-awareness for header detection.
 
@@ -915,7 +915,7 @@ def extract_unified_elements(docx_path: str) -> Dict[str, Any]:
     }
 
 
-def extract_docx_structure(docx_path: str) -> Dict[str, Any]:
+def extract_docx_structure(docx_path: str) -> dict[str, Any]:
     """
     Extract complete document structure from .docx file.
 
@@ -1000,7 +1000,7 @@ def extract_docx_structure(docx_path: str) -> Dict[str, Any]:
     }
 
 
-def normalize_style_name(style_name: str) -> Dict[str, Any]:
+def normalize_style_name(style_name: str) -> dict[str, Any]:
     """
     Normalize style name to generic role.
 
@@ -1046,7 +1046,7 @@ def normalize_style_name(style_name: str) -> Dict[str, Any]:
     }
 
 
-def create_simplified_layout_json(structure: Dict[str, Any], skip_empty: bool = True) -> List[Dict[str, Any]]:
+def create_simplified_layout_json(structure: dict[str, Any], skip_empty: bool = True) -> list[dict[str, Any]]:
     """
     Create simplified layout JSON optimized for LLM processing.
 

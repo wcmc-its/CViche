@@ -9,7 +9,7 @@ import string
 import tempfile
 import zipfile
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime

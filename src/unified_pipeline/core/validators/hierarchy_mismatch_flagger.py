@@ -16,7 +16,6 @@ These may be CORRECT (content overrides hierarchy), but warrant review.
 """
 
 import re
-from typing import Dict, List, Tuple, Optional
 
 
 # Map hierarchy keywords to expected taxonomy code families
@@ -137,7 +136,7 @@ def normalize_hierarchy_text(text: str) -> str:
     return text.lower().strip()
 
 
-def get_expected_codes_from_hierarchy(hierarchy: List[str]) -> List[str]:
+def get_expected_codes_from_hierarchy(hierarchy: list[str]) -> list[str]:
     """
     Determine expected taxonomy codes based on hierarchy path.
 
@@ -158,7 +157,7 @@ def get_expected_codes_from_hierarchy(hierarchy: List[str]) -> List[str]:
 
 def code_matches_expected(
     taxonomy_code: str,
-    expected_codes: List[str]
+    expected_codes: list[str]
 ) -> bool:
     """
     Check if taxonomy code matches any of the expected codes.
@@ -194,7 +193,7 @@ def code_matches_expected(
     return False
 
 
-def flag_hierarchy_mismatches(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
+def flag_hierarchy_mismatches(entries: list[dict]) -> tuple[list[dict], dict]:
     """
     Flag entries where taxonomy code doesn't match hierarchy expectations.
 
@@ -250,7 +249,7 @@ def flag_hierarchy_mismatches(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
     return entries, stats
 
 
-def get_mismatch_summary(entries: List[Dict]) -> Dict:
+def get_mismatch_summary(entries: list[dict]) -> dict:
     """
     Generate a summary of hierarchy mismatches for reporting.
 

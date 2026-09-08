@@ -2,7 +2,6 @@
 import hashlib
 import json
 import logging
-from typing import Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session, selectinload
@@ -26,7 +25,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _run_duration_seconds(run) -> Optional[int]:
+def _run_duration_seconds(run) -> int | None:
     """Total pipeline time for a run, in whole seconds.
 
     Prefers the authoritative value persisted by the orchestrator at terminal
@@ -357,7 +356,7 @@ async def restart_run(
             "user_email": current_user.email,
         }, indent=2).encode("utf-8")
 
-    def _write_local(path):
+    def _write_local(path: Path) -> None:
         # Exclusive create, exactly like /upload's pod-local write. A
         # non-exclusive copy here was a live defect: on a drawn id that
         # collides with a run whose pod-local input exists on THIS pod, the

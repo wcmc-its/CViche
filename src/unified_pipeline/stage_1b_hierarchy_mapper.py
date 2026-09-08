@@ -18,7 +18,6 @@ Output: Hierarchy with element indices (the "fenceposts" for sections)
 import sys
 import json
 from pathlib import Path
-from typing import Dict, List, Any, Optional, Tuple
 
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -84,10 +83,10 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
 
 
 def find_header_in_sequence(
-    elements: List[Dict],
-    hierarchy_sequence: List[str],
+    elements: list[dict],
+    hierarchy_sequence: list[str],
     start_idx: int = 0
-) -> Optional[List[Tuple[str, int]]]:
+) -> list[tuple[str, int]] | None:
     """
     Find a sequence of headers in the document elements starting from start_idx.
 
@@ -145,11 +144,11 @@ def find_header_in_sequence(
 
 
 def map_hierarchy_node(
-    node: Dict,
-    elements: List[Dict],
-    parent_path: List[str] = None,
+    node: dict,
+    elements: list[dict],
+    parent_path: list[str] = None,
     start_search_idx: int = 0
-) -> Tuple[Dict, int]:
+) -> tuple[dict, int]:
     """
     Map a single hierarchy node and its children to element indices.
 
@@ -192,7 +191,7 @@ def map_hierarchy_node(
             # If not found, try searching from the beginning (handles out-of-order hierarchies)
             normalized_target = normalize_text(node_text)
 
-            def search_for_header(search_start: int, search_end: int) -> Optional[int]:
+            def search_for_header(search_start: int, search_end: int) -> int | None:
                 """Search for header in a range of elements."""
                 for i in range(search_start, search_end):
                     elem = elements[i]
@@ -263,7 +262,7 @@ def map_hierarchy_node(
     return mapped_node, next_search_idx
 
 
-def get_first_child_element_idx(children: List[Dict]) -> Optional[int]:
+def get_first_child_element_idx(children: list[dict]) -> int | None:
     """
     Recursively find the first element_idx in a list of children.
 
@@ -289,7 +288,7 @@ def get_first_child_element_idx(children: List[Dict]) -> Optional[int]:
     return min(indices) if indices else None
 
 
-def has_mapped_children(node: Dict) -> bool:
+def has_mapped_children(node: dict) -> bool:
     """
     Check if a hierarchy node has any children with actual element indices.
 
@@ -317,7 +316,7 @@ def has_mapped_children(node: Dict) -> bool:
     return False
 
 
-def compute_section_boundaries(mapped_hierarchy: List[Dict], doc_length: int) -> List[Dict]:
+def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) -> list[dict]:
     """
     Compute start/end element indices for each section.
 
@@ -341,8 +340,8 @@ def compute_section_boundaries(mapped_hierarchy: List[Dict], doc_length: int) ->
     sections = []
 
     def compute_bounds(
-        nodes: List[Dict],
-        parent_path: List[str] = None,
+        nodes: list[dict],
+        parent_path: list[str] = None,
         default_end: int = None
     ):
         """
