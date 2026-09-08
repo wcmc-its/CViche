@@ -8,7 +8,13 @@ import os
 import shutil
 from pathlib import Path
 
-from app.storage.base import RunStorage, StorageKeyExists
+from app.storage.base import (
+    RunStorage,
+    StorageKeyExists,
+    validate_key,
+    validate_run_id,
+    validate_run_key,
+)
 
 
 class LocalRunStorage(RunStorage):
@@ -36,9 +42,48 @@ class LocalRunStorage(RunStorage):
                 self._base = Path(__file__).resolve().parent.parent.parent.parent / "uploads"
         self._base.mkdir(parents=True, exist_ok=True)
 
+    def _safe_path(self, *parts: str) -> Path:
+        """Join parts under the storage base, proving the result stays inside it.
+
+        The string-level rules (validate_run_id / validate_key) reject ".."
+        and absolute components, but a symlink already inside the store can
+        redirect a perfectly well-formed path outside it, so containment is
+        also checked against fully resolved paths -- Path.resolve() follows
+        symlinks, and Path.is_relative_to answers the containment question.
+
+        The candidate itself usually does not exist yet (put_file_exclusive's
+        whole point is that it must not), so the check resolves the deepest
+        component that DOES exist: the file itself on a read, its parent
+        directory on a create. That keeps the exclusive create exclusive --
+        nothing here touches or stats the target as a precondition.
+
+        Raises:
+            ValueError: If the resolved path is not inside the storage base.
+        """
+        # ponytail: resolve-then-open, so a symlink planted between the check
+        # and the open would still be followed. Closing that gap needs
+        # dir-relative I/O (os.open with O_NOFOLLOW walking each component
+        # under a dirfd), which is a rewrite of every operation in this class.
+        # Every key this store is asked for is server-built, so the
+        # string-rules + resolved-containment check is the level bought here;
+        # the upgrade path is that dirfd walk, in one place, if the store ever
+        # accepts a caller-shaped key.
+        candidate = self._base.joinpath(*parts)
+        probe = candidate
+        while not os.path.lexists(probe) and probe != probe.parent:
+            probe = probe.parent
+        if not probe.resolve().is_relative_to(self._base.resolve()):
+            raise ValueError(f"storage path escapes the storage base: {candidate}")
+        return candidate
+
     def _resolve(self, run_id: str, key: str) -> Path:
-        """Resolve a run_id + key to an absolute filesystem path."""
-        return self._base / run_id / key
+        """Resolve a run_id + key to an absolute filesystem path.
+
+        Validates at the boundary so put_file, put_file_exclusive, get_file
+        and exists all inherit the same invariant from one place.
+        """
+        validate_run_key(run_id, key)
+        return self._safe_path(run_id, key)
 
     def put_file(self, run_id: str, key: str, data: bytes) -> None:
         path = self._resolve(run_id, key)
@@ -55,7 +100,8 @@ class LocalRunStorage(RunStorage):
             raise StorageKeyExists(f"{run_id}/{key} already exists") from e
 
     def put_global(self, key: str, data: bytes) -> None:
-        path = self._base / key
+        validate_key(key)
+        path = self._safe_path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
 
@@ -74,12 +120,18 @@ class LocalRunStorage(RunStorage):
         return count
 
     def delete_run(self, run_id: str) -> int:
-        return self._delete_tree(self._base / run_id)
+        # Validate before building a recursive-delete path: a malformed id
+        # here turns a routing bug into a data-loss incident.
+        validate_run_id(run_id)
+        return self._delete_tree(self._safe_path(run_id))
 
     def delete_global_prefix(self, prefix: str) -> int:
         if not prefix or not prefix.strip("/"):
             raise ValueError("delete prefix must be non-empty")
-        return self._delete_tree(self._base / prefix)
+        # Non-empty is not the same as safe: "../sibling" is non-empty and
+        # would rmtree a directory beside the store.
+        validate_key(prefix)
+        return self._delete_tree(self._safe_path(prefix))
 
     def get_file(self, run_id: str, key: str) -> bytes:
         path = self._resolve(run_id, key)
@@ -88,12 +140,13 @@ class LocalRunStorage(RunStorage):
         return path.read_bytes()
 
     def list_files(self, run_id: str, prefix: str = "") -> list[str]:
-        run_dir = self._base / run_id
+        validate_run_key(run_id, prefix)
+        run_dir = self._safe_path(run_id)
         if not run_dir.exists():
             return []
 
         # Glob for all files under the prefix
-        search_dir = run_dir / prefix if prefix else run_dir
+        search_dir = self._safe_path(run_id, prefix) if prefix else run_dir
         if not search_dir.exists():
             # prefix might be a partial path — glob from parent
             parent = search_dir.parent

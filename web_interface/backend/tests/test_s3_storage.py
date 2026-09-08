@@ -77,6 +77,54 @@ def test_put_file_exclusive_sends_if_none_match_and_maps_412(monkeypatch):
     stub.assert_no_pending_responses()
 
 
+@pytest.mark.parametrize("run_id,key", [
+    ("../other", "input/cv.docx"),
+    ("run1", "../other/input/cv.docx"),
+    ("run1", "/absolute/cv.docx"),
+    ("run1", "input/../../other/cv.docx"),
+    ("a b", "input/cv.docx"),
+])
+def test_s3_key_rejects_unsafe_identifiers(run_id, key):
+    """S3 keys are opaque strings, so ".." cannot escape the bucket -- but it
+    does silently place the object in a SIBLING run's namespace
+    ("cviche/runs/../other/..." is a literal key), which is the same
+    isolation break. Rejected inside the storage boundary, so no request
+    ever reaches S3."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    with stub:  # no stubbed responses queued: any S3 call would raise
+        with pytest.raises(ValueError):
+            storage.put_file_exclusive(run_id, key, b"x")
+        with pytest.raises(ValueError):
+            storage.get_file(run_id, key)
+    stub.assert_no_pending_responses()
+
+
+def test_s3_delete_run_rejects_unsafe_run_id():
+    """delete_run builds its destructive prefix directly, NOT through
+    _s3_key, so it needs the check spelled out: an unvalidated id turns a
+    single-run cleanup into a bulk delete of the wrong prefix."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    with stub:
+        with pytest.raises(ValueError):
+            storage.delete_run("../")
+        with pytest.raises(ValueError):
+            storage.delete_global_prefix("../../")
+    stub.assert_no_pending_responses()
+
+
+def test_s3_key_still_accepts_the_prefixes_live_callers_pass():
+    """Regression guard on the validator: list_files passes an empty key and
+    trailing-slash prefixes (steps.py:611 "prompt_logs/",
+    quality_score_service.py:54 "outputs/"), and legacy run ids from the
+    pre-#685 generator can contain "-"/"_". None may be rejected."""
+    storage = _storage()
+    assert storage._s3_key("run1", "") == "cviche/runs/run1/"
+    assert storage._s3_key("run1", "outputs/") == "cviche/runs/run1/outputs/"
+    assert storage._s3_key("A-B_c1", "prompt_logs/") == "cviche/runs/A-B_c1/prompt_logs/"
+
+
 def test_put_file_exclusive_other_clienterror_propagates():
     """A non-412 ClientError (outage, permissions) is a real fault, not a
     collision, and must not be swallowed as StorageKeyExists."""

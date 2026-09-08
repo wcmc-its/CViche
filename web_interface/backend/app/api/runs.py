@@ -2,7 +2,6 @@
 import hashlib
 import json
 import logging
-import shutil
 from typing import Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
@@ -359,10 +358,17 @@ async def restart_run(
         }, indent=2).encode("utf-8")
 
     def _write_local(path):
-        # Not exclusive (shutil.copy2 has no such mode): the archive below is
-        # the authoritative collision check either way (#685), and this local
-        # copy is ephemeral per-pod, same as /upload's.
-        shutil.copy2(str(original_file), str(path))
+        # Exclusive create, exactly like /upload's pod-local write. A
+        # non-exclusive copy here was a live defect: on a drawn id that
+        # collides with a run whose pod-local input exists on THIS pod, the
+        # copy overwrote that file, and the durable manifest write then
+        # raised StorageKeyExists, whose cleanup unlinked it -- destroying
+        # the other run's local input. Raising FileExistsError instead lets
+        # create_run_archive regenerate the id and retry, touching nothing.
+        # The bytes are already in memory (read above), so write them
+        # directly rather than copying the file a second time.
+        with open(path, "xb") as f:
+            f.write(content)
 
     try:
         new_run_id, _, _, manifest = create_run_archive(

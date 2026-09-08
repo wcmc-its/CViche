@@ -232,10 +232,10 @@ def create_run_archive(
         build_manifest: (run_id, stored_name) -> the manifest JSON to archive
             alongside the file. Caller-supplied because /upload's and
             restart_run's manifests carry different provenance fields.
-        write_local: writes the pod-local copy at the given path (an
-            exclusive `"xb"` open for /upload; a `shutil.copy2` for restart,
-            which does not itself detect a collision -- the archive above is
-            the authoritative check either way). May raise FileExistsError.
+        write_local: writes the pod-local copy at the given path. Both
+            callers use an exclusive `"xb"` open, so a pod-local id
+            collision raises FileExistsError and this loop retries with a
+            fresh id rather than overwriting another run's local input.
 
     Returns:
         (run_id, stored_name, file_path, manifest) for the archived file.

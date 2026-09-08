@@ -1,5 +1,6 @@
 """Abstract base class for run storage backends."""
 
+import re
 from abc import ABC, abstractmethod
 
 
@@ -7,9 +8,68 @@ class StorageKeyExists(Exception):
     """Raised by put_file_exclusive when the target key already has an object.
 
     Signals a run-id collision to the caller so it can regenerate the id and
-    retry, rather than silently overwriting another run's archived file
-    (#685). Never raised by put_file, which always overwrites.
+    retry, rather than silently overwriting another run's archived file.
+    Never raised by put_file, which always overwrites.
     """
+
+
+# The widest run-id shape any existing Run.id row can hold -- the same pattern
+# api/steps.py validates request run ids with. Deliberately NOT "^[A-Z0-9]{6}$":
+# the previous generator (secrets.token_urlsafe(4)[:6].upper()) could emit "-"
+# and "_", so rows written before it was replaced hold ids a stricter pattern
+# would reject, and every read, download and reaper delete of those legacy runs
+# would start raising.
+RUN_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+# Key path components that would walk out of the namespace the key is joined
+# onto. An EMPTY component is deliberately allowed: callers legitimately pass
+# "" and trailing-slash prefixes (list_files(run_id, "outputs/")).
+_UNSAFE_KEY_COMPONENTS = frozenset({".", ".."})
+_KEY_SEPARATORS = re.compile(r"[\\/]")
+
+
+def validate_run_id(run_id: str) -> None:
+    """Reject a run id that could reshape or escape the storage namespace.
+
+    Defense in depth at the storage boundary: every run id reaching storage
+    today has already been matched against a Run.id row by check_run_access,
+    but this interface accepts arbitrary strings and delete_run builds a
+    recursive-delete prefix out of one, so a malformed id is a data-loss
+    hazard rather than a routing bug.
+
+    Raises:
+        ValueError: If run_id is not a plain identifier.
+    """
+    if not isinstance(run_id, str) or not RUN_ID_PATTERN.match(run_id):
+        raise ValueError(f"invalid run id for storage: {run_id!r}")
+
+
+def validate_key(key: str) -> None:
+    """Reject an absolute key, or one carrying a "." or ".." path component.
+
+    Applies equally to run-scoped keys, global keys and delete prefixes: all
+    three get joined onto a storage root, and no backend may let a
+    caller-supplied string walk out of it. An empty key and a trailing slash
+    stay legal -- list and delete prefixes use both.
+
+    Raises:
+        ValueError: If the key is absolute or has a relative component.
+    """
+    if not isinstance(key, str):
+        raise ValueError(f"invalid storage key: {key!r}")
+    if key.startswith(("/", "\\")):
+        raise ValueError(f"storage key must be relative, not absolute: {key!r}")
+    for component in _KEY_SEPARATORS.split(key):
+        if component in _UNSAFE_KEY_COMPONENTS:
+            raise ValueError(
+                f"storage key must not contain a {component!r} component: {key!r}"
+            )
+
+
+def validate_run_key(run_id: str, key: str) -> None:
+    """The check every run-scoped operation makes: both of the above."""
+    validate_run_id(run_id)
+    validate_key(key)
 
 
 class RunStorage(ABC):
@@ -19,6 +79,17 @@ class RunStorage(ABC):
     this interface. Two implementations exist:
     - LocalRunStorage: reads/writes to local filesystem (dev)
     - S3RunStorage: reads/writes to S3 (production/EKS)
+
+    Key validation is a storage invariant, not a caller courtesy. run_id, key
+    and prefix arrive here as arbitrary strings, so every backend must enforce
+    the same logical rules on every operation that builds a path or key out of
+    them -- put_file, put_file_exclusive, get_file, exists, list_files,
+    put_global, delete_run and delete_global_prefix: run ids match
+    RUN_ID_PATTERN, and keys are relative with no "." or ".." component
+    (validate_run_id / validate_key / validate_run_key above, which both
+    backends call). A backend on a hierarchical namespace must additionally
+    guarantee containment after symlink resolution, not just by inspecting the
+    string.
     """
 
     @abstractmethod
@@ -39,10 +110,22 @@ class RunStorage(ABC):
 
         Same contract as put_file, except a pre-existing key is a hard error
         instead of a silent overwrite -- this is what closes the run-id
-        collision that let one user's upload overwrite another's (#685).
-        Callers that want "create fresh or fail" (allocating a new run id's
-        archive) use this instead of exists()-then-put_file, which is a
-        race, not a fix.
+        collision that let one user's upload overwrite another's. Callers
+        that want "create fresh or fail" (allocating a new run id's archive)
+        use this instead of exists()-then-put_file, which is a race, not a
+        fix.
+
+        Each call is atomic for its own key: the existence check and the
+        write are one indivisible operation in every backend (an O_EXCL
+        create locally, a conditional PUT on S3), so two concurrent callers
+        for the same key can never both succeed. A SEQUENCE of keys is NOT
+        transactional, though -- writing input/manifest.json and then
+        input/{stored_name} is two independent atomic writes, and a failure
+        of the second leaves the namespace partially populated with the
+        first. Reconciling (or deliberately tolerating) that residue is the
+        caller's contract, not this interface's: see create_run_archive in
+        api/upload.py, which documents why the orphaned manifest it can leave
+        behind is harmless and is not cleaned up.
 
         Args:
             run_id: The run identifier.
