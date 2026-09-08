@@ -48,23 +48,27 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install "pip-audit==2.10.1"
 
-      # SCOPE LIMIT -- read this before trusting a green run.
-      # With --no-deps, pip-audit audits exactly the distributions named in the
-      # requirements file and does not resolve their dependency trees. These
-      # three files list direct dependencies only (12 + 23 + 3 pinned
-      # distributions) and the repo has no lockfile, so the transitive set --
-      # botocore, httpx, pydantic-core, pyopenssl, certifi, urllib3 and the rest,
-      # none of which appear in any requirements file -- is NOT covered by this
-      # gate. A vulnerability reachable only through a transitive dependency
-      # passes here. Closing that needs a hash-pinned lockfile of the fully
-      # resolved set (e.g. pip-compile --generate-hashes), audited instead of
-      # these files; until then this gate covers the direct pins and nothing more.
+      # SCOPE -- what this gate actually audits. Measured, not inferred.
+      # --no-deps is very nearly a no-op as invoked here. pip-audit only skips
+      # resolution when it is ALSO given --disable-pip: in
+      # pip_audit/_dependency_source/requirement.py the pre-resolved path is
+      # guarded by `if self._disable_pip:`, and we never pass that flag. So
+      # pip-audit builds a venv, pip-installs the requirements file (which
+      # resolves the whole tree) and audits every resolved distribution.
+      # Measured with the pinned pip-audit==2.10.1:
+      #   --no-deps -r requirements.txt                 -> 39 packages audited
+      #     (12 declared; adds botocore, httpx, pydantic-core, certifi, urllib3)
+      #   --no-deps -r backend/requirements.txt         -> 60 packages audited
+      #     (23 declared; adds pyopenssl, cryptography, starlette, anyio, h11)
+      #   --no-deps --disable-pip -r requirements.txt   -> 12 packages audited
+      # Transitive dependencies ARE covered. The remaining gap is reproducibility,
+      # not coverage: the audited set is whatever pip resolves at audit time
+      # rather than a hash-pinned set (#130, prerequisite #754).
       #
-      # --no-deps is kept anyway because dropping it is worse than the gap it
-      # leaves: resolving each tree makes pip build and install it, which turns
-      # runner-environment problems (missing xmlsec1 for pysaml2, poppler, C
-      # toolchain for lxml/cryptography) into red runs on a security gate that
-      # then says nothing at all about vulnerabilities.
+      # THE TRAP: adding --disable-pip -- or hash-pinning these files, which
+      # takes the same branch -- silently collapses coverage from 39/60 packages
+      # to the 12/23 direct pins, with no warning and a still-green run. If you
+      # hash-pin for #130, pin the fully RESOLVED set, never just these files.
       #
       # Ignored advisories are maintained in .pip-audit-ignore.txt (tracked in #126).
       # Both this workflow and buildspec.yaml reference that file so the ignore
