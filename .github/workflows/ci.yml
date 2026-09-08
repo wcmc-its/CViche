@@ -143,6 +143,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0  # TruffleHog needs the base commit to diff against
+      # Same pin as deps-audit.yml's secret-scan-full-history job -- bump both
+      # together. That job carries the recipe for re-verifying that this SHA is
+      # the v3.97.4 tag commit rather than trusting the trailing comment.
       - name: Scan changed commits for secrets
         uses: trufflesecurity/trufflehog@363923b901c911a9164f50b6c423f47c15372b1c # v3.97.4
         with:
