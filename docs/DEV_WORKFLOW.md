@@ -283,8 +283,11 @@ theory that later proved wrong.
 python3 -m pytest src/unified_pipeline/tests/ -q
 
 # backend suite — needs dummy env, the factory raises without it
-CVICHE_SESSION_SECRET=x DB_HOST=x DB_PORT=3306 DB_USER=x DB_PASSWORD=x DB_NAME=x \
+CVICHE_SESSION_SECRET=x DB_HOST=x DB_PORT=3306 DB_USER=x DB_NAME=x \
+  DB_AUTH_MODE=password DB_PASSWORD=x \
   python3 -m pytest web_interface/backend/tests/ -q
+# DB_AUTH_MODE=password is required: DB_PASSWORD alone no longer selects
+# password auth, so without it this runs against the IAM path.
 
 # coverage — reported, never a gate. `term-missing` lists the uncovered lines and branches.
 python3 -m pytest src/unified_pipeline/tests/ --cov=src --cov-branch --cov-report=term-missing -q
