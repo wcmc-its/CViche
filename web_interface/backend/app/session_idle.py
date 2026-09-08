@@ -114,7 +114,7 @@ class IdleSessionStore:
         self._lock = threading.Lock()
 
     @classmethod
-    def from_env(cls) -> "IdleSessionStore":
+    def from_env(cls) -> IdleSessionStore:
         url, _ = get_config("redis", "CVICHE_REDIS_URL", default="")
         return cls(url, SESSION_IDLE_TIMEOUT)
 
@@ -238,7 +238,7 @@ class IdleSessionStore:
             raise SessionStoreUnavailable("could not revoke the server-side session") from exc
 
 
-_store: "IdleSessionStore | None" = None
+_store: IdleSessionStore | None = None
 _store_lock = threading.Lock()
 
 

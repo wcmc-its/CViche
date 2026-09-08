@@ -17,7 +17,7 @@ separate, mechanical follow-up.
 """
 import logging
 import re
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
 
@@ -100,7 +100,7 @@ def _extract_last_name_from_uid(uid: str) -> str:
     return ''
 
 
-def _extract_year_from_text(text: str) -> Optional[str]:
+def _extract_year_from_text(text: str) -> str | None:
     """Extract year from raw text as fallback when not in extracted_fields.
 
     Looks for patterns like:
@@ -136,7 +136,7 @@ def _extract_year_from_text(text: str) -> Optional[str]:
     return None
 
 
-def _is_table_header_entry(text: str, header_keywords: List[str], threshold: int = 2) -> bool:
+def _is_table_header_entry(text: str, header_keywords: list[str], threshold: int = 2) -> bool:
     """Detect if an entry is actually a table header that was mistakenly extracted as data.
 
     Table headers are characterized by:
@@ -208,7 +208,7 @@ def _is_table_header_entry(text: str, header_keywords: List[str], threshold: int
     return False
 
 
-def _is_structural_label(entry: Dict) -> bool:
+def _is_structural_label(entry: dict) -> bool:
     """Check if an entry is a structural label from the source CV rather than actual content.
 
     Source CVs contain section headers, sub-headers, and structural labels
@@ -268,7 +268,7 @@ def _is_structural_label(entry: Dict) -> bool:
     return False
 
 
-def _parse_multi_membership_entry(lines: List[str]) -> List[Tuple[str, str, str]]:
+def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]]:
     """Parse multiple memberships from merged entry lines.
 
     Handles patterns like:
@@ -345,7 +345,7 @@ _TRAILING_DATE = re.compile(r'(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)\s*$', re
 _PAREN_ROLE_DATE = re.compile(r'\(([^)]*?)(\d{4})\s*[-–]\s*(\d{4}|present)\s*\)', re.IGNORECASE)
 
 
-def _parse_flattened_committee_lines(lines: List[str]) -> List[ParsedActivityLine]:
+def _parse_flattened_committee_lines(lines: list[str]) -> list[ParsedActivityLine]:
     """Parse committee/leadership lines flattened out of a source table.
 
     The single line parser behind section O's `_add_multiline_leadership_rows`
@@ -375,8 +375,8 @@ def _parse_flattened_committee_lines(lines: List[str]) -> List[ParsedActivityLin
     2008-2010)") is one role held under changing titles, so it becomes one
     item: the latest date range, with every title collected into `roles`.
     """
-    items: List[ParsedActivityLine] = []
-    dates_pool: List[str] = []
+    items: list[ParsedActivityLine] = []
+    dates_pool: list[str] = []
 
     for line in lines:
         # entry_lines() already strips every line at both call sites, but this

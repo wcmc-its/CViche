@@ -9,11 +9,10 @@ The key is total on purpose. A record with no parseable date sorts to (0, 0, 0)
 a section that raises mid-render loses the whole document.
 """
 from collections.abc import Mapping
-from typing import Dict, List
 
 from ..parsing.dates import _parse_date_components
 
-def extract_sort_date(entry: Dict) -> tuple:
+def extract_sort_date(entry: dict) -> tuple:
     """
     Extract a sortable date tuple from an entry for reverse-chronological ordering.
 
@@ -80,7 +79,7 @@ def extract_sort_date(entry: Dict) -> tuple:
     return (0, 0, 0)
 
 
-def sort_entries_reverse_chronological(entries: List[Dict]) -> List[Dict]:
+def sort_entries_reverse_chronological(entries: list[dict]) -> list[dict]:
     """
     Sort entries in reverse chronological order (most recent first).
 

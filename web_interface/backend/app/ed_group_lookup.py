@@ -4,7 +4,7 @@ import logging
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Iterator
+from collections.abc import Iterator
 from urllib.parse import unquote, urlparse
 from ldap3 import Server, Connection, BASE, LEVEL, SUBTREE
 from ldap3.utils.conv import escape_filter_chars

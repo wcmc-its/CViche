@@ -12,7 +12,6 @@ Based on Haendel CV analysis showing 0.85 confidence is correct <50% of time.
 """
 
 import re
-from typing import Dict, List
 
 try:
     from .base_validator import BaseValidator, ValidatorGuidance
@@ -81,7 +80,7 @@ class FellowshipValidator(BaseValidator):
         r'inducted',
     ]
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """
         Applies to multiple parent sections where fellowships can appear.
         """
@@ -97,7 +96,7 @@ class FellowshipValidator(BaseValidator):
         """Medium-high priority - should run before generic classification."""
         return 12
 
-    def analyze(self, group: Dict, parent_section: str) -> ValidatorGuidance:
+    def analyze(self, group: dict, parent_section: str) -> ValidatorGuidance:
         """
         Analyze fellowship content and provide routing guidance.
 

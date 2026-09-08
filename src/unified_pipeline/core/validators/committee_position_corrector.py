@@ -24,7 +24,6 @@ Signals for COMMITTEE (not position):
 """
 
 import re
-from typing import List, Dict, Tuple
 from dataclasses import dataclass
 
 try:
@@ -128,7 +127,7 @@ class CommitteePositionCorrector(BaseValidator):
         r'\bconsortium\b',
     ]
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to position-related sections."""
         return ['D', 'D1', 'D2', 'D3', 'O', 'P', 'Q', 'Q1', 'Q2']
 
@@ -178,7 +177,7 @@ class CommitteePositionCorrector(BaseValidator):
 
         return ValidatorGuidance.no_guidance()
 
-    def check_and_correct(self, entry: Dict) -> CommitteeCorrectionResult:
+    def check_and_correct(self, entry: dict) -> CommitteeCorrectionResult:
         """
         Check a classified entry and auto-correct if it's committee service
         misclassified as a position.
@@ -266,7 +265,7 @@ class CommitteePositionCorrector(BaseValidator):
         )
 
 
-def apply_committee_corrections(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
+def apply_committee_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
     """
     Apply committee vs position corrections to classified entries.
 

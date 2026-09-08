@@ -16,7 +16,6 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import Dict, Optional, Set
 from fastapi import WebSocket
 from datetime import datetime
 
@@ -69,14 +68,14 @@ class EventEmitter:
     """Manages WebSocket connections and broadcasts events."""
 
     def __init__(self, broker=None):
-        self.connections: Dict[str, Set[WebSocket]] = {}
+        self.connections: dict[str, set[WebSocket]] = {}
         # Sockets that have already been told this run is over. Per socket, not
         # per run: two clients watching one run each need their own copy, and a
         # reconnecting client is a new socket and gets told again.
-        self._terminal_delivered: Set[WebSocket] = set()
+        self._terminal_delivered: set[WebSocket] = set()
         self._broker = broker
         self._pubsub = None
-        self._subscriber_task: Optional[asyncio.Task] = None
+        self._subscriber_task: asyncio.Task | None = None
 
     def set_broker(self, broker) -> None:
         """Attach the Redis broker (called at app startup)."""

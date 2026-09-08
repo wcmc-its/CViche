@@ -22,7 +22,6 @@ import sys
 import json
 import re
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 from unified_pipeline.llm_client import call_llm
@@ -124,7 +123,7 @@ Now format these citations:
 RAW_CITATIONS>>>'''
 
 
-def build_raw_content(entries: List[Dict]) -> Tuple[str, Dict[str, Dict]]:
+def build_raw_content(entries: list[dict]) -> tuple[str, dict[str, dict]]:
     """
     Build raw content string for LLM prompt and a mapping of entry IDs to entries.
 
@@ -151,7 +150,7 @@ def build_raw_content(entries: List[Dict]) -> Tuple[str, Dict[str, Dict]]:
     return '\n'.join(lines), id_to_entry
 
 
-def parse_llm_output(llm_output: str, id_to_entry: Dict[str, Dict], verbose: bool = True) -> Dict[str, Dict]:
+def parse_llm_output(llm_output: str, id_to_entry: dict[str, dict], verbose: bool = True) -> dict[str, dict]:
     """
     Parse LLM JSON output and extract formatted citations per entry ID.
 

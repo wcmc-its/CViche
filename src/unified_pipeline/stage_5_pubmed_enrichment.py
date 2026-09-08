@@ -30,7 +30,7 @@ import time
 import requests
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -102,7 +102,7 @@ class PubMedEnricher:
         # (operation, status/exception) classes already logged at ERROR this run
         self._logged_failure_classes = set()
 
-    def enrich_stage4_output(self, stage4_path: str) -> Dict[str, Any]:
+    def enrich_stage4_output(self, stage4_path: str) -> dict[str, Any]:
         """
         Main entry point: Enrich a Stage 4 output file.
 
@@ -214,7 +214,7 @@ class PubMedEnricher:
 
         return output
 
-    def _clean_pmid(self, pmid: Any) -> Optional[str]:
+    def _clean_pmid(self, pmid: Any) -> str | None:
         """Extract clean PMID number."""
         if not pmid:
             return None
@@ -223,7 +223,7 @@ class PubMedEnricher:
         match = re.search(r'(\d{7,8})', pmid_str)
         return match.group(1) if match else None
 
-    def _clean_pmcid(self, pmcid: Any) -> Optional[str]:
+    def _clean_pmcid(self, pmcid: Any) -> str | None:
         """Extract clean PMCID (with PMC prefix)."""
         if not pmcid:
             return None
@@ -238,7 +238,7 @@ class PubMedEnricher:
             return f"PMC{match.group(1)}"
         return None
 
-    def _clean_doi(self, doi: Any) -> Optional[str]:
+    def _clean_doi(self, doi: Any) -> str | None:
         """Extract clean DOI."""
         if not doi:
             return None
@@ -247,7 +247,7 @@ class PubMedEnricher:
         match = re.search(r'(10\.\d{4,}/[^\s]+)', doi_str)
         return match.group(1).rstrip('.,;') if match else None
 
-    def _enrich_by_pmid(self, entries_with_pmid: List[Tuple[Dict, str]]) -> List[Dict]:
+    def _enrich_by_pmid(self, entries_with_pmid: list[tuple[dict, str]]) -> list[dict]:
         """
         Enrich entries by direct PMID lookup.
 
@@ -284,7 +284,7 @@ class PubMedEnricher:
 
         return results
 
-    def _enrich_by_pmcid(self, entries_with_pmcid: List[Tuple[Dict, str]]) -> List[Dict]:
+    def _enrich_by_pmcid(self, entries_with_pmcid: list[tuple[dict, str]]) -> list[dict]:
         """
         Enrich entries by PMCID → PMID conversion, then lookup.
         """
@@ -322,7 +322,7 @@ class PubMedEnricher:
 
         return results
 
-    def _enrich_by_doi(self, entries_with_doi: List[Tuple[Dict, str]]) -> List[Dict]:
+    def _enrich_by_doi(self, entries_with_doi: list[tuple[dict, str]]) -> list[dict]:
         """
         Enrich entries by DOI search in PubMed, then lookup.
 
@@ -371,7 +371,7 @@ class PubMedEnricher:
 
         return results
 
-    def _identity_params(self) -> Dict[str, str]:
+    def _identity_params(self) -> dict[str, str]:
         """NCBI identification params; email omitted when not configured."""
         params = {'tool': 'scholar_signals_cv_pipeline'}
         if PUBMED_CONTACT_EMAIL:
@@ -399,7 +399,7 @@ class PubMedEnricher:
             message += f" | response body: {_sanitize_error(body[:500])}"
         logger.error(message)
 
-    def _get_with_retry(self, url: str, params: Dict[str, Any]) -> requests.Response:
+    def _get_with_retry(self, url: str, params: dict[str, Any]) -> requests.Response:
         """
         HTTP GET with retry on transient failures.
 
@@ -439,7 +439,7 @@ class PubMedEnricher:
 
         raise last_error
 
-    def _fetch_pubmed_batch(self, pmids: List[str]) -> Dict[str, Dict]:
+    def _fetch_pubmed_batch(self, pmids: list[str]) -> dict[str, dict]:
         """
         Fetch multiple PubMed records via efetch.
         """
@@ -479,7 +479,7 @@ class PubMedEnricher:
                 print(f"    ❌ API error: {_sanitize_error(e)}")
             return {}
 
-    def _parse_pubmed_article(self, article: ET.Element) -> Tuple[Optional[str], Optional[Dict]]:
+    def _parse_pubmed_article(self, article: ET.Element) -> tuple[str | None, dict | None]:
         """
         Parse a single PubmedArticle XML element.
         """
@@ -577,7 +577,7 @@ class PubMedEnricher:
         found = elem.find(path)
         return found.text.strip() if found is not None and found.text else ''
 
-    def _convert_pmcids_to_pmids(self, pmcids: List[str]) -> Dict[str, str]:
+    def _convert_pmcids_to_pmids(self, pmcids: list[str]) -> dict[str, str]:
         """
         Convert PMCIDs to PMIDs using NCBI ID converter.
         """
@@ -614,7 +614,7 @@ class PubMedEnricher:
                 print(f"    ❌ ID conversion error: {_sanitize_error(e)}")
             return {}
 
-    def _search_pmid_by_doi(self, doi: str) -> Optional[str]:
+    def _search_pmid_by_doi(self, doi: str) -> str | None:
         """
         Search PubMed for a DOI to get the PMID.
 
@@ -640,7 +640,7 @@ class PubMedEnricher:
             return id_list[0]  # First match
         return None
 
-    def _merge_pubmed_data(self, entry: Dict, pubmed_record: Dict):
+    def _merge_pubmed_data(self, entry: dict, pubmed_record: dict):
         """
         Merge PubMed data into the entry's extracted_fields.
 
@@ -695,7 +695,7 @@ class PubMedEnricher:
             entry.setdefault('enriched_fields', []).append('pages')
 
 
-def run_stage5(stage4_path: str, output_path: str = None, verbose: bool = True) -> Dict[str, Any]:
+def run_stage5(stage4_path: str, output_path: str = None, verbose: bool = True) -> dict[str, Any]:
     """
     Run Stage 5 enrichment on a Stage 4 output file.
 
