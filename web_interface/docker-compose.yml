@@ -59,8 +59,13 @@ services:
       # alembic/env.py resolves its own MIGRATE_USER, not DB_USER.
       MIGRATE_USER: "root"
       DB_NAME: "cviche"
-      # Presence of DB_PASSWORD selects password auth over RDS IAM auth. Local
-      # dev only: deployed environments leave it unset and keep IAM + TLS.
+      # DB_AUTH_MODE selects the credential explicitly; DB_PASSWORD no longer
+      # does. It defaults to "iam" (RDS IAM token over certificate-verified
+      # TLS), which is what every deployed environment runs and what a stray
+      # DB_PASSWORD must never be able to downgrade. "password" is local dev
+      # only -- this MariaDB container speaks password auth with no TLS -- and
+      # the backend refuses to start in this mode if DB_PASSWORD is empty.
+      DB_AUTH_MODE: "password"
       DB_PASSWORD: "cviche_dev"
       # Real-time broker: enables cross-worker events + cancellation. Remove to
       # exercise the in-process (single-worker) fallback path. LOCAL DEV ONLY:
