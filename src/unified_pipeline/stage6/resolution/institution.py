@@ -11,10 +11,9 @@ plus, in the first case, whether it came from enrichment, because an enriched
 value is rendered as a tracked change and an extracted one is not.
 """
 import re
-from typing import Dict, List, Tuple
 
 
-def _get_institution_location(entry: Dict) -> Tuple[str, bool]:
+def _get_institution_location(entry: dict) -> tuple[str, bool]:
     """Get formatted location string from institution enrichment data.
 
     Uses institution_enrichment from Stage 5b if available, otherwise falls back
@@ -109,7 +108,7 @@ def _get_institution_location(entry: Dict) -> Tuple[str, bool]:
     return (fields.get('location', ''), False)  # False = not from enrichment
 
 
-def _recover_institution_from_nearby_entries(entry: Dict, all_entries: List[Dict]) -> str:
+def _recover_institution_from_nearby_entries(entry: dict, all_entries: list[dict]) -> str:
     """Recover institution name from nearby entries in the original CV.
 
     When a training entry (like Graduate Research Assistant) is missing institution,

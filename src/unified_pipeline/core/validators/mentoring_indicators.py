@@ -10,7 +10,6 @@ Based on ChatGPT feedback for CV 2036 Hoffman:
 - Rule 10: "MENTEES" in group label → N3/N4, not D/K
 """
 
-from typing import Dict, List
 import re
 
 try:
@@ -26,7 +25,7 @@ class MentoringIndicatorsValidator(BaseValidator):
     - Mentee positions (N4) vs own positions (D)
     """
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """
         This validator applies to sections that might be confused with mentoring.
         """
@@ -41,7 +40,7 @@ class MentoringIndicatorsValidator(BaseValidator):
         """
         return 10
 
-    def analyze(self, group: Dict, parent_section: str) -> ValidatorGuidance:
+    def analyze(self, group: dict, parent_section: str) -> ValidatorGuidance:
         """
         Analyze group for student/mentee indicators.
 

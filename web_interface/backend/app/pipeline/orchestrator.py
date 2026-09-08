@@ -17,7 +17,7 @@ import threading
 import io
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, Any, Optional
+from typing import Any
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -156,9 +156,9 @@ class _RoutedStdout:
 
     def __init__(self, real_stdout):
         self._real = real_stdout
-        self._captures: Dict[int, "StreamingStdoutCapture"] = {}
+        self._captures: dict[int, StreamingStdoutCapture] = {}
 
-    def register(self, capture: "StreamingStdoutCapture") -> None:
+    def register(self, capture: StreamingStdoutCapture) -> None:
         self._captures[threading.get_ident()] = capture
 
     def unregister(self) -> None:
@@ -312,14 +312,14 @@ class PipelineOrchestrator:
         self.document_uid = Path(file_path).stem
 
         # Track outputs between stages
-        self.stage_outputs: Dict[str, str] = {}
+        self.stage_outputs: dict[str, str] = {}
 
         # Total cost tracking
         self.total_cost = 0.0
 
         # Step number of the stage that raised, so the run-level failure handler
         # can attribute RUN_FAILED to the stage the user was watching.
-        self.failed_step_number: Optional[int] = None
+        self.failed_step_number: int | None = None
 
     async def log(self, step_number: int, message: str, level: str = "INFO"):
         """Log a message to database and emit via WebSocket."""
@@ -392,7 +392,7 @@ class PipelineOrchestrator:
 
         return str(dest_path)
 
-    def _get_output_paths(self) -> Dict[str, Path]:
+    def _get_output_paths(self) -> dict[str, Path]:
         """Get expected output file paths for each stage."""
         base = self.pipeline_output_dir
         return {
@@ -512,7 +512,7 @@ class PipelineOrchestrator:
             self.total_cost -= sum((s.cost or 0.0) for s in recomputed)
         return effective_start
 
-    async def execute(self, start_step_number: Optional[int] = None):
+    async def execute(self, start_step_number: int | None = None):
         """Execute the pipeline.
 
         When ``start_step_number`` is given (a per-step retry), stages before it
@@ -903,7 +903,7 @@ class PipelineOrchestrator:
             raise
 
     def _sync_prompt_logs_to_storage(
-        self, since: Optional[datetime], step_number: int
+        self, since: datetime | None, step_number: int
     ) -> None:
         """Copy this run's prompt log files written since ``since`` into per-run storage.
 
@@ -996,7 +996,7 @@ class PipelineOrchestrator:
             func, step_number, event_loop, *args, **kwargs
         )
 
-    async def _execute_stage_logic(self, stage_id: str, cv_path: str) -> Dict[str, Any]:
+    async def _execute_stage_logic(self, stage_id: str, cv_path: str) -> dict[str, Any]:
         """Execute a specific pipeline stage."""
         output_paths = self._get_output_paths()
         output_files = []

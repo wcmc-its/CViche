@@ -10,7 +10,6 @@ Case Study: CV 2032 had groups with bare journal names mapped incorrectly.
 """
 
 import re
-from typing import List
 from .base_validator import BaseValidator, ValidatorGuidance
 
 
@@ -58,7 +57,7 @@ class ServiceVsPublicationValidator(BaseValidator):
         r'\bdoi:',  # DOI
     ]
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to S (Bibliography) and Q (Professional Service)."""
         return ['S', 'Q']
 

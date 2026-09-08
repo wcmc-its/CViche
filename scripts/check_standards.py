@@ -22,14 +22,20 @@ build note at its top for which is which and why.
                                                     # in place (never raises a
                                                     # baseline -- see check_function_size.py)
 
-Five of the nine rows are a snapshot, not a debt budget -- a row going up is
-information, not a failure to refuse, and --update always writes the fresh
-number either direction. Four rows (2.1, 3.7's dynamic-attribute row, 5.4,
-7.1) are ratcheted instead, the same way check_function_size.py ratchets
-3.x: scripts/standards-baseline.json holds one number per row, --update
-refuses to write one higher than what's on disk, and the bare command fails
-if a fresh count exceeds its baseline. See RATCHETED_ROWS below and
-CODING_STANDARDS.md's "Closing the loop" section for which rows qualify.
+Six of the thirteen rows are a snapshot, not a debt budget -- a row going up
+is information, not a failure to refuse, and --update always writes the
+fresh number either direction. Seven rows (2.1, 3.7's dynamic-attribute row,
+5.4, both 7.1 rows, both 8.3 rows) are ratcheted instead, the same way
+check_function_size.py ratchets 3.x: scripts/standards-baseline.json holds
+one number per row, --update refuses to write one higher than what's on
+disk, and the bare command fails if a fresh count exceeds its baseline. See
+RATCHETED_ROWS below and CODING_STANDARDS.md's "Closing the loop" section
+for which rows qualify.
+
+Three of the ratcheted rows (7.1's print() row and both 8.3 rows) are not
+AST walks here but sums over `ruff check --statistics`, with ruff.toml at the
+repo root as the one definition of what is counted. ruff missing from PATH
+is a hard failure (exit 2, §5.5), never a zero.
 
 Two rows (both under §3.7) also accept a `# standards-waiver: <rule>`
 comment at the site (WAIVABLE_ROWS): a hit there is excused from that row's
@@ -44,6 +50,7 @@ and a shared cache would only save the few hundred ms this already costs.
 
 import argparse
 import ast
+import functools
 import json
 import os
 import re
@@ -62,7 +69,7 @@ END_MARKER = "<!-- check_standards:auto:end -->"
 
 # Rows in ROWS below whose target is "this count never rises," not "this
 # count is already zero" -- ratcheted against BASELINE the same way §3.2a
-# ratchets oversized-function debt. Which four rows qualify is a judgment
+# ratchets oversized-function debt. Which seven rows qualify is a judgment
 # call made once in CODING_STANDARDS.md's "Closing the loop" section, not
 # re-derived here -- adding a row is a real decision, not a mechanical one.
 RATCHETED_ROWS = {
@@ -70,6 +77,9 @@ RATCHETED_ROWS = {
     "3.7 dynamic attribute access (non-literal)",
     "5.4 bare swallows (`except Exception: pass`)",
     "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)",
+    "7.1 print() in library code (T201)",
+    "8.3 typing syntax (UP*, RUF013)",
+    "8.3 missing annotations (ANN*, RUF012)",
 }
 
 # Anchored to right after `#` (mod whitespace), not a bare substring search
@@ -436,6 +446,69 @@ def check_python_version_drift():
     return len(hits), hits
 
 
+# 7.1 / 8.3 -- three rows that sum `ruff check --statistics` by rule family.
+# ruff.toml at the repo root is the one definition of the rule set (§1.5);
+# passing it explicitly turns off ruff's per-directory config discovery so a
+# stray pyproject.toml somewhere below can't widen or narrow one row's count.
+# With --config, ruff resolves the per-file-ignore globs and excludes against
+# the working directory, not the config file's directory -- hence cwd=ROOT
+# below; run from anywhere else and tests/ and scripts/ stop being exempt.
+RUFF_CONFIG = os.path.join(ROOT, "ruff.toml")
+
+
+class RuffUnavailable(RuntimeError):
+    """ruff could not be run, so the three ruff-backed rows have no number.
+    §5.5: a gate that cannot do its job fails, it does not read zero."""
+
+
+@functools.cache
+def _ruff_statistics() -> dict[str, int]:
+    """{rule code: count} over the whole repo, one ruff run shared by every
+    ruff-backed row. --exit-zero keeps violations from turning into a
+    nonzero exit, so any nonzero exit left is ruff itself failing (bad
+    config, unreadable path) and is raised, not summed as 0."""
+    cmd = ["ruff", "check", ".", "--config", RUFF_CONFIG, "--statistics",
+           "--exit-zero", "--output-format", "json"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+    except FileNotFoundError as exc:
+        raise RuffUnavailable(
+            "ruff is not on PATH; the 7.1/8.3 ratchet rows need it. Install the "
+            "version .github/workflows/ci.yml pins for the function-size job."
+        ) from exc
+    if r.returncode != 0:
+        raise RuffUnavailable(f"`{' '.join(cmd)}` exited {r.returncode}: {r.stderr.strip()}")
+    return {entry["code"]: int(entry["count"]) for entry in json.loads(r.stdout)}
+
+
+def _ruff_family_count(*prefixes: str) -> tuple[int, list[str]]:
+    """(total, per-code detail) for every ruff code starting with one of
+    `prefixes` -- "T201" matches itself, "UP" matches UP006, UP035, ..."""
+    stats = _ruff_statistics()
+    matched = {code: n for code, n in stats.items() if code.startswith(prefixes)}
+    detail = [f"{code}: {n}" for code, n in sorted(matched.items(), key=lambda kv: (-kv[1], kv[0]))]
+    return sum(matched.values()), detail
+
+
+def check_print_in_library() -> tuple[int, list[str]]:
+    """§7.1 -- print() outside tests/ and scripts/ (ruff T201; the
+    per-file-ignores in ruff.toml are what scope it to library code)."""
+    return _ruff_family_count("T201")
+
+
+def check_typing_syntax() -> tuple[int, list[str]]:
+    """§8.3 item 1 -- pre-3.10 typing syntax: typing.List/Dict/Optional/
+    Union, quoted annotations (UP*), and implicit Optional (RUF013)."""
+    return _ruff_family_count("UP", "RUF013")
+
+
+def check_missing_annotations() -> tuple[int, list[str]]:
+    """§8.3 item 1 -- unannotated arguments and returns, `Any` where a
+    real type could be written (ANN*), mutable class attributes without
+    ClassVar (RUF012)."""
+    return _ruff_family_count("ANN", "RUF012")
+
+
 # (row label, target text, check fn) -- target is prose ("0", "falling"),
 # not itself the enforcement; RATCHETED_ROWS above decides how a row's
 # count is actually gated.
@@ -449,7 +522,10 @@ ROWS = [
     ("3.7 dynamic attribute access (non-literal)", "falling", check_dynamic_attribute_access),
     ("5.4 bare swallows (`except Exception: pass`)", "falling", check_bare_swallows),
     ("7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)", "falling", check_progress_patterns),
+    ("7.1 print() in library code (T201)", "falling", check_print_in_library),
     ("7.9 restated Python version != the build image", "0", check_python_version_drift),
+    ("8.3 typing syntax (UP*, RUF013)", "falling", check_typing_syntax),
+    ("8.3 missing annotations (ANN*, RUF012)", "falling", check_missing_annotations),
 ]
 
 
@@ -519,7 +595,13 @@ def main():
     ap.add_argument("--update", action="store_true", help="rewrite CODING_STANDARDS.md's auto block and standards-baseline.json")
     args = ap.parse_args()
 
-    results = compute_rows()
+    try:
+        results = compute_rows()
+    except RuffUnavailable as exc:
+        # Every mode, --report included: a table with three rows missing is
+        # not a report, and a baseline written from one would lock in zeros.
+        print(f"FAIL: {exc}", file=sys.stderr)
+        return 2
     fresh = render_table(results)
     baseline = _load_baseline()
 

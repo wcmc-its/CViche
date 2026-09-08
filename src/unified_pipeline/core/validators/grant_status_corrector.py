@@ -12,14 +12,13 @@ Solution: Parse date ranges from grant text and compare to current date.
 
 import re
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
 
 
 # Current year for comparison
 CURRENT_YEAR = datetime.now().year
 
 
-def extract_year_range(text: str) -> Optional[Tuple[int, int]]:
+def extract_year_range(text: str) -> tuple[int, int] | None:
     """
     Extract start and end years from grant text.
 
@@ -80,7 +79,7 @@ def is_grant_code(code: str) -> bool:
     return code in ('M2', 'M2A', 'M2B', 'M2C')
 
 
-def correct_grant_status(entry: Dict) -> Dict:
+def correct_grant_status(entry: dict) -> dict:
     """
     Correct grant status code based on date analysis.
 
@@ -162,7 +161,7 @@ def correct_grant_status(entry: Dict) -> Dict:
     return entry
 
 
-def apply_grant_status_corrections(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
+def apply_grant_status_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
     """
     Apply grant status corrections to a list of classified entries.
 
@@ -201,7 +200,7 @@ def apply_grant_status_corrections(entries: List[Dict]) -> Tuple[List[Dict], Dic
 
 
 # Convenience function for integration with Stage 3b
-def apply_grant_corrections(entries: List[Dict]) -> List[Dict]:
+def apply_grant_corrections(entries: list[dict]) -> list[dict]:
     """Apply grant status corrections, returning only the corrected list."""
     corrected, _ = apply_grant_status_corrections(entries)
     return corrected
