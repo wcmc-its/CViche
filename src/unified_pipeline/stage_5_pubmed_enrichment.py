@@ -705,7 +705,7 @@ def run_stage5(stage4_path: str, output_path: str = None, verbose: bool = True) 
         verbose: Print progress
 
     Returns:
-        Enriched output dict
+        Enriched output dict, with 'output_path' set to the file written
     """
     enricher = PubMedEnricher(verbose=verbose)
     result = enricher.enrich_stage4_output(stage4_path)
@@ -722,6 +722,9 @@ def run_stage5(stage4_path: str, output_path: str = None, verbose: bool = True) 
     if verbose:
         print(f"\n✅ Enriched output saved to: {output_path}")
 
+    # Additive, and after the write so the on-disk artifact is unchanged: the
+    # caller reads the path this stage actually used instead of rebuilding it.
+    result['output_path'] = str(output_path)
     return result
 
 
