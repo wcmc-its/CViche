@@ -10,7 +10,8 @@ import json
 import pytest
 
 import app.api.steps as steps_mod
-from app.models import User, Run
+import app.services.artifact_service as artifact_service_mod
+from app.models import User, Run, Step
 from app.auth import create_session_cookie, COOKIE_NAME
 from sqlalchemy.orm import object_session
 
@@ -66,7 +67,7 @@ def test_viewer_falls_back_to_storage_when_not_on_local_pod(
         lambda: _FakeStorage({"outputs/stage1a.json": json.dumps(payload).encode()}),
     )
 
-    # File is NOT on local disk -> _resolve_safe_path 404s -> storage fallback hits.
+    # File is NOT on local disk -> resolve_artifact's local_path is None -> storage fallback hits.
     resp = client.get(f"/api/run/{run.id}/json/stage1a.json")
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -122,13 +123,21 @@ def test_data_docx_still_allowed_for_owner(client, db, seed_simple_mode, monkeyp
 
 def _seed_shared_artifact(monkeypatch, tmp_path, basename):
     """Put a file in the SHARED src/unified_pipeline/outputs tree (candidate 2),
-    which every run on the pod writes into, and point steps.py at it."""
+    which every run on the pod writes into, and point artifact_service at it.
+
+    #780 review r3965813607: path derivation moved from steps.py (which used
+    to derive pipeline_dir from its own __file__) into
+    app.services.artifact_service, which computes it once at import as the
+    module-level _PIPELINE_OUTPUTS_ROOT. Redirecting that constant directly is
+    both simpler and more robust than the old __file__-chain trick.
+    """
     stage_dir = tmp_path / "src" / "unified_pipeline" / "outputs" / "stage_4_wcm_templates"
     stage_dir.mkdir(parents=True)
     (stage_dir / basename).write_bytes(b"PK\x03\x04 another run's parsed CV")
-    # steps.py derives pipeline_dir from __file__; redirect it at the temp tree.
-    monkeypatch.setattr(steps_mod, "__file__",
-                        str(tmp_path / "web_interface" / "backend" / "app" / "api" / "steps.py"))
+    monkeypatch.setattr(
+        artifact_service_mod, "_PIPELINE_OUTPUTS_ROOT",
+        (tmp_path / "src" / "unified_pipeline" / "outputs").resolve(),
+    )
 
 
 def test_owner_cannot_read_another_runs_docx_from_shared_dir(
@@ -157,6 +166,12 @@ def test_owner_can_still_read_its_own_docx_from_shared_dir(
     _auth(client, user)
     monkeypatch.setattr(steps_mod, "get_storage", lambda: _FakeStorage({}))
     _seed_shared_artifact(monkeypatch, tmp_path, f"{run.id}_wcm.docx")
+    # #780 review r3965760129: ownership of the shared tree is now decided by
+    # exact membership in this run's persisted Step.output_files, not by a
+    # filename prefix -- so the legitimate case needs a Step recording it.
+    db.add(Step(run_id=run.id, step_number=1, stage_id="6", step_name="WCM Template",
+                status="complete", output_files=json.dumps([f"{run.id}_wcm.docx"])))
+    db.commit()
 
     resp = client.get(f"/api/run/{run.id}/data/{run.id}_wcm.docx")
     assert resp.status_code == 200, resp.text
