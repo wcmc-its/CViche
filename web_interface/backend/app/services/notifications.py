@@ -560,30 +560,6 @@ def _do_post(url: str, payload: dict) -> _Attempt:
     return _Attempt(success=True, retryable=False, detail=f"HTTP {resp.status_code}")
 
 
-def _post(payload: dict, run_id: str) -> bool:
-    """Single-attempt POST via the module-level session (_SESSION).
-
-    No-ops (returns False) silently when the webhook URL is not configured.
-    Returns True on a 2xx response, False on a non-2xx response or any
-    exception -- never raises. Retained as the single-attempt primitive
-    (retry/backoff policy lives in _deliver, which calls _do_post directly to
-    see the retryable/detail classification _post's plain bool can't carry).
-    """
-    url = _webhook_url()
-    if not url:
-        return False
-    try:
-        return _do_post(url, payload).success
-    except Exception:  # noqa: BLE001 -- best-effort, must never raise
-        # Unexpected (e.g. a payload TypeError, not a request-layer failure):
-        # still swallowed per this function's contract, but with a traceback
-        # so it doesn't vanish silently.
-        logger.exception(
-            "Teams notification failed for run %s with an unexpected error", run_id
-        )
-        return False
-
-
 def _deliver(url: str, payload: dict, run_id: str) -> None:
     """Runs on the _DELIVERY worker thread: retry a transient failure.
 

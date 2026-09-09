@@ -546,7 +546,7 @@ def test_notify_started_swallows_post_exception(monkeypatch, caplog):
 
 def test_notify_started_swallows_builder_exception(monkeypatch, caplog):
     """#782 D7: the builder call is inside notify_run_started's own
-    never-raise boundary, not just _post's."""
+    never-raise boundary, not just _deliver's."""
     def _boom(*a, **k):
         raise RuntimeError("bad run object")
 
@@ -732,8 +732,8 @@ def test_notify_feedback_swallows_builder_exception(monkeypatch, caplog):
 
 def test_notify_terminal_swallows_builder_exception(monkeypatch, caplog):
     """#782 D7: build_teams_payload raising is caught by notify_run_terminal's
-    own never-raise boundary, not just _post's (a payload-build exception
-    used to escape notify_* entirely -- it ran outside _post's try)."""
+    own never-raise boundary, not just _deliver's (a payload-build exception
+    used to escape notify_* entirely -- it ran outside the try)."""
     def _boom(*a, **k):
         raise RuntimeError("bad run object")
 
@@ -851,7 +851,7 @@ def test_action_button_uses_untruncated_run_id_for_link(monkeypatch):
     assert len(_facts(payload)["Run ID"]) <= notifications._FACT_MAX_CHARS
 
 
-# --- #309: _post exception narrowing ----------------------------------------
+# --- #309: _do_post/_deliver exception narrowing ----------------------------
 
 def test_notify_swallows_connection_error_with_warning(monkeypatch, caplog):
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
