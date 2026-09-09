@@ -20,6 +20,7 @@ Cards are Adaptive Cards in the Teams Workflows envelope:
 """
 import logging
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from urllib.parse import quote
@@ -389,7 +390,14 @@ def test_notify_swallows_unexpected_post_exception_with_exception_log(monkeypatc
 
 
 def test_notify_retries_5xx_then_gives_up_with_one_summary_warning(monkeypatch, caplog):
+    """Also pins the actual backoff: deleting time.sleep entirely, or
+    replacing _RETRY_BACKOFF_SECONDS with all-zero delays, leaves every
+    other assertion in this test (and test_notify_does_not_retry_non_
+    retryable_4xx / test_notify_terminal_retries_and_swallows_timeout) green
+    -- only the recorded sleep durations catch it."""
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    sleeps = []
+    monkeypatch.setattr(notifications.time, "sleep", lambda seconds: sleeps.append(seconds))
 
     monkeypatch.setattr(
         notifications._SESSION,
@@ -409,17 +417,47 @@ def test_notify_retries_5xx_then_gives_up_with_one_summary_warning(monkeypatch, 
     assert len(warnings) == 1
     assert f"failed after {notifications._RETRY_ATTEMPTS} attempts" in warnings[0].message
     assert "HTTP 500" in warnings[0].message
+    # 3 attempts -> 2 backoff sleeps, matching _RETRY_BACKOFF_SECONDS exactly
+    # (not just "some number of sleeps" -- the actual durations).
+    assert sleeps == [1.0, 2.0]
 
 
-def test_notify_does_not_retry_non_retryable_4xx(monkeypatch, caplog):
+def test_notify_retries_backoff_stops_sleeping_once_it_succeeds(monkeypatch):
+    """Fail once (retryable), then succeed on the second attempt: exactly one
+    backoff sleep, for exactly the first interval -- proves the backoff
+    schedule is read positionally (attempt 1's sleep), not just summed or
+    ignored once a later attempt succeeds."""
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    sleeps = []
+    monkeypatch.setattr(notifications.time, "sleep", lambda seconds: sleeps.append(seconds))
+
+    calls = {"n": 0}
+
+    def _fail_then_succeed(*a, **k):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return SimpleNamespace(status_code=503)
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(notifications._SESSION, "post", _fail_then_succeed)
+
+    notifications.notify_run_terminal(_run(), None)
+    notifications.flush()
+
+    assert calls["n"] == 2
+    assert sleeps == [1.0]
+
+
+@pytest.mark.parametrize("status_code", [400, 404])
+def test_notify_does_not_retry_non_retryable_4xx(monkeypatch, caplog, status_code):
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
     calls = {"n": 0}
 
-    def _not_found(*a, **k):
+    def _client_error(*a, **k):
         calls["n"] += 1
-        return SimpleNamespace(status_code=404)
+        return SimpleNamespace(status_code=status_code)
 
-    monkeypatch.setattr(notifications._SESSION, "post", _not_found)
+    monkeypatch.setattr(notifications._SESSION, "post", _client_error)
 
     with caplog.at_level(logging.WARNING):
         result = notifications.notify_run_terminal(_run(), None)
@@ -433,7 +471,26 @@ def test_notify_does_not_retry_non_retryable_4xx(monkeypatch, caplog):
     ]
     assert len(warnings) == 1
     assert "not retried" in warnings[0].message
-    assert "HTTP 404" in warnings[0].message
+    assert f"HTTP {status_code}" in warnings[0].message
+
+
+@pytest.mark.parametrize("status_code", [429, 500, 503])
+def test_notify_retries_retryable_status_codes(monkeypatch, status_code):
+    """429 and 5xx ARE retried (unlike plain 4xx above) -- exhausts all
+    _RETRY_ATTEMPTS rather than stopping after one."""
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    calls = {"n": 0}
+
+    def _retryable_error(*a, **k):
+        calls["n"] += 1
+        return SimpleNamespace(status_code=status_code)
+
+    monkeypatch.setattr(notifications._SESSION, "post", _retryable_error)
+
+    notifications.notify_run_terminal(_run(), None)
+    notifications.flush()
+
+    assert calls["n"] == notifications._RETRY_ATTEMPTS
 
 
 # --- notify_run_started ---------------------------------------------------
@@ -752,13 +809,14 @@ def test_webhook_cache_revalidates_on_each_distinct_value(monkeypatch):
 
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "not-a-url-1")
     notifications.notify_run_terminal(_run(), None)
+    notifications.flush()
 
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
     notifications.notify_run_terminal(_run(), None)
+    notifications.flush()
 
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "not-a-url-2")
     notifications.notify_run_terminal(_run(), None)
-
     notifications.flush()
 
     assert captured == ["https://webhook.example/teams"]
@@ -989,6 +1047,43 @@ def test_notify_run_terminal_posts_for_each_terminal_status(monkeypatch, status)
     notifications.flush()
 
     assert captured["called"] is True
+
+
+# --- D1's core property: notify_* returns before the POST completes -------
+
+def test_notify_returns_before_delivery_completes(monkeypatch):
+    """The whole point of D1 (#782) is that notify_* hands delivery to the
+    background worker and returns immediately, without waiting for the POST.
+    Nothing above pins that directly -- a mutant that replaces
+    `_DELIVERY.submit(_deliver, ...)` with a synchronous `_deliver(...)` call
+    leaves the rest of the suite green. This test fails under that mutant:
+    with a POST blocked for up to 2s, notify_run_terminal must still return
+    in well under that."""
+    release = threading.Event()
+    post_completed = {"value": False}
+    calls = {"n": 0}
+
+    def _blocking_post(url, json=None, timeout=None):
+        calls["n"] += 1
+        release.wait(timeout=2.0)
+        post_completed["value"] = True
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    monkeypatch.setattr(notifications._SESSION, "post", _blocking_post)
+
+    start = time.perf_counter()
+    notifications.notify_run_terminal(_run(), None)
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.5
+    assert post_completed["value"] is False  # the POST has not completed yet
+
+    release.set()
+    notifications.flush()
+
+    assert post_completed["value"] is True
+    assert calls["n"] == 1
 
 
 # --- flush() has no Future list of its own -- proves the FIFO-queue design -

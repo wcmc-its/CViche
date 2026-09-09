@@ -584,8 +584,20 @@ def _post(payload: dict, run_id: str) -> bool:
         return False
 
 
-def _deliver(payload: dict, run_id: str) -> None:
+def _deliver(url: str, payload: dict, run_id: str) -> None:
     """Runs on the _DELIVERY worker thread: retry a transient failure.
+
+    Takes the already-resolved, already-validated webhook URL from the
+    caller's thread (each notify_*) instead of calling _webhook_url() here.
+    _webhook_url() reads live, mutable config (env var or auth_config.yaml)
+    -- calling it on the worker thread raced the config a caller resolved
+    moments earlier against whatever the worker actually saw once its task
+    ran, which could be a different value if config changed in between (a
+    real race, not just a test artifact: confirmed by
+    test_webhook_cache_revalidates_on_each_distinct_value failing under
+    reordering/repetition before this fix). Resolving once, on the caller's
+    thread, and passing the result through makes one notify_* call see one
+    config snapshot end to end.
 
     Retries a request-layer exception or an HTTP 429/5xx up to
     _RETRY_ATTEMPTS times, sleeping _RETRY_BACKOFF_SECONDS between attempts.
@@ -595,10 +607,6 @@ def _deliver(payload: dict, run_id: str) -> None:
     uncaught exception here would only surface in an unfetched Future, never
     anywhere a human sees it.
     """
-    url = _webhook_url()
-    if not url:
-        return
-
     last_detail = ""
     for attempt in range(1, _RETRY_ATTEMPTS + 1):
         try:
@@ -635,9 +643,9 @@ def _deliver(payload: dict, run_id: str) -> None:
     )
 
 
-def _enqueue(payload: dict, run_id: str) -> None:
+def _enqueue(url: str, payload: dict, run_id: str) -> None:
     """Submit a delivery to the background worker."""
-    _DELIVERY.submit(_deliver, payload, run_id)
+    _DELIVERY.submit(_deliver, url, payload, run_id)
 
 
 def flush(timeout: float = 15.0) -> None:
@@ -669,11 +677,17 @@ def flush(timeout: float = 15.0) -> None:
 # --- public entry points -------------------------------------------------------
 #
 # Each of these is the never-raise boundary for its notification: converting
-# the caller's object(s) to a typed DTO and building the payload happen
-# inside the try, since a malformed input can make either raise, and a
-# notification must never affect run status, feedback submission, or surface
-# to the user (#782 review, r3968255070 point 5 / point 1). Delivery itself
-# is hung off _DELIVERY and can't raise back here at all.
+# the caller's object(s) to a typed DTO, building the payload, resolving/
+# validating the webhook URL, and enqueueing the delivery all happen inside
+# the try -- a malformed input can make DTO conversion or the builder raise,
+# and _DELIVERY.submit() can itself raise RuntimeError once interpreter
+# shutdown has begun (#782 review follow-up, point 5) -- and a notification
+# must never affect run status, feedback submission, or surface to the user
+# (#782 review, r3968255070 point 5 / point 1). The webhook URL is resolved
+# here, on the caller's thread, and passed to _enqueue/_deliver explicitly --
+# not re-resolved on the worker thread -- so one notify_* call sees one
+# config snapshot rather than racing a config change against whenever the
+# worker gets to the task (#782 review follow-up, r3968142554).
 
 
 def notify_run_started(run: object, submitter: str | None = None) -> None:
@@ -682,10 +696,13 @@ def notify_run_started(run: object, submitter: str | None = None) -> None:
     try:
         run_id = getattr(run, "id", None) or "unknown"
         payload = build_started_payload(RunFacts.from_run(run), submitter)
+        url = _webhook_url()
+        if not url:
+            return
+        _enqueue(url, payload, run_id)
     except Exception:
         logger.exception("Teams notification payload build failed for run %s", run_id)
         return
-    _enqueue(payload, run_id)
 
 
 def notify_run_terminal(
@@ -711,10 +728,13 @@ def notify_run_terminal(
             )
             return
         payload = build_teams_payload(facts, score, submitter, doctor)
+        url = _webhook_url()
+        if not url:
+            return
+        _enqueue(url, payload, run_id)
     except Exception:
         logger.exception("Teams notification payload build failed for run %s", run_id)
         return
-    _enqueue(payload, run_id)
 
 
 def notify_feedback_submitted(feedback: object, run: object, submitter: str | None = None) -> None:
@@ -725,7 +745,10 @@ def notify_feedback_submitted(feedback: object, run: object, submitter: str | No
         payload = build_feedback_payload(
             FeedbackFacts.from_feedback(feedback), RunFacts.from_run(run), submitter
         )
+        url = _webhook_url()
+        if not url:
+            return
+        _enqueue(url, payload, run_id)
     except Exception:
         logger.exception("Teams notification payload build failed for run %s", run_id)
         return
-    _enqueue(payload, run_id)
