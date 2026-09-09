@@ -1,12 +1,16 @@
-"""Regression guards for the Teams run-notification service (issue #154).
+"""Regression guards for the Teams run-notification service (issue #154, #309, #782).
 
 Covers:
   - build_teams_payload / build_started_payload / build_feedback_payload field
     mapping and title color, plus run-link derivation from
-    CVICHE_ALLOWED_ORIGINS.
+    CVICHE_ALLOWED_ORIGINS. These now take typed DTOs (RunFacts/
+    FeedbackFacts), not ORM objects -- see _run_facts/_feedback_facts below.
   - notify_run_* / notify_feedback_submitted best-effort contract: no-op when
-    unconfigured, and a POST exception / non-2xx is swallowed (logged, never
-    raised).
+    unconfigured, and any failure (payload-build or delivery) is swallowed
+    (logged, never raised).
+  - Delivery (#782): each notify_* enqueues onto a background worker
+    (notifications._DELIVERY) and returns immediately; notifications.flush()
+    makes a test's queued delivery synchronous before it asserts.
 
 See test_feedback_notification.py for the feedback_routes.submit_feedback
 call-site wiring -- these tests only cover the notifications helpers.
@@ -14,12 +18,10 @@ call-site wiring -- these tests only cover the notifications helpers.
 Cards are Adaptive Cards in the Teams Workflows envelope:
   {"type": "message", "attachments": [{"content": <AdaptiveCard>}]}
 """
-import os
-os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
-
 import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from urllib.parse import quote
 
 import pytest
 
@@ -35,9 +37,18 @@ def _clear_webhook_validation_cache():
     notifications._validate_webhook_url.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_sleep_in_retries(monkeypatch):
+    """_deliver's retry backoff sleeps via notifications.time.sleep -- never
+    let a test actually wait out a real backoff. A test that wants to assert
+    on sleep's own arguments overrides this with its own monkeypatch."""
+    monkeypatch.setattr(notifications.time, "sleep", lambda *_args, **_kwargs: None)
+
+
 def _run(**overrides):
     """A Run-like stand-in; the service only reads attributes (matches the
-    SimpleNamespace style used by the auto_retry tests)."""
+    SimpleNamespace style used by the auto_retry tests). Feeds notify_*
+    (which still accept ORM-like objects) and RunFacts.from_run."""
     base = dict(
         id="A1B2C3",
         filename="cv.docx",
@@ -47,6 +58,29 @@ def _run(**overrides):
     )
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def _run_facts(**overrides) -> notifications.RunFacts:
+    """A RunFacts DTO built the same way build_*_payload's real callers get
+    one -- via RunFacts.from_run -- so tests exercise the actual conversion,
+    not a hand-built shortcut."""
+    return notifications.RunFacts.from_run(_run(**overrides))
+
+
+def _feedback(**overrides):
+    """A Feedback-like stand-in; the service only reads attributes."""
+    base = dict(
+        reviewer_role="self",
+        overall_accuracy=None,
+        overall_usefulness=4,
+        likelihood_to_recommend=4,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def _feedback_facts(**overrides) -> notifications.FeedbackFacts:
+    return notifications.FeedbackFacts.from_feedback(_feedback(**overrides))
 
 
 def _card(payload):
@@ -74,10 +108,9 @@ def _title(payload):
 
 def test_payload_maps_all_fields_with_score(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-    run = _run()
     score = {"totalScore": 87, "band": "GREEN (ship)"}
 
-    payload = notifications.build_teams_payload(run, score)
+    payload = notifications.build_teams_payload(_run_facts(), score)
 
     facts = _facts(payload)
     assert facts["Run ID"] == "A1B2C3"
@@ -92,9 +125,10 @@ def test_payload_maps_all_fields_with_score(monkeypatch):
 
 def test_payload_renders_na_on_failure_without_score(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-    run = _run(status="failed", total_cost=0.0, total_duration_seconds=None)
 
-    payload = notifications.build_teams_payload(run, None)
+    payload = notifications.build_teams_payload(
+        _run_facts(status="failed", total_cost=0.0, total_duration_seconds=None), None
+    )
 
     facts = _facts(payload)
     assert facts["Status"] == "failed"
@@ -109,9 +143,8 @@ def test_payload_run_link_uses_first_allowed_origin(monkeypatch):
         "CVICHE_ALLOWED_ORIGINS",
         "https://cviche.weill.cornell.edu/,https://other.example.com",
     )
-    run = _run()
 
-    payload = notifications.build_teams_payload(run, {"totalScore": 1, "band": "RED"})
+    payload = notifications.build_teams_payload(_run_facts(), {"totalScore": 1, "band": "RED"})
 
     action = _card(payload)["actions"][0]
     assert action["type"] == "Action.OpenUrl"
@@ -120,9 +153,8 @@ def test_payload_run_link_uses_first_allowed_origin(monkeypatch):
 
 def test_payload_omits_action_when_no_origin_configured(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-    run = _run()
 
-    payload = notifications.build_teams_payload(run, None)
+    payload = notifications.build_teams_payload(_run_facts(), None)
 
     assert "actions" not in _card(payload)
 
@@ -135,7 +167,7 @@ def test_terminal_payload_has_fallback_and_summary(monkeypatch):
         {"severity": "ERROR", "lint": "grants_dropped"}]}
 
     payload = notifications.build_teams_payload(
-        _run(), {"totalScore": 87, "band": "GREEN"}, doctor=doctor)
+        _run_facts(), {"totalScore": 87, "band": "GREEN"}, doctor=doctor)
 
     # message summary and card fallbackText both present, useful, and identical.
     summary = payload["summary"]
@@ -148,7 +180,7 @@ def test_terminal_payload_has_fallback_and_summary(monkeypatch):
 def test_terminal_summary_degrades_without_score_or_doctor(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
 
-    payload = notifications.build_teams_payload(_run(status="failed"), None)
+    payload = notifications.build_teams_payload(_run_facts(status="failed"), None)
 
     assert payload["summary"] == "CViche run A1B2C3 failed"  # bare status, no " — "
     assert _card(payload)["fallbackText"] == payload["summary"]
@@ -157,7 +189,7 @@ def test_terminal_summary_degrades_without_score_or_doctor(monkeypatch):
 def test_started_payload_has_fallback_and_summary(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
 
-    payload = notifications.build_started_payload(_run(status="created"))
+    payload = notifications.build_started_payload(_run_facts(status="created"))
 
     assert payload["summary"] == "CViche run A1B2C3 started"
     assert _card(payload)["fallbackText"] == payload["summary"]
@@ -167,15 +199,15 @@ def test_started_payload_has_fallback_and_summary(monkeypatch):
 
 def test_started_payload_has_no_score_or_cost(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-    run = _run(status="created")  # start fires before status flips in-memory
+    facts = _run_facts(status="created")  # start fires before status flips in-memory
 
-    payload = notifications.build_started_payload(run)
+    payload = notifications.build_started_payload(facts)
 
-    facts = _facts(payload)
-    assert facts == {"Run ID": "A1B2C3", "File": "cv.docx", "Status": "started"}
+    payload_facts = _facts(payload)
+    assert payload_facts == {"Run ID": "A1B2C3", "File": "cv.docx", "Status": "started"}
     # The lean start card omits the terminal-only fields entirely.
-    assert "Quality score" not in facts
-    assert "Total cost" not in facts
+    assert "Quality score" not in payload_facts
+    assert "Total cost" not in payload_facts
     # started -> blue title
     assert _title(payload)["color"] == "accent"
 
@@ -183,8 +215,8 @@ def test_started_payload_has_no_score_or_cost(monkeypatch):
 def test_payload_includes_submitter_when_given(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
 
-    started = notifications.build_started_payload(_run(status="created"), submitter="Jane Doe")
-    terminal = notifications.build_teams_payload(_run(), {"totalScore": 9, "band": "GREEN"}, submitter="Jane Doe")
+    started = notifications.build_started_payload(_run_facts(status="created"), submitter="Jane Doe")
+    terminal = notifications.build_teams_payload(_run_facts(), {"totalScore": 9, "band": "GREEN"}, submitter="Jane Doe")
 
     assert _facts(started)["Submitted by"] == "Jane Doe"
     assert _facts(terminal)["Submitted by"] == "Jane Doe"
@@ -193,15 +225,14 @@ def test_payload_includes_submitter_when_given(monkeypatch):
 def test_payload_omits_submitter_when_none(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
 
-    assert "Submitted by" not in _facts(notifications.build_started_payload(_run()))
-    assert "Submitted by" not in _facts(notifications.build_teams_payload(_run(), None))
+    assert "Submitted by" not in _facts(notifications.build_started_payload(_run_facts()))
+    assert "Submitted by" not in _facts(notifications.build_teams_payload(_run_facts(), None))
 
 
 def test_started_payload_action_uses_first_allowed_origin(monkeypatch):
     monkeypatch.setenv("CVICHE_ALLOWED_ORIGINS", "https://cviche.weill.cornell.edu/")
-    run = _run()
 
-    payload = notifications.build_started_payload(run)
+    payload = notifications.build_started_payload(_run_facts())
 
     assert _card(payload)["actions"][0]["url"] == (
         "https://cviche.weill.cornell.edu/run/A1B2C3"
@@ -220,7 +251,7 @@ def test_payload_includes_doctor_summary(monkeypatch):
         ],
     }
 
-    facts = _facts(notifications.build_teams_payload(_run(), None, doctor=doctor))
+    facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor=doctor))
 
     # 3 substantive findings (INFO excluded); the most severe names the lint.
     assert facts["Doctor"] == "3 findings (top: segmentation)"
@@ -230,7 +261,7 @@ def test_payload_doctor_reports_zero_findings_when_clean(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
     doctor = {"counts": {"ERROR": 0, "WARN": 0, "INFO": 7}, "findings": []}
 
-    facts = _facts(notifications.build_teams_payload(_run(), None, doctor=doctor))
+    facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor=doctor))
 
     assert facts["Doctor"] == "0 findings"
 
@@ -238,7 +269,7 @@ def test_payload_doctor_reports_zero_findings_when_clean(monkeypatch):
 def test_payload_omits_doctor_when_unavailable(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
 
-    assert "Doctor" not in _facts(notifications.build_teams_payload(_run(), None))
+    assert "Doctor" not in _facts(notifications.build_teams_payload(_run_facts(), None))
 
 
 @pytest.mark.parametrize(
@@ -259,12 +290,39 @@ def test_payload_doctor_line_omitted_and_warned_on_malformed_report(
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
 
     with caplog.at_level(logging.WARNING):
-        facts = _facts(notifications.build_teams_payload(_run(), None, doctor=doctor))
+        facts = _facts(notifications.build_teams_payload(_run_facts(), None, doctor=doctor))
 
     assert "Doctor" not in facts
     assert any(
         "Doctor report summary failed to parse" in r.message for r in caplog.records
     )
+
+
+# --- doctor `lint` is sanitised (#782 D2 / D8 point 3) -----------------------
+
+def test_doctor_lint_control_chars_stripped_and_bounded(monkeypatch):
+    """finding["lint"] is a doctor-module code literal by convention, not
+    enforced -- it is interpolated straight into the Doctor fact and the
+    card's summary/fallbackText, so it must be run through _card_text like
+    any other unenforced string. Must fail against the pre-fix implementation
+    (mutant M1: drop the _card_text call in _doctor_text)."""
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    bad_lint = "lint\x07id\x9f" + ("x" * 500)
+    doctor = {"counts": {"ERROR": 1, "WARN": 0}, "findings": [
+        {"severity": "ERROR", "lint": bad_lint}]}
+
+    payload = notifications.build_teams_payload(_run_facts(), None, doctor=doctor)
+    facts = _facts(payload)
+
+    assert "\x07" not in facts["Doctor"]
+    assert "\x9f" not in facts["Doctor"]
+    # "N findings (top: ...)" wrapper adds a small fixed overhead around the
+    # sanitised+truncated lint value -- the lint itself is bounded to
+    # _FACT_MAX_CHARS, so the whole fact can't run away with an unbounded
+    # lint id.
+    assert len(facts["Doctor"]) <= notifications._FACT_MAX_CHARS + 20
+    assert "\x07" not in payload["summary"]
+    assert "\x9f" not in payload["summary"]
 
 
 # --- notify_run_terminal --------------------------------------------------
@@ -276,12 +334,14 @@ def test_notify_is_noop_when_webhook_unconfigured(monkeypatch):
 
     def _fail_post(*args, **kwargs):  # pragma: no cover - must not be reached
         called["posted"] = True
-        raise AssertionError("requests.post should not be called when unconfigured")
+        raise AssertionError("_SESSION.post should not be called when unconfigured")
 
-    monkeypatch.setattr(notifications.requests, "post", _fail_post)
+    monkeypatch.setattr(notifications._SESSION, "post", _fail_post)
 
-    # Returns None, raises nothing, and never POSTs.
+    # Returns None, raises nothing, and never POSTs (even once delivery --
+    # queued on the background worker -- has had a chance to run).
     assert notifications.notify_run_terminal(_run(), {"totalScore": 90, "band": "GREEN"}) is None
+    notifications.flush()
     assert called["posted"] is False
 
 
@@ -294,44 +354,85 @@ def test_notify_posts_when_configured(monkeypatch):
         captured["json"] = json
         return SimpleNamespace(status_code=200)
 
-    monkeypatch.setattr(notifications.requests, "post", _ok_post)
+    monkeypatch.setattr(notifications._SESSION, "post", _ok_post)
 
     notifications.notify_run_terminal(_run(), {"totalScore": 90, "band": "GREEN"})
+    notifications.flush()
 
     assert captured["url"] == "https://webhook.example/teams"
     assert captured["json"]["type"] == "message"
 
 
-def test_notify_swallows_post_exception(monkeypatch, caplog):
+def test_notify_swallows_unexpected_post_exception_with_exception_log(monkeypatch, caplog):
+    """A non-request exception (e.g. a bad payload) is not transient -- it is
+    logged once at ERROR with a traceback and NOT retried."""
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    calls = {"n": 0}
 
     def _boom(*args, **kwargs):
+        calls["n"] += 1
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(notifications.requests, "post", _boom)
+    monkeypatch.setattr(notifications._SESSION, "post", _boom)
 
     with caplog.at_level(logging.WARNING):
         # Must not raise despite the POST blowing up.
         result = notifications.notify_run_terminal(_run(), None)
+        notifications.flush()
 
     assert result is None
-    assert any("Teams notification failed" in r.message for r in caplog.records)
+    assert calls["n"] == 1  # unexpected, non-transient -- no retry
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "unexpected error" in errors[0].message
 
 
-def test_notify_logs_warning_on_non_2xx(monkeypatch, caplog):
+def test_notify_retries_5xx_then_gives_up_with_one_summary_warning(monkeypatch, caplog):
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
 
     monkeypatch.setattr(
-        notifications.requests,
+        notifications._SESSION,
         "post",
         lambda *a, **k: SimpleNamespace(status_code=500),
     )
 
     with caplog.at_level(logging.WARNING):
         result = notifications.notify_run_terminal(_run(), None)
+        notifications.flush()
 
     assert result is None
-    assert any("returned HTTP 500" in r.message for r in caplog.records)
+    warnings = [
+        r for r in caplog.records
+        if r.name == "app.services.notifications" and r.levelname == "WARNING"
+    ]
+    assert len(warnings) == 1
+    assert f"failed after {notifications._RETRY_ATTEMPTS} attempts" in warnings[0].message
+    assert "HTTP 500" in warnings[0].message
+
+
+def test_notify_does_not_retry_non_retryable_4xx(monkeypatch, caplog):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    calls = {"n": 0}
+
+    def _not_found(*a, **k):
+        calls["n"] += 1
+        return SimpleNamespace(status_code=404)
+
+    monkeypatch.setattr(notifications._SESSION, "post", _not_found)
+
+    with caplog.at_level(logging.WARNING):
+        result = notifications.notify_run_terminal(_run(), None)
+        notifications.flush()
+
+    assert result is None
+    assert calls["n"] == 1  # a client error is not retried
+    warnings = [
+        r for r in caplog.records
+        if r.name == "app.services.notifications" and r.levelname == "WARNING"
+    ]
+    assert len(warnings) == 1
+    assert "not retried" in warnings[0].message
+    assert "HTTP 404" in warnings[0].message
 
 
 # --- notify_run_started ---------------------------------------------------
@@ -340,11 +441,12 @@ def test_notify_started_is_noop_when_unconfigured(monkeypatch):
     monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
 
     def _fail_post(*args, **kwargs):  # pragma: no cover - must not be reached
-        raise AssertionError("requests.post should not be called when unconfigured")
+        raise AssertionError("_SESSION.post should not be called when unconfigured")
 
-    monkeypatch.setattr(notifications.requests, "post", _fail_post)
+    monkeypatch.setattr(notifications._SESSION, "post", _fail_post)
 
     assert notifications.notify_run_started(_run()) is None
+    notifications.flush()
 
 
 def test_notify_started_posts_when_configured(monkeypatch):
@@ -356,33 +458,87 @@ def test_notify_started_posts_when_configured(monkeypatch):
         captured["json"] = json
         return SimpleNamespace(status_code=200)
 
-    monkeypatch.setattr(notifications.requests, "post", _ok_post)
+    monkeypatch.setattr(notifications._SESSION, "post", _ok_post)
 
     notifications.notify_run_started(_run())
+    notifications.flush()
 
     assert captured["url"] == "https://webhook.example/teams"
     assert _title(captured["json"])["text"].endswith("started")
 
 
+def test_notify_started_swallows_post_exception(monkeypatch, caplog):
+    """#782 D8 point 1: notify_run_started's own delivery failure isolation
+    -- the terminal/feedback paths already had a version of this test, the
+    started path did not."""
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(notifications._SESSION, "post", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        result = notifications.notify_run_started(_run())
+        notifications.flush()
+
+    assert result is None
+    assert any("unexpected error" in r.message for r in caplog.records)
+
+
+def test_notify_started_swallows_builder_exception(monkeypatch, caplog):
+    """#782 D7: the builder call is inside notify_run_started's own
+    never-raise boundary, not just _post's."""
+    def _boom(*a, **k):
+        raise RuntimeError("bad run object")
+
+    monkeypatch.setattr(notifications, "build_started_payload", _boom)
+
+    with caplog.at_level(logging.ERROR):
+        result = notifications.notify_run_started(_run())
+
+    assert result is None
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "payload build failed" in errors[0].message
+
+
+# --- requests.Timeout is an explicit, tested failure mode (#782 D8 point 2) --
+
+def test_notify_terminal_retries_and_swallows_timeout(monkeypatch, caplog):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    calls = {"n": 0}
+
+    def _timeout(*a, **k):
+        calls["n"] += 1
+        raise notifications.requests.Timeout("timed out")
+
+    monkeypatch.setattr(notifications._SESSION, "post", _timeout)
+
+    with caplog.at_level(logging.WARNING):
+        result = notifications.notify_run_terminal(_run(), None)
+        notifications.flush()
+
+    assert result is None
+    # requests.Timeout is a RequestException -- retried up to the bound, not
+    # given up on after one attempt. Proves M5 (drop the retry loop): without
+    # a retry loop this would be 1, not _RETRY_ATTEMPTS.
+    assert calls["n"] == notifications._RETRY_ATTEMPTS
+    warnings = [
+        r for r in caplog.records
+        if r.name == "app.services.notifications" and r.levelname == "WARNING"
+    ]
+    assert len(warnings) == 1
+    assert f"failed after {notifications._RETRY_ATTEMPTS} attempts" in warnings[0].message
+
+
 # --- build_feedback_payload -------------------------------------------------
-
-def _feedback(**overrides):
-    """A Feedback-like stand-in; the service only reads attributes."""
-    base = dict(
-        reviewer_role="self",
-        overall_accuracy=None,
-        overall_usefulness=4,
-        likelihood_to_recommend=4,
-    )
-    base.update(overrides)
-    return SimpleNamespace(**base)
-
 
 def test_feedback_payload_maps_all_fields(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-    feedback = _feedback(overall_accuracy=8)
+    feedback_facts = _feedback_facts(overall_accuracy=8)
 
-    payload = notifications.build_feedback_payload(feedback, _run(), submitter="Jane Doe")
+    payload = notifications.build_feedback_payload(feedback_facts, _run_facts(), submitter="Jane Doe")
 
     facts = _facts(payload)
     assert facts["Run ID"] == "A1B2C3"
@@ -397,7 +553,7 @@ def test_feedback_payload_maps_all_fields(monkeypatch):
 def test_feedback_payload_omits_optional_fields_when_absent(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
 
-    facts = _facts(notifications.build_feedback_payload(_feedback(), _run()))
+    facts = _facts(notifications.build_feedback_payload(_feedback_facts(), _run_facts()))
 
     assert "Submitted by" not in facts
     assert "Overall accuracy" not in facts
@@ -405,14 +561,16 @@ def test_feedback_payload_omits_optional_fields_when_absent(monkeypatch):
 
 def test_feedback_payload_never_includes_free_text_fields(monkeypatch):
     """biggest_issue/issue_locations are reviewer-typed free text that can name
-    a person or quote CV content -- never put it on the card, even when set."""
+    a person or quote CV content -- FeedbackFacts doesn't even carry them, so
+    they cannot reach the card."""
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
     feedback = _feedback(
         biggest_issue="Jane Smith's grant dates were wrong",
         issue_locations=["section M"],
     )
+    feedback_facts = notifications.FeedbackFacts.from_feedback(feedback)
 
-    payload = notifications.build_feedback_payload(feedback, _run())
+    payload = notifications.build_feedback_payload(feedback_facts, _run_facts())
 
     assert "Biggest issue" not in _facts(payload)
     assert "Jane Smith" not in str(payload)
@@ -425,7 +583,7 @@ def test_feedback_payload_color_by_recommend_score(monkeypatch, recommend, color
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
 
     payload = notifications.build_feedback_payload(
-        _feedback(likelihood_to_recommend=recommend), _run())
+        _feedback_facts(likelihood_to_recommend=recommend), _run_facts())
 
     assert _title(payload)["color"] == color
 
@@ -433,7 +591,7 @@ def test_feedback_payload_color_by_recommend_score(monkeypatch, recommend, color
 def test_feedback_payload_has_fallback_and_summary(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
 
-    payload = notifications.build_feedback_payload(_feedback(), _run())
+    payload = notifications.build_feedback_payload(_feedback_facts(), _run_facts())
 
     assert payload["summary"].startswith("CViche feedback on run A1B2C3")
     assert _card(payload)["fallbackText"] == payload["summary"]
@@ -442,7 +600,7 @@ def test_feedback_payload_has_fallback_and_summary(monkeypatch):
 def test_feedback_payload_action_uses_first_allowed_origin(monkeypatch):
     monkeypatch.setenv("CVICHE_ALLOWED_ORIGINS", "https://cviche.weill.cornell.edu/")
 
-    payload = notifications.build_feedback_payload(_feedback(), _run())
+    payload = notifications.build_feedback_payload(_feedback_facts(), _run_facts())
 
     assert _card(payload)["actions"][0]["url"] == (
         "https://cviche.weill.cornell.edu/run/A1B2C3"
@@ -455,11 +613,12 @@ def test_notify_feedback_is_noop_when_unconfigured(monkeypatch):
     monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
 
     def _fail_post(*args, **kwargs):  # pragma: no cover - must not be reached
-        raise AssertionError("requests.post should not be called when unconfigured")
+        raise AssertionError("_SESSION.post should not be called when unconfigured")
 
-    monkeypatch.setattr(notifications.requests, "post", _fail_post)
+    monkeypatch.setattr(notifications._SESSION, "post", _fail_post)
 
     assert notifications.notify_feedback_submitted(_feedback(), _run()) is None
+    notifications.flush()
 
 
 def test_notify_feedback_posts_when_configured(monkeypatch):
@@ -471,9 +630,10 @@ def test_notify_feedback_posts_when_configured(monkeypatch):
         captured["json"] = json
         return SimpleNamespace(status_code=200)
 
-    monkeypatch.setattr(notifications.requests, "post", _ok_post)
+    monkeypatch.setattr(notifications._SESSION, "post", _ok_post)
 
     notifications.notify_feedback_submitted(_feedback(), _run(), submitter="Jane Doe")
+    notifications.flush()
 
     assert captured["url"] == "https://webhook.example/teams"
     assert _facts(captured["json"])["Submitted by"] == "Jane Doe"
@@ -485,13 +645,49 @@ def test_notify_feedback_swallows_post_exception(monkeypatch, caplog):
     def _boom(*args, **kwargs):
         raise RuntimeError("network down")
 
-    monkeypatch.setattr(notifications.requests, "post", _boom)
+    monkeypatch.setattr(notifications._SESSION, "post", _boom)
 
     with caplog.at_level(logging.WARNING):
         result = notifications.notify_feedback_submitted(_feedback(), _run())
+        notifications.flush()
 
     assert result is None
-    assert any("Teams notification failed" in r.message for r in caplog.records)
+    assert any("unexpected error" in r.message for r in caplog.records)
+
+
+def test_notify_feedback_swallows_builder_exception(monkeypatch, caplog):
+    """#782 D7: build_feedback_payload raising is caught by notify_feedback_
+    submitted's own never-raise boundary."""
+    def _boom(*a, **k):
+        raise RuntimeError("bad feedback object")
+
+    monkeypatch.setattr(notifications, "build_feedback_payload", _boom)
+
+    with caplog.at_level(logging.ERROR):
+        result = notifications.notify_feedback_submitted(_feedback(), _run())
+
+    assert result is None
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "payload build failed" in errors[0].message
+
+
+def test_notify_terminal_swallows_builder_exception(monkeypatch, caplog):
+    """#782 D7: build_teams_payload raising is caught by notify_run_terminal's
+    own never-raise boundary, not just _post's (a payload-build exception
+    used to escape notify_* entirely -- it ran outside _post's try)."""
+    def _boom(*a, **k):
+        raise RuntimeError("bad run object")
+
+    monkeypatch.setattr(notifications, "build_teams_payload", _boom)
+
+    with caplog.at_level(logging.ERROR):
+        result = notifications.notify_run_terminal(_run(), None)
+
+    assert result is None
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "payload build failed" in errors[0].message
 
 
 # --- #309: webhook URL validation -------------------------------------------
@@ -499,10 +695,11 @@ def test_notify_feedback_swallows_post_exception(monkeypatch, caplog):
 def test_webhook_rejects_non_https_scheme(monkeypatch, caplog):
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "http://webhook.example/teams")
     mock_post = MagicMock()
-    monkeypatch.setattr(notifications.requests, "post", mock_post)
+    monkeypatch.setattr(notifications._SESSION, "post", mock_post)
 
     with caplog.at_level(logging.WARNING):
         result = notifications.notify_run_terminal(_run(), None)
+        notifications.flush()
 
     assert result is None
     mock_post.assert_not_called()
@@ -512,10 +709,11 @@ def test_webhook_rejects_non_https_scheme(monkeypatch, caplog):
 def test_webhook_rejects_malformed_url(monkeypatch, caplog):
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "not-a-url-at-all")
     mock_post = MagicMock()
-    monkeypatch.setattr(notifications.requests, "post", mock_post)
+    monkeypatch.setattr(notifications._SESSION, "post", mock_post)
 
     with caplog.at_level(logging.WARNING):
         result = notifications.notify_run_terminal(_run(), None)
+        notifications.flush()
 
     assert result is None
     mock_post.assert_not_called()
@@ -525,28 +723,73 @@ def test_webhook_rejects_malformed_url(monkeypatch, caplog):
 def test_webhook_invalid_url_warns_once_not_per_call(monkeypatch, caplog):
     monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "ftp://webhook.example/teams")
     mock_post = MagicMock()
-    monkeypatch.setattr(notifications.requests, "post", mock_post)
+    monkeypatch.setattr(notifications._SESSION, "post", mock_post)
 
     with caplog.at_level(logging.WARNING):
         notifications.notify_run_terminal(_run(), None)
         notifications.notify_run_terminal(_run(), None)
         notifications.notify_run_started(_run())
+        notifications.flush()
 
     mock_post.assert_not_called()
     warnings = [r for r in caplog.records if "not a valid https URL" in r.message]
     assert len(warnings) == 1
 
 
+def test_webhook_cache_revalidates_on_each_distinct_value(monkeypatch):
+    """#782 D8 point 6: _validate_webhook_url is memoized (maxsize=1), but a
+    changed config value must still be re-validated on its own -- an
+    invalid -> valid -> invalid sequence must post only for the valid one,
+    proving the cache doesn't mask a config change either direction."""
+    captured = []
+
+    def _ok_post(url, json=None, timeout=None):
+        captured.append(url)
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(notifications._SESSION, "post", _ok_post)
+
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "not-a-url-1")
+    notifications.notify_run_terminal(_run(), None)
+
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    notifications.notify_run_terminal(_run(), None)
+
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "not-a-url-2")
+    notifications.notify_run_terminal(_run(), None)
+
+    notifications.flush()
+
+    assert captured == ["https://webhook.example/teams"]
+
+
 # --- #309: run id is URL-encoded in the action button -----------------------
 
 def test_action_button_encodes_run_id(monkeypatch):
     monkeypatch.setenv("CVICHE_ALLOWED_ORIGINS", "https://cviche.weill.cornell.edu")
-    run = _run(id="a/b?c")
 
-    payload = notifications.build_teams_payload(run, None)
+    payload = notifications.build_teams_payload(_run_facts(id="a/b?c"), None)
 
     action = _card(payload)["actions"][0]
     assert action["url"] == "https://cviche.weill.cornell.edu/run/a%2Fb%3Fc"
+
+
+def test_action_button_uses_untruncated_run_id_for_link(monkeypatch):
+    """#782 D8 point 4: the production code truncated the run id (via
+    _card_text) before handing it to _action_buttons, so the OpenUrl button
+    pointed at a truncated, nonexistent run id for any id over
+    _FACT_MAX_CHARS. Must fail against the pre-fix implementation (mutant
+    M4: pass the _card_text-truncated id to _adaptive_card instead of the
+    raw one)."""
+    monkeypatch.setenv("CVICHE_ALLOWED_ORIGINS", "https://cviche.weill.cornell.edu")
+    long_id = "R" * 300
+
+    payload = notifications.build_teams_payload(_run_facts(id=long_id), None)
+
+    action = _card(payload)["actions"][0]
+    assert action["url"] == f"https://cviche.weill.cornell.edu/run/{quote(long_id, safe='')}"
+    # The FactSet's displayed Run ID is still the sanitised/truncated one.
+    assert len(_facts(payload)["Run ID"]) <= notifications._FACT_MAX_CHARS
 
 
 # --- #309: _post exception narrowing ----------------------------------------
@@ -557,13 +800,14 @@ def test_notify_swallows_connection_error_with_warning(monkeypatch, caplog):
     def _boom(*args, **kwargs):
         raise notifications.requests.ConnectionError("network down")
 
-    monkeypatch.setattr(notifications.requests, "post", _boom)
+    monkeypatch.setattr(notifications._SESSION, "post", _boom)
 
     with caplog.at_level(logging.WARNING):
         result = notifications.notify_run_terminal(_run(), None)
+        notifications.flush()
 
     assert result is None
-    records = [r for r in caplog.records if "Teams notification failed" in r.message]
+    records = [r for r in caplog.records if "failed after" in r.message]
     assert len(records) == 1
     assert records[0].levelname == "WARNING"
     assert records[0].exc_info is None
@@ -575,10 +819,11 @@ def test_notify_swallows_type_error_with_exception_log(monkeypatch, caplog):
     def _boom(*args, **kwargs):
         raise TypeError("payload is not JSON-serialisable")
 
-    monkeypatch.setattr(notifications.requests, "post", _boom)
+    monkeypatch.setattr(notifications._SESSION, "post", _boom)
 
     with caplog.at_level(logging.WARNING):
         result = notifications.notify_run_terminal(_run(), None)
+        notifications.flush()
 
     assert result is None
     records = [r for r in caplog.records if "unexpected error" in r.message]
@@ -587,7 +832,35 @@ def test_notify_swallows_type_error_with_exception_log(monkeypatch, caplog):
     assert records[0].exc_info is not None
 
 
-# --- #309: card text sanitising ---------------------------------------------
+# --- #782 D6: the webhook URL/query string must never reach the logs -------
+
+def test_connection_error_never_leaks_webhook_path_or_query(monkeypatch, caplog):
+    """str(requests.ConnectionError) can embed the full request URL --
+    including the webhook's secret path and query string. Must fail against
+    the pre-fix implementation, which %s-formatted the exception directly
+    (mutant M2)."""
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    secret_path = "/webhookb2/SECRET-PATH-xyz"
+    secret_query = "sig=abcTOPSECRET"
+
+    def _boom(*args, **kwargs):
+        raise notifications.requests.ConnectionError(
+            "HTTPSConnectionPool(host='example.invalid', port=443): Max "
+            f"retries exceeded with url: {secret_path}?{secret_query} "
+            "(Caused by NewConnectionError(...))"
+        )
+
+    monkeypatch.setattr(notifications._SESSION, "post", _boom)
+
+    with caplog.at_level(logging.DEBUG):
+        notifications.notify_run_terminal(_run(), None)
+        notifications.flush()
+
+    assert secret_path not in caplog.text
+    assert secret_query not in caplog.text
+
+
+# --- card text sanitising ---------------------------------------------------
 
 def test_card_text_strips_control_chars_and_truncates():
     value = "cv\x07report" + ("x" * 500)
@@ -600,44 +873,44 @@ def test_card_text_strips_control_chars_and_truncates():
 
 def test_filename_control_chars_stripped_from_terminal_card(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-    run = _run(id="run\x07id" + ("a" * 500), filename="cv\x07report" + ("x" * 500))
+    facts = _run_facts(id="run\x07id" + ("a" * 500), filename="cv\x07report" + ("x" * 500))
 
-    facts = _facts(notifications.build_teams_payload(run, None))
+    payload_facts = _facts(notifications.build_teams_payload(facts, None))
 
-    assert "\x07" not in facts["File"]
-    assert len(facts["File"]) <= notifications._FACT_MAX_CHARS
-    assert "\x07" not in facts["Run ID"]
-    assert len(facts["Run ID"]) <= notifications._FACT_MAX_CHARS
+    assert "\x07" not in payload_facts["File"]
+    assert len(payload_facts["File"]) <= notifications._FACT_MAX_CHARS
+    assert "\x07" not in payload_facts["Run ID"]
+    assert len(payload_facts["Run ID"]) <= notifications._FACT_MAX_CHARS
 
 
 def test_submitter_control_chars_stripped_from_started_card(monkeypatch):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-    run = _run(id="run\x07id" + ("a" * 500), filename="cv\x07" + ("x" * 500))
+    facts = _run_facts(id="run\x07id" + ("a" * 500), filename="cv\x07" + ("x" * 500))
 
-    payload = notifications.build_started_payload(run, submitter="Jane\x07Doe" + ("z" * 500))
+    payload = notifications.build_started_payload(facts, submitter="Jane\x07Doe" + ("z" * 500))
 
-    facts = _facts(payload)
-    submitted_by = facts["Submitted by"]
+    payload_facts = _facts(payload)
+    submitted_by = payload_facts["Submitted by"]
     assert "\x07" not in submitted_by
     assert len(submitted_by) <= notifications._FACT_MAX_CHARS
-    assert "\x07" not in facts["File"]
-    assert len(facts["File"]) <= notifications._FACT_MAX_CHARS
-    assert "\x07" not in facts["Run ID"]
-    assert len(facts["Run ID"]) <= notifications._FACT_MAX_CHARS
+    assert "\x07" not in payload_facts["File"]
+    assert len(payload_facts["File"]) <= notifications._FACT_MAX_CHARS
+    assert "\x07" not in payload_facts["Run ID"]
+    assert len(payload_facts["Run ID"]) <= notifications._FACT_MAX_CHARS
 
 
 def test_feedback_card_control_chars_stripped_from_run_id_filename_and_submitter(
     monkeypatch,
 ):
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-    run = _run(id="run\x07id" + ("a" * 500), filename="cv\x07report" + ("x" * 500))
+    run_facts = _run_facts(id="run\x07id" + ("a" * 500), filename="cv\x07report" + ("x" * 500))
 
     payload = notifications.build_feedback_payload(
-        _feedback(), run, submitter="Jane\x07Doe" + ("z" * 500)
+        _feedback_facts(), run_facts, submitter="Jane\x07Doe" + ("z" * 500)
     )
 
-    facts = _facts(payload)
-    for value in (facts["Run ID"], facts["File"], facts["Submitted by"]):
+    payload_facts = _facts(payload)
+    for value in (payload_facts["Run ID"], payload_facts["File"], payload_facts["Submitted by"]):
         assert "\x07" not in value
         assert len(value) <= notifications._FACT_MAX_CHARS
 
@@ -650,9 +923,9 @@ def test_feedback_card_sanitises_reviewer_role(monkeypatch):
     `str`, so it is user-typed and must be sanitised like filename/submitter.
     """
     monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
-    feedback = _feedback(reviewer_role="dept\x07admin\x9f" + ("r" * 500))
+    feedback_facts = _feedback_facts(reviewer_role="dept\x07admin\x9f" + ("r" * 500))
 
-    facts = _facts(notifications.build_feedback_payload(feedback, _run()))
+    facts = _facts(notifications.build_feedback_payload(feedback_facts, _run_facts()))
 
     assert "\x07" not in facts["Reviewer role"]
     assert "\x9f" not in facts["Reviewer role"]
@@ -660,11 +933,71 @@ def test_feedback_card_sanitises_reviewer_role(monkeypatch):
     assert facts["Reviewer role"].startswith("deptadmin")
 
 
-# --- #309: notify_* wrappers never raise (already pinned; named for #309) --
-# test_notify_swallows_post_exception, test_notify_feedback_swallows_post_exception
-# (above) and test_notify_swallows_connection_error_with_warning /
-# test_notify_swallows_type_error_with_exception_log (above) all assert
-# notify_run_terminal/notify_feedback_submitted return None despite the
-# underlying requests.post call raising. test_feedback_notification.py's
+# --- #782 D4: startup validation / health check -----------------------------
+
+def test_validate_configuration_reports_unconfigured(monkeypatch):
+    monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
+
+    assert notifications.validate_configuration() == {"configured": False, "valid": False}
+
+
+def test_validate_configuration_reports_valid(monkeypatch):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+
+    assert notifications.validate_configuration() == {"configured": True, "valid": True}
+
+
+def test_validate_configuration_reports_configured_but_invalid(monkeypatch, caplog):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "not-a-url")
+
+    with caplog.at_level(logging.WARNING):
+        result = notifications.validate_configuration()
+
+    assert result == {"configured": True, "valid": False}
+    assert any("not a valid https URL" in r.message for r in caplog.records)
+
+
+# --- #782 D5: terminal-status guard -----------------------------------------
+
+def test_notify_run_terminal_skips_non_terminal_status(monkeypatch, caplog):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    mock_post = MagicMock()
+    monkeypatch.setattr(notifications._SESSION, "post", mock_post)
+
+    with caplog.at_level(logging.WARNING):
+        result = notifications.notify_run_terminal(_run(status="running"), None)
+        notifications.flush()
+
+    assert result is None
+    mock_post.assert_not_called()
+    assert any("non-terminal status" in r.message for r in caplog.records)
+
+
+@pytest.mark.parametrize("status", sorted(notifications.Run.TERMINAL_RUN_STATUSES))
+def test_notify_run_terminal_posts_for_each_terminal_status(monkeypatch, status):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    captured = {"called": False}
+
+    def _ok_post(url, json=None, timeout=None):
+        captured["called"] = True
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(notifications._SESSION, "post", _ok_post)
+
+    notifications.notify_run_terminal(_run(status=status), None)
+    notifications.flush()
+
+    assert captured["called"] is True
+
+
+# --- notify_* wrappers never raise (already pinned; named for #309/#782) ---
+# test_notify_swallows_unexpected_post_exception_with_exception_log,
+# test_notify_feedback_swallows_post_exception,
+# test_notify_swallows_connection_error_with_warning,
+# test_notify_swallows_type_error_with_exception_log, and the three
+# test_notify_*_swallows_builder_exception tests (above) all assert
+# notify_run_terminal/notify_run_started/notify_feedback_submitted return
+# None despite the payload build or the underlying POST raising.
+# test_feedback_notification.py's
 # test_submit_feedback_succeeds_even_if_notification_raises additionally pins
 # this at the route call-site.
