@@ -275,18 +275,20 @@ def _install_stubs(monkeypatch, calls, fail, stage5b_writer, stage5_path, tmp_pa
 
 
 def _run_main(tmp_path, monkeypatch, capsys, fail=(), stage5b_writer=None,
-              argv=None, calls=None, stage5_path=None, setup=None):
+              argv=None, calls=None, stage5_path=None, setup=None, make_docx=True):
     """Run main() end to end with every stage runner stubbed. Returns (rc, stdout).
 
     ``stage5b_writer``, if given, replaces the default stage 5b output (a valid
     ``institution_enrichment_stats`` payload) so a test can point run_stage5b at
     a missing or corrupt file without touching any other stage. ``setup`` runs
     after the tmp repo layout exists and before main(), so a test can plant a
-    stale artifact from a previous run.
+    stale artifact from a previous run. ``make_docx=False`` leaves the source
+    document off disk, for the stages that never open it.
     """
     monkeypatch.chdir(tmp_path)
     (tmp_path / 'data/sample_cvs/word').mkdir(parents=True)
-    (tmp_path / _DOCX).write_bytes(b'PK\x03\x04fake')
+    if make_docx:
+        (tmp_path / _DOCX).write_bytes(b'PK\x03\x04fake')
     if setup is not None:
         setup()
 
@@ -784,15 +786,21 @@ def test_tracebacks_go_to_stderr_and_never_into_the_parsed_stdout(tmp_path):
     assert proc.stdout.count("Models: ") == 1
 
 
-def test_a_cv_that_cannot_be_resolved_is_named_as_such(tmp_path):
+@pytest.mark.parametrize("args", [
+    ("nonexistent.pdf",),                    # full run
+    ("nonexistent.pdf", "--stage", "1a"),    # segmentation reads the docx
+    ("nonexistent.pdf", "--stage", "1b"),    # so does hierarchy mapping
+    ("nonexistent.pdf", "--stage", "2"),     # and entry extraction
+])
+def test_a_cv_that_cannot_be_resolved_is_named_as_such(args, tmp_path):
     """`run_full_pipeline.py nonexistent.pdf` used to die on the stem/uid guard
     -- an accurate message about the wrong thing. The first argument not
-    resolving to a file is its own error.
+    resolving to a file is its own error, on every run that opens the document.
 
     Mutant that kills this: drop the _cv_is_missing() check from main() and let
     PipelineContext.__post_init__ raise.
     """
-    proc = _run_cli(tmp_path, "nonexistent.pdf")
+    proc = _run_cli(tmp_path, *args)
 
     assert proc.returncode == 1
     assert "Error: CV not found: nonexistent.pdf" in proc.stdout
@@ -800,6 +808,32 @@ def test_a_cv_that_cannot_be_resolved_is_named_as_such(tmp_path):
     assert "ValueError" not in proc.stdout and "Traceback" not in proc.stderr
     assert "CV PROCESSING PIPELINE" not in proc.stdout, (
         "the run banner printed for a run that cannot start")
+
+
+def test_a_standalone_stage_that_never_reads_the_docx_runs_without_it(
+    tmp_path, monkeypatch, capsys
+):
+    """Only stages 1a/1b/2 open the source document; everything below works from
+    the JSON an earlier run left behind. `--stage 5b` on a stage-4 artifact is a
+    legitimate rerun and must not be blocked because the .docx has since moved.
+
+    Mutant that kills this: apply _cv_is_missing() unconditionally, ignoring
+    _STAGES_READING_THE_DOCX.
+    """
+    calls = _Calls()
+
+    def plant():
+        _write(_FILES['4'])
+
+    rc, out = _run_main(tmp_path, monkeypatch, capsys, calls=calls, setup=plant,
+                        make_docx=False,
+                        argv=['run_full_pipeline.py', UID, '--stage', '5b'])
+
+    assert not (tmp_path / _DOCX).exists(), "the fixture defeated its own point"
+    assert rc == 0
+    assert calls.order == ['5b']
+    assert calls.kwargs['5b'] == {'input_path': str(_FILES['4']), 'verbose': True}
+    assert "Error: CV not found" not in out
 
 
 # ------------------------------------------------------------------ #686

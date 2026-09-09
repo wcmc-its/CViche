@@ -103,6 +103,11 @@ logger = logging.getLogger(__name__)
 _COMPOSITE_STAGE = '3'
 # Nothing runs after stage 6, so its failure notice does not promise to continue.
 _FINAL_STAGE = '6'
+# The only stages that open the source document. Everything else works from the
+# JSON artifacts an earlier run left behind -- including stage 4, which reads
+# Path(docx_path).stem and never the file -- so a standalone --stage rerun of
+# those does not need the .docx to still be on disk.
+_STAGES_READING_THE_DOCX = ('1a', '1b', '2')
 _BANNER_WIDTH = 80
 
 
@@ -1016,14 +1021,20 @@ def _exit_if_prerequisites_missing(target_stage: str, document_uid: str) -> None
     sys.exit(1)
 
 
-def _cv_is_missing(cv_path: str) -> bool:
+def _cv_is_missing(cv_path: str, target_stage: str | None) -> bool:
     """Report an unresolvable first argument as what it is.
 
     resolve_cv_path() hands back whatever it was given when nothing matched, so
     a typo or an unsupported extension used to travel all the way into the
     context and surface as a stem/uid mismatch -- an accurate message about the
     wrong thing. The stem/uid guard stays for the case it is actually about.
+
+    Scoped to the runs that actually open the document: a full run, or a
+    standalone _STAGES_READING_THE_DOCX one. `--stage 5b` on last week's stage-4
+    artifact is a legitimate rerun and must not need the .docx back.
     """
+    if target_stage is not None and target_stage not in _STAGES_READING_THE_DOCX:
+        return False
     if Path(cv_path).is_file():
         return False
     print(f"Error: CV not found: {cv_path}")
@@ -1037,7 +1048,7 @@ def main() -> int:
     cv_path_or_uid, target_stage = parse_args(sys.argv)
     cv_path, document_uid = resolve_cv_path_for_run(cv_path_or_uid)
 
-    if _cv_is_missing(cv_path):
+    if _cv_is_missing(cv_path, target_stage):
         return 1
 
     if target_stage and target_stage != "1a":
