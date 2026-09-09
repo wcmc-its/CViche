@@ -14,6 +14,14 @@ from types import SimpleNamespace
 import pytest
 
 from app.api.steps import STAGE_TO_PURPOSES, STAGES_WITHOUT_PROMPT_LOGS
+# Filename parser/matcher moved to app.services.prompt_log_service (#780
+# review r3965813607#2) -- new tests import it from its actual home; the
+# STAGE_TO_PURPOSES/STAGES_WITHOUT_PROMPT_LOGS import above keeps working
+# unmodified via steps.py's re-export.
+from app.services.prompt_log_service import (
+    purpose_from_filename,
+    purpose_matches_stage,
+)
 
 
 class TestStage5bRouting:
@@ -170,3 +178,49 @@ class TestLegacyFlatDirFallbackRemoved:
         assert str(legacy_file) not in filenames
         assert legacy_file.name not in filenames
         assert body["logs"] == []
+
+
+class TestPromptLogFilenameParsing:
+    """r3965862896#6: the prompt filename parser and matcher are core routing
+    logic -- exact matches, prefix matches, invalid names, and the
+    stage_4/stage_4_5 collision the module docstring documents."""
+
+    def test_exact_purpose_match(self):
+        purposes = STAGE_TO_PURPOSES['3a']
+        purpose = purpose_from_filename("2026-01-01_00-00-00_stage_3a_0123456789ab.txt")
+        assert purpose == "stage_3a"
+        assert purpose_matches_stage(purpose, purposes) is True
+
+    def test_prefix_purpose_match(self):
+        purposes = STAGE_TO_PURPOSES['4']
+        purpose = purpose_from_filename(
+            "2026-01-01_00-00-00_stage_4_field_S8_0123456789ab.txt"
+        )
+        assert purpose == "stage_4_field_S8"
+        assert purpose_matches_stage(purpose, purposes) is True
+
+    def test_invalid_filename_does_not_parse(self):
+        # No 12-hex-char id segment.
+        assert purpose_from_filename("not_a_prompt_log.txt") is None
+        # Missing the timestamp prefix entirely.
+        assert purpose_from_filename("stage_3a_0123456789ab.txt") is None
+
+    def test_json_prompt_log_name_no_longer_parses(self):
+        """r3965815739: .json was dropped from the filename regex -- the
+        retrieval code only ever reads .txt, so a .json name matching here
+        was a dead-end correctness inconsistency."""
+        assert purpose_from_filename("2026-01-01_00-00-00_stage_3a_0123456789ab.json") is None
+
+    def test_stage_4_vs_stage_4_5_collision(self):
+        """A stage_4_5_* purpose must be claimed by stage 4.5, never by stage
+        4's `stage_4_` prefix entry -- this is exactly what the exact/prefix
+        split in purpose_matches_stage exists to prevent."""
+        purpose = purpose_from_filename(
+            "2026-01-01_00-00-00_stage_4_5_summary_generation_0123456789ab.txt"
+        )
+        assert purpose == "stage_4_5_summary_generation"
+        assert purpose_matches_stage(purpose, STAGE_TO_PURPOSES['4']) is False
+        assert purpose_matches_stage(purpose, STAGE_TO_PURPOSES['4.5']) is True
+
+    def test_purpose_matches_stage_false_for_empty_purposes(self):
+        assert purpose_matches_stage("stage_1a", STAGE_TO_PURPOSES['1a']) is False
