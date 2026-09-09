@@ -1,11 +1,12 @@
 """Best-effort outbound notifications for run lifecycle events.
 
 Posts a Microsoft Teams message when a run starts processing, again when it
-reaches a terminal status (complete or failed), and again when a user submits
-feedback on a run. Fully decoupled from run execution and from the feedback
-API: a missing webhook URL is a silent no-op, and any delivery failure is
-logged and swallowed so it can never affect run status, feedback submission,
-or surface to the user.
+reaches a terminal status (complete, failed, or cancelled), and again when a
+user submits feedback on a run. Fully decoupled from run execution and from
+the feedback API: a missing webhook URL is a silent no-op, payload building
+and delivery never raise back into the caller, and delivery itself happens on
+a dedicated single-worker thread (see _DELIVERY below) so a slow or
+unreachable webhook can never block the run/feedback path that triggered it.
 
 Cards are Adaptive Cards wrapped in the {"type": "message", "attachments": [...]}
 envelope that the Teams *Workflows* incoming webhook expects. (The older Office
@@ -19,16 +20,32 @@ Config (read via app.config_loader.get_config, never hardcoded):
     empty/unset, notifications are disabled. Treat as a secret.
   - auth.CVICHE_ALLOWED_ORIGINS -- reused to derive the run-link base URL (its
     first origin), consistent with how the CORS layer resolves the app origin.
+
+Delivery model (#782 review round):
+  Each notify_* call builds its payload synchronously on the caller's thread
+  (cheap, in-memory, and still inside the never-raise boundary -- see
+  notify_run_started et al.), then hands it to _DELIVERY, a module-level
+  single-worker ThreadPoolExecutor, and returns immediately. _deliver() (run
+  on that worker) retries a transient failure with a fixed bounded backoff.
+  flush() blocks until everything queued so far has been attempted; tests use
+  it to make delivery synchronous for assertions, and main.py's lifespan
+  shutdown calls it so a pod stop doesn't drop a terminal card mid-flight.
 """
 
 import functools
 import logging
 import re
+import threading
+import time
+from concurrent.futures import Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
+from typing import NamedTuple, TypedDict
 from urllib.parse import quote, urlparse
 
 import requests
 
 from app.config_loader import get_config
+from app.models import Run
 
 logger = logging.getLogger(__name__)
 
@@ -37,13 +54,15 @@ logger = logging.getLogger(__name__)
 _STATUS_COLOR = {
     "complete": "good",       # green
     "failed": "attention",    # red
+    "cancelled": "attention", # red
     "error": "attention",     # red
     "started": "accent",      # blue -- a run just started processing
 }
 _DEFAULT_COLOR = "default"
 
-# POST timeout (seconds). Kept short so a slow/unreachable webhook never stalls
-# the orchestrator's executor thread for long; delivery is best-effort anyway.
+# POST timeout (seconds) per attempt. Kept short so one attempt never sits on
+# the delivery worker for long; _deliver bounds the total worst case anyway
+# (see _RETRY_ATTEMPTS / _RETRY_BACKOFF_SECONDS below).
 _POST_TIMEOUT = 10
 
 # Max characters kept in any single card fact/title built from a run- or
@@ -55,6 +74,30 @@ _FACT_MAX_CHARS = 200
 # filename or run id can't inject formatting/control bytes into a rendered
 # Adaptive Card.
 _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+# --- delivery: single background worker + bounded retry ---------------------
+#
+# ponytail: in-process single worker + bounded retry; survives neither a pod
+# restart nor a crash mid-queue -- upgrade path is a transactional outbox once
+# a job queue exists (none does: no taskiq/celery; the Valkey broker is
+# pub/sub). Worst-case in-flight delivery is 3 * _POST_TIMEOUT + 3s ~= 33s.
+_DELIVERY = ThreadPoolExecutor(max_workers=1, thread_name_prefix="teams-notify")
+
+# Used only from the _DELIVERY worker thread (single worker => no lock needed
+# on the Session itself; see _deliver). Long-lived so retries and repeated
+# notifications reuse connections instead of paying a new TLS handshake each
+# time (#782 review point 7).
+_SESSION = requests.Session()
+
+_RETRY_ATTEMPTS = 3
+_RETRY_BACKOFF_SECONDS = (1.0, 2.0)
+
+# Futures for deliveries submitted but not yet confirmed finished, so flush()
+# can wait on exactly those. Appended to (by any caller thread, via
+# notify_*) and drained by flush() -- both under _PENDING_LOCK, since unlike
+# _SESSION this list is touched from multiple threads.
+_PENDING: list[Future] = []
+_PENDING_LOCK = threading.Lock()
 
 
 def _run_link_base() -> str:
@@ -80,7 +123,9 @@ def _validate_webhook_url(raw: str) -> str:
     memoized (via lru_cache) instead of a module-level "already warned" flag,
     so this doesn't add to CODING_STANDARDS §4.1's no-mutable-module-state
     debt, and a corrected config value still gets validated (and, if still
-    wrong, warned about) on its own first use.
+    wrong, warned about) on its own first use. validate_configuration() also
+    calls this, so the warning (if any) fires once at startup rather than
+    only lazily on a run's first notification.
 
     The webhook URL is operator configuration (env var or auth_config.yaml),
     not user input, so this is defence in depth against a mis-set config --
@@ -107,6 +152,22 @@ def _webhook_url() -> str:
     return _validate_webhook_url((url or "").strip())
 
 
+def validate_configuration() -> dict[str, bool]:
+    """Resolve and validate the Teams webhook config once, eagerly.
+
+    Called from main.py's lifespan at startup (rather than only lazily on a
+    run's first notification) so a missing or malformed
+    CVICHE_TEAMS_WEBHOOK_URL is visible in the boot log and on /readyz instead
+    of only surfacing the first time a run finishes. Notifications stay
+    best-effort either way -- this never raises and never affects readiness.
+    """
+    raw, _ = get_config("notifications", "CVICHE_TEAMS_WEBHOOK_URL", default="")
+    raw = (raw or "").strip()
+    configured = bool(raw)
+    valid = bool(_validate_webhook_url(raw)) if configured else False
+    return {"configured": configured, "valid": valid}
+
+
 def _card_text(value, limit: int) -> str:
     """Sanitise a run- or user-supplied string for a Teams card.
 
@@ -124,6 +185,7 @@ def _action_buttons(run_id) -> list:
     """The "Open run" Adaptive Card action list, or [] when no app origin is set.
 
     Shared by the started and terminal cards so both link the same way.
+    `run_id` must be the RAW (un-truncated) id -- see _adaptive_card.
     """
     base = _run_link_base()
     if not base:
@@ -151,12 +213,13 @@ def _adaptive_card(title, color, facts, run_id, summary) -> dict:
         title: the bold heading line.
         color: an Adaptive Card color enum ("good"/"attention"/"accent"/...).
         facts: list of {"name", "value"} dicts (rendered as an Adaptive FactSet).
-        run_id: used to build the optional "Open run" button link. Callers
-            pass the already-sanitised (_card_text-truncated) run id here,
-            not the raw one -- harmless for real run ids (server-generated
-            6-char ids, well under _FACT_MAX_CHARS), but a run id over the
-            limit would link to a truncated, nonexistent run rather than the
-            real one.
+        run_id: the RAW run id, used only to build the optional "Open run"
+            button link (via urllib.parse.quote). Deliberately NOT the
+            _card_text-truncated id used elsewhere on the card: truncating it
+            here would build a link to a nonexistent, truncated run id
+            (#782 review, D8 point 4) -- percent-encoding already neutralises
+            anything a raw id could inject into the URL, so no length bound
+            is needed for this use.
         summary: plain-text fallback/summary one-liner (see above).
     """
     card = {
@@ -198,7 +261,80 @@ def _adaptive_card(title, color, facts, run_id, summary) -> dict:
     }
 
 
-def build_started_payload(run, submitter=None) -> dict:
+# --- notification DTOs -------------------------------------------------------
+#
+# Immutable facts extracted from the ORM (or ORM-like) objects the run/
+# feedback services pass in. from_run/from_feedback are the *only* places
+# that reach into those objects with getattr -- everything below them (the
+# build_*_payload functions) takes a typed DTO, not an ORM object, keeping the
+# notification adapter decoupled from the persistence layer (#782 review,
+# r3968159100 / point 1).
+
+
+@dataclass(frozen=True, slots=True)
+class RunFacts:
+    """Notification-relevant facts about a Run, decoupled from the ORM model."""
+
+    id: str
+    filename: str
+    status: str
+    total_cost: float | None
+    total_duration_seconds: int | None
+
+    @classmethod
+    def from_run(cls, run: object) -> RunFacts:
+        return cls(
+            id=str(getattr(run, "id", None) or "unknown"),
+            filename=str(getattr(run, "filename", None) or "unknown"),
+            status=str(getattr(run, "status", None) or "unknown"),
+            total_cost=getattr(run, "total_cost", None),
+            total_duration_seconds=getattr(run, "total_duration_seconds", None),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class FeedbackFacts:
+    """Notification-relevant facts about a Feedback row, decoupled from the ORM model."""
+
+    reviewer_role: str | None
+    overall_usefulness: int | None
+    likelihood_to_recommend: int | None
+    overall_accuracy: int | None
+
+    @classmethod
+    def from_feedback(cls, feedback: object) -> FeedbackFacts:
+        return cls(
+            reviewer_role=getattr(feedback, "reviewer_role", None),
+            overall_usefulness=getattr(feedback, "overall_usefulness", None),
+            likelihood_to_recommend=getattr(feedback, "likelihood_to_recommend", None),
+            overall_accuracy=getattr(feedback, "overall_accuracy", None),
+        )
+
+
+class ScoreSummary(TypedDict, total=False):
+    """The cached quality-score dict, as read by build_teams_payload."""
+
+    totalScore: float
+    band: str
+
+
+class DoctorFinding(TypedDict, total=False):
+    """One run-doctor finding, as read by _doctor_text."""
+
+    lint: str
+    severity: str
+    message: str
+    evidence: str
+
+
+class DoctorSummary(TypedDict, total=False):
+    """The run-doctor report payload, as read by _doctor_text."""
+
+    counts: dict[str, int]
+    findings: list[DoctorFinding]
+
+
+def build_started_payload(facts: RunFacts, submitter: str | None = None) -> dict:
     """Build the Teams card for a run that just started processing.
 
     Leaner than the terminal card: at start there is no score, cost, or
@@ -206,29 +342,33 @@ def build_started_payload(run, submitter=None) -> dict:
 
     submitter: display name/email of who submitted the run, or None to omit.
     """
-    run_id = _card_text(getattr(run, "id", None) or "unknown", _FACT_MAX_CHARS)
-    filename = _card_text(getattr(run, "filename", None) or "unknown", _FACT_MAX_CHARS)
+    run_id = _card_text(facts.id, _FACT_MAX_CHARS)
+    filename = _card_text(facts.filename, _FACT_MAX_CHARS)
 
-    facts = [
+    card_facts = [
         {"name": "Run ID", "value": run_id},
         {"name": "File", "value": filename},
     ]
     if submitter:
-        facts.append({"name": "Submitted by", "value": _card_text(submitter, _FACT_MAX_CHARS)})
-    facts.append({"name": "Status", "value": "started"})
+        card_facts.append({"name": "Submitted by", "value": _card_text(submitter, _FACT_MAX_CHARS)})
+    card_facts.append({"name": "Status", "value": "started"})
 
     return _adaptive_card(
-        f"CViche run {run_id} started", _STATUS_COLOR["started"], facts, run_id,
+        f"CViche run {run_id} started", _STATUS_COLOR["started"], card_facts, facts.id,
         f"CViche run {run_id} started",
     )
 
 
-def _doctor_text(doctor):
+def _doctor_text(doctor: DoctorSummary | None) -> str | None:
     """One-line summary of the run-doctor report, or None to omit the line.
 
     Counts substantive findings only (ERROR + WARN; INFO covers skipped-lint
     notices and informational counts), naming the most severe finding's lint
-    when there is one.
+    when there is one. `lint` is a doctor-module code literal by convention
+    (src/unified_pipeline/doctor/shared.py._finding), not enforced here, so
+    it is run through _card_text before going on the card -- like any other
+    string this module doesn't fully control the shape of (#782 review,
+    r3968154302 / D8 point 3).
     """
     if not isinstance(doctor, dict):
         return None
@@ -243,6 +383,8 @@ def _doctor_text(doctor):
              if f.get("severity") == severity and f.get("lint")),
             None,
         )
+        if top:
+            top = _card_text(str(top), _FACT_MAX_CHARS)
         return f"{total} findings (top: {top})" if top else f"{total} findings"
     except (TypeError, ValueError, AttributeError, OverflowError):
         # A malformed report must cost only its own line, never the card --
@@ -256,21 +398,25 @@ def _doctor_text(doctor):
         return None
 
 
-def build_teams_payload(run, score=None, submitter=None, doctor=None) -> dict:
-    """Build the Teams card for a terminal run (complete or failed).
+def build_teams_payload(
+    facts: RunFacts,
+    score: ScoreSummary | None = None,
+    submitter: str | None = None,
+    doctor: DoctorSummary | None = None,
+) -> dict:
+    """Build the Teams card for a terminal run (complete, failed, or cancelled).
 
     Args:
-        run: the Run ORM object (id, filename, status, total_cost,
-            total_duration_seconds).
+        facts: the run's notification-relevant facts (see RunFacts).
         score: the cached quality-score dict ({"totalScore": int, "band": str})
             or None when unavailable (e.g. on failure).
         submitter: display name/email of who submitted the run, or None to omit.
         doctor: the run-doctor report dict (run_doctor payload) or None to omit
             the Doctor line (doctor disabled, failed, or a failed run).
     """
-    status = getattr(run, "status", None) or "unknown"
-    run_id = _card_text(getattr(run, "id", None) or "unknown", _FACT_MAX_CHARS)
-    filename = _card_text(getattr(run, "filename", None) or "unknown", _FACT_MAX_CHARS)
+    status = facts.status
+    run_id = _card_text(facts.id, _FACT_MAX_CHARS)
+    filename = _card_text(facts.filename, _FACT_MAX_CHARS)
 
     if score:
         total = score.get("totalScore")
@@ -279,27 +425,27 @@ def build_teams_payload(run, score=None, submitter=None, doctor=None) -> dict:
     else:
         score_text = "n/a"
 
-    total_cost = getattr(run, "total_cost", None)
+    total_cost = facts.total_cost
     cost_text = f"${total_cost:.4f}" if isinstance(total_cost, (int, float)) else "n/a"
 
-    duration = getattr(run, "total_duration_seconds", None)
+    duration = facts.total_duration_seconds
     duration_text = f"{duration}s" if isinstance(duration, int) else "n/a"
 
-    facts = [
+    card_facts = [
         {"name": "Run ID", "value": run_id},
         {"name": "File", "value": filename},
     ]
     if submitter:
-        facts.append({"name": "Submitted by", "value": _card_text(submitter, _FACT_MAX_CHARS)})
+        card_facts.append({"name": "Submitted by", "value": _card_text(submitter, _FACT_MAX_CHARS)})
     # These four are deliberately NOT run through _card_text: unlike run id,
     # filename, submitter and (on the feedback card) reviewer_role, none is
     # user-, LLM- or filename-derived. `status` is written only as a code
     # literal (upload/runs/run_service/orchestrator), `band` is one of the
     # three strings quality_score.band_for returns, and cost/duration are
     # numbers guarded by isinstance above. Same for the Doctor line below: it
-    # uses a finding's `lint` id (a code literal) and an int() count, never
-    # its `message`/`evidence`, which do quote CV text.
-    facts += [
+    # uses a finding's `lint` id (sanitised in _doctor_text) and an int()
+    # count, never its `message`/`evidence`, which do quote CV text.
+    card_facts += [
         {"name": "Status", "value": str(status)},
         {"name": "Quality score", "value": score_text},
         {"name": "Total cost", "value": cost_text},
@@ -308,7 +454,7 @@ def build_teams_payload(run, score=None, submitter=None, doctor=None) -> dict:
 
     doctor_text = _doctor_text(doctor)
     if doctor_text:
-        facts.append({"name": "Doctor", "value": doctor_text})
+        card_facts.append({"name": "Doctor", "value": doctor_text})
 
     color = _STATUS_COLOR.get(status, _DEFAULT_COLOR)
     # One-line summary for the non-card surfaces (mobile / activity feed /
@@ -322,10 +468,12 @@ def build_teams_payload(run, score=None, submitter=None, doctor=None) -> dict:
     summary = f"CViche run {run_id} {status}"
     if extras:
         summary += " — " + ", ".join(extras)
-    return _adaptive_card(f"CViche run {run_id} {status}", color, facts, run_id, summary)
+    return _adaptive_card(f"CViche run {run_id} {status}", color, card_facts, facts.id, summary)
 
 
-def build_feedback_payload(feedback, run, submitter=None) -> dict:
+def build_feedback_payload(
+    feedback: FeedbackFacts, run: RunFacts, submitter: str | None = None
+) -> dict:
     """Build the Teams card for a user-submitted run feedback survey.
 
     Only ratings and category picks go on the card -- never a reviewer's
@@ -342,32 +490,31 @@ def build_feedback_payload(feedback, run, submitter=None) -> dict:
     other user-supplied facts.
 
     Args:
-        feedback: the Feedback ORM object (reviewer_role, overall_usefulness,
-            likelihood_to_recommend, overall_accuracy).
-        run: the Run ORM object the feedback was submitted against.
+        feedback: the feedback's notification-relevant facts (see FeedbackFacts).
+        run: the run's notification-relevant facts (see RunFacts).
         submitter: display name/email of who submitted the feedback, or None
             to omit.
     """
-    run_id = _card_text(getattr(run, "id", None) or "unknown", _FACT_MAX_CHARS)
-    filename = _card_text(getattr(run, "filename", None) or "unknown", _FACT_MAX_CHARS)
-    usefulness = getattr(feedback, "overall_usefulness", None)
-    recommend = getattr(feedback, "likelihood_to_recommend", None)
+    run_id = _card_text(run.id, _FACT_MAX_CHARS)
+    filename = _card_text(run.filename, _FACT_MAX_CHARS)
+    usefulness = feedback.overall_usefulness
+    recommend = feedback.likelihood_to_recommend
 
-    facts = [
+    card_facts = [
         {"name": "Run ID", "value": run_id},
         {"name": "File", "value": filename},
     ]
     if submitter:
-        facts.append({"name": "Submitted by", "value": _card_text(submitter, _FACT_MAX_CHARS)})
-    facts += [
+        card_facts.append({"name": "Submitted by", "value": _card_text(submitter, _FACT_MAX_CHARS)})
+    card_facts += [
         {"name": "Reviewer role",
-         "value": _card_text(getattr(feedback, "reviewer_role", None) or "n/a", _FACT_MAX_CHARS)},
+         "value": _card_text(feedback.reviewer_role or "n/a", _FACT_MAX_CHARS)},
         {"name": "Overall usefulness", "value": f"{usefulness}/5" if usefulness is not None else "n/a"},
         {"name": "Likelihood to recommend", "value": f"{recommend}/5" if recommend is not None else "n/a"},
     ]
-    accuracy = getattr(feedback, "overall_accuracy", None)
+    accuracy = feedback.overall_accuracy
     if accuracy is not None:
-        facts.append({"name": "Overall accuracy", "value": f"{accuracy}/10"})
+        card_facts.append({"name": "Overall accuracy", "value": f"{accuracy}/10"})
 
     # A low recommend score is the signal worth a red card; a high one is a
     # green nod. 3 (neutral) falls through to the default color.
@@ -379,61 +526,208 @@ def build_feedback_payload(feedback, run, submitter=None) -> dict:
         color = _DEFAULT_COLOR
 
     summary = f"CViche feedback on run {run_id}: usefulness {usefulness or 'n/a'}/5, recommend {recommend or 'n/a'}/5"
-    return _adaptive_card(f"CViche feedback on run {run_id}", color, facts, run_id, summary)
+    return _adaptive_card(f"CViche feedback on run {run_id}", color, card_facts, run.id, summary)
 
 
-def _post(payload, run_id) -> None:
-    """Best-effort: POST a prepared card to the Teams webhook.
+# --- delivery -----------------------------------------------------------------
 
-    No-ops silently when the webhook URL is not configured. Catches and logs
-    every exception (and any non-2xx response) so it can never raise or affect
-    run status. Shared by the started, terminal, and feedback notifications.
+
+class _Attempt(NamedTuple):
+    """Outcome of one _do_post attempt -- internal to the retry loop in _deliver."""
+
+    success: bool
+    retryable: bool
+    detail: str
+
+
+def _do_post(url: str, payload: dict) -> _Attempt:
+    """One HTTP attempt against an already-resolved, already-validated URL.
+
+    Never itself raises requests.RequestException (caught and classified
+    below); a non-request error (e.g. a payload requests can't serialise) is
+    left to propagate so the caller can tell an unexpected/non-transient
+    failure apart from a network one.
+
+    `detail` never includes str(exception): a requests.RequestException's
+    message can embed the full request URL, including the webhook's secret
+    path and query string (#782 review, r3968176452 point 6) -- only the
+    exception's type name, plus an HTTP status code when one is available,
+    goes into `detail`.
     """
     try:
-        url = _webhook_url()
-        if not url:
-            return
-
-        resp = requests.post(url, json=payload, timeout=_POST_TIMEOUT)
-        # Surface non-2xx as a warning, but never raise.
-        if resp.status_code >= 400:
-            logger.warning(
-                "Teams notification for run %s returned HTTP %s",
-                run_id,
-                resp.status_code,
-            )
+        resp = _SESSION.post(url, json=payload, timeout=_POST_TIMEOUT)
     except requests.RequestException as e:
-        # Network/HTTP-layer failure (timeout, connection refused, ...): the
-        # expected best-effort failure mode, logged at WARNING without a
-        # traceback.
-        logger.warning("Teams notification failed for run %s: %s", run_id, e)
+        detail = type(e).__name__
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        if status is not None:
+            detail = f"{detail} (HTTP {status})"
+        return _Attempt(success=False, retryable=True, detail=detail)
+    if resp.status_code >= 400:
+        retryable = resp.status_code == 429 or resp.status_code >= 500
+        return _Attempt(success=False, retryable=retryable, detail=f"HTTP {resp.status_code}")
+    return _Attempt(success=True, retryable=False, detail=f"HTTP {resp.status_code}")
+
+
+def _post(payload: dict, run_id: str) -> bool:
+    """Single-attempt POST via the module-level session (_SESSION).
+
+    No-ops (returns False) silently when the webhook URL is not configured.
+    Returns True on a 2xx response, False on a non-2xx response or any
+    exception -- never raises. Retained as the single-attempt primitive
+    (retry/backoff policy lives in _deliver, which calls _do_post directly to
+    see the retryable/detail classification _post's plain bool can't carry).
+    """
+    url = _webhook_url()
+    if not url:
+        return False
+    try:
+        return _do_post(url, payload).success
     except Exception:  # noqa: BLE001 -- best-effort, must never raise
-        # Anything else (e.g. a bad payload TypeError) is unexpected -- still
-        # swallowed per this function's contract, but with a traceback so it
-        # doesn't vanish silently.
+        # Unexpected (e.g. a payload TypeError, not a request-layer failure):
+        # still swallowed per this function's contract, but with a traceback
+        # so it doesn't vanish silently.
         logger.exception(
             "Teams notification failed for run %s with an unexpected error", run_id
         )
+        return False
 
 
-def notify_run_started(run, submitter=None) -> None:
-    """Best-effort: POST a Teams notification when a run starts processing."""
-    _post(build_started_payload(run, submitter), getattr(run, "id", "unknown"))
+def _deliver(payload: dict, run_id: str) -> None:
+    """Runs on the _DELIVERY worker thread: retry a transient failure.
 
-
-def notify_run_terminal(run, score=None, submitter=None, doctor=None) -> None:
-    """Best-effort: POST a Teams notification for a terminal run.
-
-    No-ops silently when the webhook URL is not configured. Catches and logs
-    every exception so it can never raise or affect run status.
+    Retries a request-layer exception or an HTTP 429/5xx up to
+    _RETRY_ATTEMPTS times, sleeping _RETRY_BACKOFF_SECONDS between attempts.
+    Any other 4xx is not retried (repeating a client error just repeats it) --
+    logged once. Exhausting all attempts logs once, summarising. Success logs
+    at debug. Never raises: this is the executor's target function, so an
+    uncaught exception here would only surface in an unfetched Future, never
+    anywhere a human sees it.
     """
-    _post(build_teams_payload(run, score, submitter, doctor), getattr(run, "id", "unknown"))
+    url = _webhook_url()
+    if not url:
+        return
+
+    last_detail = ""
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        try:
+            result = _do_post(url, payload)
+        except Exception:  # noqa: BLE001 -- best-effort, must never raise
+            # Unexpected and not transient (e.g. a payload TypeError) --
+            # retrying would just fail the same way again.
+            logger.exception(
+                "Teams notification failed for run %s with an unexpected error", run_id
+            )
+            return
+
+        if result.success:
+            logger.debug(
+                "Teams notification delivered for run %s (attempt %d/%d)",
+                run_id, attempt, _RETRY_ATTEMPTS,
+            )
+            return
+
+        last_detail = result.detail
+        if not result.retryable:
+            logger.warning(
+                "Teams notification for run %s failed (not retried): %s",
+                run_id, last_detail,
+            )
+            return
+
+        if attempt < _RETRY_ATTEMPTS:
+            time.sleep(_RETRY_BACKOFF_SECONDS[attempt - 1])
+
+    logger.warning(
+        "Teams notification for run %s failed after %d attempts: %s",
+        run_id, _RETRY_ATTEMPTS, last_detail,
+    )
 
 
-def notify_feedback_submitted(feedback, run, submitter=None) -> None:
-    """Best-effort: POST a Teams notification when a user submits run feedback.
+def _enqueue(payload: dict, run_id: str) -> None:
+    """Submit a delivery to the background worker and track its Future for flush()."""
+    future = _DELIVERY.submit(_deliver, payload, run_id)
+    with _PENDING_LOCK:
+        _PENDING.append(future)
 
-    No-ops silently when the webhook URL is not configured. Catches and logs
-    every exception so it can never raise or affect the feedback submission.
+
+def flush(timeout: float = 15.0) -> None:
+    """Block until every delivery queued before this call has been attempted.
+
+    Best-effort: tests call this after notify_*() to make delivery
+    synchronous for assertions; main.py's lifespan shutdown calls it too, so
+    a pod stop doesn't drop a terminal card that was still in flight. Never
+    raises; logs (does not raise) if `timeout` elapses first.
     """
-    _post(build_feedback_payload(feedback, run, submitter), getattr(run, "id", "unknown"))
+    with _PENDING_LOCK:
+        pending = list(_PENDING)
+        _PENDING.clear()
+    if not pending:
+        return
+    _done, not_done = wait(pending, timeout=timeout)
+    if not_done:
+        logger.warning(
+            "Teams notification flush timed out with %d delivery(ies) still pending",
+            len(not_done),
+        )
+
+
+# --- public entry points -------------------------------------------------------
+#
+# Each of these is the never-raise boundary for its notification: converting
+# the caller's object(s) to a typed DTO and building the payload happen
+# inside the try, since a malformed input can make either raise, and a
+# notification must never affect run status, feedback submission, or surface
+# to the user (#782 review, r3968255070 point 5 / point 1). Delivery itself
+# is hung off _DELIVERY and can't raise back here at all.
+
+
+def notify_run_started(run: object, submitter: str | None = None) -> None:
+    """Best-effort: queue a Teams notification for a run that just started."""
+    run_id = getattr(run, "id", None) or "unknown"
+    try:
+        payload = build_started_payload(RunFacts.from_run(run), submitter)
+    except Exception:
+        logger.exception("Teams notification payload build failed for run %s", run_id)
+        return
+    _enqueue(payload, run_id)
+
+
+def notify_run_terminal(
+    run: object,
+    score: ScoreSummary | None = None,
+    submitter: str | None = None,
+    doctor: DoctorSummary | None = None,
+) -> None:
+    """Best-effort: queue a Teams notification for a terminal run.
+
+    No-ops (with a warning, no post) when run.status is not one of
+    Run.TERMINAL_RUN_STATUSES -- this function's name and contract are for
+    terminal runs only (#782 review, r3968176452 point 5).
+    """
+    run_id = getattr(run, "id", None) or "unknown"
+    try:
+        facts = RunFacts.from_run(run)
+        if facts.status not in Run.TERMINAL_RUN_STATUSES:
+            logger.warning(
+                "notify_run_terminal called for run %s with non-terminal status %r; skipping",
+                run_id, facts.status,
+            )
+            return
+        payload = build_teams_payload(facts, score, submitter, doctor)
+    except Exception:
+        logger.exception("Teams notification payload build failed for run %s", run_id)
+        return
+    _enqueue(payload, run_id)
+
+
+def notify_feedback_submitted(feedback: object, run: object, submitter: str | None = None) -> None:
+    """Best-effort: queue a Teams notification when a user submits run feedback."""
+    run_id = getattr(run, "id", None) or "unknown"
+    try:
+        payload = build_feedback_payload(
+            FeedbackFacts.from_feedback(feedback), RunFacts.from_run(run), submitter
+        )
+    except Exception:
+        logger.exception("Teams notification payload build failed for run %s", run_id)
+        return
+    _enqueue(payload, run_id)

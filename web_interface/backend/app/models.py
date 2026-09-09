@@ -114,6 +114,9 @@ class Run(Base):
     filename = Column(String(255), nullable=False)
     file_type = Column(String(20), nullable=False)  # "docx" or "pdf"
     status = Column(String(20), nullable=False, index=True)  # "running", "complete", "failed", "paused"
+    # Statuses a run does not transition past. Single definition (CODING
+    # STANDARDS §1.5) -- app.services.notifications imports this.
+    TERMINAL_RUN_STATUSES = frozenset({"complete", "failed", "cancelled"})
     started_at = Column(DateTime, nullable=False, server_default=func.now(), index=True)
     completed_at = Column(DateTime)
     # Authoritative total pipeline execution time, in whole seconds, persisted by
