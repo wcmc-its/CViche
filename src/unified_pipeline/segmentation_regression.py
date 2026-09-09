@@ -39,10 +39,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import re
 import sys
+from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, TypedDict
+
+logger = logging.getLogger(__name__)
 
 # Substantive-line threshold: shorter lines ("2016", "PhD", bare bullets)
 # match by accident and only add noise to the coverage metric.
@@ -101,10 +106,65 @@ class Metrics(TypedDict):
     empty_content: int
     duplicate_entries: int
     mega_entries: int
+    # max_entry_chars and per_h1_content_counts (below) are informational
+    # only: written to metrics.json for manual inspection, but neither
+    # compare_metrics() nor lint_metrics() reads them (#617). entries_total
+    # and entries_content are the same shape -- LLM segmentation can
+    # legitimately merge or split entries between runs without losing
+    # content, so an entry-count delta alone isn't a regression signal, and
+    # wiring either into comparison would need a threshold this harness does
+    # not have evidence to set. Comparison stays scoped to the loss/noise
+    # signals below it: coverage, lost lines, headers, and the three
+    # _COUNT_KEYS.
     max_entry_chars: int
     headers_detected: int
     header_titles: list[str]
-    per_h1_content_counts: dict[str, int]
+    per_h1_content_counts: dict[str, int]  # informational only -- see above
+
+
+def _is_int_count(value: object) -> bool:
+    # bool is an int subclass and would otherwise silently pass.
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _is_coverage_pct(value: object) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and 0 <= value <= 100
+
+
+def _is_str_list(value: object) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) for item in value)
+
+
+def _is_str_int_dict(value: object) -> bool:
+    return isinstance(value, dict) and all(
+        isinstance(k, str) and _is_int_count(v) for k, v in value.items()
+    )
+
+
+# One (checker, description) pair per Metrics field, keyed by field name so
+# this mapping and the TypedDict cannot drift apart (#T2.2) -- pinned by
+# test_metrics_field_checkers_cover_every_required_key. _load_metrics() uses
+# this to validate the FULL persisted shape, not just key presence: a
+# corrupted or hand-edited metrics.json (a count as a string, a coverage
+# value out of [0, 100], a list field holding a non-list) previously passed
+# and failed later with an unrelated TypeError. The description is a plain
+# string, not the checker's __doc__ -- docstrings are stripped under -OO,
+# which would blank the error message (#T2.2 follow-up).
+_METRICS_FIELD_CHECKERS: dict[str, tuple[Callable[[Any], bool], str]] = {
+    "source_lines": (_is_int_count, "an int count"),
+    "substantive_lines": (_is_int_count, "an int count"),
+    "text_coverage_pct": (_is_coverage_pct, "a number in [0, 100]"),
+    "lost_lines": (_is_str_list, "a list of str"),
+    "entries_total": (_is_int_count, "an int count"),
+    "entries_content": (_is_int_count, "an int count"),
+    "empty_content": (_is_int_count, "an int count"),
+    "duplicate_entries": (_is_int_count, "an int count"),
+    "mega_entries": (_is_int_count, "an int count"),
+    "max_entry_chars": (_is_int_count, "an int count"),
+    "headers_detected": (_is_int_count, "an int count"),
+    "header_titles": (_is_str_list, "a list of str"),
+    "per_h1_content_counts": (_is_str_int_dict, "a dict of str to int"),
+}
 
 
 Verdict = Literal["REGRESSION", "IMPROVED", "OK"]
@@ -131,9 +191,11 @@ def _norm(text: str) -> str:
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
-def _tokens(text: str) -> set[str]:
-    """Word/number token set for the coverage check (see compute_metrics)."""
-    return set(_TOKEN_RE.findall(_norm(text)))
+def _tokens(text: str) -> Counter[str]:
+    """Word/number token MULTISET for the coverage check (see
+    compute_metrics). A set would collapse repeated tokens, so a source line
+    repeating an entry's words would read as covered (#T2.3)."""
+    return Counter(_TOKEN_RE.findall(_norm(text)))
 
 
 def _squash(text: str) -> str:
@@ -156,8 +218,20 @@ def iter_source_lines(docx_path: str) -> list[str]:
     from unified_pipeline.core.docx_structure_extractor import get_paragraph_text
 
     lines: list[str] = []
+    # python-docx returns the same underlying cell (_tc element) for every grid
+    # position a vMerge/hMerge spans, so an unguarded walk counts a merged
+    # cell's paragraphs once per spanned row/column. Mirror the identity guard
+    # at core/docx_structure_extractor.py's seen_cells handling (~line 642):
+    # identity is the cell's _tc element, not the _Cell wrapper (a fresh
+    # wrapper is constructed on every access, so wrapper identity never
+    # matches). One set shared by the top-level loop and the recursive calls
+    # below covers both entry points into walk_cell (#615 item 1).
+    seen_cells: set = set()
 
-    def walk_cell(cell):
+    def walk_cell(cell) -> None:
+        if cell._tc in seen_cells:
+            return
+        seen_cells.add(cell._tc)
         for para in cell.paragraphs:
             text = get_paragraph_text(para, tab_char='\t')
             if text.strip():
@@ -255,10 +329,20 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
     header_titles: list[str] = []
     _walk_headers(stage1a.get("hierarchy"), header_titles)
 
+    # per_h1_content_counts (#617): informational only, see the Metrics
+    # TypedDict's comment -- not read by compare_metrics()/lint_metrics().
     per_h1: dict[str, int] = {}
     for e in content:
-        hierarchy = e.get("hierarchy") or ["(none)"]
-        top = _norm(hierarchy[0]) or "(none)"
+        # hierarchy is typed as list[str] (Entry) but arrives untyped off
+        # json.loads at runtime; a malformed entry with hierarchy as a bare
+        # string (e.g. "Education" instead of ["Education"]) would otherwise
+        # index hierarchy[0] and silently key on its first CHARACTER ("E")
+        # instead of raising or falling back cleanly (#616 item i).
+        hierarchy = e.get("hierarchy")
+        if isinstance(hierarchy, list) and hierarchy:
+            top = _norm(hierarchy[0]) or "(none)"
+        else:
+            top = "(none)"
         per_h1[top] = per_h1.get(top, 0) + 1
 
     return {
@@ -282,7 +366,13 @@ def compute_metrics(source_lines: list[str], stage1a: Stage1A, stage2: Stage2) -
 
 def compare_metrics(baseline: Metrics, candidate: Metrics) -> tuple[Verdict, list[str]]:
     """Pure: verdict for one CV. Returns (verdict, reasons); verdict is
-    REGRESSION / IMPROVED / OK."""
+    REGRESSION / IMPROVED / OK.
+
+    Deliberately does NOT compare max_entry_chars, per_h1_content_counts,
+    entries_total, or entries_content -- they're informational-only (#617,
+    see the Metrics TypedDict). Comparison stays on the loss/noise signals:
+    coverage, lost lines, header titles, and _COUNT_KEYS.
+    """
     reasons: list[str] = []
     b_counts, c_counts = _counts(baseline), _counts(candidate)
 
@@ -293,9 +383,15 @@ def compare_metrics(baseline: Metrics, candidate: Metrics) -> tuple[Verdict, lis
     newly_lost = [l for l in candidate["lost_lines"] if _norm(l) not in lost_before]
     if newly_lost:
         reasons.append(f"{len(newly_lost)} newly lost line(s), e.g. '{newly_lost[0][:60]}'")
-    if candidate["headers_detected"] < baseline["headers_detected"]:
-        gone = set(baseline["header_titles"]) - set(candidate["header_titles"])
-        sample = next(iter(gone), "?")
+    # Diffed unconditionally (not gated on a headers_detected count drop):
+    # a same-count header REPLACEMENT -- one title swapped for another --
+    # is invisible if this only runs when the count falls (#615 item 2).
+    # Counter (multiset), not set: a title duplicated in baseline that loses
+    # one copy is invisible to a set diff even though headers_detected (the
+    # full list length) already reflects the loss (#615 item 3).
+    gone_counter = Counter(baseline["header_titles"]) - Counter(candidate["header_titles"])
+    if gone_counter:
+        sample = next(iter(gone_counter), "?")
         reasons.append(
             f"headers {baseline['headers_detected']} -> {candidate['headers_detected']}"
             f" (lost e.g. '{sample[:40]}')"
@@ -335,11 +431,37 @@ def lint_metrics(metrics: Metrics) -> list[str]:
 
 # ---------------------------------------------------------------- snapshotting
 
+class SegmentationRegressionError(Exception):
+    """Raised by snapshot()/_load_metrics()/run_compare() on a fatal,
+    user-facing condition. The error policy belongs to the driver, not the
+    stage (CODING_STANDARDS §5.1): these functions raise, and main() is the
+    sole place that translates that into sys.exit (#616 item v). Raising
+    also makes each condition unit-testable without a SystemExit-catching
+    test (the prior sys.exit() calls made these functions harder to test in
+    isolation, per the issue)."""
+
+
+class SnapshotLabelError(SegmentationRegressionError, ValueError):
+    """A snapshot label that fails validation (#616 item iv). Also a ValueError
+    for callers that treat it as a bad argument, while main() translates it to a
+    clean exit like every other SegmentationRegressionError."""
+
+
+# Snapshot labels build a directory path directly (_snapshot_dir below); a
+# label containing '../' segments could otherwise walk outside gold_set/
+# (#616 item iv). CLI-only tool, so the risk is low, but the check is cheap.
+_SNAPSHOT_LABEL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
 def _outputs_root() -> Path:
     return Path(__file__).resolve().parent / "outputs"
 
 
 def _snapshot_dir(label: str) -> Path:
+    if not _SNAPSHOT_LABEL_RE.fullmatch(label):
+        raise SnapshotLabelError(
+            f"invalid snapshot label {label!r}: must match {_SNAPSHOT_LABEL_RE.pattern}"
+        )
     return _outputs_root() / "gold_set" / f"segsnap_{label}"
 
 
@@ -354,92 +476,199 @@ def _default_cv_dir() -> Path | None:
     return candidates[-1] if candidates else None
 
 
-def snapshot(label: str, cv_dir: str | None, uids: list[str] | None) -> Path:
-    """Run stages 1a -> 1b -> 2 on each gold CV and record outputs + metrics.
-    Costs real LLM calls (~$0.25/CV)."""
+class SnapshotResult(TypedDict):
+    """One CV's outcome from _snapshot_cv(): either metrics (error is None)
+    or an error (metrics is None) -- never both, never neither."""
+    uid: str
+    metrics: Metrics | None
+    error: str | None
+    cost: float
+
+
+def _snapshot_cv(docx_path: Path, snap_dir: Path) -> SnapshotResult:
+    """Run stages 1a -> 1b -> 2 on ONE gold CV, persist its artifacts under
+    snap_dir, and compute its metrics (#T2.1). Any Exception during that
+    work is caught and returned as SnapshotResult['error'] rather than
+    propagated, so one CV's failure doesn't take the whole snapshot's
+    already-computed metrics down with it -- snapshot() is what isolates
+    per-CV failures and keeps going; see its docstring. No retry/resume: a
+    failed CV is simply reported, not automatically re-attempted -- out of
+    scope for this fix."""
     from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import (
         get_cv_hierarchy_chunked,
     )
     from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
     from unified_pipeline.stage_2_entry_extraction import run_stage_2
 
+    uid = docx_path.stem
+    cv_snap = snap_dir / uid
+    cv_snap.mkdir(exist_ok=True)
+    cost = 0.0
+    try:
+        hierarchy, stats = get_cv_hierarchy_chunked(cv_path=str(docx_path))
+        stage1a: Stage1A = {"document_uid": uid, "hierarchy": hierarchy, "meta": stats}
+        stage1a_path = cv_snap / f"{uid}_segmented.json"
+        stage1a_path.write_text(json.dumps(stage1a, indent=2), encoding="utf-8")
+        cost += stats.get("extraction_cost", 0) or 0
+
+        _, stage1b_path = run_stage_1b(str(docx_path), hierarchy_json_path=str(stage1a_path))
+        stage2, _ = run_stage_2(str(docx_path), hierarchy_json_path=str(stage1b_path))
+        (cv_snap / f"{uid}_entries.json").write_text(
+            json.dumps(stage2, indent=2), encoding="utf-8"
+        )
+        cost += stage2.get("total_cost", 0) or 0
+
+        metrics = compute_metrics(iter_source_lines(str(docx_path)), stage1a, stage2)
+    except Exception as exc:
+        logger.exception("snapshot: %s failed", uid)
+        return {"uid": uid, "metrics": None, "error": str(exc), "cost": cost}
+    return {"uid": uid, "metrics": metrics, "error": None, "cost": cost}
+
+
+def snapshot(label: str, cv_dir: str | None, uids: list[str] | None) -> Path:
+    """Run stages 1a -> 1b -> 2 on each gold CV and record outputs + metrics.
+    Costs real LLM calls (~$0.25/CV).
+
+    Fault isolation (#T2.1): each CV runs through _snapshot_cv(), which
+    catches its own exceptions. metrics.json is written for every CV that
+    succeeded even if others failed, and if ANY CV failed this still raises
+    SegmentationRegressionError AFTER writing, naming the failed uids, so
+    main() exits nonzero (fail closed, CODING_STANDARDS §5.5) without losing
+    what was already computed. No retry/resume -- out of scope.
+    """
+    snap = _snapshot_dir(label)
+    if (snap / "metrics.json").exists():
+        raise SnapshotLabelError(
+            f"Snapshot '{label}' already exists ({snap / 'metrics.json'}). "
+            "Choose a new label or delete the directory."
+        )
+
     source = Path(cv_dir) if cv_dir else _default_cv_dir()
     if not source or not source.is_dir():
-        sys.exit("No gold CV directory found. Pass --cvs <dir of .docx files>.")
+        raise SegmentationRegressionError(
+            "No gold CV directory found. Pass --cvs <dir of .docx files>."
+        )
 
     docx_files = sorted(source.glob("*.docx"))
     if uids:
         docx_files = [f for f in docx_files if f.stem in set(uids)]
     if not docx_files:
-        sys.exit(f"No .docx files matched in {source}")
+        raise SegmentationRegressionError(f"No .docx files matched in {source}")
 
-    snap = _snapshot_dir(label)
     snap.mkdir(parents=True, exist_ok=True)
     all_metrics: dict[str, Metrics] = {}
     total_cost = 0.0
+    failed_uids: list[str] = []
 
     for docx in docx_files:
-        uid = docx.stem
-        print(f"\n=== {uid} ===")
-        cv_snap = snap / uid
-        cv_snap.mkdir(exist_ok=True)
-
-        hierarchy, stats = get_cv_hierarchy_chunked(cv_path=str(docx))
-        stage1a: Stage1A = {"document_uid": uid, "hierarchy": hierarchy, "meta": stats}
-        stage1a_path = cv_snap / f"{uid}_segmented.json"
-        stage1a_path.write_text(json.dumps(stage1a, indent=2))
-        total_cost += stats.get("extraction_cost", 0) or 0
-
-        _, stage1b_path = run_stage_1b(str(docx), hierarchy_json_path=str(stage1a_path))
-        stage2, _ = run_stage_2(str(docx), hierarchy_json_path=str(stage1b_path))
-        (cv_snap / f"{uid}_entries.json").write_text(json.dumps(stage2, indent=2))
-        total_cost += stage2.get("total_cost", 0) or 0
-
-        metrics = compute_metrics(iter_source_lines(str(docx)), stage1a, stage2)
-        all_metrics[uid] = metrics
+        logger.info("=== %s ===", docx.stem)
+        result = _snapshot_cv(docx, snap)
+        total_cost += result["cost"]
+        if result["error"] is not None:
+            failed_uids.append(result["uid"])
+            logger.warning("  FAILED: %s", result['error'])
+            continue
+        metrics = result["metrics"]
+        if metrics is None:
+            raise SegmentationRegressionError(
+                f"{result['uid']}: _snapshot_cv returned neither metrics nor error"
+            )
+        all_metrics[result["uid"]] = metrics
         print(f"  coverage={metrics['text_coverage_pct']}% "
               f"entries={metrics['entries_total']} mega={metrics['mega_entries']} "
               f"dups={metrics['duplicate_entries']} headers={metrics['headers_detected']}")
 
-    (snap / "metrics.json").write_text(json.dumps(all_metrics, indent=2))
+    (snap / "metrics.json").write_text(json.dumps(all_metrics, indent=2), encoding="utf-8")
     print(f"\nSnapshot '{label}': {len(all_metrics)} CVs, LLM cost ${total_cost:.2f}")
     print(f"Metrics: {snap / 'metrics.json'}")
+
+    if failed_uids:
+        raise SegmentationRegressionError(
+            f"Snapshot '{label}': {len(failed_uids)} CV(s) failed: {', '.join(failed_uids)}"
+        )
     return snap
 
 
 # --------------------------------------------------------------------- report
 
 def _load_metrics(label: str) -> dict[str, Metrics]:
+    """Load one snapshot's metrics.json. Raises SegmentationRegressionError
+    if the file is missing, isn't a JSON object, or a value inside it isn't
+    shaped like a Metrics dict (#616 item ii: json.loads() is typed
+    dict[str, Metrics] but returns Any at runtime, with no shape check)."""
     path = _snapshot_dir(label) / "metrics.json"
     if not path.exists():
-        sys.exit(f"No snapshot '{label}' ({path} missing). Run: snapshot {label}")
-    return json.loads(path.read_text())
+        raise SegmentationRegressionError(
+            f"No snapshot '{label}' ({path} missing). Run: snapshot {label}"
+        )
+    raw: Any = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise SegmentationRegressionError(
+            f"{path}: expected a JSON object of {{uid: Metrics}}, got {type(raw).__name__}"
+        )
+    required_keys = Metrics.__required_keys__
+    for uid, entry in raw.items():
+        if not isinstance(entry, dict):
+            raise SegmentationRegressionError(
+                f"{path}: entry {uid!r} is a {type(entry).__name__}, not a Metrics object"
+            )
+        missing = required_keys - entry.keys()
+        if missing:
+            raise SegmentationRegressionError(
+                f"{path}: entry {uid!r} is missing Metrics keys: {sorted(missing)}"
+            )
+        for field, (checker, description) in _METRICS_FIELD_CHECKERS.items():
+            if not checker(entry[field]):
+                raise SegmentationRegressionError(
+                    f"{path}: entry {uid!r} field {field!r} must be "
+                    f"{description}, got {entry[field]!r}"
+                )
+    return raw
 
 
 def run_compare(baseline_label: str, candidate_label: str) -> int:
+    """Diff two snapshots. Raises if they share no CVs at all; otherwise
+    fails closed on a uid present in baseline but absent from candidate --
+    reported as a MISSING row and counted toward regressions, rather than
+    silently dropped from `shared` and the run passing with 0 regressions
+    (#621; CODING_STANDARDS §5.5, "fail closed"). A uid present ONLY in the
+    candidate is reported as an informational NEW row (mirroring MISSING's
+    style) and is neither a regression nor an error -- a newly added CV
+    cannot regress against nothing (#T2.5)."""
     baseline = _load_metrics(baseline_label)
     candidate = _load_metrics(candidate_label)
     shared = sorted(set(baseline) & set(candidate))
-    if not shared:
-        sys.exit("Snapshots share no CVs — nothing to compare.")
+    missing = sorted(set(baseline) - set(candidate))
+    new = sorted(set(candidate) - set(baseline))
+    if not shared and not missing and not new:
+        raise SegmentationRegressionError("Snapshots share no CVs — nothing to compare.")
 
-    rows: list[tuple[str, Verdict, str]] = []
+    rows: list[tuple[str, str, str]] = []
     regressions = 0
+    for uid in missing:
+        regressions += 1
+        rows.append((uid, "MISSING", "present in baseline, absent from candidate snapshot"))
+    for uid in new:
+        rows.append((uid, "NEW", "present in candidate, absent from baseline snapshot"))
     for uid in shared:
         verdict, reasons = compare_metrics(baseline[uid], candidate[uid])
         if verdict == "REGRESSION":
             regressions += 1
         rows.append((uid, verdict, "; ".join(reasons)))
+    rows.sort(key=lambda row: row[0])
 
-    width = max(len(u) for u in shared)
+    width = max(len(row[0]) for row in rows)
     lines = [f"Segmentation regression: {baseline_label} -> {candidate_label}", ""]
-    for uid, verdict, detail in rows:
-        lines.append(f"{uid:<{width}}  {verdict:<10}  {detail}")
+    for uid, label, detail in rows:
+        lines.append(f"{uid:<{width}}  {label:<10}  {detail}")
     lines.append("")
-    lines.append(f"{regressions} regression(s) across {len(shared)} CVs")
+    total = len(shared) + len(missing) + len(new)
+    missing_note = f" ({len(missing)} missing from candidate)" if missing else ""
+    new_note = f" ({len(new)} new in candidate)" if new else ""
+    lines.append(f"{regressions} regression(s) across {total} CVs{missing_note}{new_note}")
     report = "\n".join(lines)
     print(report)
-    (_snapshot_dir(candidate_label) / "REPORT.md").write_text(report + "\n")
+    (_snapshot_dir(candidate_label) / "REPORT.md").write_text(report + "\n", encoding="utf-8")
     return 1 if regressions else 0
 
 
@@ -474,13 +703,20 @@ def main() -> None:
     p_lint.add_argument("label")
 
     args = parser.parse_args()
-    if args.command == "snapshot":
-        snapshot(args.label, args.cvs, args.uids)
-        sys.exit(0)
-    if args.command == "compare":
-        sys.exit(run_compare(args.baseline, args.candidate))
-    if args.command == "lint":
-        sys.exit(run_lint(args.label))
+    # snapshot()/run_compare()/run_lint() (via _load_metrics()) raise
+    # SegmentationRegressionError on a fatal, user-facing condition; main()
+    # is the one place that translates that into a process exit
+    # (CODING_STANDARDS §5.1; #616 item v).
+    try:
+        if args.command == "snapshot":
+            snapshot(args.label, args.cvs, args.uids)
+            sys.exit(0)
+        if args.command == "compare":
+            sys.exit(run_compare(args.baseline, args.candidate))
+        if args.command == "lint":
+            sys.exit(run_lint(args.label))
+    except SegmentationRegressionError as exc:
+        sys.exit(str(exc))
 
 
 if __name__ == "__main__":
