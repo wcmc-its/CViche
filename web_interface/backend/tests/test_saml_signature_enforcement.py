@@ -35,6 +35,7 @@ from saml2.metadata import entity_descriptor
 from saml2.saml import NAMEID_FORMAT_EMAILADDRESS
 
 from app.saml_client import extract_user_attrs
+from app.saml_replay import assertion_ids
 
 _XMLSEC = shutil.which("xmlsec1")
 _OPENSSL = shutil.which("openssl")
@@ -90,9 +91,9 @@ def _write_md(conf, path):
     return path
 
 
-def _authn_response(server, name):
+def _authn_response(server, name, in_response_to="id-1"):
     return str(server.create_authn_response(
-        IDENTITY, in_response_to="id-1", destination=ACS, sp_entity_id=SP_EID,
+        IDENTITY, in_response_to=in_response_to, destination=ACS, sp_entity_id=SP_EID,
         name_id=server.ident.transient_nameid(SP_EID, name), authn=AUTHN,
         sign_assertion=name != "unsigned", sign_response=False))
 
@@ -126,14 +127,24 @@ def harness():
     assert tampered != valid
     forged = _authn_response(atk, "victim")
     unsigned = _authn_response(idp, "unsigned")
+    # No InResponseTo at all -- a genuinely unsolicited (IdP-initiated)
+    # response, same shape as a real IdP-initiated login. D9 #12 (mrj4001
+    # review, PR #781 thread r3967362882): this harness DOES drive real
+    # pysaml2 parsing (unlike every other SAML test, which mocks
+    # parse_authn_request_response), so it's the right place for a
+    # real-parser proof that allow_unsolicited=True actually works.
+    unsolicited = _authn_response(idp, "victim", in_response_to=None)
 
     return {"strict": strict_sp, "lax": lax_sp,
-            "valid": valid, "tampered": tampered, "forged": forged, "unsigned": unsigned}
+            "valid": valid, "tampered": tampered, "forged": forged,
+            "unsigned": unsigned, "unsolicited": unsolicited}
 
 
-def _parse(sp, xml):
+def _parse(sp, xml, outstanding=None):
     b64 = base64.b64encode(xml.encode()).decode()
-    return sp.parse_authn_request_response(b64, BINDING_HTTP_POST, outstanding={"id-1": "/"})
+    if outstanding is None:
+        outstanding = {"id-1": "/"}
+    return sp.parse_authn_request_response(b64, BINDING_HTTP_POST, outstanding=outstanding)
 
 
 def test_valid_signature_is_accepted(harness):
@@ -168,3 +179,19 @@ def test_flag_is_load_bearing(harness):
     documents that the flag (app/saml_client.py) is what forces rejection."""
     resp = _parse(harness["lax"], harness["unsigned"])
     assert resp is not None  # bypass reappears if the flag is ever flipped off
+
+
+def test_unsolicited_response_is_accepted(harness):
+    """D9 #12 (mrj4001 review, PR #781 thread r3967362882): allow_unsolicited=
+    True (app/saml_client.py) exists specifically so IdP-initiated SSO keeps
+    working -- a genuinely unsolicited response (no InResponseTo) parsed
+    against an empty outstanding-request map, not the mocked stand-in every
+    other ACS test uses. A validly signed, otherwise-unremarkable response
+    with in_response_to=None must be accepted, and assertion_ids() (the
+    replay gate's own ID extraction) must find exactly the one real
+    assertion ID pysaml2 parsed out of it."""
+    resp = _parse(harness["strict"], harness["unsolicited"], outstanding={})
+    assert resp is not None
+    ids = assertion_ids(resp)
+    assert len(ids) == 1
+    assert ids[0]

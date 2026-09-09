@@ -325,25 +325,32 @@ class SamlReplayCache:
             raise ValueError(f"ttl_seconds must be > 0, got {ttl_seconds!r}")
         if self.url:
             try:
-                # SET NX EX: atomic first-presentation check + record -- one
-                # key, one command, so concurrent replays across pods cannot
-                # both win. (Never more than one ID per call -- see this
-                # module's docstring.)
-                return bool(
-                    self._redis().set(
-                        _redis_key(assertion_id), "1", nx=True, ex=ttl_seconds
-                    )
-                )
+                client = self._redis()
             except _STORE_ERRORS as exc:
                 return self._log_store_failure(exc, time.time())
             except ValueError as exc:
                 # A malformed (non-blank) CVICHE_REDIS_URL surfaces here:
                 # redis.Redis.from_url() raises ValueError lazily, at first
-                # use inside _redis(), not at __init__ time (D7). This is
-                # configured-but-BROKEN, not "unconfigured" -- it must never
-                # silently fall through to the per-pod local cache below;
-                # instead it gets exactly the same fail-closed-by-posture
-                # treatment as any other store failure.
+                # use inside _redis() -- CLIENT CONSTRUCTION only (D7), not
+                # the .set() call below. This is configured-but-BROKEN, not
+                # "unconfigured" -- it must never silently fall through to
+                # the per-pod local cache; instead it gets exactly the same
+                # fail-closed-by-posture treatment as any other store
+                # failure. Scoped this narrowly on purpose: a ValueError
+                # from client.set() itself would be a programming error
+                # (e.g. a bad kwarg), not a config problem, and must
+                # propagate rather than be swallowed as a store failure
+                # (mrj4001 review, PR #781 fix-round item 2).
+                return self._log_store_failure(exc, time.time())
+            try:
+                # SET NX EX: atomic first-presentation check + record -- one
+                # key, one command, so concurrent replays across pods cannot
+                # both win. (Never more than one ID per call -- see this
+                # module's docstring.)
+                return bool(
+                    client.set(_redis_key(assertion_id), "1", nx=True, ex=ttl_seconds)
+                )
+            except _STORE_ERRORS as exc:
                 return self._log_store_failure(exc, time.time())
         return self._check_local(assertion_id, ttl_seconds)
 

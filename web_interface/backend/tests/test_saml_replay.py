@@ -201,6 +201,20 @@ def test_typeerror_from_client_propagates():
         cache.check_and_record("id-1", 60)
 
 
+def test_valueerror_from_set_propagates_not_treated_as_malformed_url():
+    """The malformed-URL ValueError special-case (D7) is scoped to CLIENT
+    CONSTRUCTION only (redis.Redis.from_url(), inside _redis()) -- a
+    ValueError raised by client.set() itself (e.g. a bad kwarg -- a
+    programming error, not a config problem) must propagate exactly like
+    the TypeError case above, not be swallowed as a store failure (PR #781
+    fix-round item 2, following r3966551686's narrowing)."""
+    client = MagicMock()
+    client.set.side_effect = ValueError("not a malformed-URL error")
+    cache = SamlReplayCache("redis://fake", fail_closed=True, client=client)
+    with pytest.raises(ValueError):
+        cache.check_and_record("id-1", 60)
+
+
 # --- redis.Redis.from_url() failure (D7, D9 #7) ---------------------------------
 
 def test_client_init_connection_error_fails_closed_by_default(monkeypatch):
@@ -744,6 +758,36 @@ class TestAcsReplayGate:
             response = _post_acs(client)
         assert response.status_code == 302
         assert response.headers["location"] == "/login?error=auth_failed"
+        assert not any(c.name for c in response.cookies.jar)
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_replay_cache_bug_propagates_as_500_not_redirected(
+        self, mock_get_client, client, db, seed_saml_mode
+    ):
+        """A programming error inside check_and_record (anything other than
+        a RedisError) must surface as a sanitized 500 with NO cookie minted
+        -- it must NOT be caught by D10's parsing-boundary catch-all in
+        _parse_saml_assertion. Before PR #781 fix-round item 1, the
+        catch-all's try enclosed _reject_replayed_assertion too, so this
+        TypeError was silently redirected to /login?error=auth_failed
+        instead of propagating -- directly contradicting D2's whole point
+        (mrj4001 review threads r3966551686 / r3966560287). This test was
+        RED against that code (302, cookie-free but wrongly redirected
+        rather than 500) before the _parse_saml_assertion restructuring."""
+        resp = _AuthnResponse(
+            ["_bug-id"], identity=_IDENTITY, not_on_or_after=time.time() + 300
+        )
+        mock_get_client.return_value = _mock_client(resp)
+
+        broken_cache = SamlReplayCache("", fail_closed=True)
+        broken_cache.check_and_record = MagicMock(
+            side_effect=TypeError("programming error inside check_and_record")
+        )
+        set_replay_cache(broken_cache)
+
+        response = _post_acs(client)
+        assert response.status_code == 500
+        assert response.json()["error"] == "internal_error"
         assert not any(c.name for c in response.cookies.jar)
 
 
