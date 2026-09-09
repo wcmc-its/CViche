@@ -1,7 +1,6 @@
 """Step details and data API endpoints."""
 import json
 import logging
-from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -10,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import User
-from app.schemas import StepDetail, LogEntry, OutputPreview
+from app.schemas import StepDetail, LogEntry
 from app.auth import get_current_user, require_admin
 from app.services import artifact_service, prompt_log_service
 from app.services.run_service import check_run_access
@@ -239,7 +238,10 @@ def get_json_content(
                 "size_bytes": resolved.local_path.stat().st_size,
                 "content": data,
             })
-        except Exception:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+            logger.warning(
+                "JSON viewer read failed for %s/%s: %s", run_id, resolved.basename, exc
+            )
             raise internal_error("Error reading file")
 
     # Durable storage fallback (S3 in prod): the file may live in S3 but not on

@@ -97,7 +97,10 @@ def _owned_basenames_for_run(db: Session, run_id: str) -> set[str]:
             continue
         try:
             files = json.loads(step.output_files)
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError) as exc:
+            logger.warning(
+                "Malformed output_files for run=%s step=%s: %s", run_id, step.step_number, exc
+            )
             continue
         if not isinstance(files, list):
             continue

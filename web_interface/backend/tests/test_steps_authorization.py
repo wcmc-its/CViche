@@ -5,6 +5,7 @@ owner / non-owner / admin / unauthenticated, for /step/{n}, /data/{f},
 from __future__ import annotations
 
 import json
+import logging
 
 import app.services.artifact_service as artifact_service_mod
 from app.models import User, Run, Step
@@ -135,6 +136,43 @@ class TestDataFileAuthorization:
         resp = client.get(f"/api/run/{run.id}/data/stage1a.json", params={"preview": "true"})
         assert resp.status_code == 403
 
+    def test_non_admin_uppercase_json_data_forbidden(
+        self, client, db, seed_simple_mode, monkeypatch, tmp_path
+    ):
+        """r3965801468, wire-level: a mutation check (restoring
+        `Path(filename).name.endswith(".json")` at the admin gate) leaves
+        FOO.JSON ungated for a non-admin owner -- this must go red under
+        that mutant."""
+        user, run = _user_and_run(db, suffix="-data-json-upper")
+        _auth(client, user)
+        monkeypatch.setattr("app.api.steps.get_storage", lambda: _EmptyStorage())
+        _seed_local_file(monkeypatch, tmp_path, run.id, "STAGE1A.JSON", b"{}")
+        resp = client.get(f"/api/run/{run.id}/data/STAGE1A.JSON")
+        assert resp.status_code == 403
+
+    def test_non_admin_uppercase_json_preview_forbidden(
+        self, client, db, seed_simple_mode, monkeypatch, tmp_path
+    ):
+        user, run = _user_and_run(db, suffix="-data-json-upper-prev")
+        _auth(client, user)
+        monkeypatch.setattr("app.api.steps.get_storage", lambda: _EmptyStorage())
+        _seed_local_file(monkeypatch, tmp_path, run.id, "STAGE1A.JSON", b"{}")
+        resp = client.get(f"/api/run/{run.id}/data/STAGE1A.JSON", params={"preview": "true"})
+        assert resp.status_code == 403
+
+    def test_admin_uppercase_json_data_not_forbidden(
+        self, client, db, seed_simple_mode, monkeypatch, tmp_path
+    ):
+        """The same FOO.JSON name is not blocked for an admin -- proves the
+        403 above is the JSON gate, not a generic filename problem."""
+        _, run = _user_and_run(db, suffix="-data-json-upper-owner")
+        admin, _ = _user_and_run(db, role="admin", suffix="-data-json-upper-admin")
+        _auth(client, admin)
+        monkeypatch.setattr("app.api.steps.get_storage", lambda: _EmptyStorage())
+        _seed_local_file(monkeypatch, tmp_path, run.id, "STAGE1A.JSON", b"{}")
+        resp = client.get(f"/api/run/{run.id}/data/STAGE1A.JSON")
+        assert resp.status_code != 403
+
 
 class TestJsonContentAuthorization:
     """/json/{f} is require_admin -- only role=='admin' ever reaches 200; a
@@ -156,6 +194,25 @@ class TestJsonContentAuthorization:
         _seed_local_file(monkeypatch, tmp_path, run.id, "stage1a.json", b'{"x": 1}')
         resp = client.get(f"/api/run/{run.id}/json/stage1a.json")
         assert resp.status_code == 200
+
+    def test_malformed_local_json_returns_500_and_logs_warning(
+        self, client, db, seed_simple_mode, monkeypatch, tmp_path, caplog
+    ):
+        """r3965796995/get_json_content: the local-branch read must narrow
+        its except and log, not swallow silently -- a mutation check
+        (restoring `except Exception: raise internal_error(...)` with no log)
+        leaves this warning missing while the 500 stays the same, so this
+        must check caplog, not just the status code."""
+        admin, run = _user_and_run(db, role="admin", suffix="-json-malformed")
+        _auth(client, admin)
+        monkeypatch.setattr("app.api.steps.get_storage", lambda: _EmptyStorage())
+        _seed_local_file(monkeypatch, tmp_path, run.id, "broken.json", b"{not valid json")
+
+        with caplog.at_level(logging.WARNING):
+            resp = client.get(f"/api/run/{run.id}/json/broken.json")
+
+        assert resp.status_code == 500
+        assert any("JSON viewer read failed" in r.getMessage() for r in caplog.records)
 
     def test_unauthenticated_gets_401(self, client, db, seed_simple_mode):
         _, run = _user_and_run(db, suffix="-json-u")

@@ -278,6 +278,48 @@ class TestParseJsonToPreview:
         assert len(result.rows[0][0]) == svc.PREVIEW_CELL_MAX_CHARS
 
 
+class TestParseJsonToPreviewBranchCaps:
+    """The row cap must hold in every branch of parse_json_to_preview, not
+    just the top-level list branch -- _preview_from_sections,
+    _preview_from_single_list_value (dict items and scalar items), and the
+    key/value fallback each apply it independently. Each of these dies if
+    its own cap is removed (pasted per-branch in the ticket report)."""
+
+    def test_sections_branch_cap(self):
+        data = {
+            "publications": [{"id": i} for i in range(150)],
+            "grants": [{"id": i} for i in range(60)],
+        }
+        result = svc.parse_json_to_preview(data)
+        assert len(result.rows) == svc.PREVIEW_MAX_ROWS
+        assert result.truncated is True
+        assert result.total_rows == 210
+
+    def test_single_list_value_with_dicts_cap(self):
+        data = {"items": [{"a": i} for i in range(201)]}
+        result = svc.parse_json_to_preview(data)
+        assert result.headers == ["a"]
+        assert len(result.rows) == svc.PREVIEW_MAX_ROWS
+        assert result.truncated is True
+        assert result.total_rows == 201
+
+    def test_single_list_value_with_scalars_cap(self):
+        data = {"items": list(range(201))}
+        result = svc.parse_json_to_preview(data)
+        assert result.headers == ["value"]
+        assert len(result.rows) == svc.PREVIEW_MAX_ROWS
+        assert result.truncated is True
+        assert result.total_rows == 201
+
+    def test_key_value_fallback_cap(self):
+        data = {f"k{i}": i for i in range(201)}
+        result = svc.parse_json_to_preview(data)
+        assert result.headers == ["Key", "Value"]
+        assert len(result.rows) == svc.PREVIEW_MAX_ROWS
+        assert result.truncated is True
+        assert result.total_rows == 201
+
+
 # --- is_json_artifact: the single normalized JSON-classification rule ---
 
 
