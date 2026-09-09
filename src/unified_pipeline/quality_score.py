@@ -28,6 +28,13 @@ and a clean run scores 100::
 Two dimensions are hard-fail gates: a fatal pipeline error or a missing CV
 owner name caps the final score regardless of the other dimensions.
 
+The result also says what the score was computed *without*: ``data_complete``
+is False and ``missing_evidence`` names each scored artifact that was absent,
+unreadable, or ambiguous (and a ``EVIDENCE INCOMPLETE`` flag repeats it), so a
+score over an incomplete output directory is recognizable as missing evidence
+rather than read as a precise measurement (#724 review item 2). The score
+itself is unchanged by it.
+
 Bands (PROVISIONAL -- see calibration note below):
     >= 85  GREEN   ship
     >= 60  YELLOW  human cleanup needed
@@ -50,10 +57,24 @@ one human-confirmed clean run exists. Treat GREEN as "no detected problems,"
 never "human-verified correct."
 """
 
+from __future__ import annotations
+
 import json
+import logging
 import re
 import sys
+import zipfile
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from docx.document import Document as DocumentType
+    from docx.oxml.table import CT_Tc
+    from docx.table import Table
+
+logger = logging.getLogger(__name__)
 
 # --- band thresholds (provisional; see module docstring) --------------------
 BAND_GREEN = 85
@@ -68,39 +89,139 @@ def clamp(val, lo=0.0, hi=1.0):
     return max(lo, min(hi, val))
 
 
-def linear_interp(val, lo, hi, out_lo, out_hi):
-    """Map val from [lo, hi] -> [out_lo, out_hi] linearly."""
+def linear_interp(val: float, lo: float, hi: float, out_lo: float, out_hi: float) -> float:
+    """Map val from [lo, hi] -> [out_lo, out_hi] linearly, clamped to the
+    output range regardless of direction (out_lo may be > out_hi) -- a caller
+    passing a val outside [lo, hi] gets a bounded result, not an extrapolated
+    one (#724 review)."""
     if hi == lo:
         return out_lo
     t = (val - lo) / (hi - lo)
-    return out_lo + t * (out_hi - out_lo)
+    result = out_lo + t * (out_hi - out_lo)
+    return clamp(result, min(out_lo, out_hi), max(out_lo, out_hi))
 
 
-def _load_first(outputs_dir: Path, pattern: str):
-    """Load the first JSON artifact matching pattern, or None."""
+def _load_first(outputs_dir: Path, pattern: str) -> tuple[dict | None, str | None]:
+    """Load the first JSON artifact matching pattern.
+
+    Returns ``(data, reason)``. ``data`` is ``None`` when nothing usable was
+    loaded; ``reason`` then tells the misses apart: ``None`` means no file
+    matched `pattern` at all (genuinely absent); a string starting with
+    "ambiguous:" means more than one file matched and none was loaded --
+    both live callers (quality_score_service.py, per-run S3 key filter into a
+    fresh temp dir; scripts/score_one.py, per-uid glob into a fresh temp dir)
+    build a directory holding at most one file per pattern, so this guards
+    against a mis-pointed directory rather than a path either caller
+    exercises (#724 review); any other string means a file *matched* but
+    failed to parse -- e.g. the truncated JSON a crashed or OOM-killed stage
+    leaves mid-write (present but unreadable, #497). Mirrors
+    run_doctor._load_json's absent-vs-unreadable distinction.
+    """
     files = sorted(outputs_dir.glob(pattern))
     if not files:
-        return None
+        return None, None
+    if len(files) > 1:
+        names = ", ".join(f.name for f in files)
+        reason = f"ambiguous: {len(files)} files match {pattern} ({names})"
+        logger.warning("quality_score found multiple candidates for %s: %s", pattern, names)
+        return None, reason
     try:
         with open(files[0]) as f:
-            return json.load(f)
-    except Exception:
-        return None
+            return json.load(f), None
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        reason = f"{type(e).__name__}: {e}"
+        logger.warning("quality_score could not read %s (%s)", files[0], reason)
+        return None, reason
 
 
-def _load_docx(outputs_dir: Path):
-    """Return (Document, reason). Document is None if unavailable."""
+def _missing_or_unreadable_detail(label: str, reason: str | None) -> str:
+    """Detail-string fragment for a `_load_first` miss: names an unreadable
+    artifact distinctly from a genuinely absent one (#497)."""
+    if reason is not None:
+        return f"{label} unreadable ({reason})"
+    return f"no {label} found"
+
+
+def _load_docx(outputs_dir: Path) -> tuple[DocumentType | None, str | None]:
+    """Return (Document, reason). Document is None if unavailable.
+
+    Mirrors _load_first's ambiguous-match guard (#724 review): more than one
+    *.docx in the directory is not loaded rather than silently picking one.
+
+    Catches only what python-docx raises for a file that is present but not
+    a readable Word document (each probed, 2026-09-04): ``BadZipFile`` for
+    garbage, truncated or empty bytes; ``KeyError`` for a zip missing
+    ``[Content_Types].xml`` or ``word/document.xml``; ``XMLSyntaxError``
+    for a corrupt ``document.xml``; ``ValueError`` for a package whose main
+    part is not a Word document (python-docx ``api.py``: "is not a Word
+    file"); ``OSError`` for a directory or an unreadable file. Anything
+    else is a programming error and propagates, the same rule #724 review
+    item 12 set for ``_load_first``.
+    """
     try:
         from docx import Document
+        from lxml.etree import XMLSyntaxError
     except ImportError:
         return None, "python-docx not available"
     docx_files = sorted(outputs_dir.glob("*.docx"))
     if not docx_files:
         return None, "no docx found"
+    if len(docx_files) > 1:
+        names = ", ".join(f.name for f in docx_files)
+        reason = f"ambiguous: {len(docx_files)} files match *.docx ({names})"
+        logger.warning("quality_score found multiple docx candidates: %s", names)
+        return None, reason
     try:
         return Document(docx_files[0]), None
-    except Exception as e:  # pragma: no cover - corrupt docx
-        return None, f"docx open error: {e}"
+    except (OSError, zipfile.BadZipFile, KeyError, ValueError, XMLSyntaxError) as e:
+        reason = f"docx open error: {type(e).__name__}: {e}"
+        logger.warning("quality_score could not read %s (%s)", docx_files[0], reason)
+        return None, reason
+
+
+#: Every artifact score_run reads, as (label, glob pattern). The evidence
+#: inventory behind ``data_complete`` (#724 review item 2) walks exactly this
+#: list plus the docx, so a new dimension that reads a new artifact must add
+#: it here or its absence will not be reported as missing evidence.
+SCORED_JSON_ARTIFACTS = (
+    ("fields.json", "*_fields.json"),
+    ("classified.json", "*_classified.json"),
+    ("entries.json", "*_entries.json"),
+)
+#: Number of artifacts the inventory checks: the JSON patterns above plus the docx.
+SCORED_ARTIFACT_COUNT = len(SCORED_JSON_ARTIFACTS) + 1
+
+
+def missing_evidence(outputs_dir: Path) -> list[str]:
+    """One entry per scored artifact that could not be loaded, in
+    SCORED_JSON_ARTIFACTS order then the docx; empty when every artifact
+    loaded (#724 review item 2).
+
+    Each entry is the same absent / unreadable / ambiguous wording the
+    dimension details use (`_missing_or_unreadable_detail`, `_load_docx`),
+    so a reader can tell a directory that genuinely has no stage-3b output
+    from a truncated classified.json from a scorer pointed at the wrong
+    directory. This is the artifact-health signal the score itself does not
+    carry: every dimension still scores a missing artifact the way it did
+    before (0.5 for a docx, 1.0 for a JSON), so a run with absent evidence
+    can look like a precisely measured bad run. score_run exposes this list
+    as ``missing_evidence`` and its emptiness as ``data_complete``; turning
+    it into a typed scoring_confidence field on the API schema, the Teams
+    card, and the frontend types is #745.
+
+    Loads each artifact once more, the way every dimension does (fields.json
+    and classified.json are each already read by two dimensions, the docx by
+    two); the scorer is offline and the artifacts are small.
+    """
+    missing: list[str] = []
+    for label, pattern in SCORED_JSON_ARTIFACTS:
+        data, reason = _load_first(outputs_dir, pattern)
+        if data is None:
+            missing.append(_missing_or_unreadable_detail(label, reason))
+    doc, reason = _load_docx(outputs_dir)
+    if doc is None:
+        missing.append(f"docx: {reason}")
+    return missing
 
 
 # ---------------------------------------------------------------------------
@@ -113,16 +234,53 @@ def _load_docx(outputs_dir: Path):
 # ---------------------------------------------------------------------------
 
 #: Error text that means a stage broke, not that one lookup came back empty.
+#: The exception-type-name alternation was added for #724 (T2.5: the review
+#: named NameError/UnboundLocalError/KeyError as too narrow -- ValidationException
+#: was one of the review's suggested examples, not a measured farm count; the
+#: farm's scored artifacts have 0 ValidationException hits. Those three named
+#: patterns are now subsumed by the general alternation and kept implicitly).
+#: It was first written case-insensitive (`\b\w+(?:Error|Exception)\b`) but
+#: that matched ordinary prose containing a trailing "...error"/"...exception"
+#: substring case-insensitively -- on the farm it fired on the OpenAI API's
+#: own `'type': 'invalid_request_error'` envelope text inside
+#: meta.stats.t_validation.error (uid L7IAKW), a real stage failure but not
+#: an exception *type name*. Follow-up review (2026-09-02) made the
+#: exception-name branch case-sensitive (`(?-i:...)`, requiring a capital
+#: first letter and exact-case Error/Exception) so lowercase prose like "the
+#: war on terror" or a lowercase "keyerror" no longer matches it, and added
+#: an explicit, still case-insensitive, API-envelope branch so the
+#: genuine L7IAKW failure (an OpenAI 400) stays fatal by name rather than by
+#: accident of the broad heuristic. Residual gap the pattern still cannot
+#: see: a stage failure recorded as a raw Python exception message with no
+#: type name in it, e.g. `'int' object is not iterable` (1 of the 66 scored
+#: farm uids, ODAWYA_2002_Holtz, carries exactly this in
+#: meta.stats.t_validation.error and stays non-fatal) -- driving this from
+#: structured stage error metadata instead of exception text is #745.
 FATAL_ERROR_PATTERN = re.compile(
     r"name '\w+' is not defined"
     r"|Traceback \(most recent call last\)"
-    r"|NameError:|UnboundLocalError:|KeyError:",
+    r"|(?-i:\b[A-Z]\w*(?:Error|Exception)\b)"
+    r"|invalid_request_error"
+    r"|Error code: \d{3}",
     re.IGNORECASE,
 )
 
 
-def iter_error_fields(obj, path=""):
-    """(dotted path, value) for every non-null ``error`` field anywhere in obj."""
+def iter_error_fields(obj: object, path: str = "") -> list[tuple[str, str]]:
+    """(dotted path, value) for every non-null ``error`` field anywhere in obj.
+
+    Every non-null ``error`` key counts, with no allowlist for "benign"
+    metadata: scouted against the 66-CV farm (#724 review item 4), the 66
+    uids' scored artifacts (fields.json, classified.json, entries.json)
+    carry 5 non-null error fields, all at ``meta.stats.t_validation.error``
+    (6 across the whole stage_3b_classified_entries directory, which has 98
+    files, more than the 66 scored uids) -- every one a real stage error
+    (an LLM API error envelope, a `name 'response' is not defined`
+    NameError, or a bare `'int' object is not iterable` TypeError with no
+    exception-type name in the message) -- no schema in this pipeline emits
+    an ``error`` key for anything else. If a stage ever adds one, an
+    allowlist belongs here, keyed on the dotted path's stage prefix.
+    """
     results = []
     if isinstance(obj, dict):
         for k, v in obj.items():
@@ -134,6 +292,22 @@ def iter_error_fields(obj, path=""):
         for i, item in enumerate(obj):
             results.extend(iter_error_fields(item, f"{path}[{i}]"))
     return results
+
+
+def _invalid_metadata_result(
+        context: str, invariant: str, **values: int) -> tuple[float, str, None]:
+    """Shared (fraction, detail, cap) for a stage-metadata invariant
+    violation (#724 review items 10/11): worst-case fraction rather than
+    computing a ratio from numbers that cannot be trusted (e.g. negative
+    counts, or duplicate_entries exceeding total_entries). Farm: 0 of 65
+    classified.json files in the scored population violate either invariant
+    (0 of 98 in the whole stage_3b_classified_entries dir), so this never
+    fires on real output today.
+    """
+    values_str = ", ".join(f"{k}={v}" for k, v in values.items())
+    detail = f"invalid metadata: {invariant} ({values_str})"
+    logger.warning("quality_score %s: %s", context, detail)
+    return 1.0, detail, None
 
 
 def cv_owner_name_missing(fields_data) -> bool:
@@ -150,16 +324,31 @@ def cv_owner_name_missing(fields_data) -> bool:
 # Dimension scorers  -- each returns (penalty_fraction, detail, hard_fail_cap)
 # ---------------------------------------------------------------------------
 
-def score_pipeline_errors(outputs_dir: Path):
-    """Pipeline / API errors. Fatal patterns are a hard-fail (cap=40)."""
+def score_pipeline_errors(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Pipeline / API errors. Fatal patterns are a hard-fail (cap=40).
+
+    An unreadable stage JSON is itself a pipeline-health signal (#724 review
+    item 1) -- a truncated/corrupt artifact is exactly the shape a crashed or
+    OOM-killed stage leaves behind -- so it is recorded as a synthetic
+    non-fatal error entry rather than silently skipped. It is not fatal by
+    itself; FATAL_ERROR_PATTERN still decides that from the parse-error text.
+    """
     nonnull_errors = 0
     fatal_locations = []
+    unreadable_files = []
 
     for json_file in sorted(outputs_dir.glob("*.json")):
         try:
             with open(json_file) as f:
                 data = json.load(f)
-        except Exception:
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+            reason = str(e)
+            logger.warning("quality_score could not read %s (%s)", json_file, reason)
+            path = f"{json_file.name}: unreadable"
+            unreadable_files.append(path)
+            nonnull_errors += 1
+            if FATAL_ERROR_PATTERN.search(reason):
+                fatal_locations.append(f"{path}: {reason!r}")
             continue
         for path, val in iter_error_fields(data, json_file.name):
             nonnull_errors += 1
@@ -173,6 +362,8 @@ def score_pipeline_errors(outputs_dir: Path):
         f"nonnull_error_fields={nonnull_errors}; fatal_pattern={'YES' if fatal_hit else 'NO'}; "
         f"fatal_locations={fatal_locations[:3]}"
     )
+    if unreadable_files:
+        detail += f"; unreadable_files={unreadable_files[:3]}"
     return fraction, detail, hard_fail_cap
 
 
@@ -192,11 +383,11 @@ _CONTACT_KEY_RE = re.compile(
     r"email|phone|address|\b(?:cell|fax|mobile|telephone)\b", re.IGNORECASE)
 
 
-def score_cv_owner(outputs_dir: Path):
+def score_cv_owner(outputs_dir: Path) -> tuple[float, str, int | None]:
     """CV owner name / contact. Missing name is a hard-fail (cap=25)."""
-    data = _load_first(outputs_dir, "*_fields.json")
+    data, reason = _load_first(outputs_dir, "*_fields.json")
     if data is None:
-        return 1.0, "no fields.json found", 25
+        return 1.0, _missing_or_unreadable_detail("fields.json", reason), 25
 
     if cv_owner_name_missing(data):
         return 1.0, "cv_owner name empty; hard-fail cap=25", 25
@@ -229,14 +420,25 @@ def score_cv_owner(outputs_dir: Path):
     return clamp(fraction), detail, None
 
 
-def score_t_bucket(outputs_dir: Path):
+def score_t_bucket(outputs_dir: Path) -> tuple[float, str, None]:
     """Share of entries in the stage_3b ``T`` catch-all ('nothing else fits')."""
-    data = _load_first(outputs_dir, "*_classified.json")
+    data, reason = _load_first(outputs_dir, "*_classified.json")
     if data is None:
-        return 1.0, "no classified.json found", None
+        return 1.0, _missing_or_unreadable_detail("classified.json", reason), None
 
     meta = data.get("meta", {}) or {}
     code_dist = meta.get("code_distribution", {}) or {}
+    total_entries_meta = meta.get("total_entries")
+    if total_entries_meta is not None and total_entries_meta < 0:
+        return _invalid_metadata_result(
+            "t_bucket", "total_entries < 0", total_entries=total_entries_meta)
+    if "code_distribution" in meta and total_entries_meta is not None:
+        code_dist_sum = sum(code_dist.values())
+        if code_dist_sum != total_entries_meta:
+            return _invalid_metadata_result(
+                "t_bucket", "sum(code_distribution) != total_entries",
+                code_distribution_sum=code_dist_sum, total_entries=total_entries_meta)
+
     total = sum(code_dist.values()) or meta.get("total_entries", 1) or 1
     t_count = code_dist.get("T", 0)
     t_ratio = t_count / total
@@ -263,7 +465,7 @@ def score_t_bucket(outputs_dir: Path):
     return fraction, detail, None
 
 
-def score_sparse_tables(outputs_dir: Path):
+def score_sparse_tables(outputs_dir: Path) -> tuple[float, str, None]:
     """Sparse / under-filled tables in the generated docx."""
     doc, reason = _load_docx(outputs_dir)
     if doc is None:
@@ -272,7 +474,11 @@ def score_sparse_tables(outputs_dir: Path):
     tables = doc.tables
     total_tables = len(tables)
     if total_tables == 0:
-        return 0.0, "no tables in docx", None
+        # Not perfect quality (#724 review item 6): the WCM template always
+        # renders tables, so a docx with none is not our template's output --
+        # worst-case fraction, not a false GREEN. Farm: 0 of 65 rendered docx
+        # have zero tables, so this never fires on real output today.
+        return 1.0, "no tables in docx (template always renders tables)", None
 
     total_cells = empty_cells = sparse_count = 0
     for tbl in tables:
@@ -301,34 +507,165 @@ def score_sparse_tables(outputs_dir: Path):
     return fraction, detail, None
 
 
-def score_broken_format(outputs_dir: Path):
-    """Raw-tab and prompt-echo (template instruction) artifacts in the docx."""
+#: The pristine WCM template's own incidental tab: table 16 row 1 col 0's
+#: "Project title:\t\t" label cell (confirmed by scanning
+#: `key_files/wcm_cv_template_faculty_october_2022_final.docx` directly). It
+#: IS reachable from rendered CV content -- 27 of 65 farm docx contain this
+#: exact cell text, and for all 27 it is their ONLY raw-tab cell (#724
+#: follow-up review) -- so it is excluded by exact text match, the smallest
+#: equivalent of the INSTRUCTION_MARKERS exclusion `score_broken_format`
+#: already applies for the same reason: penalizing the template's own
+#: boilerplate is not a genuine raw-formatting artifact.
+_TEMPLATE_TAB_CELL_TEXT = "Project title:\t\t"
+
+
+def _count_raw_tab_cells(
+        tables: Iterable[Table], _depth: int = 0,
+        _seen_tc: set[CT_Tc] | None = None) -> int:
+    """Raw-tab paragraphs inside every cell of `tables`, nested tables one
+    level deep via `cell.tables` (#724 follow-up review, D7'); the recursion
+    is bounded by `_depth` so a table nested inside a table nested inside a
+    table is not walked a third level down, matching this docstring. A
+    paragraph whose text is exactly `_TEMPLATE_TAB_CELL_TEXT` is excluded:
+    it is the template's own boilerplate, not a rendering defect.
+
+    A cell merged across columns (gridSpan) is repeated once per spanned
+    column in `row.cells` -- python-docx does not collapse it -- so counting
+    every `row.cells` entry would count one physical cell's tab once per
+    spanned column. Dedupe by the underlying `w:tc` element so each physical
+    cell is visited once (#724 second follow-up review, F3).
+
+    The dedupe set holds the `cell._tc` elements themselves, not `id(...)`
+    of them: `id()` alone is a memory address, and without a live reference
+    keeping the element's temporary python-docx wrapper alive, a later,
+    unrelated cell's wrapper can be allocated at the same freed address and
+    collide -- confirmed against a real farm docx, where an `id()`-only set
+    silently dropped a genuine tab-containing cell as a false "already seen"
+    duplicate. Storing the element itself in the set keeps it alive for the
+    whole walk, so identity stays meaningful.
+    """
+    if _seen_tc is None:
+        _seen_tc = set()
+    count = 0
+    for table in tables:
+        for row in table.rows:
+            for cell in row.cells:
+                tc = cell._tc
+                if tc in _seen_tc:
+                    continue
+                _seen_tc.add(tc)
+                for p in cell.paragraphs:
+                    if "\t" in p.text and p.text != _TEMPLATE_TAB_CELL_TEXT:
+                        count += 1
+                if _depth < 1:
+                    count += _count_raw_tab_cells(cell.tables, _depth + 1, _seen_tc)
+    return count
+
+
+#: Template instruction text left standing in a rendered CV ("prompt echo").
+#: Each alternation is a phrase the pristine WCM template
+#: (`key_files/wcm_cv_template_faculty_october_2022_final.docx`) itself uses
+#: in an instruction line -- every "please" there is "Please include / list /
+#: summarize / annotate / provide / choose / keep / do not / also include",
+#: every "e.g.," is "e.g., 50%" / "(e.g., sessions" / "(e.g., drugs", and
+#: "bedside" appears only as "(bedside teaching, teaching rounds, ...)" --
+#: rather than the bare words. The bare words were the #724 review's item 8:
+#: "please" and "e.g.," occur in ordinary academic prose and "bedside" in
+#: citation titles. Measured on the 65-docx farm (22,546 body paragraphs)
+#: before narrowing: the bare pattern hit 1,312 paragraphs, this one 1,300;
+#: the 12 dropped are 10 citation titles containing "bedside", one teaching
+#: bullet ("including Bedside Teaching") and one research summary with
+#: "e.g.," -- every one legitimate content -- and it gains nothing the bare
+#: pattern missed (strict subset). Every one of the template's 20 body
+#: instruction paragraphs still matches (pinned by a test that reads the
+#: template). Score effect, measured with score_run over all 66 farm uids:
+#: the dimension's fraction is clamp(0.6 * tabs/20 + 0.4 * echoes/15) with
+#: the clamp on the sum, so an echo count above 15 still counts; the six
+#: docx that lost 1-3 false positives drop 0.027-0.080 on this dimension,
+#: three totals rise by one point (77->78, 78->79 twice), no band changes.
+INSTRUCTION_MARKERS = re.compile(
+    r"(please (?:include|list|summarize|annotate|provide|choose|keep|do not|also include)"
+    r"|delete the others|list here|choose one"
+    r"|bedside teaching, teaching rounds"
+    r"|e\.g\., (?:50%|sessions|drugs)"
+    r"|yyyy-yyyy|\(optional\)|\(Research, clinical)",
+    re.IGNORECASE,
+)
+
+
+def score_broken_format(outputs_dir: Path) -> tuple[float, str, None]:
+    """Raw-tab and prompt-echo (template instruction) artifacts in the docx.
+
+    Two different scans, two different scopes, on purpose:
+
+    - Prompt-echo (``INSTRUCTION_MARKERS``) scans body paragraphs ONLY. A
+      #724 follow-up review probe confirmed every marker this pattern
+      checks ("please provide", "yyyy-yyyy", "(optional)", "(Research,
+      clinical") occurs verbatim in the pristine WCM template's own table cells --
+      table 1 row 7 col 0 "If yes, please provide Visa type (Examples: J-1,
+      H-1B, E-3, TN, etc.):", table 9 rows 0-1 col 0 "DEA number:
+      (optional)" / "NPI number: (optional)", table 13 row 0 col 1 "Date
+      (yyyy-yyyy)" (and the same label repeated in tables 19-29), table
+      17/18 row 5 col 0 "Type of Supervision (research, clinical, teaching,
+      leadership)" -- confirmed against
+      `key_files/wcm_cv_template_faculty_october_2022_final.docx` directly,
+      independent of any rendered CV. Scanning cells for these markers would
+      therefore false-positive on the template's own label text in every
+      one of the 65 farm docx (65/65), not catch an echoed-into-content
+      defect, so the instruction-marker check stays paragraph-only and is
+      deliberately never applied to cells.
+    - The raw-tab check DOES scan every paragraph of every table cell
+      (nested tables one level deep), in addition to body paragraphs. A raw
+      ``\\t`` is not template boilerplate the way the instruction markers
+      are -- the pristine template contains exactly one incidental tab, a
+      static "Project title:" label row, and it IS reachable from rendered
+      CV content: 27 of 65 farm docx contain that exact cell text as their
+      only raw-tab cell (#724 follow-up review), so `_count_raw_tab_cells`
+      excludes that one cell text by exact match (`_TEMPLATE_TAB_CELL_TEXT`)
+      the same way the instruction markers above are excluded from cells --
+      versus the instruction markers' dozens of legitimate hits -- so any
+      other tab inside a cell is still a meaningful signal of a
+      raw-formatting artifact leaking into the docx.
+
+    Headers and footers are not scanned either way: stage 6 never writes to
+    them.
+    """
     doc, reason = _load_docx(outputs_dir)
     if doc is None:
         return 0.5, reason, None
 
-    INSTRUCTION_MARKERS = re.compile(
-        r"(please|delete the others|list here|choose one|bedside|e\.g\.,|yyyy-yyyy|\(optional\)|\(Research, clinical)",
-        re.IGNORECASE,
-    )
-    raw_tab_count = echo_count = 0
+    raw_tab_paragraphs = echo_count = 0
     for p in doc.paragraphs:
         text = p.text
         if "\t" in text:
-            raw_tab_count += 1
+            raw_tab_paragraphs += 1
         if INSTRUCTION_MARKERS.search(text):
             echo_count += 1
 
-    fraction = clamp(0.6 * (raw_tab_count / 20) + 0.4 * (echo_count / 15))
-    detail = f"raw_tab_paragraphs={raw_tab_count}; echo_paragraphs={echo_count}; fraction={fraction:.3f}"
+    raw_tab_cells = _count_raw_tab_cells(doc.tables)
+    total_raw_tab = raw_tab_paragraphs + raw_tab_cells
+
+    fraction = clamp(0.6 * (total_raw_tab / 20) + 0.4 * (echo_count / 15))
+    detail = (
+        f"raw_tab_paragraphs={raw_tab_paragraphs}; raw_tab_cells={raw_tab_cells}; "
+        f"echo_paragraphs={echo_count}; fraction={fraction:.3f}"
+    )
     return fraction, detail, None
 
 
-def score_field_sparseness(outputs_dir: Path):
-    """Entry-level field-extraction sparseness."""
-    data = _load_first(outputs_dir, "*_fields.json")
+def score_field_sparseness(outputs_dir: Path) -> tuple[float, str, None]:
+    """Entry-level field-extraction sparseness.
+
+    Deliberate double-signal, not an accident (#724 review item 9):
+    ``success_rate`` measures the extractor (how many entries the extraction
+    call reported success on), while allnull_or_zero measures the entries
+    (how many carry no usable fields regardless of what the extractor
+    claimed). An entry that fails both is meant to weigh on both terms --
+    that is the calibration, not a double-count of one failure.
+    """
+    data, reason = _load_first(outputs_dir, "*_fields.json")
     if data is None:
-        return 1.0, "no fields.json found", None
+        return 1.0, _missing_or_unreadable_detail("fields.json", reason), None
 
     entries = data.get("entries", [])
     total = len(entries)
@@ -358,15 +695,25 @@ def score_field_sparseness(outputs_dir: Path):
     return fraction, detail, None
 
 
-def score_duplicate_ratio(outputs_dir: Path):
+def score_duplicate_ratio(outputs_dir: Path) -> tuple[float, str, None]:
     """Duplicate-entry ratio (de-dup / fragmentation health)."""
-    data = _load_first(outputs_dir, "*_classified.json")
+    data, reason = _load_first(outputs_dir, "*_classified.json")
     if data is None:
-        return 1.0, "no classified.json found", None
+        return 1.0, _missing_or_unreadable_detail("classified.json", reason), None
 
     meta = data.get("meta", {}) or {}
     total = meta.get("total_entries", 0) or 0
     dup = meta.get("duplicate_entries", 0) or 0
+    if total < 0:
+        return _invalid_metadata_result(
+            "duplicate_ratio", "total_entries < 0", total_entries=total)
+    if dup < 0:
+        return _invalid_metadata_result(
+            "duplicate_ratio", "duplicate_entries < 0", duplicate_entries=dup)
+    if dup > total:
+        return _invalid_metadata_result(
+            "duplicate_ratio", "duplicate_entries > total_entries",
+            duplicate_entries=dup, total_entries=total)
     if total == 0:
         return 0.0, "total_entries=0", None
 
@@ -380,14 +727,15 @@ def score_duplicate_ratio(outputs_dir: Path):
     else:
         fraction = 1.0
 
-    edata = _load_first(outputs_dir, "*_entries.json")
+    edata, edata_reason = _load_first(outputs_dir, "*_entries.json")
     coverage_pct = (edata or {}).get("coverage", {}).get("coverage_percentage") if edata else None
     if coverage_pct is not None and coverage_pct > 130:
         fraction = clamp(fraction + 0.1)
 
+    entries_note = f"; {_missing_or_unreadable_detail('entries.json', edata_reason)}" if edata_reason else ""
     detail = (
         f"total_entries={total}; duplicate_entries={dup}; dup_ratio={dup_ratio:.3f}; "
-        f"entries_coverage_pct={coverage_pct}; fraction={fraction:.3f}"
+        f"entries_coverage_pct={coverage_pct}; fraction={fraction:.3f}{entries_note}"
     )
     return fraction, detail, None
 
@@ -416,7 +764,7 @@ def band_for(score: int) -> str:
     return "RED (re-run / do-not-deliver)"
 
 
-def score_run(run_output_dir, run_id: str = None) -> dict:
+def score_run(run_output_dir: str | Path, run_id: str | None = None) -> dict:
     """Score a run's output directory. Returns the full breakdown dict."""
     outputs_dir = Path(run_output_dir)
     if not outputs_dir.exists():
@@ -455,6 +803,16 @@ def score_run(run_output_dir, run_id: str = None) -> dict:
     if not flags:
         flags.append("No hard-fail caps triggered")
 
+    # Artifact health (#724 review item 2): does not move the score -- the
+    # dimensions already scored each absence -- but names what the score was
+    # computed without, so "25 RED" on an empty directory reads as missing
+    # evidence, not a measured result.
+    missing = missing_evidence(outputs_dir)
+    if missing:
+        flags.append(
+            f"EVIDENCE INCOMPLETE ({len(missing)} of {SCORED_ARTIFACT_COUNT} artifacts): "
+            + "; ".join(missing))
+
     return {
         "run_id": run_id,
         "totalScore": total_score,
@@ -464,10 +822,19 @@ def score_run(run_output_dir, run_id: str = None) -> dict:
         "total_weight": TOTAL_WEIGHT,
         "dimensionScores": dimension_scores,
         "flags": flags,
+        "data_complete": not missing,
+        "missing_evidence": missing,
     }
 
 
-def quality_gate(run_output_dir, run_id: str = None, mode: str = "advisory") -> dict:
+#: The only modes quality_gate accepts. A typo (e.g. "blok") must fail
+#: closed, not silently fall through to advisory (#724 review item 3) --
+#: this is the single caller's only gate mode value, currently hardcoded to
+#: "block" (quality_score.py:_main), never config- or env-driven.
+VALID_GATE_MODES = frozenset({"off", "advisory", "block"})
+
+
+def quality_gate(run_output_dir: str | Path, run_id: str | None = None, mode: str = "advisory") -> dict:
     """
     Run the scorer and return a gate verdict.
 
@@ -476,10 +843,18 @@ def quality_gate(run_output_dir, run_id: str = None, mode: str = "advisory") -> 
       "advisory" -> compute verdict but never block (default)
       "block"    -> RED runs fail the gate (gate_passed=False)
 
+    Raises ValueError for any other mode -- validated before scoring runs, so
+    a misconfigured caller fails fast instead of silently defaulting to
+    advisory (#724 review item 3).
+
     Returns the score_run() dict augmented with 'verdict' and 'gate_passed'.
     Callers decide what to do with gate_passed; this function never raises on a
     low score.
     """
+    if mode not in VALID_GATE_MODES:
+        raise ValueError(
+            f"invalid quality_gate mode: {mode!r}; must be one of {sorted(VALID_GATE_MODES)}")
+
     result = score_run(run_output_dir, run_id)
     score = result["totalScore"]
     if score >= BAND_GREEN:
