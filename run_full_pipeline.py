@@ -1016,10 +1016,29 @@ def _exit_if_prerequisites_missing(target_stage: str, document_uid: str) -> None
     sys.exit(1)
 
 
+def _cv_is_missing(cv_path: str) -> bool:
+    """Report an unresolvable first argument as what it is.
+
+    resolve_cv_path() hands back whatever it was given when nothing matched, so
+    a typo or an unsupported extension used to travel all the way into the
+    context and surface as a stem/uid mismatch -- an accurate message about the
+    wrong thing. The stem/uid guard stays for the case it is actually about.
+    """
+    if Path(cv_path).is_file():
+        return False
+    print(f"Error: CV not found: {cv_path}")
+    print("  Give a path to a .docx, or a document UID present in "
+          "data/sample_cvs/word/.")
+    return True
+
+
 @_scope_prompt_logger_per_run
 def main() -> int:
     cv_path_or_uid, target_stage = parse_args(sys.argv)
     cv_path, document_uid = resolve_cv_path_for_run(cv_path_or_uid)
+
+    if _cv_is_missing(cv_path):
+        return 1
 
     if target_stage and target_stage != "1a":
         _exit_if_prerequisites_missing(target_stage, document_uid)
@@ -1064,15 +1083,24 @@ if __name__ == '__main__':
     # module configures one, and Python's root logger has only a last-resort
     # WARNING-only handler.
     #
+    # That handler streams to STDERR, not stdout. Splitting the two is what
+    # makes the sentence above true rather than aspirational: stdout carries
+    # only the narration and the five parsed lines, stderr carries the
+    # tracebacks and warnings. It is the same split CODING_STANDARDS.md 6.4
+    # cites as the precedent -- scripts/doctor_one.py and scripts/score_one.py
+    # both put their parsed output on stdout and their diagnostics on stderr.
+    # Nothing is lost from a batch log: run_corpus_batch.sh:122,124 redirect
+    # the run with `> "$log" 2>&1`, so both streams still land in it.
+    #
     # dictConfig, not logging.basicConfig() (project convention -- see
     # web_interface/backend/app/logging_config.py's module docstring), but
     # deliberately NOT that module's configure_logging(): CODING_STANDARDS.md
     # 1.4 -- "the pipeline core does not import the web backend" -- exists
     # precisely because reaching into web_interface/backend/app/ from the
     # pipeline side makes the CLI unable to run without the web app's config
-    # layout. This is self-contained instead: no cross-boundary import, no
+    # layout. This is self-contained instead: no cross-boundary import, and no
     # sys.stdout swap to track (that only happens inside the web
-    # orchestrator's own process), so a plain "ext://sys.stdout" is fine.
+    # orchestrator's own process).
     import logging.config
     logging.config.dictConfig({
         "version": 1,
@@ -1084,7 +1112,7 @@ if __name__ == '__main__':
             "default": {
                 "class": "logging.StreamHandler",
                 "formatter": "plain",
-                "stream": "ext://sys.stdout",
+                "stream": "ext://sys.stderr",
             },
         },
         "root": {"level": "INFO", "handlers": ["default"]},

@@ -509,6 +509,43 @@ def test_stage6_does_not_use_stale_artifact(tmp_path, monkeypatch, capsys):
     assert "stage_5d: RuntimeError" in out
 
 
+def test_full_run_never_reads_a_stale_artifact_from_disk(tmp_path, monkeypatch, capsys):
+    """A full run resolves inputs ONLY from what it produced itself.
+
+    Stage 4's and stage 5d's artifacts from a previous run are sitting at their
+    exact expected paths. This run's stage 4 fails, so every stage below it has
+    no input -- and must say so rather than quietly picking up the stale files
+    and rendering a document out of last week's data.
+
+    Mutant that kills this: delete `if self.target_stage is None: return None`
+    from PipelineContext.best_input, so a full run falls through to the same
+    disk lookup that --stage mode uses. Stages 4.5 through 6 then run on the
+    stale artifacts and the run reports success.
+    """
+    calls = _Calls()
+
+    def plant_stale():
+        _write(_FILES['4'], {'document_uid': UID, 'stale': 'from an earlier run'})
+        _write(_FILES['5d'], {'document_uid': UID, 'stale': 'from an earlier run'})
+
+    rc, out = _run_main(tmp_path, monkeypatch, capsys, fail={'4'}, calls=calls,
+                        setup=plant_stale)
+
+    assert rc == 1
+    assert calls.order == ['1a', '1b', '2', '3a', '3b', '4'], (
+        f"a stage below the failure ran on a stale artifact: {calls.order}")
+    for stage in ('4.5', '5', '5b', '5c', '5d', '6'):
+        assert stage not in calls.kwargs, f"stage {stage} was called anyway"
+    assert "stage_4: RuntimeError: simulated 4 failure" in out
+    for line in ("stage_4.5: Stage 4 required",
+                 "stage_5: Stage 4 required",
+                 "stage_5b: Stage 5 or 4 required",
+                 "stage_5c: Stage 5b, 5, or 4 required",
+                 "stage_5d: Stage 5c, 5b, 5, or 4 required",
+                 "stage_6: Stage 5d, 5c, 5b, 5, or 4 required"):
+        assert line in out, f"missing skip reason: {line!r}"
+
+
 def test_standalone_stage_6_uses_the_exact_expected_path(tmp_path, monkeypatch, capsys):
     """Filesystem discovery is confined to intentional --stage execution, and
     even there it is the stage's exact expected path -- never a substring glob
@@ -693,26 +730,76 @@ def test_the_reported_total_cost_matches_the_stage_lines(tmp_path, monkeypatch, 
 # -- r3960726469 #7: the OS-level exit status -------------------------------
 
 
+def _run_cli(tmp_path, *args):
+    """Run the real CLI as a subprocess, with every LLM credential stripped from
+    its environment so it cannot reach a model even if a stage tried."""
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith('AWS_') or k in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY'))}
+    return subprocess.run(
+        [sys.executable, str(_ROOT / "run_full_pipeline.py"), *args],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+
+
 def test_the_cli_exits_non_zero_as_a_subprocess(tmp_path):
     """main()'s return value is not the production contract -- the process exit
-    status is, and that is what scripts/run_corpus_batch.sh records. Runs with
-    every LLM credential stripped from the environment, over a garbage .docx, so
-    stage 1a fails inside python-docx before any model can be reached.
+    status is, and that is what scripts/run_corpus_batch.sh records. Runs over a
+    garbage .docx, so stage 1a fails inside python-docx before any model can be
+    reached.
 
     Mutant that kills this: `main()` instead of `sys.exit(main())` in __main__.
     """
     (tmp_path / 'data/sample_cvs/word').mkdir(parents=True)
     (tmp_path / _DOCX).write_bytes(b'not a docx at all')
 
-    env = {k: v for k, v in os.environ.items()
-           if not (k.startswith('AWS_') or k in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY'))}
-    proc = subprocess.run(
-        [sys.executable, str(_ROOT / "run_full_pipeline.py"), UID],
-        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=120)
+    proc = _run_cli(tmp_path, UID)
 
     assert proc.returncode == 1, (
         f"exit status {proc.returncode}; stdout tail:\n{proc.stdout[-2000:]}")
     assert "PIPELINE COMPLETE WITH ERRORS" in proc.stdout
+
+
+def test_tracebacks_go_to_stderr_and_never_into_the_parsed_stdout(tmp_path):
+    """The stream split the __main__ block configures, checked on the real
+    process rather than asserted in a comment.
+
+    stdout is the contract stream: scripts/run_corpus_batch.sh greps it, and a
+    Python traceback in it is noise at best. The logger's handler therefore
+    streams to stderr, where the traceback for every failed stage lands.
+
+    Mutant that kills this: put the dictConfig handler back on
+    "ext://sys.stdout".
+    """
+    (tmp_path / 'data/sample_cvs/word').mkdir(parents=True)
+    (tmp_path / _DOCX).write_bytes(b'not a docx at all')
+
+    proc = _run_cli(tmp_path, UID)
+
+    assert "Traceback (most recent call last)" not in proc.stdout, (
+        "a traceback reached the stream run_corpus_batch.sh parses")
+    assert "Traceback (most recent call last)" in proc.stderr, (
+        "the stage failure's traceback went nowhere")
+    assert "ERROR" in proc.stderr and "Stage 1a failed" in proc.stderr
+    # The contract lines are still on stdout, not swept into stderr with it.
+    assert "PIPELINE COMPLETE WITH ERRORS" in proc.stdout
+    assert proc.stdout.count("Models: ") == 1
+
+
+def test_a_cv_that_cannot_be_resolved_is_named_as_such(tmp_path):
+    """`run_full_pipeline.py nonexistent.pdf` used to die on the stem/uid guard
+    -- an accurate message about the wrong thing. The first argument not
+    resolving to a file is its own error.
+
+    Mutant that kills this: drop the _cv_is_missing() check from main() and let
+    PipelineContext.__post_init__ raise.
+    """
+    proc = _run_cli(tmp_path, "nonexistent.pdf")
+
+    assert proc.returncode == 1
+    assert "Error: CV not found: nonexistent.pdf" in proc.stdout
+    assert "data/sample_cvs/word/" in proc.stdout
+    assert "ValueError" not in proc.stdout and "Traceback" not in proc.stderr
+    assert "CV PROCESSING PIPELINE" not in proc.stdout, (
+        "the run banner printed for a run that cannot start")
 
 
 # ------------------------------------------------------------------ #686
