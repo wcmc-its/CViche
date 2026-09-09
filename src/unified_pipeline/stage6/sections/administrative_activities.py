@@ -197,8 +197,8 @@ class AdministrativeActivitiesSection:
             self._add_committee_row(table, activity, role, dates)
 
     def _parse_administrative_activity_rows(
-        self, sorted_entries: List[_AdminActivityEntry]
-    ) -> List[Tuple[str, str, str]]:
+        self, sorted_entries: list[_AdminActivityEntry]
+    ) -> list[tuple[str, str, str]]:
         """Parse every entry into (activity, role, dates) rows.
 
         Pure with respect to the Word document -- nothing here touches a
@@ -232,7 +232,38 @@ class AdministrativeActivitiesSection:
 
             record = _CommitteeRecord.from_raw(fields)
             activity, role = record.activity, record.role
+            # What extraction actually produced, kept apart from `activity`
+            # itself: the parenthetical fallback below overwrites `activity`
+            # with the stripped raw text (including any second line) when
+            # extraction gave none, which hid line 2 from the reroute check
+            # further down (review thread 3915848371 item 2). Routing must
+            # look at what extraction produced, not at the fallback's
+            # rewrite.
+            extracted_activity = activity
             dates = format_date_range(record.start_date, record.end_date, taxonomy_code) or ''
+
+            # #660 item 1: extraction alone already produced a complete
+            # activity+dates record for this entry. Capture that BEFORE any
+            # raw-text fallback below touches `activity`/`dates`, so the
+            # line-count-based rerouting further down can never discard a
+            # fully-populated structured record just because its source text
+            # happens to wrap across a FEW display lines (a wrapped
+            # description under an otherwise clean single committee entry,
+            # say). Capped at <=3 raw lines, not "any line count": corpus
+            # proof (66-CV render gate) that an uncapped version regresses --
+            # a genuine multi-committee mega-block where extraction only
+            # captured ONE of many merged committees (e.g. the first of 25+
+            # blank-line- or date-prefix-delimited entries) also produces a
+            # non-empty activity+dates pair for that one committee, and
+            # trusting it outright silently dropped the other 24. Below the
+            # cap, every corpus case observed was a genuine single record
+            # (extraction legitimately consolidating a multi-line
+            # description); at or above it, every corpus case observed was a
+            # genuine burst extraction only partially captured -- the
+            # existing (safer) reparse below is still correct there. See the
+            # PR description for the exact corpus counter-example.
+            lines = entry_lines(original_text)
+            structured_complete = bool(activity) and bool(dates) and len(lines) <= 3
 
             # If dates not extracted, try to parse from parenthetical patterns in original text
             # Common patterns: "(Chair 2011-2013)", "(2010-present)", "(Member 1999-2012)"
@@ -276,17 +307,33 @@ class AdministrativeActivitiesSection:
                         activity = _PARENTHETICAL_WITH_YEAR_RE.sub(
                             '', activity or original_text).strip()
 
-            # Check if this entry contains multiple items (newline-separated)
-            lines = entry_lines(original_text)
+            # `lines` (entry_lines(original_text)) was already computed above
+            # for `structured_complete`; reused here for the line-count-based
+            # rerouting below.
 
-            # Use multi-line parsing when the text contains 3+ lines — this catches
-            # mega-blocks where field extraction only captured one item from many.
-            if len(lines) >= 3:
-                # Multiple items merged - split them into separate rows
-                rows.extend(self._multiline_committee_rows(lines))
-            elif len(lines) > 1 and not activity:
-                # Two lines, no extracted activity - still try multi-line parsing
-                rows.extend(self._multiline_committee_rows(lines))
+            # Route through the shared #572 line parser (`_multiline_committee_rows`
+            # -> `_parse_flattened_committee_lines`) when:
+            #   - the text contains 3+ lines (a merged multi-record block --
+            #     field extraction only captured one item out of many), or
+            #   - it's 2 lines with nothing extracted, or
+            #   - #627: it's a 1- or 2-line entry whose raw text still carries
+            #     an unresolved pipe-separated date column (e.g. "Committee
+            #     (Chair 2002-present) | 1996-Present") -- the parenthetical
+            #     fallback above has no pipe branch, so it strips only the
+            #     paren and leaves "| 1996-Present" stuck in `activity` while
+            #     taking the (wrong) paren date. `structured_complete` guards
+            #     this last case: a fully-resolved record from extraction
+            #     never gets rerouted just because its raw text happens to
+            #     contain a `|`.
+            has_unresolved_pipe = not structured_complete and '|' in original_text
+            multiline_burst = not structured_complete and len(lines) >= 3
+            if multiline_burst or (len(lines) > 1 and not extracted_activity) or has_unresolved_pipe:
+                parsed_rows = self._multiline_committee_rows(lines)
+            else:
+                parsed_rows = []
+
+            if parsed_rows:
+                rows.extend(parsed_rows)
             else:
                 if not activity:
                     activity = original_text[:150]
