@@ -73,7 +73,9 @@ jobs:
   function-size:
     # Ratchet on oversized functions (CODING_STANDARDS.md 3.2a), plus §9's
     # mechanically-checkable rows (CODING_STANDARDS.md 9, check_standards.py).
-    # Both stdlib only -- no pip install, so this stays the cheapest job here.
+    # Stdlib plus one wheel: check_standards.py's §7.1/§8.3 rows shell out to
+    # ruff (rule set in ruff.toml), and fail closed if it is missing, so it is
+    # installed here and nowhere else -- still the cheapest job in this file.
     # The function-size baseline may fall but never rise (a deliberate,
     # reviewed --update); §9's auto block just has to match current dev, in
     # either direction -- it's a snapshot, not a debt budget.
@@ -83,6 +85,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.14"
+      - name: Install ruff (pinned -- a version bump changes the counts)
+        run: pip install ruff==0.16.6
       - name: Oversized-function ratchet
         run: python3 scripts/check_function_size.py
       - name: Ratchet self-test

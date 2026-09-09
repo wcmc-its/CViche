@@ -27,7 +27,7 @@ class SchemaConfigurationError(Exception):
 # Field Schema Configuration
 # ============================================================================
 
-def load_field_schemas_from_config(config_path: str | None = None) -> "dict[str, Any] | None":
+def load_field_schemas_from_config(config_path: str | None = None) -> dict[str, Any] | None:
     """
     Load field schemas from versioned config file.
 

@@ -111,7 +111,7 @@ class SamlReplayCache:
         self._local: dict[str, float] = {}
 
     @classmethod
-    def from_env(cls) -> "SamlReplayCache":
+    def from_env(cls) -> SamlReplayCache:
         url, _ = get_config("redis", "CVICHE_REDIS_URL", default="")
         return cls(url)
 
@@ -176,7 +176,7 @@ class SamlReplayCache:
             return fresh
 
 
-_cache: "SamlReplayCache | None" = None
+_cache: SamlReplayCache | None = None
 _cache_lock = threading.Lock()
 
 

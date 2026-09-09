@@ -21,7 +21,7 @@ Architecture:
 
 import json
 import time
-from typing import List, Dict, Any, Optional, Tuple
+from typing import Any
 
 from unified_pipeline.llm_client import call_llm
 
@@ -118,10 +118,10 @@ TAXONOMY_CODES_CONDENSED = {
 def surface_candidates_for_subsection(
     section_header: str,
     subsection_header: str,
-    sample_entries: List[str],
+    sample_entries: list[str],
     model: str = "gpt-5.1",
     max_candidates: int = 12
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """
     Use LLM to analyze CV subsection structure and surface relevant taxonomy codes.
 
@@ -406,8 +406,8 @@ IMPORTANT:
 # =============================================================================
 
 def format_candidates_for_prompt(
-    primary_candidates: List[Dict],
-    secondary_candidates: List[Dict],
+    primary_candidates: list[dict],
+    secondary_candidates: list[dict],
     include_full_descriptions: bool = True
 ) -> str:
     """

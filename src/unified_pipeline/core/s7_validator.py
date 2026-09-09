@@ -9,7 +9,6 @@ This validator implements hard validation rules to prevent S7 misclassification.
 """
 
 import re
-from typing import Dict, List, Tuple, Optional
 
 
 # Known published indicators
@@ -110,7 +109,7 @@ def check_journal_citation(text: str) -> bool:
     return False
 
 
-def check_year_present(text: str) -> Tuple[bool, Optional[int]]:
+def check_year_present(text: str) -> tuple[bool, int | None]:
     """Check if publication year is present (1990-2030)."""
     year_match = re.search(r'\b(19\d{2}|20[0-3]\d)\b', text)
     if year_match:
@@ -158,7 +157,7 @@ def is_book_chapter_series(text: str) -> bool:
     return False
 
 
-def validate_s7_assignment(text: str, current_section: str) -> Dict:
+def validate_s7_assignment(text: str, current_section: str) -> dict:
     """
     Validate if S7 (Unpublished) assignment is correct.
 
@@ -257,7 +256,7 @@ def validate_s7_assignment(text: str, current_section: str) -> Dict:
     }
 
 
-def batch_validate_records(records: List[Dict]) -> Dict:
+def batch_validate_records(records: list[dict]) -> dict:
     """
     Validate a batch of records.
 
@@ -305,7 +304,7 @@ def batch_validate_records(records: List[Dict]) -> Dict:
     }
 
 
-def apply_corrections(mapped_data: Dict, validation_results: Dict) -> Dict:
+def apply_corrections(mapped_data: dict, validation_results: dict) -> dict:
     """
     Apply validation corrections to mapped data.
 

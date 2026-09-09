@@ -18,7 +18,6 @@ Everything else is P (or Q2 if external).
 """
 
 import re
-from typing import Dict, List, Tuple
 
 
 # Patterns that indicate TRUE executive leadership (should stay O)
@@ -78,7 +77,7 @@ EXECUTIVE_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in EXECUTIVE_L
 ADMIN_PATTERNS_COMPILED = [re.compile(p, re.IGNORECASE) for p in ADMINISTRATIVE_PATTERNS]
 
 
-def is_executive_leadership(text: str) -> Tuple[bool, str]:
+def is_executive_leadership(text: str) -> tuple[bool, str]:
     """Check if text contains executive leadership signals."""
     for pattern in EXECUTIVE_PATTERNS_COMPILED:
         match = pattern.search(text)
@@ -87,7 +86,7 @@ def is_executive_leadership(text: str) -> Tuple[bool, str]:
     return False, ""
 
 
-def is_administrative_role(text: str) -> Tuple[bool, str]:
+def is_administrative_role(text: str) -> tuple[bool, str]:
     """Check if text contains administrative (non-executive) role signals."""
     for pattern in ADMIN_PATTERNS_COMPILED:
         match = pattern.search(text)
@@ -96,7 +95,7 @@ def is_administrative_role(text: str) -> Tuple[bool, str]:
     return False, ""
 
 
-def correct_leadership_level(entry: Dict) -> Dict:
+def correct_leadership_level(entry: dict) -> dict:
     """
     Correct O to P if the role is administrative, not executive leadership.
 
@@ -133,7 +132,7 @@ def correct_leadership_level(entry: Dict) -> Dict:
     return entry
 
 
-def apply_leadership_level_corrections(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
+def apply_leadership_level_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
     """
     Apply leadership level corrections to all entries.
 

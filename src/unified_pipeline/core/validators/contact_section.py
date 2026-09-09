@@ -12,7 +12,6 @@ and prevent research resources from being misclassified.
 """
 
 import re
-from typing import List, Dict, Optional, Tuple
 from .base_validator import BaseValidator, ValidatorGuidance
 
 
@@ -27,7 +26,7 @@ class ContactSectionValidator(BaseValidator):
 
     name = "ContactSectionValidator"
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Helps identify section A (Personal Data)."""
         return ['personal_data', 'research', 'professional_affiliations']
 
@@ -35,7 +34,7 @@ class ContactSectionValidator(BaseValidator):
         """High priority - runs early to exclude contact from other classifications."""
         return 90
 
-    def analyze(self, entry_text: str) -> Optional[ValidatorGuidance]:
+    def analyze(self, entry_text: str) -> ValidatorGuidance | None:
         """Per-entry analysis not used - this validator works at section level."""
         return None
 
@@ -95,8 +94,8 @@ class ContactSectionValidator(BaseValidator):
 
     def analyze_all_sections(
         self,
-        sections: List[Dict]
-    ) -> List[ValidatorGuidance]:
+        sections: list[dict]
+    ) -> list[ValidatorGuidance]:
         """
         Analyze all sections to find the ONE true contact section.
 
@@ -185,7 +184,7 @@ class ContactSectionValidator(BaseValidator):
 
         return guidance_list
 
-    def _find_education_index(self, sections: List[Dict]) -> int:
+    def _find_education_index(self, sections: list[dict]) -> int:
         """Find index of education section, or -1 if not found."""
         education_keywords = ['education', 'training', 'qualifications', 'degrees']
 
@@ -198,7 +197,7 @@ class ContactSectionValidator(BaseValidator):
 
         return -1
 
-    def _extract_features(self, section: Dict) -> Dict:
+    def _extract_features(self, section: dict) -> dict:
         """Extract content features from section."""
         entries = section.get('entries', [])
         label = section.get('label_inferred', '') or section.get('label', '')
@@ -233,7 +232,7 @@ class ContactSectionValidator(BaseValidator):
 
         return features
 
-    def _compute_contact_score(self, section: Dict, features: Dict) -> int:
+    def _compute_contact_score(self, section: dict, features: dict) -> int:
         """Compute contact likelihood score."""
         score = 0
 
@@ -264,7 +263,7 @@ class ContactSectionValidator(BaseValidator):
 
         return score
 
-    def _format_signals(self, features: Dict) -> str:
+    def _format_signals(self, features: dict) -> str:
         """Format feature signals for display."""
         signals = []
         if features['has_email']:
@@ -280,7 +279,7 @@ class ContactSectionValidator(BaseValidator):
 
         return ", ".join(signals) if signals else "none"
 
-    def _identify_alternative_section(self, section: Dict) -> Optional[str]:
+    def _identify_alternative_section(self, section: dict) -> str | None:
         """Identify what this false-positive contact section actually is."""
         label = section.get('label_inferred', '') or section.get('label', '')
         label_lower = label.lower()
