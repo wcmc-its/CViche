@@ -32,12 +32,11 @@ Delivery model (#782 review round):
   shutdown calls it so a pod stop doesn't drop a terminal card mid-flight.
 """
 
+import concurrent.futures
 import functools
 import logging
 import re
-import threading
 import time
-from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import NamedTuple, TypedDict
 from urllib.parse import quote, urlparse
@@ -81,7 +80,7 @@ _CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 # restart nor a crash mid-queue -- upgrade path is a transactional outbox once
 # a job queue exists (none does: no taskiq/celery; the Valkey broker is
 # pub/sub). Worst-case in-flight delivery is 3 * _POST_TIMEOUT + 3s ~= 33s.
-_DELIVERY = ThreadPoolExecutor(max_workers=1, thread_name_prefix="teams-notify")
+_DELIVERY = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="teams-notify")
 
 # Used only from the _DELIVERY worker thread (single worker => no lock needed
 # on the Session itself; see _deliver). Long-lived so retries and repeated
@@ -91,13 +90,6 @@ _SESSION = requests.Session()
 
 _RETRY_ATTEMPTS = 3
 _RETRY_BACKOFF_SECONDS = (1.0, 2.0)
-
-# Futures for deliveries submitted but not yet confirmed finished, so flush()
-# can wait on exactly those. Appended to (by any caller thread, via
-# notify_*) and drained by flush() -- both under _PENDING_LOCK, since unlike
-# _SESSION this list is touched from multiple threads.
-_PENDING: list[Future] = []
-_PENDING_LOCK = threading.Lock()
 
 
 def _run_link_base() -> str:
@@ -644,30 +636,33 @@ def _deliver(payload: dict, run_id: str) -> None:
 
 
 def _enqueue(payload: dict, run_id: str) -> None:
-    """Submit a delivery to the background worker and track its Future for flush()."""
-    future = _DELIVERY.submit(_deliver, payload, run_id)
-    with _PENDING_LOCK:
-        _PENDING.append(future)
+    """Submit a delivery to the background worker."""
+    _DELIVERY.submit(_deliver, payload, run_id)
 
 
 def flush(timeout: float = 15.0) -> None:
     """Block until every delivery queued before this call has been attempted.
+
+    _DELIVERY has exactly one worker, so its internal task queue is FIFO: a
+    no-op task submitted now can only run after every delivery already
+    queued has been attempted, so waiting on that no-op's Future is
+    equivalent to waiting on the whole backlog -- without this module
+    keeping its own list of pending Futures (module-level mutable state
+    written after import, exactly what CODING STANDARDS §4.1 flags and
+    _validate_webhook_url's docstring says this module avoids elsewhere).
 
     Best-effort: tests call this after notify_*() to make delivery
     synchronous for assertions; main.py's lifespan shutdown calls it too, so
     a pod stop doesn't drop a terminal card that was still in flight. Never
     raises; logs (does not raise) if `timeout` elapses first.
     """
-    with _PENDING_LOCK:
-        pending = list(_PENDING)
-        _PENDING.clear()
-    if not pending:
-        return
-    _done, not_done = wait(pending, timeout=timeout)
-    if not_done:
+    try:
+        _DELIVERY.submit(lambda: None).result(timeout=timeout)
+    except concurrent.futures.TimeoutError:
         logger.warning(
-            "Teams notification flush timed out with %d delivery(ies) still pending",
-            len(not_done),
+            "Teams notification flush timed out after %ss waiting for the "
+            "delivery queue to drain",
+            timeout,
         )
 
 
@@ -683,8 +678,9 @@ def flush(timeout: float = 15.0) -> None:
 
 def notify_run_started(run: object, submitter: str | None = None) -> None:
     """Best-effort: queue a Teams notification for a run that just started."""
-    run_id = getattr(run, "id", None) or "unknown"
+    run_id = "unknown"
     try:
+        run_id = getattr(run, "id", None) or "unknown"
         payload = build_started_payload(RunFacts.from_run(run), submitter)
     except Exception:
         logger.exception("Teams notification payload build failed for run %s", run_id)
@@ -704,8 +700,9 @@ def notify_run_terminal(
     Run.TERMINAL_RUN_STATUSES -- this function's name and contract are for
     terminal runs only (#782 review, r3968176452 point 5).
     """
-    run_id = getattr(run, "id", None) or "unknown"
+    run_id = "unknown"
     try:
+        run_id = getattr(run, "id", None) or "unknown"
         facts = RunFacts.from_run(run)
         if facts.status not in Run.TERMINAL_RUN_STATUSES:
             logger.warning(
@@ -722,8 +719,9 @@ def notify_run_terminal(
 
 def notify_feedback_submitted(feedback: object, run: object, submitter: str | None = None) -> None:
     """Best-effort: queue a Teams notification when a user submits run feedback."""
-    run_id = getattr(run, "id", None) or "unknown"
+    run_id = "unknown"
     try:
+        run_id = getattr(run, "id", None) or "unknown"
         payload = build_feedback_payload(
             FeedbackFacts.from_feedback(feedback), RunFacts.from_run(run), submitter
         )

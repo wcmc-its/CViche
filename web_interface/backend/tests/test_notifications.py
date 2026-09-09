@@ -19,6 +19,7 @@ Cards are Adaptive Cards in the Teams Workflows envelope:
   {"type": "message", "attachments": [{"content": <AdaptiveCard>}]}
 """
 import logging
+import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 from urllib.parse import quote
@@ -988,6 +989,87 @@ def test_notify_run_terminal_posts_for_each_terminal_status(monkeypatch, status)
     notifications.flush()
 
     assert captured["called"] is True
+
+
+# --- flush() has no Future list of its own -- proves the FIFO-queue design -
+
+def test_flush_waits_for_delivery_queued_before_it(monkeypatch):
+    """flush() keeps no list of pending Futures (removed as module-level
+    mutable state, #782 follow-up) -- it relies on _DELIVERY's single worker
+    processing its queue FIFO. A slow delivery queued first must have
+    finished by the time flush() returns, even though nothing tracks it."""
+    release = threading.Event()
+    done = {"value": False}
+
+    def _slow_post(url, json=None, timeout=None):
+        release.wait(timeout=5)
+        done["value"] = True
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    monkeypatch.setattr(notifications._SESSION, "post", _slow_post)
+
+    notifications.notify_run_terminal(_run(), None)  # queues the slow delivery
+
+    # Release the slow post from a background thread shortly after flush()
+    # starts -- the single worker is still busy inside _slow_post, so
+    # flush()'s own no-op sentinel task can't even start (let alone
+    # complete) until release fires. If flush() returned without actually
+    # waiting on the FIFO queue, `done["value"]` would still be False here.
+    threading.Timer(0.05, release.set).start()
+
+    notifications.flush()
+
+    assert done["value"] is True
+
+
+# --- run_id access stays inside the never-raise boundary (#782 follow-up) --
+
+class _RaisingIdRun:
+    """A run-like object whose `id` access raises -- simulates a SQLAlchemy
+    DetachedInstanceError on an expired attribute (r3968255070 point 5's
+    scenario: an ORM property that raises). getattr(obj, "id", default)
+    only swallows AttributeError, so this must propagate through any bare
+    getattr("id") call made outside a try/except."""
+
+    filename = "cv.docx"
+    status = "complete"
+    total_cost = 0.1
+    total_duration_seconds = 1
+
+    @property
+    def id(self):
+        raise RuntimeError("detached instance")
+
+
+def test_notify_run_terminal_swallows_raising_id_property(caplog):
+    with caplog.at_level(logging.ERROR):
+        result = notifications.notify_run_terminal(_RaisingIdRun(), None)
+
+    assert result is None
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "payload build failed" in errors[0].message
+
+
+def test_notify_run_started_swallows_raising_id_property(caplog):
+    with caplog.at_level(logging.ERROR):
+        result = notifications.notify_run_started(_RaisingIdRun())
+
+    assert result is None
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "payload build failed" in errors[0].message
+
+
+def test_notify_feedback_submitted_swallows_raising_id_property(caplog):
+    with caplog.at_level(logging.ERROR):
+        result = notifications.notify_feedback_submitted(_feedback(), _RaisingIdRun())
+
+    assert result is None
+    errors = [r for r in caplog.records if r.levelname == "ERROR"]
+    assert len(errors) == 1
+    assert "payload build failed" in errors[0].message
 
 
 # --- notify_* wrappers never raise (already pinned; named for #309/#782) ---
