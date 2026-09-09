@@ -103,6 +103,9 @@ def _owned_basenames_for_run(db: Session, run_id: str) -> set[str]:
             )
             continue
         if not isinstance(files, list):
+            logger.warning(
+                "Malformed output_files for run=%s step=%s: not a list", run_id, step.step_number
+            )
             continue
         for f in files:
             if isinstance(f, str):

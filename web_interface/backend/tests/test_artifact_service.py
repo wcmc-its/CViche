@@ -97,6 +97,44 @@ class TestResolveArtifact:
         assert resolved.basename == "nope.json"
         assert resolved.storage_key == "outputs/nope.json"
 
+    def test_malformed_output_files_rows_are_logged_and_skipped(
+        self, db, monkeypatch, tmp_path, caplog
+    ):
+        """_owned_basenames_for_run must log -- not silently skip -- every
+        malformed Step.output_files row it encounters, including a
+        valid-JSON-but-wrong-shape row (r3965790925's concern, one level
+        down from get_step_detail). A run with two bad rows and one good row
+        must still resolve its real artifact, and caplog must hold exactly
+        one warning per bad row, each naming the run and the step."""
+        monkeypatch.setattr(svc, "_WEB_OUTPUTS_ROOT", tmp_path / "outputs")
+        pipeline_root = tmp_path / "pipeline_outputs"
+        monkeypatch.setattr(svc, "_PIPELINE_OUTPUTS_ROOT", pipeline_root)
+
+        stage_dir = pipeline_root / "stage_4_wcm_templates"
+        stage_dir.mkdir(parents=True)
+        (stage_dir / "RUNW1_wcm.docx").write_bytes(b"real artifact")
+
+        db.add(Run(id="RUNW1", filename="a.docx", file_type="docx", status="complete"))
+        db.add(Step(run_id="RUNW1", step_number=1, stage_id="4", step_name="Extract",
+                    status="error", output_files="{not json"))
+        db.add(Step(run_id="RUNW1", step_number=2, stage_id="4.5", step_name="Summarize",
+                    status="error", output_files='{"a": 1}'))
+        db.add(Step(run_id="RUNW1", step_number=3, stage_id="6", step_name="WCM",
+                    status="complete", output_files=json.dumps(["RUNW1_wcm.docx"])))
+        db.commit()
+
+        with caplog.at_level(logging.WARNING):
+            resolved = svc.resolve_artifact(db, "RUNW1", "RUNW1_wcm.docx")
+
+        assert resolved.local_path is not None
+
+        warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        step1_warnings = [w for w in warnings if "run=RUNW1 step=1" in w]
+        step2_warnings = [w for w in warnings if "run=RUNW1 step=2" in w]
+        assert len(step1_warnings) == 1, warnings
+        assert len(step2_warnings) == 1, warnings
+        assert "not a list" in step2_warnings[0]
+
     def test_subpath_component_cannot_reach_a_sibling_runs_directory(
         self, db, monkeypatch, tmp_path
     ):
