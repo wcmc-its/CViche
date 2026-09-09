@@ -8,7 +8,6 @@ Based on ChatGPT feedback for CV 2036 Hoffman:
   Pattern: "Reviewer for the following journals", "External referee"
 """
 
-from typing import Dict, List
 
 try:
     from .base_validator import BaseValidator, ValidatorGuidance
@@ -23,7 +22,7 @@ class ProfessionalServiceValidator(BaseValidator):
     - Q3: Editorial (journal reviewer, editor)
     """
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to extramural professional activities."""
         return ['extramural_professional_activities']
 
@@ -31,7 +30,7 @@ class ProfessionalServiceValidator(BaseValidator):
         """Medium priority - helps with Q subsection classification."""
         return 15
 
-    def analyze(self, group: Dict, parent_section: str) -> ValidatorGuidance:
+    def analyze(self, group: dict, parent_section: str) -> ValidatorGuidance:
         """
         Analyze for grant vs editorial service.
 

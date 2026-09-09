@@ -17,7 +17,6 @@ import re
 import os
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
 
 # Output directory
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_4_5_research_summary"
@@ -82,7 +81,7 @@ GRANT_TAXONOMY_PREFIX = 'M2'  # M2A/M2B/M2C/M2D -- all grant/funding entries
 PUBLICATION_TAXONOMY_CODES = ('S1', 'S2', 'S7', 'S8')  # publication-like codes that need a title
 
 
-def score_entry_seniority(entry: Dict, taxonomy_code: str, cv_owner_name: str = '') -> float:
+def score_entry_seniority(entry: dict, taxonomy_code: str, cv_owner_name: str = '') -> float:
     """
     Score an entry's seniority/importance.
 
@@ -122,7 +121,7 @@ def score_entry_seniority(entry: Dict, taxonomy_code: str, cv_owner_name: str = 
     return 0.0
 
 
-def prioritize_entries(entries: List[Dict], taxonomy_code: str, cv_owner_name: str = '', limit: int = None) -> List[Dict]:
+def prioritize_entries(entries: list[dict], taxonomy_code: str, cv_owner_name: str = '', limit: int = None) -> list[dict]:
     """
     Prioritize and limit entries for a taxonomy code.
 
@@ -172,7 +171,7 @@ def prioritize_entries(entries: List[Dict], taxonomy_code: str, cv_owner_name: s
     return [entry for _, entry in scored_entries[:limit]]
 
 
-def gather_context_entries(entries_by_code: Dict[str, List[Dict]], cv_owner_name: str = '') -> List[Tuple[str, Dict, float]]:
+def gather_context_entries(entries_by_code: dict[str, list[dict]], cv_owner_name: str = '') -> list[tuple[str, dict, float]]:
     """
     Gather and weight entries from all sections for summary generation.
 
@@ -203,7 +202,7 @@ def gather_context_entries(entries_by_code: Dict[str, List[Dict]], cv_owner_name
     return weighted_entries
 
 
-def is_valid_entry(code: str, entry: Dict) -> bool:
+def is_valid_entry(code: str, entry: dict) -> bool:
     """
     Check if an entry has valid/substantive content worth including.
 
@@ -231,7 +230,7 @@ def is_valid_entry(code: str, entry: Dict) -> bool:
     return True
 
 
-def format_entry_for_context(code: str, entry: Dict) -> str:
+def format_entry_for_context(code: str, entry: dict) -> str:
     """Format an entry for inclusion in the LLM context (no truncation)."""
     fields = entry.get('extracted_fields', {})
     text = entry.get('text', '')  # No truncation
@@ -266,7 +265,7 @@ def format_entry_for_context(code: str, entry: Dict) -> str:
         return f"[{code}] {text}"
 
 
-def build_context_string(weighted_entries: List[Tuple[str, Dict, float]], max_tokens: int = 4000) -> str:
+def build_context_string(weighted_entries: list[tuple[str, dict, float]], max_tokens: int = 4000) -> str:
     """
     Build context string from weighted entries, respecting token limit.
 
@@ -300,7 +299,7 @@ def build_context_string(weighted_entries: List[Tuple[str, Dict, float]], max_to
     return '\n'.join(context_parts)
 
 
-def score_existing_m1(m1_content: str) -> Tuple[float, str, dict]:
+def score_existing_m1(m1_content: str) -> tuple[float, str, dict]:
     """
     Score existing M1 content for biosketch summary quality.
 
@@ -370,7 +369,7 @@ Respond with JSON only:
         return 0.0, "Failed to parse response", usage
 
 
-def generate_research_summary(context: str, cv_owner_name: str) -> Tuple[str, dict]:
+def generate_research_summary(context: str, cv_owner_name: str) -> tuple[str, dict]:
     """
     Generate a biosketch-style research summary from CV context.
 
@@ -463,7 +462,7 @@ def run_stage_4_5(input_path: str, output_path: str = None, verbose: bool = True
         print(f"CV Owner: {cv_owner_name}")
 
     # Group entries by taxonomy code
-    entries_by_code: Dict[str, List[Dict]] = {}
+    entries_by_code: dict[str, list[dict]] = {}
     for entry in data.get('entries', []):
         code = entry.get('taxonomy_code', 'T')
         if code not in entries_by_code:

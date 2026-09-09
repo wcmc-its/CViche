@@ -26,7 +26,8 @@ import json
 import os
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 

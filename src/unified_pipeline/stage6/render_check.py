@@ -21,7 +21,6 @@ in sync by name, not by import.
 """
 import re
 from types import MappingProxyType
-from typing import Dict, List, Optional
 
 from unified_pipeline.core.render_check import entry_fragments
 
@@ -48,7 +47,7 @@ RETIRED_TAXONOMY_CODES = MappingProxyType({
 #   N4/M4C have no live equivalent and need real render routes — see #261.
 
 
-def normalize_retired_code(entry: Dict) -> str:
+def normalize_retired_code(entry: dict) -> str:
     """Rewrite a retired taxonomy code on ``entry`` to its live equivalent.
 
     Mutates ``entry`` IN PLACE when its code is retired: sets
@@ -97,7 +96,7 @@ def _value_is_datelike(v: str) -> bool:
     return all(word in _MONTH_WORDS for word in re.findall(r'[a-z]{4,}', v))
 
 
-def segment_already_rendered(segment_text: str, extracted_fields: Dict) -> bool:
+def segment_already_rendered(segment_text: str, extracted_fields: dict) -> bool:
     """True if an overflow segment duplicates content already rendered from
     this entry's extracted fields — e.g. the first grant of an under-extracted
     multi-record entry, which DID make it into a funding table (#209).
@@ -220,7 +219,7 @@ def _is_column_header_row(line: str) -> bool:
     return hits / len(words) >= 0.5
 
 
-def _record_lines(text) -> List[str]:
+def _record_lines(text) -> list[str]:
     """Record-like lines of an entry: pipe/tab rows plus date-range-prefixed
     lines that carry a payload beyond the bare date range."""
     return [line.strip() for line in str(text or "").split("\n")
@@ -229,7 +228,7 @@ def _record_lines(text) -> List[str]:
                 and _RECORD_DATE_PREFIX_RE.match(line.strip()))]
 
 
-def _entry_pieces(text) -> List[str]:
+def _entry_pieces(text) -> list[str]:
     """Squashed fragments of an entry long enough to be looked up verbatim in
     the rendered-output haystack."""
     pieces = []
@@ -241,7 +240,7 @@ def _entry_pieces(text) -> List[str]:
 
 
 def _record_rendered(line: str, haystack: str,
-                     line_token_sets: List[set]) -> Optional[bool]:
+                     line_token_sets: list[set]) -> bool | None:
     """Whether one record line surfaces in the output: verbatim piece first,
     then per-output-line token overlap (per-line, not pooled, so common
     academic words scattered across unrelated sections can't vouch for a

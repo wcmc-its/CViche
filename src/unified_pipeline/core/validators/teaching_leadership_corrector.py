@@ -13,7 +13,6 @@ Rule: If the teaching entry contains leadership signals (Director,
 """
 
 import re
-from typing import Dict, List, Tuple
 
 
 # Leadership signals that indicate K3 (program leadership) not K1 (didactic)
@@ -43,7 +42,7 @@ LEADERSHIP_SIGNALS = [
 LEADERSHIP_PATTERNS = [re.compile(p, re.IGNORECASE) for p in LEADERSHIP_SIGNALS]
 
 
-def has_teaching_leadership_signal(text: str) -> Tuple[bool, str]:
+def has_teaching_leadership_signal(text: str) -> tuple[bool, str]:
     """
     Check if text contains teaching leadership signals.
 
@@ -62,7 +61,7 @@ def is_teaching_code(code: str) -> bool:
     return code.startswith('K')
 
 
-def correct_teaching_leadership(entry: Dict) -> Dict:
+def correct_teaching_leadership(entry: dict) -> dict:
     """
     Correct teaching code from K1 to K3 if leadership signals present.
 
@@ -95,7 +94,7 @@ def correct_teaching_leadership(entry: Dict) -> Dict:
     return entry
 
 
-def apply_teaching_leadership_corrections(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
+def apply_teaching_leadership_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
     """
     Apply teaching leadership corrections to all entries.
 
