@@ -136,8 +136,11 @@ def _parse_saml_assertion(
     """Validate the POSTed assertion and pull the user attributes out of it.
 
     Returns (attrs, relay_state, error): exactly one of `attrs` and `error` is
-    None. Every failure arm redirects to the login page rather than raising --
-    a genuinely unexpected exception still propagates (see saml_login).
+    None. Every failure arm redirects to the login page rather than raising.
+    Unlike saml_login (whose narrower catch lets a genuinely unexpected
+    exception propagate to a 500), this function's untrusted-input parsing is
+    a security boundary where a catch-all IS correct -- see the bare
+    `except Exception` below.
     """
     try:
         saml_response = form.get("SAMLResponse", "")
@@ -193,8 +196,25 @@ def _parse_saml_assertion(
         #
         # A genuinely unexpected exception still propagates rather than
         # redirecting -- see saml_login's comment for why (mrj4001 review,
-        # PR #656 item 6 / #672).
+        # PR #656 item 6 / #672). This SAMLError/RuntimeError/OSError/
+        # SourceNotFound tuple stays narrow; the catch-all below it is a
+        # separate, deliberate boundary (see its own comment).
         logger.error("SAML ACS processing failed: %s", e, exc_info=True)
+        return None, None, RedirectResponse("/login?error=auth_failed", status_code=302)
+    except Exception:
+        # pysaml2's audience-restriction check (saml2/response.py's
+        # AuthnResponse.for_me()) raises a BARE `Exception`, not a SAMLError
+        # subclass -- the one pysaml2 failure mode none of the typed clauses
+        # above can name. This IS the untrusted-input boundary where a
+        # fail-closed catch-all is correct (CODING_STANDARDS.md §5.5),
+        # unlike the replay cache's *operational* except (app/saml_replay.py
+        # SamlReplayCache.check_and_record catches only redis.RedisError, so
+        # a programming bug there still propagates to a 500 -- mrj4001
+        # review, PR #781 threads r3966551686 / r3966560287). Any exception
+        # reaching here came from parsing IdP-supplied input, so failing
+        # closed to a sanitized redirect (not a stack-trace-bearing 500) is
+        # the correct default regardless of exact type.
+        logger.exception("[SECURITY] SAML response rejected: unexpected parser error")
         return None, None, RedirectResponse("/login?error=auth_failed", status_code=302)
 
 
@@ -203,11 +223,30 @@ def _reject_replayed_assertion(authn_response) -> RedirectResponse | None:
     means pysaml2 never matches InResponseTo, so a captured signed response
     would otherwise replay until its NotOnOrAfter lapses. Each assertion ID is
     accepted exactly once (see app/saml_replay.py). Returns a redirect to
-    reject with, or None to continue."""
+    reject with, or None to continue.
+
+    # ponytail: single-assertion invariant -- pysaml2 7.5.4's parse_assertion
+    # (saml2/response.py, "saml2int limitation") raises InvalidAssertion
+    # before this function ever runs unless a response carries exactly one
+    # plain (or one encrypted) assertion, so len(ids) > 1 below is dead code
+    # on every real response; a Lua EXISTS-all-then-SET-all script (fakeredis
+    # would need the `lupa` extra, not installed/pinned) is the upgrade path
+    # if multi-assertion responses are ever accepted.
+    """
     ids = assertion_ids(authn_response)
+    if len(ids) > 1:
+        # Never fail open here, and ignore CVICHE_SAML_REPLAY_FAIL_CLOSED --
+        # a response naming more than one assertion ID is untrustworthy on
+        # its face (see the ponytail comment above), not merely unverifiable.
+        logger.warning(
+            "[SECURITY] SAML response carried %d assertion IDs (pysaml2 "
+            "permits at most 1); rejecting rather than guessing which is authoritative",
+            len(ids),
+        )
+        return RedirectResponse("/login?error=auth_failed", status_code=302)
     replay_cache = get_replay_cache()
     if ids:
-        if not replay_cache.check_and_record(ids, replay_ttl(authn_response)):
+        if not replay_cache.check_and_record(ids[0], replay_ttl(authn_response)):
             # Redirect like every other ACS failure: the benign replay case
             # is a human re-POSTing the ACS form (back button), not an attacker.
             logger.warning("[SECURITY] SAML assertion replay rejected (ID already presented)")
@@ -219,8 +258,16 @@ def _reject_replayed_assertion(authn_response) -> RedirectResponse | None:
         # closed (prod).
         logger.warning("[SECURITY] SAML assertion carried no ID; failing closed -- rejecting")
         return RedirectResponse("/login?error=auth_failed", status_code=302)
-    # No ID and failing open: only stubbed parsers land here in practice.
-    logger.warning("SAML ACS: no assertion ID extractable; replay gate skipped (fail open)")
+    # No ID: the gate is skipped BECAUSE CVICHE_SAML_REPLAY_FAIL_CLOSED is
+    # explicitly opted out (local dev, when Valkey is not running) -- not
+    # because "fail open" is this gate's default. Only stubbed parsers land
+    # here in practice; a deployed instance never reaches this branch (see
+    # app/saml_replay.py:check_deployed_posture, which refuses the opt-out
+    # outright on a deployed instance).
+    logger.warning(
+        "SAML ACS: no assertion ID extractable; replay gate skipped "
+        "(CVICHE_SAML_REPLAY_FAIL_CLOSED opt-out)"
+    )
     return None
 
 
