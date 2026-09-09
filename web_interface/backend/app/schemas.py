@@ -135,9 +135,17 @@ class LogEntry(BaseModel):
 
 
 class OutputPreview(BaseModel):
-    """Preview of step output data."""
+    """Preview of step output data.
+
+    truncated/total_rows are additive (#780 review r3965770586): previews cap
+    at PREVIEW_MAX_ROWS in app.services.artifact_service, so a large pipeline
+    artifact can no longer be expanded into an unbounded response. Both default
+    so existing callers that construct an OutputPreview without them keep working.
+    """
     headers: list[str]
     rows: list[list[str]]
+    truncated: bool = False
+    total_rows: int | None = None
 
 
 class StepDetail(BaseModel):
