@@ -15,7 +15,7 @@ Key insight: Let the LLM classify ~10-20 format signature groups, not 200+ parag
 import json
 import hashlib
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
+from typing import Any
 from dataclasses import dataclass, asdict
 from docx import Document
 from docx.shared import RGBColor, Pt
@@ -33,7 +33,7 @@ except ImportError:
 # Helper: Extract All Paragraphs (Including Tables)
 # ============================================================================
 
-def extract_all_paragraphs(doc: Document) -> List:
+def extract_all_paragraphs(doc: Document) -> list:
     """
     Extract all paragraphs from document in order, including paragraphs within tables.
 
@@ -124,7 +124,7 @@ class FormatSignature:
     border_bottom_width_pt: float
 
     # Background
-    background_color: Optional[str]
+    background_color: str | None
 
     # Style name (for style-based formatting)
     style_name: str
@@ -143,21 +143,21 @@ class FormatSignature:
         return hashlib.md5(json_str.encode()).hexdigest()
 
 
-def rgb_to_hex(rgb: Optional[RGBColor]) -> str:
+def rgb_to_hex(rgb: RGBColor | None) -> str:
     """Convert RGBColor to hex string."""
     if rgb is None:
         return "#000000"
     return f"#{rgb[0]:02x}{rgb[1]:02x}{rgb[2]:02x}"
 
 
-def pt_to_inches(pt: Optional[Pt]) -> float:
+def pt_to_inches(pt: Pt | None) -> float:
     """Convert points to inches."""
     if pt is None:
         return 0.0
     return pt.inches if hasattr(pt, 'inches') else 0.0
 
 
-def extract_border_info(para) -> Dict[str, Any]:
+def extract_border_info(para) -> dict[str, Any]:
     """Extract border information from paragraph XML."""
     borders = {
         'top': None,
@@ -192,7 +192,7 @@ def extract_border_info(para) -> Dict[str, Any]:
     return borders
 
 
-def extract_paragraph_signature(para, para_idx: int, total_paras: int) -> Dict[str, Any]:
+def extract_paragraph_signature(para, para_idx: int, total_paras: int) -> dict[str, Any]:
     """
     Extract comprehensive format signature for a paragraph.
 
@@ -440,7 +440,7 @@ def extract_paragraph_signature(para, para_idx: int, total_paras: int) -> Dict[s
 # STEP 3-4: Group Signatures + Compute Prominence Scores
 # ============================================================================
 
-def group_by_signature(paragraphs: List[Dict]) -> Dict[str, List[Dict]]:
+def group_by_signature(paragraphs: list[dict]) -> dict[str, list[dict]]:
     """Group paragraphs by identical format signatures."""
     groups = {}
 
@@ -453,7 +453,7 @@ def group_by_signature(paragraphs: List[Dict]) -> Dict[str, List[Dict]]:
     return groups
 
 
-def compute_prominence_score(signature_group: List[Dict]) -> float:
+def compute_prominence_score(signature_group: list[dict]) -> float:
     """
     Compute visual prominence score for a signature group.
 
@@ -542,7 +542,7 @@ def compute_prominence_score(signature_group: List[Dict]) -> float:
 # STEP 5: LLM Classification of Signature Groups
 # ============================================================================
 
-def classify_signature_groups_with_llm(signature_groups: Dict[str, List[Dict]], max_groups: int = 100) -> Dict[str, Dict]:
+def classify_signature_groups_with_llm(signature_groups: dict[str, list[dict]], max_groups: int = 100) -> dict[str, dict]:
     """
     Send signature groups to LLM for H1/H2/H3 classification.
 
@@ -767,7 +767,7 @@ Classify each group based on FORMATTING ONLY."""
 # STEP 5b: Rescue Known Headers from NOT_HEADER Groups
 # ============================================================================
 
-def rescue_locked_headers(signature_groups: Dict, classifications: Dict) -> Dict:
+def rescue_locked_headers(signature_groups: dict, classifications: dict) -> dict:
     """
     Scan through NOT_HEADER groups and rescue paragraphs that match known CV section headers.
 
@@ -830,7 +830,7 @@ def rescue_locked_headers(signature_groups: Dict, classifications: Dict) -> Dict
 # STEP 6b: Ensure PERSONAL DATA is the First Section
 # ============================================================================
 
-def ensure_personal_data_first(hierarchy: List[Dict]) -> List[Dict]:
+def ensure_personal_data_first(hierarchy: list[dict]) -> list[dict]:
     """
     Ensure PERSONAL DATA is the first H1 section in the hierarchy when needed.
 
@@ -982,7 +982,7 @@ def ensure_personal_data_first(hierarchy: List[Dict]) -> List[Dict]:
 # STEP 6: Build Final Hierarchy
 # ============================================================================
 
-def normalize_hierarchy_with_llm(headers: List[Dict], pass_number: int = 1) -> List[Dict]:
+def normalize_hierarchy_with_llm(headers: list[dict], pass_number: int = 1) -> list[dict]:
     """
     Use GPT to normalize the hierarchy based on semantic meaning.
 
@@ -1260,7 +1260,7 @@ No commentary."""
         return headers
 
 
-def parse_normalized_hierarchy(corrected_text: str, original_headers: List[Dict]) -> List[Dict]:
+def parse_normalized_hierarchy(corrected_text: str, original_headers: list[dict]) -> list[dict]:
     """
     Parse the GPT-corrected hierarchy text back into our data structure.
 
@@ -1351,7 +1351,7 @@ def parse_normalized_hierarchy(corrected_text: str, original_headers: List[Dict]
     return result
 
 
-def validate_headers_vs_entries(headers: List[Dict]) -> List[Dict]:
+def validate_headers_vs_entries(headers: list[dict]) -> list[dict]:
     """
     Validate each header to assess confidence that it's truly a header vs an entry.
     Uses LLM to provide header_likelihood and entry_likelihood percentages.
@@ -1572,7 +1572,7 @@ Do NOT add extra commentary."""
         return headers
 
 
-def remove_duplicate_children(headers: List[Dict]) -> List[Dict]:
+def remove_duplicate_children(headers: list[dict]) -> list[dict]:
     """
     Remove child headers that have the same paragraph_index as their parent.
     This handles cases where the same header appears as both H1 and H2.
@@ -1599,9 +1599,9 @@ def remove_duplicate_children(headers: List[Dict]) -> List[Dict]:
 
 
 def build_hierarchy_from_classifications(
-    signature_groups: Dict[str, List[Dict]],
-    classifications: Dict[str, Dict]
-) -> List[Dict]:
+    signature_groups: dict[str, list[dict]],
+    classifications: dict[str, dict]
+) -> list[dict]:
     """
     Build hierarchical structure from classified signature groups.
 
@@ -1713,7 +1713,7 @@ def build_hierarchy_from_classifications(
 # MAIN PIPELINE
 # ============================================================================
 
-def segment_cv_with_signatures(docx_path: str, output_path: Optional[str] = None) -> Dict:
+def segment_cv_with_signatures(docx_path: str, output_path: str | None = None) -> dict:
     """
     Complete signature-based segmentation pipeline.
 

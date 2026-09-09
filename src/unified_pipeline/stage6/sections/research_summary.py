@@ -26,7 +26,6 @@ The floor is 50 characters rather than a word count because the failure it
 catches is a stub -- an empty string, a header echo, a refusal -- not a short
 but real summary.
 """
-from typing import Dict, Optional
 
 try:
     from docx.shared import Pt
@@ -39,7 +38,7 @@ except ImportError as exc:
 class ResearchSummarySection:
     """Section M1 writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_research_summary(self, research_summary_data: Optional[Dict]) -> bool:
+    def _fill_research_summary(self, research_summary_data: dict | None) -> bool:
         """Fill Research Summary section from Stage 4.5 output.
 
         Inserts a RESEARCH SUMMARY section before RESEARCH SUPPORT with
