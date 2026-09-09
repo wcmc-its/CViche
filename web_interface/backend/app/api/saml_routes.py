@@ -197,7 +197,7 @@ def _parse_saml_assertion(
         # above can name (ditto ResponseLifetimeExceed, the expired-assertion
         # case -- also a plain Exception, not a SAMLError). This IS the
         # untrusted-input boundary where a fail-closed catch-all is correct
-        # (CODING_STANDARDS.md SS5.5), unlike the replay cache's operational
+        # (CODING_STANDARDS.md §5.5), unlike the replay cache's operational
         # except (SamlReplayCache.check_and_record catches only
         # redis.RedisError -- mrj4001 review, PR #781 threads r3966551686 /
         # r3966560287). Scoped to ONLY get_saml_client()/parse above -- NOT

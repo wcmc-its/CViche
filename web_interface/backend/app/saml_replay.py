@@ -33,7 +33,7 @@ collection: pysaml2 7.5.4 rejects a response carrying more than one plain (or
 one encrypted) assertion before this module ever sees it (saml2int
 limitation -- see ``saml2/response.py``'s ``parse_assertion``), so a
 multi-key atomic claim would buy safety a real response can never need. See
-the ``# ponytail`` comment at the call site (app/api/saml_routes.py) for the
+the ponytail comment at the call site (app/api/saml_routes.py) for the
 upgrade path if that ever changes.
 """
 import calendar

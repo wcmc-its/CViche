@@ -683,15 +683,28 @@ class TestAcsReplayGate:
             mock_get_client.return_value = _mock_client(resp)
             assert _post_acs(client).status_code == 302
 
+    @pytest.mark.parametrize("fail_closed_opted_out", [False, True])
     @patch("app.api.saml_routes.get_saml_client")
     def test_multiple_assertion_ids_always_rejected_without_partial_recording(
-        self, mock_get_client, client, db, seed_saml_mode, replay_cache
+        self, mock_get_client, fail_closed_opted_out, client, db, seed_saml_mode,
+        replay_cache, monkeypatch,
     ):
         """D9 #1/#19: a response naming more than one assertion ID must be
-        rejected outright, with NEITHER id recorded -- proven by a follow-up
-        single-ID presentation of one of them still succeeding. Mutant: M2 --
-        dropping the len(ids) > 1 reject in _reject_replayed_assertion makes
-        this fail (the response would instead be accepted)."""
+        rejected outright regardless of CVICHE_SAML_REPLAY_FAIL_CLOSED --
+        parametrized over the default fail-closed posture AND the explicit
+        local-dev opt-out, so the `len(ids) > 1` branch is pinned as
+        ignoring the flag entirely, not merely as agreeing with it by
+        coincidence (mrj4001 review, PR #781 final-polish item 1: mutating
+        that branch to `if len(ids) > 1 and replay_fail_closed():` survived
+        the whole suite before this parametrization, because only the
+        fail-closed arm was ever exercised here). NEITHER id is recorded on
+        rejection, in either arm -- proven by a follow-up single-ID
+        presentation of one of them still succeeding. Mutants: M2 (dropping
+        the `len(ids) > 1` reject entirely) and the flag-leak mutant above
+        both die on this test."""
+        if fail_closed_opted_out:
+            monkeypatch.setattr("app.api.saml_routes.replay_fail_closed", lambda: False)
+
         resp = _AuthnResponse(["_multi-a", "_multi-b"], identity=_IDENTITY)
         mock_get_client.return_value = _mock_client(resp)
 

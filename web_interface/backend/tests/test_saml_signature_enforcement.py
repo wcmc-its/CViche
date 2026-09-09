@@ -182,12 +182,16 @@ def test_flag_is_load_bearing(harness):
 
 
 def test_unsolicited_response_is_accepted(harness):
-    """D9 #12 (mrj4001 review, PR #781 thread r3967362882): allow_unsolicited=
-    True (app/saml_client.py) exists specifically so IdP-initiated SSO keeps
-    working -- a genuinely unsolicited response (no InResponseTo) parsed
-    against an empty outstanding-request map, not the mocked stand-in every
-    other ACS test uses. A validly signed, otherwise-unremarkable response
-    with in_response_to=None must be accepted, and assertion_ids() (the
+    """D9 #12 (mrj4001 review, PR #781 thread r3967362882): proves pysaml2
+    itself accepts a genuinely unsolicited response (no InResponseTo, parsed
+    against an empty outstanding-request map) when the SP is configured with
+    allow_unsolicited=True -- via this file's OWN `_sp_conf` harness config,
+    not the running app's. That IdP-initiated SSO keeps working end to end
+    additionally depends on the app's own SP config actually setting
+    allow_unsolicited=True, which is pinned separately in
+    test_saml_sp.py::TestGetSamlClient::test_config_allows_unsolicited_responses.
+    A validly signed, otherwise-unremarkable response with
+    in_response_to=None must be accepted here, and assertion_ids() (the
     replay gate's own ID extraction) must find exactly the one real
     assertion ID pysaml2 parsed out of it."""
     resp = _parse(harness["strict"], harness["unsolicited"], outstanding={})
