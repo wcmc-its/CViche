@@ -21,6 +21,8 @@ import ast
 import sys
 from pathlib import Path
 
+from docx import Document
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
@@ -231,8 +233,11 @@ def test_a_mentee_record_is_routed_to_a_table_not_to_this_function():
 class _MentoringProbe(MentoringSection):
     """Stand-in for `WCMTemplateGenerator`: records what each entry became.
 
-    Only the collaborators `_fill_mentoring` actually reaches on the N4 path
-    are stubbed; no `Document` is created, so nothing here touches Word.
+    `_mentoring_anchors` / `_paragraph_element` (#739) resolve anchors as
+    lxml elements off `self.doc.paragraphs[...]._element`, so this probe
+    carries a real minimal `Document` -- paragraph 0 is "MENTORING" -- rather
+    than a sentinel; only the collaborators `_fill_mentoring` actually
+    reaches on the N4 path are otherwise stubbed.
     """
 
     def __init__(self):
@@ -240,6 +245,8 @@ class _MentoringProbe(MentoringSection):
         self.stats = {'tables_populated': 0, 'entries_inserted': 0}
         self.lines: list[str] = []
         self.tabled: list[dict] = []
+        self.doc = Document()
+        self.doc.add_paragraph("MENTORING")
 
     def _find_paragraph_exact(self, text):
         return 0 if text == "MENTORING" else None
@@ -250,11 +257,11 @@ class _MentoringProbe(MentoringSection):
     def _find_table_after_paragraph(self, idx):
         return None
 
-    def _create_mentee_table_with_spacing(self, fields, insert_after_idx, entry=None):
-        self.tabled.append(entry)
+    def _create_mentee_table_with_spacing(self, record, anchor):
+        self.tabled.append(record.source_entry if record else None)
         return None
 
-    def _insert_mentoring_line(self, text, insert_after_idx, entry=None):
+    def _insert_mentoring_line(self, text, anchor, entry=None):
         self.lines.append(text)
         return None
 
