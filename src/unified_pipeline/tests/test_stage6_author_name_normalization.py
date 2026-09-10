@@ -141,12 +141,13 @@ def test_trailing_odd_author_is_emitted_not_dropped():
     assert citation == '1. Kelly R, Pirog. A Study.'
 
 
-def test_docstrings_own_broken_example_is_pinned_as_it_actually_behaves():
-    """The docstring promised 'Smith, John A., Jones, Mary B.' ->
-    'Smith JA, Jones MB'; on dev it actually produces 'Smith, John A,
-    Jones, Mary B' (full given names are not initials, so the pair
-    detector correctly declines this shape). This pins the true,
-    non-destructive behaviour -- nothing is deleted -- not the promise."""
+def test_the_docstring_example_produces_exactly_what_it_documents() -> None:
+    """`_normalize_author_names`'s docstring documents 'Smith, John A.,
+    Jones, Mary B.' -> 'Smith, John A, Jones, Mary B' (full given names
+    aren't initials, so the pair detector correctly declines this shape
+    and the fallback parser carries both names through untouched). This
+    pins that the documented input produces exactly the documented
+    output -- the docstring and the behaviour agree."""
     assert _cite('Smith, John A., Jones, Mary B.') == (
         '1. Smith, John A, Jones, Mary B. A Study.'
     )
@@ -453,40 +454,13 @@ def test_consecutive_orphan_initials_coalesce_into_one_author():
 
 
 # --------------------------------------------------------------------------
-# #735 review item 9: "_normalize_author_names() has one remaining
-# problematic test contract".
-#
-# Two candidates were named: `test_docstrings_own_broken_example_is_pinned_
-# as_it_actually_behaves` and `test_the_two_parsers_place_a_second_
-# consecutive_orphan_differently`. Grounding against the CODE rather than
-# the review comment (the review predates the same-day docstring-correction
-# commits in this branch's own history -- `git log` on authors.py shows
-# `4ca9a78 docs(stage6): cite the one measured definition, and a base-true
-# example` and `13598e5 docs(stage6): state where the two orphan placements
-# differ, and pin it`, both dated the same day as the review): BOTH
-# docstrings already state the true, current behaviour, and both pinning
-# tests already assert it. Running the first candidate's example confirms
-# there is no live discrepancy left to resolve:
-#
-#     _normalize_author_names('Smith, John A., Jones, Mary B.')
-#     -> 'Smith, John A, Jones, Mary B'
-#
-# which is exactly what the function's docstring states today. So there is
-# no wrong output left pinned as expected on either candidate -- what was
-# "problematic" about both was prose making a promise the code did not
-# keep, and that promise was already corrected to match reality. Per the
-# ticket's own fallback ("if the docstring example is itself wrong, correct
-# the docstring and turn the test into an assertion of the correct
-# contract"): the docstring is not wrong, so what remained undone was only
-# that "nothing is deleted" / "no token deleted" were prose claims, not
-# assertions. The two tests below turn each into an actual multiset check,
-# over more than the one pinned example, which is the concrete, checkable
-# form those claims were missing. No production code changes: there was no
-# defect to fix, only an assertion to add.
+# #735 review item 9: two more assertions past the one pinned example,
+# generalising "nothing is deleted" into an actual multiset check on both
+# parsers rather than leaving it as prose.
 # --------------------------------------------------------------------------
 
-def test_declining_the_pair_shape_for_full_given_names_never_drops_a_character():
-    """Candidate 1, generalised past its one pinned example. The pair
+def test_declining_the_pair_shape_for_full_given_names_never_drops_a_character() -> None:
+    """Generalised past the one pinned example above. The pair
     detector declines whenever an odd-indexed token is not initials-shaped
     -- a full given name being the case the docstring documents -- and the
     fallback parser then has to carry every token through untouched rather
@@ -507,8 +481,8 @@ def test_declining_the_pair_shape_for_full_given_names_never_drops_a_character()
         )
 
 
-def test_the_two_parsers_second_orphan_divergence_still_drops_no_character():
-    """Candidate 2. The two parsers place a second consecutive orphan
+def test_the_two_parsers_second_orphan_divergence_still_drops_no_character() -> None:
+    """The two parsers place a second consecutive orphan
     differently (pinned above), and that placement choice is a documented
     decision, not a defect -- but the decision is only acceptable if #560's
     bar still holds on both sides of it: no character of the input is lost
@@ -534,11 +508,11 @@ def test_the_two_parsers_second_orphan_divergence_still_drops_no_character():
 # #735 review item 10: `_looks_like_initials` Unicode behaviour.
 # --------------------------------------------------------------------------
 
-def test_a_single_precomposed_accented_letter_is_an_initial():
+def test_a_single_precomposed_accented_letter_is_an_initial() -> None:
     assert _looks_like_initials('É')
 
 
-def test_an_nfd_decomposed_letter_is_not_recognised_as_an_initial():
+def test_an_nfd_decomposed_letter_is_not_recognised_as_an_initial() -> None:
     """The one genuinely surprising Unicode result: an NFD-decomposed 'É' is
     two code points -- the base letter 'E' and a COMBINING ACUTE ACCENT
     (U+0301). The combining mark is not in `_INITIALS_TRAILING_MARKS`, so it
@@ -551,39 +525,39 @@ def test_an_nfd_decomposed_letter_is_not_recognised_as_an_initial():
     assert not _looks_like_initials(nfd)
 
 
-def test_a_two_letter_non_ascii_group_is_recognised():
+def test_a_two_letter_non_ascii_group_is_recognised() -> None:
     assert _looks_like_initials('ÉÀ')
 
 
-def test_greek_and_cyrillic_capital_groups_are_recognised():
+def test_greek_and_cyrillic_capital_groups_are_recognised() -> None:
     assert _looks_like_initials('ΑΒ')   # Greek capital Alpha, Beta
     assert _looks_like_initials('АБ')   # Cyrillic capital A, Be
 
 
-def test_a_trailing_mark_after_a_non_ascii_letter_is_stripped_first():
+def test_a_trailing_mark_after_a_non_ascii_letter_is_stripped_first() -> None:
     assert _looks_like_initials('É.')
 
 
-def test_fullwidth_latin_letters_are_recognised():
+def test_fullwidth_latin_letters_are_recognised() -> None:
     assert _looks_like_initials('ＡＢ')  # fullwidth 'AB'
 
 
-def test_a_lowercase_non_ascii_word_is_not_initials():
+def test_a_lowercase_non_ascii_word_is_not_initials() -> None:
     assert not _looks_like_initials('éa')
 
 
-def test_non_ascii_digits_are_not_initials():
+def test_non_ascii_digits_are_not_initials() -> None:
     assert not _looks_like_initials('１')  # fullwidth digit '1'
 
 
-def test_a_mark_only_token_is_not_initials():
+def test_a_mark_only_token_is_not_initials() -> None:
     """Stripping every trailing mark can leave nothing at all -- the `if not
     t: return False` guard, not an accidental match on an empty pattern."""
     assert not _looks_like_initials('.')
     assert not _looks_like_initials('*')
 
 
-def test_the_precomposed_single_initial_is_recognised_on_both_parsing_paths():
+def test_the_precomposed_single_initial_is_recognised_on_both_parsing_paths() -> None:
     """The one Unicode shape threaded through both real parsing paths, per
     the review's ask. On the pairs path (a clean alternating list) the
     precomposed 'É' pairs normally, upper-cased like any initial. On the
@@ -612,7 +586,7 @@ def test_the_precomposed_single_initial_is_recognised_on_both_parsing_paths():
     ('Jr', 'Jr'), ('Jr.', 'Jr'), ('JR', 'JR'), ('jr.', 'jr'),
     ('Sr', 'Sr'), ('III', 'III'), ('iii', 'iii'), ('IV', 'IV'), ('IV.', 'IV'),
 ])
-def test_a_suffix_variant_attaches_to_the_surname_on_the_pairs_path(suffix, attached):
+def test_a_suffix_variant_attaches_to_the_surname_on_the_pairs_path(suffix: str, attached: str) -> None:
     """A recognised suffix in the initials slot does not itself have to look
     like initials -- it belongs to the surname before it (#560) -- and its
     case is carried through verbatim, never upper-cased the way a real
@@ -626,7 +600,7 @@ def test_a_suffix_variant_attaches_to_the_surname_on_the_pairs_path(suffix, atta
     ('Jr', 'Jr'), ('Jr.', 'Jr'), ('JR', 'JR'), ('jr.', 'jr'),
     ('Sr', 'Sr'), ('III', 'III'), ('iii', 'iii'), ('IV', 'IV'), ('IV.', 'IV'),
 ])
-def test_a_suffix_variant_attaches_to_the_surname_on_the_fallback_path(suffix, attached):
+def test_a_suffix_variant_attaches_to_the_surname_on_the_fallback_path(suffix: str, attached: str) -> None:
     """Same suffix set, forced onto the fallback path: a full given name
     ('John') in the surname slot is not initials-shaped, so the pair
     detector declines before it ever reaches the suffix check."""
@@ -635,18 +609,18 @@ def test_a_suffix_variant_attaches_to_the_surname_on_the_fallback_path(suffix, a
     )
 
 
-def test_a_suffix_survives_a_stray_double_comma_right_after_it():
+def test_a_suffix_survives_a_stray_double_comma_right_after_it() -> None:
     """Double/triple commas are collapsed to one before the comma-split, so
     a suffix immediately followed by an extra comma is not a distinct
     fragment of its own."""
     assert _cite('Smith, Sr,, Jones, JA') == '1. Smith Sr, Jones JA. A Study.'
 
 
-def test_a_suffix_survives_extra_internal_whitespace_around_it():
+def test_a_suffix_survives_extra_internal_whitespace_around_it() -> None:
     assert _cite('Smith, Sr  , Jones, JA') == '1. Smith Sr, Jones JA. A Study.'
 
 
-def test_junior_spelled_out_is_not_a_recognised_suffix():
+def test_junior_spelled_out_is_not_a_recognised_suffix() -> None:
     """'Junior' is 6 letters and mixed case: it fails both the suffix regex
     (only the abbreviated forms are listed) and `_looks_like_initials`
     (too long, not all-uppercase), so it is neither attached as a suffix
@@ -657,13 +631,13 @@ def test_junior_spelled_out_is_not_a_recognised_suffix():
     )
 
 
-def test_a_near_miss_suffix_spelling_is_not_recognised():
+def test_a_near_miss_suffix_spelling_is_not_recognised() -> None:
     """'Jrs' fails the suffix regex (not an exact listed form) and fails
     `_looks_like_initials` (mixed case) -- same fate as 'Junior'."""
     assert _cite('Smith, Jrs, Jones, JA') == '1. Smith, Jrs, Jones JA. A Study.'
 
 
-def test_a_bare_roman_numeral_v_is_not_a_recognised_suffix():
+def test_a_bare_roman_numeral_v_is_not_a_recognised_suffix() -> None:
     """'V' is not in the enumerated suffix set, but a single letter of any
     case is ALWAYS initials-shaped (`_looks_like_initials`'s own rule), so
     it is folded in as an initials group rather than rejected outright --
@@ -671,7 +645,7 @@ def test_a_bare_roman_numeral_v_is_not_a_recognised_suffix():
     assert _cite('Smith, V, Jones, JA') == '1. Smith V, Jones JA. A Study.'
 
 
-def test_four_is_are_not_a_recognised_suffix_but_pass_as_initials_shaped():
+def test_four_is_are_not_a_recognised_suffix_but_pass_as_initials_shaped() -> None:
     """'IIII' is not a valid roman numeral and not in the suffix set, but it
     IS 4 uppercase letters -- exactly `_MAX_INITIALS_LETTERS` -- so
     `_looks_like_initials` accepts it and it is folded in as initials, the

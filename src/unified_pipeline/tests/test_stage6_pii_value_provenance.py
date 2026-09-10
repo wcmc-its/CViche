@@ -133,7 +133,7 @@ def test_no_fragments_means_nothing_is_denied():
     assert not _from_pii_fragment("1300 York Avenue, New York, NY", [])
 
 
-def test_a_non_str_value_is_squashed_through_str_like_any_other():
+def test_a_non_str_value_is_squashed_through_str_like_any_other() -> None:
     """#735 review item 2's one case the existing 12 tests do not cover:
     `value` is typed `object`, not `str`, and stage 4 can hand back a bare
     int for a birth year. `_squash` runs every value through `str(value or

@@ -92,7 +92,14 @@ def test_three_digits_does_not_match() -> None:
 
 
 def test_lowercase_letters_do_not_match() -> None:
-    text = "[m2b] lowercase"
+    # Two fixtures so a regression in either letter class alone still
+    # fails one of them: "[m2] ..." isolates the leading letter, "[M2b]
+    # ..." isolates the trailing optional letter -- "[m2b] ..." alone
+    # needs BOTH classes lowered to match and so would survive either
+    # regression on its own.
+    text = "[m2] leading letter lowercase"
+    assert _strip_taxonomy_code(text) == text
+    text = "[M2b] trailing letter lowercase"
     assert _strip_taxonomy_code(text) == text
 
 

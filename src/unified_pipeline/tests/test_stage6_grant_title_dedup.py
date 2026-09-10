@@ -129,20 +129,20 @@ def _rendered_title(title: str) -> str:
     return {row.cells[0].text: row.cells[1].text for row in table.rows}[_TITLE_ROW]
 
 
-def test_the_caller_collapses_three_identical_pipe_segments_to_one():
+def test_the_caller_collapses_three_identical_pipe_segments_to_one() -> None:
     """"X | X | X" rendered through the real grant table -> "X", the shape
     a merged table cell repeating itself produces."""
     assert _rendered_title(f'{_AWARD} | {_AWARD} | {_AWARD}') == _AWARD
 
 
-def test_the_caller_leaves_a_two_segment_title_untouched():
+def test_the_caller_leaves_a_two_segment_title_untouched() -> None:
     """#561 through the real call site: "X | Y" is meaningfully different
     content and must render whole, not truncated to "X"."""
     title = f'{_AWARD} | NIH R01 Supplement'
     assert _rendered_title(title) == title
 
 
-def test_the_caller_leaves_a_three_segment_title_with_one_difference_untouched():
+def test_the_caller_leaves_a_three_segment_title_with_one_difference_untouched() -> None:
     """Two matching segments and one that doesn't still fails the "every
     segment identical" bar, through the real call site."""
     title = f'{_AWARD} | {_AWARD} | Different Award Name'

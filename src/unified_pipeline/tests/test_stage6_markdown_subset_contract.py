@@ -147,7 +147,7 @@ _CONTENT_PRESERVATION_CASES = (
 )
 
 
-def test_every_alphanumeric_character_of_the_input_survives_the_output():
+def test_every_alphanumeric_character_of_the_input_survives_the_output() -> None:
     """The property, not one example, for both `preserve_newlines` values.
     Counted as a multiset so a repeated character cannot go missing behind
     an identical one -- the same technique
