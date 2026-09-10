@@ -113,12 +113,18 @@ def test_personal_data_path_keeps_phone_and_email_beside_a_birth_date(tmp_path):
     office phone AND a work email; the consumption path denies by value, so
     both live contact values survive while only the birth date is denied.
     Extends `test_real_contact_data_survives_an_entry_that_also_carries_pii`
-    (address + phone) with the one field it does not cover, email."""
+    (address + phone) with the one field it does not cover, email.
+
+    The email is deliberately absent from the raw text (unlike address and
+    phone, which the entry's raw text also carries): `_fill_personal_data`
+    has a second, regex-based email fallback that scans raw text
+    independently of `extracted_fields['email']`, and it would mask a
+    regression in the field-based classification this test targets if the
+    email string were also sitting in the text for it to find."""
     text = _render(tmp_path, [
         _a("Born: April 1, 1958\n"
            "Office: 1300 York Avenue\n"
-           "Phone: (212) 555-0100\n"
-           "Email: jane.roe@med.example.edu",
+           "Phone: (212) 555-0100",
            {"address": "1300 York Avenue",
             "phone": "(212) 555-0100",
             "email": "jane.roe@med.example.edu"}),
