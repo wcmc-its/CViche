@@ -133,14 +133,36 @@ _PERCENT_CELL_RE = re.compile(r'^(\d{1,3})\s*%$')
 # falls back to reading some unrelated numeric cell as the percentage.
 _BARE_INT_CELL_RE = re.compile(r'^(\d{1,3})$')
 
+# The hierarchy substring AND, since #260's TRAINING-collision fix, the
+# taxonomy code stage 3b can also assign a J row even when dedup leaves it
+# under a foreign hierarchy (9TUVGW) -- used both to select candidates and
+# to recognize the source table's own header row.
+_PERCENT_EFFORT_HIERARCHY_KEYWORD = 'PERCENT EFFORT'
+_PERCENT_EFFORT_TAXONOMY_CODE = 'J'
+
+# The template's third-column wording ("... (Yes/No)"), checked as a
+# case-insensitive substring against a candidate row's own text -- the
+# second half of the header-row positive signature alongside the hierarchy
+# keyword above.
+_PERCENT_EFFORT_HEADER_YES_NO_KEYWORD = 'YES/NO'
+
+# A real pipe-joined table row (activity | percent | involves-trainees) has
+# at least this many pipes; required of a header-row candidate too, so a
+# prose sentence merely mentioning the section's own vocabulary can't trip
+# the same positive signature (#260).
+_PERCENT_EFFORT_MIN_HEADER_PIPES = 2
+
 
 class PercentEffortRow(NamedTuple):
     """One parsed J-table source row, before activity-name mapping.
 
     `activity` is the raw first-cell text, unmapped. `percent` is normalized
     to "NN%" text, or None if no cell parsed as a percentage. `involves_trainees`
-    is the exact "Yes"/"No" text of whichever cell matched that, or None when
-    no cell was exactly (case-insensitively) "yes" or "no".
+    is "Yes"/"No" when the third cell is exactly (case-insensitively) one of
+    those, that cell's own trimmed text when it is non-empty but something
+    else (a real run's "Teaching | 3 | X" -- the third cell is real content
+    and must not be dropped just for not being yes/no), or None when there is
+    no third cell, or it is empty.
     """
     activity: str
     percent: str | None
@@ -186,40 +208,57 @@ def _parse_percent_effort_row(text: str) -> PercentEffortRow | None:
                 percent = f"{int(m.group(1))}%"
                 break
 
+    # Cell 3 (the third pipe-separated cell overall) is the "does it involve
+    # trainees" column. A real run's "Teaching | 3 | X" showed this cell can
+    # carry real, non-yes/no content -- normalizing anything but an exact
+    # yes/no to None dropped it silently, so a non-empty cell that is not
+    # exactly (case-insensitively) "yes" or "no" is kept verbatim instead.
     involves_trainees = None
-    for cell in other_cells:
-        low = cell.lower()
-        if low == 'yes':
-            involves_trainees = 'Yes'
-            break
-        if low == 'no':
-            involves_trainees = 'No'
-            break
+    if len(cells) > 2:
+        third_cell = cells[2].strip()
+        if third_cell:
+            low = third_cell.lower()
+            if low == 'yes':
+                involves_trainees = 'Yes'
+            elif low == 'no':
+                involves_trainees = 'No'
+            else:
+                involves_trainees = third_cell
 
     return PercentEffortRow(activity=activity, percent=percent, involves_trainees=involves_trainees)
 
 
-def _is_percent_effort_header_row(mapped_activity: str | None, text: str) -> bool:
+def _is_percent_effort_header_row(
+    mapped_activity: str | None, parsed_percent: str | None, text: str,
+) -> bool:
     """Whether `text` is the source table's OWN column-header row, coded T
     (or, since candidates can now also be selected by `taxonomy_code == 'J'`,
     coded J) like ordinary content in real runs (e.g. "Current percent
     effort | Percent effort % | Does the activity involve WMC
     students/researchers? (Yes/No)"). Matched by a POSITIVE header signature
-    -- an activity cell that maps to nothing, row text naming the columns,
-    AND at least 2 pipes (both real header rows have exactly 2) -- not by
-    "all cells are template labels", which is the filter #260's own
-    investigation found eating "Total | 100% |" (Total maps to a known
-    activity, so this never fires on it). The pipe-count check matters more
-    now that J-coded prose can reach here too: without it, a J-coded prose
-    paragraph that merely mentions "percent effort" would be consumed and
-    silently vanish from the Appendix -- content loss, not a header.
+    -- an activity cell that maps to nothing, NO parsed percent at all, row
+    text naming the columns, AND at least `_PERCENT_EFFORT_MIN_HEADER_PIPES`
+    pipes (both real header rows have exactly 2) -- not by "all cells are
+    template labels", which is the filter #260's own investigation found
+    eating "Total | 100% |" (Total maps to a known activity, so this never
+    fires on it).
+
+    The no-percent requirement exists because the keyword+pipe-count checks
+    alone are still a substring test: "Other duties | 5% | Yes/No unclear"
+    contains "YES/NO" and has 2 pipes, but it carries a real percent cell --
+    a genuine header row never does. `parsed_percent` comes from the SAME
+    parse the caller already ran (`_parse_percent_effort_row`), so this adds
+    no second parse of `text`.
     """
     if mapped_activity is not None:
         return False
-    if text.count('|') < 2:
+    if parsed_percent is not None:
+        return False
+    if text.count('|') < _PERCENT_EFFORT_MIN_HEADER_PIPES:
         return False
     upper = text.upper()
-    return 'PERCENT EFFORT' in upper or 'YES/NO' in upper
+    return (_PERCENT_EFFORT_HIERARCHY_KEYWORD in upper
+            or _PERCENT_EFFORT_HEADER_YES_NO_KEYWORD in upper)
 
 
 def _percent_effort_table_is_valid(table) -> bool:
@@ -506,36 +545,45 @@ class PassthroughSection:
         is still consumed -- excluded from the Appendix -- even though
         nothing is written for it, since it is not CV content.
 
-        Returns the entries actually written OR recognized as the header row
-        (#260, #294) -- an entry with an unmapped activity that is not the
-        header, or a mapped activity with no percent, is neither, and stays
-        Appendix-bound.
+        A SECOND candidate for an activity already written this call (two
+        entries both mapping to, say, Teaching) is consumed WITHOUT a second
+        write only when its own (percent, involves_trainees) exactly match
+        what was already written -- a true duplicate copy, the shape #260's
+        own T-coded and J-coded `Total | 100% |` copies take in 9TUVGW.
+        Anything else is a genuine conflict: left unwritten AND unconsumed
+        (so it stays visible in the Appendix rather than silently losing one
+        of two disagreeing values) and logged.
+
+        Returns the entries actually written, recognized as a true duplicate
+        of an already-written row, OR recognized as the header row (#260,
+        #294) -- an entry with an unmapped activity that is not the header, a
+        mapped activity with no percent, or a conflicting second row for an
+        already-written activity, is none of those, and stays Appendix-bound.
         """
         candidates = [
             entry for entry in all_entries
-            if 'PERCENT EFFORT' in ' '.join(entry.get('hierarchy', [])).upper()
-            or entry.get('taxonomy_code') == 'J'
+            if _PERCENT_EFFORT_HIERARCHY_KEYWORD in ' '.join(entry.get('hierarchy', [])).upper()
+            or entry.get('taxonomy_code') == _PERCENT_EFFORT_TAXONOMY_CODE
         ]
         if not candidates:
             return []
 
-        header_idx = self._find_header_paragraph('PERCENT EFFORT')
+        header_idx = self._find_header_paragraph(_PERCENT_EFFORT_HIERARCHY_KEYWORD)
         if header_idx is None:
-            header_idx = self._find_paragraph_with_text('PERCENT EFFORT')
+            header_idx = self._find_paragraph_with_text(_PERCENT_EFFORT_HIERARCHY_KEYWORD)
         if header_idx is None:
-            if self.verbose:
-                print("  Passthrough: Could not find Percent Effort section")
+            logger.warning("Percent Effort: could not find the section header in the template; entries not written")
             return []
 
         table = self._find_table_after_paragraph(header_idx)
         if not _percent_effort_table_is_valid(table):
-            if self.verbose:
-                print("  Passthrough: Could not find Percent Effort table")
+            logger.warning("Percent Effort: could not find a valid table after the section header; entries not written")
             return []
 
         row_index = _percent_effort_row_index(table)
 
         consumed = []
+        written: dict[str, PercentEffortRow] = {}
         for entry in candidates:
             text = entry.get('text', '').strip()
             parsed = _parse_percent_effort_row(text)
@@ -544,7 +592,7 @@ class PassthroughSection:
 
             activity = _map_percent_effort_activity(parsed.activity)
             if activity is None:
-                if _is_percent_effort_header_row(activity, text):
+                if _is_percent_effort_header_row(activity, parsed.percent, text):
                     consumed.append(entry)
                 continue
             if parsed.percent is None:
@@ -558,7 +606,18 @@ class PassthroughSection:
                     parsed.activity, activity)
                 continue
 
+            prior = written.get(activity)
+            if prior is not None:
+                if (parsed.percent, parsed.involves_trainees) == (prior.percent, prior.involves_trainees):
+                    consumed.append(entry)  # a true duplicate copy of what's already written
+                else:
+                    logger.warning(
+                        "Percent Effort: %s already written as %r; conflicting "
+                        "entry %r not written", activity, prior, parsed)
+                continue
+
             self._write_percent_effort_row(table, row_idx, parsed)
+            written[activity] = parsed
             consumed.append(entry)
         return consumed
 

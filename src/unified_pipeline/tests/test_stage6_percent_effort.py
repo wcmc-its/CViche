@@ -273,6 +273,66 @@ def test_j_coded_header_row_under_foreign_hierarchy_consumed(tmp_path):
     ]
 
 
+def test_third_cell_non_yes_no_text_is_kept_verbatim(tmp_path):
+    """Live corpus uid PNLRAA (#260): 'Teaching | 3 | X' was consumed and the
+    'X' silently dropped -- column 3 stayed blank. The third cell's own
+    trimmed text must survive when it isn't exactly yes/no."""
+    entries = [_OWNER_ENTRY, _j_entry("Teaching | 3 | X", 1)]
+    doc = _render(tmp_path, entries)
+    rows = _j_rows_by_label(doc)
+
+    assert rows["Teaching"] == ["Teaching", "3%", "X"]
+    assert _clean_inline_tabs("Teaching | 3 | X") not in _appendix_text(doc)
+
+
+def test_second_row_for_written_activity_conflicts_stays_appendix_bound(tmp_path):
+    """Two DIFFERENT candidates mapping to the same activity: the first
+    write wins, and the second (a real conflict, not a duplicate copy) is
+    left unwritten and reaches the Appendix instead of silently overwriting
+    the first."""
+    entries = [
+        _OWNER_ENTRY,
+        _j_entry("Teaching | 10% | Yes", 1),
+        _j_entry("Teaching | 30% | No", 2),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = _j_rows_by_label(doc)
+
+    assert rows["Teaching"] == ["Teaching", "10%", "Yes"], "first write must win"
+    assert _clean_inline_tabs("Teaching | 30% | No") in _appendix_text(doc), (
+        "conflicting second row must stay Appendix-bound, not vanish or overwrite")
+
+
+def test_second_row_for_written_activity_true_duplicate_both_consumed(tmp_path):
+    """9TUVGW's own shape: the T-coded and J-coded copies of 'Total | 100% |'
+    are identical in every parsed field -- both must be consumed and neither
+    left behind in the Appendix."""
+    entries = [
+        _OWNER_ENTRY,
+        _j_entry("Total | 100% |", 1),
+        _j_entry("Total | 100% |", 2),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = _j_rows_by_label(doc)
+
+    assert rows["Total"][:2] == ["Total", "100%"]
+    assert _clean_inline_tabs("Total | 100% |") not in _appendix_text(doc)
+
+
+def test_prose_with_percent_and_yes_no_keywords_not_a_header_stays_appendix_bound(tmp_path):
+    """'Other duties | 5% | Yes/No unclear' contains the header substring
+    'YES/NO' and has 2 pipes, but carries a real percent cell -- a genuine
+    header row never does. Must not be swallowed as a false header."""
+    entries = [_OWNER_ENTRY, _j_entry("Other duties | 5% | Yes/No unclear", 1)]
+    doc = _render(tmp_path, entries)
+
+    assert _clean_inline_tabs("Other duties | 5% | Yes/No unclear") in _appendix_text(doc)
+    table = _find_j_table(doc)
+    for row in table.rows[1:]:
+        if row.cells[0].text.strip() != "Total":
+            assert row.cells[1].text == ""
+
+
 class _StubGenerator(PassthroughSection):
     """Just enough of WCMTemplateGenerator to drive `_fill_percent_effort`
     directly, for the one case `generate()` can't produce: no J table at
