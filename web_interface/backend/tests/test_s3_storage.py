@@ -6,6 +6,7 @@ AccessDenied must PROPAGATE -- it is a real IAM/KMS fault, not a missing file,
 and masking it as "missing" would hide an outage (and is also what a missing
 key looks like without s3:ListBucket -- that wants an IAM fix, not a code one).
 """
+import io
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -13,9 +14,10 @@ import pytest
 boto3 = pytest.importorskip("boto3")
 from botocore.stub import Stubber
 from botocore.exceptions import ClientError
+from botocore.response import StreamingBody
 
 from app.storage.base import StorageKeyExists
-from app.storage.s3_storage import S3RunStorage
+from app.storage.s3_storage import S3RunStorage, StorageDeleteError
 
 
 def _storage():
@@ -83,6 +85,11 @@ def test_put_file_exclusive_sends_if_none_match_and_maps_412(monkeypatch):
     ("run1", "/absolute/cv.docx"),
     ("run1", "input/../../other/cv.docx"),
     ("a b", "input/cv.docx"),
+    # PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 9:
+    # a NUL byte in either component (the run id via RUN_ID_PATTERN, the key
+    # via the S3-side check) must be refused before any request is built.
+    ("run1", "input/cv\x00.docx"),
+    ("run\x00", "input/cv.docx"),
 ])
 def test_s3_key_rejects_unsafe_identifiers(run_id, key):
     """S3 keys are opaque strings, so ".." cannot escape the bucket -- but it
@@ -120,7 +127,10 @@ def test_s3_key_still_accepts_the_prefixes_live_callers_pass():
     quality_score_service.py:54 "outputs/"), and legacy run ids from the
     pre-#685 generator can contain "-"/"_". None may be rejected."""
     storage = _storage()
-    assert storage._s3_key("run1", "") == "cviche/runs/run1/"
+    # "" is only legal as a LIST prefix (item 9 split): list_files passes
+    # allow_empty=True; object operations reject it, see
+    # test_s3_object_operations_reject_empty_key.
+    assert storage._s3_key("run1", "", allow_empty=True) == "cviche/runs/run1/"
     assert storage._s3_key("run1", "outputs/") == "cviche/runs/run1/outputs/"
     assert storage._s3_key("A-B_c1", "prompt_logs/") == "cviche/runs/A-B_c1/prompt_logs/"
 
@@ -154,3 +164,465 @@ def test_download_name_is_percent_encoded_not_raw(monkeypatch):
         "attachment; filename*=utf-8''Dvo%C5%99%C3%A1k%E2%80%99s%20CV%20%E2%80%93%202026.docx")
     # The signed URL must carry only latin-1-encodable bytes for S3 to accept it.
     disposition.encode("latin-1")
+
+
+# ---------------------------------------------------------------------------
+# PR #779 review thread web_interface/backend/tests/test_s3_storage.py
+# ---------------------------------------------------------------------------
+
+RUN_PREFIX = "cviche/runs/run1/"
+
+
+def _stub_listing(stub, keys, prefix=RUN_PREFIX):
+    stub.add_response(
+        "list_objects_v2",
+        {"Contents": [{"Key": k} for k in keys]},
+        expected_params={"Bucket": "test-bucket", "Prefix": prefix},
+    )
+
+
+def _delete_params(keys):
+    return {"Bucket": "test-bucket", "Delete": {"Objects": [{"Key": k} for k in keys]}}
+
+
+def test_delete_run_partial_errors_raise_and_are_not_counted():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 1
+
+    S3 answers DeleteObjects with 200 even when some keys stay in place,
+    listing them under "Errors". Such a batch must surface as
+    StorageDeleteError naming the surviving key, not be counted as deleted."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    a, b = RUN_PREFIX + "input/cv.docx", RUN_PREFIX + "steps/3a/output.json"
+    _stub_listing(stub, [a, b])
+    stub.add_response(
+        "delete_objects",
+        {
+            "Deleted": [{"Key": a}],
+            "Errors": [{"Key": b, "Code": "AccessDenied", "Message": "Access Denied"}],
+        },
+        expected_params=_delete_params([a, b]),
+    )
+    with stub, pytest.raises(StorageDeleteError, match="cviche/runs/run1/steps/3a/output.json"):
+        storage.delete_run("run1")
+    stub.assert_no_pending_responses()
+
+
+def test_delete_run_counts_only_deleted_entries():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 1
+
+    The return value derives from the response's "Deleted" list, not from
+    len(batch): a batch of 3 that S3 confirms 2 of (and reports no Errors
+    for) returns 2."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    keys = [RUN_PREFIX + f"f{i}" for i in range(3)]
+    _stub_listing(stub, keys)
+    stub.add_response(
+        "delete_objects",
+        {"Deleted": [{"Key": keys[0]}, {"Key": keys[1]}]},
+        expected_params=_delete_params(keys),
+    )
+    with stub:
+        assert storage.delete_run("run1") == 2
+    stub.assert_no_pending_responses()
+
+
+def test_delete_by_prefix_splits_at_1000_keys():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 2
+
+    DeleteObjects takes at most 1000 keys per request. 1001 listed keys must
+    go out as exactly [0:1000] then [1000:]; Stubber's expected_params is an
+    exact match, so a batch split anywhere else fails."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    keys = [RUN_PREFIX + f"f{i}" for i in range(1001)]
+    _stub_listing(stub, keys)
+    stub.add_response(
+        "delete_objects",
+        {"Deleted": [{"Key": k} for k in keys[:1000]]},
+        expected_params=_delete_params(keys[:1000]),
+    )
+    stub.add_response(
+        "delete_objects",
+        {"Deleted": [{"Key": keys[1000]}]},
+        expected_params=_delete_params(keys[1000:]),
+    )
+    with stub:
+        assert storage.delete_run("run1") == 1001
+    stub.assert_no_pending_responses()
+
+
+@pytest.mark.parametrize("bad_prefix", ["", "/", "//"])
+def test_delete_by_prefix_refuses_empty_prefix(bad_prefix):
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 2
+
+    An empty (or slash-only) full prefix would enumerate and delete the whole
+    bucket; it must raise before any S3 call."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    with stub, pytest.raises(ValueError, match="non-empty"):
+        storage._delete_by_prefix(bad_prefix)
+    stub.assert_no_pending_responses()
+
+
+def test_delete_run_prefix_is_slash_terminated_run_namespace():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 3
+
+    delete_run must list exactly "cviche/runs/run1/" -- WITH the trailing
+    slash. "cviche/runs/run1" would also match run10/, run1a/, ... and the
+    reaper would delete a sibling run's artifacts."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    key = "cviche/runs/run1/input/cv.docx"
+    _stub_listing(stub, [key], prefix="cviche/runs/run1/")
+    stub.add_response(
+        "delete_objects",
+        {"Deleted": [{"Key": key}]},
+        expected_params=_delete_params([key]),
+    )
+    with stub:
+        assert storage.delete_run("run1") == 1
+    stub.assert_no_pending_responses()
+
+
+def test_delete_global_prefix_lists_exactly_the_given_prefix():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 3
+
+    delete_global_prefix joins the caller's prefix onto the store root
+    verbatim ("cviche/by-submitter/e@x.edu/R1/"), never under runs/."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    key = "cviche/by-submitter/e@x.edu/R1/manifest.json"
+    _stub_listing(stub, [key], prefix="cviche/by-submitter/e@x.edu/R1/")
+    stub.add_response(
+        "delete_objects",
+        {"Deleted": [{"Key": key}]},
+        expected_params=_delete_params([key]),
+    )
+    with stub:
+        assert storage.delete_global_prefix("by-submitter/e@x.edu/R1/") == 1
+    stub.assert_no_pending_responses()
+
+
+def test_put_file_sends_bucket_key_body_without_precondition():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 4
+
+    put_file is the overwriting write: exact Bucket/Key/Body, and (because
+    expected_params is an exact dict match) NO IfNoneMatch."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_response(
+        "put_object",
+        {},
+        expected_params={
+            "Bucket": "test-bucket",
+            "Key": "cviche/runs/run1/input/cv.docx",
+            "Body": b"dummy-bytes",
+        },
+    )
+    with stub:
+        storage.put_file("run1", "input/cv.docx", b"dummy-bytes")
+    stub.assert_no_pending_responses()
+
+
+def test_list_files_returns_run_relative_keys():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 5
+
+    Normal listing: the run namespace "cviche/runs/run1/" is stripped from
+    every returned key, in S3 order."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    _stub_listing(stub, [RUN_PREFIX + "input/cv.docx", RUN_PREFIX + "steps/3a/output.json"])
+    with stub:
+        assert storage.list_files("run1") == ["input/cv.docx", "steps/3a/output.json"]
+    stub.assert_no_pending_responses()
+
+
+def test_list_files_prefix_filter_is_sent_to_s3():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 5
+
+    Prefix-filtered listing: the caller's prefix is appended to the run
+    namespace and sent as the S3 Prefix, so filtering happens server-side."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    _stub_listing(stub, [RUN_PREFIX + "steps/3a/output.json"], prefix=RUN_PREFIX + "steps/3a/")
+    with stub:
+        assert storage.list_files("run1", "steps/3a/") == ["steps/3a/output.json"]
+    stub.assert_no_pending_responses()
+
+
+def test_list_files_empty_result():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 5
+
+    Empty listing: S3 omits "Contents" entirely for an empty prefix; the
+    result is [] rather than a KeyError."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_response(
+        "list_objects_v2",
+        {"KeyCount": 0},
+        expected_params={"Bucket": "test-bucket", "Prefix": RUN_PREFIX},
+    )
+    with stub:
+        assert storage.list_files("run1") == []
+    stub.assert_no_pending_responses()
+
+
+def test_list_files_follows_pagination():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 5
+
+    Multi-page listing: a truncated first page must be followed by a second
+    request carrying its NextContinuationToken, and both pages' keys are
+    returned in order."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_response(
+        "list_objects_v2",
+        {
+            "IsTruncated": True,
+            "NextContinuationToken": "tok",
+            "Contents": [{"Key": RUN_PREFIX + "a.json"}],
+        },
+        expected_params={"Bucket": "test-bucket", "Prefix": RUN_PREFIX},
+    )
+    stub.add_response(
+        "list_objects_v2",
+        {"Contents": [{"Key": RUN_PREFIX + "b.json"}]},
+        expected_params={"Bucket": "test-bucket", "Prefix": RUN_PREFIX, "ContinuationToken": "tok"},
+    )
+    with stub:
+        assert storage.list_files("run1") == ["a.json", "b.json"]
+    stub.assert_no_pending_responses()
+
+
+def test_list_files_returns_foreign_key_unchanged():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 5
+
+    Full-key to relative-key conversion only strips the run namespace: a key
+    S3 returns that does not start with it is passed through verbatim (the
+    else branch), never mangled by a blind slice."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    _stub_listing(stub, [RUN_PREFIX + "input/cv.docx", "cviche/runs/run10/input/cv.docx"])
+    with stub:
+        assert storage.list_files("run1") == ["input/cv.docx", "cviche/runs/run10/input/cv.docx"]
+    stub.assert_no_pending_responses()
+
+
+def test_exists_true_on_head_object_success():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 6"""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_response(
+        "head_object",
+        {"ContentLength": 3},
+        expected_params={"Bucket": "test-bucket", "Key": "cviche/runs/run1/input/cv.docx"},
+    )
+    with stub:
+        assert storage.exists("run1", "input/cv.docx") is True
+    stub.assert_no_pending_responses()
+
+
+def test_exists_false_on_404():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 6"""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error(
+        "head_object", service_error_code="404", http_status_code=404,
+        expected_params={"Bucket": "test-bucket", "Key": "cviche/runs/run1/input/cv.docx"},
+    )
+    with stub:
+        assert storage.exists("run1", "input/cv.docx") is False
+    stub.assert_no_pending_responses()
+
+
+@pytest.mark.parametrize("code,status", [("AccessDenied", 403), ("InternalError", 500)])
+def test_exists_non_404_clienterror_propagates(code, status):
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 6
+
+    A 403 (IAM/KMS) or 5xx from head_object is an infrastructure fault; it
+    must propagate as ClientError, not be reported as "file doesn't exist"."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_client_error("head_object", service_error_code=code, http_status_code=status)
+    with stub, pytest.raises(ClientError) as ei:
+        storage.exists("run1", "input/cv.docx")
+    assert ei.value.response["Error"]["Code"] == code
+    stub.assert_no_pending_responses()
+
+
+def test_get_file_returns_body_bytes():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 7
+
+    The success path reads the streaming Body fully and returns the bytes
+    unchanged (including a leading NUL, so no text decoding sneaks in)."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    payload = b"\x00PK-docx-bytes"
+    stub.add_response(
+        "get_object",
+        {"Body": StreamingBody(io.BytesIO(payload), len(payload))},
+        expected_params={"Bucket": "test-bucket", "Key": "cviche/runs/run1/input/cv.docx"},
+    )
+    with stub:
+        assert storage.get_file("run1", "input/cv.docx") == payload
+    stub.assert_no_pending_responses()
+
+
+def test_put_global_writes_under_prefix_not_runs_namespace():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 8
+
+    put_global writes {prefix}/{key}, never {prefix}/runs/{run_id}/{key}: the
+    by-submitter index must sit beside runs/, not inside a run."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    stub.add_response(
+        "put_object",
+        {},
+        expected_params={
+            "Bucket": "test-bucket",
+            "Key": "cviche/by-submitter/jdoe@example.edu/AAAAAA/manifest.json",
+            "Body": b"{}",
+        },
+    )
+    with stub:
+        storage.put_global("by-submitter/jdoe@example.edu/AAAAAA/manifest.json", b"{}")
+    stub.assert_no_pending_responses()
+
+
+@pytest.mark.parametrize("key", ["../escape", "/abs/manifest.json", "by-submitter/a\x00b", ""])
+def test_put_global_rejects_unsafe_keys_before_any_call(key):
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 8
+
+    put_global validates its key at the boundary: a ".." component, an
+    absolute key, a NUL byte or an empty key raises with no request made."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    with stub, pytest.raises(ValueError):
+        storage.put_global(key, b"{}")
+    stub.assert_no_pending_responses()
+
+
+def test_s3_object_operations_reject_empty_key():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 9
+
+    "" is a legal LIST prefix (base.py's validate_key allows it because
+    list_files callers pass "" and "outputs/") but never a legal object key:
+    every object operation would otherwise address the namespace root
+    "cviche/runs/run1/" as a file. Rejected with no S3 call."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    with stub:
+        with pytest.raises(ValueError, match="non-empty"):
+            storage.put_file("run1", "", b"x")
+        with pytest.raises(ValueError, match="non-empty"):
+            storage.put_file_exclusive("run1", "", b"x")
+        with pytest.raises(ValueError, match="non-empty"):
+            storage.get_file("run1", "")
+        with pytest.raises(ValueError, match="non-empty"):
+            storage.exists("run1", "")
+        with pytest.raises(ValueError, match="non-empty"):
+            storage.get_download_url("run1", "")
+        with pytest.raises(ValueError, match="non-empty"):
+            storage.delete_global_prefix("")
+    stub.assert_no_pending_responses()
+
+
+def test_list_files_still_accepts_empty_prefix_after_object_key_check():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 9
+
+    The other half of the empty-key split: list_files("run1", "") must keep
+    working (steps.py and quality_score_service.py rely on it) and send the
+    bare run namespace as the Prefix."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    _stub_listing(stub, [RUN_PREFIX + "input/cv.docx"], prefix=RUN_PREFIX)
+    with stub:
+        assert storage.list_files("run1", "") == ["input/cv.docx"]
+    stub.assert_no_pending_responses()
+
+
+@pytest.mark.parametrize("op,code,status", [
+    ("list_objects_v2", "AccessDenied", 403),
+    ("list_objects_v2", "InternalError", 500),
+    ("delete_objects", "AccessDenied", 403),
+    ("delete_objects", "SlowDown", 503),
+])
+def test_delete_run_propagates_s3_errors(op, code, status):
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 10
+
+    AccessDenied, throttling (SlowDown) and server errors from either the
+    listing or the delete call propagate as ClientError so the reaper logs a
+    failure instead of counting the run as cleaned up."""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    if op == "delete_objects":
+        _stub_listing(stub, [RUN_PREFIX + "input/cv.docx"])
+    stub.add_client_error(op, service_error_code=code, http_status_code=status)
+    with stub, pytest.raises(ClientError) as ei:
+        storage.delete_run("run1")
+    assert ei.value.response["Error"]["Code"] == code
+    stub.assert_no_pending_responses()
+
+
+def test_delete_global_prefix_propagates_s3_errors():
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 10"""
+    storage = _storage()
+    stub = Stubber(storage._s3)
+    _stub_listing(stub, ["cviche/by-submitter/e@x.edu/R1/manifest.json"],
+                  prefix="cviche/by-submitter/e@x.edu/R1/")
+    stub.add_client_error("delete_objects", service_error_code="SlowDown", http_status_code=503)
+    with stub, pytest.raises(ClientError) as ei:
+        storage.delete_global_prefix("by-submitter/e@x.edu/R1/")
+    assert ei.value.response["Error"]["Code"] == "SlowDown"
+    stub.assert_no_pending_responses()
+
+
+def test_client_pins_sigv4_for_sse_kms(monkeypatch):
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 11
+
+    SSE-KMS objects reject SigV2-signed presigned URLs ("Requests specifying
+    Server Side Encryption with AWS KMS managed keys require AWS Signature
+    Version 4"), so the client must be built with signature_version s3v4 and
+    every presigned URL it hands out must carry the SigV4 algorithm marker.
+    (botocore >= 1.29 already defaults S3 to s3v4, so this pins the effective
+    value: a refactor to signature_version="s3" fails here; simply dropping
+    the explicit pin is behaviour-preserving on current botocore.)"""
+    monkeypatch.setenv("AWS_ACCESS_KEY_ID", "testing")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "testing")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+    storage = _storage()
+    assert storage._s3.meta.config.signature_version == "s3v4"
+    url = storage.get_download_url("run1", "input/cv.docx")
+    query = parse_qs(urlparse(url).query)
+    assert query["X-Amz-Algorithm"] == ["AWS4-HMAC-SHA256"]
+    assert "Signature" not in query  # the SigV2 marker
+
+
+def test_region_from_aws_region_env(monkeypatch):
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 11
+
+    AWS_REGION (set by the IRSA webhook on EKS) selects the client region
+    and keeps requests on the regional endpoint."""
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+    client = _storage()._s3
+    assert client.meta.region_name == "us-west-2"
+    assert client.meta.endpoint_url.startswith("https://s3.us-west-2.")
+
+
+def test_region_falls_back_to_aws_default_region(monkeypatch):
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 11"""
+    monkeypatch.delenv("AWS_REGION", raising=False)
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
+    client = _storage()._s3
+    assert client.meta.region_name == "eu-west-1"
+    assert client.meta.endpoint_url.startswith("https://s3.eu-west-1.")
+
+
+def test_aws_region_takes_precedence_over_default_region(monkeypatch):
+    """PR #779 review thread web_interface/backend/tests/test_s3_storage.py item 11"""
+    monkeypatch.setenv("AWS_REGION", "us-west-2")
+    monkeypatch.setenv("AWS_DEFAULT_REGION", "eu-west-1")
+    assert _storage()._s3.meta.region_name == "us-west-2"
