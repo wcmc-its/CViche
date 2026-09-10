@@ -1,18 +1,20 @@
-"""Sections E and G: the passthrough sections (#398).
+"""Sections E, G and J: the passthrough sections (#398).
 
     E. EMPLOYMENT STATUS
     G. INSTITUTIONAL/HOSPITAL AFFILIATION
+    J. PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES
 
-Every other section in the template is rebuilt from stage-4 fields. These two
-are short, already structured in the source CV, and structured the same way the
-WCM template wants them, so they are copied across instead -- which is what
-"passthrough" means here and why the two share one module and one entry point.
-`_fill_passthrough_sections` is dispatched once from `generate` and is nothing
-but the two calls.
+Every other section in the template is rebuilt from stage-4 fields. These
+three are short, already structured in the source CV, and structured the same
+way the WCM template wants them, so they are copied across instead -- which is
+what "passthrough" means here and why the three share one module and one entry
+point. `_fill_passthrough_sections` is dispatched once from `generate` and is
+nothing but the three calls.
 
-Both writers select their input by HIERARCHY rather than by taxonomy code:
-neither section has a code of its own, so the only signal that an entry belongs
-here is the source heading it was found under.
+All three writers select their input by HIERARCHY rather than by taxonomy
+code: none of the three sections has a code of its own on the live path, so
+the only signal that an entry belongs here is the source heading it was found
+under.
 
 E writes into paragraphs, not a table. It matches on the "Label: Value" shape,
 routes each entry to the template row whose label means the same thing as the
@@ -30,17 +32,25 @@ so the first cell is tested for "hospital", "affiliation" or "primary" before
 anything is cleared; a template whose affiliation section has no table falls
 back to bullets under the header instead of writing into a stranger's table.
 
-Percent effort is deliberately absent. It is in the same part of the template
-and looks like it belongs, but it is filled by hand.
+J writes into a table too, and the table is fixed-row (Teaching, Clinical,
+Administrative, Research, Total) -- it is never cleared and never grown, only
+matched by row label and filled (#260). The source's own table survives into
+stage 3b as ordinary T-coded rows sharing the same hierarchy, column-header
+row included, so `_fill_percent_effort` parses every candidate row itself
+rather than trusting its taxonomy code; see the function's own docstring for
+the parse/match rules and the header-row and `Total | 100% |` traps a coarser
+filter fell into.
 
-Neither section has a taxonomy code of its own that `generate()`'s
+None of the three has a taxonomy code of its own that `generate()`'s
 RENDER_ROUTED_CODES dispatch can key on, so each writer here reports back
 exactly which entry dicts it actually wrote (never merely matched -- a
-refused E label is not in that list). `generate()` uses that to keep a
-written entry out of the Appendix a second time (#294) without keying
-anything off taxonomy code at all.
+refused E label or an unmapped J activity is not in that list). `generate()`
+uses that to keep a written entry out of the Appendix a second time (#294,
+#260) without keying anything off taxonomy code at all.
 """
 import logging
+import re
+from typing import NamedTuple
 
 from ..formatting import _clear_table_data, _set_font
 from ..normalization import _squash
@@ -85,8 +95,151 @@ def _employment_row_key(label: str) -> str | None:
     return None
 
 
+# --- J. Percent Effort (#260) ------------------------------------------
+
+# Synonyms for the template's five fixed row labels, keyed by the activity
+# text after `_normalize_percent_effort_activity` -- lower-cased, punctuation
+# stripped to a single space. An activity that maps to none of these is left
+# unwritten and un-consumed (still Appendix-bound); it is never guessed at.
+_PERCENT_EFFORT_ACTIVITY_SYNONYMS: dict[str, str] = {
+    'teaching': 'Teaching',
+    'clinical': 'Clinical',
+    'clinical care': 'Clinical',
+    'patient care': 'Clinical',
+    'clinical practice': 'Clinical',
+    'administrative': 'Administrative',
+    'administration': 'Administrative',
+    'admin': 'Administrative',
+    'research': 'Research',
+    'total': 'Total',
+}
+
+# A percent cell as stage 2 emits it: digits then '%', an optional space
+# between ("10%" or "10 %"). Matched cell-by-cell against the row's non-
+# activity cells; the FIRST such cell wins, so a stray '%' anywhere else in
+# the row (e.g. a Yes/No cell can't have one, but a header cell can) doesn't
+# get picked over a genuine percent cell.
+_PERCENT_CELL_RE = re.compile(r'^(\d{1,3})\s*%$')
+# A bare integer cell, used ONLY when no cell in the row contains a literal
+# '%' at all -- so a malformed percent cell (e.g. "10 pct") never silently
+# falls back to reading some unrelated numeric cell as the percentage.
+_BARE_INT_CELL_RE = re.compile(r'^(\d{1,3})$')
+
+
+class PercentEffortRow(NamedTuple):
+    """One parsed J-table source row, before activity-name mapping.
+
+    `activity` is the raw first-cell text, unmapped. `percent` is normalized
+    to "NN%" text, or None if no cell parsed as a percentage. `involves_trainees`
+    is the exact "Yes"/"No" text of whichever cell matched that, or None when
+    no cell was exactly (case-insensitively) "yes" or "no".
+    """
+    activity: str
+    percent: str | None
+    involves_trainees: str | None
+
+
+def _normalize_percent_effort_activity(raw: str) -> str:
+    """Lower-case, punctuation-stripped, single-spaced -- for synonym lookup.
+    "Clinical Care", "clinical-care" and "Clinical  Care:" all normalize the
+    same way."""
+    stripped = re.sub(r'[^\w\s]', ' ', raw)
+    return re.sub(r'\s+', ' ', stripped).strip().lower()
+
+
+def _map_percent_effort_activity(raw: str) -> str | None:
+    """The template row label `raw` names, or None if it names none of them."""
+    return _PERCENT_EFFORT_ACTIVITY_SYNONYMS.get(_normalize_percent_effort_activity(raw))
+
+
+def _parse_percent_effort_row(text: str) -> PercentEffortRow | None:
+    """Parse one pipe-joined J source row (stage 2's table-row shape, e.g.
+    "Teaching | 10% | Yes") into a `PercentEffortRow`. Returns None only when
+    there is no activity cell at all -- an empty string can't name a row and
+    is never worth logging.
+    """
+    cells = [c.strip() for c in text.split('|')]
+    activity = cells[0] if cells else ''
+    if not activity:
+        return None
+    other_cells = cells[1:]
+
+    has_percent_sign = any('%' in c for c in other_cells)
+    percent = None
+    for cell in other_cells:
+        m = _PERCENT_CELL_RE.match(cell)
+        if m and 0 <= int(m.group(1)) <= 100:
+            percent = f"{int(m.group(1))}%"
+            break
+    if percent is None and not has_percent_sign:
+        for cell in other_cells:
+            m = _BARE_INT_CELL_RE.match(cell)
+            if m and 0 <= int(m.group(1)) <= 100:
+                percent = f"{int(m.group(1))}%"
+                break
+
+    involves_trainees = None
+    for cell in other_cells:
+        low = cell.lower()
+        if low == 'yes':
+            involves_trainees = 'Yes'
+            break
+        if low == 'no':
+            involves_trainees = 'No'
+            break
+
+    return PercentEffortRow(activity=activity, percent=percent, involves_trainees=involves_trainees)
+
+
+def _is_percent_effort_header_row(mapped_activity: str | None, text: str) -> bool:
+    """Whether `text` is the source table's OWN column-header row, coded T
+    with a J hierarchy like ordinary content in real runs (e.g. "Current
+    percent effort | Percent effort % | Does the activity involve WMC
+    students/researchers? (Yes/No)"). Matched by a POSITIVE header signature
+    -- an activity cell that maps to nothing AND row text naming the columns
+    -- not by "all cells are template labels", which is the filter #260's
+    own investigation found eating "Total | 100% |" (Total maps to a known
+    activity, so this never fires on it).
+    """
+    if mapped_activity is not None:
+        return False
+    upper = text.upper()
+    return 'PERCENT EFFORT' in upper or 'YES/NO' in upper
+
+
+def _percent_effort_table_is_valid(table) -> bool:
+    """Guard against writing into a stranger's table, the same way G does:
+    the table's own first row must mention the columns this section has, or
+    failing that, some row's first cell must be a recognizable Teaching row.
+    """
+    if not table or not table.rows:
+        return False
+    header_text = ' '.join(c.text.strip().lower() for c in table.rows[0].cells)
+    if any(kw in header_text for kw in ('activity', 'percent', 'effort')):
+        return True
+    return any(
+        row.cells and _map_percent_effort_activity(row.cells[0].text) == 'Teaching'
+        for row in table.rows
+    )
+
+
+def _percent_effort_row_index(table) -> dict[str, int]:
+    """Map each known activity to the template row that names it. Skips row
+    0 (the header) so a header cell that happened to normalize to a known
+    activity could never be treated as that activity's row.
+    """
+    mapping: dict[str, int] = {}
+    for i, row in enumerate(table.rows):
+        if i == 0 or not row.cells:
+            continue
+        activity = _map_percent_effort_activity(row.cells[0].text)
+        if activity is not None and activity not in mapping:
+            mapping[activity] = i
+    return mapping
+
+
 class PassthroughSection:
-    """Section E and G writers, mixed into `WCMTemplateGenerator`."""
+    """Section E, G and J writers, mixed into `WCMTemplateGenerator`."""
 
     def _fill_passthrough_sections(self, all_entries: list[dict]) -> list[dict]:
         """Fill sections that can be copied directly from source CV when format matches.
@@ -97,8 +250,7 @@ class PassthroughSection:
         Sections handled:
         - E. EMPLOYMENT STATUS
         - G. INSTITUTIONAL/HOSPITAL AFFILIATION
-
-        Note: PERCENT EFFORT is complex and typically filled manually.
+        - J. PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES (#260)
 
         Args:
             all_entries: All entries from the pipeline (to search by hierarchy)
@@ -107,11 +259,14 @@ class PassthroughSection:
             The union of entry dicts each writer actually wrote into the
             document -- not merely matched by hierarchy. `generate()` uses
             this to keep a consumed entry out of the Appendix a second time
-            (#294); an entry a writer matched but refused (e.g. an E label
-            with no known template row, #571) is NOT in this list, so it
-            still reaches the Appendix as before.
+            (#294, #260); an entry a writer matched but refused (e.g. an E
+            label with no known template row, #571, or a J row with no
+            recognized activity) is NOT in this list, so it still reaches
+            the Appendix as before.
         """
-        return self._fill_employment_status(all_entries) + self._fill_hospital_affiliation(all_entries)
+        return (self._fill_employment_status(all_entries)
+                + self._fill_hospital_affiliation(all_entries)
+                + self._fill_percent_effort(all_entries))
 
     def _fill_employment_status(self, all_entries: list[dict]) -> list[dict]:
         """Fill E. EMPLOYMENT STATUS section.
@@ -308,3 +463,93 @@ class PassthroughSection:
                         self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=(i == 0), list_level=0)
                         consumed.append(entry)
         return consumed
+
+    def _fill_percent_effort(self, all_entries: list[dict]) -> list[dict]:
+        """Fill J. PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES (#260).
+
+        Selects candidates by hierarchy, the same way E and G do -- the
+        source's own effort table (its column-header row and its
+        `Total | 100% |` row included) reaches stage 3b as ordinary T-coded
+        entries sharing the J hierarchy, so taxonomy code is not a usable
+        filter here (see #260's real-run traps in the module docstring).
+        Each candidate is parsed (`_parse_percent_effort_row`), its activity
+        mapped to a template row (`_map_percent_effort_activity`), and only
+        written when both a percent and a known row are found. An unmapped
+        row that is the source table's own header (`_is_percent_effort_header_row`)
+        is still consumed -- excluded from the Appendix -- even though
+        nothing is written for it, since it is not CV content.
+
+        Returns the entries actually written OR recognized as the header row
+        (#260, #294) -- an entry with an unmapped activity that is not the
+        header, or a mapped activity with no percent, is neither, and stays
+        Appendix-bound.
+        """
+        candidates = [
+            entry for entry in all_entries
+            if 'PERCENT EFFORT' in ' '.join(entry.get('hierarchy', [])).upper()
+        ]
+        if not candidates:
+            return []
+
+        header_idx = self._find_header_paragraph('PERCENT EFFORT')
+        if header_idx is None:
+            header_idx = self._find_paragraph_with_text('PERCENT EFFORT')
+        if header_idx is None:
+            if self.verbose:
+                print("  Passthrough: Could not find Percent Effort section")
+            return []
+
+        table = self._find_table_after_paragraph(header_idx)
+        if not _percent_effort_table_is_valid(table):
+            if self.verbose:
+                print("  Passthrough: Could not find Percent Effort table")
+            return []
+
+        row_index = _percent_effort_row_index(table)
+
+        consumed = []
+        for entry in candidates:
+            text = entry.get('text', '').strip()
+            parsed = _parse_percent_effort_row(text)
+            if parsed is None:
+                continue
+
+            activity = _map_percent_effort_activity(parsed.activity)
+            if activity is None:
+                if _is_percent_effort_header_row(activity, text):
+                    consumed.append(entry)
+                continue
+            if parsed.percent is None:
+                continue
+
+            row_idx = row_index.get(activity)
+            if row_idx is None:
+                logger.warning(
+                    "Percent Effort entry activity %r maps to %r, which has "
+                    "no row in the template table; entry not written",
+                    parsed.activity, activity)
+                continue
+
+            self._write_percent_effort_row(table, row_idx, parsed)
+            consumed.append(entry)
+        return consumed
+
+    def _write_percent_effort_row(self, table, row_idx: int, parsed: PercentEffortRow) -> None:
+        """Write `parsed`'s percent (and Yes/No, if parsed) into the
+        template's EXISTING row at `row_idx`. Never clears the table, never
+        adds a row, never touches the header row (row 0 is never passed in
+        here -- `_percent_effort_row_index` excludes it) -- only the two
+        non-label cells of an already-fixed row.
+        """
+        row = table.rows[row_idx]
+        if len(row.cells) > 1:
+            row.cells[1].text = parsed.percent
+            for para in row.cells[1].paragraphs:
+                for run in para.runs:
+                    _set_font(run)
+        if parsed.involves_trainees is not None and len(row.cells) > 2:
+            row.cells[2].text = parsed.involves_trainees
+            for para in row.cells[2].paragraphs:
+                for run in para.runs:
+                    _set_font(run)
+        self.stats['entries_inserted'] += 1

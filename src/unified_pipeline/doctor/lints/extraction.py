@@ -265,25 +265,26 @@ def lint_classified_unrendered(stage3b: Dict,
 # Taxonomy codes stage 3b can assign that stage 6 has no render route for.
 
 # Codes a `_fill_*` method reads and renders directly, but that were never
-# added to RENDER_ROUTED_CODES: E/G match on the source heading rather than
-# a taxonomy code (stage6/sections/passthrough.py), and N4 is pulled via
-# entries_by_code.get('N4', ...) in stage6/sections/mentoring.py (added by
-# #261's fix, which gave N4 a render path without also adding it here). All
-# three DO render -- and BECAUSE they're absent from RENDER_ROUTED_CODES,
-# their entries also fall through to the appendix a second time. That's a
-# real defect (duplicate content, tracked for G at #294 and for N4 at #587),
-# but it is a different defect from "no render route at all", which is what
-# this lint exists to catch -- flagging these here would conflate the two.
+# added to RENDER_ROUTED_CODES: E/G/J match on the source heading rather
+# than a taxonomy code (stage6/sections/passthrough.py), and N4 is pulled
+# via entries_by_code.get('N4', ...) in stage6/sections/mentoring.py (added
+# by #261's fix, which gave N4 a render path without also adding it here).
+# All four DO render. E, G and J's writers also report back exactly which
+# entry dicts they wrote (by object identity, not by code), which
+# `generate()` uses to exclude those specific entries from the appendix a
+# second time (#294, #260) -- so their entries do NOT duplicate. N4 has no
+# such tracking and still does duplicate into the appendix (#587, N4 is out
+# of scope here).
 #
 # This is itself a second, hand-maintained source of truth for stage-6
 # routing (review on #588) -- a code silently added here without a real
 # passthrough route would make this lint wrongly stay quiet about it.
 # test_taxonomy_code_render_coverage.py's
 # test_render_exceptions_still_wired_into_generate() is a cheap guard
-# against the two hooks these three codes depend on being removed without
+# against the two hooks these four codes depend on being removed without
 # updating this set; it can't prove a *new* addition is correct, only that
 # the existing ones haven't silently gone stale.
-_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES = frozenset({'E', 'G', 'N4'})
+_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES = frozenset({'E', 'G', 'J', 'N4'})
 
 
 def lint_taxonomy_code_coverage(stage3b: Dict) -> List[Dict]:
