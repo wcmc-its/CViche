@@ -541,6 +541,24 @@ def resolve_pi_name(
     return pi_name
 
 
+def _format_grant_costs(
+    annual_direct_costs: str | int | float | None, total_funding: str | int | float | None
+) -> str:
+    """The "Annual direct costs:" cell, as currency.
+
+    `or` on the raw value treated a real $0 as missing (round-2 review of #481,
+    point 4): the fallback is decided on what annual_direct_costs *renders*, so
+    0 wins and only a value that renders nothing (None, blank, non-amount)
+    falls through. Both arguments are `_create_grant_table`'s locals rather
+    than fresh `fields` reads, so a duplicate-of-title blanking made before the
+    call is what renders here too.
+    """
+    costs_formatted = _format_currency(annual_direct_costs)
+    if not costs_formatted:
+        costs_formatted = _format_currency(total_funding)
+    return costs_formatted
+
+
 class ResearchSupportSection:
     """Section M2 writers, mixed into `WCMTemplateGenerator`."""
 
@@ -784,13 +802,7 @@ class ResearchSupportSection:
         raw_text = entry.get('text', '') if entry else ''
         pi_name = resolve_pi_name(fields, raw_text, role, owner_name)
 
-        # Format costs as currency. `or` on the raw value treated a real $0 as
-        # missing (round-2 review of #481, point 4): the fallback is decided on
-        # what annual_direct_costs *renders*, so 0 wins and only a value that
-        # renders nothing (None, blank, non-amount) falls through.
-        costs_formatted = _format_currency(annual_direct_costs)
-        if not costs_formatted:
-            costs_formatted = _format_currency(total_funding)
+        costs_formatted = _format_grant_costs(annual_direct_costs, total_funding)
 
         # Carry the grant/award identifier in Award Source. The WCM template has no
         # grant-number row -- its block is exactly these 8 rows plus optional goals --
