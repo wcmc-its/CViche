@@ -602,10 +602,20 @@ def test_create_run_archive_concurrent_same_first_draw(tmp_path):
     tests are sequential (a pre-seeded archive). This drives create_run_archive
     directly because the TestClient + shared-SQLite-session harness cannot
     safely serve N requests from N threads.
+
+    Each writer gets its own pod-local directory (a thread-local stands in for
+    a pod's disk), so the pod-local open("xb") cannot settle the race by
+    itself; only the durable storage's put_file_exclusive can, which is the
+    cross-pod collision #685 is about. The verifier's first draft of this test
+    shared one UPLOAD_DIR and never reached storage.
     """
     storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
+    pod_of = threading.local()  # this thread's pod-local disk
+
+    def unlink_on_this_pod(path) -> None:
+        (pod_of.dir / path.name).unlink(missing_ok=True)
 
     lock = threading.Lock()
     first_drawn: set[int] = set()
@@ -628,12 +638,14 @@ def test_create_run_archive_concurrent_same_first_draw(tmp_path):
 
     def race(n: int) -> None:
         payload = f"writer-{n}-payload".encode()
+        pod_of.dir = upload_dir / f"pod{n}"
+        pod_of.dir.mkdir()
 
         def build_manifest(run_id: str, stored_name: str) -> bytes:
             return json.dumps({"run_id": run_id, "stored_as": stored_name, "writer": n}).encode()
 
         def write_local(path) -> None:
-            with open(path, "xb") as f:
+            with open(pod_of.dir / path.name, "xb") as f:
                 f.write(payload)
 
         barrier.wait()
@@ -650,7 +662,8 @@ def test_create_run_archive_concurrent_same_first_draw(tmp_path):
 
     with patch("app.api.upload.UPLOAD_DIR", upload_dir), \
          patch("app.api.upload.get_storage", return_value=storage), \
-         patch("app.api.upload.generate_run_id", new=draw):
+         patch("app.api.upload.generate_run_id", new=draw), \
+         patch("app.api.upload._unlink_best_effort", new=unlink_on_this_pod):
         threads = [threading.Thread(target=race, args=(n,)) for n in range(_RACING_WRITERS)]
         for t in threads:
             t.start()
@@ -673,10 +686,13 @@ def test_create_run_archive_concurrent_same_first_draw(tmp_path):
         assert storage.list_files(run_id) == [f"input/{stored_name}", "input/manifest.json"]
         assert storage.get_file(run_id, f"input/{stored_name}") == payload
         assert json.loads(storage.get_file(run_id, "input/manifest.json"))["writer"] == n
-        # Pod-local copy matches too.
-        assert file_path.read_bytes() == payload
-    # Losers' partial local files for SAME01 were unlinked: N files, no residue.
-    assert len(list(upload_dir.iterdir())) == _RACING_WRITERS
+        # This pod's disk holds exactly its winning copy: the SAME01 loser file
+        # was unlinked before the retry, so no residue.
+        pod = upload_dir / f"pod{n}"
+        assert [p.name for p in pod.iterdir()] == [stored_name]
+        assert (pod / stored_name).read_bytes() == payload
+    # Every pod-local SAME01 copy but the winner's is gone.
+    assert sum((upload_dir / f"pod{n}" / "SAME01.docx").exists() for n in range(_RACING_WRITERS)) == 1
 
 
 # --- (h) PR #779 review asks: restart_run ----------------------------------
