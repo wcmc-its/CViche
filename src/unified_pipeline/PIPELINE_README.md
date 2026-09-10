@@ -112,7 +112,6 @@ unified_pipeline/
 │   └── taxonomy_v7.json          # Taxonomy code definitions
 │
 ├── core/                         # Core components
-│   ├── taxonomy_mapper_v2.py     # Header taxonomy mapping
 │   ├── classification_rules/     # LLM classification rules (versioned)
 │   └── validators/               # Pre/post classification validators
 │

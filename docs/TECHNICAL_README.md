@@ -128,22 +128,11 @@ CViche/
 │       │   └── taxonomy_v7.json
 │       │
 │       ├── core/                     # Core components
-│       │   ├── taxonomy_mapper_v2.py
 │       │   ├── classification_rules/
 │       │   └── validators/
 │       │
 │       ├── segmentation/             # Document parsing
-│       │   ├── chunked_chat_hierarchy_extractor.py  # Primary segmenter
-│       │   ├── word_chunked.py
-│       │   └── pdf_vision.py
-│       │
-│       ├── parsers/                  # Section-specific parsers
-│       │   ├── publications_parser.py
-│       │   ├── education_parser.py
-│       │   └── grants_parser.py
-│       │
-│       ├── cv_parser/                # Supporting libraries
-│       │   └── cv_taxonomy_wcm.py
+│       │   └── chunked_chat_hierarchy_extractor.py  # Primary segmenter
 │       │
 │       └── outputs/                  # Pipeline outputs
 │           ├── stage_1a_segmentation/
