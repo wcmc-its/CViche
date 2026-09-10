@@ -433,7 +433,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
 | 7.1 print() in library code (T201) | falling | 1248 | ratchet |
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
-| 8.3 typing syntax (UP*, RUF013) | falling | 310 | ratchet |
+| 8.3 typing syntax (UP*, RUF013) | falling | 309 | ratchet |
 | 8.3 missing annotations (ANN*, RUF012) | falling | 627 | ratchet |
 
 <!-- check_standards:auto:end -->
