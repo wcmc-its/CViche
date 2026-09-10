@@ -333,6 +333,49 @@ def test_prose_with_percent_and_yes_no_keywords_not_a_header_stays_appendix_boun
             assert row.cells[1].text == ""
 
 
+def test_multiline_candidate_not_fused_stays_appendix_bound(tmp_path):
+    """N1: a multi-line pipe-joined candidate ("Teaching | 10% | Yes\\n
+    Clinical | 20% | No") must not be parsed as one row with a corrupted
+    third cell and the later row silently dropped from both the table and
+    the Appendix."""
+    text = "Teaching | 10% | Yes\nClinical | 20% | No"
+    entries = [_OWNER_ENTRY, _j_entry(text, 1)]
+    doc = _render(tmp_path, entries)
+
+    assert _clean_inline_tabs(text) in _appendix_text(doc)
+    table = _find_j_table(doc)
+    for row in table.rows[1:]:
+        if row.cells[0].text.strip() != "Total":
+            assert row.cells[1].text == ""
+
+
+def test_extra_cell_candidate_not_written_stays_appendix_bound(tmp_path):
+    """N2: F1's class one column over -- a non-empty 4th+ cell
+    ("Teaching | 10% | Yes | extra") must not be silently dropped by
+    writing only the first three cells."""
+    text = "Teaching | 10% | Yes | extra"
+    entries = [_OWNER_ENTRY, _j_entry(text, 1)]
+    doc = _render(tmp_path, entries)
+
+    assert _clean_inline_tabs(text) in _appendix_text(doc)
+    table = _find_j_table(doc)
+    for row in table.rows[1:]:
+        if row.cells[0].text.strip() != "Total":
+            assert row.cells[1].text == ""
+
+
+def test_trailing_empty_fourth_cell_still_written_and_consumed(tmp_path):
+    """The real PNLRAA shape: an EMPTY trailing 4th cell is not 'extra
+    content' and must still render and be consumed normally."""
+    text = "Teaching | 10% | Yes |"
+    entries = [_OWNER_ENTRY, _j_entry(text, 1)]
+    doc = _render(tmp_path, entries)
+    rows = _j_rows_by_label(doc)
+
+    assert rows["Teaching"] == ["Teaching", "10%", "Yes"]
+    assert _clean_inline_tabs(text) not in _appendix_text(doc)
+
+
 class _StubGenerator(PassthroughSection):
     """Just enough of WCMTemplateGenerator to drive `_fill_percent_effort`
     directly, for the one case `generate()` can't produce: no J table at

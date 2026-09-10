@@ -152,6 +152,11 @@ _PERCENT_EFFORT_HEADER_YES_NO_KEYWORD = 'YES/NO'
 # the same positive signature (#260).
 _PERCENT_EFFORT_MIN_HEADER_PIPES = 2
 
+# A real J row has exactly 3 cells (activity, percent, involves-trainees); a
+# candidate with a non-empty 4th+ cell, or two source rows fused by a
+# newline, is not one -- see `_percent_effort_row_is_single_row`.
+_PERCENT_EFFORT_MAX_ROW_CELLS = 3
+
 
 class PercentEffortRow(NamedTuple):
     """One parsed J-table source row, before activity-name mapping.
@@ -180,6 +185,24 @@ def _normalize_percent_effort_activity(raw: str) -> str:
 def _map_percent_effort_activity(raw: str) -> str | None:
     """The template row label `raw` names, or None if it names none of them."""
     return _PERCENT_EFFORT_ACTIVITY_SYNONYMS.get(_normalize_percent_effort_activity(raw))
+
+
+def _percent_effort_row_is_single_row(text: str) -> bool:
+    """Whether `text` is ONE pipe-joined J row, not several rows fused
+    together. Two latent loss shapes, neither seen in the corpus or S3 yet:
+    a multi-line candidate ("Teaching | 10% | Yes\\nClinical | 20% | No")
+    parses as one row with a corrupted third cell ("Yes\\nClinical") and the
+    later row(s) vanish entirely; a non-empty 4th+ cell ("Teaching | 10% |
+    Yes | extra") is dropped the same way a non-empty third cell used to be
+    (F1) -- real content silently lost. Checked independently: a newline can
+    appear with the cell count still exactly 3, and an extra cell can appear
+    with no newline. An empty trailing cell (the real PNLRAA shape,
+    "Teaching | 10% | Yes |") is still a single row.
+    """
+    if '\n' in text:
+        return False
+    cells = [c.strip() for c in text.split('|')]
+    return not any(cells[_PERCENT_EFFORT_MAX_ROW_CELLS:])
 
 
 def _parse_percent_effort_row(text: str) -> PercentEffortRow | None:
@@ -521,44 +544,32 @@ class PassthroughSection:
     def _fill_percent_effort(self, all_entries: list[dict]) -> list[dict]:
         """Fill J. PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES (#260).
 
-        Selects candidates by hierarchy, the same way E and G do -- the
-        source's own effort table (its column-header row and its
-        `Total | 100% |` row included) reaches stage 3b as ordinary T-coded
-        entries sharing the J hierarchy, so taxonomy code alone is not a
-        sufficient filter here (see #260's real-run traps in the module
-        docstring). It ALSO accepts `taxonomy_code == 'J'` regardless of
-        hierarchy: a real S3 run over-segmented one source table into a
-        PERCENT-EFFORT-hierarchy copy and a mis-hierarchied 'TRAINING' copy,
-        both taxonomy_code 'J', and generate()'s per-code dedup
-        (stage_6_word_template.py) kept the TRAINING copies -- hierarchy-only
-        selection left the table with only its header row and Total as
-        candidates, so the data rows rendered nowhere and were duplicated
-        into the Appendix under "From \"TRAINING\":". The parse/activity-map/
-        percent guards below make a J-coded candidate just as safe as a
-        hierarchy-matched one: anything that isn't a parseable, recognized
-        activity row is left alone and stays Appendix-bound.
+        Selects candidates by hierarchy OR `taxonomy_code == 'J'` -- stage
+        3b's per-code dedup can leave only a mis-hierarchied copy of an
+        over-segmented source table, #260/9TUVGW; see the module docstring.
+        Each candidate must then be one single pipe-joined row
+        (`_percent_effort_row_is_single_row` -- a multi-line or extra-celled
+        candidate is real content this writer must not silently fuse or
+        truncate), parsed (`_parse_percent_effort_row`), and have its
+        activity mapped to a template row (`_map_percent_effort_activity`);
+        it is written only when both a percent and a known row are found.
+        The source table's own header row is still consumed though nothing
+        is written for it (`_is_percent_effort_header_row`), since it is not
+        CV content.
 
-        Each candidate is parsed (`_parse_percent_effort_row`), its activity
-        mapped to a template row (`_map_percent_effort_activity`), and only
-        written when both a percent and a known row are found. An unmapped
-        row that is the source table's own header (`_is_percent_effort_header_row`)
-        is still consumed -- excluded from the Appendix -- even though
-        nothing is written for it, since it is not CV content.
+        A SECOND candidate for an already-written activity is consumed
+        WITHOUT a second write only when its (percent, involves_trainees)
+        exactly match what's already written -- a true duplicate copy, the
+        shape #260's own T-coded/J-coded `Total | 100% |` copies take in
+        9TUVGW. Anything else is a genuine conflict: left unwritten AND
+        unconsumed (visible in the Appendix instead of silently losing one
+        of two disagreeing values), and logged.
 
-        A SECOND candidate for an activity already written this call (two
-        entries both mapping to, say, Teaching) is consumed WITHOUT a second
-        write only when its own (percent, involves_trainees) exactly match
-        what was already written -- a true duplicate copy, the shape #260's
-        own T-coded and J-coded `Total | 100% |` copies take in 9TUVGW.
-        Anything else is a genuine conflict: left unwritten AND unconsumed
-        (so it stays visible in the Appendix rather than silently losing one
-        of two disagreeing values) and logged.
-
-        Returns the entries actually written, recognized as a true duplicate
-        of an already-written row, OR recognized as the header row (#260,
-        #294) -- an entry with an unmapped activity that is not the header, a
-        mapped activity with no percent, or a conflicting second row for an
-        already-written activity, is none of those, and stays Appendix-bound.
+        Returns the entries actually written, recognized as a true
+        duplicate, or recognized as the header row (#260, #294) -- a
+        multi-row/extra-celled candidate, an unmapped activity, a mapped
+        activity with no percent, or a conflicting duplicate is none of
+        those and stays Appendix-bound.
         """
         candidates = [
             entry for entry in all_entries
@@ -586,6 +597,12 @@ class PassthroughSection:
         written: dict[str, PercentEffortRow] = {}
         for entry in candidates:
             text = entry.get('text', '').strip()
+            if not _percent_effort_row_is_single_row(text):
+                logger.warning(
+                    "Percent Effort entry spans multiple rows or has an "
+                    "extra cell; entry not written: %r", text)
+                continue
+
             parsed = _parse_percent_effort_row(text)
             if parsed is None:
                 continue
