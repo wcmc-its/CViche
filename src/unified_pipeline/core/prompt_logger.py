@@ -29,7 +29,7 @@ import re
 import contextvars
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import Any
 import hashlib
 
 
@@ -45,7 +45,7 @@ PROMPT_LOG_DIR.mkdir(exist_ok=True, parents=True)
 # upload pick up another run's verbatim CV text (#580). The web backend sets
 # this once per run via set_current_run_id(); unset (CLI / script usage)
 # keeps the original flat layout.
-_current_run_id: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVar(
+_current_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "prompt_logger_current_run_id", default=None
 )
 
@@ -57,7 +57,7 @@ _current_run_id: "contextvars.ContextVar[Optional[str]]" = contextvars.ContextVa
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,10}$")
 
 
-def set_current_run_id(run_id: Optional[str]) -> "contextvars.Token":
+def set_current_run_id(run_id: str | None) -> contextvars.Token:
     """Scope this task's prompt-log writes to PROMPT_LOG_DIR/<run_id>.
 
     Must arrive as an argument, not a reach into the web backend's ``app.`` --
@@ -72,7 +72,7 @@ def set_current_run_id(run_id: Optional[str]) -> "contextvars.Token":
     return _current_run_id.set(run_id)
 
 
-def reset_current_run_id(token: "contextvars.Token") -> None:
+def reset_current_run_id(token: contextvars.Token) -> None:
     """Undo a set_current_run_id() call, restoring whatever was active before it."""
     _current_run_id.reset(token)
 
@@ -87,14 +87,14 @@ def _log_dir() -> Path:
 
 
 def log_prompt_before_call(
-    messages: List[Dict[str, str]],
+    messages: list[dict[str, str]],
     model: str,
     purpose: str,
-    temperature: Optional[float] = None,
-    response_format: Optional[Dict] = None,
-    max_tokens: Optional[int] = None,
-    context: Optional[Dict[str, Any]] = None,
-    caller_file: Optional[str] = None
+    temperature: float | None = None,
+    response_format: dict | None = None,
+    max_tokens: int | None = None,
+    context: dict[str, Any] | None = None,
+    caller_file: str | None = None
 ) -> str:
     """
     Log the EXACT prompt before sending to LLM API.
@@ -217,7 +217,7 @@ def log_prompt_response(
     log_id: str,
     response: Any,
     purpose: str,
-    elapsed_time: Optional[float] = None
+    elapsed_time: float | None = None
 ) -> None:
     """
     Log the response from the LLM (optional, for completeness).

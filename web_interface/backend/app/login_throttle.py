@@ -44,7 +44,7 @@ class LoginThrottle:
         self._last_sweep = 0.0
 
     @classmethod
-    def from_env(cls) -> "LoginThrottle":
+    def from_env(cls) -> LoginThrottle:
         url, _ = get_config("redis", "CVICHE_REDIS_URL", default="")
         return cls(url, LOGIN_RATE_LIMIT_MAX, LOGIN_RATE_LIMIT_WINDOW)
 
@@ -110,7 +110,7 @@ class LoginThrottle:
             return True
 
 
-_throttle: "LoginThrottle | None" = None
+_throttle: LoginThrottle | None = None
 _throttle_lock = threading.Lock()
 
 

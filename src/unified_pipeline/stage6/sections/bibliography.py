@@ -25,18 +25,24 @@ over two different substrates:
   `w:r` elements inside a `w:ins`, because an enriched citation is rendered as a
   tracked insertion paired with a deletion of the original text, and python-docx
   cannot add a run *into* a revision element. It falls back to the plain path if
-  the XML build raises, so an enrichment can never cost the citation itself.
+  the XML build raises. Raw control characters, the one input class known to
+  make the XML build raise, are stripped inside the tracked-insertion writer
+  itself (#552) -- and the plain writer now sanitizes too (#711), so all
+  four run-text writes (the two here plus stage_6_word_template.py's
+  `_add_track_change_insertion` / `_add_track_change_deletion`) reject the
+  same input class the same way instead of raising.
 
 Author bolding targets `target_name` from `_format_citation`, falling back to
 the CV owner's last name -- taken from `cv_owner`, or recovered from the
 document uid when the pipeline never resolved an owner.
 """
+import inspect
 import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 try:
     from docx.oxml import OxmlElement
@@ -56,13 +62,32 @@ logger = logging.getLogger(__name__)
 
 # Tracked-insertion citation runs are built as raw w:r XML -- python-docx has
 # no API to add a run *into* a w:ins element, so this path cannot call
-# _set_font() like every other run in this file (#625). These constants are
-# that call's policy, named so the two paths can't silently diverge:
-# _set_font's own defaults are Arial / 11pt (stage6/formatting/docx.py), and
-# w:sz is expressed in half-points.
-TRACKED_INSERTION_FONT_NAME = 'Arial'
-TRACKED_INSERTION_FONT_SIZE_PT = 11
+# _set_font() like every other run in this file (#625). A prior fix (#625
+# round 2) named these two constants so a diverging value would at least be
+# visible at both call sites; that only holds if someone remembers to update
+# both by hand. #662 item 4 closes the actual gap: read straight out of
+# _set_font's own default parameters, so a policy change in
+# stage6/formatting/docx.py reaches this path automatically instead of
+# silently drifting out of step. w:sz is expressed in half-points.
+_SET_FONT_DEFAULTS = inspect.signature(_set_font).parameters
+TRACKED_INSERTION_FONT_NAME = _SET_FONT_DEFAULTS['name'].default
+TRACKED_INSERTION_FONT_SIZE_PT = _SET_FONT_DEFAULTS['size'].default
 TRACKED_INSERTION_FONT_SIZE_HALF_POINTS = str(TRACKED_INSERTION_FONT_SIZE_PT * 2)
+
+# #552: raw `w:t` / `w:delText` assignment is lxml's own `.text` setter, not
+# python-docx's `Run.text` -- it raises ValueError on the same control-code
+# range python-docx itself rejects ("All strings must be XML compatible: ...
+# no NULL bytes or control characters"), for any of the three run-text
+# writes in stage 6 that build revision XML by hand (the other two are
+# stage_6_word_template.py's `_add_track_change_insertion` /
+# `_add_track_change_deletion`; this module's own is `create_run_element`
+# below). Source .docx text cannot carry these codepoints (lxml rejects them
+# at parse time), so the exposure is LLM-written fields -- a stage-4.5/5c/5d
+# field reaching a citation or a tracked-change run. `\t`, `\n` and `\r` are
+# valid XML characters and must NOT be stripped: `_clean_inline_tabs`'s
+# label/value contract (test_cell_separators.py:34-37) depends on tab
+# characters surviving into rendered text.
+_CONTROL_CHAR_PATTERN = re.compile(r'[\x00-\x08\x0b\x0c\x0e-\x1f]')
 
 
 def _enrichment_field_text(value: Any) -> str:
@@ -111,7 +136,7 @@ class _CitationEnrichment:
         )
 
 
-def _citation_author_split(citation: str, target_name: Optional[str],
+def _citation_author_split(citation: str, target_name: str | None,
                            cv_owner_last_name: str) -> tuple[str, str, str]:
     """Split a citation around the author name that should render bold.
 
@@ -123,7 +148,8 @@ def _citation_author_split(citation: str, target_name: Optional[str],
 
     Prefers `target_name` when it appears verbatim in the citation; otherwise
     falls back to finding `cv_owner_last_name` with trailing initials, e.g.
-    "Wende ME", "Wende, M", "Wende M.".
+    "Wende ME", "Wende M", "Wende M.". The comma form ("Wende, M") is not
+    matched, pinned by test_citation_author_split_additional_dimensions.
 
     Returns `(before, name_to_bold, after)`. When nothing matches,
     `name_to_bold` is '' and the whole citation is in `before`.
@@ -146,6 +172,21 @@ def _citation_author_split(citation: str, target_name: Optional[str],
 
 class BibliographySection:
     """Section S writers, mixed into `WCMTemplateGenerator`."""
+
+    @staticmethod
+    def _sanitize_run_text(text: str) -> str:
+        """Strip the control characters lxml's `.text` setter rejects from
+        one run's text, before it reaches a raw `w:t`/`w:delText` element.
+
+        The one sanitiser for stage 6's four run-text writes (#552, #711) --
+        `WCMTemplateGenerator._add_track_change_insertion` and
+        `_add_track_change_deletion` in stage_6_word_template.py reach this
+        through the mixin (`self._sanitize_run_text`); this module's own
+        `create_run_element`, below, and `_add_citation_with_bold_author`
+        call it directly. `\\t`, `\\n` and `\\r` are valid XML and are left
+        untouched.
+        """
+        return _CONTROL_CHAR_PATTERN.sub('', text)
 
     def _fill_bibliography(self, entries_by_code: Dict[str, List[Dict]], cv_owner: Dict, document_uid: str = ''):
         """Fill bibliography section with formatted citations.
@@ -262,13 +303,25 @@ class BibliographySection:
 
                 self.stats['entries_inserted'] += 1
 
-    def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: Optional[str], cv_owner_last_name: str = ''):
+    def _add_citation_with_bold_author(self, para: Paragraph, citation: str, target_name: str | None, cv_owner_last_name: str = '') -> None:
         """
         Add citation text to paragraph, bolding the target author name.
 
         If target_name is not found, falls back to searching for cv_owner_last_name.
         """
         para.clear()
+
+        # python-docx's `add_run`/`Run.text` reaches the same lxml `.text`
+        # setter the raw-XML writers use and raises on the same control-code
+        # range (#552). This writer is also the tracked writer's
+        # `emit_track_changes=False` path and its exception fallback, so an
+        # unsanitised control character here would still abort the citation.
+        # Sanitise before the split, on both writers, so a control character in
+        # the citation or the target name cannot make the plain and tracked
+        # paths bold different text (#552 round 2).
+        citation = self._sanitize_run_text(citation)
+        if target_name:
+            target_name = self._sanitize_run_text(target_name)
 
         before, name_to_bold, after = _citation_author_split(
             citation, target_name, cv_owner_last_name)
@@ -294,14 +347,21 @@ class BibliographySection:
             _set_font(run)
 
     def _add_citation_with_bold_author_as_insertion(self, para: Paragraph, citation: str,
-                                                     target_name: Optional[str], cv_owner_last_name: str = '',
-                                                     author: str = "PubMed Enrichment"):
+                                                     target_name: str | None, cv_owner_last_name: str = '',
+                                                     author: str = "PubMed Enrichment") -> None:
         """
         Add citation as a track change insertion, bolding the target author name.
 
         This creates proper Word track change structure with w:ins element,
         and includes bold formatting for the target author within the insertion.
         """
+        # Sanitise before the split, on both writers, so a control character in
+        # the citation or the target name cannot make the plain and tracked
+        # paths bold different text (#552 round 2).
+        citation = self._sanitize_run_text(citation)
+        if target_name:
+            target_name = self._sanitize_run_text(target_name)
+
         # Issue #153: when track changes are disabled, render the citation as a
         # plain (non-tracked) paragraph with the target author bolded.
         if not self.emit_track_changes:
@@ -336,8 +396,13 @@ class BibliographySection:
                     rPr.append(b)
                 run_elem.append(rPr)
                 t = OxmlElement('w:t')
-                t.text = text
-                if text.startswith(' ') or text.endswith(' '):
+                # The xml:space guard reads the sanitized string, not the raw
+                # one: stripping a control character can expose a leading or
+                # trailing space that the raw text did not start or end with,
+                # and without xml:space="preserve" Word collapses it.
+                clean_text = self._sanitize_run_text(text)
+                t.text = clean_text
+                if clean_text.startswith(' ') or clean_text.endswith(' '):
                     t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
                 run_elem.append(t)
                 return run_elem

@@ -13,7 +13,6 @@ This is a "Pass 1.5" validator that provides hard exclusions for obvious cases.
 """
 
 import re
-from typing import List
 from .base_validator import BaseValidator, ValidatorGuidance
 
 
@@ -72,7 +71,7 @@ class PublicationAbstractValidator(BaseValidator):
         r'PMID:\s*\d{7,}',  # PMID
     ]
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to Publications parent section (S)."""
         return ['S', 'scholarly_outputs', 'bibliography']
 

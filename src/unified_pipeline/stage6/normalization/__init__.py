@@ -23,6 +23,9 @@ a change to the other.
                      protected personal data out
     fields.py        a stage-4 field of unpredictable *shape* in, plain text out
     records.py       a record filed wrongly in, the correction out
+    citation_matching.py
+                     does this citation's text already say that value?
+    publication.py   a raw publication entry in, one resolved record out
 
 The first six were one module, `text.py`, until they were split apart. "Value
 in, cleaner value out" is a shared signature, not a shared reason to change: an
@@ -40,10 +43,30 @@ LLM JSON against no schema, so a field the renderer expects to be a string can
 arrive as a dict or a list -- and `cell.text = <dict>` aborts the whole document
 (#442, #450). Until a schema layer exists between stage 4 and stage 6, that
 absence is absorbed there and nowhere else.
+
+`publication.py` is that same absence absorbed once for the bibliography, and it
+is why `formatting/values.py` no longer names a single pipeline key: an entry is
+resolved here -- guards, enrichment precedence, non-text coercion, author
+normalization, stage-5d reconciliation -- and the renderer receives a record
+whose every field is already the text it will print.
+
+Dependencies run one way, inside this package and out of it. `publication`
+imports `citation_matching` and `authors`; nothing imports `publication`. Nothing
+here imports `formatting/`, `sections/`, or `stage_6_word_template` -- those
+import this, so a back-edge would be an import cycle that fails at load rather
+than at render.
 """
 
 from .authors import (  # noqa: F401
     _normalize_author_names,
+)
+from .citation_matching import (  # noqa: F401
+    _CITATION_MATCH_MIN_RATIO,
+    _CITATION_STOPWORDS,
+    _CITATION_TOKEN_MIN_LEN,
+    _CITATION_TOKEN_RE,
+    _append_missing_stage5d_values,
+    _value_referenced,
 )
 from .content import (  # noqa: F401
     _deduplicate_repeated_content,
@@ -72,6 +95,12 @@ from .pii import (  # noqa: F401
     _squash,
     _pii_fragments,
     _from_pii_fragment,
+)
+from .publication import (  # noqa: F401
+    PubMedEnrichment,
+    PublicationFields,
+    ResolvedPublication,
+    resolve_publication,
 )
 from .records import (  # noqa: F401
     grant_status_rebucket_target,

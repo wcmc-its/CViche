@@ -20,22 +20,36 @@ shape observed in a real CV. The proper fix is a schema layer between stage 4
 and stage 6; until that exists this is where the absence is absorbed.
 """
 
-def _committee_cell_text(value) -> str:
+from typing import Literal
+
+
+# Keys observed carrying the committee's name in a structured stage-4
+# `committee` value, in the order they are tried.
+_COMMITTEE_NAME_KEYS = ('committee_name', 'committee', 'activity', 'name', 'title')
+
+
+def _committee_cell_text(value: object) -> str:
     """Coerce a possibly-structured committee field to plain cell text.
 
     Stage 4 can emit a committee field as a dict or a list of record dicts for a
     multi-record entry (#208/#248 fusion), not just a string. Writing a non-str
     into a Word cell (``cell.text = <dict>``) raises deep in python-docx and
     aborts the whole document (#256). Never let that happen: pull the name-like
-    value from a dict, join a list, and stringify anything else."""
+    value from a dict, falling back to joining its other values rather
+    than dropping an unrecognised shape (#555); join a list, and stringify
+    anything else. The recognised-key value and the fallback values are
+    recursed, not str()-ed, so a nested dict or list never renders its Python
+    repr into a Word cell."""
     if value is None:
         return ""
     if isinstance(value, str):
         return value
     if isinstance(value, dict):
-        return str(value.get("committee_name") or value.get("committee")
-                   or value.get("activity") or value.get("name")
-                   or value.get("title") or "")
+        for key in _COMMITTEE_NAME_KEYS:
+            text = _committee_cell_text(value.get(key))
+            if text:
+                return text
+        return "; ".join(t for t in (_committee_cell_text(v) for v in value.values()) if t)
     if isinstance(value, list):
         return "; ".join(t for t in (_committee_cell_text(v) for v in value) if t)
     return str(value)
