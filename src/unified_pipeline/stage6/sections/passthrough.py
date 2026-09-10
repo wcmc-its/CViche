@@ -32,6 +32,13 @@ back to bullets under the header instead of writing into a stranger's table.
 
 Percent effort is deliberately absent. It is in the same part of the template
 and looks like it belongs, but it is filled by hand.
+
+Neither section has a taxonomy code of its own that `generate()`'s
+RENDER_ROUTED_CODES dispatch can key on, so each writer here reports back
+exactly which entry dicts it actually wrote (never merely matched -- a
+refused E label is not in that list). `generate()` uses that to keep a
+written entry out of the Appendix a second time (#294) without keying
+anything off taxonomy code at all.
 """
 import logging
 
@@ -81,7 +88,7 @@ def _employment_row_key(label: str) -> str | None:
 class PassthroughSection:
     """Section E and G writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_passthrough_sections(self, all_entries: list[dict]):
+    def _fill_passthrough_sections(self, all_entries: list[dict]) -> list[dict]:
         """Fill sections that can be copied directly from source CV when format matches.
 
         These are short, structured sections in the WCM template that may already exist
@@ -95,15 +102,26 @@ class PassthroughSection:
 
         Args:
             all_entries: All entries from the pipeline (to search by hierarchy)
-        """
-        self._fill_employment_status(all_entries)
-        self._fill_hospital_affiliation(all_entries)
 
-    def _fill_employment_status(self, all_entries: list[dict]):
+        Returns:
+            The union of entry dicts each writer actually wrote into the
+            document -- not merely matched by hierarchy. `generate()` uses
+            this to keep a consumed entry out of the Appendix a second time
+            (#294); an entry a writer matched but refused (e.g. an E label
+            with no known template row, #571) is NOT in this list, so it
+            still reaches the Appendix as before.
+        """
+        return self._fill_employment_status(all_entries) + self._fill_hospital_affiliation(all_entries)
+
+    def _fill_employment_status(self, all_entries: list[dict]) -> list[dict]:
         """Fill E. EMPLOYMENT STATUS section.
 
         Looks for entries with hierarchy containing 'EMPLOYMENT STATUS' and
         text in 'Label: Value' format (e.g., 'Name of Employer(s): Weill Cornell').
+
+        Returns the entries actually written (#294) -- an entry whose label
+        names no known row, or whose row is not found in the template, is
+        matched but not written, and is excluded from this list.
         """
         # Find entries from Employment Status section
         matching_entries = []
@@ -125,7 +143,7 @@ class PassthroughSection:
                         matching_entries.append(entry)
 
         if not matching_entries:
-            return
+            return []
 
         # Find "Name of Current Employer" paragraph in template (more specific than section header)
         target_idx = None
@@ -142,7 +160,7 @@ class PassthroughSection:
         if target_idx is None:
             if self.verbose:
                 print("  Passthrough: Could not find Employment Status section")
-            return
+            return []
 
         if self.verbose:
             print(f"  Passthrough: Filling Employment Status ({len(matching_entries)} entries)")
@@ -150,6 +168,7 @@ class PassthroughSection:
         # Route each entry to the template row its OWN label names. The first
         # 'employer' paragraph must not win for every entry -- that files a
         # position or a date under "Name of Current Employer(s):" (#571).
+        consumed = []
         for entry in matching_entries:
             text = entry.get('text', '').strip()
             if ':' not in text:
@@ -164,10 +183,13 @@ class PassthroughSection:
                     "Employment Status entry label %r names no known template row; "
                     "entry not written", label)
                 continue
-            if not self._write_employment_row(target_idx, row_key, value):
+            if self._write_employment_row(target_idx, row_key, value):
+                consumed.append(entry)
+            else:
                 logger.warning(
                     "Employment Status entry %r matched no template row near the "
                     "section; entry not written", label)
+        return consumed
 
     def _write_employment_row(self, anchor_idx: int, row_key: str, value: str) -> bool:
         """Write `value` into the Employment Status row that classifies as `row_key`.
@@ -193,10 +215,15 @@ class PassthroughSection:
             return True
         return False
 
-    def _fill_hospital_affiliation(self, all_entries: list[dict]):
+    def _fill_hospital_affiliation(self, all_entries: list[dict]) -> list[dict]:
         """Fill G. INSTITUTIONAL/HOSPITAL AFFILIATION section.
 
         Looks for dedicated hospital affiliation entries or extracts from D2 positions.
+
+        Returns the entries actually written (#294): every entry that matches
+        the section's hierarchy gets a row or a bullet UNLESS the section or
+        its table cannot be located at all, in which case nothing is written
+        and this returns [].
         """
         # Find entries from Affiliation sections
         matching_entries = []
@@ -212,7 +239,7 @@ class PassthroughSection:
 
         if not matching_entries:
             # No dedicated affiliation entries - skip (D2 positions are handled elsewhere)
-            return
+            return []
 
         # Find the affiliation table
         section_idx = self._find_paragraph_with_text('INSTITUTIONAL/HOSPITAL AFFILIATION')
@@ -222,10 +249,12 @@ class PassthroughSection:
         if section_idx is None:
             if self.verbose:
                 print("  Passthrough: Could not find Hospital Affiliation section")
-            return
+            return []
 
         # Find table after the section
         table = self._find_table_after_paragraph(section_idx)
+
+        consumed = []
 
         # Validate this is the affiliation table (should have "Primary Hospital" or similar)
         if table and table.rows:
@@ -269,6 +298,7 @@ class PassthroughSection:
                                 _set_font(run)
 
                     self.stats['entries_inserted'] += 1
+                    consumed.append(entry)
             else:
                 # No table - insert as bullet points after the section header
                 for i, entry in enumerate(matching_entries):
@@ -276,3 +306,5 @@ class PassthroughSection:
                     if text:
                         insert_idx = section_idx + 1 + i
                         self._insert_bulleted_entry(insert_idx, text, entry, add_blank_before=(i == 0), list_level=0)
+                        consumed.append(entry)
+        return consumed
