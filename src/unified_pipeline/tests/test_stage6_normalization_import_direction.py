@@ -2,7 +2,7 @@
 
 §1.1 asks for an import test per package. `normalization/` grew a second
 module that other modules in it depend on (`publication.py` imports
-`citation_matching` and `text`, PR #737), which is the first same-level edge
+`citation_matching` and `authors`, PR #737), which is the first same-level edge
 in any of the pure stage-6 layers -- `formatting/` and `sorting/` reach
 *across* to `parsing/`, but no module in a pure package imported a sibling
 before this one. That is worth a gate rather than a sentence in a docstring:
@@ -70,7 +70,7 @@ _IO_MODULES = frozenset({
 #: made rather than noticed.
 _DECLARED_INTERNAL_EDGES = frozenset({
     ("publication", "citation_matching"),
-    ("publication", "text"),
+    ("publication", "authors"),
 })
 
 #: Dotted names that an import from inside `normalization/` may not reach.
@@ -212,7 +212,7 @@ def test_normalization_has_exactly_the_internal_edges_it_declares():
 
 def test_nothing_in_normalization_imports_publication():
     """`publication` is the top of the package's internal order: it depends on
-    `citation_matching` and `text`, and nothing depends on it. A back-edge
+    `citation_matching` and `authors`, and nothing depends on it. A back-edge
     would be an import cycle, which fails at load and takes every stage-6
     render with it -- not at render, where a test might still catch it."""
     importers = [
