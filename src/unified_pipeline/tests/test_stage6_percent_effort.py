@@ -376,6 +376,34 @@ def test_trailing_empty_fourth_cell_still_written_and_consumed(tmp_path):
     assert _clean_inline_tabs(text) not in _appendix_text(doc)
 
 
+def test_real_four_cell_header_row_consumed_regardless_of_cell_count(tmp_path):
+    """13 older-template corpus CVs (uid 1FRABQ's stage-6 input, taxonomy_code
+    J, table_row, no newline): the real source header row has FOUR cells.
+    Commit 6's single-row guard ran before the header-row check and refused
+    it, putting it back in the Appendix on all 13 CVs (corpus attribution:
+    20 header-row removals -> 1). The header-row check must run regardless
+    of cell count -- #260's acceptance says the column-header row must never
+    appear as content."""
+    text = "Current percent effort\t\t\t\t Percent effort | % | students | researchers"
+    entries = [_OWNER_ENTRY, {
+        "text": text, "taxonomy_code": "J", "hierarchy": _HIERARCHY,
+        "extracted_fields": {}, "element_idx_start": 1,
+    }]
+    doc = _render(tmp_path, entries)
+
+    assert _clean_inline_tabs(text) not in _appendix_text(doc), (
+        "real 4-cell header row duplicated into the Appendix -- #260 regression")
+    table = _find_j_table(doc)
+    assert [c.text for c in table.rows[0].cells] == [
+        "Weill Cornell Activity (Current or Anticipated)",
+        "Percent Effort (%)",
+        "Does the activity involve Weill Cornell students/research trainees? (Yes/No)",
+    ]
+    for row in table.rows[1:]:
+        if row.cells[0].text.strip() != "Total":
+            assert row.cells[1].text == ""
+
+
 class _StubGenerator(PassthroughSection):
     """Just enough of WCMTemplateGenerator to drive `_fill_percent_effort`
     directly, for the one case `generate()` can't produce: no J table at

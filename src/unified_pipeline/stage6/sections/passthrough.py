@@ -152,9 +152,10 @@ _PERCENT_EFFORT_HEADER_YES_NO_KEYWORD = 'YES/NO'
 # the same positive signature (#260).
 _PERCENT_EFFORT_MIN_HEADER_PIPES = 2
 
-# A real J row has exactly 3 cells (activity, percent, involves-trainees); a
-# candidate with a non-empty 4th+ cell, or two source rows fused by a
-# newline, is not one -- see `_percent_effort_row_is_single_row`.
+# A real J DATA row has exactly 3 cells (activity, percent, involves-
+# trainees); a candidate with a non-empty 4th+ cell is not one. NOT applied
+# to header-row detection -- the real 13-CV corpus header row has 4 columns
+# (uid 1FRABQ) -- see `_percent_effort_row_has_extra_cells`.
 _PERCENT_EFFORT_MAX_ROW_CELLS = 3
 
 
@@ -187,22 +188,32 @@ def _map_percent_effort_activity(raw: str) -> str | None:
     return _PERCENT_EFFORT_ACTIVITY_SYNONYMS.get(_normalize_percent_effort_activity(raw))
 
 
-def _percent_effort_row_is_single_row(text: str) -> bool:
-    """Whether `text` is ONE pipe-joined J row, not several rows fused
-    together. Two latent loss shapes, neither seen in the corpus or S3 yet:
-    a multi-line candidate ("Teaching | 10% | Yes\\nClinical | 20% | No")
-    parses as one row with a corrupted third cell ("Yes\\nClinical") and the
-    later row(s) vanish entirely; a non-empty 4th+ cell ("Teaching | 10% |
-    Yes | extra") is dropped the same way a non-empty third cell used to be
-    (F1) -- real content silently lost. Checked independently: a newline can
-    appear with the cell count still exactly 3, and an extra cell can appear
-    with no newline. An empty trailing cell (the real PNLRAA shape,
-    "Teaching | 10% | Yes |") is still a single row.
+def _percent_effort_row_has_newline(text: str) -> bool:
+    """Whether `text` fuses several source rows into one candidate, e.g.
+    "Teaching | 10% | Yes\\nClinical | 20% | No" -- which would otherwise
+    parse as one row with a corrupted third cell ("Yes\\nClinical") and the
+    later row(s) vanishing entirely. Checked for EVERY candidate, before
+    parsing and regardless of what it turns out to be (data row or header),
+    since a multi-line candidate can never be a genuine single row of
+    either kind.
     """
-    if '\n' in text:
-        return False
+    return '\n' in text
+
+
+def _percent_effort_row_has_extra_cells(text: str) -> bool:
+    """Whether `text` has a non-empty cell beyond the third, e.g.
+    "Teaching | 10% | Yes | extra" -- dropped the same way a non-empty third
+    cell used to be (F1) if written anyway. An empty trailing cell (the real
+    PNLRAA shape, "Teaching | 10% | Yes |") does not count.
+
+    Checked ONLY for a DATA row (mapped activity), never for header-row
+    detection: the real 13-CV corpus header row (uid 1FRABQ) has 4 cells,
+    and refusing it here before `_is_percent_effort_header_row` gets a
+    chance to run put it back in the Appendix on all 13 CVs -- the column-
+    header row appearing as content is exactly what #260 forbids.
+    """
     cells = [c.strip() for c in text.split('|')]
-    return not any(cells[_PERCENT_EFFORT_MAX_ROW_CELLS:])
+    return any(cells[_PERCENT_EFFORT_MAX_ROW_CELLS:])
 
 
 def _parse_percent_effort_row(text: str) -> PercentEffortRow | None:
@@ -544,32 +555,26 @@ class PassthroughSection:
     def _fill_percent_effort(self, all_entries: list[dict]) -> list[dict]:
         """Fill J. PERCENT EFFORT AND INSTITUTIONAL RESPONSIBILITIES (#260).
 
-        Selects candidates by hierarchy OR `taxonomy_code == 'J'` -- stage
-        3b's per-code dedup can leave only a mis-hierarchied copy of an
-        over-segmented source table, #260/9TUVGW; see the module docstring.
-        Each candidate must then be one single pipe-joined row
-        (`_percent_effort_row_is_single_row` -- a multi-line or extra-celled
-        candidate is real content this writer must not silently fuse or
-        truncate), parsed (`_parse_percent_effort_row`), and have its
-        activity mapped to a template row (`_map_percent_effort_activity`);
-        it is written only when both a percent and a known row are found.
-        The source table's own header row is still consumed though nothing
-        is written for it (`_is_percent_effort_header_row`), since it is not
-        CV content.
+        Selects candidates by hierarchy OR `taxonomy_code == 'J'` (dedup can
+        leave only a mis-hierarchied copy, #260/9TUVGW; see the module
+        docstring). A multi-line candidate is refused outright, before
+        parsing (`_percent_effort_row_has_newline`). Everything else is
+        parsed and activity-mapped FIRST: an unmapped activity may still be
+        the source table's own header row (`_is_percent_effort_header_row`,
+        checked regardless of cell count -- the real 13-CV corpus header has
+        4, uid 1FRABQ), consumed with nothing written. Only a MAPPED
+        activity is then checked for a non-empty 4th+ cell
+        (`_percent_effort_row_has_extra_cells`), before a percent and a
+        known template row are both required to write.
 
-        A SECOND candidate for an already-written activity is consumed
+        A second candidate for an already-written activity is consumed
         WITHOUT a second write only when its (percent, involves_trainees)
-        exactly match what's already written -- a true duplicate copy, the
-        shape #260's own T-coded/J-coded `Total | 100% |` copies take in
-        9TUVGW. Anything else is a genuine conflict: left unwritten AND
-        unconsumed (visible in the Appendix instead of silently losing one
-        of two disagreeing values), and logged.
+        match what's already written (a true duplicate, e.g. 9TUVGW's
+        T-coded/J-coded `Total | 100% |` copies); otherwise it's a conflict,
+        left unwritten AND unconsumed, and logged.
 
-        Returns the entries actually written, recognized as a true
-        duplicate, or recognized as the header row (#260, #294) -- a
-        multi-row/extra-celled candidate, an unmapped activity, a mapped
-        activity with no percent, or a conflicting duplicate is none of
-        those and stays Appendix-bound.
+        Returns the entries written, a true duplicate, or the header row
+        (#260, #294) -- anything else stays Appendix-bound.
         """
         candidates = [
             entry for entry in all_entries
@@ -597,10 +602,8 @@ class PassthroughSection:
         written: dict[str, PercentEffortRow] = {}
         for entry in candidates:
             text = entry.get('text', '').strip()
-            if not _percent_effort_row_is_single_row(text):
-                logger.warning(
-                    "Percent Effort entry spans multiple rows or has an "
-                    "extra cell; entry not written: %r", text)
+            if _percent_effort_row_has_newline(text):
+                logger.warning("Percent Effort entry spans multiple rows; entry not written: %r", text)
                 continue
 
             parsed = _parse_percent_effort_row(text)
@@ -613,6 +616,10 @@ class PassthroughSection:
                     consumed.append(entry)
                 continue
             if parsed.percent is None:
+                continue
+
+            if _percent_effort_row_has_extra_cells(text):
+                logger.warning("Percent Effort entry has an extra cell; entry not written: %r", text)
                 continue
 
             row_idx = row_index.get(activity)
