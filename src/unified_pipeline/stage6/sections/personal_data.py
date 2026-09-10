@@ -522,9 +522,11 @@ class PersonalDataSection:
                     _set_cell_text(row.cells[1], personal_email)
                     self.stats['entries_inserted'] += 1
 
-    def _recover_contact_fields_from_docx(self, original_doc_path, document_uid,
-                                          name, name_is_complete, work_email,
-                                          office_phone, office_address):
+    def _recover_contact_fields_from_docx(
+            self, original_doc_path: str | None, document_uid: str,
+            name: str | None, name_is_complete: bool, work_email: str | None,
+            office_phone: str | None,
+            office_address: str | None) -> _RecoveredContact:
         """Re-open the ORIGINAL .docx and recover contact fields still missing.
 
         Step 3 of the module docstring, lifted out of `_fill_personal_data` so
@@ -650,7 +652,9 @@ class PersonalDataSection:
         return _RecoveredContact(name, name_is_complete, work_email,
                                  office_phone, office_address)
 
-    def _parse_address_block(self, value, office_phone, work_email):
+    def _parse_address_block(
+            self, value: str, office_phone: str | None,
+            work_email: str | None) -> tuple[str, str | None, str | None]:
         """Split a business-address cell into address / phone / email.
 
         A "BUSINESS ADDRESS:" cell is one cell, not three rows: it carries the
