@@ -108,6 +108,26 @@ def test_email_regex_fallback_does_not_harvest_from_a_pii_fragment(tmp_path):
     assert "pat.doe@example.com" not in text
 
 
+def test_personal_data_path_keeps_phone_and_email_beside_a_birth_date(tmp_path):
+    """#735 review item 3: the same entry carries a birth date AND a real
+    office phone AND a work email; the consumption path denies by value, so
+    both live contact values survive while only the birth date is denied.
+    Extends `test_real_contact_data_survives_an_entry_that_also_carries_pii`
+    (address + phone) with the one field it does not cover, email."""
+    text = _render(tmp_path, [
+        _a("Born: April 1, 1958\n"
+           "Office: 1300 York Avenue\n"
+           "Phone: (212) 555-0100\n"
+           "Email: jane.roe@med.example.edu",
+           {"address": "1300 York Avenue",
+            "phone": "(212) 555-0100",
+            "email": "jane.roe@med.example.edu"}),
+    ])
+    assert "(212) 555-0100" in text, "real office phone was dropped with the PII"
+    assert "jane.roe@med.example.edu" in text, "real work email was dropped with the PII"
+    assert "April 1, 1958" not in text, "birth date reached the document"
+
+
 # --------------------------------------------------------------------------
 # appendix recovery path
 # --------------------------------------------------------------------------
@@ -174,6 +194,28 @@ def test_pii_named_only_by_field_key_is_caught(tmp_path):
     ])
     assert "Ann, Bob" not in text
     assert PII_REDACTED_NOTICE in text
+
+
+def test_appendix_removal_catches_raw_text_and_field_key_pii_alike(tmp_path):
+    """#735 review item 1, end-to-end through the real appendix removal site
+    (`_unconsumed_personal_data_batch`, `stage_6_word_template.py:2390`): an
+    A-coded entry whose RAW TEXT carries a PII label, and a sibling entry
+    whose text carries no label but whose `extracted_fields` alone carries a
+    PII key, are both absent from the generated document with one shared
+    withheld notice -- and a third, non-PII sibling in the same appendix
+    batch still renders. `test_pii_orphan_is_redacted_with_a_visible_notice`
+    and `test_pii_named_only_by_field_key_is_caught` pin the two halves
+    separately; this pins them together in one batch, which is what item 1
+    actually asks for."""
+    text = _render(tmp_path, [
+        _a("Date of Birth: 04/01/1958"),
+        _a("Additional information", {"marital_status_spouse": "Pat Roe"}),
+        _a("Foreign Languages: French"),
+    ])
+    assert "04/01/1958" not in text, "raw-text-labelled PII reached the document"
+    assert "Pat Roe" not in text, "field-key-only PII reached the document"
+    assert PII_REDACTED_NOTICE in text, "content was withheld with no indication"
+    assert "French" in text, "a non-PII sibling in the same batch was dropped too"
 
 
 def test_pii_in_a_tab_separated_cell_is_still_caught(tmp_path):

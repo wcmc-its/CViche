@@ -133,6 +133,20 @@ def test_no_fragments_means_nothing_is_denied():
     assert not _from_pii_fragment("1300 York Avenue, New York, NY", [])
 
 
+def test_a_non_str_value_is_squashed_through_str_like_any_other():
+    """#735 review item 2's one case the existing 12 tests do not cover:
+    `value` is typed `object`, not `str`, and stage 4 can hand back a bare
+    int for a birth year. `_squash` runs every value through `str(value or
+    "")`, so a truthy int is matched exactly as its string form would be --
+    but a FALSY int (0) is indistinguishable from a missing value: `0 or ""`
+    evaluates to `""` before `str()` ever runs, so it is never denied even
+    when the fragment would otherwise match "0"."""
+    fragments = _pii_fragments("Date of Birth: 12/13/1947")
+    assert fragments
+    assert _from_pii_fragment(1947, fragments)
+    assert not _from_pii_fragment(0, _pii_fragments("Marital Status: 0"))
+
+
 # --------------------------------------------------------------------------
 # Whitespace still does not matter, only alignment does
 # --------------------------------------------------------------------------
