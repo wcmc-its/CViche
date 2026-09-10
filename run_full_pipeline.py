@@ -1100,7 +1100,6 @@ def _exit_if_prerequisites_missing(target_stage: str, document_uid: str) -> None
     logger.error("Error: Cannot run stage %s", target_stage)
     logger.error("  Missing prerequisite: Stage %s output", required_stage)
     logger.error("  Expected file: %s", missing_file)
-    logger.error("")
     logger.error("  Run the prerequisite stage first, or run without --stage for full pipeline.")
     sys.exit(1)
 
