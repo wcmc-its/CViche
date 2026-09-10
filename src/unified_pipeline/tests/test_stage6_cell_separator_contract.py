@@ -344,6 +344,52 @@ def test_an_empty_cell_is_dropped_rather_than_kept_as_a_gap():
     assert _clean_inline_tabs("Jane Roe |  | 2022") == "Jane Roe — 2022"
 
 
+# --------------------------------------------------------------------------
+# #735 review item 7: the specific empty-cell / separator shapes named by
+# the review, pinned individually rather than folded into the cases above.
+# --------------------------------------------------------------------------
+
+def test_an_all_empty_pipe_row_collapses_to_empty() -> None:
+    assert _clean_inline_tabs(" | | ") == ""
+
+
+def test_a_pipe_row_with_one_empty_middle_cell_drops_it() -> None:
+    assert _clean_inline_tabs("a | | b") == "a — b"
+
+
+def test_a_lone_pipe_collapses_to_empty() -> None:
+    assert _clean_inline_tabs("|") == ""
+
+
+def test_two_bare_tabs_collapse_to_empty() -> None:
+    """Both cells around and between the tabs are empty, so there are no
+    surviving `parts`, and the `len(parts) <= 1` fallback replaces every tab
+    with a space over an all-whitespace string -- also empty after strip()."""
+    assert _clean_inline_tabs("\t\t") == ""
+
+
+def test_a_single_label_with_a_trailing_tab_keeps_just_the_label() -> None:
+    """Only one non-empty part, so the `len(parts) <= 1` branch fires: the
+    tab is replaced with a space rather than turned into a colon, since a
+    colon needs a label AND a value."""
+    assert _clean_inline_tabs("Label\t") == "Label"
+
+
+def test_a_single_value_with_a_leading_tab_keeps_just_the_value() -> None:
+    assert _clean_inline_tabs("\tValue") == "Value"
+
+
+def test_a_pipe_pair_with_no_surrounding_spaces_still_splits() -> None:
+    assert _clean_inline_tabs("a|b") == "a — b"
+
+
+def test_mixed_pipe_and_tab_applies_the_colon_rule_after_the_pipe_pass() -> None:
+    """The pipe pass runs first and rejoins with " — ", so the tab that
+    survives inside the second pipe-cell becomes the label/value colon of
+    the whole rejoined line -- "b" is the label, "c" the value."""
+    assert _clean_inline_tabs("a | b\tc") == "a — b: c"
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_"):

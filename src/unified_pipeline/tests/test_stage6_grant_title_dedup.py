@@ -22,11 +22,14 @@ Run with:
 import sys
 from pathlib import Path
 
+import docx
+
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from unified_pipeline.stage6.normalization.content import _deduplicate_repeated_content  # noqa: E402
+from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -100,3 +103,55 @@ def test_empty_string_returns_empty_string():
 def test_three_of_four_identical_does_not_collapse():
     text = 'A | A | A | B'
     assert _deduplicate_repeated_content(text) == text
+
+
+# --------------------------------------------------------------------------
+# #735 review item 12: through its ACTUAL caller. Every test above calls
+# `_deduplicate_repeated_content` directly; none exercises the one real call
+# site, `_create_grant_table`'s `title = _deduplicate_repeated_content(title)`
+# (`stage6/sections/research_support.py:275`). The harness reuses
+# `test_stage6_grant_cost_precedence.py`'s pattern: `_create_grant_table`
+# needs only a bare generator with a `docx` document, so it is called
+# directly and the rendered "Project title:" cell is read back off the
+# table.
+# --------------------------------------------------------------------------
+
+_TITLE_ROW = 'Project title:'
+_AWARD = 'Cancer Genomics Pilot Award'
+
+
+def _rendered_title(title: str) -> str:
+    """Render one grant table and return its "Project title:" value."""
+    gen = WCMTemplateGenerator.__new__(WCMTemplateGenerator)
+    gen.doc = docx.Document()
+    gen.verbose = False
+    table = gen._create_grant_table({'title': title, 'agency': 'NIH'}, 'M2B')
+    return {row.cells[0].text: row.cells[1].text for row in table.rows}[_TITLE_ROW]
+
+
+def test_the_caller_collapses_three_identical_pipe_segments_to_one():
+    """"X | X | X" rendered through the real grant table -> "X", the shape
+    a merged table cell repeating itself produces."""
+    assert _rendered_title(f'{_AWARD} | {_AWARD} | {_AWARD}') == _AWARD
+
+
+def test_the_caller_leaves_a_two_segment_title_untouched():
+    """#561 through the real call site: "X | Y" is meaningfully different
+    content and must render whole, not truncated to "X"."""
+    title = f'{_AWARD} | NIH R01 Supplement'
+    assert _rendered_title(title) == title
+
+
+def test_the_caller_leaves_a_three_segment_title_with_one_difference_untouched():
+    """Two matching segments and one that doesn't still fails the "every
+    segment identical" bar, through the real call site."""
+    title = f'{_AWARD} | {_AWARD} | Different Award Name'
+    assert _rendered_title(title) == title
+
+
+if __name__ == "__main__":
+    for _name, _fn in sorted(globals().items()):
+        if _name.startswith("test_"):
+            _fn()
+            print(f"ok  {_name}")
+    print("all checks passed")

@@ -27,8 +27,11 @@ Run with:
 """
 
 import sys
+import unicodedata
 from collections import Counter
 from pathlib import Path
+
+import pytest
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -36,6 +39,7 @@ if str(_SRC) not in sys.path:
 
 from unified_pipeline.stage6.formatting.values import _format_citation  # noqa: E402
 from unified_pipeline.stage6.normalization.authors import (  # noqa: E402
+    _looks_like_initials,
     _parse_author_fallback,
     _parse_surname_initial_pairs,
 )
@@ -446,3 +450,230 @@ def test_consecutive_orphan_initials_coalesce_into_one_author():
     assert _parse_surname_initial_pairs(
         ['Alpha', 'A', 'E', 'L', 'Bravo', 'B']
     ) == ['Alpha A', 'E L', 'Bravo B']
+
+
+# --------------------------------------------------------------------------
+# #735 review item 9: "_normalize_author_names() has one remaining
+# problematic test contract".
+#
+# Two candidates were named: `test_docstrings_own_broken_example_is_pinned_
+# as_it_actually_behaves` and `test_the_two_parsers_place_a_second_
+# consecutive_orphan_differently`. Grounding against the CODE rather than
+# the review comment (the review predates the same-day docstring-correction
+# commits in this branch's own history -- `git log` on authors.py shows
+# `4ca9a78 docs(stage6): cite the one measured definition, and a base-true
+# example` and `13598e5 docs(stage6): state where the two orphan placements
+# differ, and pin it`, both dated the same day as the review): BOTH
+# docstrings already state the true, current behaviour, and both pinning
+# tests already assert it. Running the first candidate's example confirms
+# there is no live discrepancy left to resolve:
+#
+#     _normalize_author_names('Smith, John A., Jones, Mary B.')
+#     -> 'Smith, John A, Jones, Mary B'
+#
+# which is exactly what the function's docstring states today. So there is
+# no wrong output left pinned as expected on either candidate -- what was
+# "problematic" about both was prose making a promise the code did not
+# keep, and that promise was already corrected to match reality. Per the
+# ticket's own fallback ("if the docstring example is itself wrong, correct
+# the docstring and turn the test into an assertion of the correct
+# contract"): the docstring is not wrong, so what remained undone was only
+# that "nothing is deleted" / "no token deleted" were prose claims, not
+# assertions. The two tests below turn each into an actual multiset check,
+# over more than the one pinned example, which is the concrete, checkable
+# form those claims were missing. No production code changes: there was no
+# defect to fix, only an assertion to add.
+# --------------------------------------------------------------------------
+
+def test_declining_the_pair_shape_for_full_given_names_never_drops_a_character():
+    """Candidate 1, generalised past its one pinned example. The pair
+    detector declines whenever an odd-indexed token is not initials-shaped
+    -- a full given name being the case the docstring documents -- and the
+    fallback parser then has to carry every token through untouched rather
+    than attempt an abbreviation it was never asked to make."""
+    for authors in (
+        'Smith, John A., Jones, Mary B.',
+        'Alpha, Jamie Lee, Bravo, Chris Ann',
+        'Charlie, Robin, Delta, Morgan Kay',
+    ):
+        parts = [p.strip() for p in authors.rstrip('.,;').split(',') if p.strip()]
+        cleaned, has_et_al = _parse_author_fallback(parts)
+        assert not has_et_al
+        expected = Counter(c for token in parts for c in token if c.isalnum())
+        actual = Counter(c for token in cleaned for c in token if c.isalnum())
+        assert actual == expected, (
+            f'{authors!r} lost {dict(expected - actual)} '
+            f'and gained {dict(actual - expected)}'
+        )
+
+
+def test_the_two_parsers_second_orphan_divergence_still_drops_no_character():
+    """Candidate 2. The two parsers place a second consecutive orphan
+    differently (pinned above), and that placement choice is a documented
+    decision, not a defect -- but the decision is only acceptable if #560's
+    bar still holds on both sides of it: no character of the input is lost
+    either way, whichever parser a given input happens to reach."""
+    parts = ['Alpha', 'B', 'C', 'D', 'Echo', 'F']
+    expected = Counter(c for token in parts for c in token if c.isalnum())
+
+    from_pairs = _parse_surname_initial_pairs(parts)
+    actual_pairs = Counter(c for token in from_pairs for c in token if c.isalnum())
+    assert actual_pairs == expected, 'pair parser dropped a character'
+
+    fallback_parts = ['Alpha B', 'C', 'D', 'Echo F']
+    fallback_expected = Counter(
+        c for token in fallback_parts for c in token if c.isalnum())
+    from_fallback, has_et_al = _parse_author_fallback(fallback_parts)
+    actual_fallback = Counter(
+        c for token in from_fallback for c in token if c.isalnum())
+    assert not has_et_al
+    assert actual_fallback == fallback_expected, 'fallback parser dropped a character'
+
+
+# --------------------------------------------------------------------------
+# #735 review item 10: `_looks_like_initials` Unicode behaviour.
+# --------------------------------------------------------------------------
+
+def test_a_single_precomposed_accented_letter_is_an_initial():
+    assert _looks_like_initials('É')
+
+
+def test_an_nfd_decomposed_letter_is_not_recognised_as_an_initial():
+    """The one genuinely surprising Unicode result: an NFD-decomposed 'É' is
+    two code points -- the base letter 'E' and a COMBINING ACUTE ACCENT
+    (U+0301). The combining mark is not in `_INITIALS_TRAILING_MARKS`, so it
+    survives the rstrip, and `str.isalpha()` is False for a standalone
+    combining mark (Unicode category Mn, not a letter category) -- so
+    `t.isalpha()` fails on the two-character token as a whole. Precomposed
+    and NFD forms of the same visible character are NOT treated alike."""
+    nfd = unicodedata.normalize('NFD', 'É')
+    assert len(nfd) == 2, 'fixture assumption: NFD form is base + combining mark'
+    assert not _looks_like_initials(nfd)
+
+
+def test_a_two_letter_non_ascii_group_is_recognised():
+    assert _looks_like_initials('ÉÀ')
+
+
+def test_greek_and_cyrillic_capital_groups_are_recognised():
+    assert _looks_like_initials('ΑΒ')   # Greek capital Alpha, Beta
+    assert _looks_like_initials('АБ')   # Cyrillic capital A, Be
+
+
+def test_a_trailing_mark_after_a_non_ascii_letter_is_stripped_first():
+    assert _looks_like_initials('É.')
+
+
+def test_fullwidth_latin_letters_are_recognised():
+    assert _looks_like_initials('ＡＢ')  # fullwidth 'AB'
+
+
+def test_a_lowercase_non_ascii_word_is_not_initials():
+    assert not _looks_like_initials('éa')
+
+
+def test_non_ascii_digits_are_not_initials():
+    assert not _looks_like_initials('１')  # fullwidth digit '1'
+
+
+def test_a_mark_only_token_is_not_initials():
+    """Stripping every trailing mark can leave nothing at all -- the `if not
+    t: return False` guard, not an accidental match on an empty pattern."""
+    assert not _looks_like_initials('.')
+    assert not _looks_like_initials('*')
+
+
+def test_the_precomposed_single_initial_is_recognised_on_both_parsing_paths():
+    """The one Unicode shape threaded through both real parsing paths, per
+    the review's ask. On the pairs path (a clean alternating list) the
+    precomposed 'É' pairs normally, upper-cased like any initial. On the
+    fallback path (forced by its NFD sibling in the third slot, which is
+    NOT initials-shaped) the precomposed 'É' is still recognised as
+    initials and merges into the open 'Kelly' -- it is the NFD form, not
+    the character itself, that fails to be recognised."""
+    precomposed = 'É'
+    assert _cite(f'Kelly, {precomposed}, Pirog, R') == (
+        '1. Kelly É, Pirog R. A Study.'
+    )
+    nfd = unicodedata.normalize('NFD', precomposed)
+    assert not _looks_like_initials(nfd), 'fixture assumption: NFD sibling forces fallback'
+    assert _cite(f'Kelly, {precomposed}, {nfd}, Pirog, R') == (
+        f'1. Kelly É, {nfd}, Pirog R. A Study.'
+    )
+
+
+# --------------------------------------------------------------------------
+# #735 review item 11: author suffix handling with punctuation and case,
+# through `_AUTHOR_SUFFIX_RE` via `_normalize_author_names`, on both parsing
+# paths.
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize('suffix,attached', [
+    ('Jr', 'Jr'), ('Jr.', 'Jr'), ('JR', 'JR'), ('jr.', 'jr'),
+    ('Sr', 'Sr'), ('III', 'III'), ('iii', 'iii'), ('IV', 'IV'), ('IV.', 'IV'),
+])
+def test_a_suffix_variant_attaches_to_the_surname_on_the_pairs_path(suffix, attached):
+    """A recognised suffix in the initials slot does not itself have to look
+    like initials -- it belongs to the surname before it (#560) -- and its
+    case is carried through verbatim, never upper-cased the way a real
+    initials group is."""
+    assert _cite(f'Smith, {suffix}, Jones, JA') == (
+        f'1. Smith {attached}, Jones JA. A Study.'
+    )
+
+
+@pytest.mark.parametrize('suffix,attached', [
+    ('Jr', 'Jr'), ('Jr.', 'Jr'), ('JR', 'JR'), ('jr.', 'jr'),
+    ('Sr', 'Sr'), ('III', 'III'), ('iii', 'iii'), ('IV', 'IV'), ('IV.', 'IV'),
+])
+def test_a_suffix_variant_attaches_to_the_surname_on_the_fallback_path(suffix, attached):
+    """Same suffix set, forced onto the fallback path: a full given name
+    ('John') in the surname slot is not initials-shaped, so the pair
+    detector declines before it ever reaches the suffix check."""
+    assert _cite(f'Smith, John, {suffix}, Brown') == (
+        f'1. Smith, John {attached}, Brown. A Study.'
+    )
+
+
+def test_a_suffix_survives_a_stray_double_comma_right_after_it():
+    """Double/triple commas are collapsed to one before the comma-split, so
+    a suffix immediately followed by an extra comma is not a distinct
+    fragment of its own."""
+    assert _cite('Smith, Sr,, Jones, JA') == '1. Smith Sr, Jones JA. A Study.'
+
+
+def test_a_suffix_survives_extra_internal_whitespace_around_it():
+    assert _cite('Smith, Sr  , Jones, JA') == '1. Smith Sr, Jones JA. A Study.'
+
+
+def test_junior_spelled_out_is_not_a_recognised_suffix():
+    """'Junior' is 6 letters and mixed case: it fails both the suffix regex
+    (only the abbreviated forms are listed) and `_looks_like_initials`
+    (too long, not all-uppercase), so it is neither attached as a suffix
+    nor folded in as initials -- it becomes its own ordinary element, and
+    the pair detector declines the whole string over it."""
+    assert _cite('Smith, Junior, Jones, JA') == (
+        '1. Smith, Junior, Jones JA. A Study.'
+    )
+
+
+def test_a_near_miss_suffix_spelling_is_not_recognised():
+    """'Jrs' fails the suffix regex (not an exact listed form) and fails
+    `_looks_like_initials` (mixed case) -- same fate as 'Junior'."""
+    assert _cite('Smith, Jrs, Jones, JA') == '1. Smith, Jrs, Jones JA. A Study.'
+
+
+def test_a_bare_roman_numeral_v_is_not_a_recognised_suffix():
+    """'V' is not in the enumerated suffix set, but a single letter of any
+    case is ALWAYS initials-shaped (`_looks_like_initials`'s own rule), so
+    it is folded in as an initials group rather than rejected outright --
+    not treated as a suffix, but not lost either."""
+    assert _cite('Smith, V, Jones, JA') == '1. Smith V, Jones JA. A Study.'
+
+
+def test_four_is_are_not_a_recognised_suffix_but_pass_as_initials_shaped():
+    """'IIII' is not a valid roman numeral and not in the suffix set, but it
+    IS 4 uppercase letters -- exactly `_MAX_INITIALS_LETTERS` -- so
+    `_looks_like_initials` accepts it and it is folded in as initials, the
+    same misclassification 'V' gets above."""
+    assert _cite('Smith, IIII, Jones, JA') == '1. Smith IIII, Jones JA. A Study.'

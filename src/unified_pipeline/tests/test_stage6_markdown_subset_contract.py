@@ -22,6 +22,7 @@ Self-contained: no DB, no template, no python-docx, no PII.
 """
 
 import sys
+from collections import Counter
 from pathlib import Path
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -116,6 +117,51 @@ def test_an_unbalanced_bold_run_is_left_as_found():
     loses only its inner pair."""
     assert _strip_markdown_for_word("**a*b**") == "**a*b**"
     assert _strip_markdown_for_word("***triple***") == "*triple*"
+
+
+# --------------------------------------------------------------------------
+# Content preservation (#735 review item 8): every alphanumeric character
+# of the input survives into the output, for both the supported subset AND
+# every unsupported construct -- pass-through preserves everything by
+# definition, and the two supported transforms (bold-marker removal, the
+# "- " bullet prefix) remove only delimiter punctuation, never a letter or
+# digit. The one deliberate exception is the stage-5c "Notes:" structural
+# marker, which is content-shaped but is documentation markup, not CV text,
+# and is excluded from this battery -- it is pinned on its own terms by
+# `test_the_stage_5c_notes_marker_is_stripped_with_the_bullet` above.
+# --------------------------------------------------------------------------
+
+_CONTENT_PRESERVATION_CASES = (
+    "**bold text** and normal",          # supported: bold markers
+    "- a sub bullet",                    # supported: bullet prefix
+    "[link text](http://example.com/path)",  # unsupported: links
+    "*emphasis* and _under_",            # unsupported: emphasis
+    "`inline code`",                     # unsupported: inline code
+    "\\*\\*escaped\\*\\*",               # unsupported: escapes
+    "# Header\n## sub header",           # unsupported: ATX headers
+    "1. ordered\n2. items",              # unsupported: ordered lists
+    "-no-space-bullet",                  # unsupported: dash w/ no space
+    "- parent\n  - nested child",        # unsupported: nested lists
+    "**a*b**",                           # unsupported: unbalanced bold
+    "***triple***",                      # supported bold nested in itself
+)
+
+
+def test_every_alphanumeric_character_of_the_input_survives_the_output():
+    """The property, not one example, for both `preserve_newlines` values.
+    Counted as a multiset so a repeated character cannot go missing behind
+    an identical one -- the same technique
+    `test_the_pair_parser_keeps_every_alphabetic_character_of_its_input`
+    uses for author names."""
+    for text in _CONTENT_PRESERVATION_CASES:
+        expected = Counter(c for c in text if c.isalnum())
+        for preserve_newlines in (False, True):
+            output = _strip_markdown_for_word(text, preserve_newlines=preserve_newlines)
+            actual = Counter(c for c in output if c.isalnum())
+            assert actual == expected, (
+                f'{text!r} (preserve_newlines={preserve_newlines}) lost '
+                f'{dict(expected - actual)} and gained {dict(actual - expected)}'
+            )
 
 
 if __name__ == "__main__":
