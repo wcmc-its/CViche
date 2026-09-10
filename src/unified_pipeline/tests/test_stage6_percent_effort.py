@@ -57,6 +57,18 @@ def _j_entry(text: str, idx: int) -> dict:
     }
 
 
+def _training_j_entry(text: str, idx: int) -> dict:
+    """A J-coded entry under an unrelated hierarchy -- the 9TUVGW shape
+    (#260): over-segmentation produced two copies of the source effort
+    table, one correctly hierarchied, one filed under 'TRAINING', both
+    taxonomy_code 'J'; generate()'s per-code dedup kept the TRAINING copies.
+    """
+    return {
+        "text": text, "taxonomy_code": "J", "hierarchy": ["TRAINING"],
+        "extracted_fields": {}, "element_idx_start": idx,
+    }
+
+
 def _full_text(doc) -> str:
     parts = [p.text for p in doc.paragraphs]
     parts += [c.text for tb in doc.tables for row in tb.rows for c in row.cells]
@@ -199,6 +211,66 @@ def test_unknown_activity_row_not_written_stays_appendix_bound(tmp_path):
     for row in table.rows[1:]:
         if row.cells[0].text.strip() != "Total":
             assert row.cells[1].text == ""
+
+
+def test_j_coded_rows_under_foreign_hierarchy_render_and_leave_appendix(tmp_path):
+    """9TUVGW (#260): dedup can leave only the mis-hierarchied 'TRAINING'
+    copies of an over-segmented source table. taxonomy_code == 'J' alone
+    must be enough to reach the writer."""
+    entries = [
+        _OWNER_ENTRY,
+        _training_j_entry("Teaching | 5 | Yes", 1),
+        _training_j_entry("Clinical | 40 | Yes", 2),
+        _training_j_entry("Administrative | 15 | Yes", 3),
+        _training_j_entry("Research | 40 | No", 4),
+        _training_j_entry("Total | 100% |", 5),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = _j_rows_by_label(doc)
+
+    assert rows["Teaching"] == ["Teaching", "5%", "Yes"]
+    assert rows["Clinical"] == ["Clinical", "40%", "Yes"]
+    assert rows["Administrative"] == ["Administrative", "15%", "Yes"]
+    assert rows["Research"] == ["Research", "40%", "No"]
+    assert rows["Total"][:2] == ["Total", "100%"]
+
+    appendix = _appendix_text(doc)
+    assert 'From "TRAINING"' not in appendix, "TRAINING heading survived -- nothing was consumed"
+    for source_text in ("Teaching | 5 | Yes", "Clinical | 40 | Yes",
+                        "Administrative | 15 | Yes", "Research | 40 | No", "Total | 100% |"):
+        assert _clean_inline_tabs(source_text) not in appendix
+
+
+def test_j_coded_prose_without_pipes_not_written_stays_appendix_bound(tmp_path):
+    """A J-coded prose paragraph that merely mentions "percent effort" is
+    not a table row and must not be swallowed by the header-row signature."""
+    prose = ("Percent effort is allocated across clinical, teaching and "
+              "research responsibilities as described above.")
+    entries = [_OWNER_ENTRY, _training_j_entry(prose, 1)]
+    doc = _render(tmp_path, entries)
+
+    assert prose.count('|') == 0
+    assert prose in _appendix_text(doc), "J-coded prose vanished instead of reaching the Appendix"
+    table = _find_j_table(doc)
+    for row in table.rows[1:]:
+        if row.cells[0].text.strip() != "Total":
+            assert row.cells[1].text == ""
+
+
+def test_j_coded_header_row_under_foreign_hierarchy_consumed(tmp_path):
+    header = ("Weill Cornell Activity (Current or Anticipated) | "
+              "Percent Effort (%) | Does the activity involve Weill Cornell "
+              "students/researchers? (Yes/No)")
+    entries = [_OWNER_ENTRY, _training_j_entry(header, 1)]
+    doc = _render(tmp_path, entries)
+
+    assert _clean_inline_tabs(header) not in _appendix_text(doc)
+    table = _find_j_table(doc)
+    assert [c.text for c in table.rows[0].cells] == [
+        "Weill Cornell Activity (Current or Anticipated)",
+        "Percent Effort (%)",
+        "Does the activity involve Weill Cornell students/research trainees? (Yes/No)",
+    ]
 
 
 class _StubGenerator(PassthroughSection):

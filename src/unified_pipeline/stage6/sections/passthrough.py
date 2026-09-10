@@ -14,7 +14,15 @@ nothing but the three calls.
 All three writers select their input by HIERARCHY rather than by taxonomy
 code: none of the three sections has a code of its own on the live path, so
 the only signal that an entry belongs here is the source heading it was found
-under.
+under. J is the one exception: it ALSO accepts a bare `taxonomy_code == 'J'`
+match regardless of hierarchy, because stage 3b's own per-code dedup can drop
+every correctly-hierarchied copy of an over-segmented source table and leave
+only a copy filed under an unrelated heading (a real S3 run over-segmented one
+J table into two copies -- one under the expected PERCENT EFFORT hierarchy,
+one mis-hierarchied under 'TRAINING' -- and dedup kept the TRAINING copies).
+The existing parse/activity-map/percent guards make this safe: a J-coded
+entry that isn't a parseable, recognized activity row still stays
+Appendix-bound exactly as before.
 
 E writes into paragraphs, not a table. It matches on the "Label: Value" shape,
 routes each entry to the template row whose label means the same thing as the
@@ -193,15 +201,22 @@ def _parse_percent_effort_row(text: str) -> PercentEffortRow | None:
 
 def _is_percent_effort_header_row(mapped_activity: str | None, text: str) -> bool:
     """Whether `text` is the source table's OWN column-header row, coded T
-    with a J hierarchy like ordinary content in real runs (e.g. "Current
-    percent effort | Percent effort % | Does the activity involve WMC
+    (or, since candidates can now also be selected by `taxonomy_code == 'J'`,
+    coded J) like ordinary content in real runs (e.g. "Current percent
+    effort | Percent effort % | Does the activity involve WMC
     students/researchers? (Yes/No)"). Matched by a POSITIVE header signature
-    -- an activity cell that maps to nothing AND row text naming the columns
-    -- not by "all cells are template labels", which is the filter #260's
-    own investigation found eating "Total | 100% |" (Total maps to a known
-    activity, so this never fires on it).
+    -- an activity cell that maps to nothing, row text naming the columns,
+    AND at least 2 pipes (both real header rows have exactly 2) -- not by
+    "all cells are template labels", which is the filter #260's own
+    investigation found eating "Total | 100% |" (Total maps to a known
+    activity, so this never fires on it). The pipe-count check matters more
+    now that J-coded prose can reach here too: without it, a J-coded prose
+    paragraph that merely mentions "percent effort" would be consumed and
+    silently vanish from the Appendix -- content loss, not a header.
     """
     if mapped_activity is not None:
+        return False
+    if text.count('|') < 2:
         return False
     upper = text.upper()
     return 'PERCENT EFFORT' in upper or 'YES/NO' in upper
@@ -470,8 +485,20 @@ class PassthroughSection:
         Selects candidates by hierarchy, the same way E and G do -- the
         source's own effort table (its column-header row and its
         `Total | 100% |` row included) reaches stage 3b as ordinary T-coded
-        entries sharing the J hierarchy, so taxonomy code is not a usable
-        filter here (see #260's real-run traps in the module docstring).
+        entries sharing the J hierarchy, so taxonomy code alone is not a
+        sufficient filter here (see #260's real-run traps in the module
+        docstring). It ALSO accepts `taxonomy_code == 'J'` regardless of
+        hierarchy: a real S3 run over-segmented one source table into a
+        PERCENT-EFFORT-hierarchy copy and a mis-hierarchied 'TRAINING' copy,
+        both taxonomy_code 'J', and generate()'s per-code dedup
+        (stage_6_word_template.py) kept the TRAINING copies -- hierarchy-only
+        selection left the table with only its header row and Total as
+        candidates, so the data rows rendered nowhere and were duplicated
+        into the Appendix under "From \"TRAINING\":". The parse/activity-map/
+        percent guards below make a J-coded candidate just as safe as a
+        hierarchy-matched one: anything that isn't a parseable, recognized
+        activity row is left alone and stays Appendix-bound.
+
         Each candidate is parsed (`_parse_percent_effort_row`), its activity
         mapped to a template row (`_map_percent_effort_activity`), and only
         written when both a percent and a known row are found. An unmapped
@@ -487,6 +514,7 @@ class PassthroughSection:
         candidates = [
             entry for entry in all_entries
             if 'PERCENT EFFORT' in ' '.join(entry.get('hierarchy', [])).upper()
+            or entry.get('taxonomy_code') == 'J'
         ]
         if not candidates:
             return []
