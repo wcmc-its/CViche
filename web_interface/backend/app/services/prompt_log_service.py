@@ -38,12 +38,11 @@ PROMPT_LOG_CONTENT_MAX_CHARS = 50_000
 # Stage IDs without LLM activity get an empty list and surface a friendly
 # explanation via STAGES_WITHOUT_PROMPT_LOGS instead.
 #
-# The '4' exact list pre-applies #771's pending edit (commit ccbb57c,
-# "#771 pt N: drop stale steps.py stage labels"): core_repair_segmentation,
-# cv_parser_classifier, cv_parser_evaluator, cv_parser_structurer and
-# validator_llm are dropped -- #771 deletes those modules, so nothing
-# surviving ever emits those purposes. Whichever of #771 / #780 lands second
-# resolves the STAGE_TO_PURPOSES conflict by taking this moved dict.
+# The '4' exact list carries #771's stage-4 label drops (commits b883e5f
+# and ccbb57c): #771 deleted the modules behind those five purposes, so
+# nothing surviving emits them. Merging dev brought both commits in; the
+# STAGE_TO_PURPOSES conflict was resolved by keeping this moved dict and
+# dropping steps.py's copy.
 STAGE_TO_PURPOSES: dict[str, dict[str, list[str]]] = {
     '1a': {'exact': [], 'prefix': []},
     '1b': {'exact': [], 'prefix': []},
