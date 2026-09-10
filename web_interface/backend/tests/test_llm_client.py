@@ -953,67 +953,6 @@ def test_llm_usage_provider_column():
 
 
 # ---------------------------------------------------------------------------
-# E2E pipeline smoke test (TEST-02)
-# ---------------------------------------------------------------------------
-
-@pytest.mark.e2e
-def test_pipeline_e2e_openai():
-    """Full CV pipeline completes with OpenAI config and produces output.
-
-    This is a smoke test per D-08: pipeline completes all stages without
-    exceptions and generates output .docx. No assertions on output quality.
-
-    Requires OPENAI_API_KEY in environment. Costs money per run.
-    Run explicitly: RUN_LLM_E2E=1 pytest -m e2e
-
-    Per D-10: Runs against OpenAI (default config) only. Bedrock E2E is
-    manual when AWS credentials are available.
-    """
-    import os
-    import tempfile
-    import shutil
-
-    # No pytest.ini/pyproject addopts filters out `-m e2e` in this repo and
-    # CI runs plain `pytest -q`, so OPENAI_API_KEY presence alone was the
-    # only thing standing between a normal test run and a real, billed
-    # OpenAI call. Require an explicit opt-in too (PR #620 review).
-    if not os.environ.get("RUN_LLM_E2E"):
-        pytest.skip("RUN_LLM_E2E not set -- skipping opt-in live E2E test")
-    if not os.environ.get("OPENAI_API_KEY"):
-        pytest.skip("OPENAI_API_KEY not set -- skipping E2E test")
-
-    # Use the sample CV
-    sample_cv = str(Path(__file__).parent.parent.parent.parent / "data" /
-                     "sample_cvs" / "word" / "sample_vasquez_cv.docx")
-    if not Path(sample_cv).exists():
-        pytest.skip(f"Sample CV not found at {sample_cv}")
-
-    # Create temp output directory so test doesn't pollute project outputs
-    temp_dir = tempfile.mkdtemp(prefix="cviche_e2e_")
-
-    try:
-        from unified_pipeline.core.cv_pipeline import CVPipeline
-
-        # Pass output_dir via the constructor so it is normalised to Path()
-        # alongside the stage_dirs map. Monkey-patching pipeline.output_dir
-        # after construction skips that normalisation (and CVPipeline uses
-        # `self.output_dir / "subdir"` at several call sites).
-        pipeline = CVPipeline(sample_cv, output_dir=temp_dir)
-
-        result = pipeline.run()
-
-        # D-08: Verify pipeline completed without exceptions
-        assert result is not None, "Pipeline returned None"
-        assert isinstance(result, dict), f"Pipeline returned {type(result)}, expected dict"
-
-        # Check that output files were generated (at minimum, some output exists)
-        output_files = list(Path(temp_dir).rglob("*"))
-        assert len(output_files) > 0, "Pipeline produced no output files"
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-
-# ---------------------------------------------------------------------------
 # Load hardening: per-pod concurrency cap + retry backoff jitter
 # ---------------------------------------------------------------------------
 

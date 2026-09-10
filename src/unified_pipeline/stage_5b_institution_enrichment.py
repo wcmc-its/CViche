@@ -26,7 +26,6 @@ import sys
 import json
 import logging
 from pathlib import Path
-from typing import Dict
 from datetime import datetime
 
 logger = logging.getLogger(__name__)
@@ -79,7 +78,7 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
-def enrich_entry_with_result(entry: Dict, result: Dict) -> Dict:
+def enrich_entry_with_result(entry: dict, result: dict) -> dict:
     """
     Apply a pre-looked-up institution result to an entry.
 

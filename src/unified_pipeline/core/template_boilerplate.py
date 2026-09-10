@@ -20,7 +20,6 @@ header could disturb downstream structure.
 import json
 import re
 from pathlib import Path
-from typing import List
 
 # Resolve the JSON relative to THIS file so it works regardless of cwd.
 _JSON_PATH = Path(__file__).resolve().parent / "template_boilerplate_phrases.json"
@@ -194,7 +193,7 @@ def is_template_instruction(text: str) -> bool:
     return False
 
 
-def filter_template_instructions(texts: List[str]) -> List[str]:
+def filter_template_instructions(texts: list[str]) -> list[str]:
     """Convenience: return only the texts that are NOT template instructions."""
     return [t for t in texts if not is_template_instruction(t)]
 

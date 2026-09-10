@@ -21,20 +21,45 @@ Two fields can be enriched, and each is attributed separately:
 `dates_attended_start_date`, a nested dict, or plain `start_date`), and all
 three are tried before the range is formatted.
 
-`_degree_is_in_progress` and its `_IN_PROGRESS_DEGREE_MARKERS` vocabulary are
+`_degree_is_in_progress` and its `_IN_PROGRESS_DEGREE_PATTERN` vocabulary are
 here because a year in the "Year Awarded" column asserts the degree was
 conferred. A CV that says "PhD, expected May 2030" has a year, and printing it
 bare turns an anticipated degree into a granted one. Two general signals mark
 it: an explicit marker word, or an award year later than the run year. Neither
 is tied to a particular CV. The column then reads "Expected 2030".
 
+The marker match is word-bounded, not a bare substring (#549): 'present' as a
+bare substring matched inside "presented", "presentation", "presently", and
+'candidate' or 'pending' as an ordinary noun matched inside unrelated prose,
+so a conferred degree could render "Expected <year>". `candidate` and
+`present` are dropped from the vocabulary entirely rather than just bounded --
+neither earned its place once bounded: `\b`-bounded `candidate` still matches
+whole-word uses like "Candidate for Honors" (an award name, not a degree
+status), and `present` as a genuine *degree* marker normally shows up in a
+date range ("2019-present"), a case the fallback in `_fill_education` already
+folds into `year_awarded` and that the future-year branch below covers when a
+real year is present. `pending` is kept because it does not have the same
+noun-collision problem in practice.
+
 `_degree_is_in_progress` is pinned on the class surface by
 `tests/test_stage6_import_surface.py` -- the suite calls it on an instance. The
 mixin keeps it resolving through the MRO, which is what that guard checks.
+
+Stage 4 emits an explicit ``None`` for a missing degree/institution/major
+rather than omitting the key (#659). `degree: None` with a `major` present
+used to raise `TypeError` at `major not in degree`, and the farm has ten such
+entries; five more carry `institution: None`. `_field_text` coerces every raw
+field to a string at the point it is read so no non-str value -- `None` or
+otherwise -- reaches a `.lower()` or an `in` test. A truthy non-dict
+`extracted_fields` (a stray list) is guarded the same way `extracted_fields`
+already is throughout stage6 (`isinstance(..., Mapping)`), and a whole entry
+that is not a mapping at all is skipped with a warning rather than crashing
+on `entry.get(...)`.
 """
+import logging
 import re
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Dict, List
 
 from ..formatting import (
     _clear_table_data,
@@ -46,29 +71,50 @@ from ..parsing import _extract_year_from_text
 from ..resolution import _get_institution_location
 from ..sorting import sort_entries_reverse_chronological
 
+logger = logging.getLogger(__name__)
+
+
+def _field_text(value: object) -> str:
+    """Coerce one raw stage-4 education field to plain text.
+
+    Stage 4 sets `degree`/`major`/`institution` to an explicit ``None``
+    rather than omitting the key when a field wasn't extracted, so
+    `dict.get(key, '')`'s own default never fires for those entries. This
+    covers that case, plus the general one -- a field that came back as
+    something other than a string. Never raises -- stringifying an
+    unexpected shape keeps the entry rendering instead of aborting the whole
+    Stage 6 render (#659)."""
+    if value is None:
+        return ''
+    if isinstance(value, str):
+        return value
+    return str(value)
+
 
 class EducationSection:
     """Section B1 writers, mixed into `WCMTemplateGenerator`."""
 
-    # Phrases a CV uses to mark a degree that has not yet been conferred.
-    _IN_PROGRESS_DEGREE_MARKERS = (
-        'expected', 'anticipated', 'in progress', 'in-progress', 'ongoing',
-        'to be conferred', 'to be awarded', 'candidate', 'pending', 'present',
+    # Word-bounded phrases a CV uses to mark a degree that has not yet been
+    # conferred. Matched with \b on both sides so "presented" or "Candidate
+    # for Honors" cannot fire this the way a bare substring test would (#549).
+    _IN_PROGRESS_DEGREE_PATTERN = re.compile(
+        r'\b(expected|anticipated|in[- ]progress|ongoing|'
+        r'to be conferred|to be awarded|pending)\b',
+        re.IGNORECASE,
     )
 
     def _degree_is_in_progress(self, raw_text: str, year_awarded: str) -> bool:
         """Return True when a degree has not yet been conferred.
 
         Two general signals, neither tied to any specific CV:
-        1. The source line carries an explicit "not yet awarded" marker
-           ("expected", "anticipated", "in progress", "candidate", ...).
+        1. The source line carries an explicit, word-bounded "not yet
+           awarded" marker ("expected", "anticipated", "in progress", ...).
         2. The award year parses to a year later than the current (run) year, so
            it cannot already have been conferred.
         """
-        text = (raw_text or '').lower()
-        for marker in self._IN_PROGRESS_DEGREE_MARKERS:
-            if marker in text:
-                return True
+        text = raw_text or ''
+        if self._IN_PROGRESS_DEGREE_PATTERN.search(text):
+            return True
 
         # Future award year => not yet conferred. year_awarded is already
         # normalized to a 4-digit year by format_date_for_section(..., 'H').
@@ -81,7 +127,7 @@ class EducationSection:
                 pass
         return False
 
-    def _fill_education(self, entries: List[Dict]):
+    def _fill_education(self, entries: list[dict]) -> None:
         """Fill education table with track changes for enriched content.
 
         Track changes are used for:
@@ -102,21 +148,37 @@ class EducationSection:
         _clear_table_data(table, keep_header=True)
         self.stats['tables_populated'] += 1
 
+        # A malformed entry (not even a mapping) can't reach entry.get(...)
+        # below or in sort_entries_reverse_chronological's own sort key, so
+        # it's filtered out here rather than inside the loop (#659).
+        mapping_entries = []
+        for idx, entry in enumerate(entries):
+            if isinstance(entry, Mapping):
+                mapping_entries.append(entry)
+            else:
+                logger.warning(
+                    "Skipping education entry %d: expected a mapping, got %s",
+                    idx, type(entry).__name__,
+                )
+
         # Sort entries reverse chronologically (most recent first)
-        sorted_entries = sort_entries_reverse_chronological(entries)
+        sorted_entries = sort_entries_reverse_chronological(mapping_entries)
 
         for entry in sorted_entries:
-            fields = entry.get('extracted_fields', {})
-            raw_text = entry.get('text', '')
+            # A truthy non-dict extracted_fields (a stray list) must not
+            # reach .get() below.
+            raw_fields = entry.get('extracted_fields')
+            fields = raw_fields if isinstance(raw_fields, Mapping) else {}
+            raw_text = _field_text(entry.get('text', ''))
 
             # Degree column (not enriched)
-            degree = fields.get('degree', '')
-            major = fields.get('major') or fields.get('field_of_study', '')
+            degree = _field_text(fields.get('degree', ''))
+            major = _field_text(fields.get('major')) or _field_text(fields.get('field_of_study', ''))
             if major and major not in degree:
                 degree = f"{degree}, {major}" if degree else major
 
             # Institution - use cleaned_name from enrichment if available
-            institution = fields.get('institution', '')
+            institution = _field_text(fields.get('institution', ''))
             if institution and institution.lower() == 'none':
                 institution = ''
             cleaned = _get_cleaned_institution_name(entry)
@@ -130,6 +192,7 @@ class EducationSection:
 
             # Location from enrichment
             location, location_is_enriched = _get_institution_location(entry)
+            location = _field_text(location)
 
             # Dates - format according to B1 requirements (mm/yyyy-mm/yyyy)
             # Field extraction may use three different structures:

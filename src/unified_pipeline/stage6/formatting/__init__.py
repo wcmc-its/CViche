@@ -21,7 +21,9 @@ from .dates import (  # noqa: F401
     normalize_iso_dates_in_text,
 )
 from .docx import (  # noqa: F401
+    DetachedAnchorError,
     _clear_table_data,
+    _insert_after,
     _set_cell_background,
     _set_cell_borders,
     _set_cell_text,

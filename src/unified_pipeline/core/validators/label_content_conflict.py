@@ -21,7 +21,7 @@ Design Principles:
 - Logging: Track conflict frequency for monitoring
 """
 
-from typing import List, Dict, Optional, Counter as CounterType
+from typing import Counter as CounterType
 from collections import Counter
 from .base_validator import BaseValidator, ValidatorGuidance
 
@@ -65,7 +65,7 @@ class LabelContentConflictValidator(BaseValidator):
     # Minimum entries to detect conflict (avoid false positives on tiny sections)
     MIN_ENTRIES = 3
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """
         Universal validator - applies to all parent sections.
 
@@ -96,7 +96,7 @@ class LabelContentConflictValidator(BaseValidator):
     def analyze_section(
         self,
         section_label: str,
-        entries: List
+        entries: list
     ) -> ValidatorGuidance:
         """
         Analyze section for label-content conflicts.
@@ -119,8 +119,8 @@ class LabelContentConflictValidator(BaseValidator):
     def _detect_conflict(
         self,
         label: str,
-        entry_types: List[str]
-    ) -> Optional[Dict]:
+        entry_types: list[str]
+    ) -> dict | None:
         """
         Detect label-content conflict.
 
@@ -178,7 +178,7 @@ class LabelContentConflictValidator(BaseValidator):
             'type_distribution': type_counter  # Keep as Counter for .most_common() method
         }
 
-    def _generate_guidance(self, conflict_info: Dict) -> ValidatorGuidance:
+    def _generate_guidance(self, conflict_info: dict) -> ValidatorGuidance:
         """
         Generate advisory guidance for detected conflict.
 

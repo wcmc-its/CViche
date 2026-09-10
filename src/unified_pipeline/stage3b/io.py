@@ -14,7 +14,6 @@ import json
 import logging
 import math
 from pathlib import Path
-from typing import Dict, List, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +48,7 @@ def _safe_float(value, default: float) -> float:
     return default
 
 
-def load_taxonomy() -> Dict:
+def load_taxonomy() -> dict:
     """Load the taxonomy reference JSON."""
     # One .parent more than the original stage_3b_entry_classifier.py site:
     # this file lives in stage3b/, one directory below unified_pipeline/.
@@ -58,7 +57,7 @@ def load_taxonomy() -> Dict:
         return json.load(f)
 
 
-def load_stage_2_entries(path: Path) -> Tuple[List[Dict], List[Dict]]:
+def load_stage_2_entries(path: Path) -> tuple[list[dict], list[dict]]:
     """
     Load Stage 2 entries, filtering to content entries only.
 
@@ -123,7 +122,7 @@ def load_stage_2_entries(path: Path) -> Tuple[List[Dict], List[Dict]]:
     return content_entries, all_entries
 
 
-def load_stage_3a_mappings(path: Path) -> Dict:
+def load_stage_3a_mappings(path: Path) -> dict:
     """Load Stage 3a header taxonomy mappings.
 
     ``mappings`` is unvalidated LLM output -- stage 3a parses it with
@@ -152,7 +151,7 @@ def load_stage_3a_mappings(path: Path) -> Dict:
     return data
 
 
-def _normalize_taxonomy_mappings(nodes: List[Dict]) -> None:
+def _normalize_taxonomy_mappings(nodes: list[dict]) -> None:
     """Recursively normalise a stage 3a mappings tree.
 
     Mutates in place and returns nothing: ``nodes`` itself is filtered

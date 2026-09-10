@@ -19,15 +19,16 @@ CViche expects the following attributes in the SAML assertion. OID format is pre
 
 | Attribute | OID | Example Value | Required |
 |-----------|-----|---------------|----------|
-| mail | `urn:oid:0.9.2342.19200300.100.1.3` | `user@med.cornell.edu` | Yes |
+| uid | `urn:oid:0.9.2342.19200300.100.1.1` | `js1234` | One of uid / eduPersonPrincipalName |
+| eduPersonPrincipalName | `urn:oid:1.3.6.1.4.1.5923.1.1.1.6` | `js1234@cornell.edu` | One of uid / eduPersonPrincipalName |
 | displayName | `urn:oid:2.16.840.1.113730.3.1.241` | `Jane Smith` | No |
-| eduPersonPrincipalName | `urn:oid:1.3.6.1.4.1.5923.1.1.1.6` | `js1234@cornell.edu` | No |
+| mail | `urn:oid:0.9.2342.19200300.100.1.3` | `user@med.cornell.edu` | No |
 
 **Notes:**
 
-- `mail` is the only required attribute. If it is missing from the assertion, login will fail with a clear error message.
+- CViche anchors each user's identity on a CWID, derived from `uid` or `eduPersonPrincipalName` (ePPN). At least one of the two must be released, or login fails with `No CWID derivable from SAML assertion (need uid or eduPersonPrincipalName)`. `uid` is checked first and used as the CWID directly; if `uid` is absent, CViche derives the CWID from the local part of ePPN (the portion before `@`).
 - `displayName` is used to populate the user's display name. If absent, CViche falls back to `eduPersonPrincipalName`, then to `mail`.
-- `eduPersonPrincipalName` (ePPN) is a scoped identifier, not an email address. CViche uses `mail` for user identification, not ePPN.
+- `mail` is optional; a user with no `mail` released (e.g. an external affiliate) still authenticates. When present, CViche stores it for display in the UI and admin views and to identify the submitter in run/feedback notifications -- it is not used for login or identity matching.
 
 ## SAML Endpoints
 

@@ -14,7 +14,7 @@ import sys
 import json
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Callable, Optional
+from collections.abc import Callable
 from docx import Document
 
 # Add to path
@@ -26,7 +26,7 @@ from core.docx_structure_extractor import extract_docx_structure, extract_unifie
 from core.template_boilerplate import is_template_instruction
 
 
-def get_hierarchy_path(node: Dict, current_path: List[str] = None) -> List[str]:
+def get_hierarchy_path(node: dict, current_path: list[str] = None) -> list[str]:
     """Build full hierarchy path for a node"""
     if current_path is None:
         current_path = []
@@ -38,7 +38,7 @@ def get_hierarchy_path(node: Dict, current_path: List[str] = None) -> List[str]:
     return current_path
 
 
-def build_element_index_map(doc_structure: Dict) -> Dict[int, Dict]:
+def build_element_index_map(doc_structure: dict) -> dict[int, dict]:
     """
     Build a map from element index to element data from extract_unified_elements output.
 
@@ -69,7 +69,7 @@ def build_element_index_map(doc_structure: Dict) -> Dict[int, Dict]:
     return element_map
 
 
-def get_element_text(element: Dict) -> str:
+def get_element_text(element: dict) -> str:
     """
     Extract text from an element (paragraph, table_header, table_content, table, or empty).
 
@@ -139,9 +139,9 @@ def split_merged_row_into_pseudo_rows(row: list) -> list:
 
 
 def extract_leaf_sections_with_boundaries(
-    section_boundaries: List[Dict],
-    hierarchy: List[Dict]
-) -> List[Tuple[List[str], int, int]]:
+    section_boundaries: list[dict],
+    hierarchy: list[dict]
+) -> list[tuple[list[str], int, int]]:
     """
     Extract all leaf sections with their boundaries from Stage 1b output.
 
@@ -214,7 +214,7 @@ def extract_leaf_sections_with_boundaries(
     return leaf_sections
 
 
-def collect_header_indices(hierarchy_with_indices: List[Dict]) -> set:
+def collect_header_indices(hierarchy_with_indices: list[dict]) -> set:
     """
     Recursively collect all element indices that are section/subsection headers.
 
@@ -237,7 +237,7 @@ def collect_header_indices(hierarchy_with_indices: List[Dict]) -> set:
     return header_indices
 
 
-def collect_header_info(hierarchy_with_indices: List[Dict]) -> Dict[int, List[str]]:
+def collect_header_info(hierarchy_with_indices: list[dict]) -> dict[int, list[str]]:
     """
     Collect header indices mapped to their hierarchy paths.
 
@@ -455,7 +455,7 @@ def _dedup_idx_key(idx):
         return (str(idx), 0.0)
 
 
-def filter_extraction_noise(entries: List[Dict]) -> List[Dict]:
+def filter_extraction_noise(entries: list[dict]) -> list[dict]:
     """Drop noise from the final entry list (#211): empty content entries and
     exact duplicates. Every survivor rides through the 3b/4/5 LLM stages, so
     noise here is paid for several times over downstream.
@@ -492,14 +492,14 @@ def filter_extraction_noise(entries: List[Dict]) -> List[Dict]:
 
 
 def detect_entries_for_section(
-    section_hierarchy: List[str],
-    doc_elements: List[Dict],
+    section_hierarchy: list[str],
+    doc_elements: list[dict],
     start_elem_idx: int,
     end_elem_idx: int,
     document_uid: str = None,
     header_indices: set = None,
-    element_index_map: Dict = None
-) -> Tuple[List[Dict], Dict]:
+    element_index_map: dict = None
+) -> tuple[list[dict], dict]:
     """
     Use LLM to detect and extract entries within a section.
 
@@ -1008,7 +1008,7 @@ Respond **only** with a JSON array containing the identified entries. If no entr
 def run_stage_2(
     docx_path: str,
     hierarchy_json_path: str = None,
-    cancel_check: Optional[Callable[[], None]] = None,
+    cancel_check: Callable[[], None] | None = None,
     strip_template_instructions: bool = True,
 ):
     """

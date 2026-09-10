@@ -6,7 +6,6 @@ Critical for disambiguating entries that appear in unexpected sections.
 """
 
 import re
-from typing import List, Set
 from .base_validator import BaseValidator, ValidatorGuidance
 
 
@@ -23,7 +22,7 @@ class SectionHeaderContextValidator(BaseValidator):
 
     name = "SectionHeaderContextValidator"
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to all parent sections."""
         return ['*']  # Universal validator
 
