@@ -15,7 +15,7 @@ Delivery has two modes, selected by whether a Redis broker is enabled:
 import asyncio
 import json
 import logging
-from typing import Dict, Optional, Set
+import uuid
 from fastapi import WebSocket
 from datetime import datetime
 
@@ -23,15 +23,59 @@ from app.pipeline.redis_broker import EVENTS_PATTERN
 
 logger = logging.getLogger(__name__)
 
+# A run ends exactly once, and the client acts on that once (it stops its
+# elapsed timer and switches to the outcome view). But the terminal event can
+# reach one socket by two routes -- the live broadcast, and the replay the
+# WebSocket endpoint sends on connect -- and a client connecting in the same
+# instant the run finishes gets both. These names are the routes' overlap; a
+# socket is told at most once (#657 review, thread 6). Kept in sync by hand
+# with websocket._terminal_event_for_run, which builds these same three.
+_TERMINAL_EVENTS = frozenset({"RUN_COMPLETE", "RUN_FAILED", "RUN_CANCELLED"})
+
+
+def _stamp(event: dict) -> dict:
+    """Add the fields every emitted event carries, in place.
+
+    `event_id` is a per-emission identity: it lets a consumer recognize the
+    same event arriving twice (across a reconnect, or from two delivery
+    routes) rather than inferring duplication from field equality. Additive --
+    the frontend switches on `event` and ignores unknown keys.
+    """
+    event.setdefault("timestamp", datetime.now().isoformat())
+    event.setdefault("event_id", uuid.uuid4().hex)
+    return event
+
+
+def _event_name(message: str) -> str | None:
+    """The `event` name inside an already-serialized message, or None.
+
+    _deliver_local is handed JSON, not a dict (the broker path receives it off
+    the wire), so the name has to be read back out to know whether this is a
+    terminal event.
+    """
+    try:
+        parsed = json.loads(message)
+    except json.JSONDecodeError:
+        logger.warning("Undeliverable event: message is not JSON")
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    name = parsed.get("event")
+    return name if isinstance(name, str) else None
+
 
 class EventEmitter:
     """Manages WebSocket connections and broadcasts events."""
 
     def __init__(self, broker=None):
-        self.connections: Dict[str, Set[WebSocket]] = {}
+        self.connections: dict[str, set[WebSocket]] = {}
+        # Sockets that have already been told this run is over. Per socket, not
+        # per run: two clients watching one run each need their own copy, and a
+        # reconnecting client is a new socket and gets told again.
+        self._terminal_delivered: set[WebSocket] = set()
         self._broker = broker
         self._pubsub = None
-        self._subscriber_task: Optional[asyncio.Task] = None
+        self._subscriber_task: asyncio.Task | None = None
 
     def set_broker(self, broker) -> None:
         """Attach the Redis broker (called at app startup)."""
@@ -86,19 +130,57 @@ class EventEmitter:
         except Exception:
             logger.warning("subscriber loop error", exc_info=True)
 
+    async def _send_one(self, websocket: WebSocket, message: str, *,
+                        is_terminal: bool) -> bool:
+        """Send one serialized message to one socket. False => drop the socket.
+
+        The single write path, shared by the broadcast (_deliver_local) and the
+        point-to-point replay (send_direct), so the terminal dedup cannot hold
+        on one route and not the other. For a terminal event the mark is
+        claimed before the send is awaited, not after: the replay and a live
+        broadcast can run concurrently, and if both passed the membership
+        check before either marked, they could both await send_text and both
+        deliver (#657 review, thread 6, interleaved case).
+        """
+        if is_terminal:
+            if websocket in self._terminal_delivered:
+                logger.debug("Terminal event already delivered to this socket; skipping")
+                return True
+            self._terminal_delivered.add(websocket)
+        try:
+            await websocket.send_text(message)
+        except Exception:
+            if is_terminal:
+                self._terminal_delivered.discard(websocket)
+            return False
+        return True
+
     async def _deliver_local(self, run_id: str, message: str) -> None:
         """Send a serialized message to this worker's sockets for run_id."""
         local = self.connections.get(run_id)
         if not local:
             return
+        is_terminal = _event_name(message) in _TERMINAL_EVENTS
         disconnected = set()
         for websocket in list(local):
-            try:
-                await websocket.send_text(message)
-            except Exception:
+            if not await self._send_one(websocket, message, is_terminal=is_terminal):
                 disconnected.add(websocket)
         for ws in disconnected:
             self.disconnect(run_id, ws)
+
+    async def send_direct(self, run_id: str, websocket: WebSocket, event: dict) -> None:
+        """Deliver one event to one socket, bypassing the broadcast.
+
+        Used for the WebSocket endpoint's terminal-status replay on connect:
+        the other sockets on this run already saw it. Stamped and deduped
+        exactly like a broadcast event, so a replay that races the live
+        terminal event does not double-report the run's end.
+        """
+        message = json.dumps(_stamp(event))
+        is_terminal = _event_name(message) in _TERMINAL_EVENTS
+        if not await self._send_one(websocket, message, is_terminal=is_terminal):
+            logger.info("Direct send for run %s failed; dropping socket", run_id)
+            self.disconnect(run_id, websocket)
 
     async def connect(self, run_id: str, websocket: WebSocket):
         """Register a new WebSocket connection."""
@@ -109,6 +191,9 @@ class EventEmitter:
 
     def disconnect(self, run_id: str, websocket: WebSocket):
         """Remove a WebSocket connection."""
+        # Drop the dedup mark with the socket, or the set grows for the life of
+        # the process and a reused object could inherit another socket's mark.
+        self._terminal_delivered.discard(websocket)
         if run_id in self.connections:
             self.connections[run_id].discard(websocket)
             if not self.connections[run_id]:
@@ -117,8 +202,7 @@ class EventEmitter:
     async def emit(self, run_id: str, event: dict):
         """Broadcast an event. Publishes via Redis when enabled, else delivers
         directly to this process's local connections."""
-        if "timestamp" not in event:
-            event["timestamp"] = datetime.now().isoformat()
+        _stamp(event)
 
         if self._enabled:
             # Publish only; the subscriber loop delivers to local sockets

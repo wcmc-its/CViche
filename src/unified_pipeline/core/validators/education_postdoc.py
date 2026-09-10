@@ -14,7 +14,6 @@ Solution: Detect mixed content and provide guidance to LLM.
 """
 
 import re
-from typing import List, Dict
 from .base_validator import BaseValidator, ValidatorGuidance
 
 
@@ -99,7 +98,7 @@ class EducationPostdocValidator(BaseValidator):
         r'^\d{4}$',  # Single year (graduation year)
     ]
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """This validator applies to B and C parent sections (and borderline cases)."""
         return ['B', 'C', 'D']  # Education, Postdoc, and Positions (borderline)
 
@@ -124,7 +123,7 @@ class EducationPostdocValidator(BaseValidator):
 
         return self._detect_entry_type(entry_text)
 
-    def analyze_section(self, section_label: str, entries: List[str]) -> ValidatorGuidance:
+    def analyze_section(self, section_label: str, entries: list[str]) -> ValidatorGuidance:
         """
         Analyze entire section to detect mixed content.
 

@@ -30,8 +30,11 @@ phases:
       - echo "Both kustomize overlays render."
   pre_build:
      commands:
-       # Install and audit dependencies
-       - pip install pip-audit
+       # Install and audit dependencies.
+       # pip-audit is pinned so this deploy gate cannot change behaviour between
+       # builds; bump it deliberately and keep it in sync with the same pin in
+       # .github/workflows/deps-audit.yml, which runs this identical gate in CI.
+       - pip install "pip-audit==2.10.1"
        # Audit pinned dependencies for known vulnerabilities
        # Ignore list is maintained in .pip-audit-ignore.txt (tracked in #126)
        - |

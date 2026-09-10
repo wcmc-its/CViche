@@ -12,7 +12,6 @@ that were unmapped or misclassified.
 """
 
 import re
-from typing import List, Dict
 from .base_validator import BaseValidator, ValidatorGuidance
 
 
@@ -73,7 +72,7 @@ class MenteeOutcomesValidator(BaseValidator):
         r'placement',
     ]
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to N (Mentoring) sections primarily."""
         return ['N', 'D', 'E']
 
@@ -84,7 +83,7 @@ class MenteeOutcomesValidator(BaseValidator):
     def analyze_section(
         self,
         section_label: str,
-        entries: List[Dict]
+        entries: list[dict]
     ) -> ValidatorGuidance:
         """
         Analyze section to detect mentee outcome tracking.

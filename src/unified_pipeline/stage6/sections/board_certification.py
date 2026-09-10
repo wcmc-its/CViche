@@ -50,7 +50,7 @@ unambiguous, independent of why the row came up short.
 """
 import logging
 import re
-from typing import Dict, List, Literal, Optional
+from typing import Literal
 
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
 from ..sorting import sort_entries_reverse_chronological
@@ -84,7 +84,7 @@ _HAS_LETTER = re.compile(r'[A-Za-z]')
 # misclassified as a certification year (#625 thread 3850184512).
 _MOC_TOKEN_PATTERN = re.compile(r'^MOC(?:[\s:.\-]*\d{4})?$', re.IGNORECASE)
 
-CertTokenType = Optional[Literal['year', 'cert_number', 'specialty']]
+CertTokenType = Literal['year', 'cert_number', 'specialty'] | None
 
 
 def _classify_cert_token(token: str) -> CertTokenType:
@@ -115,7 +115,7 @@ def _classify_cert_token(token: str) -> CertTokenType:
     return None
 
 
-def _split_multi(value) -> List[str]:
+def _split_multi(value) -> list[str]:
     """Split a comma/semicolon-delimited field into its non-empty parts.
 
     Accepts a list (already split, e.g. `certificate_number` sometimes
@@ -140,7 +140,7 @@ def _split_multi(value) -> List[str]:
 _BOARD_WORD_RE = re.compile(r'\bboard\b', re.IGNORECASE)
 
 
-def _is_fused_certification(fields: Dict, cert_numbers: List[str]) -> bool:
+def _is_fused_certification(fields: dict, cert_numbers: list[str]) -> bool:
     """True when an entry's extracted fields describe more than one certification.
 
     The dispatch that decides between the single-row path and
@@ -177,7 +177,7 @@ def _is_fused_certification(fields: Dict, cert_numbers: List[str]) -> bool:
     return len(_BOARD_WORD_RE.findall(board)) > 1
 
 
-def _format_certification_date_str(fields: Dict) -> str:
+def _format_certification_date_str(fields: dict) -> str:
     """Build the F2 "yyyy-yyyy" (or "yyyy-Present") date string for one
     entry's structured fields.
 
@@ -207,7 +207,7 @@ def _format_certification_date_str(fields: Dict) -> str:
 
 
 def _is_reconstruction_confident(
-    specialties: List[str], cert_numbers: List[str], years: List[str],
+    specialties: list[str], cert_numbers: list[str], years: list[str],
 ) -> bool:
     """True when the recovered token counts support a positional pairing.
 
@@ -230,8 +230,8 @@ def _is_reconstruction_confident(
 
 
 def _backfill_missing_fields_from_structured(
-    rows: List[tuple], fields: Dict, structured_cert: str,
-) -> List[tuple]:
+    rows: list[tuple], fields: dict, structured_cert: str,
+) -> list[tuple]:
     """Fill a blank certificate number or date in a reparsed row from the
     entry's own structured fields, when it is unambiguous to do so.
 
@@ -295,8 +295,8 @@ def _backfill_missing_fields_from_structured(
 
 
 def _reconstruct_certification_rows(
-    specialties: List[str], cert_numbers: List[str], years: List[str],
-) -> List[tuple]:
+    specialties: list[str], cert_numbers: list[str], years: list[str],
+) -> list[tuple]:
     """Pair specialty/cert-number/year tokens recovered from a flattened table.
 
     HARD SAFETY GATE: this always pairs positionally, padding whichever list
@@ -401,7 +401,7 @@ def _is_certification_header_line(line: str) -> bool:
 class BoardCertificationSection:
     """Section F2 writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_board_certification(self, entries: List[Dict]):
+    def _fill_board_certification(self, entries: list[dict]):
         """Fill F2. BOARD CERTIFICATION section.
 
         WCM template has table with: Name of specialty | Board Certificate # | Date of Certification
@@ -473,7 +473,7 @@ class BoardCertificationSection:
                 # No structured fields - try to parse from text
                 self._parse_and_add_multiple_certifications(table, original_text, entry)
 
-    def _parse_and_add_multiple_certifications(self, table, text: str, entry: Dict):
+    def _parse_and_add_multiple_certifications(self, table, text: str, entry: dict):
         """Parse multiple board certifications from raw text and add rows.
 
         HARD SAFETY NET (data-loss gate, 2026-08-25): every caller reaches
@@ -604,9 +604,32 @@ class BoardCertificationSection:
         because a raised exception here would abort the rest of the document
         (docs/DEV_WORKFLOW.md's no-content-loss rule -- one narrow table
         should not cost every section after it).
+
+        That guard used to live only in the too-narrow (<2 column) branch,
+        which meant a caller that supplies no content at all still wrote a
+        fully blank row on the >=3 and >=2 branches, with `entries_inserted`
+        incremented for it (#663 item 8). The only reproduced trigger is
+        synthetic -- a caller passing all-empty or whitespace-only strings
+        directly, as the tests below do -- not a confirmed corpus path; no
+        production caller has been shown to reach this function with
+        `specialty`, `cert_number`, and `dates` all blank. The blank check
+        now runs once, before any column-count branch, so every path through
+        this function shares it instead of each branch needing its own copy.
         """
         row = table.add_row()
         num_cols = len(row.cells)
+
+        if not (
+            (specialty or '').strip()
+            or (cert_number or '').strip()
+            or (dates or '').strip()
+        ):
+            row._element.getparent().remove(row._element)
+            logger.warning(
+                "board certification: skipping blank row -- specialty, "
+                "certificate number, and dates were all empty",
+            )
+            return
 
         if num_cols >= 3:
             row.cells[0].text = specialty or ''

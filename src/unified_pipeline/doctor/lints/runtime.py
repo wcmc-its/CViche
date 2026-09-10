@@ -24,7 +24,6 @@ scorer names, all of which already live outside `run_doctor.py`. Nothing moved
 to `doctor.shared`. Bodies are unmodified; `run_doctor` re-exports the name it
 exported before.
 """
-from typing import Dict, List
 
 from unified_pipeline.quality_score import FATAL_ERROR_PATTERN, iter_error_fields
 
@@ -35,7 +34,7 @@ from ..shared import _finding
 # The cap-40 HARD-FAIL gate: a stage died mid-run.
 
 
-def lint_pipeline_errors(artifacts: Dict[str, Dict]) -> List[Dict]:
+def lint_pipeline_errors(artifacts: dict[str, dict]) -> list[dict]:
     """The quality score's cap-40 hard-fail gate: an ``error`` field somewhere
     in the run's artifacts carries a fatal pattern (NameError, traceback), so a
     stage died mid-run and whatever it owned is missing from the output. The
@@ -45,7 +44,7 @@ def lint_pipeline_errors(artifacts: Dict[str, Dict]) -> List[Dict]:
     ``artifacts`` is keyed by stage label and the caller narrows it to exactly
     the JSON the deployed scorer reads, so the cap this finding names is the
     cap those artifacts actually produce."""
-    fatal: List[str] = []
+    fatal: list[str] = []
     for label in sorted(artifacts):
         for path, value in iter_error_fields(artifacts[label], label):
             if FATAL_ERROR_PATTERN.search(value):

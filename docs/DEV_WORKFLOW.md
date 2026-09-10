@@ -75,16 +75,61 @@ The standing verdict on most reviews is:
 So a review is not a gate. The friction is in how we answer it. Five rules, all
 written from complaints we actually caused:
 
-1. **Never decline without a reason.** "Declined" with no explanation drew the
+1. **A reviewer ask on a file the PR already touches is fixed in the PR,
+   however architectural it reads.** In the reviewer's own words, on #656
+   (relayed by Paul): *"I don't want to create independent issues as separate
+   issues just because they are not directly related to this PR diff;
+   otherwise, the issue list will keep growing until we address them. If
+   modifying other files that are unrelated to this PR is genuinely required,
+   I can understand creating a separate PR in that case."* And again on
+   #737/#738 (2026-09-04), after we had done exactly that: *"I asked for these
+   issues to be fixed in the PRs, rather than being filed as new issues.
+   Filing #763-#765 adds unnecessary tracking overhead... I want to clean up
+   as many files as possible, with no code review comments left unresolved."*
+   So: a separate **PR** — not an issue — only when the fix needs files
+   genuinely unrelated to the PR. "It is architectural" and "it is big" are
+   not exemptions. The test is falsifiable — *does this fix touch a file the
+   PR doesn't already touch* — not a judgment call about whether the finding
+   "feels" architecturally big. Two incidents after the rule was first
+   written down here, both the same shape: #763-#765 were filed off #737/#738
+   as whole-file architecture asks (a typed record at the stage-4 → stage-6
+   boundary, a `_format_citation` decomposition, a typed contract for
+   `coercion.py`'s shared dicts) and closed as filed-in-error the same day,
+   every one folding back into the PR it came from; on #725, eight review
+   points were routed to issues (#746-#749 among them) when six of the eight
+   live in `render.py` and `run_doctor.py`, both already in the PR. Earlier,
+   #656 filed 8 issues for findings that mostly turned out fixable in the same
+   three files already touched (frozenset membership checks, an
+   isolated-session write, a single-flight lock, a dropped-async conversion
+   once actually checked for real `await`s inside); only 2 of the 8 survived a
+   second look, both needing test files genuinely outside the PR's diff. On
+   #625, 24 of the reviewer's 29 follow-up comments on 2026-08-25 were
+   re-asking for something we had deferred instead of fixing in place, e.g.
+   *"As we discussed and as mentioned in the coding standards, the change is
+   localized to this file. I don't think any changes outside this file are
+   required. Therefore, I would insist that we fix this as part of the
+   current PR."* He said "mentioned in the coding standards" — it wasn't
+   written down anywhere, which is the actual cost of not having this rule.
+   When the test does say yes, open a **PR**, not an issue: a filed issue with
+   no PR attached is where findings go to be forgotten (see rule 3 below).
+2. **Never decline without a reason.** "Declined" with no explanation drew the
    same objection seven times across #514 and #517 — *"Declined without any
    explanation."* Say what you considered and why it does not apply here.
-2. **File the issue before you reply, and name the real number.** Replying "will
-   track this" and not filing is our most common failure: the #569 retrospective
-   found **34 of 45 tracking promises were never filed**. Pointing at an issue
-   that does not in fact cover the comment is the same failure with extra steps —
-   *"I don't see this issue included in #494"* (#503). Open the issue, then paste
-   its number.
-3. **Every reply that claims a fix cites the commit that made it.** The
+3. **For the genuinely-unrelated case only: file before you reply, and name
+   the real number.** Rule 1 decides *whether* anything leaves the PR; this
+   rule is for the follow-up PR (or, until that PR exists, the issue that will
+   carry it) when something does. Replying "will track this" and not filing is
+   our most common failure: the #569 retrospective found **34 of 45 tracking
+   promises were never filed**. Pointing at an issue that does not in fact
+   cover the comment is the same failure with extra steps — *"I don't see this
+   issue included in #494"* (#503). Open the issue, then paste its number. And
+   make the pointer findable: on #625, 5 of the reviewer's 29 follow-up
+   comments said he could not find what we had pointed him at; an unfindable
+   pointer costs the same round as no pointer, so link the exact comment URL
+   (`.../issues/N#issuecomment-<id>`) and say whether it's an issue or a PR —
+   our reference to #660 was correct but he searched PRs for it, and #660 is
+   an issue.
+4. **Every reply that claims a fix cites the commit that made it.** The
    reviewer asked for this outright on #624 (2026-08-24) — *"There are 150+
    comments on this PR#624, and it is becoming difficult to cross-check
    multiple commit hashes to confirm whether each issue has actually been
@@ -98,32 +143,6 @@ written from complaints we actually caused:
    bookkeeping — the commit hash is what lets one person cross-check a
    150-comment review at all. One commit that covers several comments gets
    cited on each of them; a fix that spans several commits lists every one.
-4. **If the fix is localized to a file already in the PR, it goes in the PR.**
-   A separate issue or PR is for genuinely cross-file work only — this decides
-   *whether* to file, ahead of rule 2's *file before you reply*. "Off-diff" is
-   not, by itself, a reason to spin a review comment into a separate issue —
-   #656 filed 8 issues for findings that mostly turned out fixable in the same
-   three files already touched (frozenset membership checks, an
-   isolated-session write, a single-flight lock, a dropped-async conversion
-   once actually checked for real `await`s inside). Only 2 of the 8 survived a
-   second look: both needed test files genuinely outside the PR's diff. On
-   #625, 24 of the reviewer's 29 follow-up comments on 2026-08-25 were
-   re-asking for something we had deferred instead of fixing in place, e.g.
-   *"As we discussed and as mentioned in the coding standards, the change is
-   localized to this file. I don't think any changes outside this file are
-   required. Therefore, I would insist that we fix this as part of the
-   current PR."* He said "mentioned in the coding standards" — it wasn't
-   written down anywhere, which is the actual cost of not having this rule.
-   The same round, 5 of those 29 comments said he could not find what we had
-   pointed him at; an unfindable pointer costs the same round as no pointer,
-   so if pointing elsewhere really is right, link the exact comment URL
-   (`.../issues/N#issuecomment-<id>`) and say whether it's an issue or a PR —
-   on #625 our reference to #660 was correct but he searched PRs for it, and
-   #660 is an issue. The test is falsifiable — *does this fix touch a file
-   the PR doesn't already touch* — not a judgment call about whether the
-   finding "feels" architecturally big. When the test says yes, open a
-   **PR**, not an issue: a filed issue with no PR attached is where findings
-   go to be forgotten (see rule 2 above).
 5. **Never resolve a review thread. That is the reviewer's act.** Replying,
    pushing the fix and then clicking *Resolved* makes the author both developer
    and reviewer, and ends the round unilaterally — *"...marked them as resolved,
@@ -283,8 +302,11 @@ theory that later proved wrong.
 python3 -m pytest src/unified_pipeline/tests/ -q
 
 # backend suite — needs dummy env, the factory raises without it
-CVICHE_SESSION_SECRET=x DB_HOST=x DB_PORT=3306 DB_USER=x DB_PASSWORD=x DB_NAME=x \
+CVICHE_SESSION_SECRET=x DB_HOST=x DB_PORT=3306 DB_USER=x DB_NAME=x \
+  DB_AUTH_MODE=password DB_PASSWORD=x \
   python3 -m pytest web_interface/backend/tests/ -q
+# DB_AUTH_MODE=password is required: DB_PASSWORD alone no longer selects
+# password auth, so without it this runs against the IAM path.
 
 # coverage — reported, never a gate. `term-missing` lists the uncovered lines and branches.
 python3 -m pytest src/unified_pipeline/tests/ --cov=src --cov-branch --cov-report=term-missing -q
