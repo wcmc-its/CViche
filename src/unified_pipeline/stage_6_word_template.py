@@ -2942,7 +2942,7 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
                emit_track_changes: bool = True, emit_comments: bool = False,
                strip_template_instructions: bool = True,
                recover_unrendered_records: bool = True,
-               original_doc_path: str = None) -> str:
+               original_doc_path: str | None = None) -> str:
     """
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
