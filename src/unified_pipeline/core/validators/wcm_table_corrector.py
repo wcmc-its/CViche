@@ -28,7 +28,6 @@ codes are made to agree with how the content is ultimately laid out.
 """
 
 import re
-from typing import List, Dict, Tuple
 
 # --- detection signatures ---------------------------------------------------
 _MENTEE_PERIOD = re.compile(r"mentoring\s*period", re.I)
@@ -52,7 +51,7 @@ _BOARD_FROM = {"I", "H", "C", "T"}
 _LICENSE_FROM = {"I", "H", "C", "T", "A", "F2"}
 
 
-def _correct(entry: Dict):
+def _correct(entry: dict):
     """Return (new_code, reason) or (None, None) if no correction applies."""
     text = entry.get("text", "") or ""
     code = entry.get("taxonomy_code", "") or ""
@@ -79,7 +78,7 @@ def _correct(entry: Dict):
     return None, None
 
 
-def apply_wcm_table_corrections(entries: List[Dict]) -> Tuple[List[Dict], Dict]:
+def apply_wcm_table_corrections(entries: list[dict]) -> tuple[list[dict], dict]:
     """Apply WCM structured-table corrections in place. Returns (entries, stats)."""
     corrections_made = 0
     details = []

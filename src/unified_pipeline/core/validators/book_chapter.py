@@ -6,7 +6,6 @@ Critical for entries like "Introduction to Statistics" that could be either.
 """
 
 import re
-from typing import List
 from .base_validator import BaseValidator, ValidatorGuidance
 
 
@@ -28,7 +27,7 @@ class BookChapterValidator(BaseValidator):
 
     name = "BookChapterValidator"
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to bibliography and teaching sections."""
         return ['S', 'bibliography', 'K', 'teaching']
 

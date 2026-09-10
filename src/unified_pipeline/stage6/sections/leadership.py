@@ -17,7 +17,7 @@ describes the flattened-table shapes it handles. O's own job is folding the
 parsed role titles back into the activity text, because its table has no role
 column for them.
 """
-from typing import Dict, List
+from typing import List
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
 from ..normalization import _committee_cell_text
@@ -37,10 +37,28 @@ from unified_pipeline.core.render_check import entry_lines
 _LEADERSHIP_SECTION_HEADER = "INSTITUTIONAL LEADERSHIP ACTIVITIES"
 
 
+def _looks_like_leadership_table(table) -> bool:
+    """True when `table`'s header row looks like Section O's own table.
+
+    The real template's header row is `Role(s)/Position | Institution/Location
+    | Dates (yyyy-yyyy)` (key_files/wcm_cv_template_faculty_october_2022_final.docx
+    paragraph 156's table) -- checked loosely, on the first cell containing
+    "role", so an exact wording change to the other two columns doesn't
+    false-negative this. #664 item 2: this is the validation
+    `_find_table_after_paragraph` itself does not do.
+    """
+    if not table.rows:
+        return False
+    header_cells = table.rows[0].cells
+    if not header_cells:
+        return False
+    return 'role' in header_cells[0].text.strip().lower()
+
+
 class LeadershipSection:
     """Section O writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_leadership(self, entries: List[Dict]):
+    def _fill_leadership(self, entries: list[dict]) -> None:
         """Fill O. INSTITUTIONAL LEADERSHIP ACTIVITIES section.
 
         WCM template has table with: Role(s)/Position | Institution/Location | Dates
@@ -63,6 +81,16 @@ class LeadershipSection:
 
         table = self._find_table_after_paragraph(section_idx)
         if not table:
+            return
+
+        # #664 item 2: `_find_table_after_paragraph` (stage_6_word_template.py,
+        # a different PR's file) is a purely positional "next <w:tbl> after
+        # this paragraph" walk with no awareness of what table it lands on.
+        # Validate the shape at this call site before `_clear_table_data`
+        # mutates it -- fail closed the same way the exact-header match above
+        # already does (review thread 3850828607): writing real content into
+        # the wrong table is worse than omitting it.
+        if not _looks_like_leadership_table(table):
             return
 
         _clear_table_data(table, keep_header=True)
@@ -88,14 +116,33 @@ class LeadershipSection:
             # Check if this entry contains multiple items (newline-separated)
             lines = entry_lines(original_text)
 
+            # #660-equivalent completeness signal, mirrored from sibling P
+            # (administrative_activities.py): extraction already gave a
+            # usable role+dates, before anything below reroutes on line
+            # count or a raw-text pipe.
+            fields_complete = bool(role) and bool(dates)
+
             # Use multi-line parsing when the text contains 3+ lines — this catches
             # mega-blocks where field extraction only captured one item from many.
             # For single/double-line entries, use extracted fields normally.
+            #
+            # #627: mirrors sibling P -- a 1- or 2-line entry whose raw text
+            # still carries an unresolved pipe-separated date column (e.g.
+            # "Committee (Chair 2002-present) | 1996-Present") bypassed the
+            # shared #572 line parser entirely; there is no pipe-aware
+            # fallback here the way P's parenthetical regex is. `fields_complete`
+            # guards this so an entry extraction already fully resolved is
+            # never rerouted (and its institution, which the multiline path
+            # cannot carry -- #664 item 1, out of scope here -- lost) just
+            # because its raw text happens to contain a `|`.
+            has_unresolved_pipe = not fields_complete and '|' in original_text
             if len(lines) >= 3:
                 # Multiple items merged - split them into separate rows
                 self._add_multiline_leadership_rows(table, lines)
             elif len(lines) > 1 and not role:
                 # Two lines, no extracted role - still try multi-line parsing
+                self._add_multiline_leadership_rows(table, lines)
+            elif has_unresolved_pipe:
                 self._add_multiline_leadership_rows(table, lines)
             else:
                 if not role and not institution:
@@ -103,7 +150,7 @@ class LeadershipSection:
 
                 self._add_leadership_row(table, role, institution, dates)
 
-    def _add_leadership_row(self, table, role: str, institution: str, dates: str):
+    def _add_leadership_row(self, table, role: str, institution: str, dates: str) -> None:
         """Add a single row to leadership table."""
         # Defensive: never write a non-str (dict/list) into a Word cell -- it
         # raises deep in python-docx and aborts the whole document (#256).
@@ -120,6 +167,18 @@ class LeadershipSection:
         elif num_cols >= 2:
             row.cells[0].text = f"{role}, {institution}" if institution else (role or '')
             row.cells[1].text = dates or ''
+        elif num_cols == 1:
+            # #664 item 6: a 0- or 1-column table hit neither branch above --
+            # nothing was written, yet `entries_inserted` still incremented
+            # unconditionally below. Mirror sibling P's single-column
+            # fallback (`_add_committee_row`): fold everything into the one
+            # cell rather than silently writing nothing.
+            combined = ", ".join(part for part in (role, institution) if part)
+            row.cells[0].text = f"{combined} - {dates}" if dates else combined
+        else:
+            # num_cols == 0: no cell exists to write into; nothing to do,
+            # and nothing was inserted -- don't count it (#664 item 6).
+            return
 
         for cell in row.cells:
             for para in cell.paragraphs:

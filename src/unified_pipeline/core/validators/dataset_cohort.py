@@ -6,7 +6,6 @@ Critical for entries about datasets that could be either publications or researc
 """
 
 import re
-from typing import List
 from .base_validator import BaseValidator, ValidatorGuidance
 
 
@@ -27,7 +26,7 @@ class DatasetCohortValidator(BaseValidator):
 
     name = "DatasetCohortValidator"
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """Applies to bibliography and research overview sections."""
         return ['S', 'bibliography', 'M', 'research_overview']
 

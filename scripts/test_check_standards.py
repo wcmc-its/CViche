@@ -10,15 +10,22 @@ check_function_size.py's own self-test copies the script into a temp
 scripts/ dir rather than pointing it at synthetic files anywhere). One
 planted violation per check, run --report, assert it's counted; then the
 --update / diff-gate mechanics against CODING_STANDARDS.md's auto block;
-then the four ratcheted rows' baseline mechanics (RATCHETED_ROWS); then
+then the seven ratcheted rows' baseline mechanics (RATCHETED_ROWS); then
 the waiver mechanism (WAIVABLE_ROWS) -- a waived hit is excused from its
 row's count but not forgotten, and the waived count itself ratchets; then
-the staleness helpers, which run against the real repo rather than the
-fixture since there's no git history to fake in a plain tempdir.
+the three ruff-backed rows (7.1 print(), both 8.3 rows) -- the count is
+summed from ruff's own statistics, a rise blocks, and a missing ruff is a
+hard failure rather than a zero; then the staleness helpers, which run
+against the real repo rather than the fixture since there's no git history
+to fake in a plain tempdir.
+
+Needs `ruff` on PATH (CI installs the pinned version in the function-size
+job); the ruff-backed rows are exercised for real, not mocked.
 """
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -26,6 +33,22 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "check_standards.py")
 CHECK_FUNCTION_SIZE = os.path.join(HERE, "check_function_size.py")
+RUFF_TOML = os.path.join(os.path.dirname(HERE), "ruff.toml")
+
+# One library file that trips every ruff family the three rows sum, with a
+# known count per row: typing syntax UP035 + UP006 + UP045 + UP037 + RUF013
+# = 5; annotations RUF012 + ANN401 = 2; print T201 = 1.
+RUFF_BAIT = (
+    "from typing import Any, List, Optional\n\n\n"
+    "class Bait:\n"
+    "    tags = []\n\n\n"
+    "def typed(x: List[int], y: Optional[str] = None, z: str = None, w: Any = 1) -> \"None\":\n"
+    "    print(x, y, z, w)\n"
+)
+# Under tests/: ruff.toml's per-file-ignores drop ANN and T201 there but
+# keep UP, so this adds UP035 + UP006 = 2 to the syntax row and nothing to
+# the other two.
+RUFF_TEST_BAIT = "from typing import List\n\n\ndef t(a: List[int]):\n    print(a)\n"
 
 DOC_TEMPLATE = """# CODING_STANDARDS.md (fixture)
 
@@ -51,7 +74,18 @@ def build_tree(tree):
     for src, name in ((SCRIPT, "check_standards.py"), (CHECK_FUNCTION_SIZE, "check_function_size.py")):
         with open(src) as fh, open(os.path.join(tree, "scripts", name), "w") as out:
             out.write(fh.read())
+    # the real ruff.toml, not a fixture copy of its rule list: the test
+    # proves the committed config is what the rows count
+    shutil.copy(RUFF_TOML, os.path.join(tree, "ruff.toml"))
     _write(os.path.join(tree, "docs", "CODING_STANDARDS.md"), DOC_TEMPLATE)
+
+    # 7.1 print() / 8.3 typing syntax / 8.3 annotations -- one library file
+    # with a known count per family, plus a tests/ file whose ANN and T201
+    # hits must NOT count (per-file-ignores) while its UP hits still do.
+    # The copied scripts/check_standards.py above has a dozen print() calls
+    # of its own, so T201 landing on exactly 1 is also the scripts/ ignore.
+    _write(os.path.join(tree, "src", "ruffbait.py"), RUFF_BAIT)
+    _write(os.path.join(tree, "src", "unified_pipeline", "tests", "test_bait.py"), RUFF_TEST_BAIT)
 
     # 1.2 -- a pure-layer file that imports docx (the violation)
     _write(
@@ -125,14 +159,15 @@ def build_tree(tree):
 
 
 
-def run(tree, *args):
+def run(tree, *args, env=None):
     return subprocess.run(
         [sys.executable, os.path.join(tree, "scripts", "check_standards.py"), *args],
-        capture_output=True, text=True, cwd=tree,
+        capture_output=True, text=True, cwd=tree, env=env,
     )
 
 
 def main():
+    assert shutil.which("ruff"), "ruff must be on PATH -- install the version .github/workflows/ci.yml pins"
     with tempfile.TemporaryDirectory() as tree:
         build_tree(tree)
 
@@ -170,6 +205,24 @@ def main():
         assert "today=1" in out.split("7.9")[1].split("\n")[0], out.split("7.9")[1][:200]
         print("7.9 doc disagreeing with the image tag    counted   ok (matching CI pin excluded)")
 
+        # ruff-backed rows: the count is parsed from ruff's own statistics,
+        # per family. ruffbait.py contributes 5 / 2 / 1 (see RUFF_BAIT); the
+        # tests/ file adds 2 UP and nothing else; every other fixture def
+        # above is unannotated, 17 ANN hits in all (bad.py 1, alpha 1,
+        # beta 1, reaches_back 1, widgets 2, meta 2, waived_meta 2,
+        # dynattr 5, swallows 2).
+        print_section = out.split("7.1 print() in library code (T201)")[1].split("\n")[0]
+        assert "today=1" in print_section, print_section
+        print("7.1 print() in library code (T201)         counted   ok (tests/ and scripts/ excluded)")
+
+        syntax_section = out.split("8.3 typing syntax (UP*, RUF013)")[1].split("\n")[0]
+        assert "today=7" in syntax_section, syntax_section
+        print("8.3 typing syntax (UP*, RUF013)            counted   ok (UP still counts under tests/)")
+
+        ann_section = out.split("8.3 missing annotations (ANN*, RUF012)")[1].split("\n")[0]
+        assert "today=19" in ann_section, ann_section
+        print("8.3 missing annotations (ANN*, RUF012)     counted   ok")
+
         assert "7.4" not in out  # [judgement], not [gate] -- the auto table is [gate]-only
         print("7.4 absent from --report's auto-checkable set             ok")
 
@@ -202,6 +255,9 @@ def main():
         assert baseline["2.1 no `db.query(` in `api/`"] == 1
         assert baseline["7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)"] == 3
         assert baseline["3.7 no metaprogramming [waived]"] == 1  # a waiver ratchets too
+        assert baseline["7.1 print() in library code (T201)"] == 1
+        assert baseline["8.3 typing syntax (UP*, RUF013)"] == 7
+        assert baseline["8.3 missing annotations (ANN*, RUF012)"] == 19
         print("--update writes standards-baseline.json with fresh counts  ok")
 
         # now in sync -> default mode passes
@@ -259,6 +315,11 @@ def main():
         with open(baseline_path) as fh:
             b = json.load(fh)
         b["3.7 dynamic attribute access (non-literal)"] = 1
+        # the same edit for the annotations row: dynattr's trimmed `f` took 3
+        # unannotated-def hits with it and widgets' handler2 added 2, so the
+        # partial --update above legitimately locked that row at 18; the
+        # restored fixtures put it back at 19
+        b["8.3 missing annotations (ANN*, RUF012)"] = 19
         with open(baseline_path, "w") as fh:
             json.dump(b, fh)
         _write(
@@ -346,6 +407,55 @@ def main():
         with open(baseline_path, "w") as fh:
             json.dump(b, fh)
         run(tree, "--update")
+
+        # ruff-backed rows rising: one more LIBRARY file adds UP035 + UP006
+        # (syntax 7 -> 9), a missing return annotation (19 -> 20) and a
+        # print() (1 -> 2). All three rows must block, in one run.
+        bait2 = os.path.join(tree, "src", "ruffbait2.py")
+        _write(bait2, "from typing import Dict\n\n\ndef more(d: Dict[str, int]):\n    print(d)\n")
+        r = run(tree)
+        assert r.returncode == 1, r.stdout
+        assert "7.1 print() in library code (T201) rose 1 -> 2" in r.stderr, r.stderr
+        assert "8.3 typing syntax (UP*, RUF013) rose 7 -> 9" in r.stderr, r.stderr
+        assert "8.3 missing annotations (ANN*, RUF012) rose 19 -> 20" in r.stderr, r.stderr
+        print("ruff-backed rows rising block the gate       exit=1    ok (all three)")
+
+        r = run(tree, "--update")
+        assert r.returncode == 1, r.stdout
+        assert "refusing to raise" in r.stderr
+        with open(baseline_path) as fh:
+            b = json.load(fh)
+        assert b["7.1 print() in library code (T201)"] == 1
+        assert b["8.3 typing syntax (UP*, RUF013)"] == 7
+        assert b["8.3 missing annotations (ANN*, RUF012)"] == 19
+        print("--update refuses to raise a ruff-backed baseline           ok")
+
+        os.remove(bait2)
+        r = run(tree, "--update")
+        assert r.returncode == 0, r.stderr
+        r = run(tree)
+        assert r.returncode == 0, r.stdout
+        print("removing the extra ruff hits clears the gate               ok")
+
+        # ruff missing from PATH: every mode fails closed (exit 2, §5.5) and
+        # writes nothing -- a zero here would lock in an empty baseline.
+        empty_bin = os.path.join(tree, "empty-bin")
+        os.makedirs(empty_bin)
+        no_ruff = dict(os.environ, PATH=empty_bin)
+        with open(baseline_path) as fh:
+            baseline_before = fh.read()
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
+            doc_before = fh.read()
+        for mode in ((), ("--report",), ("--update",)):
+            r = run(tree, *mode, env=no_ruff)
+            assert r.returncode == 2, (mode, r.returncode, r.stdout, r.stderr)
+            assert "ruff is not on PATH" in r.stderr, (mode, r.stderr)
+            assert "today=" not in r.stdout, (mode, r.stdout)
+        with open(baseline_path) as fh:
+            assert fh.read() == baseline_before
+        with open(os.path.join(tree, "docs", "CODING_STANDARDS.md")) as fh:
+            assert fh.read() == doc_before
+        print("missing ruff fails closed in every mode      exit=2    ok (nothing written)")
 
         # fix the docx violation (not a ratcheted row) -> the AUTO TABLE goes
         # stale rather than the ratchet gate tripping, a different failure mode

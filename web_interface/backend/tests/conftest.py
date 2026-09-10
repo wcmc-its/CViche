@@ -28,6 +28,16 @@ def setup_database():
     Base.metadata.drop_all(bind=engine)
 
 
+@pytest.fixture(autouse=True)
+def _no_teams_webhook_leak(monkeypatch):
+    """Tests that exercise execute()/submit_feedback for real must not fire
+    live Teams posts just because a developer has CVICHE_TEAMS_WEBHOOK_URL
+    exported in their shell (config precedence puts the env var first). A test
+    that wants to assert on an actual POST sets it back with monkeypatch.setenv.
+    """
+    monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
+
+
 @pytest.fixture
 def db():
     """Provide a test database session."""

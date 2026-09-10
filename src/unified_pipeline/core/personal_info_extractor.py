@@ -22,7 +22,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Dict, Any, List, Optional
+from typing import Any
 from docx import Document
 
 from unified_pipeline.llm_client import call_llm
@@ -99,7 +99,7 @@ def extract_first_page_text(cv_path: str, max_paragraphs: int = 15) -> str:
     return '\n'.join(paragraphs)
 
 
-def extract_emails_regex(text: str) -> List[str]:
+def extract_emails_regex(text: str) -> list[str]:
     """
     Extract all email addresses using regex.
 
@@ -110,7 +110,7 @@ def extract_emails_regex(text: str) -> List[str]:
     return re.findall(pattern, text)
 
 
-def extract_phones_regex(text: str) -> List[str]:
+def extract_phones_regex(text: str) -> list[str]:
     """
     Extract all phone numbers using regex.
 
@@ -137,7 +137,7 @@ def extract_phones_regex(text: str) -> List[str]:
     return list(set(phones))  # Remove duplicates
 
 
-def extract_orcid_regex(text: str) -> Optional[str]:
+def extract_orcid_regex(text: str) -> str | None:
     """
     Extract ORCID identifier using regex.
 
@@ -151,7 +151,7 @@ def extract_orcid_regex(text: str) -> Optional[str]:
     return match.group(1) if match else None
 
 
-def extract_name_regex(text: str) -> Optional[str]:
+def extract_name_regex(text: str) -> str | None:
     """
     Extract name from first few lines using heuristics.
 
@@ -279,7 +279,7 @@ def extract_name_regex(text: str) -> Optional[str]:
     return None
 
 
-def extract_regex_only(first_page_text: str, emails_found: List[str], phones_found: List[str], orcid_found: Optional[str]) -> Dict[str, Any]:
+def extract_regex_only(first_page_text: str, emails_found: list[str], phones_found: list[str], orcid_found: str | None) -> dict[str, Any]:
     """
     Fallback extraction using only regex (no LLM).
 
@@ -301,7 +301,7 @@ def extract_regex_only(first_page_text: str, emails_found: List[str], phones_fou
     }
 
 
-def extract_with_llm(first_page_text: str, emails_found: List[str], phones_found: List[str]) -> Dict[str, Any]:
+def extract_with_llm(first_page_text: str, emails_found: list[str], phones_found: list[str]) -> dict[str, Any]:
     """
     Extract personal information using LLM with Structured Outputs.
 
@@ -378,7 +378,7 @@ IMPORTANT:
         return None  # Signal to use regex fallback
 
 
-def calculate_confidence(personal_info: Dict[str, Any]) -> float:
+def calculate_confidence(personal_info: dict[str, Any]) -> float:
     """
     Calculate confidence score based on what was extracted.
 
@@ -406,7 +406,7 @@ def calculate_confidence(personal_info: Dict[str, Any]) -> float:
     return score
 
 
-def extract_personal_info(cv_path: str) -> Dict[str, Any]:
+def extract_personal_info(cv_path: str) -> dict[str, Any]:
     """
     Extract personal information from first page of CV.
 

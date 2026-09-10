@@ -1,4 +1,5 @@
 """Feedback API endpoints for collecting user feedback on pipeline runs."""
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -224,7 +225,7 @@ async def submit_feedback(
 
     Returns 409 if the user has already submitted feedback for this run.
     """
-    check_run_access(run_id, current_user, db)
+    run = check_run_access(run_id, current_user, db)
 
     # Check for existing feedback
     existing = db.query(Feedback).filter(
@@ -308,6 +309,18 @@ async def submit_feedback(
     db.refresh(feedback)
 
     logger.info("Feedback submitted for run %s by user %s", run_id, current_user.id)
+
+    # Best-effort Teams notification. Off the event loop (blocking POST);
+    # swallows all failures so a webhook problem can never affect the
+    # already-committed feedback or the response.
+    try:
+        from app.services.notifications import notify_feedback_submitted
+        submitter = current_user.display_name or current_user.email
+        await asyncio.get_running_loop().run_in_executor(
+            None, notify_feedback_submitted, feedback, run, submitter
+        )
+    except Exception as e:  # noqa: BLE001 -- best-effort, must never raise
+        logger.warning("Feedback notification failed for run %s: %s", run_id, e)
 
     return FeedbackResponse(
         id=feedback.id,

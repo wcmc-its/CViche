@@ -3,7 +3,6 @@ import hashlib
 import json
 import logging
 import shutil
-from typing import Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session, selectinload
@@ -27,7 +26,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _run_duration_seconds(run) -> Optional[int]:
+def _run_duration_seconds(run) -> int | None:
     """Total pipeline time for a run, in whole seconds.
 
     Prefers the authoritative value persisted by the orchestrator at terminal

@@ -15,7 +15,6 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
 from datetime import datetime
 
 # Add parent to path for imports
@@ -24,14 +23,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 from unified_pipeline.llm_client import call_llm
 
 
-def load_taxonomy() -> Dict:
+def load_taxonomy() -> dict:
     """Load the taxonomy reference JSON."""
     taxonomy_path = Path(__file__).parent / "core" / "taxonomy_v7.json"
     with open(taxonomy_path, 'r') as f:
         return json.load(f)
 
 
-def format_hierarchy_as_outline(hierarchy: List[Dict], indent: int = 0) -> str:
+def format_hierarchy_as_outline(hierarchy: list[dict], indent: int = 0) -> str:
     """
     Format hierarchy as indented outline for LLM input.
 
@@ -58,7 +57,7 @@ def format_hierarchy_as_outline(hierarchy: List[Dict], indent: int = 0) -> str:
     return "\n".join(lines)
 
 
-def build_taxonomy_reference_condensed(taxonomy: Dict) -> str:
+def build_taxonomy_reference_condensed(taxonomy: dict) -> str:
     """
     Build a condensed taxonomy reference for the prompt.
 
@@ -90,9 +89,9 @@ def build_taxonomy_reference_condensed(taxonomy: Dict) -> str:
 
 
 def map_headers_to_taxonomy(
-    hierarchy: List[Dict],
-    taxonomy: Dict,
-) -> Tuple[Dict, Dict]:
+    hierarchy: list[dict],
+    taxonomy: dict,
+) -> tuple[dict, dict]:
     """
     Map CV hierarchy headers to taxonomy codes using LLM.
 
@@ -336,7 +335,7 @@ Now output the JSON mapping. Remember: output ONLY valid JSON, no markdown or co
     return result, stats
 
 
-def count_nodes(mappings: List[Dict]) -> int:
+def count_nodes(mappings: list[dict]) -> int:
     """Count total nodes in mapping tree."""
     count = 0
     for node in mappings:
@@ -347,9 +346,9 @@ def count_nodes(mappings: List[Dict]) -> int:
 
 def run_stage_3a(
     document_uid: str,
-    stage_1a_path: Optional[str] = None,
-    output_dir: Optional[str] = None,
-) -> Dict:
+    stage_1a_path: str | None = None,
+    output_dir: str | None = None,
+) -> dict:
     """
     Run Stage 3a header taxonomy mapping.
 

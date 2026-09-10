@@ -4,7 +4,6 @@ import io
 import json
 import logging
 from datetime import datetime, timedelta
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -247,7 +246,7 @@ async def delete_feedback(
 @router.post("/admin/runs/reap-orphans")
 async def reap_orphan_runs(
     dry_run: bool = Query(False, description="Preview candidates without deleting anything."),
-    older_than_hours: Optional[int] = Query(
+    older_than_hours: int | None = Query(
         None, ge=1, description="Override the age threshold in hours (default 24)."
     ),
     db: Session = Depends(get_db),
@@ -279,8 +278,8 @@ async def reap_orphan_runs(
 async def get_runs(
     offset: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
-    user: Optional[str] = Query(None, description="Filter by user email"),
-    status: Optional[str] = Query(
+    user: str | None = Query(None, description="Filter by user email"),
+    status: str | None = Query(
         None,
         description=(
             "Filter by run status. Omit for the default view, which hides "
