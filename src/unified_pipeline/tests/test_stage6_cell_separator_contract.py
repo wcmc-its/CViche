@@ -57,7 +57,7 @@ _CALL_SITES = {
     ("stage_6_word_template.py", "_unconsumed_personal_data_batch"):
         "A entries no Personal Data slot consumed; its PII scan reads the "
         "RAW text, because this call destroys the fragment boundaries",
-    ("stage6/sections/appendix.py", "_fill_appendix"):
+    ("stage6/sections/appendix.py", "_filter_unmapped_entries"):
         "entries no section renderer claimed -- no table by construction",
     ("stage6/sections/mentoring.py", "_insert_mentoring_summaries"):
         "N3A/N3B are what _is_mentee_record rejected; N4 is unscreened, "
