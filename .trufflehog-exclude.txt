@@ -1,0 +1,13 @@
+# TruffleHog --exclude-paths regexes (#684). One line so far: the local
+# full-history baseline scan (2026-09-05) found 2 unverified LDAP-detector
+# hits, both from the same line -- web_interface/backend/tests/test_ed_group.py
+# @ commit 841617cc42799c59f03ba96bf072324d123e7b90, a 4-character
+# dictionary-word placeholder in test_ed_group.py (LDAP detector, unverified)
+# assigned to an LDAPConfig test double's bind_password (line 200 at that
+# commit; dev has since moved on to a SecretStr(...) placeholder at the
+# module-level LDAP_PARAMS fixture instead). The matched value is an obvious
+# placeholder, not a live credential. Excluding the whole file, not just that
+# historical line: TruffleHog's git-history scanner has no per-finding/per-commit
+# baseline (unlike gitleaks' fingerprint baseline), so path is the narrowest
+# granularity available. Re-tighten this if TruffleHog ever adds finer scoping.
+^web_interface/backend/tests/test_ed_group\.py$
