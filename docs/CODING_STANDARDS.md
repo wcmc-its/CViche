@@ -431,10 +431,10 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 3.7 dynamic attribute access (non-literal) | falling | 8 | ratchet |
 | 5.4 bare swallows (`except Exception: pass`) | falling | 3 | ratchet |
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
-| 7.1 print() in library code (T201) | falling | 2929 | ratchet |
+| 7.1 print() in library code (T201) | falling | 2926 | ratchet |
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
-| 8.3 typing syntax (UP*, RUF013) | falling | 1561 | ratchet |
-| 8.3 missing annotations (ANN*, RUF012) | falling | 941 | ratchet |
+| 8.3 typing syntax (UP*, RUF013) | falling | 1485 | ratchet |
+| 8.3 missing annotations (ANN*, RUF012) | falling | 903 | ratchet |
 
 <!-- check_standards:auto:end -->
 
