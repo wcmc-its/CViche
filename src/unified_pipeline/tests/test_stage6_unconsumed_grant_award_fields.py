@@ -31,6 +31,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.sections.mentoring import _normalize_mentee  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
@@ -54,8 +55,9 @@ def _grant(**fields):
 def _mentee(**fields):
     fields.setdefault("mentee_name", "Brian Wood")
     gen = _generator()
-    gen.doc.add_paragraph("Past Mentees:")
-    return _cells(gen._create_mentee_table(fields, 0))
+    anchor = gen.doc.add_paragraph("Past Mentees:")._element
+    record = _normalize_mentee({"extracted_fields": fields})
+    return _cells(gen._create_mentee_table(record, anchor))
 
 
 # --- the grant identifier rides in Award Source --------------------------------
