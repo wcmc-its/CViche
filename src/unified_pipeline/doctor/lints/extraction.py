@@ -12,8 +12,10 @@ These four are about the extracted record; the render lints are about the page.
 a 3b classification survived -- the finding is about the classification.
 
 The thirteen constants, regexes and helpers below them are used by nothing else
-in `run_doctor.py`, so they move together and stop being module-global. Bodies
-are unmodified; `run_doctor` re-exports every name it exported before.
+in `run_doctor.py`, so they move together and stop being module-global.
+`run_doctor` re-exports every name it exported before; `_entry_rendered` and
+`_funding_haystacks` have since been fixed in place (#537, #492) -- see their
+docstrings and comments for what changed.
 """
 import re
 from typing import Dict, List, Optional, Tuple
@@ -58,6 +60,22 @@ _FUNDING_SECTIONS = (
 )
 
 
+# Segment boundaries that are not themselves funding headers but still close
+# a funding section. `_output_section_header` only recognises a lettered
+# "X. " prefix or an ALL-CAPS paragraph; the M2D heading `_fill_patents`
+# writes into the template (stage_6_word_template.py's generate() calls
+# `_fill_patents` immediately after `_fill_research_support`, so M2D always
+# sits directly after M2A/B/C in render order) is Title-Case ("Patents &
+# Inventions") and matches neither, so it used to fall through and keep
+# accumulating into whichever funding bucket was still open -- the M2C
+# haystack absorbed the entire patents section on every corpus CV that had
+# one (#492). Normalised exactly like `_FUNDING_SECTIONS` titles are
+# compared (`_norm`, trailing colon stripped).
+_FUNDING_BOUNDARY_TITLES = frozenset({
+    "patents & inventions",
+})
+
+
 def _entry_status(entry: Dict) -> Optional[str]:
     status = (entry.get("extracted_fields") or {}).get("status")
     if status:
@@ -66,7 +84,7 @@ def _entry_status(entry: Dict) -> Optional[str]:
     return match.group(1).strip() if match else None
 
 
-def _funding_haystacks(blocks: List[Tuple[str, str]]) -> Dict[str, Haystack]:
+def _funding_haystacks(blocks: list[tuple[str, str]]) -> dict[str, Haystack]:
     """Per-bucket Haystack of everything rendered under each of stage 6's
     funding subsection headers."""
     segments: Dict[str, List[Tuple[str, str]]] = {c: [] for c, _ in _FUNDING_SECTIONS}
@@ -79,7 +97,7 @@ def _funding_haystacks(blocks: List[Tuple[str, str]]) -> Dict[str, Haystack]:
             if code:
                 current = code
                 continue
-            if _output_section_header(stripped):
+            if normed in _FUNDING_BOUNDARY_TITLES or _output_section_header(stripped):
                 current = None
                 continue
         if current:
@@ -177,7 +195,7 @@ def lint_under_extraction(stage4: Dict) -> List[Dict]:
 CLASSIFIED_UNRENDERED_WARN_ENTRIES = 2
 
 
-def _entry_rendered(text, haystack: str, haystack_tokens: set) -> Optional[bool]:
+def _entry_rendered(text: str | None, haystack: str, haystack_tokens: set) -> bool | None:
     """Whether an entry's text surfaces in the output: verbatim piece
     containment first, then distinctive-token overlap over the whole text and
     each fragment (stages 4-6 re-render entries from extracted fields, so no
@@ -187,7 +205,14 @@ def _entry_rendered(text, haystack: str, haystack_tokens: set) -> Optional[bool]
     pieces = _entry_pieces(text)
     if any(piece in haystack for piece in pieces):
         return True
-    verifiable = bool(pieces)
+    # Seeded False, not bool(pieces): a short label-prefixed entry ("Email:
+    # x@y.org") produces a piece but every chunk below falls under
+    # RENDER_TOKEN_MIN_COUNT long-word tokens, so the loop never runs and
+    # this used to fall through to a hard False (definitively unrendered)
+    # instead of None (too short to verify). Matches _record_rendered's
+    # sibling pattern in render.py, which never sets verifiable from pieces
+    # alone (#537).
+    verifiable = False
     for chunk in [str(text or "")] + entry_fragments(text):
         tokens = _long_word_tokens(chunk)
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:

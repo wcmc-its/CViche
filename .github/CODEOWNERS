@@ -1,0 +1,46 @@
+# Code owners for the security-sensitive paths in this repo (#684 / #690).
+#
+# Why: the CI security gates and their allow-lists must not be widened by
+# whoever happens to be editing them. Listing a path here makes GitHub request
+# review from its owner automatically on any PR that touches it, and -- once
+# branch protection requires it -- hold the merge until that review lands.
+#
+# WHAT ENFORCES THIS, AND WHAT DOES NOT. Read before treating this as a control:
+#   1. This file only requests a reviewer. Blocking a merge additionally needs
+#      branch protection on `dev` with "Require review from Code Owners"
+#      enabled. That is a repo-admin setting, not a file, and this PR does not
+#      and cannot ship it.
+#   2. CODEOWNERS is a paid feature for *private* repositories. wcmc-its is on
+#      the GitHub Free plan and CViche is private, so as of 2026-09-08 GitHub
+#      does not apply this file at all; the branch-protection and ruleset APIs
+#      for this repo both answer 403 "Upgrade to GitHub Pro or make this
+#      repository public". So this is intent-of-record today. It starts working
+#      when the org moves to Team/Enterprise (or the repo goes public) and (1)
+#      is turned on.
+#
+# Owner choice: @mrj4001 is a direct admin collaborator here, so the entry
+# resolves. A CODEOWNERS line naming a user or team without write access is
+# silently ignored by GitHub -- worse than no file, because it looks like a
+# control and is not one. Check before substituting a handle:
+#   gh api "repos/wcmc-its/CViche/collaborators?affiliation=direct" --jq '.[].login'
+#   gh api repos/wcmc-its/CViche/teams --jq '.[] | [.slug, .permission] | @tsv'
+# The only team with repo access today is @wcmc-its/reciter (maintain, 7
+# members) -- the application team, not a security team, so it is deliberately
+# not used as the owner here. Swap in a dedicated security team once one exists.
+
+# Dependency-vulnerability gate: an entry here suppresses an advisory in CI and
+# on the production deploy path alike (buildspec.yaml runs the same pip-audit).
+/.pip-audit-ignore.txt      @mrj4001
+
+# Secret-scanning gate: an entry here excludes a path from TruffleHog.
+/.trufflehog-exclude.txt    @mrj4001
+
+# CI definitions -- the security gates themselves, and their token permissions.
+/.github/workflows/         @mrj4001
+
+# Production build/deploy pipeline (CodeBuild), which carries the deploy-time
+# copy of the dependency audit.
+/buildspec.yaml             @mrj4001
+
+# This file: ownership rules must not be editable without the same review.
+/.github/CODEOWNERS         @mrj4001

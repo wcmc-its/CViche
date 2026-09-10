@@ -152,9 +152,15 @@ def _classify_licensure_entry(state: str, license_number: str,
     """
     label = str(license_type or '').lower()
     text = str(original_text or '')
-    if 'npi' in label:
+    # Bounded the same way as the raw-text checks below (#658), same reason:
+    # a bare `'npi'`/`'dea' in label` substring test matches the acronym
+    # embedded in an unrelated word (e.g. a `license_type` of "Idea for
+    # renewal"), the same class of false positive the raw-text
+    # `_NPI_LABEL_RE`/`_DEA_LABEL_RE` fix (#573) exists to prevent for
+    # "Dean".
+    if _NPI_LABEL_RE.search(label):
         return KIND_NPI
-    if 'dea' in label:
+    if _DEA_LABEL_RE.search(label):
         return KIND_DEA
     if _NPI_LABEL_RE.search(text):
         return KIND_NPI
@@ -331,18 +337,19 @@ class LicensureSection:
         unannotated: no module under `stage6/` imports `docx`, and annotating
         it would be the first one to.
         """
+        num_cols = len(table.columns)
+        if num_cols < 2:
+            return False
+
         row = table.add_row()
-        num_cols = len(row.cells)
         if num_cols >= 4:
             row.cells[0].text = record.state or ''
             row.cells[1].text = record.number or ''
             row.cells[2].text = record.issue_date or ''
             row.cells[3].text = record.last_registration_date or ''
-        elif num_cols >= 2:
+        else:
             row.cells[0].text = record.state or ''
             row.cells[1].text = record.number or ''
-        else:
-            return False
 
         for cell in row.cells:
             for para in cell.paragraphs:
@@ -383,12 +390,16 @@ class LicensureSection:
         for row in dea_npi_table.rows:
             if len(row.cells) >= 2:
                 label = row.cells[0].text.lower()
-                if 'dea' in label:
+                # Bounded the same way as `_classify_licensure_entry` (#658)
+                # -- a template cell relabelled from its current "DEA
+                # Number"/"NPI Number" text should not risk matching on an
+                # embedded substring.
+                if _DEA_LABEL_RE.search(label):
                     row.cells[1].text = dea_number or ''
                     for para in row.cells[1].paragraphs:
                         for run in para.runs:
                             _set_font(run)
-                elif 'npi' in label:
+                elif _NPI_LABEL_RE.search(label):
                     row.cells[1].text = npi_number or ''
                     for para in row.cells[1].paragraphs:
                         for run in para.runs:
