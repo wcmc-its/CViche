@@ -17,14 +17,22 @@ separate, mechanical follow-up.
 """
 import logging
 import re
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import NamedTuple
 
 logger = logging.getLogger(__name__)
+
+# The document-uid convention this module parses: an optional "CV_" prefix,
+# then underscore-separated name/year parts (e.g. "CV_2015_Wende",
+# "Wende_John"). `removeprefix` strips only a leading match; a bare
+# `.replace('CV_', '')` would also eat "CV_" occurring mid-string in a name
+# part, which `removeprefix` cannot do.
+_UID_PREFIX = 'CV_'
+
 
 def _extract_name_from_uid(uid: str) -> str:
     """Extract formatted name from document UID."""
     # Remove year prefix (e.g., "2015_Wende" -> "Wende")
-    parts = uid.replace('CV_', '').split('_')
+    parts = uid.removeprefix(_UID_PREFIX).split('_')
 
     # Filter out year
     parts = [p for p in parts if not p.isdigit() and len(p) > 2]
@@ -40,7 +48,7 @@ def _extract_name_from_uid(uid: str) -> str:
 def _extract_last_name_from_uid(uid: str) -> str:
     """Extract last name from document UID for author matching."""
     # Remove year prefix (e.g., "2015_Wende" -> "Wende")
-    parts = uid.replace('CV_', '').split('_')
+    parts = uid.removeprefix(_UID_PREFIX).split('_')
 
     # Filter out years and very short parts
     parts = [p for p in parts if not p.isdigit() and len(p) > 2]
@@ -48,9 +56,40 @@ def _extract_last_name_from_uid(uid: str) -> str:
     if parts:
         # Last part is typically the last name
         last_name = parts[-1]
-        # Handle cases like "Albrechtjs" -> "Albrecht" (initials appended)
+        # Handle cases like "Albrechtjs" -> "Albrecht" (initials appended).
+        #
+        # #665 item 1 flags this as unsound: `suffix.islower() or
+        # suffix.isupper()` matches the tail of almost any Title Case word,
+        # so no case-based rule can tell "appended initials" apart from
+        # "the end of an ordinary surname" (its own stated conclusion).
+        # Deliberately left in place rather than "fixed" by deletion: this
+        # exact case is corpus-real (uid "2003_Albrechtjs_Cv") and the
+        # owner's real surname genuinely is "Albrecht" -- confirmed by
+        # "Albrecht JS"/"Albrecht J" as the cited author in every one of
+        # that CV's own bibliography entries. `bibliography.py:176` uses
+        # this function's return value to decide which citation author to
+        # bold as the CV owner, so removing the strip does not fix a false
+        # positive here -- render_gate_compare over the full 66-CV corpus
+        # showed it silently drops bold-highlighting from 12 of the 98
+        # paragraphs in that document's bibliography citing "Albrecht": the
+        # 12 formatted as bare "Albrecht J"/"Albrecht JS" (which the
+        # stripped "Albrechtjs" no longer matches), not the other 86, whose
+        # bolding must key off something else (full-name or first-name
+        # matching) unaffected by this function's return value. 12 matches
+        # what commit 6935094's body and PR_BODY.md already said; this
+        # comment (and the test docstring) previously said 10, an error
+        # caught in review and corrected here after re-running the
+        # python-docx run-level bold diff directly (ref arm vs a probe
+        # render with this strip disabled) rather than trusting either
+        # number. With zero corresponding case in-corpus where the strip
+        # was itself the bug, no signal available inside this function
+        # (case pattern, part count, the filtered-out non-name parts)
+        # distinguishes the two cases; a real
+        # fix belongs at the call site (matching both the raw and stripped
+        # candidates against actual citation text) rather than a blind guess
+        # made here. See PR body for the corpus evidence in full; #665 item
+        # 1 stays open.
         if len(last_name) > 5:
-            # Check if last 2-3 chars look like initials
             for suffix_len in [2, 3]:
                 suffix = last_name[-suffix_len:]
                 if suffix.islower() or suffix.isupper():
@@ -61,7 +100,7 @@ def _extract_last_name_from_uid(uid: str) -> str:
     return ''
 
 
-def _extract_year_from_text(text: str) -> Optional[str]:
+def _extract_year_from_text(text: str) -> str | None:
     """Extract year from raw text as fallback when not in extracted_fields.
 
     Looks for patterns like:
@@ -97,7 +136,7 @@ def _extract_year_from_text(text: str) -> Optional[str]:
     return None
 
 
-def _is_table_header_entry(text: str, header_keywords: List[str], threshold: int = 2) -> bool:
+def _is_table_header_entry(text: str, header_keywords: list[str], threshold: int = 2) -> bool:
     """Detect if an entry is actually a table header that was mistakenly extracted as data.
 
     Table headers are characterized by:
@@ -122,8 +161,19 @@ def _is_table_header_entry(text: str, header_keywords: List[str], threshold: int
     # If text is very short, it might be header-like
     # But only if it matches header patterns
     if len(text_lower) < 100:
-        # Count how many header keywords appear
-        keyword_count = sum(1 for kw in header_keywords if kw.lower() in text_lower)
+        # Count how many header keywords appear as whole words -- a substring
+        # test would match "date" inside "candidate" or "organization" inside
+        # "Organization of Medical Education", both real content, not headers.
+        # A trailing optional "s" keeps this matching a plural header word
+        # ("Dates" for keyword "date") the same way `header_patterns` below
+        # already does via `dates?` -- without it, a bare `\bdate\b` regexp
+        # stops matching "Dates" entirely (word-boundary matching removes
+        # the plural along with the "candidate" false positive it was meant
+        # to fix).
+        keyword_count = sum(
+            1 for kw in header_keywords
+            if re.search(rf'\b{re.escape(kw.lower())}s?\b', text_lower)
+        )
 
         # Check for common header patterns
         header_patterns = [
@@ -145,14 +195,20 @@ def _is_table_header_entry(text: str, header_keywords: List[str], threshold: int
             parts = re.split(r'[\t|]', text_lower)
             # If all parts are short and most match header keywords, it's a header
             if all(len(p.strip()) < 30 for p in parts if p.strip()):
-                parts_matching = sum(1 for p in parts if any(kw in p for kw in header_keywords))
+                parts_matching = sum(
+                    1 for p in parts
+                    # Same trailing optional "s" as the keyword-count path
+                    # above, so a plural column header ("Dates") still
+                    # matches keyword "date".
+                    if any(re.search(rf'\b{re.escape(kw.lower())}s?\b', p) for kw in header_keywords)
+                )
                 if parts_matching >= len(parts) * 0.5:
                     return True
 
     return False
 
 
-def _is_structural_label(entry: Dict) -> bool:
+def _is_structural_label(entry: dict) -> bool:
     """Check if an entry is a structural label from the source CV rather than actual content.
 
     Source CVs contain section headers, sub-headers, and structural labels
@@ -161,27 +217,58 @@ def _is_structural_label(entry: Dict) -> bool:
     in the WCM output — the WCM template provides its own structure.
 
     Checks:
-    1. All-caps text longer than 3 characters (section headers)
+    1. All-caps text longer than 3 characters, corroborated by either the
+       entry's own hierarchy labels (section headers) or a stage-4
+       extraction that found no substantive fields for it at all
     2. Entry text that exactly matches one of its own hierarchy labels
     """
     text = (entry.get('text', '') or '').strip()
     if not text:
         return True
 
-    # All-caps text (section headers like "CLINICAL PRACTICE ACTIVITIES")
-    if text == text.upper() and len(text) > 3 and not any(c.isdigit() for c in text):
-        return True
+    text_lower = text.lower()
+    hierarchy = entry.get('hierarchy', []) or []
 
     # Text that exactly matches one of its hierarchy labels
-    hierarchy = entry.get('hierarchy', [])
     for label in hierarchy:
-        if text.strip().lower() == label.strip().lower():
+        if text_lower == label.strip().lower():
+            return True
+
+    # All-caps text (section headers like "CLINICAL PRACTICE ACTIVITIES").
+    # Case alone can't tell a header from legitimate all-caps content (a
+    # name, "USA", an org name written in caps) -- require corroborating
+    # evidence before treating it as a header rather than dropping every
+    # long all-caps run unconditionally.
+    if text == text.upper() and len(text) > 3 and not any(c.isdigit() for c in text):
+        # Signal 1: the text echoes one of the entry's own hierarchy labels.
+        for label in hierarchy:
+            label_lower = label.strip().lower()
+            if label_lower and (label_lower in text_lower or text_lower in label_lower):
+                return True
+
+        # Signal 2: stage 4 attempted extraction on this entry and came back
+        # with nothing -- every field it looked for is null. A hierarchy-echo
+        # match alone misses a real corpus case: a stray section-header
+        # string (e.g. "CLINICAL PRACTICE ACTIVITIES") extracted as an entry
+        # *under a different section's hierarchy* than its own (a stage 2/3
+        # misclassification -- see `hierarchy_mismatch_flag` on such
+        # entries), which by construction never echoes the hierarchy it was
+        # filed under. It also never carries any real field value, since
+        # there was never any content to extract. Genuine all-caps content
+        # (a name, an org) that reaches this function always has at least
+        # one populated field or is missing `extracted_fields` altogether
+        # (untested/synthetic callers) -- neither case trips this signal.
+        # `extracted_fields` must be present and non-None to count: an
+        # absent key means extraction was never attempted for this entry,
+        # which is not evidence of "nothing to extract".
+        fields = entry.get('extracted_fields')
+        if isinstance(fields, dict) and fields and not any(fields.values()):
             return True
 
     return False
 
 
-def _parse_multi_membership_entry(lines: List[str]) -> List[Tuple[str, str, str]]:
+def _parse_multi_membership_entry(lines: list[str]) -> list[tuple[str, str, str]]:
     """Parse multiple memberships from merged entry lines.
 
     Handles patterns like:
@@ -258,7 +345,7 @@ _TRAILING_DATE = re.compile(r'(\d{4}(?:\s*[-–]\s*(?:\d{4}|present))?)\s*$', re
 _PAREN_ROLE_DATE = re.compile(r'\(([^)]*?)(\d{4})\s*[-–]\s*(\d{4}|present)\s*\)', re.IGNORECASE)
 
 
-def _parse_flattened_committee_lines(lines: List[str]) -> List[ParsedActivityLine]:
+def _parse_flattened_committee_lines(lines: list[str]) -> list[ParsedActivityLine]:
     """Parse committee/leadership lines flattened out of a source table.
 
     The single line parser behind section O's `_add_multiline_leadership_rows`
@@ -288,8 +375,8 @@ def _parse_flattened_committee_lines(lines: List[str]) -> List[ParsedActivityLin
     2008-2010)") is one role held under changing titles, so it becomes one
     item: the latest date range, with every title collected into `roles`.
     """
-    items: List[ParsedActivityLine] = []
-    dates_pool: List[str] = []
+    items: list[ParsedActivityLine] = []
+    dates_pool: list[str] = []
 
     for line in lines:
         # entry_lines() already strips every line at both call sites, but this

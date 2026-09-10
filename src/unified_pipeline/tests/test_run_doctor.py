@@ -155,6 +155,75 @@ def test_iter_header_candidates_skips_bold_non_headers(tmp_path):
     assert iter_header_candidates(str(path)) == ["MENTORING"]
 
 
+def _merge_row(row):
+    """Merge every cell of a python-docx row into one (a gridSpan merge)."""
+    cells = row.cells
+    if len(cells) > 1:
+        cells[0].merge(cells[-1])
+
+
+def test_iter_header_candidates_sees_a_gridspan_merged_single_column_table(tmp_path):
+    """#749 / #446 review item 6: a section-container table built on a
+    two-column grid with every row merged into one cell is ONE logical
+    column. `len(tbl.columns)` says 2 and used to skip it, so the bold
+    ALL-CAPS header inside was never a candidate -- and a merged row must
+    yield the header once, not once per grid column it spans."""
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    for row in table.rows:
+        _merge_row(row)
+    table.rows[0].cells[0].paragraphs[0].add_run("PROFESSIONAL SOCIETIES").bold = True
+    table.rows[1].cells[0].paragraphs[0].add_run("Member, American College of Physicians")
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    assert len(table.columns) == 2, "the grid count the old rule keyed on"
+    assert iter_header_candidates(str(path)) == ["PROFESSIONAL SOCIETIES"]
+
+
+def test_iter_header_candidates_skips_a_data_table_with_a_merged_title_row(tmp_path):
+    """#749 discriminator, variable row widths: a three-column data table
+    whose FIRST row is merged into one title cell is still a data table --
+    its bold cells are column headers. Counting effective columns from the
+    first row alone (the issue's first suggestion) would read it as
+    single-column and promote 'YEARS TAUGHT' to a section header."""
+    doc = Document()
+    table = doc.add_table(rows=3, cols=3)
+    _merge_row(table.rows[0])
+    table.rows[0].cells[0].paragraphs[0].add_run("TEACHING").bold = True
+    for i, label in enumerate(["YEARS TAUGHT", "COURSE NUMBER", "ROLE IN COURSE"]):
+        table.rows[1].cells[i].paragraphs[0].add_run(label).bold = True
+    for i, value in enumerate(["2019-2021", "MED 101", "Lecturer"]):
+        table.rows[2].cells[i].paragraphs[0].add_run(value)
+    doc.add_paragraph("MENTORING").runs[0].bold = True
+    path = tmp_path / "cv.docx"
+    doc.save(path)
+
+    assert iter_header_candidates(str(path)) == ["MENTORING"]
+
+
+def test_is_single_column_is_the_logical_cell_count_not_the_grid():
+    """The document representation made explicit: single-column means every
+    row has exactly one logical cell, independent of the layout grid."""
+    from unified_pipeline.run_doctor import _is_single_column, _logical_cells
+    doc = Document()
+    plain = doc.add_table(rows=2, cols=1)
+    merged = doc.add_table(rows=2, cols=3)
+    for row in merged.rows:
+        _merge_row(row)
+    title_over_data = doc.add_table(rows=2, cols=2)
+    _merge_row(title_over_data.rows[0])
+    data = doc.add_table(rows=2, cols=2)
+
+    assert _is_single_column(plain)
+    assert _is_single_column(merged)
+    assert [len(_logical_cells(r)) for r in merged.rows] == [1, 1]
+    assert (len(merged.rows[0].cells), len(merged.columns)) == (3, 3), \
+        "what python-docx itself reports for the merged table"
+    assert not _is_single_column(title_over_data)
+    assert not _is_single_column(data)
+
+
 def test_missed_headers_fires_on_demoted_header():
     findings = lint_missed_headers(
         ["PROFESSIONAL EXPERIENCE"], _STAGE1A,
@@ -442,6 +511,28 @@ def test_output_hygiene_warns_on_oversized_appendix():
     count = next(f for f in lint_output_hygiene(blocks)
                  if "appendix holds" in f["message"])
     assert count["severity"] == "WARN"
+
+
+def test_output_hygiene_flags_a_non_paragraph_block_inside_the_appendix():
+    """#725 review r3923589271 pt 9: the paragraph-only appendix invariant
+    used to be documented, not enforced -- the lint dropped every
+    non-paragraph block before locating and scanning the appendix, so a
+    table landing inside the appendix range was silently invisible to it.
+    Measured over the 65-doc farm none actually does this today, but a
+    table that DOES land there now gets its own finding instead of being
+    dropped."""
+    blocks = [
+        ("p", "T. APPENDIX"),
+        ("p", "The following content from the original CV was not "
+              "successfully mapped to this CV format:"),
+        ("table", "cell text that never gets scanned as an appendix entry"),
+        ("p", "• Real leftover grant content | Role: PI | Status: Under review"),
+    ]
+    findings = lint_output_hygiene(blocks)
+    non_paragraph = [f for f in findings if "non-paragraph" in f["message"]]
+    assert len(non_paragraph) == 1
+    assert non_paragraph[0]["severity"] == "WARN"
+    assert non_paragraph[0]["message"].startswith("1 ")
 
 
 def test_output_hygiene_quiet_on_clean_output():
@@ -837,6 +928,40 @@ def test_duplicate_passages_flags_a_repeated_block_run():
     assert "2 passage(s)" in thrice[0]["message"]
 
 
+def test_duplicate_passages_cross_stretch_scan_distance_not_double_counted():
+    """`distances` is built globally from every repeated window in the
+    document (#446 review, fb73705 rework): stretch A repeats 3 times, 6
+    blocks apart, earning scan distance 6. Separately, stretch B repeats
+    once, 12 blocks apart, earning scan distance 12. Because A's first and
+    third occurrences also happen to sit 12 blocks apart, the distance-12
+    scan re-pairs them -- a match already charged via the two distance-6
+    pairs. The fix must count A's 3x repeat as 2 (not 3) and B's 1x repeat
+    as 1, for 3 total, and no evidence line's 'repeat at' block range may
+    appear twice."""
+    stretch_a = [("p", "• AAA Alpha item — 2001"),
+                 ("p", "• AAA Beta item — 2001"),
+                 ("p", "• AAA Gamma item — 2001")]
+    filler_1 = [("p", "• Filler One Uno"), ("p", "• Filler One Dos"),
+                ("p", "• Filler One Tres")]
+    filler_2 = [("p", "• Filler Two Uno"), ("p", "• Filler Two Dos"),
+                ("p", "• Filler Two Tres")]
+    filler_3 = [("p", "• Filler Three Uno"), ("p", "• Filler Three Dos"),
+                ("p", "• Filler Three Tres")]
+    filler_4 = [("p", f"• Filler Four {n}") for n in range(1, 10)]
+    stretch_b = [("p", "• BBB Uno item — 2002"),
+                 ("p", "• BBB Dos item — 2002"),
+                 ("p", "• BBB Tres item — 2002")]
+
+    blocks = (stretch_a + filler_1 + stretch_a + filler_2 + stretch_a
+              + filler_3 + stretch_b + filler_4 + stretch_b)
+    findings = lint_duplicate_passages(blocks)
+    assert len(findings) == 1
+    assert "3 passage(s)" in findings[0]["message"]
+    repeat_ranges = [e.split("repeat at ")[1].split(":")[0]
+                      for e in findings[0]["evidence"]]
+    assert len(repeat_ranges) == len(set(repeat_ranges))
+
+
 def test_duplicate_passages_quiet_when_only_the_adjacent_date_differs():
     """The mode both earlier attempts fired on: one course taught at nine
     venues renders nine records whose first three bullets are IDENTICAL and
@@ -1108,7 +1233,7 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    assert len(payload["findings"]) == 17  # one skip per lint in KNOWN_LINTS
+    assert len(payload["findings"]) == 18  # one skip per lint in KNOWN_LINTS
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
     assert payload["counts"]["ERROR"] == 0

@@ -42,11 +42,15 @@ def _auth(client, cookie_value):
 # Cookie payload
 # ---------------------------------------------------------------------------
 
-def test_cookie_carries_epoch():
+def test_cookie_carries_current_epoch(db):
+    """create_session_cookie reads the epoch itself rather than taking it as an
+    argument: an omitted argument used to default to 0, which after a "sign out
+    everyone" minted a cookie that was dead on arrival (#657 review, thread 12)."""
     from app.auth import create_session_cookie, decode_session_cookie
     from app.models import User
     user = User(id=1, email="u@example.com", role="user")
-    token = create_session_cookie(user, epoch=3)
+    _set_epoch(db, 3)
+    token = create_session_cookie(user, db)
     assert decode_session_cookie(token)["epoch"] == 3
 
 
@@ -58,7 +62,7 @@ def test_current_epoch_cookie_accepted(client, db, seed_simple_mode):
     from app.auth import create_session_cookie
     user = _make_user(db)
     _set_epoch(db, 0)
-    _auth(client, create_session_cookie(user, epoch=0))
+    _auth(client, create_session_cookie(user, db))
     assert client.get("/api/auth/me").status_code == 200
 
 
@@ -66,7 +70,7 @@ def test_stale_epoch_cookie_rejected(client, db, seed_simple_mode):
     from app.auth import create_session_cookie
     user = _make_user(db)
     _set_epoch(db, 0)
-    _auth(client, create_session_cookie(user, epoch=0))
+    _auth(client, create_session_cookie(user, db))
     assert client.get("/api/auth/me").status_code == 200  # valid before the bump
 
     _set_epoch(db, 1)  # an admin revoked everyone
@@ -75,9 +79,16 @@ def test_stale_epoch_cookie_rejected(client, db, seed_simple_mode):
     assert resp.json()["detail"]["error"] == "auth_required"
 
 
-def test_legacy_cookie_without_epoch_accepted_until_first_bump(client, db, seed_simple_mode):
-    """A cookie minted before this feature (no 'epoch' key) is read as epoch 0,
-    so the rollout itself does not force a mass re-login -- the first bump does."""
+def test_cookie_without_epoch_is_rejected(client, db, seed_simple_mode):
+    """A rich cookie with no 'epoch' key no longer reads as epoch 0.
+
+    It used to, so that the #110 rollout itself would not force a re-login.
+    Defaulting a missing security field is the same class of bug thread 9
+    reported against get_session_epoch: it silently hands a truncated or
+    hand-built cookie whatever the current epoch happens to be. Every cookie
+    minted since #110 carries the field, and the ones that did not have long
+    since passed their absolute TTL.
+    """
     from app.auth import _serializer
     user = _make_user(db)
     _set_epoch(db, 0)
@@ -88,10 +99,9 @@ def test_legacy_cookie_without_epoch_accepted_until_first_bump(client, db, seed_
         "issued_at": int(time.time()),
     })  # note: no "epoch" key
     _auth(client, legacy)
-    assert client.get("/api/auth/me").status_code == 200
-
-    _set_epoch(db, 1)
-    assert client.get("/api/auth/me").status_code == 401
+    resp = client.get("/api/auth/me")
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["error"] == "session_invalid"
 
 
 # ---------------------------------------------------------------------------
@@ -125,7 +135,7 @@ def test_admin_revoke_all_bumps_epoch_and_kills_sessions(client, db, seed_simple
     from app.models import SystemConfig
     user = _make_user(db)
     _set_epoch(db, 0)
-    cookie = create_session_cookie(user, epoch=0)
+    cookie = create_session_cookie(user, db)
 
     resp = _as_admin(client, lambda: client.post("/api/admin/sessions/revoke-all"))
     assert resp.status_code == 200

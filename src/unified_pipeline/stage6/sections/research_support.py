@@ -784,9 +784,13 @@ class ResearchSupportSection:
         raw_text = entry.get('text', '') if entry else ''
         pi_name = resolve_pi_name(fields, raw_text, role, owner_name)
 
-        # Format costs as currency
-        costs = annual_direct_costs or total_funding
-        costs_formatted = _format_currency(costs)
+        # Format costs as currency. `or` on the raw value treated a real $0 as
+        # missing (round-2 review of #481, point 4): the fallback is decided on
+        # what annual_direct_costs *renders*, so 0 wins and only a value that
+        # renders nothing (None, blank, non-amount) falls through.
+        costs_formatted = _format_currency(annual_direct_costs)
+        if not costs_formatted:
+            costs_formatted = _format_currency(total_funding)
 
         # Carry the grant/award identifier in Award Source. The WCM template has no
         # grant-number row -- its block is exactly these 8 rows plus optional goals --

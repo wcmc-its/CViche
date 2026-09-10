@@ -21,7 +21,6 @@ When a conflict is detected with high confidence, auto-correct the code.
 """
 
 import re
-from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 
 
@@ -30,7 +29,7 @@ class ConsistencyResult:
     """Result of reasoning-code consistency check."""
     has_conflict: bool
     original_code: str
-    reasoning_suggests: Optional[str]
+    reasoning_suggests: str | None
     confidence: float
     conflict_type: str  # 'explicit_mention', 'semantic_mismatch', 'none'
     evidence: str
@@ -76,7 +75,7 @@ VALID_CODES = {
 }
 
 
-def extract_codes_from_reasoning(reasoning: str) -> List[Tuple[str, str]]:
+def extract_codes_from_reasoning(reasoning: str) -> list[tuple[str, str]]:
     """
     Extract taxonomy codes mentioned in reasoning text.
 
@@ -105,7 +104,7 @@ def extract_codes_from_reasoning(reasoning: str) -> List[Tuple[str, str]]:
     return found_codes
 
 
-def check_reasoning_consistency(entry: Dict) -> ConsistencyResult:
+def check_reasoning_consistency(entry: dict) -> ConsistencyResult:
     """
     Check if an entry's reasoning is consistent with its assigned code.
 
@@ -206,9 +205,9 @@ def check_reasoning_consistency(entry: Dict) -> ConsistencyResult:
 
 
 def apply_reasoning_corrections(
-    entries: List[Dict],
+    entries: list[dict],
     min_confidence: float = 0.80
-) -> Tuple[List[Dict], Dict]:
+) -> tuple[list[dict], dict]:
     """
     Apply reasoning-based corrections to classified entries.
 

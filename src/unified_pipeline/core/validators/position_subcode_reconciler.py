@@ -37,7 +37,6 @@ are left untouched.
 """
 
 import re
-from typing import Dict, List, Optional, Tuple
 
 POSITION_CODES = {"D1", "D2", "D3"}
 
@@ -63,7 +62,7 @@ _INSTITUTION_SIGNAL = re.compile(
 _MAX_FRAGMENT_WORDS = 8
 
 
-def _idx(entry: Dict) -> int:
+def _idx(entry: dict) -> int:
     """Document-order key for an entry (falls back gracefully)."""
     for key in ("element_idx_start", "element_idx_end"):
         val = entry.get(key)
@@ -72,7 +71,7 @@ def _idx(entry: Dict) -> int:
     return 0
 
 
-def is_context_poor_position(entry: Dict) -> bool:
+def is_context_poor_position(entry: dict) -> bool:
     """A position entry that is just a role title -- no date, no institution.
 
     These are the fragments that lose their clinical context and get
@@ -94,8 +93,8 @@ def is_context_poor_position(entry: Dict) -> bool:
 
 
 def apply_position_subcode_reconciliation(
-    entries: List[Dict],
-) -> Tuple[List[Dict], Dict]:
+    entries: list[dict],
+) -> tuple[list[dict], dict]:
     """Reconcile stray position subcodes for context-poor title fragments.
 
     Args:
@@ -106,7 +105,7 @@ def apply_position_subcode_reconciliation(
         and reconciled, with per-correction detail -- matching the other
         post-classification correctors' shape.
     """
-    stats: Dict = {
+    stats: dict = {
         "position_fragments_reviewed": 0,
         "corrections_applied": 0,
         "correction_details": [],
@@ -125,8 +124,8 @@ def apply_position_subcode_reconciliation(
             continue
         stats["position_fragments_reviewed"] += 1
 
-        left: Optional[Dict] = pos[i - 1] if i > 0 else None
-        right: Optional[Dict] = pos[i + 1] if i < len(pos) - 1 else None
+        left: dict | None = pos[i - 1] if i > 0 else None
+        right: dict | None = pos[i + 1] if i < len(pos) - 1 else None
         if not (left and right):
             continue  # edge of the run -> not enough evidence
 

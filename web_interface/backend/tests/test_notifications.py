@@ -1,10 +1,15 @@
 """Regression guards for the Teams run-notification service (issue #154).
 
 Covers:
-  - build_teams_payload / build_started_payload field mapping and title color,
-    plus run-link derivation from CVICHE_ALLOWED_ORIGINS.
-  - notify_run_* best-effort contract: no-op when unconfigured, and a POST
-    exception / non-2xx is swallowed (logged, never raised).
+  - build_teams_payload / build_started_payload / build_feedback_payload field
+    mapping and title color, plus run-link derivation from
+    CVICHE_ALLOWED_ORIGINS.
+  - notify_run_* / notify_feedback_submitted best-effort contract: no-op when
+    unconfigured, and a POST exception / non-2xx is swallowed (logged, never
+    raised).
+
+See test_feedback_notification.py for the feedback_routes.submit_feedback
+call-site wiring -- these tests only cover the notifications helpers.
 
 Cards are Adaptive Cards in the Teams Workflows envelope:
   {"type": "message", "attachments": [{"content": <AdaptiveCard>}]}
@@ -321,3 +326,133 @@ def test_notify_started_posts_when_configured(monkeypatch):
 
     assert captured["url"] == "https://webhook.example/teams"
     assert _title(captured["json"])["text"].endswith("started")
+
+
+# --- build_feedback_payload -------------------------------------------------
+
+def _feedback(**overrides):
+    """A Feedback-like stand-in; the service only reads attributes."""
+    base = dict(
+        reviewer_role="self",
+        overall_accuracy=None,
+        overall_usefulness=4,
+        likelihood_to_recommend=4,
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_feedback_payload_maps_all_fields(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    feedback = _feedback(overall_accuracy=8)
+
+    payload = notifications.build_feedback_payload(feedback, _run(), submitter="Jane Doe")
+
+    facts = _facts(payload)
+    assert facts["Run ID"] == "A1B2C3"
+    assert facts["File"] == "cv.docx"
+    assert facts["Submitted by"] == "Jane Doe"
+    assert facts["Reviewer role"] == "self"
+    assert facts["Overall usefulness"] == "4/5"
+    assert facts["Likelihood to recommend"] == "4/5"
+    assert facts["Overall accuracy"] == "8/10"
+
+
+def test_feedback_payload_omits_optional_fields_when_absent(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+
+    facts = _facts(notifications.build_feedback_payload(_feedback(), _run()))
+
+    assert "Submitted by" not in facts
+    assert "Overall accuracy" not in facts
+
+
+def test_feedback_payload_never_includes_free_text_fields(monkeypatch):
+    """biggest_issue/issue_locations are reviewer-typed free text that can name
+    a person or quote CV content -- never put it on the card, even when set."""
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+    feedback = _feedback(
+        biggest_issue="Jane Smith's grant dates were wrong",
+        issue_locations=["section M"],
+    )
+
+    payload = notifications.build_feedback_payload(feedback, _run())
+
+    assert "Biggest issue" not in _facts(payload)
+    assert "Jane Smith" not in str(payload)
+
+
+@pytest.mark.parametrize("recommend,color", [
+    (1, "attention"), (2, "attention"), (3, "default"), (4, "good"), (5, "good"),
+])
+def test_feedback_payload_color_by_recommend_score(monkeypatch, recommend, color):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+
+    payload = notifications.build_feedback_payload(
+        _feedback(likelihood_to_recommend=recommend), _run())
+
+    assert _title(payload)["color"] == color
+
+
+def test_feedback_payload_has_fallback_and_summary(monkeypatch):
+    monkeypatch.delenv("CVICHE_ALLOWED_ORIGINS", raising=False)
+
+    payload = notifications.build_feedback_payload(_feedback(), _run())
+
+    assert payload["summary"].startswith("CViche feedback on run A1B2C3")
+    assert _card(payload)["fallbackText"] == payload["summary"]
+
+
+def test_feedback_payload_action_uses_first_allowed_origin(monkeypatch):
+    monkeypatch.setenv("CVICHE_ALLOWED_ORIGINS", "https://cviche.weill.cornell.edu/")
+
+    payload = notifications.build_feedback_payload(_feedback(), _run())
+
+    assert _card(payload)["actions"][0]["url"] == (
+        "https://cviche.weill.cornell.edu/run/A1B2C3"
+    )
+
+
+# --- notify_feedback_submitted ----------------------------------------------
+
+def test_notify_feedback_is_noop_when_unconfigured(monkeypatch):
+    monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
+
+    def _fail_post(*args, **kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("requests.post should not be called when unconfigured")
+
+    monkeypatch.setattr(notifications.requests, "post", _fail_post)
+
+    assert notifications.notify_feedback_submitted(_feedback(), _run()) is None
+
+
+def test_notify_feedback_posts_when_configured(monkeypatch):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+    captured = {}
+
+    def _ok_post(url, json=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        return SimpleNamespace(status_code=200)
+
+    monkeypatch.setattr(notifications.requests, "post", _ok_post)
+
+    notifications.notify_feedback_submitted(_feedback(), _run(), submitter="Jane Doe")
+
+    assert captured["url"] == "https://webhook.example/teams"
+    assert _facts(captured["json"])["Submitted by"] == "Jane Doe"
+
+
+def test_notify_feedback_swallows_post_exception(monkeypatch, caplog):
+    monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(notifications.requests, "post", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        result = notifications.notify_feedback_submitted(_feedback(), _run())
+
+    assert result is None
+    assert any("Teams notification failed" in r.message for r in caplog.records)

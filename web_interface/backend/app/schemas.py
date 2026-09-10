@@ -1,6 +1,6 @@
 """Pydantic schemas for API request/response validation."""
 from pydantic import BaseModel, PlainSerializer
-from typing import Optional, List, Annotated, Literal
+from typing import Annotated, Literal
 from datetime import datetime
 
 
@@ -53,7 +53,7 @@ class UploadResponse(BaseModel):
     # for server-side logging/telemetry and available to the client; the UI
     # currently shows a qualitative warning rather than this raw number. None
     # when the ratio couldn't be computed.
-    wcm_template_match_ratio: Optional[float] = None
+    wcm_template_match_ratio: float | None = None
 
 
 # ============================================================
@@ -67,18 +67,18 @@ class RunStatus(BaseModel):
     file_type: str
     status: str
     started_at: TZDateTime
-    completed_at: Optional[TZDateTime] = None
+    completed_at: TZDateTime | None = None
     total_cost: float
     total_tokens: int
     input_tokens: int = 0
     output_tokens: int = 0
-    total_duration_seconds: Optional[int] = None
+    total_duration_seconds: int | None = None
     # Input-scaled wall-clock estimate from upload; the client stall watchdog
     # scales its "taking longer than expected" threshold off this. NULL for runs
     # created before the column existed (watchdog falls back to a default).
-    estimated_duration_seconds: Optional[int] = None
-    error_message: Optional[str] = None
-    steps: List["StepSummary"]
+    estimated_duration_seconds: int | None = None
+    error_message: str | None = None
+    steps: list[StepSummary]
 
     class Config:
         from_attributes = True
@@ -87,14 +87,14 @@ class RunStatus(BaseModel):
 class StepSummary(BaseModel):
     """Summary of a single step."""
     step_number: int
-    stage_id: Optional[str] = None  # e.g., '1a', '1b', '2', '3a', '3b', '4', '4.5', '5', '5b', '5c', '5d', '6'
+    stage_id: str | None = None  # e.g., '1a', '1b', '2', '3a', '3b', '4', '4.5', '5', '5b', '5c', '5d', '6'
     step_name: str
     status: str
-    started_at: Optional[TZDateTime] = None
-    completed_at: Optional[TZDateTime] = None
-    duration_seconds: Optional[int] = None
+    started_at: TZDateTime | None = None
+    completed_at: TZDateTime | None = None
+    duration_seconds: int | None = None
     cost: float
-    output_files: Optional[str] = None  # JSON array as string
+    output_files: str | None = None  # JSON array as string
 
     class Config:
         from_attributes = True
@@ -106,9 +106,9 @@ class RunSummary(BaseModel):
     filename: str
     status: str
     started_at: TZDateTime
-    completed_at: Optional[TZDateTime] = None
+    completed_at: TZDateTime | None = None
     total_cost: float
-    total_duration_seconds: Optional[int] = None
+    total_duration_seconds: int | None = None
 
     class Config:
         from_attributes = True
@@ -116,7 +116,7 @@ class RunSummary(BaseModel):
 
 class PaginatedRuns(BaseModel):
     """Paginated list of runs."""
-    runs: List[RunSummary]
+    runs: list[RunSummary]
     total: int
     has_more: bool
     offset: int
@@ -136,8 +136,8 @@ class LogEntry(BaseModel):
 
 class OutputPreview(BaseModel):
     """Preview of step output data."""
-    headers: List[str]
-    rows: List[List[str]]
+    headers: list[str]
+    rows: list[list[str]]
 
 
 class StepDetail(BaseModel):
@@ -146,12 +146,12 @@ class StepDetail(BaseModel):
     step_number: int
     name: str
     status: str
-    duration: Optional[int] = None
+    duration: int | None = None
     cost_usd: float
-    input_file: Optional[str] = None
-    output_files: List[str]
-    logs: List[LogEntry]
-    output_preview: Optional[OutputPreview] = None
+    input_file: str | None = None
+    output_files: list[str]
+    logs: list[LogEntry]
+    output_preview: OutputPreview | None = None
 
 
 # ============================================================
@@ -184,7 +184,7 @@ class StepCompleteEvent(BaseModel):
     step: int
     duration: int
     cost: float
-    output_files: List[str]
+    output_files: list[str]
 
 
 class RunCompleteEvent(BaseModel):
@@ -219,30 +219,30 @@ class LoginResponse(BaseModel):
 class AuthConfigResponse(BaseModel):
     """Public auth configuration for frontend mode detection."""
     mode: str  # "simple" or "saml"
-    discovery_url: Optional[str] = None  # Only present when mode is "saml"
+    discovery_url: str | None = None  # Only present when mode is "saml"
 
 
 class QuotaInfo(BaseModel):
     """Rate limit quota information."""
-    daily_limit: Optional[int] = None  # None = unlimited
+    daily_limit: int | None = None  # None = unlimited
     daily_used: int = 0
-    daily_remaining: Optional[int] = None
-    monthly_limit: Optional[int] = None
+    daily_remaining: int | None = None
+    monthly_limit: int | None = None
     monthly_used: int = 0
-    monthly_remaining: Optional[int] = None
+    monthly_remaining: int | None = None
     is_admin: bool = False
 
 
 class MeResponse(BaseModel):
     """Current user info."""
     user_id: int
-    cwid: Optional[str] = None
-    email: Optional[str] = None
+    cwid: str | None = None
+    email: str | None = None
     display_name: str
     role: str
-    consent_version: Optional[str] = None
-    default_submission_type: Optional[str] = None
-    quota: Optional[QuotaInfo] = None
+    consent_version: str | None = None
+    default_submission_type: str | None = None
+    quota: QuotaInfo | None = None
 
     class Config:
         from_attributes = True
@@ -279,22 +279,22 @@ class ConsentSubmitResponse(BaseModel):
 class FeedbackSubmit(BaseModel):
     """Feedback submission from a user on a pipeline run."""
     reviewer_role: str  # required
-    overall_accuracy: Optional[int] = None  # 1-10
-    overall_completeness: Optional[int] = None  # 1-10
+    overall_accuracy: int | None = None  # 1-10
+    overall_completeness: int | None = None  # 1-10
     overall_usefulness: int  # 1-5, required
     manual_conversion_effort: str  # required
     correction_effort: str  # required
-    enrichment_quality: Optional[int] = None  # 1-5
-    summary_generated: Optional[bool] = None
-    summary_quality: Optional[int] = None  # 1-5
-    issue_missing_content: Optional[str] = None
-    issue_split_merged: Optional[str] = None
-    issue_wrong_section: Optional[str] = None
-    issue_inaccurate: Optional[str] = None
-    issue_ai_enrichment: Optional[str] = None
-    issue_formatting: Optional[str] = None
-    issue_locations: Optional[list[str]] = None
-    biggest_issue: Optional[str] = None
+    enrichment_quality: int | None = None  # 1-5
+    summary_generated: bool | None = None
+    summary_quality: int | None = None  # 1-5
+    issue_missing_content: str | None = None
+    issue_split_merged: str | None = None
+    issue_wrong_section: str | None = None
+    issue_inaccurate: str | None = None
+    issue_ai_enrichment: str | None = None
+    issue_formatting: str | None = None
+    issue_locations: list[str] | None = None
+    biggest_issue: str | None = None
     likelihood_to_recommend: int  # 1-5, required
 
 
@@ -351,27 +351,27 @@ class AdminStats(BaseModel):
     feedback_rate: float  # percentage 0-100
     # CV-to-WCM conversion time over completed runs (whole seconds). None when
     # there are no completed runs yet.
-    avg_duration_seconds: Optional[float] = None
-    p95_duration_seconds: Optional[int] = None
+    avg_duration_seconds: float | None = None
+    p95_duration_seconds: int | None = None
 
 
 class AdminUser(BaseModel):
     """User record with per-user stats for admin view."""
     id: int
-    cwid: Optional[str] = None
-    email: Optional[str] = None
+    cwid: str | None = None
+    email: str | None = None
     display_name: str
     role: str
     status: str
-    daily_limit: Optional[int] = None
-    monthly_limit: Optional[int] = None
+    daily_limit: int | None = None
+    monthly_limit: int | None = None
     runs_today: int = 0
     total_runs: int = 0
     total_cost: float = 0.0
     feedback_count: int = 0
     completed_run_count: int = 0
-    last_active_at: Optional[TZDateTime] = None
-    created_at: Optional[TZDateTime] = None
+    last_active_at: TZDateTime | None = None
+    created_at: TZDateTime | None = None
 
     class Config:
         from_attributes = True
@@ -379,25 +379,25 @@ class AdminUser(BaseModel):
 
 class AdminUserUpdate(BaseModel):
     """Request body for updating a user via admin."""
-    role: Optional[str] = None  # "user" or "admin"
-    status: Optional[str] = None  # "active" or "disabled"
-    daily_limit: Optional[int] = None  # 0 = reset to system default
-    monthly_limit: Optional[int] = None  # 0 = reset to system default
+    role: str | None = None  # "user" or "admin"
+    status: str | None = None  # "active" or "disabled"
+    daily_limit: int | None = None  # 0 = reset to system default
+    monthly_limit: int | None = None  # 0 = reset to system default
 
 
 class AdminRunEntry(BaseModel):
     """Single run entry for admin run listing."""
     run_id: str
-    user_email: Optional[str] = None
-    user_display_name: Optional[str] = None
+    user_email: str | None = None
+    user_display_name: str | None = None
     filename: str
     status: str
-    duration_seconds: Optional[int] = None
+    duration_seconds: int | None = None
     total_cost: float = 0.0
-    started_at: Optional[TZDateTime] = None
+    started_at: TZDateTime | None = None
     has_feedback: bool = False
-    quality_score: Optional[int] = None      # advisory 0-100, None if not computed
-    quality_band: Optional[str] = None       # "GREEN (ship)" / "YELLOW ..." / "RED ..."
+    quality_score: int | None = None      # advisory 0-100, None if not computed
+    quality_band: str | None = None       # "GREEN (ship)" / "YELLOW ..." / "RED ..."
 
     class Config:
         from_attributes = True
@@ -408,13 +408,13 @@ class QualityScoreResult(BaseModel):
     run_id: str
     totalScore: int
     band: str
-    dimensionScores: List[dict] = []
-    flags: List[str] = []
+    dimensionScores: list[dict] = []
+    flags: list[str] = []
 
 
 class AdminRunsResponse(BaseModel):
     """Paginated list of all runs for admin."""
-    runs: List[AdminRunEntry]
+    runs: list[AdminRunEntry]
     total: int
     has_more: bool
     offset: int
@@ -423,8 +423,8 @@ class AdminRunsResponse(BaseModel):
 
 class AdminConfigResponse(BaseModel):
     """Current system configuration."""
-    allowed_users: List[str] = []
-    admin_users: List[str] = []
+    allowed_users: list[str] = []
+    admin_users: list[str] = []
     rate_limit_daily: int = 10
     rate_limit_monthly: int = 50
     consent_version: str = "1.0"
@@ -433,8 +433,8 @@ class AdminConfigResponse(BaseModel):
 
 class AdminConfigUpdate(BaseModel):
     """Request body for updating system config."""
-    allowed_users: Optional[List[str]] = None
-    admin_users: Optional[List[str]] = None
-    rate_limit_daily: Optional[int] = None
-    rate_limit_monthly: Optional[int] = None
-    consent_version: Optional[str] = None
+    allowed_users: list[str] | None = None
+    admin_users: list[str] | None = None
+    rate_limit_daily: int | None = None
+    rate_limit_monthly: int | None = None
+    consent_version: str | None = None

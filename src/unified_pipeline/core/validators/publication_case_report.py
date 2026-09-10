@@ -5,7 +5,6 @@ Detects case reports/case series to route to S6 instead of S1 (original research
 """
 
 import re
-from typing import List
 from .base_validator import BaseValidator, ValidatorGuidance
 
 
@@ -28,7 +27,7 @@ class CaseReportValidator(BaseValidator):
 
     name = "CaseReportValidator"
 
-    def applies_to(self) -> List[str]:
+    def applies_to(self) -> list[str]:
         """This validator applies to publication sections."""
         return ['S', 'bibliography']
 
