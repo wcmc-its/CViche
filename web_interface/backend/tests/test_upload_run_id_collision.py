@@ -13,15 +13,20 @@ tests, so "the first user's data survives" is proven against the actual
 filesystem write path, not against an assertion that a mock was called.
 """
 import asyncio
+import contextlib
+import hashlib
 import json
 import re
 import threading
+from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy.orm import object_session
 
-from app.models import Run, User
+from app.models import Run, Step, User
+from app.pipeline.step_registry import STEP_REGISTRY
 from app.storage.base import StorageKeyExists
 from app.storage.local_storage import LocalRunStorage
 from app.api import upload as upload_module
@@ -407,17 +412,40 @@ def test_restart_regenerates_id_on_real_storage_collision(db, tmp_path):
 # --- (e) exhausting every attempt fails the request, no run row ------------
 
 def test_upload_fails_after_exhausting_run_id_attempts(client, db, seed_simple_mode, tmp_path):
-    """Mirrors test_upload_atomicity's contract: when the durable archive
-    can never be created, the request errors and NO run row is left behind
-    -- whether the cause is a real outage or (here) every retry colliding."""
+    """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 23
+
+    Mirrors test_upload_atomicity's contract: when the durable archive can
+    never be created, the request errors and NO run row is left behind --
+    whether the cause is a real outage or (here) every retry colliding.
+
+    Rewritten against the real LocalRunStorage, which is what this module's
+    docstring promises for every collision test; the earlier version used a
+    MagicMock that collided on every call and asserted only a call count, so
+    it could not see whether the five aborted attempts left pod-local files
+    behind, whether each attempt actually drew a FRESH id, or whether the
+    colliding runs' archives were touched. Every one of the _RUN_ID_ATTEMPTS
+    draws is pre-seeded with another run's manifest, so all five collide.
+    """
     user = _make_user(db, email="exhausted@example.com")
     _auth(client, user)
 
-    storage = MagicMock()
-    storage.put_file_exclusive.side_effect = StorageKeyExists("always collides")
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))
+    colliding_ids = ["AAAAAA", "BBBBBB", "CCCCCC", "DDDDDD", "EEEEEE"]
+    assert len(colliding_ids) == upload_module._RUN_ID_ATTEMPTS
+    seeds = {}
+    for rid in colliding_ids:
+        seeds[rid] = f'{{"run_id": "{rid}", "owner": "someone-else"}}'.encode()
+        storage.put_file(rid, "input/manifest.json", seeds[rid])
 
-    patches = _bypass_file_validation(tmp_path)
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    # Exactly _RUN_ID_ATTEMPTS ids: a sixth draw raises StopIteration (still a
+    # 502, but call_count below then reads 6 and fails), so the list doubles
+    # as the bound check.
+    draw = MagicMock(side_effect=list(colliding_ids))
+    patches = _bypass_file_validation(upload_dir)
     patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.api.upload.generate_run_id", draw))
     for p in patches:
         p.start()
     try:
@@ -429,10 +457,17 @@ def test_upload_fails_after_exhausting_run_id_attempts(client, db, seed_simple_m
     assert resp.status_code == 502, resp.text
     assert resp.json()["detail"]["error"] == "storage_unavailable"
     assert db.query(Run).count() == 0
-    # One put_file_exclusive call per attempt (each attempt's manifest put
-    # goes first and collides, so the content put is never reached); bounded
-    # by the named retry constant, not unbounded.
-    assert storage.put_file_exclusive.call_count == upload_module._RUN_ID_ATTEMPTS
+    # One fresh id per attempt, bounded by the named retry constant.
+    assert draw.call_count == upload_module._RUN_ID_ATTEMPTS
+    # Every colliding run's archive is byte-identical to its seed and gained
+    # no content key (the manifest put collides first, so the content put is
+    # never reached).
+    for rid in colliding_ids:
+        assert storage.get_file(rid, "input/manifest.json") == seeds[rid]
+        assert storage.list_files(rid) == ["input/manifest.json"]
+    # Each attempt's pod-local file was created exclusively and then unlinked
+    # on the collision, so five aborted attempts leave nothing on disk.
+    assert list(upload_dir.iterdir()) == []
 
 
 # --- (f) generate_run_id is uniform over its format -------------------------
@@ -452,3 +487,529 @@ def test_generate_run_id_format_and_position_entropy():
             f"position {pos} saw only {distinct} distinct symbols in 20,000 draws "
             "(the pre-fix defect collapsed position 5 to ~4)"
         )
+
+
+# --- (g) PR #779 review asks: the collision loop's other branches ----------
+
+def test_upload_collision_on_content_after_manifest_retries(client, db, seed_simple_mode, tmp_path):
+    """PR #779 review thread web_interface/backend/tests/test_upload_atomicity.py item 16
+
+    A StorageKeyExists from the CONTENT put (manifest already landed) is a
+    collision too: the id is regenerated and the request succeeds under the
+    fresh id. create_run_archive's docstring says this codebase cannot
+    produce that state (nothing writes a content key without its manifest),
+    but the branch is reachable with a pre-seeded content object lacking a
+    manifest, and neither real-storage collision test above drives it (both
+    pre-seed the manifest, so the manifest put collides first). Pins the
+    documented residue as well: the orphaned manifest under the abandoned id
+    is left in place, and carries only this requester's own data.
+    """
+    user = _make_user(db, email="content-collision@example.com")
+    _auth(client, user)
+
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))
+    other_bytes = b"PK\x03\x04 someone-elses-cv-bytes"
+    # Content key only -- NO manifest, so the manifest put succeeds and only
+    # the content put can detect the collision.
+    storage.put_file("AAAAAA", "input/AAAAAA.docx", other_bytes)
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    patches = _bypass_file_validation(upload_dir)
+    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.api.upload.generate_run_id", side_effect=["AAAAAA", "BBBBBB"]))
+    for p in patches:
+        p.start()
+    try:
+        resp = _post_dummy_upload(client)
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["run_id"] == "BBBBBB"
+
+    # The pre-existing content object was never overwritten.
+    assert storage.get_file("AAAAAA", "input/AAAAAA.docx") == other_bytes
+    # The documented residue: this request's manifest stays orphaned under
+    # the abandoned id (no run row), naming only this same requester.
+    assert storage.exists("AAAAAA", "input/manifest.json") is True
+    orphan = json.loads(storage.get_file("AAAAAA", "input/manifest.json"))
+    assert orphan["run_id"] == "AAAAAA"
+    assert orphan["user_email"] == user.email
+    assert storage.list_files("AAAAAA") == ["input/AAAAAA.docx", "input/manifest.json"]
+
+    # The fresh id got the whole archive, and only it got a run row.
+    assert storage.list_files("BBBBBB") == ["input/BBBBBB.docx", "input/manifest.json"]
+    assert storage.get_file("BBBBBB", "input/BBBBBB.docx") == b"PK\x03\x04dummy-docx-bytes"
+    assert [r.id for r in db.query(Run).all()] == ["BBBBBB"]
+    # The colliding attempt's pod-local file was unlinked; only the winner's remains.
+    assert [p.name for p in upload_dir.iterdir()] == ["BBBBBB.docx"]
+
+
+def test_upload_real_storage_fault_is_not_retried(client, db, seed_simple_mode, tmp_path):
+    """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 15
+
+    A non-collision storage failure is fatal on the FIRST attempt: no fresh
+    id is drawn, no second put is tried, the attempt's pod-local file is
+    removed, and no run row or by-submitter index is written. The existing
+    fatal-path test (test_upload_atomicity.py) only asserts the put was
+    attempted, which one call or five satisfy alike; here both the put count
+    and the id-draw count are pinned to exactly one, in contrast with the
+    exhaustion test's _RUN_ID_ATTEMPTS.
+    """
+    user = _make_user(db, email="fault@example.com")
+    _auth(client, user)
+
+    storage = MagicMock()
+    storage.put_file_exclusive.side_effect = RuntimeError("S3 down")
+    draw = MagicMock(return_value="AAAAAA")
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    patches = _bypass_file_validation(upload_dir)
+    patches.append(patch("app.api.upload.get_storage", return_value=storage))
+    patches.append(patch("app.api.upload.generate_run_id", draw))
+    for p in patches:
+        p.start()
+    try:
+        resp = _post_dummy_upload(client)
+    finally:
+        for p in patches:
+            p.stop()
+
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["detail"]["error"] == "storage_unavailable"
+    # Exactly one attempt: one id drawn, one (failing) put, no retry loop.
+    assert draw.call_count == 1
+    assert storage.put_file_exclusive.call_count == 1
+    assert storage.put_file_exclusive.call_args.args[:2] == ("AAAAAA", "input/manifest.json")
+    storage.put_global.assert_not_called()
+    assert db.query(Run).count() == 0
+    # The single attempt's pod-local file was cleaned up on the fault.
+    assert list(upload_dir.iterdir()) == []
+
+
+def test_create_run_archive_concurrent_same_first_draw(tmp_path):
+    """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 18
+
+    N uploads whose FIRST id draw is the same value, released together: the
+    real id-regeneration loop over the real LocalRunStorage and a real
+    UPLOAD_DIR must let exactly one keep that id, give every other caller a
+    distinct fresh id, and let all N succeed with their own bytes intact.
+    test_local_put_file_exclusive_is_atomic_under_concurrency above covers
+    only the storage primitive on one fixed key; the two /upload collision
+    tests are sequential (a pre-seeded archive). This drives create_run_archive
+    directly because the TestClient + shared-SQLite-session harness cannot
+    safely serve N requests from N threads.
+    """
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+
+    lock = threading.Lock()
+    first_drawn: set[int] = set()
+    unique_draws = 0
+
+    def draw() -> str:
+        # Every thread's first draw is the same id; later draws are unique.
+        nonlocal unique_draws
+        with lock:
+            me = threading.get_ident()
+            if me not in first_drawn:
+                first_drawn.add(me)
+                return "SAME01"
+            unique_draws += 1
+            return f"UNIQ{unique_draws:02d}"
+
+    barrier = threading.Barrier(_RACING_WRITERS)
+    results: dict[int, tuple] = {}
+    errors: dict[int, str] = {}
+
+    def race(n: int) -> None:
+        payload = f"writer-{n}-payload".encode()
+
+        def build_manifest(run_id: str, stored_name: str) -> bytes:
+            return json.dumps({"run_id": run_id, "stored_as": stored_name, "writer": n}).encode()
+
+        def write_local(path) -> None:
+            with open(path, "xb") as f:
+                f.write(payload)
+
+        barrier.wait()
+        try:
+            run_id, stored_name, file_path, _ = upload_module.create_run_archive(
+                payload, ".docx", build_manifest, write_local,
+            )
+        except Exception as e:  # recorded, asserted empty below
+            with lock:
+                errors[n] = repr(e)
+            return
+        with lock:
+            results[n] = (run_id, stored_name, file_path, payload)
+
+    with patch("app.api.upload.UPLOAD_DIR", upload_dir), \
+         patch("app.api.upload.get_storage", return_value=storage), \
+         patch("app.api.upload.generate_run_id", new=draw):
+        threads = [threading.Thread(target=race, args=(n,)) for n in range(_RACING_WRITERS)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    assert errors == {}, f"no writer may fail on a mere collision: {errors}"
+    assert len(results) == _RACING_WRITERS
+    ids = [r[0] for r in results.values()]
+    assert len(set(ids)) == _RACING_WRITERS, f"ids must be distinct, got {ids}"
+    assert ids.count("SAME01") == 1, f"exactly one writer keeps the shared draw, got {ids}"
+
+    winner = next(n for n, r in results.items() if r[0] == "SAME01")
+    assert storage.get_file("SAME01", "input/SAME01.docx") == results[winner][3]
+
+    for n, (run_id, stored_name, file_path, payload) in results.items():
+        assert stored_name == f"{run_id}.docx"
+        assert file_path == upload_dir / stored_name
+        # Durable archive: both keys, this writer's whole payload, its own manifest.
+        assert storage.list_files(run_id) == [f"input/{stored_name}", "input/manifest.json"]
+        assert storage.get_file(run_id, f"input/{stored_name}") == payload
+        assert json.loads(storage.get_file(run_id, "input/manifest.json"))["writer"] == n
+        # Pod-local copy matches too.
+        assert file_path.read_bytes() == payload
+    # Losers' partial local files for SAME01 were unlinked: N files, no residue.
+    assert len(list(upload_dir.iterdir())) == _RACING_WRITERS
+
+
+# --- (h) PR #779 review asks: restart_run ----------------------------------
+
+# Every Run column restart reads or could plausibly touch; snapshotted before a
+# restart and compared after (item 21), so a write to the original is caught
+# whichever column it lands on.
+_ORIGINAL_RUN_COLS = (
+    "status", "filename", "file_type", "user_id", "submission_type",
+    "started_at", "completed_at", "total_cost", "total_tokens", "error_message",
+    "show_track_changes", "show_pipeline_comments", "strip_template_instructions",
+)
+
+
+def _snapshot_run(run) -> dict:
+    return {col: getattr(run, col) for col in _ORIGINAL_RUN_COLS}
+
+
+def _make_original(db, user, run_id, **overrides):
+    """A completed original run owned by `user`, with every render flag set
+    away from its column default (1/0/1) so a fall-back to defaults on the
+    child is caught."""
+    fields = dict(
+        id=run_id,
+        filename="my cv.docx",
+        file_type="docx",
+        status="completed",
+        user_id=user.id,
+        submission_type="standard",
+        show_track_changes=0,
+        show_pipeline_comments=1,
+        strip_template_instructions=0,
+    )
+    fields.update(overrides)
+    original = Run(**fields)
+    db.add(original)
+    db.commit()
+    db.refresh(original)
+    return original
+
+
+@contextlib.contextmanager
+def _restart_env(original, storage, upload_dir, materialize=True, extra=()):
+    """The restart_run harness shared by (h): the access gate and rate limit
+    stubbed, storage and UPLOAD_DIR redirected on BOTH modules (runs.py reads
+    the original through its own import; create_run_archive lives in
+    upload.py). `_materialize_input_if_missing` stays REAL unless
+    materialize=False -- it is a no-op when the local file exists.
+    """
+    from app.api import runs as runs_api
+
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.object(runs_api, "check_run_access", return_value=original))
+        stack.enter_context(patch.object(runs_api, "check_rate_limit", return_value=None))
+        if not materialize:
+            stack.enter_context(patch.object(runs_api, "_materialize_input_if_missing", return_value=None))
+        stack.enter_context(patch.object(runs_api, "get_storage", return_value=storage))
+        stack.enter_context(patch.object(runs_api, "UPLOAD_DIR", upload_dir))
+        stack.enter_context(patch("app.api.upload.UPLOAD_DIR", upload_dir))
+        stack.enter_context(patch("app.api.upload.get_storage", return_value=storage))
+        for p in extra:
+            stack.enter_context(p)
+        yield runs_api
+
+
+def _restart(runs_api, run_id, db, user):
+    return asyncio.run(runs_api.restart_run(run_id=run_id, db=db, current_user=user))
+
+
+def test_restart_rematerializes_missing_local_input_from_storage(db, tmp_path):
+    """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 5
+
+    The pod-local original is gone (pod recycle) but the durable copy exists:
+    restart re-fetches input/{id}.{ext} from storage into UPLOAD_DIR and forks
+    the child from those bytes. Every other restart test patches
+    _materialize_input_if_missing to a no-op, so the positive half of that
+    helper had no assertion (the 404 half is test_release_guards.py::
+    TestRestartQuota::test_restart_passes_quota_check_when_under_limit).
+    """
+    user = _make_user(db, email="rematerialize@example.com")
+    original = _make_original(db, user, "ORIGM1")
+
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))
+    original_bytes = b"PK\x03\x04 durable-copy-of-the-original"
+    storage.put_file("ORIGM1", "input/ORIGM1.docx", original_bytes)
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()  # NO ORIGM1.docx here: the pod-local copy is gone
+
+    with _restart_env(original, storage, upload_dir) as runs_api:
+        result = _restart(runs_api, "ORIGM1", db, user)
+
+    child_id = result["run_id"]
+    assert child_id != "ORIGM1"
+    # Re-materialized from storage, byte for byte.
+    assert (upload_dir / "ORIGM1.docx").read_bytes() == original_bytes
+    # And the child was forked from exactly those bytes.
+    assert storage.get_file(child_id, f"input/{child_id}.docx") == original_bytes
+    assert (upload_dir / f"{child_id}.docx").read_bytes() == original_bytes
+    manifest = json.loads(storage.get_file(child_id, "input/manifest.json"))
+    assert manifest["sha256"] == hashlib.sha256(original_bytes).hexdigest()
+    assert manifest["size_bytes"] == len(original_bytes)
+    assert manifest["restarted_from"] == "ORIGM1"
+    assert db.get(Run, child_id) is not None
+
+
+def test_restart_with_no_local_or_durable_input_is_404(db, tmp_path):
+    """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 5
+
+    Neither a pod-local copy nor a durable one: restart is refused with
+    404 file_not_found and creates nothing -- no child row, no archive, no
+    local file.
+    """
+    user = _make_user(db, email="no-input@example.com")
+    original = _make_original(db, user, "ORIGM2")
+
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))  # empty
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()  # empty
+
+    with _restart_env(original, storage, upload_dir) as runs_api:
+        with pytest.raises(HTTPException) as exc:
+            _restart(runs_api, "ORIGM2", db, user)
+
+    assert exc.value.status_code == 404
+    assert exc.value.detail["error"] == "file_not_found"
+    assert [r.id for r in db.query(Run).all()] == ["ORIGM2"]
+    assert list(upload_dir.iterdir()) == []
+    assert not (tmp_path / "storage").exists() or list((tmp_path / "storage").iterdir()) == []
+
+
+def test_restart_real_storage_fault_is_not_retried(db, tmp_path):
+    """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 15
+
+    Restart twin of the /upload test: a non-collision storage fault fails
+    the restart on the first attempt -- one id drawn, one put, the attempt's
+    pod-local file removed, the original's local file untouched, no child row
+    and no by-submitter index.
+    """
+    user = _make_user(db, email="restart-fault@example.com")
+    original = _make_original(db, user, "ORIGF1")
+
+    storage = MagicMock()
+    storage.put_file_exclusive.side_effect = RuntimeError("S3 down")
+    draw = MagicMock(return_value="AAAAAA")
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    original_bytes = b"PK\x03\x04fake-restarted-docx"
+    (upload_dir / "ORIGF1.docx").write_bytes(original_bytes)
+
+    with _restart_env(original, storage, upload_dir,
+                      extra=[patch("app.api.upload.generate_run_id", draw)]) as runs_api:
+        with pytest.raises(HTTPException) as exc:
+            _restart(runs_api, "ORIGF1", db, user)
+
+    assert exc.value.status_code == 502
+    assert exc.value.detail["error"] == "storage_unavailable"
+    assert draw.call_count == 1
+    assert storage.put_file_exclusive.call_count == 1
+    assert storage.put_file_exclusive.call_args.args[:2] == ("AAAAAA", "input/manifest.json")
+    storage.put_global.assert_not_called()
+    assert [r.id for r in db.query(Run).all()] == ["ORIGF1"]
+    assert sorted(p.name for p in upload_dir.iterdir()) == ["ORIGF1.docx"]
+    assert (upload_dir / "ORIGF1.docx").read_bytes() == original_bytes
+
+
+def test_restart_fails_after_exhausting_run_id_attempts(db, tmp_path):
+    """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 19
+
+    Restart shares create_run_archive, so its retry bound is the same
+    _RUN_ID_ATTEMPTS: when every draw collides the restart fails 502, exactly
+    that many ids were drawn and puts attempted, no child row exists, and
+    every aborted attempt's pod-local file was unlinked (only the original's
+    remains). Only /upload's exhaustion was tested before.
+    """
+    user = _make_user(db, email="restart-exhausted@example.com")
+    original = _make_original(db, user, "ORIGB2")
+
+    storage = MagicMock()
+    storage.put_file_exclusive.side_effect = StorageKeyExists("always collides")
+    # Exactly _RUN_ID_ATTEMPTS ids; a sixth draw would raise StopIteration
+    # and push call_count to 6, failing the bound assertion below.
+    colliding_ids = ["AAAAAA", "BBBBBB", "CCCCCC", "DDDDDD", "EEEEEE"]
+    assert len(colliding_ids) == upload_module._RUN_ID_ATTEMPTS
+    draw = MagicMock(side_effect=list(colliding_ids))
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    (upload_dir / "ORIGB2.docx").write_bytes(b"PK\x03\x04fake-restarted-docx")
+
+    with _restart_env(original, storage, upload_dir,
+                      extra=[patch("app.api.upload.generate_run_id", draw)]) as runs_api:
+        with pytest.raises(HTTPException) as exc:
+            _restart(runs_api, "ORIGB2", db, user)
+
+    assert exc.value.status_code == 502
+    assert exc.value.detail["error"] == "storage_unavailable"
+    assert draw.call_count == upload_module._RUN_ID_ATTEMPTS
+    assert storage.put_file_exclusive.call_count == upload_module._RUN_ID_ATTEMPTS
+    storage.put_global.assert_not_called()
+    assert [r.id for r in db.query(Run).all()] == ["ORIGB2"]
+    assert sorted(p.name for p in upload_dir.iterdir()) == ["ORIGB2.docx"]
+
+
+def test_restart_preserves_all_fields_on_child(db, tmp_path):
+    """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 20
+
+    The child row carries every field restart copies from the original --
+    filename, file_type, submission_type and the three render flags (set to
+    non-defaults so a fall-back is caught) -- plus the fields it sets fresh:
+    user_id = the restarting user, status 'created', started_at set,
+    completed_at clear, one pending Step per registry entry. The manifest's
+    file_type/original_filename match the original. test_restart_render_options
+    asserts only the flags and submission_type.
+    """
+    user = _make_user(db, email="preserve@example.com")
+    original = _make_original(db, user, "ORIGP1", filename="Dr Who CV.docx")
+
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    (upload_dir / "ORIGP1.docx").write_bytes(b"PK\x03\x04fake-restarted-docx")
+
+    before = datetime.now()
+    with _restart_env(original, storage, upload_dir) as runs_api:
+        result = _restart(runs_api, "ORIGP1", db, user)
+
+    child = db.get(Run, result["run_id"])
+    assert child is not None
+    assert (child.filename, child.file_type, child.submission_type) == ("Dr Who CV.docx", "docx", "standard")
+    assert (child.show_track_changes, child.show_pipeline_comments, child.strip_template_instructions) == (0, 1, 0)
+    assert child.user_id == user.id
+    assert child.status == "created"
+    assert child.started_at is not None and child.started_at >= before.replace(microsecond=0)
+    assert child.completed_at is None
+
+    steps = db.query(Step).filter(Step.run_id == child.id).order_by(Step.step_number).all()
+    assert [(s.step_number, s.stage_id, s.step_name, s.status) for s in steps] == [
+        (d.number, d.stage_id, d.name, "pending") for d in STEP_REGISTRY
+    ]
+
+    manifest = json.loads(storage.get_file(child.id, "input/manifest.json"))
+    assert manifest["file_type"] == "docx"
+    assert manifest["original_filename"] == "Dr Who CV.docx"
+    assert manifest["stored_as"] == f"{child.id}.docx"
+    assert manifest["user_email"] == user.email
+
+
+def test_restart_does_not_modify_original_run(db, tmp_path):
+    """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 21
+
+    Restart reads the original and must write nothing to it: every snapshotted
+    Run column, its pod-local input, its durable archive (input AND outputs)
+    and its storage key list are byte-identical after the restart. No test
+    re-read the original after the call before this one.
+    """
+    user = _make_user(db, email="untouched@example.com")
+    original = _make_original(
+        db, user, "ORIGU1",
+        completed_at=datetime(2026, 9, 1, 12, 0, 0),
+        total_cost=1.25,
+        total_tokens=4321,
+        error_message=None,
+    )
+
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))
+    original_bytes = b"PK\x03\x04 the-original-input"
+    original_manifest = b'{"run_id": "ORIGU1", "original_filename": "my cv.docx"}'
+    storage.put_file("ORIGU1", "input/ORIGU1.docx", original_bytes)
+    storage.put_file("ORIGU1", "input/manifest.json", original_manifest)
+    storage.put_file("ORIGU1", "outputs/report.json", b'{"done": true}')
+
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    (upload_dir / "ORIGU1.docx").write_bytes(original_bytes)
+
+    before = _snapshot_run(original)
+    keys_before = storage.list_files("ORIGU1")
+    assert keys_before == ["input/ORIGU1.docx", "input/manifest.json", "outputs/report.json"]
+
+    with _restart_env(original, storage, upload_dir) as runs_api:
+        result = _restart(runs_api, "ORIGU1", db, user)
+
+    assert result["run_id"] != "ORIGU1"
+    db.refresh(original)
+    assert _snapshot_run(original) == before
+    assert (upload_dir / "ORIGU1.docx").read_bytes() == original_bytes
+    assert storage.get_file("ORIGU1", "input/ORIGU1.docx") == original_bytes
+    assert storage.get_file("ORIGU1", "input/manifest.json") == original_manifest
+    assert storage.get_file("ORIGU1", "outputs/report.json") == b'{"done": true}'
+    assert storage.list_files("ORIGU1") == keys_before
+    # The original's Step rows (none seeded) gained nothing either.
+    assert db.query(Step).filter(Step.run_id == "ORIGU1").count() == 0
+
+
+def test_duplicate_restart_creates_independent_children(db, tmp_path):
+    """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 22
+
+    Restarting the same original twice yields two distinct children, each
+    with its own row, its own durable archive of the same bytes, its own
+    manifest naming itself and the original, its own pod-local copy and its
+    own full set of pending Steps -- and the original is unchanged. No test
+    called restart twice on one original before.
+    """
+    user = _make_user(db, email="duplicate@example.com")
+    original = _make_original(db, user, "ORIGD1")
+
+    storage = LocalRunStorage(base_dir=str(tmp_path / "storage"))
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+    original_bytes = b"PK\x03\x04 restarted-twice"
+    (upload_dir / "ORIGD1.docx").write_bytes(original_bytes)
+
+    before = _snapshot_run(original)
+    with _restart_env(original, storage, upload_dir,
+                      extra=[patch("app.api.upload.generate_run_id", side_effect=["CHILD1", "CHILD2"])]) as runs_api:
+        first = _restart(runs_api, "ORIGD1", db, user)
+        second = _restart(runs_api, "ORIGD1", db, user)
+
+    assert (first["run_id"], second["run_id"]) == ("CHILD1", "CHILD2")
+    for cid in ("CHILD1", "CHILD2"):
+        row = db.get(Run, cid)
+        assert row is not None
+        assert (row.user_id, row.status, row.filename, row.file_type) == (user.id, "created", "my cv.docx", "docx")
+        assert storage.list_files(cid) == [f"input/{cid}.docx", "input/manifest.json"]
+        assert storage.get_file(cid, f"input/{cid}.docx") == original_bytes
+        manifest = json.loads(storage.get_file(cid, "input/manifest.json"))
+        assert (manifest["run_id"], manifest["restarted_from"], manifest["stored_as"]) == (cid, "ORIGD1", f"{cid}.docx")
+        assert (upload_dir / f"{cid}.docx").read_bytes() == original_bytes
+        assert db.query(Step).filter(Step.run_id == cid).count() == len(STEP_REGISTRY)
+    assert db.query(Step).count() == 2 * len(STEP_REGISTRY)
+
+    db.refresh(original)
+    assert _snapshot_run(original) == before
+    assert sorted(p.name for p in upload_dir.iterdir()) == ["CHILD1.docx", "CHILD2.docx", "ORIGD1.docx"]
