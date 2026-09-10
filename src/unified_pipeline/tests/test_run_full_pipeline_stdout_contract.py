@@ -12,13 +12,19 @@ build every metric column of ``summary.tsv`` by grepping this CLI's log::
 
 Three properties are load-bearing and none of them were guarded before #780:
 
-1. Each literal is spelled exactly as the script greps it. Rewording one --
-   or migrating that ``print()`` to ``logger.*`` -- blanks a column of
-   ``summary.tsv`` silently, on every CV of every batch.
+1. Each literal is spelled exactly as the script greps it. Rewording one blanks
+   a column of ``summary.tsv`` silently, on every CV of every batch.
 2. ``^Models:`` is ANCHORED at line start, so any logging prefix in front of it
    (a timestamp, a level, a logger name) is equivalent to deleting the column.
 3. ``tail -1`` takes the LAST occurrence, which is the summary block's. Stage
    narration alone would satisfy a naive substring check.
+
+Since #780 the narration is ``logger.info`` rather than ``print``, which makes a
+fourth property load-bearing: ``configure_cli_logging()`` has to put those
+records on stdout formatted as ``%(message)s`` and nothing else, with the
+diagnostics on stderr. A formatter change is now the way this contract breaks,
+so the tests below assert on both streams and one of them runs the real process
+and compares its whole stdout to a golden.
 
 The patterns are read out of the batch script itself rather than retyped, so
 this test fails if either side of the contract moves without the other.
@@ -29,7 +35,10 @@ Self-contained: every stage runner is stubbed by the harness this reuses from
     python3 -m pytest src/unified_pipeline/tests/test_run_full_pipeline_stdout_contract.py -p no:cacheprovider
 """
 
+import ast
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -39,9 +48,14 @@ if str(_ROOT) not in sys.path:
 if str(Path(__file__).parent) not in sys.path:
     sys.path.insert(0, str(Path(__file__).parent))
 
-from test_run_full_pipeline_exit_status import _run_main  # noqa: E402
+from test_run_full_pipeline_exit_status import (  # noqa: E402
+    _run_main,
+    _run_main_streams,
+    restore_logging_after_each_test,  # noqa: F401  (autouse fixture, used by import)
+)
 
 _BATCH_SCRIPT = _ROOT / "scripts" / "run_corpus_batch.sh"
+_CLI = _ROOT / "run_full_pipeline.py"
 
 # What the script greps, minus its `| grep -oE '[0-9]+'` value-extraction step.
 _EXPECTED_BATCH_PATTERNS = {
@@ -53,6 +67,8 @@ _EXPECTED_BATCH_PATTERNS = {
 }
 _VALUE_EXTRACTOR = '[0-9]+'
 _SUMMARY_BANNER = "PIPELINE COMPLETE"
+_METRIC_LITERALS = ('Top-level sections:', 'Total headers:',
+                    'Entries extracted:', 'Entries classified:')
 
 
 def _batch_patterns():
@@ -72,8 +88,8 @@ def test_every_batch_grep_matches_this_cli_s_stdout(tmp_path, monkeypatch, capsy
     """The contract itself: each pattern the consumer greps finds a match.
 
     Mutant that kills this: reword any one of the four literals in
-    run_full_pipeline.py (e.g. 'Total headers:' -> 'Headers total:'), or put a
-    logging prefix in front of the Models line.
+    run_full_pipeline.py (e.g. 'Total headers:' -> 'Headers total:'), or give
+    the narration handler a formatter with a prefix in it.
     """
     rc, out = _run_main(tmp_path, monkeypatch, capsys)
     assert rc == 0
@@ -93,8 +109,7 @@ def test_the_metric_literals_appear_in_the_summary_block(tmp_path, monkeypatch, 
     _, out = _run_main(tmp_path, monkeypatch, capsys)
     assert _SUMMARY_BANNER in out
     summary = out.split(_SUMMARY_BANNER, 1)[1]
-    for literal in ('Top-level sections:', 'Total headers:',
-                    'Entries extracted:', 'Entries classified:'):
+    for literal in _METRIC_LITERALS:
         assert literal in summary, f"{literal!r} is missing from the summary block"
 
 
@@ -122,8 +137,9 @@ def test_the_models_line_starts_the_line_it_is_on(tmp_path, monkeypatch, capsys)
     """`grep -oE '^Models: .*'` is anchored: a logging prefix would blank the
     model column even though the text is still on the line.
 
-    Mutant that kills this: emit the models line through logger.info(), whose
-    dictConfig format prefixes it with an asctime/level/name.
+    Mutant that kills this: drop the `message_only` formatter from
+    configure_cli_logging() and let the narration handler use `plain`, whose
+    format prefixes every record with an asctime/level/name.
     """
     monkeypatch.setattr("run_full_pipeline.format_models_used",
                         lambda: "sentinel-model (3 calls)")
@@ -135,15 +151,161 @@ def test_the_models_line_starts_the_line_it_is_on(tmp_path, monkeypatch, capsys)
     assert models_lines[-1] == "Models: sentinel-model (3 calls)"
 
 
-def test_no_stage_narration_was_migrated_to_the_logger(tmp_path, monkeypatch, capsys):
-    """The stale __main__ comment claimed the narration had moved to logger.*.
-    It had not, and it must not: these five strings are a wire protocol.
+# -- #780: the narration is logger.info now, so the split is what is pinned ---
 
-    Mutant that kills this: replace print() with logger.info() in _stage_1a or
-    print_summary -- the string then never reaches the captured stdout at all
-    under pytest's default (no handler) configuration.
+
+def test_the_cli_makes_no_print_calls_at_all():
+    """The reviewer's ask on #780, checked structurally rather than by eye: the
+    narration goes through the logger, all of it.
+
+    Not a substring search -- an AST walk, so the word `print(` inside a comment
+    or a docstring cannot satisfy it and cannot break it either.
+
+    Mutant that kills this: put any one print() back.
+    """
+    tree = ast.parse(_CLI.read_text())
+    prints = [node.lineno for node in ast.walk(tree)
+              if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == 'print']
+    assert prints == [], f"print() calls left in run_full_pipeline.py at lines {prints}"
+
+
+def test_each_parsed_line_reaches_stdout_with_nothing_in_front_of_it(
+    tmp_path, monkeypatch, capsys
+):
+    """Substring matching would pass on `2026-09-10 INFO x   Total headers: 3`,
+    and the batch script's `grep -oE 'Total headers: [0-9]+'` would too -- but
+    the anchored Models grep would not, and a prefixed log line is the failure
+    #780 had to avoid. Anchored here for all five.
+
+    Mutant that kills this: give the narration handler the `plain` formatter.
     """
     _, out = _run_main(tmp_path, monkeypatch, capsys)
-    for literal in ('Top-level sections:', 'Total headers:', 'Entries extracted:',
-                    'Entries classified:', 'Models: '):
-        assert literal in out
+    for literal in _METRIC_LITERALS:
+        assert re.search(rf"(?m)^  {re.escape(literal)} \d+$", out), (
+            f"{literal!r} never appears as a bare, two-space-indented line")
+    assert re.search(r"(?m)^Models: \S", out), "the Models line is prefixed or missing"
+
+
+def test_the_stage_failure_warning_goes_to_stderr_not_to_the_parsed_stdout(
+    tmp_path, monkeypatch, capsys
+):
+    """A stage failure is a diagnostic: WARNING and above leave by stderr, which
+    is where the traceback already went. stdout stays the parsed stream.
+
+    Mutant that kills this: emit the warning through logger.info, or drop the
+    `not_narration` filter so every record lands on both handlers.
+    """
+    run = _run_main_streams(tmp_path, monkeypatch, capsys, fail={'6'})
+    assert run.rc == 1
+    assert "Warning: Stage 6 failed" in run.err
+    assert "Warning: Stage 6 failed" not in run.out
+    assert "Continuing with remaining stages" not in run.out
+    # ...and the summary the batch script reads is still on stdout.
+    assert "PIPELINE COMPLETE WITH ERRORS" in run.out
+
+
+def test_the_narration_is_not_copied_onto_stderr_as_well(tmp_path, monkeypatch, capsys):
+    """The narration must land on exactly one stream. Duplicating it doubles
+    every line of a batch log, which redirects both into one file, and the
+    script's `tail -1` then reads whichever copy came last.
+
+    Mutant that kills this: delete the `not_narration` filter from the stderr
+    handler, or set propagate: False without it.
+    """
+    run = _run_main_streams(tmp_path, monkeypatch, capsys)
+    assert run.rc == 0
+    for literal in (*_METRIC_LITERALS, "Models: ", _SUMMARY_BANNER):
+        assert literal not in run.err, f"{literal!r} was duplicated onto stderr"
+
+
+# -- the same split, in a real process ---------------------------------------
+
+# A driver rather than the CLI itself: stubbing stage 1a is what makes the whole
+# of stdout deterministic, so it can be compared byte for byte instead of
+# grepped. It configures logging exactly as __main__ does.
+_GOLDEN_DRIVER = '''
+import sys
+sys.path.insert(0, {root!r})
+sys.argv = ["run_full_pipeline.py", "2097_Upton_Cv", "--stage", "1a"]
+import run_full_pipeline as r
+r.get_cv_hierarchy_chunked = lambda *, cv_path: (
+    [{{"level": "H1", "text": "Education", "children": []}}],
+    {{"extraction_cost": 0.01}})
+r.configure_cli_logging()
+sys.exit(r.main())
+'''
+
+_OUT = 'src/unified_pipeline/outputs/stage_1a_segmentation/2097_Upton_Cv_segmented.json'
+_GOLDEN_STDOUT = [
+    "=" * 80,
+    "CV PROCESSING PIPELINE - STAGE 1A ONLY",
+    "=" * 80,
+    "Input: data/sample_cvs/word/2097_Upton_Cv.docx",
+    "Document UID: 2097_Upton_Cv",
+    "",
+    "=" * 80,
+    "STAGE 1A: HIERARCHY EXTRACTION",
+    "=" * 80,
+    "",
+    "",
+    "Stage 1a Complete",
+    f"  Output: {_OUT}",
+    "  Top-level sections: 1",
+    "  Total headers: 1",
+    "  Cost: $0.0100",
+    "  Time: <duration>",
+    "",
+    "=" * 80,
+    "PIPELINE COMPLETE",
+    "=" * 80,
+    "Document: 2097_Upton_Cv",
+    "Models: none (no LLM calls recorded)",
+    "",
+    "Outputs:",
+    f"  Stage 1a: {_OUT}",
+    "",
+    "Timing:",
+    "  Stage 1a: <duration>",
+    "  Total:    <duration>",
+    "",
+    "Costs:",
+    "  Stage 1a: $0.0100",
+    "  Total:    $0.0100",
+    "",
+    "Processing Stats:",
+    "  Top-level sections: 1",
+    "  Total headers: 1",
+    "",
+]
+
+
+def _elapsed_normalised(line):
+    """The only value that moves between runs is how long the stage took."""
+    return re.sub(r"\d+(?:\.\d+)?s$", "<duration>", line)
+
+
+def test_the_real_process_writes_exactly_these_lines_to_stdout(tmp_path):
+    """The whole of stdout, byte for byte, from a real `python3` process with
+    the real dictConfig -- not capsys, and not a substring.
+
+    capsys tests cannot see a handler wired to the true `sys.stdout`, a
+    `flush()` that never happens, or a stray write from an import. This one can:
+    anything at all that reaches stdout and is not in this list fails it.
+
+    Mutant that kills this: add a level or a timestamp to the narration
+    formatter; send the narration to stderr; add a print() back.
+    """
+    (tmp_path / 'data/sample_cvs/word').mkdir(parents=True)
+    (tmp_path / 'data/sample_cvs/word/2097_Upton_Cv.docx').write_bytes(b'PK\x03\x04fake')
+    driver = tmp_path / 'golden_driver.py'
+    driver.write_text(_GOLDEN_DRIVER.format(root=str(_ROOT)))
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith('AWS_') or k in ('OPENAI_API_KEY', 'ANTHROPIC_API_KEY'))}
+
+    proc = subprocess.run([sys.executable, str(driver)], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=120)
+
+    assert proc.returncode == 0, f"driver failed; stderr:\n{proc.stderr[-2000:]}"
+    assert [_elapsed_normalised(line)
+            for line in proc.stdout.split('\n')] == _GOLDEN_STDOUT + ['']

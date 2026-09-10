@@ -74,6 +74,7 @@ import hashlib
 import sys
 import json
 import logging
+import logging.config
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -98,6 +99,88 @@ from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
 
 logger = logging.getLogger(__name__)
+# "__main__" when this file is run as the CLI, "run_full_pipeline" when a test
+# imports it. configure_cli_logging() and the stderr filter both key off the
+# real name so the handlers land on this logger either way.
+_NARRATION_LOGGER = logger.name
+
+
+class _NarrationOnly(logging.Filter):
+    """Let the stdout handler take the narration (INFO and below) and nothing else."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < logging.WARNING
+
+
+class _NotNarration(logging.Filter):
+    """Keep this CLI's narration off stderr -- it already went to stdout, unprefixed.
+
+    Every other logger's INFO still reaches the stderr handler, which is where
+    the stage modules' own logging has always gone.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (record.name == _NARRATION_LOGGER
+                    and record.levelno < logging.WARNING)
+
+
+def configure_cli_logging() -> None:
+    """Wire this CLI's two output streams. Called from __main__, and by the
+    tests that assert on either stream.
+
+    stdout: this module's INFO records, formatted as the message and nothing
+    else. That is the narration AND a cross-process contract --
+    scripts/run_corpus_batch.sh:142-147 greps `Top-level sections:`,
+    `Total headers:`, `Entries extracted:`, `Entries classified:` and an
+    ANCHORED `^Models: ` out of this stdout, so a timestamp or level in front
+    of a line blanks a column of summary.tsv. CODING_STANDARDS.md 7.1 names it;
+    src/unified_pipeline/tests/test_run_full_pipeline_stdout_contract.py pins it.
+
+    stderr: everything else, timestamped -- WARNING and above from here
+    (stage-failure notices and their tracebacks) plus every other logger. The
+    two filters are the whole split: narration goes to exactly one stream.
+
+    dictConfig, not basicConfig (project convention), and deliberately not
+    web_interface/backend/app/logging_config.py's configure_logging():
+    CODING_STANDARDS.md 1.4 -- the pipeline core does not import the web
+    backend.
+    """
+    logging.config.dictConfig({
+        "version": 1,
+        "disable_existing_loggers": False,
+        "filters": {
+            "narration_only": {"()": _NarrationOnly},
+            "not_narration": {"()": _NotNarration},
+        },
+        "formatters": {
+            "plain": {"format": "%(asctime)s %(levelname)s %(name)s %(message)s"},
+            "message_only": {"format": "%(message)s"},
+        },
+        "handlers": {
+            "default": {
+                "class": "logging.StreamHandler",
+                "formatter": "plain",
+                "stream": "ext://sys.stderr",
+                "filters": ["not_narration"],
+            },
+            "narration": {
+                "class": "logging.StreamHandler",
+                "formatter": "message_only",
+                "stream": "ext://sys.stdout",
+                "filters": ["narration_only"],
+            },
+        },
+        "loggers": {
+            _NARRATION_LOGGER: {
+                "level": "INFO",
+                "handlers": ["narration"],
+                # WARNING and above still travel up to the stderr handler; the
+                # filters above decide which stream each record lands on.
+                "propagate": True,
+            },
+        },
+        "root": {"level": "INFO", "handlers": ["default"]},
+    })
 
 # '3' is a CLI alias for "run 3a then 3b", not a stage with a runner of its own.
 _COMPOSITE_STAGE = '3'
@@ -443,10 +526,10 @@ class PipelineResult:
 
 def _banner(title: str) -> None:
     """The rule/title/rule block each stage opens with."""
-    print("=" * _BANNER_WIDTH)
-    print(title)
-    print("=" * _BANNER_WIDTH)
-    print()
+    logger.info("=" * _BANNER_WIDTH)
+    logger.info("%s", title)
+    logger.info("=" * _BANNER_WIDTH)
+    logger.info("")
 
 
 def _requirement_label(stages: tuple[str, ...], all_required: bool = False) -> str:
@@ -462,7 +545,7 @@ def _requirement_label(stages: tuple[str, ...], all_required: bool = False) -> s
 
 def _skipped(stage: str, requirement: str) -> StageResult:
     """Record a stage that could not start because its input was never produced."""
-    print(f"  Skipped: {requirement} output required")
+    logger.info("  Skipped: %s output required", requirement)
     return StageResult(stage=stage, skipped_reason=f"{requirement} required")
 
 
@@ -483,14 +566,14 @@ def run_stage(ctx: PipelineContext, stage: str,
         # everything -- but it never swallows: the traceback goes to the logger
         # and the reason is carried into the summary and the exit code.
         logger.exception("Stage %s failed", stage)
-        print(f"  Warning: Stage {stage} failed: {type(e).__name__}: {e}")
+        logger.warning("  Warning: Stage %s failed: %s: %s", stage, type(e).__name__, e)
         if stage != _FINAL_STAGE:
-            print("  Continuing with remaining stages...")
+            logger.warning("  Continuing with remaining stages...")
         result = StageResult(stage=stage, error=f"{type(e).__name__}: {e}")
     result = replace(result, duration_seconds=time.perf_counter() - start)
     if result.succeeded:
-        print(f"  Time: {format_duration(result.duration_seconds)}")
-    print()
+        logger.info("  Time: %s", format_duration(result.duration_seconds))
+    logger.info("")
     ctx.record(stage, result)
     return result
 
@@ -542,12 +625,12 @@ def _stage_1a(ctx: PipelineContext) -> StageResult:
     _write_hierarchy_txt(output_file.with_suffix('.txt'), ctx.document_uid, hierarchy)
 
     cost = stats.get('extraction_cost', 0)
-    print()
-    print("Stage 1a Complete")
-    print(f"  Output: {output_file}")
-    print(f"  Top-level sections: {len(hierarchy)}")
-    print(f"  Total headers: {total_headers}")
-    print(f"  Cost: ${cost:.4f}")
+    logger.info("")
+    logger.info("Stage 1a Complete")
+    logger.info("  Output: %s", output_file)
+    logger.info("  Top-level sections: %s", len(hierarchy))
+    logger.info("  Total headers: %s", total_headers)
+    logger.info("  Cost: $%.4f", cost)
     return StageResult(stage='1a', output_file=str(output_file), cost=cost,
                        stats={'num_sections': len(hierarchy),
                               'total_headers': total_headers,
@@ -564,11 +647,11 @@ def _stage_1b(ctx: PipelineContext) -> StageResult:
 
     data, path = run_stage_1b(docx_path=str(ctx.cv_path),
                               hierarchy_json_path=hierarchy_json_path)
-    print()
-    print("Stage 1b Complete")
-    print(f"  Output: {path}")
-    print(f"  Total sections: {data['meta']['total_sections']}")
-    print(f"  Leaf sections: {data['meta']['leaf_sections']}")
+    logger.info("")
+    logger.info("Stage 1b Complete")
+    logger.info("  Output: %s", path)
+    logger.info("  Total sections: %s", data['meta']['total_sections'])
+    logger.info("  Leaf sections: %s", data['meta']['leaf_sections'])
     return StageResult(stage='1b', output_file=str(path),
                        stats={'total_sections': data['meta']['total_sections'],
                               'leaf_sections': data['meta']['leaf_sections']})
@@ -586,11 +669,11 @@ def _stage_2(ctx: PipelineContext) -> StageResult:
                              hierarchy_json_path=str(hierarchy_json_path))
     cost = data.get('total_cost', 0)
     entries_found = data.get('total_entries', 0)
-    print()
-    print("Stage 2 Complete")
-    print(f"  Output: {path}")
-    print(f"  Entries extracted: {entries_found}")
-    print(f"  Cost: ${cost:.4f}")
+    logger.info("")
+    logger.info("Stage 2 Complete")
+    logger.info("  Output: %s", path)
+    logger.info("  Entries extracted: %s", entries_found)
+    logger.info("  Cost: $%.4f", cost)
     return StageResult(stage='2', output_file=str(path), cost=cost,
                        stats={'total_entries': entries_found})
 
@@ -606,11 +689,11 @@ def _stage_3a(ctx: PipelineContext) -> StageResult:
 
     result = run_stage_3a(document_uid=ctx.document_uid)
     cost = result['stats']['cost']
-    print()
-    print("Stage 3a Complete")
-    print(f"  Output: {result['output_path']}")
-    print(f"  Header nodes mapped: {result['node_count']}")
-    print(f"  Cost: ${cost:.4f}")
+    logger.info("")
+    logger.info("Stage 3a Complete")
+    logger.info("  Output: %s", result['output_path'])
+    logger.info("  Header nodes mapped: %s", result['node_count'])
+    logger.info("  Cost: $%.4f", cost)
     return StageResult(stage='3a', output_file=str(result['output_path']), cost=cost,
                        stats={'node_count': result['node_count']})
 
@@ -626,11 +709,11 @@ def _stage_3b(ctx: PipelineContext) -> StageResult:
     result = run_stage_3b(document_uid=ctx.document_uid,
                           stage_3a_path=ctx.best_input('3a'))
     cost = result['stats']['cost']
-    print()
-    print("Stage 3b Complete")
-    print(f"  Output: {result['output_path']}")
-    print(f"  Entries classified: {result['total_entries']}")
-    print(f"  Cost: ${cost:.4f}")
+    logger.info("")
+    logger.info("Stage 3b Complete")
+    logger.info("  Output: %s", result['output_path'])
+    logger.info("  Entries classified: %s", result['total_entries'])
+    logger.info("  Cost: $%.4f", cost)
     return StageResult(stage='3b', output_file=str(result['output_path']), cost=cost,
                        stats={'entries_classified': result['total_entries'],
                               'code_distribution': result.get('code_distribution', {})})
@@ -650,11 +733,11 @@ def _stage_4(ctx: PipelineContext) -> StageResult:
     result = run_stage_4(docx_path=str(ctx.cv_path))
     output = result['output']
     cost = output.get('total_cost', 0)
-    print()
-    print("Stage 4 Complete")
-    print(f"  Output: {result['output_path']}")
-    print(f"  Entries with fields: {output.get('stats', {}).get('extracted', 0)}")
-    print(f"  Cost: ${cost:.4f}")
+    logger.info("")
+    logger.info("Stage 4 Complete")
+    logger.info("  Output: %s", result['output_path'])
+    logger.info("  Entries with fields: %s", output.get('stats', {}).get('extracted', 0))
+    logger.info("  Cost: $%.4f", cost)
     return StageResult(stage='4', output_file=str(result['output_path']), cost=cost,
                        stats={'entries_extracted': output.get('total_entries', 0),
                               'extraction_stats': output.get('stats', {})})
@@ -672,12 +755,12 @@ def _stage_4_5(ctx: PipelineContext) -> StageResult:
     with open(output_path) as f:
         data = json.load(f)
     info = data.get('research_summary', {})
-    print()
-    print("Stage 4.5 Complete")
-    print(f"  Output: {output_path}")
-    print(f"  Method: {info.get('method', 'unknown')}")
-    print(f"  M1 Score: {info.get('m1_score', 0):.2f}")
-    print(f"  Summary length: {info.get('summary_length', 0)} chars")
+    logger.info("")
+    logger.info("Stage 4.5 Complete")
+    logger.info("  Output: %s", output_path)
+    logger.info("  Method: %s", info.get('method', 'unknown'))
+    logger.info("  M1 Score: %.2f", info.get('m1_score', 0))
+    logger.info("  Summary length: %s chars", info.get('summary_length', 0))
     return StageResult(stage='4.5', output_file=str(output_path),
                        stats={'method': info.get('method', 'unknown'),
                               'm1_score': info.get('m1_score', 0),
@@ -696,9 +779,9 @@ def _stage_5(ctx: PipelineContext) -> StageResult:
     # The stage's own answer, not a path rebuilt here from the uid: rebuilding
     # reported an artifact that stage 5 had not necessarily written.
     output_path = result['output_path']
-    print()
-    print("Stage 5 Complete")
-    print(f"  Output: {output_path}")
+    logger.info("")
+    logger.info("Stage 5 Complete")
+    logger.info("  Output: %s", output_path)
     return StageResult(stage='5', output_file=str(output_path))
 
 
@@ -728,13 +811,13 @@ def _stage_5b(ctx: PipelineContext) -> StageResult:
 
     output_path = run_stage5b(input_path=input_path, verbose=True)
     cost = _read_stage_5b_cost(output_path)
-    print()
-    print("Stage 5b Complete")
-    print(f"  Output: {output_path}")
+    logger.info("")
+    logger.info("Stage 5b Complete")
+    logger.info("  Output: %s", output_path)
     if cost is None:
-        print("  Cost: unknown (failed to read institution enrichment stats)")
+        logger.info("  Cost: unknown (failed to read institution enrichment stats)")
     elif cost > 0:
-        print(f"  Cost: ${cost:.4f}")
+        logger.info("  Cost: $%.4f", cost)
     return StageResult(stage='5b', output_file=str(output_path), cost=cost)
 
 
@@ -747,9 +830,9 @@ def _stage_5c(ctx: PipelineContext) -> StageResult:
         return _skipped('5c', _requirement_label(STAGE_INPUT_PREFERENCE['5c']))
 
     output_path = run_stage_5c(input_path=input_path, verbose=True)
-    print()
-    print("Stage 5c Complete")
-    print(f"  Output: {output_path}")
+    logger.info("")
+    logger.info("Stage 5c Complete")
+    logger.info("  Output: %s", output_path)
     return StageResult(stage='5c', output_file=str(output_path))
 
 
@@ -762,9 +845,9 @@ def _stage_5d(ctx: PipelineContext) -> StageResult:
         return _skipped('5d', _requirement_label(STAGE_INPUT_PREFERENCE['5d']))
 
     output_path = run_stage_5d(input_path=input_path, verbose=True)
-    print()
-    print("Stage 5d Complete")
-    print(f"  Output: {output_path}")
+    logger.info("")
+    logger.info("Stage 5d Complete")
+    logger.info("  Output: %s", output_path)
     return StageResult(stage='5d', output_file=str(output_path))
 
 
@@ -777,9 +860,9 @@ def _stage_6(ctx: PipelineContext) -> StageResult:
         return _skipped('6', _requirement_label(STAGE_INPUT_PREFERENCE['6']))
 
     output_path = run_stage6(input_path=input_path, verbose=True)
-    print()
-    print("Stage 6 Complete")
-    print(f"  Output: {output_path}")
+    logger.info("")
+    logger.info("Stage 6 Complete")
+    logger.info("  Output: %s", output_path)
     return StageResult(stage='6', output_file=str(output_path))
 
 
@@ -859,61 +942,61 @@ _CODE_DISTRIBUTION_LIMIT = 10
 
 
 def _print_outputs(result: PipelineResult) -> None:
-    print("Outputs:")
+    logger.info("Outputs:")
     for stage, label in _SUMMARY_LABELS.items():
         stage_result = result.results.get(f'stage_{stage}')
         if stage_result is not None and stage_result.output_file:
-            print(f"  {label} {stage_result.output_file}")
-    print()
+            logger.info("  %s %s", label, stage_result.output_file)
+    logger.info("")
 
 
 def _print_timing(result: PipelineResult) -> None:
-    print("Timing:")
+    logger.info("Timing:")
     for stage, label in _SUMMARY_LABELS.items():
         stage_result = result.results.get(f'stage_{stage}')
         if (stage_result is not None and stage_result.succeeded
                 and stage_result.duration_seconds > 0):
-            print(f"  {label} {format_duration(stage_result.duration_seconds)}")
-    print(f"  Total:    {format_duration(result.total_duration_seconds)}")
-    print()
+            logger.info("  %s %s", label, format_duration(stage_result.duration_seconds))
+    logger.info("  Total:    %s", format_duration(result.total_duration_seconds))
+    logger.info("")
 
 
 def _print_costs(result: PipelineResult) -> None:
-    print("Costs:")
+    logger.info("Costs:")
     for stage in _COST_REPORTING_STAGES:
         stage_result = result.results.get(f'stage_{stage}')
         if stage_result is not None and stage_result.succeeded and stage_result.cost is not None:
-            print(f"  {_SUMMARY_LABELS[stage]} ${stage_result.cost:.4f}")
+            logger.info("  %s $%.4f", _SUMMARY_LABELS[stage], stage_result.cost)
     stage_5b = result.results.get('stage_5b')
     if stage_5b is not None and stage_5b.succeeded:
         if stage_5b.cost is None:
-            print("  Stage 5b: unknown (institution enrichment stats unreadable)")
+            logger.info("  Stage 5b: unknown (institution enrichment stats unreadable)")
         elif stage_5b.cost > 0:
-            print(f"  {_SUMMARY_LABELS['5b']} ${stage_5b.cost:.4f}")
-    print(f"  Total:    ${result.total_cost:.4f}")
-    print()
+            logger.info("  %s $%.4f", _SUMMARY_LABELS['5b'], stage_5b.cost)
+    logger.info("  Total:    $%.4f", result.total_cost)
+    logger.info("")
 
 
 def _print_processing_stats(result: PipelineResult) -> None:
-    print("Processing Stats:")
+    logger.info("Processing Stats:")
     stage_1a = result.results.get('stage_1a')
     if stage_1a is not None and 'num_sections' in stage_1a.stats:
-        print(f"  Top-level sections: {stage_1a.stats['num_sections']}")
-        print(f"  Total headers: {stage_1a.stats['total_headers']}")
+        logger.info("  Top-level sections: %s", stage_1a.stats['num_sections'])
+        logger.info("  Total headers: %s", stage_1a.stats['total_headers'])
     stage_2 = result.results.get('stage_2')
     if stage_2 is not None and 'total_entries' in stage_2.stats:
-        print(f"  Entries extracted: {stage_2.stats['total_entries']}")
+        logger.info("  Entries extracted: %s", stage_2.stats['total_entries'])
     stage_3a = result.results.get('stage_3a')
     if stage_3a is not None and 'node_count' in stage_3a.stats:
-        print(f"  Header nodes mapped: {stage_3a.stats['node_count']}")
+        logger.info("  Header nodes mapped: %s", stage_3a.stats['node_count'])
     stage_3b = result.results.get('stage_3b')
     if stage_3b is not None and 'entries_classified' in stage_3b.stats:
-        print(f"  Entries classified: {stage_3b.stats['entries_classified']}")
+        logger.info("  Entries classified: %s", stage_3b.stats['entries_classified'])
     stage_4 = result.results.get('stage_4')
     if stage_4 is not None and 'entries_extracted' in stage_4.stats:
-        print(f"  Fields extracted: {stage_4.stats['entries_extracted']}")
+        logger.info("  Fields extracted: %s", stage_4.stats['entries_extracted'])
     _print_code_distribution(stage_3b)
-    print()
+    logger.info("")
 
 
 def _print_code_distribution(stage_3b: StageResult | None) -> None:
@@ -922,11 +1005,11 @@ def _print_code_distribution(stage_3b: StageResult | None) -> None:
     code_dist = stage_3b.stats.get('code_distribution') or {}
     if not code_dist:
         return
-    print()
-    print(f"Code Distribution (top {_CODE_DISTRIBUTION_LIMIT}):")
+    logger.info("")
+    logger.info("Code Distribution (top %s):", _CODE_DISTRIBUTION_LIMIT)
     ranked = sorted(code_dist.items(), key=lambda item: -item[1])[:_CODE_DISTRIBUTION_LIMIT]
     for code, count in ranked:
-        print(f"  {code}: {count}")
+        logger.info("  %s: %s", code, count)
 
 
 def print_summary(result: PipelineResult, ctx: PipelineContext) -> None:
@@ -938,20 +1021,20 @@ def print_summary(result: PipelineResult, ctx: PipelineContext) -> None:
     anchored ``^Models: `` out of this stdout into ``summary.tsv``. Pinned by
     ``src/unified_pipeline/tests/test_run_full_pipeline_stdout_contract.py``.
     """
-    print("=" * _BANNER_WIDTH)
-    print("PIPELINE COMPLETE WITH ERRORS" if result.failed else "PIPELINE COMPLETE")
-    print("=" * _BANNER_WIDTH)
-    print(f"Document: {ctx.document_uid}")
-    print(f"Models: {format_models_used()}")
-    print()
+    logger.info("=" * _BANNER_WIDTH)
+    logger.info("%s", "PIPELINE COMPLETE WITH ERRORS" if result.failed else "PIPELINE COMPLETE")
+    logger.info("=" * _BANNER_WIDTH)
+    logger.info("Document: %s", ctx.document_uid)
+    logger.info("Models: %s", format_models_used())
+    logger.info("")
     if result.failed:
-        print("Failed stages:")
+        logger.info("Failed stages:")
         for name in result.failed:
             stage_result = result.results[name]
             reason = (stage_result.error or stage_result.skipped_reason
                       or 'produced no output document')
-            print(f"  {name}: {reason}")
-        print()
+            logger.info("  %s: %s", name, reason)
+        logger.info("")
     _print_outputs(result)
     _print_timing(result)
     _print_costs(result)
@@ -959,32 +1042,32 @@ def print_summary(result: PipelineResult, ctx: PipelineContext) -> None:
 
 
 def _print_usage() -> None:
-    print("Usage: python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE]")
-    print()
-    print("Arguments:")
-    print("  cv_path_or_uid : Path to Word document OR just the document UID")
-    print("                   (if UID only, looks in data/sample_cvs/word/)")
-    print("  --stage STAGE  : Run ONLY this stage: '1a', '1b', '2', '3a', '3b', '3', or '4'")
-    print("                   (omit for full pipeline)")
-    print()
-    print("Examples:")
-    print("  # Full pipeline")
-    print("  python3 run_full_pipeline.py 2097_Upton_Cv")
-    print()
-    print("  # Run only Stage 2")
-    print("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 2")
-    print()
-    print("  # Run only Stage 3a (header taxonomy mapping)")
-    print("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3a")
-    print()
-    print("  # Run only Stage 3b (entry classification)")
-    print("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3b")
-    print()
-    print("  # Run both 3a and 3b")
-    print("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3")
-    print()
-    print("  # Run only Stage 4 (field extraction)")
-    print("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 4")
+    logger.info("Usage: python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE]")
+    logger.info("")
+    logger.info("Arguments:")
+    logger.info("  cv_path_or_uid : Path to Word document OR just the document UID")
+    logger.info("                   (if UID only, looks in data/sample_cvs/word/)")
+    logger.info("  --stage STAGE  : Run ONLY this stage: '1a', '1b', '2', '3a', '3b', '3', or '4'")
+    logger.info("                   (omit for full pipeline)")
+    logger.info("")
+    logger.info("Examples:")
+    logger.info("  # Full pipeline")
+    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv")
+    logger.info("")
+    logger.info("  # Run only Stage 2")
+    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 2")
+    logger.info("")
+    logger.info("  # Run only Stage 3a (header taxonomy mapping)")
+    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3a")
+    logger.info("")
+    logger.info("  # Run only Stage 3b (entry classification)")
+    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3b")
+    logger.info("")
+    logger.info("  # Run both 3a and 3b")
+    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3")
+    logger.info("")
+    logger.info("  # Run only Stage 4 (field extraction)")
+    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 4")
 
 
 def parse_args(argv: list[str]) -> tuple[str, str | None]:
@@ -1001,7 +1084,8 @@ def parse_args(argv: list[str]) -> tuple[str, str | None]:
         if arg == "--stage" and i + 1 < len(argv):
             target_stage = argv[i + 1]
             if target_stage not in valid_stages:
-                print(f"Error: Invalid stage '{target_stage}'. Use one of: {', '.join(valid_stages)}")
+                logger.error("Error: Invalid stage '%s'. Use one of: %s",
+                             target_stage, ', '.join(valid_stages))
                 sys.exit(1)
             i += 2
         else:
@@ -1013,11 +1097,11 @@ def _exit_if_prerequisites_missing(target_stage: str, document_uid: str) -> None
     ok, missing_file, required_stage = check_prerequisites(target_stage, document_uid)
     if ok:
         return
-    print(f"Error: Cannot run stage {target_stage}")
-    print(f"  Missing prerequisite: Stage {required_stage} output")
-    print(f"  Expected file: {missing_file}")
-    print()
-    print("  Run the prerequisite stage first, or run without --stage for full pipeline.")
+    logger.error("Error: Cannot run stage %s", target_stage)
+    logger.error("  Missing prerequisite: Stage %s output", required_stage)
+    logger.error("  Expected file: %s", missing_file)
+    logger.error("")
+    logger.error("  Run the prerequisite stage first, or run without --stage for full pipeline.")
     sys.exit(1)
 
 
@@ -1037,9 +1121,9 @@ def _cv_is_missing(cv_path: str, target_stage: str | None) -> bool:
         return False
     if Path(cv_path).is_file():
         return False
-    print(f"Error: CV not found: {cv_path}")
-    print("  Give a path to a .docx, or a document UID present in "
-          "data/sample_cvs/word/.")
+    logger.error("Error: CV not found: %s", cv_path)
+    logger.error("  Give a path to a .docx, or a document UID present in "
+                 "data/sample_cvs/word/.")
     return True
 
 
@@ -1054,15 +1138,15 @@ def main() -> int:
     if target_stage and target_stage != "1a":
         _exit_if_prerequisites_missing(target_stage, document_uid)
 
-    print("=" * _BANNER_WIDTH)
+    logger.info("=" * _BANNER_WIDTH)
     if target_stage:
-        print(f"CV PROCESSING PIPELINE - STAGE {target_stage.upper()} ONLY")
+        logger.info("CV PROCESSING PIPELINE - STAGE %s ONLY", target_stage.upper())
     else:
-        print("CV PROCESSING PIPELINE (V15)")
-    print("=" * _BANNER_WIDTH)
-    print(f"Input: {cv_path}")
-    print(f"Document UID: {document_uid}")
-    print()
+        logger.info("CV PROCESSING PIPELINE (V15)")
+    logger.info("=" * _BANNER_WIDTH)
+    logger.info("Input: %s", cv_path)
+    logger.info("Document UID: %s", document_uid)
+    logger.info("")
 
     ctx = PipelineContext(cv_path=Path(cv_path), document_uid=document_uid,
                           target_stage=target_stage)
@@ -1076,56 +1160,16 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    # Only the CLI entry point needs this, not a test that imports this module
-    # and calls main() directly.
+    # Only the CLI entry point configures logging, not a test that imports this
+    # module and calls main() directly (it calls configure_cli_logging() itself
+    # when it needs the streams). Nothing else in this file or in any non-test
+    # src/unified_pipeline module configures a handler, and Python's root logger
+    # has only a last-resort WARNING-only one.
     #
-    # The stage narration is print(), on purpose and permanently. stdout is this
-    # CLI's human interface AND a documented cross-process contract:
-    # CODING_STANDARDS.md 7.1 names scripts/run_corpus_batch.sh's four greps
-    # (Top-level sections:, Total headers:, Entries extracted:, Entries
-    # classified:) plus ^Models:, which is anchored at line start -- a logging
-    # prefix in front of it would silently blank a column of summary.tsv. The
-    # pytest suite asserts the same strings through capsys. Production
-    # observability is the web driver's job (orchestrator.py), not this CLI's.
-    #
-    # Exceptions and diagnostics DO go through logger (run_stage() logs every
-    # stage failure with its traceback), which is why a handler is configured
-    # here at all: nothing in this file or any non-test src/unified_pipeline
-    # module configures one, and Python's root logger has only a last-resort
-    # WARNING-only handler.
-    #
-    # That handler streams to STDERR, not stdout. Splitting the two is what
-    # makes the sentence above true rather than aspirational: stdout carries
-    # only the narration and the five parsed lines, stderr carries the
-    # tracebacks and warnings. It is the same split CODING_STANDARDS.md 6.4
-    # cites as the precedent -- scripts/doctor_one.py and scripts/score_one.py
-    # both put their parsed output on stdout and their diagnostics on stderr.
-    # Nothing is lost from a batch log: run_corpus_batch.sh:122,124 redirect
-    # the run with `> "$log" 2>&1`, so both streams still land in it.
-    #
-    # dictConfig, not logging.basicConfig() (project convention -- see
-    # web_interface/backend/app/logging_config.py's module docstring), but
-    # deliberately NOT that module's configure_logging(): CODING_STANDARDS.md
-    # 1.4 -- "the pipeline core does not import the web backend" -- exists
-    # precisely because reaching into web_interface/backend/app/ from the
-    # pipeline side makes the CLI unable to run without the web app's config
-    # layout. This is self-contained instead: no cross-boundary import, and no
-    # sys.stdout swap to track (that only happens inside the web
-    # orchestrator's own process).
-    import logging.config
-    logging.config.dictConfig({
-        "version": 1,
-        "disable_existing_loggers": False,
-        "formatters": {
-            "plain": {"format": "%(asctime)s %(levelname)s %(name)s %(message)s"},
-        },
-        "handlers": {
-            "default": {
-                "class": "logging.StreamHandler",
-                "formatter": "plain",
-                "stream": "ext://sys.stderr",
-            },
-        },
-        "root": {"level": "INFO", "handlers": ["default"]},
-    })
+    # See configure_cli_logging(): narration and the five lines
+    # scripts/run_corpus_batch.sh greps go to stdout as bare messages;
+    # WARNING and above, tracebacks included, go to timestamped stderr. Both
+    # streams still land in a batch log -- run_corpus_batch.sh:122,124 redirect
+    # the run with `> "$log" 2>&1`.
+    configure_cli_logging()
     sys.exit(main())

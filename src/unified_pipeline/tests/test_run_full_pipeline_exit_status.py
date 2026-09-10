@@ -33,6 +33,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -45,6 +46,47 @@ from unified_pipeline.core import prompt_logger  # noqa: E402
 
 failed_stages = run_full_pipeline.failed_stages
 StageResult = run_full_pipeline.StageResult
+
+
+class _Streams(NamedTuple):
+    """One in-process run of main(): its return value and both output streams."""
+
+    rc: int
+    out: str
+    err: str
+
+
+@pytest.fixture(autouse=True)
+def restore_logging_after_each_test():
+    """configure_cli_logging() installs handlers on real, process-wide loggers.
+    Without this they leak into every test that runs after -- the narration
+    handler still holds the previous test's capsys stream, so the next test's
+    assertions read output that was never emitted in it (#780).
+
+    Also imported by test_run_full_pipeline_stdout_contract, which runs the same
+    harness.
+    """
+    cli = logging.getLogger(run_full_pipeline.logger.name)
+    root = logging.getLogger()
+    saved = (cli.handlers[:], cli.level, cli.propagate, root.handlers[:], root.level)
+    yield
+    cli.handlers[:], cli.level, cli.propagate, root.handlers[:], root.level = saved
+
+
+def _configure_cli_logging_keeping_pytests_handlers():
+    """What __main__ does, minus the collateral damage to the test run.
+
+    dictConfig() removes every handler already on the root logger, and pytest's
+    caplog handler is one of them, so a plain call would blank caplog.records
+    for the rest of the test. The borrowed handlers go back afterwards; the
+    fixture above undoes the whole thing at teardown.
+    """
+    root = logging.getLogger()
+    borrowed = root.handlers[:]
+    run_full_pipeline.configure_cli_logging()
+    for handler in borrowed:
+        if handler not in root.handlers:
+            root.addHandler(handler)
 
 
 def _result(stage, **kwargs):
@@ -274,9 +316,10 @@ def _install_stubs(monkeypatch, calls, fail, stage5b_writer, stage5_path, tmp_pa
         monkeypatch.setattr(run_full_pipeline, name, stub)
 
 
-def _run_main(tmp_path, monkeypatch, capsys, fail=(), stage5b_writer=None,
-              argv=None, calls=None, stage5_path=None, setup=None, make_docx=True):
-    """Run main() end to end with every stage runner stubbed. Returns (rc, stdout).
+def _run_main_streams(tmp_path, monkeypatch, capsys, fail=(), stage5b_writer=None,
+                      argv=None, calls=None, stage5_path=None, setup=None,
+                      make_docx=True) -> _Streams:
+    """Run main() end to end with every stage runner stubbed. Returns both streams.
 
     ``stage5b_writer``, if given, replaces the default stage 5b output (a valid
     ``institution_enrichment_stats`` payload) so a test can point run_stage5b at
@@ -295,9 +338,20 @@ def _run_main(tmp_path, monkeypatch, capsys, fail=(), stage5b_writer=None,
     _install_stubs(monkeypatch, calls if calls is not None else _Calls(),
                    set(fail), stage5b_writer, stage5_path, tmp_path)
     monkeypatch.setattr(sys, 'argv', argv or ['run_full_pipeline.py', UID])
+    # The narration only reaches a stream once the CLI's handlers exist, and
+    # `ext://sys.stdout` has to resolve to the capsys stream that is already in
+    # place -- so this is configured here, inside the test, not at import.
+    _configure_cli_logging_keeping_pytests_handlers()
     capsys.readouterr()
     rc = run_full_pipeline.main()
-    return rc, capsys.readouterr().out
+    captured = capsys.readouterr()
+    return _Streams(rc=rc, out=captured.out, err=captured.err)
+
+
+def _run_main(*args, **kwargs):
+    """(rc, stdout) for the tests that only assert on the parsed stream."""
+    run = _run_main_streams(*args, **kwargs)
+    return run.rc, run.out
 
 
 def test_healthy_run_exits_zero_and_prints_the_plain_banner(tmp_path, monkeypatch, capsys):
@@ -803,8 +857,12 @@ def test_a_cv_that_cannot_be_resolved_is_named_as_such(args, tmp_path):
     proc = _run_cli(tmp_path, *args)
 
     assert proc.returncode == 1
-    assert "Error: CV not found: nonexistent.pdf" in proc.stdout
-    assert "data/sample_cvs/word/" in proc.stdout
+    # The message is a diagnostic, so since #780's print()->logger migration it
+    # goes to stderr, where every diagnostic goes. stdout is the parsed stream
+    # and must not carry it. Both still land in a batch log (`> "$log" 2>&1`).
+    assert "Error: CV not found: nonexistent.pdf" in proc.stderr
+    assert "data/sample_cvs/word/" in proc.stderr
+    assert "Error: CV not found" not in proc.stdout
     assert "ValueError" not in proc.stdout and "Traceback" not in proc.stderr
     assert "CV PROCESSING PIPELINE" not in proc.stdout, (
         "the run banner printed for a run that cannot start")
