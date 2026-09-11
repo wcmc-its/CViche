@@ -8,6 +8,7 @@ import os
 import pytest
 import httpx
 from unittest.mock import patch, MagicMock
+from uuid import uuid4
 
 from app.models import User
 from app.auth import COOKIE_NAME, create_session_cookie
@@ -163,7 +164,13 @@ class TestSamlACSWithMockIdP:
 
 
 def _mock_saml_client(identity_dict):
-    """Create a mock Saml2Client with pre-configured ACS response."""
+    """Create a mock Saml2Client with pre-configured ACS response.
+
+    Deliberately carries no assertion ID -- TestSamlReplayNoAssertionId below
+    exercises exactly that condition. Callers that need a realistic response
+    (a real pysaml2 assertion always has an ID) use
+    _mock_saml_client_with_assertion_id instead.
+    """
     mock_client = MagicMock()
     mock_response = MagicMock()
     mock_response.get_identity.return_value = identity_dict
@@ -200,7 +207,9 @@ class TestSamlErrorPaths:
     @patch("app.api.saml_routes.get_saml_client")
     def test_acs_missing_mail_uses_eppn(self, mock_get_client, client, db, seed_saml_mode):
         """No mail is fine -- cwid comes from ePPN, user provisioned with email=None."""
-        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY_NO_MAIL)
+        mock_get_client.return_value = _mock_saml_client_with_assertion_id(
+            _SAML_IDENTITY_NO_MAIL, f"_{uuid4().hex}"
+        )
         response = client.post(
             "/api/saml/acs",
             data={"SAMLResponse": "base64data"},
@@ -215,8 +224,8 @@ class TestSamlErrorPaths:
     @patch("app.api.saml_routes.get_saml_client")
     def test_acs_no_identifier_redirects_error(self, mock_get_client, client, seed_saml_mode):
         """Identity with no mail/ePPN/uid -> nothing to anchor on -> missing_attributes."""
-        mock_get_client.return_value = _mock_saml_client(
-            {"urn:oid:2.16.840.1.113730.3.1.241": ["Nameless"]}
+        mock_get_client.return_value = _mock_saml_client_with_assertion_id(
+            {"urn:oid:2.16.840.1.113730.3.1.241": ["Nameless"]}, f"_{uuid4().hex}"
         )
         response = client.post(
             "/api/saml/acs",
@@ -232,7 +241,9 @@ class TestSamlErrorPaths:
     def test_acs_ed_group_denied(self, mock_get_client, mock_check_ed, client, seed_ed_enabled):
         """POST to ACS with ED enabled, user not in access group -> redirect to /login?error=not_authorized."""
         clear_cache()
-        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+        mock_get_client.return_value = _mock_saml_client_with_assertion_id(
+            _SAML_IDENTITY, f"_{uuid4().hex}"
+        )
         mock_check_ed.return_value = MembershipResult(in_access_group=False, in_admin_group=False)
         response = client.post(
             "/api/saml/acs",
@@ -248,7 +259,9 @@ class TestSamlErrorPaths:
     def test_acs_ed_unavailable(self, mock_get_client, mock_check_ed, client, seed_ed_enabled):
         """POST to ACS with ED enabled, LDAP raises EdUnavailableError -> redirect to /login?error=directory_unavailable."""
         clear_cache()
-        mock_get_client.return_value = _mock_saml_client(_SAML_IDENTITY)
+        mock_get_client.return_value = _mock_saml_client_with_assertion_id(
+            _SAML_IDENTITY, f"_{uuid4().hex}"
+        )
         mock_check_ed.side_effect = EdUnavailableError("Connection refused")
         response = client.post(
             "/api/saml/acs",

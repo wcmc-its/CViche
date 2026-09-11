@@ -40,7 +40,9 @@ _TAXONOMY_PATH = _SRC / "unified_pipeline" / "core" / "taxonomy_v7.json"
 # file/link an issue) when a real new gap is found; do not widen it just to
 # make CI pass without doing that.
 _KNOWN_GAPS = frozenset({
-    'J',                                # #260 -- percent-effort rows have no TAXONOMY_TO_SECTION entry
+    # 'J' is NOT here: #260 gave it a passthrough render route
+    # (stage6/sections/passthrough.py's _fill_percent_effort), so it now
+    # belongs in _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES below, same as E/G.
     'N2',                               # #529 -- this issue; needs a placement decision
     'M2', 'M4', 'M4A', 'M4B', 'M4C',    # #291 -- parked, needs a WCM-format decision (status-aware routing)
     'N1', 'N3',                         # no separately-filed issue found; same open question as N2
@@ -60,12 +62,15 @@ def test_taxonomy_catalog_matches_known_gaps_exactly():
 
 
 def test_render_exceptions_still_wired_into_generate():
-    """_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES exempts E, G, N4 from the
+    """_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES exempts E, G, J, N4 from the
     coverage lint because a passthrough/mentoring writer renders them outside
     the RENDER_ROUTED_CODES dispatch table (see extraction.py's comment on
-    this set). If that writer's hook is ever removed from generate() -- e.g.
-    during a stage-6 decomposition -- the exemption goes stale and this lint
-    silently stops catching what would then be a real gap (review on #588).
+    this set). J joined E and G at #260, dispatched from the same
+    `_fill_passthrough_sections(` call this test already pins -- there is no
+    separate hook to add a second assertion for. If that writer's hook is
+    ever removed from generate() -- e.g. during a stage-6 decomposition --
+    the exemption goes stale and this lint silently stops catching what
+    would then be a real gap (review on #588).
 
     This doesn't prove the codes still render (that needs a real CV, which
     is what the corpus doctor sweep is for) -- only that the two call sites
@@ -73,9 +78,10 @@ def test_render_exceptions_still_wired_into_generate():
     """
     src = (_SRC / "unified_pipeline" / "stage_6_word_template.py").read_text()
     assert "self._fill_passthrough_sections(" in src, (
-        "E/G's passthrough hook is gone from generate() -- if they no longer "
-        "render, remove them from _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES "
-        "so the coverage lint catches the gap"
+        "E/G/J's passthrough hook is gone from generate() -- if they no "
+        "longer render, remove them from "
+        "_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES so the coverage lint "
+        "catches the gap"
     )
     assert "self._fill_mentoring(" in src, (
         "N4's mentoring hook is gone from generate() -- if it no longer "
