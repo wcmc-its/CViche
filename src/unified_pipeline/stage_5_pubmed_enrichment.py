@@ -121,9 +121,9 @@ class PubMedEnricher:
         cv_owner = stage4_data.get('cv_owner')  # Pass through from Stage 4
 
         if self.verbose:
-            print(f"\n{'='*60}")
-            print(f"Stage 5: PubMed Enrichment - {document_uid}")
-            print(f"{'='*60}")
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Stage 5: PubMed Enrichment - {document_uid}")
+            logger.info(f"{'='*60}")
 
         # Identify publication entries (S1-S9)
         pub_entries = [e for e in entries if e.get('taxonomy_code', '').startswith('S')
@@ -132,7 +132,7 @@ class PubMedEnricher:
         self.stats['total_publications'] = len(pub_entries)
 
         if self.verbose:
-            print(f"\nFound {len(pub_entries)} publication entries to enrich")
+            logger.info(f"\nFound {len(pub_entries)} publication entries to enrich")
 
         # Categorize by available identifiers
         by_pmid = []
@@ -160,10 +160,10 @@ class PubMedEnricher:
                 self.stats['no_identifier'] += 1
 
         if self.verbose:
-            print(f"  - {len(by_pmid)} with PMID (direct lookup)")
-            print(f"  - {len(by_pmcid)} with PMCID only (needs conversion)")
-            print(f"  - {len(by_doi)} with DOI only (needs search)")
-            print(f"  - {len(no_id)} without identifiers (skip)")
+            logger.info(f"  - {len(by_pmid)} with PMID (direct lookup)")
+            logger.info(f"  - {len(by_pmcid)} with PMCID only (needs conversion)")
+            logger.info(f"  - {len(by_doi)} with DOI only (needs search)")
+            logger.info(f"  - {len(no_id)} without identifiers (skip)")
 
         # Process each category
         enriched_entries = []
@@ -171,19 +171,19 @@ class PubMedEnricher:
         # 1. Direct PMID lookups (batch)
         if by_pmid:
             if self.verbose:
-                print(f"\n📚 Fetching {len(by_pmid)} records by PMID...")
+                logger.info(f"\n📚 Fetching {len(by_pmid)} records by PMID...")
             enriched_entries.extend(self._enrich_by_pmid(by_pmid))
 
         # 2. PMCID conversions then lookup
         if by_pmcid:
             if self.verbose:
-                print(f"\n🔄 Converting {len(by_pmcid)} PMCIDs to PMIDs...")
+                logger.info(f"\n🔄 Converting {len(by_pmcid)} PMCIDs to PMIDs...")
             enriched_entries.extend(self._enrich_by_pmcid(by_pmcid))
 
         # 3. DOI searches then lookup
         if by_doi:
             if self.verbose:
-                print(f"\n🔍 Searching PubMed for {len(by_doi)} DOIs...")
+                logger.info(f"\n🔍 Searching PubMed for {len(by_doi)} DOIs...")
             enriched_entries.extend(self._enrich_by_doi(by_doi))
 
         # 4. Entries without identifiers (pass through unchanged)
@@ -204,13 +204,13 @@ class PubMedEnricher:
         }
 
         if self.verbose:
-            print(f"\n{'='*60}")
-            print(f"Enrichment Summary")
-            print(f"{'='*60}")
-            print(f"  Total publications: {self.stats['total_publications']}")
-            print(f"  Successfully enriched: {self.stats['enriched']}")
-            print(f"  Failed lookups: {self.stats['failed_lookups']}")
-            print(f"  No identifier: {self.stats['no_identifier']}")
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Enrichment Summary")
+            logger.info(f"{'='*60}")
+            logger.info(f"  Total publications: {self.stats['total_publications']}")
+            logger.info(f"  Successfully enriched: {self.stats['enriched']}")
+            logger.info(f"  Failed lookups: {self.stats['failed_lookups']}")
+            logger.info(f"  No identifier: {self.stats['no_identifier']}")
 
         return output
 
@@ -344,7 +344,9 @@ class PubMedEnricher:
                 self.stats['api_errors'] += 1
                 self._log_api_failure('doi_search', e)
                 if self.verbose:
-                    print(f"    ⚠️ DOI search error for {doi}: {_sanitize_error(e)}")
+                    # No logger.exception/exc_info: _sanitize_error() redacts the NCBI api_key here; a traceback would leak it unredacted.
+                    # Info, not warning/error: _log_api_failure() above already emits the one deduplicated ERROR record per failure class per run; logging this per-citation line at warning/error would reintroduce the flood that dedup exists to prevent (see also _fetch_pubmed_batch and _convert_pmcids_to_pmids below).
+                    logger.info(f"    ⚠️ DOI search error for {doi}: {_sanitize_error(e)}")
 
             if pmid:
                 records = self._fetch_pubmed_batch([pmid])
@@ -433,7 +435,7 @@ class PubMedEnricher:
                     except ValueError:
                         pass
                 if self.verbose:
-                    print(f"    ⏳ Transient API error ({_sanitize_error(last_error)}); "
+                    logger.warning(f"    ⏳ Transient API error ({_sanitize_error(last_error)}); "
                           f"retry {attempt + 1}/{MAX_ATTEMPTS - 1} in {delay:g}s")
                 time.sleep(delay)
 
@@ -468,7 +470,7 @@ class PubMedEnricher:
                     results[pmid] = record
 
             if self.verbose:
-                print(f"    → Fetched {len(results)}/{len(pmids)} records")
+                logger.info(f"    → Fetched {len(results)}/{len(pmids)} records")
 
             return results
 
@@ -476,7 +478,8 @@ class PubMedEnricher:
             self.stats['api_errors'] += 1
             self._log_api_failure('efetch', e)
             if self.verbose:
-                print(f"    ❌ API error: {_sanitize_error(e)}")
+                # Info, not error: see the note at _enrich_by_doi's DOI search error above.
+                logger.info(f"    ❌ API error: {_sanitize_error(e)}")
             return {}
 
     def _parse_pubmed_article(self, article: ET.Element) -> tuple[str | None, dict | None]:
@@ -569,7 +572,7 @@ class PubMedEnricher:
 
         except Exception as e:
             if self.verbose:
-                print(f"    ⚠️ Parse error: {e}")
+                logger.warning(f"    ⚠️ Parse error: {e}")
             return None, None
 
     def _get_text(self, elem: ET.Element, path: str) -> str:
@@ -603,7 +606,7 @@ class PubMedEnricher:
                     result[pmcid] = pmid
 
             if self.verbose:
-                print(f"    → Converted {len(result)}/{len(pmcids)} PMCIDs to PMIDs")
+                logger.info(f"    → Converted {len(result)}/{len(pmcids)} PMCIDs to PMIDs")
 
             return result
 
@@ -611,7 +614,8 @@ class PubMedEnricher:
             self.stats['api_errors'] += 1
             self._log_api_failure('pmcid_conversion', e)
             if self.verbose:
-                print(f"    ❌ ID conversion error: {_sanitize_error(e)}")
+                # Info, not error: see the note at _enrich_by_doi's DOI search error above.
+                logger.info(f"    ❌ ID conversion error: {_sanitize_error(e)}")
             return {}
 
     def _search_pmid_by_doi(self, doi: str) -> str | None:
@@ -720,7 +724,7 @@ def run_stage5(stage4_path: str, output_path: str = None, verbose: bool = True) 
         json.dump(result, f, indent=2, ensure_ascii=False)
 
     if verbose:
-        print(f"\n✅ Enriched output saved to: {output_path}")
+        logger.info(f"\n✅ Enriched output saved to: {output_path}")
 
     # Additive, and after the write so the on-disk artifact is unchanged: the
     # caller reads the path this stage actually used instead of rebuilding it.
@@ -748,15 +752,15 @@ def main():
         if candidates:
             input_path = str(candidates[0])
         else:
-            print(f"Error: Could not find input file: {args.input}")
+            logger.error(f"Error: Could not find input file: {args.input}")
             sys.exit(1)
 
     result = run_stage5(input_path, args.output, verbose=not args.quiet)
 
     # Print summary stats
     stats = result.get('stats', {})
-    print(f"\nEnrichment complete:")
-    print(f"  {stats.get('enriched', 0)}/{stats.get('total_publications', 0)} publications enriched")
+    logger.info(f"\nEnrichment complete:")
+    logger.info(f"  {stats.get('enriched', 0)}/{stats.get('total_publications', 0)} publications enriched")
 
 
 if __name__ == '__main__':
