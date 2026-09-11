@@ -124,13 +124,17 @@ def test_teaching_entries_render_as_list_paragraphs_end_to_end():
     assert "•" not in rendered[0].text
 
 
-# --- and the seven K call sites actually ask for it --------------------------
+# --- and the K call site actually asks for it --------------------------------
 
 def test_every_teaching_call_site_requests_a_list_level():
-    # Guards the wire, not the helper: deleting list_level from any one of the
-    # seven call sites silently restores the glyph for part of section K.
+    # Guards the wire, not the helper: dropping list_level from the K call site
+    # silently restores the glyph for section K. The count was 7 until #476
+    # moved the text reconstruction into `_teaching_entry_lines`, leaving
+    # `_insert_teaching_entry` with one insertion loop instead of seven
+    # per-branch calls; the count still has to be pinned, so a new emitter
+    # added beside it fails here rather than in a render.
     calls = _bullet_calls_by_function()[K_CALLER]
-    assert len(calls) == 7, f"expected 7 K call sites, found {len(calls)}"
+    assert len(calls) == 1, f"expected 1 K call site, found {len(calls)}"
     for call in calls:
         kwargs = {kw.arg for kw in call.keywords}
         assert "list_level" in kwargs, f"{K_CALLER} line {call.lineno} lost list_level"

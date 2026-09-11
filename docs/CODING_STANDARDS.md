@@ -345,7 +345,7 @@ Coverage counts executed lines, not asserted behaviour, so a rising number is no
 
 **7.1 Nothing parses another process's stdout. [ratchet]**
 Progress is a callback. Metrics are a returned dict. `print()` is for humans.
-*Why:* stdout is currently a wire protocol on two live consumers — `orchestrator.py:129-138` regexes stage output into the progress bar, and `run_corpus_batch.sh` greps four literals plus an anchored `^Models: ` out of `run_full_pipeline.py`'s stdout into `summary.tsv`. That CLI's narration is `logger.info` since #780, not `print()`, which changes nothing for the consumer — the same strings reach stdout through a message-only handler, and a parse of another process's stdout is still a parse. Rewording one of them, or putting a timestamp in front of it, silently blanks the batch metrics; `test_run_full_pipeline_stdout_contract.py` now guards that half. The orchestrator half is still stage `print()` with no test, so rewording a stage print silently blanks the progress bar. The precedent for doing this properly already exists: the `cancel_check` callback threaded into stages 2 and 4.
+*Why:* `print()` is currently a wire protocol on two live consumers — `orchestrator.py:129-138` regexes stage output into the progress bar, and `run_corpus_batch.sh` greps four literals into `summary.tsv`. No test guards either, so rewording a print silently blanks the progress bar and the batch metrics. The precedent for doing this properly already exists: the `cancel_check` callback threaded into stages 2 and 4.
 *Check:* two §9 rows, both ratcheted by `scripts/check_standards.py` — the `re.compile(` count inside `PROGRESS_PATTERNS`, and every `print()` outside `tests/` and `scripts/` (ruff `T201`, scoped by `ruff.toml`'s per-file ignores).
 
 **7.2 One configuration source per consumer. [gate — check pending]**
@@ -425,16 +425,16 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 1.2 pure layers import no `docx` | 0 | 0 | ✓ |
 | 1.3 peers do not import peers | 0 | 0 | ✓ |
 | 1.4 core does not import the web backend | 0 | 1 | ✗ |
-| 2.1 no `db.query(` in `api/` | falling | 30 | ratchet |
-| 3.x oversized-function debt (excess lines) | falling | 2506 | ratchet |
+| 2.1 no `db.query(` in `api/` | falling | 33 | ratchet |
+| 3.x oversized-function debt (excess lines) | falling | 3216 | ratchet |
 | 3.7 no metaprogramming | 0 | 0 (1 waived) | ~ |
 | 3.7 dynamic attribute access (non-literal) | falling | 6 | ratchet |
 | 5.4 bare swallows (`except Exception: pass`) | falling | 3 | ratchet |
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
-| 7.1 print() in library code (T201) | falling | 979 | ratchet |
+| 7.1 print() in library code (T201) | falling | 1246 | ratchet |
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
-| 8.3 typing syntax (UP*, RUF013) | falling | 309 | ratchet |
-| 8.3 missing annotations (ANN*, RUF012) | falling | 610 | ratchet |
+| 8.3 typing syntax (UP*, RUF013) | falling | 249 | ratchet |
+| 8.3 missing annotations (ANN*, RUF012) | falling | 603 | ratchet |
 
 <!-- check_standards:auto:end -->
 
