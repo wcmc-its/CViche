@@ -2,6 +2,12 @@ name: deps-audit
 
 # Fail closed if any pinned Python dependency has a known vulnerability.
 # This is the repo's first CI workflow (addresses #118; the never-built #34).
+
+# Least-privilege default (#684): every job here is checkout + read-only scan,
+# no repo/issue/PR writes, so repo-wide read is enough.
+permissions:
+  contents: read
+
 on:
   pull_request:
     branches: [dev, main]
@@ -14,23 +20,55 @@ on:
   push:
     branches: [dev, main]
   workflow_dispatch:
+  # Weekly full-history secret-scan baseline (#684). Lives on this workflow's
+  # trigger, not ci.yml's: a `schedule:` on ci.yml would also fire its 5
+  # build/test jobs weekly for no reason, since none of them scope themselves
+  # away from `schedule`. Here, pip-audit picking up a bonus weekly run is a
+  # feature, not noise -- it catches a freshly published CVE against deps that
+  # haven't otherwise changed since the last push/PR.
+  schedule:
+    - cron: '17 6 * * 1' # Monday ~06:17 UTC
 
 jobs:
   pip-audit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.14" # match the build image (python:3.14-slim)
-      - run: pip install pip-audit
+      # pip-audit is pinned: an unpinned install lets a security gate
+      # change behaviour between runs -- a new release can add, drop or
+      # re-classify findings, so the same tree passes one day and fails the
+      # next for reasons unrelated to this repo. Bump deliberately; check the
+      # current release with `curl -s https://pypi.org/pypi/pip-audit/json |
+      # python3 -c "import json,sys; print(json.load(sys.stdin)['info']['version'])"`.
+      # buildspec.yaml pre_build runs the same gate on the deploy path and
+      # pins the same version -- keep the two in sync.
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install "pip-audit==2.10.1"
 
-      # --no-deps avoids INSTALLING each requirements file's dependency tree, so
-      # the job can't go red for runner-environment reasons (missing xmlsec1 /
-      # poppler / build libs). It does NOT narrow the audit: pip-audit still
-      # resolves the declared dependency tree -- including transitives such as
-      # pysaml2 -> pyopenssl/cryptography -- and audits those too. A hash-pinned
-      # lockfile follow-up will make the audited set fully reproducible.
+      # SCOPE -- what this gate actually audits. Measured, not inferred.
+      # --no-deps is very nearly a no-op as invoked here. pip-audit only skips
+      # resolution when it is ALSO given --disable-pip: in
+      # pip_audit/_dependency_source/requirement.py the pre-resolved path is
+      # guarded by `if self._disable_pip:`, and we never pass that flag. So
+      # pip-audit builds a venv, pip-installs the requirements file (which
+      # resolves the whole tree) and audits every resolved distribution.
+      # Measured with the pinned pip-audit==2.10.1:
+      #   --no-deps -r requirements.txt                 -> 39 packages audited
+      #     (12 declared; adds botocore, httpx, pydantic-core, certifi, urllib3)
+      #   --no-deps -r backend/requirements.txt         -> 60 packages audited
+      #     (23 declared; adds pyopenssl, cryptography, starlette, anyio, h11)
+      #   --no-deps --disable-pip -r requirements.txt   -> 12 packages audited
+      # Transitive dependencies ARE covered. The remaining gap is reproducibility,
+      # not coverage: the audited set is whatever pip resolves at audit time
+      # rather than a hash-pinned set (#130, prerequisite #754).
+      #
+      # THE TRAP: adding --disable-pip -- or hash-pinning these files, which
+      # takes the same branch -- silently collapses coverage from 39/60 packages
+      # to the 12/23 direct pins, with no warning and a still-green run. If you
+      # hash-pin for #130, pin the fully RESOLVED set, never just these files.
       #
       # Ignored advisories are maintained in .pip-audit-ignore.txt (tracked in #126).
       # Both this workflow and buildspec.yaml reference that file so the ignore
@@ -47,3 +85,43 @@ jobs:
             pip-audit --no-deps -r "$req" $IGNORE_FLAGS
             echo "::endgroup::"
           done
+
+  secret-scan-full-history:
+    # One-time-per-week full-history baseline scan (#684), separate from
+    # ci.yml's incremental secret-scan job so push/PR stays cheap (diff-only)
+    # while this still catches anything an incremental scan's shallow range
+    # could miss (e.g. a history rewrite). Guarded to schedule/dispatch only --
+    # it must NOT also run on pull_request/push, which ci.yml's job covers.
+    #
+    # WHY THIS REALLY IS A HISTORY SCAN, not a working-tree scan. The action has
+    # no scan-mode input; its composite step is hardcoded to
+    #   docker run ... "${IMAGE}:${VERSION}" git file:///tmp/ \
+    #     --since-commit ${BASE:-''} --branch ${HEAD:-''} --fail --no-update ...
+    # so the source is always `git` (walks commits) and never `filesystem`. On
+    # schedule/workflow_dispatch the action leaves BASE and HEAD empty, so the
+    # range is unbounded -- every commit in the clone, not a diff. Verified by
+    # running that exact command against a two-commit repo whose only AWS key
+    # was added in c1 and `git rm`-ed in c2 (present in history, absent from the
+    # working tree): the scan reported the finding and exited 183, i.e. it fails
+    # closed. `fetch-depth: 0` below is still required -- it supplies the
+    # commits the walk has to see -- but it is not what selects history mode.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0 # full history, not just the default shallow clone
+      # The SHA pin and the `version:` input below must denote the same release,
+      # and the trailing "# v3.97.4" is only a comment -- re-check it rather than
+      # trusting it:
+      #   gh api repos/trufflesecurity/trufflehog/git/refs/tags/v3.97.4
+      #   -> object.sha == 363923b901c911a9164f50b6c423f47c15372b1c  (confirmed)
+      # v3.97.4 is also the current latest release
+      # (gh api repos/trufflesecurity/trufflehog/releases/latest -> tag_name
+      # v3.97.4, published 2026-09-03), so no bump is outstanding as of
+      # 2026-09-08. Re-run both calls before changing either line.
+      - name: Scan full git history for secrets
+        uses: trufflesecurity/trufflehog@363923b901c911a9164f50b6c423f47c15372b1c # v3.97.4
+        with:
+          version: 3.97.4
+          extra_args: --exclude-paths=.trufflehog-exclude.txt

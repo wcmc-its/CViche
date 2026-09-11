@@ -13,14 +13,27 @@ distinct CV (pick reps with scripts/corpus_distinct_cvs.py first) so the
 aggregate counts distinct CVs, not runs. The source docx is staged into the run
 root so the segmentation/missed_headers lints run (they skip only for runs
 predating the input-archiving feature).
+
+Duplicate-uid policy: this script does not trust the caller to have actually
+picked one run per distinct CV -- `sweep()` tracks uid -> run_id itself.
+First run wins; a later run_id for a uid already reported is recorded under
+`duplicates`, never added to `reports`, and never double-counted by
+`aggregate()`.
 """
 import argparse
 import json
+import logging
+import shutil
 import sys
+import traceback
 from collections import Counter
+from collections.abc import Iterable
 from pathlib import Path
+from typing import NamedTuple, TypedDict
 
-from unified_pipeline.run_doctor import KNOWN_LINTS, run_doctor
+from unified_pipeline.run_doctor import KNOWN_LINTS, SEVERITY_ORDER, _uid_owns, run_doctor
+
+logger = logging.getLogger(__name__)
 
 # S3-flat suffix -> the stage_* dir run_doctor._ARTIFACTS globs (kept in sync
 # with that map; a suffix run_doctor stops reading just goes unused here).
@@ -35,24 +48,109 @@ SUFFIX_DIR = {
 }
 
 
-def _find_uid(run_dir: Path):
-    """The artifact prefix for this run (the `_fields.json` stem, else `_wcm`)."""
-    for f in run_dir.glob("*_fields.json"):
-        return f.name[: -len("_fields.json")]
-    for f in run_dir.glob("*_wcm.docx"):
-        return f.name[: -len("_wcm.docx")]
-    return None
+# --- records this script hands to its callers and to --out (§8.1) ---------
+
+class Finding(TypedDict):
+    """One run_doctor finding, exactly as `doctor.shared._finding()` builds
+    it -- the contract `aggregate()` validates every finding against
+    (T2.10). Pinned to the real builder by
+    `test_finding_contract_matches_doctor_shared_finding`, so the two cannot
+    drift apart silently. `aggregate()` reads lint/severity/message;
+    `evidence` is required because the builder always sets it, and a
+    finding without it did not come from the builder."""
+    lint: str
+    severity: str
+    message: str
+    evidence: list[str]
 
 
-def _resolve_run_dir(corpus_dir: Path, run_id: str) -> Path:
-    """The dir holding this run's artifacts, tolerating an already-flat layout.
+# Declaration order, for messages that name the missing key.
+FINDING_KEYS: tuple[str, ...] = tuple(Finding.__annotations__)
 
-    `<corpus>/<run>/outputs` when present, else `<corpus>/<run>`. Returns the
+
+class DoctorReport(TypedDict):
+    """The part of `run_doctor()`'s return this script reads. The real
+    report also carries document_uid/root/artifacts/counts/worst_severity,
+    which pass through to --out untouched."""
+    findings: list[Finding]
+
+
+class LintRow(TypedDict):
+    """One row of `aggregate()`'s ranking: distinct-CV counts for a lint."""
+    lint: str
+    cvs_affected: int
+    cvs_error: int
+    cvs_ran: int
+
+
+class RunFailure(TypedDict):
+    """What `sweep()` records under `failures[run_id]` for a run it could not
+    doctor. `exception` is the class name, so an operator (or a test) can
+    tell a `PermissionError` from an `AmbiguousSourceDocxError` without
+    parsing `traceback`."""
+    exception: str
+    error: str
+    traceback: str
+
+
+class DuplicateRun(TypedDict):
+    """What `sweep()` records under `duplicates[run_id]` for a later run
+    of a uid already reported by `first_run_id` (T2.2)."""
+    uid: str
+    first_run_id: str
+
+
+class SweepResult(NamedTuple):
+    """Everything `sweep()` learned, by name: `reports` feeds
+    `aggregate()`; the other three say why a requested run is not in it."""
+    reports: dict[str, DoctorReport]
+    failures: dict[str, RunFailure]
+    skipped: list[str]
+    duplicates: dict[str, DuplicateRun]
+
+
+class SweepRunError(Exception):
+    """Base for the operational per-run failures `sweep()` records and moves
+    past (T1.6): a run whose layout, uid, or source docx is wrong is that
+    run's problem, not the sweep's. Anything else the sweep's own staging
+    code raises -- a `TypeError`, a `KeyError` -- is a bug in this script
+    and propagates."""
+
+
+class MultipleUidsInRunError(SweepRunError):
+    """A run directory's artifacts name more than one distinct uid."""
+
+
+def _find_uid(outputs_dir: Path) -> str | None:
+    """The uid whose artifacts populate `outputs_dir`, or `None` if empty.
+
+    Searched over every registered `SUFFIX_DIR` suffix (T1.4/T2.7), not just
+    `_fields.json`/`_wcm.docx` -- a run that crashed before stage 4 legitimately
+    has only an earlier-stage artifact (e.g. `_segmented.json`), and the old
+    two-suffix search reported that run as having no uid at all. Raises if the
+    directory's files name more than one uid: a malformed or partially synced
+    run must never have `sweep()` silently pick one.
+    """
+    uids = {f.name[: -len(suffix)]
+            for suffix in SUFFIX_DIR
+            for f in outputs_dir.glob(f"*{suffix}")}
+    if len(uids) > 1:
+        raise MultipleUidsInRunError(
+            f"{outputs_dir}: {len(uids)} distinct uids present, expected one: "
+            f"{sorted(uids)}")
+    return next(iter(uids), None)
+
+
+def _resolve_outputs_dir(run_root: Path) -> Path:
+    """The dir holding this run's per-uid artifacts, tolerating an
+    already-flat layout.
+
+    `<run_root>/outputs` when present, else `run_root` itself. Returns the
     flat path even when it doesn't exist so the caller's `_find_uid is None`
     branch reports the run uniformly (this never raises).
     """
-    nested = corpus_dir / run_id / "outputs"
-    return nested if nested.is_dir() else corpus_dir / run_id
+    nested = run_root / "outputs"
+    return nested if nested.is_dir() else run_root
 
 
 def _relink(link: Path, src: Path) -> None:
@@ -70,12 +168,80 @@ def _relink(link: Path, src: Path) -> None:
     link.symlink_to(src.resolve())
 
 
-def stage(run_dir: Path, uid: str, work: Path) -> Path:
-    """Symlink the flat outputs into `<work>/<uid>/stage_*/` and return the root."""
+class AmbiguousSourceDocxError(SweepRunError):
+    """More than one file in a candidate dir passes `_uid_owns` for a uid,
+    and none is named exactly `<uid>.docx`."""
+
+
+def _find_source_docx(cand_dir: Path, uid: str) -> Path | None:
+    """The uid's original-upload docx in `cand_dir`, or `None` if absent.
+
+    Prefers the canonical `<uid>.docx` name; otherwise the sole candidate
+    that passes `run_doctor._uid_owns` (the same prefix-boundary guard that
+    closed the traced 2026-07-15 misattribution -- `web05` must not match
+    `web050_...`). More than one such candidate is never resolved silently
+    (T1.3/T2.7): raise so `sweep()` records the run as a failure naming
+    every candidate, instead of picking `sorted(cands)[0]` and staging the
+    wrong CV without any error.
+    """
+    exact = cand_dir / f"{uid}.docx"
+    if exact.is_file():
+        return exact
+    cands = sorted(p for p in cand_dir.glob(f"{uid}*.docx")
+                    if not p.name.endswith("_wcm.docx") and _uid_owns(p.name, uid))
+    if len(cands) > 1:
+        raise AmbiguousSourceDocxError(
+            f"uid={uid!r} in {cand_dir}: {len(cands)} candidate source docx "
+            f"files and none is named exactly {uid}.docx: "
+            f"{[p.name for p in cands]}")
+    return cands[0] if cands else None
+
+
+class StagingRootNotOwnedError(SweepRunError):
+    """`work/<uid>` contains an entry this script did not create as a symlink."""
+
+
+def _clear_staged_root(root: Path) -> None:
+    """Remove `root`, refusing if anything under it isn't a symlink or a plain
+    directory this function's own layout created.
+
+    `work` persists across invocations (`.doctor_stage`), so without this a
+    stale symlink from an earlier sweep of a DIFFERENT run for the same uid
+    can outlive the current run's stage() call and get linted as if it
+    belonged to it (T1.1/T2.1). Everything `stage()` writes under `root` is
+    either a directory it made or a symlink it created -- a plain file here
+    means something else wrote into this tree, so refuse rather than delete
+    it silently.
+    """
+    for entry in root.rglob("*"):
+        if entry.is_symlink() or entry.is_dir():
+            continue
+        raise StagingRootNotOwnedError(
+            f"{root}: refusing to remove {entry} -- not a symlink or a "
+            "directory, not something this script staged")
+    shutil.rmtree(root)
+
+
+def stage(run_root: Path, uid: str, work: Path) -> Path:
+    """Symlink the flat outputs into `<work>/<uid>/stage_*/` and return the root.
+
+    `run_root` is `<corpus>/<run_id>` -- both the outputs dir (nested or
+    flat, see `_resolve_outputs_dir`) and the archived-source `input/` dir
+    are derived from it here, once, so a flat-layout run's source docx is
+    looked up at `<run_root>/input`, not `<run_root>.parent/input`
+    (T1.2/T2.7's ask).
+
+    Rebuilt from scratch on every call (see `_clear_staged_root`) so a suffix
+    absent from THIS run's outputs never leaves behind a symlink staged by an
+    earlier run for the same uid.
+    """
+    outputs_dir = _resolve_outputs_dir(run_root)
     root = work / uid
+    if root.exists():
+        _clear_staged_root(root)
     root.mkdir(parents=True, exist_ok=True)
     for suffix, stagedir in SUFFIX_DIR.items():
-        src = run_dir / f"{uid}{suffix}"
+        src = outputs_dir / f"{uid}{suffix}"
         if not src.exists():
             continue
         d = root / stagedir
@@ -84,37 +250,110 @@ def stage(run_dir: Path, uid: str, work: Path) -> Path:
     # Source docx: the original upload is durably archived at runs/<id>/input/
     # (since 2026-06-02, commit 8358c0b). Symlink it into root so _find_source
     # picks it up and the segmentation/missed_headers lints (1-2) can run.
-    for cand_dir in (run_dir.parent / "input", run_dir):
+    for cand_dir in (run_root / "input", outputs_dir):
         if not cand_dir.is_dir():
             continue
-        cands = [p for p in sorted(cand_dir.glob(f"{uid}*.docx"))
-                 if not p.name.endswith("_wcm.docx")]
-        if cands:
-            _relink(root / cands[0].name, cands[0])
+        src = _find_source_docx(cand_dir, uid)
+        if src:
+            _relink(root / src.name, src)
             break
     return root
 
 
-def sweep(corpus_dir: Path, run_ids, work: Path):
-    """Doctor each run; one bad run is reported and skipped, never aborts the rest."""
-    reports = {}
-    failures = {}
+class RunIdEscapesCorpusError(SweepRunError):
+    """`run_id` resolves outside `corpus_dir` (e.g. contains `..`)."""
+
+
+def _resolve_run_root(corpus_dir: Path, run_id: str) -> Path:
+    """`corpus_dir / run_id`, refusing a `run_id` that would resolve outside
+    `corpus_dir` (T1.5) -- e.g. `run_id="../other-directory"`.
+    """
+    root = corpus_dir / run_id
+    resolved = root.resolve()
+    try:
+        resolved.relative_to(corpus_dir.resolve())
+    except ValueError as e:
+        raise RunIdEscapesCorpusError(
+            f"run_id={run_id!r} resolves outside corpus_dir={corpus_dir}: "
+            f"{resolved}") from e
+    return root
+
+
+def _record_failure(failures: dict[str, RunFailure], run_id: str, phase: str,
+                    e: BaseException) -> None:
+    """Log `e` with its traceback and file it under `failures[run_id]`.
+
+    Called from inside an `except` block only: `logger.exception` and
+    `traceback.format_exc()` both read the exception being handled.
+    """
+    logger.exception("%s failed for run_id=%s", phase, run_id)
+    failures[run_id] = {"exception": type(e).__name__, "error": str(e),
+                        "traceback": traceback.format_exc()}
+
+
+def sweep(corpus_dir: Path, run_ids: Iterable[str], work: Path) -> SweepResult:
+    """Doctor each run; one bad run is reported and skipped, never aborts the rest.
+
+    Returns a `SweepResult` (reports, failures, skipped, duplicates). `failures[run_id]`
+    carries the exception class name, its message, and the full traceback
+    text -- the operator's one lead into which lint raised, at which line,
+    on which artifact -- and is also logged via logger.exception so it
+    survives in the process log even when the caller does not persist
+    --out. `skipped` lists run_ids with no staged artifacts at all (a
+    distinct, non-exceptional case from a run_doctor crash).
+
+    Two catches, deliberately different in width (T1.6). Around staging,
+    only the failures that are THIS RUN's problem are recorded: the typed
+    `SweepRunError`s this script raises for a bad layout, uid, or source
+    docx, and `OSError` from the filesystem it symlinks through. A
+    `TypeError` or `KeyError` there is a bug in the sweep itself and
+    propagates so it is fixed, not filed as a run failure. Around
+    `run_doctor()` the catch is broad on purpose: a lint crashing on one
+    CV's artifacts is exactly what #563 is about, and it must not lose the
+    reports already computed for the other runs.
+
+    Duplicate-uid policy (T2.2): the caller contract (module docstring) is
+    ONE run per distinct CV, but nothing previously enforced it -- two
+    run_ids for the same uid would both land in `reports`, keyed separately,
+    and `aggregate()` would double-count that CV's findings. First run wins:
+    `duplicates[run_id] = {"uid": ..., "first_run_id": ...}` for every later
+    run_id sharing an already-reported uid; it is never added to `reports`
+    and never reaches `aggregate()`.
+    """
+    reports: dict[str, DoctorReport] = {}
+    failures: dict[str, RunFailure] = {}
+    skipped: list[str] = []
+    duplicates: dict[str, DuplicateRun] = {}
+    run_id_by_uid: dict[str, str] = {}
     for run_id in run_ids:
         try:
-            run_dir = _resolve_run_dir(corpus_dir, run_id)
-            uid = _find_uid(run_dir)
+            run_root = _resolve_run_root(corpus_dir, run_id)
+            uid = _find_uid(_resolve_outputs_dir(run_root))
             if not uid:
-                print(f"  !! {run_id}: no artifacts found, skipping", file=sys.stderr)
+                logger.warning("%s: no artifacts found, skipping", run_id)
+                skipped.append(run_id)
                 continue
-            reports[run_id] = run_doctor(stage(run_dir, uid, work), uid)
-        except Exception as e:  # noqa: BLE001 - one bad run must not lose the sweep
-            print(f"  !! {run_id}: run_doctor failed: {e}", file=sys.stderr)
-            failures[run_id] = str(e)
+            if uid in run_id_by_uid:
+                first_run_id = run_id_by_uid[uid]
+                logger.warning("%s: uid=%s already reported by run_id=%s, "
+                                "skipping duplicate", run_id, uid, first_run_id)
+                duplicates[run_id] = {"uid": uid, "first_run_id": first_run_id}
+                continue
+            root = stage(run_root, uid, work)
+        except (SweepRunError, OSError) as e:
+            _record_failure(failures, run_id, "staging", e)
+            continue
+        try:
+            reports[run_id] = run_doctor(root, uid)
+        except Exception as e:  # noqa: BLE001 - one lint crash must not lose the sweep (#563)
+            _record_failure(failures, run_id, "run_doctor", e)
+            continue
+        run_id_by_uid[uid] = run_id
     if failures:
-        print(f"\n[WARN] {len(failures)} run(s) failed and were dropped from the "
-              f"sweep: {list(failures)}. Prevalence counts are over the "
-              f"{len(reports)} that succeeded.", file=sys.stderr)
-    return reports
+        logger.warning("%d run(s) failed and were dropped from the sweep: %s. "
+                        "Prevalence counts are over the %d that succeeded.",
+                        len(failures), list(failures), len(reports))
+    return SweepResult(reports, failures, skipped, duplicates)
 
 
 # The lints run_doctor always considers (skipped ones emit a "skipped: missing"
@@ -129,17 +368,89 @@ def sweep(corpus_dir: Path, run_ids, work: Path):
 # it. Importing the canonical tuple removes both the copy and the heuristic.
 ALL_LINTS = list(KNOWN_LINTS)
 
+# `_ready()` in run_doctor.py records a lint it could not run as an INFO
+# finding whose message is "skipped: missing <inputs>" -- a finding carries
+# no structured status field yet (#750 tracks adding one to `_finding()` and
+# `_ready()`, at which point this constant goes away). Until then this is the
+# ONE place the sweep depends on that wording, and
+# `test_skip_detection_matches_what_run_doctor_actually_emits` runs the real
+# run_doctor through aggregate() so a rewording on either side fails CI
+# instead of silently turning every skipped lint into a "ran clean" one.
+SKIPPED_MISSING_PREFIX = "skipped: missing"
 
-def aggregate(reports):
+
+class MalformedReportError(Exception):
+    """A report handed to aggregate() is not a dict carrying a `findings`
+    list -- the shape `DoctorReport` names."""
+
+
+class MalformedFindingError(MalformedReportError):
+    """A report's finding is not a `Finding`: not a dict, missing a required
+    key, or a field's value isn't in the registry it's supposed to come
+    from."""
+
+
+def _validate_finding(run_id: str, f: object) -> None:
+    """Fail loudly (T1.8/T2.6/T2.10) on a finding aggregate() cannot trust:
+    not a dict, a `Finding` key absent, an unregistered severity, or a lint
+    name outside ALL_LINTS -- rather than either raising an opaque
+    KeyError deeper in aggregate() or silently mis-ranking/dropping it.
+    """
+    if not isinstance(f, dict):
+        raise MalformedFindingError(
+            f"run_id={run_id!r}: finding is a {type(f).__name__}, not a "
+            f"dict: {f!r}")
+    for field in FINDING_KEYS:
+        if field not in f:
+            raise MalformedFindingError(
+                f"run_id={run_id!r}: finding missing required field "
+                f"{field!r}: {f}")
+    if f["severity"] not in SEVERITY_ORDER:
+        raise MalformedFindingError(
+            f"run_id={run_id!r}: field=severity value={f['severity']!r} "
+            f"not in SEVERITY_ORDER={SEVERITY_ORDER}")
+    if f["lint"] not in ALL_LINTS:
+        raise MalformedFindingError(
+            f"run_id={run_id!r}: field=lint value={f['lint']!r} not in "
+            f"ALL_LINTS")
+
+
+def _validate_report(run_id: str, rep: object) -> list[Finding]:
+    """The report's findings, validated (T2.10), or MalformedReportError.
+
+    A report is whatever `run_doctor` returned for one run -- or, under a
+    test's monkeypatch, whatever the fake returned -- so the boundary
+    checks it is a dict with a `findings` list before the loop in
+    `aggregate()` reads it, naming the run instead of raising a bare
+    KeyError mid-aggregation.
+    """
+    if not isinstance(rep, dict):
+        raise MalformedReportError(
+            f"run_id={run_id!r}: report is a {type(rep).__name__}, not a dict")
+    if "findings" not in rep:
+        raise MalformedReportError(
+            f"run_id={run_id!r}: report has no 'findings' key: "
+            f"keys={sorted(rep)}")
+    findings = rep["findings"]
+    if not isinstance(findings, list):
+        raise MalformedReportError(
+            f"run_id={run_id!r}: 'findings' is a {type(findings).__name__}, "
+            f"not a list")
+    for f in findings:
+        _validate_finding(run_id, f)
+    return findings
+
+
+def aggregate(reports: dict[str, DoctorReport]) -> list[LintRow]:
     """Per lint: how many distinct reps have a real (>=WARN) finding, and ERROR."""
     warn = Counter()
     error = Counter()
     ran = Counter()  # reps where the lint actually ran (input present, not skipped)
-    for rep in reports.values():
+    for run_id, rep in reports.items():
         seen_warn, seen_err, skipped = set(), set(), set()
-        for f in rep["findings"]:
+        for f in _validate_report(run_id, rep):
             lint, sev = f["lint"], f["severity"]
-            if sev == "INFO" and "skipped: missing" in f["message"]:
+            if sev == "INFO" and f["message"].startswith(SKIPPED_MISSING_PREFIX):
                 skipped.add(lint)
             elif sev == "WARN":
                 seen_warn.add(lint)
@@ -163,64 +474,18 @@ def aggregate(reports):
     ]
 
 
-def _selftest():
-    # rep A: pipe_leaks WARN + segmentation skipped. rep B: pipe_leaks ERROR, nothing skipped.
-    reports = {
-        "A": {"findings": [
-            {"lint": "pipe_leaks", "severity": "WARN", "message": "x"},
-            {"lint": "segmentation", "severity": "INFO", "message": "skipped: missing source"},
-        ]},
-        "B": {"findings": [
-            {"lint": "pipe_leaks", "severity": "ERROR", "message": "y"},
-        ]},
-    }
-    rank = {r["lint"]: r for r in aggregate(reports)}
-    assert rank["pipe_leaks"]["cvs_affected"] == 2, "both reps have a >=WARN pipe_leaks finding"
-    assert rank["pipe_leaks"]["cvs_error"] == 1, "only rep B is ERROR"
-    assert rank["pipe_leaks"]["cvs_ran"] == 2, "pipe_leaks ran on both (never skipped)"
-    assert rank["segmentation"]["cvs_ran"] == 1, "segmentation skipped on A, ran (clean) on B"
-    assert rank["segmentation"]["cvs_affected"] == 0
-    assert aggregate(reports)[0]["lint"] == "pipe_leaks", "ranked first by affected count"
-
-    # #7: _resolve_run_dir tolerates both the nested (outputs/) and flat layout,
-    # and never raises on an absent run (returns the flat path for the caller's
-    # _find_uid-is-None branch to report).
-    import tempfile
-    with tempfile.TemporaryDirectory() as td:
-        corpus = Path(td)
-        (corpus / "nested" / "outputs").mkdir(parents=True)
-        (corpus / "flat").mkdir()
-        assert _resolve_run_dir(corpus, "nested") == corpus / "nested" / "outputs"
-        assert _resolve_run_dir(corpus, "flat") == corpus / "flat"
-        assert _resolve_run_dir(corpus, "absent") == corpus / "absent"
-
-    # #4: ALL_LINTS is now imported from run_doctor rather than hand-kept, so
-    # it cannot drift. The name-prefix count that used to live here is gone --
-    # it over-counted lint_surprise (a ranking helper, not a rule) and had been
-    # failing on dev ever since. What the registry itself must match is checked
-    # by test_run_doctor_contract.py, which runs in CI; --selftest does not.
-    assert ALL_LINTS == list(KNOWN_LINTS), "ALL_LINTS diverged from KNOWN_LINTS"
-    assert len(set(ALL_LINTS)) == len(ALL_LINTS), "ALL_LINTS has duplicates"
-
-    print("selftest OK")
-    return 0
-
-
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("corpus_dir", nargs="?")
-    ap.add_argument("run_ids", nargs="?", help="comma-separated representative run_ids")
+    ap.add_argument("corpus_dir")
+    ap.add_argument("run_ids", help="comma-separated representative run_ids")
     ap.add_argument("--work", default=None, help="staging dir (default: <corpus_dir>/.doctor_stage)")
     ap.add_argument("--out", default=None, help="write full JSON report here")
+    ap.add_argument("--allow-partial", action="store_true",
+                     help="exit 0 if at least one run produced a report, even "
+                          "though others failed, were skipped, or were duplicates "
+                          "(default: any incomplete run exits 1)")
     args = ap.parse_args(argv)
-    if args.selftest:
-        return _selftest()
-    if not args.corpus_dir:
-        ap.error("corpus_dir is required (or use --selftest)")
-    if not args.run_ids:  # nargs="?" -> None; .split() would crash without this
-        ap.error("run_ids is required (or use --selftest)")
 
     corpus_dir = Path(args.corpus_dir)
     run_ids = [r.strip() for r in args.run_ids.split(",") if r.strip()]
@@ -235,10 +500,14 @@ def main(argv=None):
     work = Path(args.work) if args.work else corpus_dir / ".doctor_stage"
     work.mkdir(parents=True, exist_ok=True)
 
-    reports = sweep(corpus_dir, run_ids, work)
-    ranking = aggregate(reports)
-    n = len(reports)
+    result = sweep(corpus_dir, run_ids, work)
+    ranking = aggregate(result.reports)
+    n = len(result.reports)
 
+    # stdout below is the human-readable ranking table -- the script's actual
+    # product (see the module docstring) -- deliberately print(), not logger:
+    # diagnostics (the warnings sweep() already logged) belong on stderr, this
+    # is the report the operator reads. Do not migrate this block to logging.
     print(f"\nDoctor sweep: {n} distinct CVs\n")
     print(f"{'lint':24s} {'CVs affected':>13s} {'(of which ERROR)':>17s} {'ran on':>8s}")
     for row in ranking:
@@ -247,10 +516,28 @@ def main(argv=None):
 
     if args.out:
         Path(args.out).write_text(json.dumps(
-            {"n_cvs": n, "ranking": ranking, "reports": reports}, indent=2))
+            {"n_cvs": n, "ranking": ranking, "reports": result.reports,
+             "failures": result.failures, "skipped": result.skipped,
+             "duplicates": result.duplicates}, indent=2, ensure_ascii=False),
+            encoding="utf-8")
         print(f"\n-> {args.out}")
+
+    # A sweep that doctored nothing is a failure, not a pass (§5.5) -- without
+    # this, every run_id failing or being skipped still printed an all-zero
+    # ranking table and exited 0.
+    if not result.reports:
+        return 1
+    # Fail closed by default (T2.4): any requested run that failed, was
+    # skipped, or was a duplicate means the sweep is incomplete, so CI
+    # should not report success on it. --allow-partial opts back into the
+    # old "at least one report" tolerance for a deliberately partial corpus.
+    incomplete = bool(result.failures) or bool(result.skipped) or bool(result.duplicates)
+    if incomplete and not args.allow_partial:
+        return 1
     return 0
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, stream=sys.stderr,
+                        format="%(levelname)s %(name)s: %(message)s")
     sys.exit(main())

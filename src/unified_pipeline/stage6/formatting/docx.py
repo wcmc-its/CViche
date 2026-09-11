@@ -20,6 +20,7 @@ import sys
 try:
     from docx.oxml import OxmlElement
     from docx.oxml.ns import qn
+    from docx.oxml.xmlchemy import BaseOxmlElement
     from docx.shared import Pt
     from docx.table import Table
     from docx.text.paragraph import Paragraph
@@ -181,3 +182,45 @@ def _set_cell_text(cell, text: str, bold: bool = False):
         para = cell.paragraphs[0]
         run = para.add_run(str(text) if text else "")
         _set_font(run, bold=bold)
+
+
+class DetachedAnchorError(ValueError):
+    """`_insert_after` was handed an anchor with no parent.
+
+    The anchor is a cursor a section writer carried across several inserts
+    (the heading, then each table it placed, then a spacing paragraph). If a
+    helper in between removed that element from the body -- the generator's
+    `_add_spacing_paragraph` does exactly that when its own re-insert fails
+    -- the cursor now points at nothing, and the next element would have
+    nowhere to go. lxml reports this as a `TypeError` about "siblings of the
+    root element", which reads as an XML-layer bug; this names what actually
+    happened so the caller can decide (#739 review: patents and mentoring
+    both hand-rolled the same body splice and swallowed the failure).
+    """
+
+
+def _insert_after(anchor: BaseOxmlElement, element: BaseOxmlElement) -> None:
+    """Move `element` to sit immediately after `anchor` in the document body.
+
+    The one body splice for section writers that build document structure
+    (a table per mentee, a table per patent, the spacing paragraph between
+    them). python-docx's `add_table` and `add_paragraph` append at the END
+    of the body, so every such element has to be moved back under its
+    heading; lxml's `addnext` detaches `element` from wherever it currently
+    sits, so this is a move, never a copy.
+
+    The position is relative to the anchor ELEMENT, not to a paragraph
+    index: `Document.paragraphs` indexes shift every time something is
+    spliced in above them, and a body-list index goes stale the same way.
+    The three hand-rolled `body.insert(body_elements.index(target) + 1, ...)`
+    splices this replaced each caught `(ValueError, IndexError)` for exactly
+    that reason and then dropped it (#739 review).
+
+    Raises `DetachedAnchorError` when the anchor has no parent -- see that
+    class for when this happens. There is no other failure mode: an
+    attached anchor always has a following-sibling slot.
+    """
+    if anchor.getparent() is None:
+        raise DetachedAnchorError(
+            "insertion anchor is not attached to the document body")
+    anchor.addnext(element)

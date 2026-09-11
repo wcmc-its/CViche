@@ -247,13 +247,11 @@ CV parsing - AI project/
 │   ├── stage_6_word_template.py                  # Stage 6 (Word doc generation)
 │   ├── core/
 │   │   ├── taxonomy_v7.json                      # Definitive taxonomy (59 codes)
-│   │   ├── taxonomy_mapper_v2.py                 # Core classification logic
 │   │   ├── candidate_surfacer.py                 # Candidate surfacing logic
 │   │   ├── taxonomy_contexts.py                  # WCM taxonomy definitions (codes + labels)
 │   │   ├── confusion_matrix.py                   # Section confusion definitions & routing rules
 │   │   ├── confusion_detector.py                 # Keyword-based confusion trigger detection
 │   │   ├── disambiguation_validators.py          # Validation flag definitions
-│   │   ├── repair_segmentation.py                # Entry filtering and noise removal
 │   │   ├── output_manager.py                     # Path management utilities
 │   │   └── validators/                           # Modular validation framework
 │   │       ├── base_validator.py                 # BaseValidator class

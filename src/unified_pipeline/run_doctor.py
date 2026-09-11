@@ -49,6 +49,11 @@ Lints, ranked by the severity of the failure class they catch:
                           appear twice in the output document — one record
                           reaching the faculty-facing docx more than once
                           (#439: C0ZGFW rendered whole teaching records twice)
+14a. duplicate_records     a single enumerated paragraph block whose
+                          normalized body repeats at a different list
+                          position within the same output section — the
+                          ONE-block shape duplicate_passages cannot see by
+                          construction (#446)
 
 Lints 14-15 are the quality-score HARD-FAIL gates and sit outside that
 ranking: they are the only ERROR-by-construction lints, because each one on
@@ -76,7 +81,9 @@ Usage:
 The CLI writes <uid>_doctor.json into the root (or --out), prints a summary,
 and exits 1 if any finding is WARN or worse. The library entry point
 run_doctor(root, uid, source=None) -> dict never calls sys.exit; missing or
-unreadable artifacts skip their lints with an INFO note instead of crashing.
+unreadable artifacts skip their lints with an INFO note instead of crashing,
+and a lint that raises becomes one ERROR finding under its own key while the
+remaining lints still run (#748).
 """
 
 import argparse
@@ -86,6 +93,7 @@ import math
 import os
 import re
 import sys
+from collections.abc import Callable, Sequence
 from functools import partial
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
@@ -145,6 +153,9 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     DEAD_SECTION_MIN_LINES,
     DUPLICATE_PASSAGE_MIN_BLOCKS,
     DUPLICATE_PASSAGE_WARN_COUNT,
+    DUPLICATE_RECORD_MIN_CHARS,
+    DUPLICATE_RECORD_WARN_COUNT,
+    DUPLICATE_RECORD_WINDOW,
     HONORS_NAME_BLOB_CHARS,
     PIPE_CLUSTER_MIN,
     PIPE_LEAK_MIN_SEPS,
@@ -171,6 +182,7 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     _record_rendered,
     lint_dead_sections,
     lint_duplicate_passages,
+    lint_duplicate_records,
     lint_output_hygiene,
     lint_pipe_leaks,
     lint_stage6_warnings,
@@ -223,7 +235,8 @@ SEVERITY_ORDER = ("ERROR", "WARN", "INFO")  # most to least severe
 #:
 #: Order is load-bearing. The sweep breaks ranking ties on index, so reordering
 #: this changes its report even when every finding is identical. Keep it in
-#: dispatch order, matching `run_doctor()`.
+#: dispatch order: `LINT_REGISTRY`'s rows, then the two hard-fail gates
+#: `run_doctor()` dispatches by hand.
 #:
 #: `test_run_doctor_contract.py` checks this against the keys the lint
 #: bodies actually pass to `_finding`/`_ready`, so adding a lint without
@@ -244,11 +257,17 @@ KNOWN_LINTS = (
     "pipe_leaks",
     "table_shape",
     "duplicate_passages",
+    "duplicate_records",
     "owner_contact_missing",
     "pipeline_errors_present",
 )
 
 
+# duplicate_records' prevalence below was measured on the 66-uid doctor-gate
+# farm (scripts/doctor_gate.py), a DIFFERENT and smaller corpus than the one
+# every other entry in this table was measured on (#438's 73 scored runs /
+# #446's 125 rendered corpus outputs) -- the two are not comparable counts,
+# only comparable ROUGH ORDER-OF-MAGNITUDE signals for `lint_surprise`.
 LINT_PREVALENCE = {
     "output_hygiene": 0.877,
     "table_shape": 0.562,
@@ -259,6 +278,7 @@ LINT_PREVALENCE = {
     "segmentation": 0.082,
     "enrichment_failures": 0.082,
     "owner_contact_missing": 0.068,
+    "duplicate_records": 0.061,
     "pipe_leaks": 0.055,
     "unrendered_records": 0.027,
     "dead_sections": 0.027,
@@ -318,13 +338,43 @@ _NAME_CREDENTIAL_RE = re.compile(
 )
 
 
-def iter_header_candidates(docx_path: str) -> List[str]:
+def _logical_cells(row) -> list:
+    """The row's distinct cells. python-docx's ``row.cells`` repeats one
+    gridSpan-merged cell once per layout-grid column it spans, so a merged
+    row reads as several copies of the same cell; this collapses them on the
+    underlying ``<w:tc>`` element."""
+    cells: list = []
+    for cell in row.cells:
+        if not any(cell._tc is kept._tc for kept in cells):
+            cells.append(cell)
+    return cells
+
+
+def _is_single_column(tbl) -> bool:
+    """Is this table one LOGICAL column -- every row exactly one cell,
+    whatever the layout grid says?
+
+    ``len(tbl.columns)`` counts ``w:tblGrid`` layout columns, and CVs
+    routinely build a 1x1 section-container table on a two- or three-column
+    grid with each row's single cell gridSpan-merged across it (#446 review,
+    run_doctor.py thread item 6 / #749: 32 of 183 sample docx carry
+    gridSpan), so the grid count read such a table as a data table and the
+    section headers inside it were never candidates. The representation this
+    commits to: a row with two or more logical cells is a data row wherever
+    the grid puts it, so one such row makes the whole table multi-column --
+    including a variable-width table whose merged title row sits over data
+    rows, which a first-row-only count would misread as single-column."""
+    return all(len(_logical_cells(row)) == 1 for row in tbl.rows)
+
+
+def iter_header_candidates(docx_path: str) -> list[str]:
     """Header-looking source lines: short, letters-only, ALL-CAPS bold (or
     styled as a Heading), from top-level paragraphs and single-column table
-    cells (the 1x1 layout tables CVs use as section containers). Multi-column
-    tables are data tables — their bold cells are column headers — and
-    document furniture ('CURRICULUM VITAE', revision stamps) is not a header
-    either. These are what stage 1a should have promoted to hierarchy nodes."""
+    cells (the 1x1 layout tables CVs use as section containers; see
+    `_is_single_column` for what single-column means). Multi-column tables
+    are data tables — their bold cells are column headers — and document
+    furniture ('CURRICULUM VITAE', revision stamps) is not a header either.
+    These are what stage 1a should have promoted to hierarchy nodes."""
     Document = _get_docx_document()
 
     candidates: List[str] = []
@@ -360,11 +410,11 @@ def iter_header_candidates(docx_path: str) -> List[str]:
         if runs and all(r.bold for r in runs):
             candidates.append(text)
 
-    def walk_table(tbl):
-        if len(tbl.columns) != 1:
+    def walk_table(tbl) -> None:
+        if not _is_single_column(tbl):
             return
         for row in tbl.rows:
-            for cell in row.cells:
+            for cell in _logical_cells(row):
                 for para in cell.paragraphs:
                     consider(para)
                 for nested in cell.tables:
@@ -455,16 +505,72 @@ def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
 class ArtifactSpec(NamedTuple):
     stage_dir: str
     suffix: str
+    #: Top-level keys that must be present and hold a list of objects -- the
+    #: records every lint on this artifact iterates.
+    record_lists: tuple[str, ...] = ()
+    #: Top-level keys that, when present, must hold a list of objects; absent
+    #: is a valid (empty) artifact of this kind.
+    optional_lists: tuple[str, ...] = ()
+    #: Top-level keys that, when present and not null, must hold an object.
+    object_fields: tuple[str, ...] = ()
 
+
+#: What "a valid artifact of this kind" means at the loading boundary (#446
+#: review, run_doctor.py thread item 2 / #747): the top-level shape every
+#: lint that reads the artifact indexes into, measured over the farm's
+#: 115/106/98/66/62 files of each JSON kind. Every one is an object; every
+#: stage-1a carries a `hierarchy` list of nodes; every stage-2/3b/4/5
+#: carries an `entries` list of objects; stage-4's `cv_owner` is an object
+#: where present (absent on 2 of 66, which the owner gate scores as missing,
+#: not invalid); the render sidecar's `warnings`/`dedup_decisions` are lists
+#: of objects where present. Nested shapes stay the lints' business -- this
+#: is the boundary check, not a schema.
 _ARTIFACTS = {
-    "stage_1a": ArtifactSpec("stage_1a_segmentation", "_segmented.json"),
-    "stage_2": ArtifactSpec("stage_2_entry_extraction", "_entries.json"),
-    "stage_3b": ArtifactSpec("stage_3b_classified_entries", "_classified.json"),
-    "stage_4": ArtifactSpec("stage_4_field_extraction", "_fields.json"),
-    "stage_5_enrichment": ArtifactSpec("stage_5_enrichment", "_enriched.json"),
+    "stage_1a": ArtifactSpec("stage_1a_segmentation", "_segmented.json",
+                             record_lists=("hierarchy",)),
+    "stage_2": ArtifactSpec("stage_2_entry_extraction", "_entries.json",
+                            record_lists=("entries",)),
+    "stage_3b": ArtifactSpec("stage_3b_classified_entries", "_classified.json",
+                             record_lists=("entries",)),
+    "stage_4": ArtifactSpec("stage_4_field_extraction", "_fields.json",
+                            record_lists=("entries",), object_fields=("cv_owner",)),
+    "stage_5_enrichment": ArtifactSpec("stage_5_enrichment", "_enriched.json",
+                                       record_lists=("entries",)),
     "stage_6_docx": ArtifactSpec("stage_6_wcm_documents", "_wcm.docx"),
-    "stage_6_report": ArtifactSpec("stage_6_wcm_documents", "_render_warnings.json"),
+    "stage_6_report": ArtifactSpec("stage_6_wcm_documents", "_render_warnings.json",
+                                   optional_lists=("warnings", "dedup_decisions")),
 }
+
+#: The artifacts `_load_json` reads, in load order; the docx is read by its
+#: own views.
+_JSON_ARTIFACTS = tuple(key for key, spec in _ARTIFACTS.items()
+                        if spec.suffix.endswith(".json"))
+
+
+def _artifact_shape_error(data: object, spec: ArtifactSpec) -> str | None:
+    """The first way `data` fails to be a valid artifact of `spec`'s kind, or
+    None when it is one. Names the offending field, so the ERROR finding a
+    reader sees says what is wrong with the file rather than which lint
+    happened to trip over it first."""
+    if not isinstance(data, dict):
+        return f"top level is {type(data).__name__}, not an object"
+    for key in spec.record_lists:
+        if key not in data:
+            return f"missing '{key}'"
+    for key in spec.record_lists + spec.optional_lists:
+        if key not in data:
+            continue
+        value = data[key]
+        if not isinstance(value, list):
+            return f"'{key}' is {type(value).__name__}, not a list"
+        for i, item in enumerate(value):
+            if not isinstance(item, dict):
+                return f"'{key}[{i}]' is {type(item).__name__}, not an object"
+    for key in spec.object_fields:
+        value = data.get(key)
+        if value is not None and not isinstance(value, dict):
+            return f"'{key}' is {type(value).__name__}, not an object"
+    return None
 
 #: The owner gate reports an ABSENT *_fields.json only for a run that got as
 #: far as rendering a deliverable, or whose stage-4 file exists but will not
@@ -512,8 +618,9 @@ def _find_source(root: Path, uid: str) -> Optional[Path]:
     return None
 
 
-def _load_json(path: Optional[Path], label: str = None,
-               on_unreadable=None) -> Optional[Dict]:
+def _load_json(path: Path | None, label: str | None = None,
+               on_unreadable: Callable[[str, str], None] | None = None,
+               spec: ArtifactSpec | None = None) -> dict | None:
     """Load an artifact JSON, or None if it is absent.
 
     `path` comes from _find_artifact/_find_source, which glob -- so a non-None
@@ -521,17 +628,32 @@ def _load_json(path: Optional[Path], label: str = None,
     present-but-unreadable (corrupt JSON, permission error), which is NOT the
     same as absent: report it via on_unreadable so a lint does not silently
     degrade to "skipped: missing <stage>". Absent (path is None) stays quiet.
+
+    With `spec`, the parsed JSON must also be a valid artifact of that kind
+    (`_artifact_shape_error`): a file that parses but is not the shape its
+    lints index into is reported through the same on_unreadable path as
+    corrupt JSON, naming the offending field, instead of failing later inside
+    whichever lint reaches it first (#446 review, run_doctor.py thread item
+    2 / #747). "JSON parsed" is not "this is a stage-4 artifact".
     """
     if not path:
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
         logger.warning("run_doctor could not read %s (%s): %s",
                        label or path, type(e).__name__, e)
         if on_unreadable is not None:
             on_unreadable(label or str(path), f"{type(e).__name__}: {e}")
         return None
+    problem = _artifact_shape_error(data, spec) if spec is not None else None
+    if problem is None:
+        return data
+    logger.warning("run_doctor: %s is not a valid %s artifact: %s",
+                   path, label or "stage", problem)
+    if on_unreadable is not None:
+        on_unreadable(label or str(path), f"invalid artifact: {problem}")
+    return None
 
 
 def _try(fn, label: str = None, on_unreadable=None):
@@ -577,16 +699,92 @@ def _ready(lint_id: str, *, unreadable: Dict[str, str], findings: List[Dict],
     return False
 
 
-def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
+def _run_lint(lint_id: str, rule: Callable[..., list[dict]],
+              args: Sequence[object], findings: list[dict]) -> None:
+    """Run one lint inside its own fault boundary (#446 review, run_doctor.py
+    thread item 3 / #748). A lint that raises becomes ONE ERROR finding
+    under its own key -- logged with the traceback, never swallowed -- and
+    the lints after it still run. The doctor diagnoses failures; it must not
+    become one: the backend calls run_doctor in-process, so an uncaught lint
+    exception used to take the quality score and the Teams card with it."""
+    try:
+        findings.extend(rule(*args))
+    except Exception as e:
+        logger.exception("run_doctor: lint %s crashed", lint_id)
+        findings.append(_finding(
+            lint_id, "ERROR", f"lint {lint_id} crashed: {type(e).__name__}: {e}"))
+
+
+class LintSpec(NamedTuple):
+    """One row of the lint registry: the key the lint emits, the rule that
+    emits it, and the loaded-input views it takes, in the rule's positional
+    order."""
+    lint_id: str
+    rule: Callable[..., list[dict]]
+    inputs: tuple[str, ...]
+
+
+#: The loader LABEL each input view is checked under by `_ready` -- the key
+#: `_note` records an unreadable artifact by, so a None view is traced back
+#: to a broken file rather than an absent one. The stage-6 docx feeds two
+#: views (body blocks, raw table rows) under one label because they read one
+#: file; the source docx feeds two readers under two labels because either
+#: can fail alone.
+_VIEW_LABELS = {
+    "source_lines": "source",
+    "candidates": "candidates",
+    "stage_1a": "stage_1a",
+    "stage_2": "stage_2",
+    "stage_3b": "stage_3b",
+    "stage_4": "stage_4",
+    "stage_5_enrichment": "stage_5_enrichment",
+    "stage_6_report": "stage_6_report",
+    "blocks": "stage_6_docx",
+    "table_rows": "stage_6_docx",
+}
+
+
+#: The lint registry (#446 review, run_doctor.py thread item 5; the registry
+#: half of #493): one row per artifact-gated lint, in dispatch order,
+#: replacing the hand-written `if ready(...): findings.extend(...)` stanza
+#: per lint that `run_doctor()` used to grow by two lines per lint. Adding a
+#: lint is one row here plus its `KNOWN_LINTS` entry, and
+#: `test_run_doctor_contract.py` pins the two against each other. The two
+#: quality-score hard-fail gates (`owner_contact_missing`,
+#: `pipeline_errors_present`) are not rows: each breaks the "missing
+#: artifact -> skip" convention in its own way (see `run_doctor()`), and a
+#: row shape that could express both would be a second dispatch language.
+LINT_REGISTRY: tuple[LintSpec, ...] = (
+    LintSpec("segmentation", lint_segmentation, ("source_lines", "stage_1a", "stage_2")),
+    LintSpec("missed_headers", lint_missed_headers, ("candidates", "stage_1a", "stage_2")),
+    LintSpec("bucket_status", lint_bucket_status, ("stage_4", "blocks")),
+    LintSpec("under_extraction", lint_under_extraction, ("stage_4",)),
+    LintSpec("classified_unrendered", lint_classified_unrendered, ("stage_3b", "blocks")),
+    LintSpec("taxonomy_code_coverage", lint_taxonomy_code_coverage, ("stage_3b",)),
+    LintSpec("output_hygiene", lint_output_hygiene, ("blocks",)),
+    LintSpec("dead_sections", lint_dead_sections, ("stage_2", "blocks")),
+    LintSpec("unrendered_records", lint_unrendered_records, ("stage_4", "blocks")),
+    LintSpec("enrichment_failures", lint_enrichment_failures, ("stage_5_enrichment",)),
+    LintSpec("stage6_render_warnings", lint_stage6_warnings, ("stage_6_report",)),
+    LintSpec("dedup_drops", lint_dedup_drops, ("stage_6_report",)),
+    LintSpec("pipe_leaks", lint_pipe_leaks, ("blocks",)),
+    LintSpec("table_shape", lint_table_shape, ("table_rows",)),
+    LintSpec("duplicate_passages", lint_duplicate_passages, ("blocks",)),
+    LintSpec("duplicate_records", lint_duplicate_records, ("blocks",)),
+)
+
+
+def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
     """Run every lint whose artifacts exist under root for this document uid.
-    Never raises on missing/unreadable artifacts and never calls sys.exit —
-    the backend calls this in-process; the CLI wraps it."""
+    Never raises on missing/unreadable artifacts, never raises out of a lint
+    (`_run_lint` turns that into an ERROR finding) and never calls sys.exit
+    — the backend calls this in-process; the CLI wraps it."""
     root = Path(root)
     paths = {key: _find_artifact(root, uid, key) for key in _ARTIFACTS}
     source_path = Path(source) if source else _find_source(root, uid)
 
-    # Artifacts that exist but failed to load, keyed by the label their loader
-    # passed to _note -- which MUST match the input kwarg name _ready() checks
+    # Artifacts that exist but failed to load or validate, keyed by the label
+    # their loader passed to _note -- which MUST match the input kwarg name _ready() checks
     # (so a None input is traced back to a broken file vs a genuinely absent
     # one). The source docx feeds two independent readers; they take separate
     # labels so a reader that fails alone is attributed to the right lint.
@@ -594,50 +792,28 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     def _note(label, detail):
         unreadable[label] = detail
 
-    stage_1a = _load_json(paths["stage_1a"], "stage_1a", _note)
-    stage_2 = _load_json(paths["stage_2"], "stage_2", _note)
-    stage_3b = _load_json(paths["stage_3b"], "stage_3b", _note)
-    stage_4 = _load_json(paths["stage_4"], "stage_4", _note)
-    stage_5e = _load_json(paths["stage_5_enrichment"], "stage_5_enrichment", _note)
-    stage_6_report = _load_json(paths["stage_6_report"], "stage_6_report", _note)
-    source_lines = _try(lambda: iter_source_lines(str(source_path)), "source", _note) if source_path else None
-    candidates = _try(lambda: iter_header_candidates(str(source_path)), "candidates", _note) if source_path else None
-    blocks = _try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note) if paths["stage_6_docx"] else None
-    table_rows = _try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note) if paths["stage_6_docx"] else None
+    views: dict[str, object] = {
+        key: _load_json(paths[key], key, _note, _ARTIFACTS[key])
+        for key in _JSON_ARTIFACTS}
+    views["source_lines"] = (_try(lambda: iter_source_lines(str(source_path)), "source", _note)
+                             if source_path else None)
+    views["candidates"] = (_try(lambda: iter_header_candidates(str(source_path)), "candidates", _note)
+                           if source_path else None)
+    views["blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note)
+                       if paths["stage_6_docx"] else None)
+    views["table_rows"] = (_try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note)
+                           if paths["stage_6_docx"] else None)
 
     findings: List[Dict] = []
     ready = partial(_ready, unreadable=unreadable, findings=findings)
 
-    if ready("segmentation", source=source_lines, stage_1a=stage_1a, stage_2=stage_2):
-        findings.extend(lint_segmentation(source_lines, stage_1a, stage_2))
-    if ready("missed_headers", candidates=candidates, stage_1a=stage_1a, stage_2=stage_2):
-        findings.extend(lint_missed_headers(candidates, stage_1a, stage_2))
-    if ready("bucket_status", stage_4=stage_4, stage_6_docx=blocks):
-        findings.extend(lint_bucket_status(stage_4, blocks))
-    if ready("under_extraction", stage_4=stage_4):
-        findings.extend(lint_under_extraction(stage_4))
-    if ready("classified_unrendered", stage_3b=stage_3b, stage_6_docx=blocks):
-        findings.extend(lint_classified_unrendered(stage_3b, blocks))
-    if ready("taxonomy_code_coverage", stage_3b=stage_3b):
-        findings.extend(lint_taxonomy_code_coverage(stage_3b))
-    if ready("output_hygiene", stage_6_docx=blocks):
-        findings.extend(lint_output_hygiene(blocks))
-    if ready("dead_sections", stage_2=stage_2, stage_6_docx=blocks):
-        findings.extend(lint_dead_sections(stage_2, blocks))
-    if ready("unrendered_records", stage_4=stage_4, stage_6_docx=blocks):
-        findings.extend(lint_unrendered_records(stage_4, blocks))
-    if ready("enrichment_failures", stage_5_enrichment=stage_5e):
-        findings.extend(lint_enrichment_failures(stage_5e))
-    if ready("stage6_render_warnings", stage_6_report=stage_6_report):
-        findings.extend(lint_stage6_warnings(stage_6_report))
-    if ready("dedup_drops", stage_6_report=stage_6_report):
-        findings.extend(lint_dedup_drops(stage_6_report))
-    if ready("pipe_leaks", stage_6_docx=blocks):
-        findings.extend(lint_pipe_leaks(blocks))
-    if ready("table_shape", stage_6_docx=table_rows):
-        findings.extend(lint_table_shape(table_rows))
-    if ready("duplicate_passages", stage_6_docx=blocks):
-        findings.extend(lint_duplicate_passages(blocks))
+    for spec in LINT_REGISTRY:
+        inputs = {_VIEW_LABELS[view]: views[view] for view in spec.inputs}
+        if ready(spec.lint_id, **inputs):
+            _run_lint(spec.lint_id, spec.rule,
+                      [views[view] for view in spec.inputs], findings)
+
+    stage_2, stage_3b, stage_4 = views["stage_2"], views["stage_3b"], views["stage_4"]
     # score_cv_owner caps at 25 for an ABSENT *_fields.json as well as an empty
     # cv_owner name, so this lint breaks the house "missing artifact -> skip"
     # convention: skipping the absent case would report the more broken run
@@ -645,8 +821,8 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
     # -- an incomplete or wrong-uid run has no owner name yet, and the batch
     # runner doctors CVs whose pipeline returned rc!=0.
     if stage_4 is not None or any(paths[k] for k in _DELIVERABLE):
-        findings.extend(lint_owner_contact_missing(
-            stage_4, uid, unreadable.get("stage_4")))
+        _run_lint("owner_contact_missing", lint_owner_contact_missing,
+                  (stage_4, uid, unreadable.get("stage_4")), findings)
     else:
         ready("owner_contact_missing", stage_4=stage_4)
     # The error scan covers exactly the JSON the DEPLOYED scorer globs:
@@ -660,7 +836,8 @@ def run_doctor(root: Path, uid: str, source: Optional[Path] = None) -> Dict:
         ("stage_2", stage_2), ("stage_3b", stage_3b), ("stage_4", stage_4))
         if data is not None}
     if scored_artifacts:
-        findings.extend(lint_pipeline_errors(scored_artifacts))
+        _run_lint("pipeline_errors_present", lint_pipeline_errors,
+                  (scored_artifacts,), findings)
     else:
         ready("pipeline_errors_present", stage_2=stage_2, stage_3b=stage_3b,
               stage_4=stage_4)

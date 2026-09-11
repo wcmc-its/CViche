@@ -25,6 +25,7 @@ of the four writers and by nothing outside the section.
 """
 import logging
 import re
+from collections.abc import Sequence
 from typing import Dict, List
 
 from ..formatting import _clear_table_data, _set_font, format_date_range
@@ -67,6 +68,148 @@ BOARD_KEYWORDS = (
     'committee', 'board member', 'panel member', 'council', 'task force',
     'working group', 'planning committee', 'advisory', 'moderator',
 )
+
+# Role indicators used by `_is_known_org_line`'s veto and the sibling
+# `is_role` check in `_parse_extramural_leadership_lines`, both matched with
+# `_matches_word_start` (below), not `_matches_bounded`. Promoted from a
+# local list literal (duplicated ad hoc between `_is_known_org_line`'s two
+# call sites) to a named module constant so this round's fix is directly
+# testable, matching REVIEWER_PATTERNS/BOARD_KEYWORDS above.
+#
+# These are STEMS, not whole words: `_matches_word_start` matches each entry
+# plus any `_ROLE_STEM_SUFFIXES` form (below), so adding a stem here adds
+# every one of its suffix forms at once, not just the bare word (#658 round
+# 4 review -- a plain list literal read as exact keywords, which this no
+# longer is).
+EXTRAMURAL_ROLE_KEYWORDS = (
+    'member', 'chair', 'reviewer', 'liaison', 'mentor', 'committee',
+    'board', 'council', 'advisor', 'director', 'leader', 'representative',
+    # These three are listed as their own stems because `_matches_word_start`
+    # cannot reach them any other way. 'subcommittee' does not start with
+    # "committee" -- the matcher anchors on the word's START, so the entry
+    # above cannot reach it; real committee role lines use it ("AHA Hospital
+    # Accreditation Stroke Certification Subcommittee", "LCME Self Study
+    # Subcommittee: ...") -- 50 line occurrences over 14 corpus UIDs (#658
+    # round 3 probe). 'advisory' and 'directorate' are DERIVED forms
+    # (`advisor` + `y`, `director` + `ate`) that `_ROLE_STEM_SUFFIXES`
+    # cannot reach either: admitting 'y'/'ate' as suffixes there would also
+    # turn "director" into the unrelated word "directory" (#658 round 4
+    # review, T1). So each derived word the suffix rule cannot reach
+    # without that side effect is listed here as its own stem instead:
+    # advisory (187 corpus lines), directorate (2 lines) (#658 round 4
+    # probe, 15,079 entry lines).
+    'subcommittee', 'advisory', 'directorate',
+)
+
+# The inflected and derived forms a role stem may take, and nothing else:
+# every form observed on the 66-CV corpus (#658 round 4 probe, 15,079 entry
+# lines) is here, so "boardwalk", "leaderboard" or "directory" cannot match
+# while "chairman", "directors", "mentorship" still do. 'y' and 'ate' are
+# deliberately absent: admitting them would reach "advisory" and
+# "directorate" but would also let "director" + 'y' match the unrelated
+# word "directory" -- so those two derived forms are instead listed as
+# their own EXTRAMURAL_ROLE_KEYWORDS entries above (#658 round 4 review,
+# T1).
+_ROLE_STEM_SUFFIXES = ('s', 'es', 'ed', 'ing', 'ship', 'ships', 'man', 'men',
+                       'woman', 'women', 'person', 'persons', 'people',
+                       'or', 'ors', 'lor', 'lors')
+
+
+def _matches_bounded(text_lower: str, keywords: Sequence[str]) -> bool:
+    """True when any keyword/phrase in `keywords` matches `text_lower` as a
+    whole word or phrase, not merely as a run of characters inside a larger
+    word (#658).
+
+    Plain substring containment (`kw in text_lower`) let "reviewer education
+    committee" trip both REVIEWER_PATTERNS and BOARD_KEYWORDS on fragments
+    that happened to co-occur, and would match a keyword embedded in an
+    unrelated longer word. `\\b` around each escaped keyword/phrase fixes
+    both without changing which whole-word/whole-phrase hits count.
+    """
+    return any(re.search(rf'\b{re.escape(kw)}\b', text_lower) for kw in keywords)
+
+
+def _matches_word_start(text_lower: str, keywords: Sequence[str]) -> bool:
+    """True when `text_lower` contains one of `keywords` as a stem, at a
+    word start, optionally followed by one of `_ROLE_STEM_SUFFIXES` and
+    nothing else before the next word boundary (#658 rounds 2-4).
+
+    Used only for `EXTRAMURAL_ROLE_KEYWORDS`, not the other keyword lists
+    `_matches_bounded` still serves. `_matches_bounded`'s whole-word
+    `\\b...\\b` fixed keyword-embedded-in-an-unrelated-word (#658), but it
+    also stopped matching `EXTRAMURAL_ROLE_KEYWORDS`' own inflected and
+    derived forms -- "member" no longer matched "members"/"membership",
+    "chair" no longer matched "chairman"/"chaired", "director" no longer
+    matched "directors"/"directorship", "mentor" no longer matched
+    "mentoring"/"mentorship", "council" no longer matched "councilor",
+    "leader" no longer matched "leaders"/"leadership". A differential probe
+    over every entry line in the corpus's stage-5d artifacts found the
+    whole-word bound dropped these forms on real leadership-table role
+    lines ("Program Chairman, ...", "Association of Directors of Medical
+    Student Education...", "Developing Leaders in Pediatric..."),
+    misreading them as organization lines.
+
+    The forms are an explicit finite list (`_ROLE_STEM_SUFFIXES`), not an
+    unbounded prefix match. An earlier round anchored only the word's start
+    with no right bound at all, on the reasoning that English
+    inflection/derivation overwhelmingly adds a suffix rather than a
+    prefix -- true, but not sufficient: unbounded matching also let
+    "boardwalk", "leaderboard" and "directory" read as role indicators,
+    which they are not (#658 round 4 review). Corpus-deriving the suffix
+    list instead of hand-guessing it matters because a hand list keeps
+    missing real forms -- but not every real form belongs in
+    `_ROLE_STEM_SUFFIXES` itself: "advisory" (`advisor` + `y`, 187 corpus
+    occurrences) and "directorate" (`director` + `ate`, 2 occurrences) are
+    both real leadership-table role words a round-3-style hand list would
+    have missed, yet admitting 'y' and 'ate' as suffixes here would also
+    let "director" + 'y' match "directory", an unrelated word with no
+    corpus role reading. Both are instead listed as their own
+    `EXTRAMURAL_ROLE_KEYWORDS` stems (see that constant's comment), so they
+    still match without opening the suffix list to that collision.
+
+    The left boundary, `(?<![^\\W\\d_])`, means "not preceded by a Unicode
+    letter" -- equivalently, "not preceded by a `\\w` character that is not
+    a digit or underscore". `\\b` sits between a word and a NON-word
+    character, so it treats a digit as part of the word and refuses to
+    start one: "2010-2012" is followed directly by "director" in real
+    stage-4 extractions ("2010-2012Director, Cardiac Prep and Recovery
+    Unit") where the source docx had the date and title in adjacent cells,
+    and a `\\b` matcher scored those lines as organizations. A digit -- and
+    any punctuation -- is a legitimate word start for this classifier's
+    purposes; only a preceding LETTER means the keyword is buried mid-word.
+    Being Unicode-aware, not the ASCII-only `[A-Za-z]` an earlier round
+    used, matters here specifically: `[A-Za-z]` does not recognize "e" in
+    "café" as a letter that blocks a match, so "cafémember" would
+    have matched "member" as if at a word start; `(?<![^\\W\\d_])` correctly
+    treats "é" as a letter and blocks it. That is the one case still
+    rejected, deliberately: "eMentorship" contains "mentor" behind a
+    letter, so it does not match (an accepted mis-file, see the PR body).
+
+    Concatenation where the preceding character is itself a letter is not
+    recoverable here and is accepted: four lines on one corpus CV glue a
+    keyword onto the word "present" ("2014-presentReviewer, ...") and stay
+    unmatched, since "t" is a letter. Stripping trailing date words before
+    matching was considered and rejected as a date-parsing responsibility
+    that does not belong in a keyword matcher; none of these lines reach
+    `_parse_extramural_leadership_lines` in the corpus.
+
+    This does not regress relative to `_matches_bounded`: every whole-word
+    match is still a match here too, since the bare stem followed by
+    nothing (the suffix group is optional) and then a word boundary is
+    exactly what `_matches_bounded` requires -- confirmed by a differential
+    probe over the corpus finding 0 disagreements against the
+    previously-shipped unbounded-right-edge matcher.
+    """
+    suffix_alternation = '|'.join(_ROLE_STEM_SUFFIXES)
+    return any(
+        re.search(
+            rf'(?<![^\W\d_]){re.escape(kw)}(?:{suffix_alternation})?\b',
+            text_lower,
+        )
+        for kw in keywords
+    )
+
+
 # A multi-line Q2 entry's trailing date-only lines (e.g. "2014, 2017-2020")
 # describe the line before them; nothing else should be treated as a
 # continuation (#573 review).
@@ -139,8 +282,8 @@ def _split_q2_lines(lines: list[str]) -> tuple[list[str], list[str]]:
 
     for line in lines:
         line_lower = line.lower()
-        is_reviewer_line = any(p in line_lower for p in REVIEWER_PATTERNS)
-        is_board_line = any(kw in line_lower for kw in BOARD_KEYWORDS)
+        is_reviewer_line = _matches_bounded(line_lower, REVIEWER_PATTERNS)
+        is_board_line = _matches_bounded(line_lower, BOARD_KEYWORDS)
 
         if (not is_reviewer_line and not is_board_line and last_group
                 and _DATE_ONLY_LINE_RE.match(line)):
@@ -168,11 +311,11 @@ def _is_q2_journal_reviewer(text_lower: str, role: str, committee: str,
     is_journal_reviewer = (
         (role == 'reviewer' and any(kw in text_lower for kw in JOURNAL_SPECIALTY_KEYWORDS)) or
         any(kw in text_lower for kw in JOURNAL_ROLE_PHRASES) or
-        any(p in text_lower for p in REVIEWER_PATTERNS) or
+        _matches_bounded(text_lower, REVIEWER_PATTERNS) or
         (role == 'reviewer' and 'j ' in committee) or
         (role == 'reviewer' and 'journal' in org)
     )
-    is_board_entry = any(kw in text_lower for kw in BOARD_KEYWORDS)
+    is_board_entry = _matches_bounded(text_lower, BOARD_KEYWORDS)
     return is_journal_reviewer and not is_board_entry
 
 
@@ -273,10 +416,17 @@ def _is_known_org_line(line_lower: str, role_keywords: list[str]) -> bool:
     classify as role lines, not organizations, while "American College of
     Cardiology" and "Society of Critical Care Medicine" still classify as
     organizations (#624 review).
+
+    The veto uses `_matches_word_start`, not `_matches_bounded`: see that
+    function's docstring for why (#658 round 2) -- in short, role_keywords'
+    base forms need to recognize their own inflected/derived forms
+    ("members", "chairman"/"chaired", "directors"/"directorship",
+    "mentoring"/"mentorship", "councilor", "leaders"/"leadership"), which a
+    strict whole-word match otherwise misses.
     """
     if any(name in line_lower for name in _KNOWN_ORG_NAMES):
         return True
-    if any(kw in line_lower for kw in role_keywords):
+    if _matches_word_start(line_lower, role_keywords):
         return False
     return any(
         re.search(rf'\b{re.escape(term)}\b', line_lower)
@@ -531,7 +681,7 @@ class ServiceSection:
                     # Single entry without extracted fields - use raw text
                     self._add_extramural_row(table, original_text[:100], '', '')
 
-    def _parse_extramural_leadership_lines(self, table, lines: List[str]):
+    def _parse_extramural_leadership_lines(self, table, lines: list[str]) -> None:
         """Parse multiple extramural leadership lines and add rows.
 
         Handles complex patterns like:
@@ -543,10 +693,6 @@ class ServiceSection:
         # Patterns for date detection
         date_range_pattern = re.compile(r'^(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?(?:\s*,\s*\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)*)$', re.IGNORECASE)
         embedded_date_pattern = re.compile(r'\|\s*(\d{4}(?:\s*[-–]\s*(?:\d{4}|present|current))?)\s*$', re.IGNORECASE)
-
-        # Role indicators
-        role_keywords = ['member', 'chair', 'reviewer', 'liaison', 'mentor', 'committee',
-                         'board', 'council', 'advisor', 'director', 'leader', 'representative']
 
         # First pass: categorize each line
         content_lines = []  # (text, embedded_date, is_org, is_role, original_idx)
@@ -574,10 +720,15 @@ class ServiceSection:
                 embedded_date = embedded_match.group(1)
                 line = line[:embedded_match.start()].strip().rstrip('|').strip()
 
-            # Determine if this is an organization or a role
+            # Determine if this is an organization or a role. Uses the same
+            # _matches_word_start matcher _is_known_org_line's veto uses, so
+            # the two checks cannot disagree on a line (#658 round 2 --
+            # this check used bare substring while the veto used `\b`-bounded
+            # matching, and could each fire for different reasons on the
+            # same line).
             line_lower = line.lower()
-            is_org = _is_known_org_line(line_lower, role_keywords)
-            is_role = any(kw in line_lower for kw in role_keywords) and not is_org
+            is_org = _is_known_org_line(line_lower, EXTRAMURAL_ROLE_KEYWORDS)
+            is_role = _matches_word_start(line_lower, EXTRAMURAL_ROLE_KEYWORDS) and not is_org
 
             # Indented lines are usually sub-items (roles under an org)
             is_indented = lines[idx].startswith('   ') or lines[idx].startswith('\t')
