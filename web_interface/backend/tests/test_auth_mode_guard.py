@@ -9,6 +9,7 @@ operator explicitly opts in via CVICHE_ALLOW_SIMPLE_AUTH=1.
 import pytest
 
 from app.main import _guard_deployed_auth_mode, SECURE_AUTH_MODES
+from app.saml_replay import check_deployed_posture
 
 
 def test_simple_on_deployed_s3_refuses_to_start():
@@ -102,3 +103,60 @@ def test_unknown_mode_noncanonical_still_guarded(auth_mode):
 def test_only_saml_is_currently_allowed():
     # Guards against someone widening the allowlist to an unimplemented mode.
     assert SECURE_AUTH_MODES == frozenset({"saml"})
+
+
+# ---------------------------------------------------------------------------
+# app.saml_replay.check_deployed_posture -- same "deployed" (S3) test as
+# _guard_deployed_auth_mode above, applied to SAML replay protection
+# specifically (mrj4001 review, PR #781 thread r3966560287). Mirrors the
+# parametrize/pytest.raises pattern used for the guard above.
+# ---------------------------------------------------------------------------
+
+def test_saml_on_deployed_s3_with_opt_out_refuses_to_start(monkeypatch):
+    """The CVICHE_SAML_REPLAY_FAIL_CLOSED opt-out exists for local dev only
+    -- refused outright on a deployed instance, no override env."""
+    monkeypatch.setattr("app.saml_replay.replay_fail_closed", lambda: False)
+    with pytest.raises(RuntimeError) as exc:
+        check_deployed_posture("saml", "s3")
+    assert "[SECURITY]" in str(exc.value)
+    assert "CVICHE_SAML_REPLAY_FAIL_CLOSED" in str(exc.value)
+
+
+def test_saml_on_deployed_s3_fail_closed_and_no_redis_url_warns_not_raises(
+    monkeypatch, caplog
+):
+    """No CVICHE_REDIS_URL on a deployed SAML instance narrows to per-pod
+    protection -- logged loudly, but must NOT refuse to boot (buildspec.yaml
+    requires the variable but its prod value isn't visible here)."""
+    monkeypatch.setattr("app.saml_replay.replay_fail_closed", lambda: True)
+    monkeypatch.setattr(
+        "app.saml_replay.get_config", lambda section, key, default="": (default, "default")
+    )
+    with caplog.at_level("ERROR", logger="app.saml_replay"):
+        check_deployed_posture("saml", "s3")  # must not raise
+    assert any("[SECURITY]" in r.getMessage() for r in caplog.records)
+    assert any("CVICHE_REDIS_URL" in r.getMessage() for r in caplog.records)
+
+
+def test_saml_on_deployed_s3_fail_closed_with_redis_url_is_fine(monkeypatch, caplog):
+    monkeypatch.setattr("app.saml_replay.replay_fail_closed", lambda: True)
+    monkeypatch.setattr(
+        "app.saml_replay.get_config",
+        lambda section, key, default="": ("redis://valkey:6379/0", "env"),
+    )
+    with caplog.at_level("ERROR", logger="app.saml_replay"):
+        check_deployed_posture("saml", "s3")  # must not raise
+    assert not any("[SECURITY]" in r.getMessage() for r in caplog.records)
+
+
+def test_simple_on_deployed_s3_is_not_this_guards_job(monkeypatch):
+    """Non-SAML auth modes are _guard_deployed_auth_mode's concern, not
+    this one's -- check_deployed_posture is a no-op for them."""
+    monkeypatch.setattr("app.saml_replay.replay_fail_closed", lambda: False)
+    check_deployed_posture("simple", "s3")  # must not raise
+
+
+def test_saml_on_local_dev_with_opt_out_is_fine(monkeypatch):
+    # Not a deployment -> the guard never fires, whatever the opt-out.
+    monkeypatch.setattr("app.saml_replay.replay_fail_closed", lambda: False)
+    check_deployed_posture("saml", "local")

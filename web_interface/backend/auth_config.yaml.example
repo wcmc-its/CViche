@@ -7,9 +7,18 @@ auth:
   # accidental debug flag in prod cannot expose the API surface.
   CVICHE_ENABLE_DOCS: ""
   # SAML replay protection posture when it cannot be verified (Valkey down, or
-  # an assertion with no ID): "" fails open (default -- availability), "true"
-  # fails closed (prod -- reject the login). See app/saml_replay.py.
+  # an assertion with no ID): "" fails closed (default -- reject the login).
+  # Set to "0" (local dev only, when Valkey is not running) to fail open
+  # instead. See app/saml_replay.py.
   CVICHE_SAML_REPLAY_FAIL_CLOSED: ""
+
+redis:
+  # Backs the SAML replay cache, idle-session store, and pipeline broker.
+  # Empty means no distributed cache: SAML replay protection falls back to a
+  # per-pod, in-process cache (see app/saml_replay.py) and idle-session
+  # enforcement is off. The env var wins over this file (buildspec.yaml
+  # renders CVICHE_REDIS_URL into the deployed overlay's own value here).
+  CVICHE_REDIS_URL: ""
 
 saml:
   entity_id: ""                    # SP entity ID (e.g., "https://cviche.weill.cornell.edu/shibboleth")

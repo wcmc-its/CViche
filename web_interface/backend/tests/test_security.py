@@ -207,11 +207,15 @@ class TestSamlSignature:
         item 6 / #672: saml_acs()'s final except now catches
         RuntimeError/OSError/SAMLError/SourceNotFound instead of bare
         Exception, so a stand-in generic Exception no longer exercises this
-        path -- a genuinely unexpected exception type now propagates instead,
-        see test_acs_unexpected_exception_propagates in test_saml_sp.py).
-        StatusError is pysaml2's own exception for an IdP-reported error
-        SAML Status -- a real, expected non-signature failure, and a
-        saml2.SAMLError subclass."""
+        path). PR #781's D10 added one more except after that tuple -- a
+        bare `except Exception` -- but it is scoped to ONLY the
+        get_saml_client()/parse_authn_request_response() call inside
+        _parse_saml_assertion; a genuinely unexpected exception raised
+        outside that boundary still propagates, see
+        test_acs_unexpected_exception_outside_parsing_boundary_still_propagates
+        in test_saml_sp.py. StatusError is pysaml2's own exception for an
+        IdP-reported error SAML Status -- a real, expected non-signature
+        failure, and a saml2.SAMLError subclass."""
         from saml2.response import StatusError
         with patch("app.api.saml_routes.get_saml_client") as mock_client:
             mock_client.return_value.parse_authn_request_response.side_effect = \
