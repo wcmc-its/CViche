@@ -14,7 +14,7 @@ and for mixins-not-composition is in `__init__.py`; this file is the index.
 | `other_education.py` | B2 | Non-degree training, certificates, workshops | `_fill_other_education` |
 | `postdoc_training.py` | C, C1, C2, C3 | Postdoctoral training, residency, fellowship | `_fill_postdoc_training` |
 | `positions.py` | D1–D3 | Academic, hospital and other appointments | `_fill_positions`, `_merge_grouped_appointments`, `_add_position_row`, … |
-| `passthrough.py` | E and G | Employment status; institutional/hospital affiliation | `_fill_passthrough_sections`, `_fill_employment_status`, `_fill_hospital_affiliation` |
+| `passthrough.py` | E, G and J | Employment status; institutional/hospital affiliation; percent effort | `_fill_passthrough_sections`, `_fill_employment_status`, `_fill_hospital_affiliation`, `_fill_percent_effort` |
 | `licensure.py` | F1 | State licences, plus the DEA and NPI numbers | `_fill_licensure`, `_fill_dea_npi` |
 | `board_certification.py` | F2 | Specialty board certifications | `_fill_board_certification`, `_parse_and_add_multiple_certifications`, `_add_board_cert_row` |
 | `honors.py` | H | Honors and awards | `_fill_honors`, `_split_award_year`, `_extract_organization_from_award`, `_add_honors_row` |
@@ -34,9 +34,12 @@ and for mixins-not-composition is in `__init__.py`; this file is the index.
 | `appendix.py` | T | Content that reached no other section | `_fill_appendix` |
 
 `passthrough.py` selects its input by source hierarchy rather than by taxonomy
-code — E and G have no code of their own. Template areas with no writer at all
-are filled by hand; percent effort is the one that most looks like it should be
-here, and `passthrough.py` says why it is not.
+code — E, G and J have no code of their own on the live path. J (Percent
+Effort) joined E and G at #260: it writes into the template's fixed
+Teaching/Clinical/Administrative/Research/Total rows, matched by label, never
+adding or clearing rows. See `passthrough.py`'s module docstring for the
+parse/match rules and the real-run traps (a source column-header row, and
+`Total | 100% |`) its parser has to survive.
 
 ## What is NOT here
 

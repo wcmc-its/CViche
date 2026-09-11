@@ -100,6 +100,7 @@ def test_lint_dedup_drops_returns_structured_findings():
 _EXCEPTION_HOOKS = {
     "E": "self._fill_passthrough_sections(",
     "G": "self._fill_passthrough_sections(",
+    "J": "self._fill_passthrough_sections(",
     "N4": "self._fill_mentoring(",
 }
 

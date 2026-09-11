@@ -826,9 +826,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._fill_presentations(entries_by_code.get('R', []))  # R = Invited Presentations
         self._fill_bibliography(entries_by_code, cv_owner, document_uid)
 
-        # Fill passthrough sections (Employment Status, Institutional Affiliation)
-        # These are copied directly from source CV when the source format matches WCM
-        self._fill_passthrough_sections(all_entries)
+        # Fill passthrough sections (Employment Status, Institutional Affiliation,
+        # Percent Effort) -- copied from source CV when it matches WCM (#294, #260).
+        passthrough_consumed_ids = {id(e) for e in self._fill_passthrough_sections(all_entries)}
 
         # Add appendix for ALL unmapped content. Local mutable copy of the
         # module-level RENDER_ROUTED_CODES: the M1 discard just below mutates
@@ -848,10 +848,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         unmapped_entries = []
 
-        # Collect ALL entries not in mapped codes
+        # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260).
         for code, entries in entries_by_code.items():
             if code not in mapped_codes:
-                unmapped_entries.extend(entries)
+                unmapped_entries.extend(e for e in entries if id(e) not in passthrough_consumed_ids)
 
         # A stays in mapped_codes, but NOT because its entries are all consumed
         # -- that was the old assumption here and the corpus refutes it (145 of
