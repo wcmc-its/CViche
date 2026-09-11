@@ -7,11 +7,17 @@ converted to the module's project logger. This file pins that conversion:
   established stage-6 pattern (see test_stage5b_print_to_logger.py) of a
   caplog assertion on level + message text;
 - the module's own NEVER-exc_info rule (stage_5_pubmed_enrichment.py:58-65,
-  _sanitize_error) is checked directly: the ERROR record from a failed lookup
-  carries exc_info=None, and a raised requests-style message with an
-  api_key=... query param is redacted before it reaches the record;
+  _sanitize_error) is checked directly on every converted call that could
+  plausibly grow an exc_info=True by mistake -- the pre-existing
+  _log_api_failure() ERROR record, the converted "Transient API error"
+  WARNING, the converted "Parse error" WARNING, and the converted __main__
+  "Could not find input file" ERROR -- plus a raised requests-style message
+  with an api_key=... query param redacted before it reaches the record;
 - the existing `if self.verbose:` gates are unchanged -- verbose=False must
-  still suppress the INFO narration exactly as it suppressed the old prints.
+  still suppress the INFO/WARNING narration exactly as it suppressed the old
+  prints, on the no-network path AND on a mocked failure path (a guard that
+  only fires under real errors is exactly the kind that a no-network smoke
+  test misses).
 
 Run with:
 
@@ -26,6 +32,7 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
 import requests
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -132,13 +139,20 @@ def test_narration_logs_at_info_with_exact_message(tmp_path, caplog):
 
 def test_transient_retry_logs_at_warning_with_exact_message(monkeypatch, caplog):
     """The "Transient API error ... retry" line must stay at WARNING (per
-    the reviewer's severity map) with its message unchanged.
+    the reviewer's severity map) with its message unchanged, and must never
+    carry exc_info (this module's never-exc_info rule, #780 review).
 
-    Mutant that kills this: promote/demote that one logger.warning() call to
-    logger.info(). Verified: edited stage_5_pubmed_enrichment.py:438 to
-    logger.info(...), reran -- failing test id --
-    test_stage5_logging.py::test_transient_retry_logs_at_warning_with_exact_message
-    (no WARNING record found).
+    Mutants that kill this:
+    1. promote/demote the logger.warning() call to logger.info(). Verified:
+       edited stage_5_pubmed_enrichment.py:438 to logger.info(...), reran --
+       failing test id --
+       test_stage5_logging.py::test_transient_retry_logs_at_warning_with_exact_message
+       (no WARNING record found).
+    2. add exc_info=True to that same call. Verified: edited
+       stage_5_pubmed_enrichment.py:438 to
+       logger.warning(..., exc_info=True), reran -- failing test id --
+       test_stage5_logging.py::test_transient_retry_logs_at_warning_with_exact_message
+       (assert matches[0].exc_info is None fails: exc_info is populated).
     """
     monkeypatch.setattr(stage5.time, 'sleep', lambda s: None)
     enricher = PubMedEnricher(verbose=True)
@@ -156,6 +170,7 @@ def test_transient_retry_logs_at_warning_with_exact_message(monkeypatch, caplog)
     assert matches[0].getMessage().startswith(
         '    ⏳ Transient API error (429 transient error for url:')
     assert 'retry 1/2 in 1s' in matches[0].getMessage()
+    assert matches[0].exc_info is None
 
 
 # ------------------------------------------------------------- (b) one ERROR
@@ -190,6 +205,64 @@ def test_lookup_failure_logs_error_no_exc_info_and_redacts_api_key(monkeypatch, 
     assert 'api_key=***' in message
 
 
+# ------------------------------------------ (b) more converted exc_info sites
+
+def test_parse_error_logs_warning_no_exc_info(caplog):
+    """The "Parse error" line (converted from print, stays WARNING per the
+    severity map) must carry the exception text but never exc_info -- same
+    never-exc_info rule as the other converted sites.
+
+    Mutant that kills this: add exc_info=True to
+    stage_5_pubmed_enrichment.py:575's logger.warning() call. Verified:
+    made that edit, reran -- failing test id --
+    test_stage5_logging.py::test_parse_error_logs_warning_no_exc_info
+    (assert warn_records[0].exc_info is None fails: exc_info is populated).
+    """
+    enricher = PubMedEnricher(verbose=True)
+
+    class _MalformedArticle:
+        """Stands in for a malformed PubmedArticle element: any .find() call
+        raises, driving _parse_pubmed_article() into its outer except."""
+
+        def find(self, path):
+            raise ValueError('malformed article XML')
+
+    with caplog.at_level(logging.WARNING, logger=stage5.__name__):
+        pmid, record = enricher._parse_pubmed_article(_MalformedArticle())
+
+    assert pmid is None
+    assert record is None
+    warn_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warn_records) == 1
+    assert warn_records[0].getMessage() == '    ⚠️ Parse error: malformed article XML'
+    assert warn_records[0].exc_info is None
+
+
+def test_main_missing_input_logs_error_no_exc_info(monkeypatch, caplog):
+    """The __main__ "Could not find input file" line (converted from print,
+    ERROR per the severity map) must carry the input path but never
+    exc_info.
+
+    Mutant that kills this: add exc_info=True to
+    stage_5_pubmed_enrichment.py:755's logger.error() call. Verified: made
+    that edit, reran -- failing test id --
+    test_stage5_logging.py::test_main_missing_input_logs_error_no_exc_info
+    (assert error_records[0].exc_info is None fails: exc_info is populated).
+    """
+    missing_input = 'definitely-missing-uid-does-not-exist-780'
+    monkeypatch.setattr(sys, 'argv', ['stage_5_pubmed_enrichment.py', missing_input])
+
+    with caplog.at_level(logging.ERROR, logger=stage5.__name__):
+        with pytest.raises(SystemExit) as exc:
+            stage5.main()
+
+    assert exc.value.code == 1
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    assert error_records[0].getMessage() == f'Error: Could not find input file: {missing_input}'
+    assert error_records[0].exc_info is None
+
+
 # ------------------------------------------------------- (c) verbose=False
 
 def test_quiet_mode_emits_no_stage5_info_record(tmp_path, caplog):
@@ -210,3 +283,42 @@ def test_quiet_mode_emits_no_stage5_info_record(tmp_path, caplog):
         enricher.enrich_stage4_output(_no_id_stage4_file(tmp_path))
 
     assert not any(r.levelno == logging.INFO for r in caplog.records)
+
+
+def test_quiet_mode_suppresses_warning_and_info_on_mocked_failure_path(monkeypatch, caplog):
+    """The no-network narration path above only exercises verbose=False
+    where nothing ever fails, so it cannot catch a guard that's missing only
+    on the FAILURE branch. This drives a real (mocked) failure -- three
+    exhausted 429s -- with verbose=False and checks that neither the
+    per-retry WARNING nor the per-citation "API error" INFO fires; the
+    unconditional _log_api_failure() ERROR record is unaffected by verbose
+    and is not asserted against here.
+
+    Mutants that kill this:
+    1. drop the `if self.verbose:` guard at
+       stage_5_pubmed_enrichment.py:437 (before the "Transient API error"
+       warning), making it unconditional. Verified: de-indented that
+       logger.warning() call out from under the if, reran -- failing test
+       id --
+       test_stage5_logging.py::test_quiet_mode_suppresses_warning_and_info_on_mocked_failure_path
+       (a WARNING record was emitted with verbose=False).
+    2. drop the `if self.verbose:` guard at
+       stage_5_pubmed_enrichment.py:480 (before the "API error" info),
+       making it unconditional. Verified: de-indented that logger.info()
+       call out from under the if, reran -- failing test id --
+       test_stage5_logging.py::test_quiet_mode_suppresses_warning_and_info_on_mocked_failure_path
+       (an INFO record containing '❌ API error' was emitted with
+       verbose=False).
+    """
+    monkeypatch.setattr(stage5.time, 'sleep', lambda s: None)
+    enricher = PubMedEnricher(verbose=False)
+    enricher.session = _FakeSession([
+        _FakeResponse(429, 'https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi?db=pubmed'),
+    ] * 3)
+
+    with caplog.at_level(logging.INFO, logger=stage5.__name__):
+        records = enricher._fetch_pubmed_batch(['12345678'])
+
+    assert records == {}
+    assert not any(r.levelno == logging.WARNING for r in caplog.records)
+    assert not any('❌ API error' in r.getMessage() for r in caplog.records)
