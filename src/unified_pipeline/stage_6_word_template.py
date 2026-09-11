@@ -268,8 +268,13 @@ def _is_bullet_paragraph(para: Paragraph) -> bool:
 TEMPLATE_PATH = Path(__file__).parent.parent.parent / "key_files" / "wcm_cv_template_faculty_october_2022_final.docx"
 OUTPUT_DIR = Path(__file__).parent / "outputs" / "stage_6_wcm_documents"
 # Local-dev only: where sample source CVs live, for the generate() fallback that
-# locates an original docx when the caller didn't pass one. Absent in the
-# deployed image (the server always passes original_doc_path explicitly).
+# locates an original docx when the caller didn't pass one. No production driver
+# passes original_doc_path -- the only callers that do are
+# scripts/render_gate.py --source-dir and stage 6's own tests -- so on a live
+# run this auto-discovery is the fallback's only feed, and it finds nothing.
+# The directory itself DOES exist in the deployed image (the backend
+# Dockerfile mkdir -p's and chowns it); what is missing is its contents, which
+# no COPY brings in and .dockerignore excludes from the build context.
 SAMPLE_CV_DIR = Path(__file__).parent.parent.parent / "data" / "sample_cvs" / "word"
 
 # Fallback template paths
@@ -705,9 +710,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if primary:
                 print(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
-        # Try to find original document if not provided. Local-dev fallback
-        # only -- the server always passes original_doc_path, and SAMPLE_CV_DIR
-        # doesn't exist in the deployed image. Anchored on the module-relative
+        # Try to find original document if not provided -- which every live run
+        # is: only render_gate.py --source-dir and stage 6's tests pass one, and
+        # SAMPLE_CV_DIR is an empty directory in the deployed image (see the
+        # constant). Anchored on the module-relative
         # SAMPLE_CV_DIR constant plus the process CWD, instead of a stack of
         # brittle '..'/.parent chains that broke silently on any restructure.
         if not original_doc_path:
@@ -826,9 +832,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._fill_presentations(entries_by_code.get('R', []))  # R = Invited Presentations
         self._fill_bibliography(entries_by_code, cv_owner, document_uid)
 
-        # Fill passthrough sections (Employment Status, Institutional Affiliation)
-        # These are copied directly from source CV when the source format matches WCM
-        self._fill_passthrough_sections(all_entries)
+        # Fill passthrough sections (Employment Status, Institutional Affiliation,
+        # Percent Effort) -- copied from source CV when it matches WCM (#294, #260).
+        passthrough_consumed_ids = {id(e) for e in self._fill_passthrough_sections(all_entries)}
 
         # Add appendix for ALL unmapped content. Local mutable copy of the
         # module-level RENDER_ROUTED_CODES: the M1 discard just below mutates
@@ -848,10 +854,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         unmapped_entries = []
 
-        # Collect ALL entries not in mapped codes
+        # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260).
         for code, entries in entries_by_code.items():
             if code not in mapped_codes:
-                unmapped_entries.extend(entries)
+                unmapped_entries.extend(e for e in entries if id(e) not in passthrough_consumed_ids)
 
         # A stays in mapped_codes, but NOT because its entries are all consumed
         # -- that was the old assumption here and the corpus refutes it (145 of
@@ -2957,20 +2963,52 @@ Now analyze the text above:"""
         return issues
 
 
-def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
+def run_stage6(input_path: str, output_path: str | None = None, verbose: bool = True,
                emit_track_changes: bool = True, emit_comments: bool = False,
                strip_template_instructions: bool = True,
-               recover_unrendered_records: bool = True) -> str:
-    """
+               recover_unrendered_records: bool = True,
+               original_doc_path: str | None = None) -> str:
+    r"""
     Run Stage 6 on a Stage 5 (or Stage 4) output file.
 
     Takes a PATH, not parsed data, and that is load-bearing for concurrency.
-    Stage 6 rewrites entries in place as it renders -- reassigning
-    ``entry['taxonomy_code']`` when it reroutes a code, writing back
-    ``entry['extracted_fields']``, annotating ``entry['reclassification_note']``
-    -- 17 sites in all. Because this function is handed a path and parses the
-    JSON itself, every render owns the dicts it mutates, and the web path runs
-    renders concurrently (``run_service.py`` starts each run in a thread and the
+    Stage 6 rewrites entries in place as it renders: 12 sites, in four
+    functions -- ``_correct_mismatch_if_needed`` here (4);
+    ``stage6.render_check.normalize_retired_code`` (2);
+    ``stage6.sections.positions._propagate_institution_to_subentries`` (3); and
+    ``_copy_dates`` inside
+    ``stage6.sections.positions._merge_grouped_appointments`` (3) -- touching
+    six keys between them, not the two an earlier wording named:
+
+    * ``entry['taxonomy_code']`` (3 sites), the rerouted code;
+    * ``entry['taxonomy_code_original']`` (3), the code it was rerouted from,
+      written beside each of those;
+    * ``entry['extracted_fields']`` (2), installing a fresh ``{}`` on an entry
+      that carried none, so the field writes below have somewhere to land;
+    * ``fields['institution']`` (1), a parent's institution propagated into a
+      sub-entry's ``extracted_fields``;
+    * ``entry['institution_enrichment']`` (1), that parent's enrichment record
+      copied across with it;
+    * ``start_date`` and ``end_date`` inside ``extracted_fields`` (2), a
+      grouped appointment's dates copied onto a member that has neither.
+
+    Counted by::
+
+        grep -rnE "[A-Za-z_][A-Za-z0-9_]*\['[a-z_]+'\] *=[^=]|\.setdefault\(" \
+            src/unified_pipeline/stage_6_word_template.py src/unified_pipeline/stage6/
+
+    which returns 21 lines today; the other 9 write to ``self.stats`` (2) or to
+    a copy the function made itself (7: four in ``sections/research_support.py``,
+    three in ``normalization/records.py``), so they reach no caller. Section M2 used to
+    be among them -- it annotated ``entry['reclassification_note']`` and filled
+    ``fields['percent_effort']`` -- but it now classifies on
+    ``copy_entries_for_render`` clones, so those three writes stop at the
+    section (``stage6/sections/research_support.py``). Re-run the grep rather
+    than trusting the count: it is a snapshot, not an invariant.
+
+    Because this function is handed a path and parses the JSON itself, every
+    render owns the dicts it mutates, and the web path runs renders
+    concurrently (``run_service.py`` starts each run in a thread and the
     orchestrator hands each stage to ``asyncio.to_thread``).
 
     Passing already-parsed stage 5 data in here to save a re-parse would be a
@@ -2989,6 +3027,13 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
         recover_unrendered_records: Re-emit record lines of fused multi-record
             entries that the structured render provably dropped (#221;
             default True).
+        original_doc_path: Optional path to the original Word document, for the
+            personal-data fallback that recovers contact fields from it (#550).
+            Neither driver passes one today, so a live run keeps taking the
+            SAMPLE_CV_DIR auto-discovery branch in generate() and renders
+            exactly as before; scripts/render_gate.py --source-dir is what
+            supplies it, and it does so through here rather than constructing
+            its own generator, so the gate measures the production entry point.
 
     Returns:
         Path to generated document
@@ -3000,7 +3045,7 @@ def run_stage6(input_path: str, output_path: str = None, verbose: bool = True,
         strip_template_instructions=strip_template_instructions,
         recover_unrendered_records=recover_unrendered_records,
     )
-    return generator.generate(input_path, output_path)
+    return generator.generate(input_path, output_path, original_doc_path=original_doc_path)
 
 
 def main():

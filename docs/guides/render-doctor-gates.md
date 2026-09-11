@@ -119,6 +119,56 @@ pre-existing, not introduced here), 58 had a locally-available source docx.
 - Crash guard (`_failed` key injected into one arm's report): refused to
   compare, FAIL.
 
+## Control log (2026-09-07, 66 CV local farm, #740)
+
+Same farm as above (`src/unified_pipeline/outputs/`, 66 uids with stage-4
+output), but all 66 now render cleanly -- the 12 crashes the 2026-08-11 log
+recorded are gone. Source documents came from `data/sample_cvs/word/` via
+`--source-dir`, which is the flag #740 added. Every arm was rendered on the
+same day, from a worktree root, off the merge result rather than the branch
+tip.
+
+Run as `PYTHONPATH=<arm>/src python3 scripts/render_gate.py <farm> <out>
+--source-dir data/sample_cvs/word`, compared with `render_gate_compare.py`.
+
+- **Real CV rendering.** 66/66 rendered, exit 0, in every arm below. The
+  per-uid `source_docx` notice resolved a document for 65; `web08` has none
+  in this corpus and is recorded as `not found` rather than rendering as if
+  the flag were absent.
+- **Determinism** (same farm, same code, rendered twice): `paragraph
+  CHANGED 0`, `fingerprint CHANGED 0` -- PASS. This is the run that makes
+  every number below mean something.
+- **`origin/dev` merge control** (branch tip vs the same branch merged with
+  19 commits of `dev`, including `stage6/parsing/text.py` and
+  `stage6/sections/board_certification.py`): `CHANGED 0`. The A/B is
+  measuring this PR, not the merge.
+- **Entry-point control** (`--source-dir` renders routed through
+  `run_stage6(original_doc_path=...)` instead of the private
+  `WCMTemplateGenerator` construction they used before): `paragraph CHANGED
+  0`, `fingerprint CHANGED 0` -- PASS. The gate now calls what production
+  calls, and calling it changes nothing.
+- **Mutation** (the #550 write-back removed, restored after): `paragraph
+  CHANGED 3`, `fingerprint CHANGED 3` -- FAIL, and the deltas are exactly
+  the five values the write-back exists to carry: `jalbrecht@som.umaryland.edu`
+  on `2003_Albrechtjs_Cv`; a business address, `412-623-7764` and
+  `plo4@pitt.edu` on `2054_Opresko_Cv`; a street address on
+  `NSUJZG_2027_Eil_Robert`. A gate that could not see this could not see
+  #550 at all.
+- **Blast radius of #740's review round** (label classifier, whole-document
+  scan, contact-line consumption, alias collapse): `paragraph CHANGED 1` --
+  `NSUJZG_2027_Eil_Robert` gains `eil@ohsu.edu`, which is the
+  `E-Mail Address:` label #740 had disclosed as unrecovered and filed as
+  #730. No other document changed. Removing the `tables[:3]` and
+  `paragraphs[:20]` bounds cost nothing on this corpus.
+- **Rendered-output validation** (new: each output must open with
+  python-docx, hold tables, and still carry the template's six PERSONAL DATA
+  label rows): no false positives across 66 real renders in any arm.
+
+What this log still cannot say is anything about production: no driver
+passes `original_doc_path`, so the `--source-dir` deltas above are corpus
+measurements of a path a live CV render does not take. That is #550's
+remaining work, not a gap in the instrument.
+
 ## Known gaps, not fixed here
 
 - **`lint_pipeline_errors` untested by either gate.** It never fires on a

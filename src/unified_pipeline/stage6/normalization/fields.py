@@ -1,7 +1,8 @@
 """Coercing a stage-4 field of unpredictable shape to plain cell text (#398).
 
-The sibling of `text.py`, and separate from it because the input is not text
-yet. Stage 4 stores raw LLM JSON and the extraction call runs with
+The sibling of the value modules (`authors.py`, `institutions.py`,
+`content.py`, `rendering.py`, `taxonomy.py`), and separate from them because
+the input is not text yet. Stage 4 stores raw LLM JSON and the extraction call runs with
 `response_format={"type": "json_object"}` and no schema, so a field the renderer
 expects to be a string arrives as a dict or a list of record dicts instead. The
 key vocabulary is unbounded -- two corpus reproductions of the same address

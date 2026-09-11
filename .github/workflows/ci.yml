@@ -76,6 +76,8 @@ jobs:
         run: python -m pytest src/unified_pipeline/tests/ -q -p no:cacheprovider
       - name: Render/doctor gate self-test
         run: python3 scripts/test_render_doctor_gates.py
+      - name: Render gate integration self-test
+        run: python3 scripts/test_render_gate_integration.py
 
   function-size:
     # Ratchet on oversized functions (CODING_STANDARDS.md 3.2a), plus §9's

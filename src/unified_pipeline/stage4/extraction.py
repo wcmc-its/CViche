@@ -385,8 +385,14 @@ def attempt_llm_recovery(
             matched = recovered_by_id.get(_recovery_entry_id(entry))
 
             if matched:
-                # Coerce off-type LLM values before regex/downstream consumers
-                recovered_fields = coerce_field_value_types(dict(matched.fields))
+                # Coerce off-type LLM values before regex/downstream consumers.
+                # Declared `Any`, not `ExtractedFields`: this is the untyped
+                # side of the bridge -- `matched.fields` is unvalidated
+                # recovery-LLM JSON, and coerce/normalize below rebuild the
+                # dict through variable keys, which no TypedDict can express.
+                # `apply_regex_post_processing` is where the shape is named
+                # (its signature returns `ExtractedFields`).
+                recovered_fields: Any = coerce_field_value_types(dict(matched.fields))
                 # Normalize dates
                 recovered_fields = normalize_dates(recovered_fields)
                 entry_text = entry.get("text", "")
@@ -695,7 +701,7 @@ def extract_fields_batch(
             # Merge using explicit indices to avoid mismapping
             for i, entry in enumerate(code_entries):
                 if i in extraction_map:
-                    extracted_fields = extraction_map[i]
+                    extracted_fields: Any = extraction_map[i]  # untyped LLM JSON -- see attempt_llm_recovery
 
                     # Coerce off-type LLM values (e.g. list-valued strings) before
                     # any string/number consumer (regex post-processing, downstream
