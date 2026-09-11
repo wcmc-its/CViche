@@ -7,11 +7,21 @@ doctor_gate_compare.py -- the parts cheap enough to pin without a corpus.
 The controls that actually prove these gates work (determinism holds, a real
 mutation is caught, a crashed render/doctor run is refused rather than
 compared) need a corpus and are logged in
-docs/guides/render-doctor-gates.md instead -- see issue #584. This file only
-covers the two regressions found while building that: the date/timestamp
-masking not accidentally masking real content, and the work-dir path
-normaliser silently failing on a relative path.
+docs/guides/render-doctor-gates.md instead -- see issue #584. This file
+covers the regressions found while building that (the date/timestamp masking
+not accidentally masking real content, and the work-dir path normaliser
+silently failing on a relative path), and render_gate.py's own pure logic:
+the LLM-disable monkeypatch below, --source-dir's uid-to-docx resolver
+(#550), whose failure mode is silent -- a wrong resolution renders ANOTHER
+CV's contact block into this CV's Personal Data table rather than raising --
+and the pieces split out of main() for review on #740: uid discovery and
+filtering, artifact precedence, the pre-rmtree output-path check, and the
+semantic validation of a rendered docx. What those helpers do when wired
+together is scripts/test_render_gate_integration.py's subject; this file
+pins each in isolation.
 """
+import contextlib
+import io
 import json
 import os
 import sys
@@ -27,6 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import doctor_gate_compare as dgc  # noqa: E402
+import render_gate as rg  # noqa: E402
 import render_gate_compare as rgc  # noqa: E402
 
 from docx import Document  # noqa: E402
@@ -221,6 +232,274 @@ def test_render_gate_llm_monkeypatch_still_intercepts_stage6():
         s6.call_llm = original
 
 
+def test_render_gate_source_dir_resolver_respects_uid_boundaries():
+    """A shorter uid must not claim a longer uid's docx (#550).
+
+    glob("web05*.docx") also matches web050_cv.docx, and sorted() puts '0'
+    (0x30) before '_' (0x5F), so a bare prefix match hands web05 the WRONG
+    CV's source document -- the same shape as the 2026-07-15 doctor sweep
+    that diagnosed 3 of 25 CVs against another CV's artifacts. Here the
+    consequence is worse than a bad diagnosis: web050's name, office
+    address, telephone and work email would render into web05's output.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "web05_cv.docx").write_text("")
+        (d / "web050_cv.docx").write_text("")
+
+        assert rg._resolve_source_docx(d, "web05").name == "web05_cv.docx", (
+            "uid web05 resolved to a longer uid's docx -- the _uid_owns "
+            "boundary rule is not being applied")
+        assert rg._resolve_source_docx(d, "web050").name == "web050_cv.docx"
+
+
+def test_render_gate_source_dir_resolver_returns_none_for_an_uncovered_uid():
+    # 65 of the farm's 66 uids have a source docx; web08 has none. That uid
+    # must resolve to None so main() falls back to the unmodified
+    # run_stage6() call and records "not found" in the index -- not an
+    # error, and not a silent render against someone else's document.
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "web09_cv.docx").write_text("")
+        assert rg._resolve_source_docx(d, "web08") is None
+
+
+def test_render_gate_source_dir_resolver_ignores_non_docx_files():
+    # The glob is *.docx: a sidecar with the same uid stem (the farm's own
+    # per-uid JSON artifacts sit beside CVs in some layouts) is not a source
+    # document and must not be handed to python-docx.
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "web05_entries.json").write_text("{}")
+        assert rg._resolve_source_docx(d, "web05") is None
+
+
+def test_render_gate_source_dir_resolver_pins_an_ambiguous_uid_to_one_docx():
+    """Two docx both legitimately owned by the uid -- pin which one wins.
+
+    Nothing in the corpus guarantees one file per uid ("... CV.docx" beside
+    "... CV (Updated 1-26-26).docx" is exactly this repo's naming), and an
+    unpinned choice here is a silently non-deterministic gate arm: two runs of
+    the same code could recover contact fields from two different documents.
+    Today's rule is sorted()[0], and this test is what makes changing it a
+    visible decision rather than a side effect.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+        (d / "web05_cv_v2.docx").write_text("")
+        (d / "web05_cv.docx").write_text("")
+
+        assert rg._resolve_source_docx(d, "web05").name == "web05_cv.docx", (
+            "an ambiguous uid must resolve to the first sorted candidate, "
+            "not to whatever order the filesystem happened to hand back")
+
+
+def test_render_gate_uid_filter_narrows_the_discovered_uids():
+    # The filter is the difference between re-rendering 66 CVs and re-rendering
+    # the one under investigation, so a filter that silently matched nothing
+    # (or everything) would waste an hour or answer the wrong question.
+    with tempfile.TemporaryDirectory() as tmp:
+        arm = Path(tmp)
+        s4 = arm / "stage_4_field_extraction"
+        s4.mkdir()
+        for uid in ("u1", "u2", "u3"):
+            (s4 / f"{uid}_fields.json").write_text("{}")
+
+        assert rg._discover_uids(arm, set()) == ["u1", "u2", "u3"], (
+            "an empty filter means every uid in the arm")
+        assert rg._discover_uids(arm, {"u2"}) == ["u2"]
+        assert rg._discover_uids(arm, {"u2", "u3"}) == ["u2", "u3"]
+        assert rg._discover_uids(arm, {"not-in-this-arm"}) == [], (
+            "a filter matching nothing must produce nothing -- main() turns "
+            "that into a non-zero exit rather than an empty PASS")
+
+
+def test_render_gate_uid_file_drops_blank_lines_and_trailing_whitespace():
+    # Every editor writes a trailing newline, and a uid list is usually
+    # hand-assembled -- an empty or space-padded entry would join the filter
+    # set, match no uid, and quietly narrow the run.
+    with tempfile.TemporaryDirectory() as tmp:
+        uids_file = Path(tmp) / "uids.txt"
+        uids_file.write_text("u1  \n\n  u2\n\n", encoding="utf-8")
+
+        assert rg._uid_filter([], uids_file) == {"u1", "u2"}
+        assert rg._uid_filter(["u9"], None) == {"u9"}, (
+            "without --uids-file the positional uids are the filter")
+        assert rg._uid_filter([], None) == set(), (
+            "no uids and no file means 'all', which is the empty set")
+
+
+def test_render_gate_input_artifact_precedence_prefers_the_latest_stage():
+    # PRECEDENCE is the whole reason two arms are comparable: both must render
+    # from the same stage for each uid. Peel the tree back one stage at a time
+    # and require the resolver to step to exactly the next entry, never past it.
+    with tempfile.TemporaryDirectory() as tmp:
+        arm = Path(tmp)
+        for stage_dir, pat in rg.PRECEDENCE:
+            (arm / stage_dir).mkdir(parents=True)
+            (arm / stage_dir / pat.format(uid="u1")).write_text("{}")
+
+        for stage_dir, pat in rg.PRECEDENCE:
+            name = pat.format(uid="u1")
+            resolved = rg._resolve_input_artifact(arm, "u1")
+            assert resolved is not None and resolved.name == name, (
+                f"expected {name}, got {resolved}")
+            (arm / stage_dir / name).unlink()
+
+        assert rg._resolve_input_artifact(arm, "u1") is None, (
+            "a uid with no artifact at any stage must resolve to None so the "
+            "index records 'no input artifact' instead of rendering nothing")
+
+
+def test_render_gate_input_artifact_skips_a_directory_named_like_an_artifact():
+    # is_file(), not exists() (review on #589): a DIRECTORY named
+    # <uid>_enriched.json would otherwise be handed to the JSON reader instead
+    # of falling through to the stage-4 file that is actually there.
+    with tempfile.TemporaryDirectory() as tmp:
+        arm = Path(tmp)
+        (arm / "stage_5_enrichment").mkdir()
+        (arm / "stage_4_field_extraction").mkdir()
+        (arm / "stage_5_enrichment" / "u1_enriched.json").mkdir()
+        (arm / "stage_4_field_extraction" / "u1_fields.json").write_text("{}")
+
+        resolved = rg._resolve_input_artifact(arm, "u1")
+        assert resolved is not None and resolved.name == "u1_fields.json", (
+            "a directory named like a stage artifact must be skipped, not "
+            "selected as this uid's input")
+
+
+def test_render_gate_output_dir_validation_refuses_to_wipe_an_input_tree():
+    """main() rmtree's `out` before every run, so `out` must be provably not an
+    input (review on #740). All three destructive relationships are refused --
+    equal, out inside an input, an input inside out -- and both paths are
+    resolved first, so a ".." detour or a symlink cannot smuggle one past a
+    string comparison."""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        arm = root / "arm"
+        (arm / "stage_4_field_extraction").mkdir(parents=True)
+
+        assert rg._validate_output_dir(arm, arm), "out == input must be refused"
+        assert rg._validate_output_dir(arm / "renders", arm), (
+            "out inside the input tree must be refused")
+        assert rg._validate_output_dir(root, arm), (
+            "an out that contains the input tree must be refused")
+        assert rg._validate_output_dir(root / "out" / ".." / "arm", arm), (
+            "a '..' detour back into the input tree must be refused")
+
+        link = root / "link"
+        link.symlink_to(arm, target_is_directory=True)
+        assert rg._validate_output_dir(link, arm), (
+            "a symlink pointing at the input tree must be refused")
+
+        assert rg._validate_output_dir(root / "out", arm) is None, (
+            "a sibling out directory is the normal invocation")
+        assert rg._validate_output_dir(root / "out", arm, None) is None, (
+            "an omitted --source-dir arrives as None and must be skipped, "
+            "not compared")
+        assert rg._validate_output_dir(root / "sources" / "sub", arm, root / "sources"), (
+            "--source-dir is checked on the same footing as arm_outputs")
+
+        # The wire, not just the helper: _parse_args must exit 2 on a bad
+        # `out`, so nothing downstream ever reaches shutil.rmtree.
+        with contextlib.redirect_stderr(io.StringIO()):
+            try:
+                rg._parse_args([str(arm), str(arm)])
+            except SystemExit as e:
+                assert e.code == 2, f"argparse parser.error exits 2, got {e.code}"
+            else:
+                raise AssertionError("out == arm_outputs was accepted by _parse_args")
+
+
+def _make_personal_data_docx(path, labels):
+    """A docx whose one table carries `labels` down its first column.
+
+    Mirrors the shape `_validate_rendered_docx` looks for, not a full render:
+    the labels are what the WCM template defines and what stage 6's own filler
+    matches on, so a table built this way is what a good render leaves behind.
+    """
+    doc = Document()
+    doc.add_paragraph("PERSONAL DATA")
+    if labels:
+        table = doc.add_table(rows=len(labels), cols=2)
+        for row, label in zip(table.rows, labels):
+            row.cells[0].text = f"{label.title()}:"
+    doc.save(str(path))
+
+
+def test_render_gate_validates_the_rendered_personal_data_table():
+    """A docx can be written, and be a bad render (review on #740).
+
+    dest.is_file() passes on a truncated file and on a document that lost the
+    template's tables outright, and the compare step would then fingerprint it
+    as a real arm. Checked as invariants, not counts: the six labels the filler
+    writes into, matched by substring the way that filler matches them.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        d = Path(tmp)
+
+        good = d / "good.docx"
+        _make_personal_data_docx(good, rg.PERSONAL_DATA_LABELS)
+        assert rg._validate_rendered_docx(good) is None, (
+            "a docx carrying every PERSONAL DATA label row is a valid render")
+
+        # (i) not a docx at all -- what a truncated or half-written file looks
+        # like to python-docx, and what is_file() alone cannot tell apart.
+        truncated = d / "truncated.docx"
+        truncated.write_text("not a zip archive")
+        assert rg._validate_rendered_docx(truncated), "an unreadable docx must be refused"
+
+        # (ii) opens cleanly, but the template's tables are gone.
+        no_tables = d / "no_tables.docx"
+        _make_personal_data_docx(no_tables, ())
+        problem = rg._validate_rendered_docx(no_tables)
+        assert problem and "no tables" in problem
+
+        # (iii) the table is there and locatable by its anchor, but a label row
+        # the filler writes into has been lost -- the shape a row-count check
+        # would catch only by accident and a hard-coded count would false-alarm
+        # on the next template revision.
+        missing_row = d / "missing_row.docx"
+        _make_personal_data_docx(
+            missing_row, [x for x in rg.PERSONAL_DATA_LABELS if x != "cell phone"])
+        problem = rg._validate_rendered_docx(missing_row)
+        assert problem and "cell phone" in problem, (
+            f"a dropped PERSONAL DATA label row must name itself, got {problem!r}")
+
+
+def test_render_gate_rejects_a_non_directory_source_dir():
+    """Fail closed (CODING_STANDARDS 5.5): a typo'd --source-dir must not
+    silently render as if the flag were omitted. Omitting it is a
+    documented, intentional mode; a bad path is not -- and the two produce
+    identical output, so a silent fallback would make an entire gate arm
+    quietly meaningless."""
+    with tempfile.TemporaryDirectory() as tmp:
+        arm = Path(tmp) / "arm"
+        (arm / "stage_4_field_extraction").mkdir(parents=True)
+        out = Path(tmp) / "out"
+
+        # Sanity: the same argv WITHOUT the flag parses, so the failure
+        # below is attributable to --source-dir and not to the arm layout.
+        ok = rg._parse_args([str(arm), str(out)])
+        assert ok.source_dir is None, "--source-dir must default to off (opt-in)"
+
+        # A FILE is not a directory either -- is_dir(), not exists().
+        afile = Path(tmp) / "a_file.docx"
+        afile.write_text("")
+
+        for bad, why in ((Path(tmp) / "nope", "a non-existent"), (afile, "a file")):
+            # argparse writes usage to stderr before raising; swallow it so
+            # this file's own output stays the single "ok" line its runner
+            # (CI's pipeline-tests job) reads.
+            with contextlib.redirect_stderr(io.StringIO()):
+                try:
+                    rg._parse_args([str(arm), str(out), "--source-dir", str(bad)])
+                except SystemExit as e:
+                    assert e.code == 2, f"argparse parser.error exits 2, got {e.code}"
+                else:
+                    raise AssertionError(f"{why} --source-dir was accepted")
+
+
 if __name__ == "__main__":
     test_fingerprint_masks_render_timestamp_but_not_real_content()
     test_check_render_failures_trips_on_either_arm()
@@ -232,4 +511,15 @@ if __name__ == "__main__":
     test_doctor_failure_guard_trips_on_malformed_failed_value()
     test_doctor_compare_identical_count_uses_uid_intersection()
     test_render_gate_llm_monkeypatch_still_intercepts_stage6()
+    test_render_gate_source_dir_resolver_respects_uid_boundaries()
+    test_render_gate_source_dir_resolver_returns_none_for_an_uncovered_uid()
+    test_render_gate_source_dir_resolver_ignores_non_docx_files()
+    test_render_gate_source_dir_resolver_pins_an_ambiguous_uid_to_one_docx()
+    test_render_gate_uid_filter_narrows_the_discovered_uids()
+    test_render_gate_uid_file_drops_blank_lines_and_trailing_whitespace()
+    test_render_gate_input_artifact_precedence_prefers_the_latest_stage()
+    test_render_gate_input_artifact_skips_a_directory_named_like_an_artifact()
+    test_render_gate_output_dir_validation_refuses_to_wipe_an_input_tree()
+    test_render_gate_validates_the_rendered_personal_data_table()
+    test_render_gate_rejects_a_non_directory_source_dir()
     print("ok")

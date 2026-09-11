@@ -4,7 +4,7 @@
   "3.7 dynamic attribute access (non-literal) [waived]": 0,
   "3.7 no metaprogramming [waived]": 1,
   "5.4 bare swallows (`except Exception: pass`)": 3,
-  "7.1 print() in library code (T201)": 1243,
+  "7.1 print() in library code (T201)": 1242,
   "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)": 4,
   "8.3 missing annotations (ANN*, RUF012)": 573,
   "8.3 typing syntax (UP*, RUF013)": 236
