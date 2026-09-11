@@ -436,7 +436,7 @@ class PubMedEnricher:
                         pass
                 if self.verbose:
                     logger.warning(f"    ⏳ Transient API error ({_sanitize_error(last_error)}); "
-                          f"retry {attempt + 1}/{MAX_ATTEMPTS - 1} in {delay:g}s")
+                                   f"retry {attempt + 1}/{MAX_ATTEMPTS - 1} in {delay:g}s")
                 time.sleep(delay)
 
         raise last_error

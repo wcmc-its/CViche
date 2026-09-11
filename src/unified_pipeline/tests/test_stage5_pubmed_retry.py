@@ -168,6 +168,7 @@ def test_id_converter_gives_up_gracefully(monkeypatch, caplog):
     assert sleeps == [1.0, 2.0]
     assert enricher.stats['api_errors'] == 1
     assert any('❌ ID conversion error' in r.getMessage() for r in caplog.records)
+    assert all(r.exc_info is None for r in caplog.records)
 
 
 def test_doi_search_retries_5xx_then_succeeds(monkeypatch):
@@ -335,6 +336,7 @@ def test_api_error_body_logged_once_per_class(monkeypatch, caplog):
     assert len(error_records) == 1  # bad key 400s every call; body logged once
     # per-citation verbose diagnostics now go through the logger at INFO
     assert sum('⚠️ DOI search error' in r.getMessage() for r in info_records) == 2
+    assert all(r.exc_info is None for r in caplog.records)
 
 
 def test_distinct_failure_classes_each_logged(monkeypatch, caplog):

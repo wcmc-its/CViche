@@ -203,6 +203,7 @@ def test_lookup_failure_logs_error_no_exc_info_and_redacts_api_key(monkeypatch, 
     message = record.getMessage()
     assert 'dummy-test-key' not in message
     assert 'api_key=***' in message
+    assert all(r.exc_info is None for r in caplog.records)
 
 
 # ------------------------------------------ (b) more converted exc_info sites
