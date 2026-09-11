@@ -267,6 +267,9 @@ async def lifespan(app: FastAPI):
             auth_mode, storage_backend,
             allow_simple=os.environ.get("CVICHE_ALLOW_SIMPLE_AUTH") == "1",
         )
+        # Same "deployed" posture, for SAML replay protection specifically (#781).
+        from app.saml_replay import check_deployed_posture
+        check_deployed_posture(auth_mode, storage_backend)
         logger.info("✅ Auth mode: %s", auth_mode or "simple (default)")
         from app.services.notifications import validate_configuration
         notif_status = validate_configuration()

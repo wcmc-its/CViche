@@ -2,6 +2,11 @@
 import pytest
 from pathlib import Path
 from unittest.mock import patch, MagicMock
+from uuid import uuid4
+
+from saml2.sigver import SigverError
+from saml2.response import IncorrectlySigned, VerificationError
+from saml2.validate import ResponseLifetimeExceed
 
 from app.saml_client import (
     extract_user_attrs,
@@ -10,6 +15,7 @@ from app.saml_client import (
     ATTR_MAIL,
     ATTR_DISPLAY_NAME,
     ATTR_EPPN,
+    ATTR_UID,
 )
 
 
@@ -86,6 +92,58 @@ class TestExtractUserAttrs:
             extract_user_attrs(mock_saml_identity)
         assert "unmapped" not in "\n".join(r.getMessage() for r in caplog.records)
 
+    # --- D9 #20: malformed/multi-valued IdP attributes (mrj4001 review,
+    # PR #781 thread r3967362882) -- SAML attributes are externally supplied.
+
+    def test_extract_attrs_empty_list_value_treated_as_absent(self):
+        """An attribute present but released with an empty value list is the
+        same as not being released -- falls through to the next candidate."""
+        identity = {ATTR_UID: [], ATTR_EPPN: ["testuser@cornell.edu"]}
+        result = extract_user_attrs(identity)
+        assert result["cwid"] == "testuser"
+
+    def test_extract_attrs_none_value_treated_as_absent(self):
+        identity = {ATTR_UID: None, ATTR_EPPN: ["testuser@cornell.edu"]}
+        result = extract_user_attrs(identity)
+        assert result["cwid"] == "testuser"
+
+    def test_extract_attrs_multi_valued_list_uses_first_value(self):
+        """Multiple released values for one attribute: the first is used,
+        pinned explicitly rather than left to accidental indexing."""
+        identity = {
+            ATTR_UID: ["first-uid", "second-uid"],
+            ATTR_EPPN: ["testuser@cornell.edu"],
+        }
+        result = extract_user_attrs(identity)
+        assert result["cwid"] == "first-uid"
+
+    # --- D9 #21: CWID trust-boundary tests (mrj4001 review, PR #781 thread
+    # r3967362882) -- CWID becomes the identity anchor, so its derivation
+    # from an untrusted ePPN needs explicit negative coverage.
+
+    def test_extract_attrs_eppn_without_at_sign_yields_no_cwid(self):
+        """A malformed ePPN with no '@' cannot anchor identity -- ValueError,
+        never a garbage cwid built from the whole string."""
+        identity = {ATTR_EPPN: ["not-an-eppn"]}
+        with pytest.raises(ValueError, match="CWID"):
+            extract_user_attrs(identity)
+
+    def test_extract_attrs_eppn_empty_local_part_yields_no_cwid(self):
+        """An empty local part ("@med.cornell.edu") must yield ValueError,
+        never a falsy-but-non-None "" cwid reaching provisioning as a
+        garbage identity anchor."""
+        identity = {ATTR_EPPN: ["@med.cornell.edu"]}
+        with pytest.raises(ValueError, match="CWID"):
+            extract_user_attrs(identity)
+
+    def test_extract_attrs_untrusted_eppn_domain_is_accepted_as_is(self):
+        """The SP trusts exactly one registered IdP (docs/sp-registration.md);
+        pin the current behavior -- an unexpected ePPN domain is accepted,
+        not rejected. No domain allowlist is added here."""
+        identity = {ATTR_EPPN: ["someone@unexpected-domain.example"]}
+        result = extract_user_attrs(identity)
+        assert result["cwid"] == "someone"
+
 
 # --- Unit test: certificate generation ---
 
@@ -112,6 +170,34 @@ class TestCertGeneration:
         _generate_self_signed_cert(cert_dir)
         mode = (cert_dir / "sp.key").stat().st_mode & 0o777
         assert mode & 0o077 == 0, f"sp.key is group/world-readable: {oct(mode)}"
+
+    def test_generated_cert_and_key_are_cryptographically_valid_pair(self, tmp_path):
+        """T11.1 (mrj4001 review, PR #781 thread r3968019366): PEM markers
+        alone don't prove the pair would work at runtime in xmlsec/pysaml2.
+        Parse both with `cryptography` and prove (a) the cert's public key
+        matches the private key's, and (b) the cert verifies its own
+        signature (it's self-signed)."""
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        cert_dir = tmp_path / "certs"
+        _generate_self_signed_cert(cert_dir)
+
+        cert = x509.load_pem_x509_certificate((cert_dir / "sp.crt").read_bytes())
+        key = serialization.load_pem_private_key(
+            (cert_dir / "sp.key").read_bytes(), password=None
+        )
+
+        assert key.public_key().public_numbers() == cert.public_key().public_numbers()
+
+        # Self-signed: the cert's own public key must verify its signature.
+        cert.public_key().verify(
+            cert.signature,
+            cert.tbs_certificate_bytes,
+            padding.PKCS1v15(),
+            cert.signature_hash_algorithm,
+        )
 
 
 # --- Unit test: xmlsec1 detection ---
@@ -144,66 +230,26 @@ class TestFindXmlsec1:
                 with pytest.raises(RuntimeError, match="xmlsec1 binary not found"):
                     _find_xmlsec1()
 
+    def test_find_xmlsec1_skips_existing_but_non_executable_candidate(self):
+        """T11.2 (mrj4001 review, PR #781 thread r3968019366): a candidate
+        path that exists but isn't executable (e.g. a partial package
+        install) must fall through to the PATH lookup, not be handed to
+        pysaml2/xmlsec as if it were runnable."""
+        with patch("app.saml_client.Path") as mock_path_cls:
+            mock_instance = MagicMock()
+            mock_instance.exists.return_value = True  # every candidate "exists"...
+            mock_path_cls.return_value = mock_instance
+
+            with patch("app.saml_client.os.access", return_value=False) as mock_access, \
+                 patch("app.saml_client.shutil.which", return_value="/usr/bin/xmlsec1") as mock_which:
+                # ...but none is executable, so all three candidates are
+                # skipped and the PATH fallback is used.
+                result = _find_xmlsec1()
+                assert result == "/usr/bin/xmlsec1"
+                mock_which.assert_called_once_with("xmlsec1")
+            assert mock_access.called
+
 # --- Unit test: get_saml_client config wiring ---
-
-
-from app.saml_client import get_saml_client
-
-
-class TestGetSamlClient:
-    """Verify Saml2Client is configured from the right SystemConfig values.
-
-    Regression coverage for the ACS-URL bug: ACS/SLO endpoints in SP metadata
-    must come from saml_sp_base_url, NOT entity_id. The IdP enforces the
-    Destination/Recipient against the URL we publish in metadata, so any drift
-    silently rejects every assertion.
-    """
-
-    def test_acs_endpoints_use_sp_base_url_not_entity_id(self, db, seed_saml_mode, tmp_path):
-        """ACS/SLO endpoint URLs are derived from sp_base_url, not entity_id."""
-        # Override cert dir to a writable tmp path
-        from app.models import SystemConfig
-        import json as _json
-        row = db.query(SystemConfig).filter(SystemConfig.key == "saml_cert_dir").first()
-        row.value = _json.dumps(str(tmp_path / "certs"))
-        db.commit()
-
-        # Stub out IdP metadata loading so the call doesn't try to fetch a URL
-        with patch("app.saml_client.Saml2Config.load") as mock_load, \
-             patch("app.saml_client.Saml2Client") as mock_client_cls:
-            get_saml_client(db)
-
-            assert mock_load.called, "Saml2Config.load() was not called"
-            saml_config = mock_load.call_args[0][0]
-            endpoints = saml_config["service"]["sp"]["endpoints"]
-            acs_url = endpoints["assertion_consumer_service"][0][0]
-            slo_url = endpoints["single_logout_service"][0][0]
-
-            # seed_saml_mode sets sp_base_url=https://cviche.med.cornell.edu
-            # and entity_id=https://cviche.med.cornell.edu/shibboleth (with /shibboleth)
-            assert acs_url == "https://cviche.med.cornell.edu/api/saml/acs", (
-                f"ACS URL should be derived from sp_base_url, got {acs_url}"
-            )
-            assert slo_url == "https://cviche.med.cornell.edu/api/saml/logout", (
-                f"SLO URL should be derived from sp_base_url, got {slo_url}"
-            )
-            # Sanity check: the bug would have produced this:
-            assert "/shibboleth/api/saml/acs" not in acs_url, (
-                "ACS URL must not include /shibboleth (the entity_id path)"
-            )
-
-    def test_raises_when_sp_base_url_missing(self, db, seed_saml_mode, tmp_path):
-        """get_saml_client raises if saml_sp_base_url is empty -- fail loud, not silently broken."""
-        from app.models import SystemConfig
-        import json as _json
-        row = db.query(SystemConfig).filter(SystemConfig.key == "saml_sp_base_url").first()
-        row.value = _json.dumps("")
-        db.commit()
-
-        with pytest.raises(RuntimeError, match="saml_sp_base_url"):
-            get_saml_client(db)
-
-    # --- Unit test: get_saml_client config wiring ---
 
 
 from app.saml_client import get_saml_client
@@ -283,6 +329,27 @@ class TestGetSamlClient:
         # The existing cert is the one filed with the IdP -- never regenerated.
         assert (cert_dir / "sp.crt").read_text() == "-----BEGIN CERTIFICATE-----\n"
 
+    def test_config_allows_unsolicited_responses(self, db, seed_saml_mode, tmp_path):
+        """D9 #12 half of the fallback (mrj4001 review, PR #781 thread
+        r3967362882): the SP config's allow_unsolicited flag is what makes
+        IdP-initiated SSO -- an unsolicited response -- acceptable at all.
+        The other half (a real-parser unsolicited response actually being
+        accepted) needs the mock-IdP harness (test_integration_saml.py,
+        skips without docker) or a real pysaml2 Server/Client harness like
+        test_saml_signature_enforcement.py's -- both outside this ticket's
+        write set; see the reply for r3967362882."""
+        from app.models import SystemConfig
+        import json as _json
+        row = db.query(SystemConfig).filter(SystemConfig.key == "saml_cert_dir").first()
+        row.value = _json.dumps(str(tmp_path / "certs"))
+        db.commit()
+
+        with patch("app.saml_client.Saml2Config.load") as mock_load, \
+             patch("app.saml_client.Saml2Client"):
+            get_saml_client(db)
+            saml_config = mock_load.call_args[0][0]
+            assert saml_config["service"]["sp"]["allow_unsolicited"] is True
+
 # --- SAML endpoint tests (Plan 02) ---
 
 from app.models import User
@@ -299,6 +366,13 @@ def _mock_saml_client(identity_dict=None):
     if identity_dict is not None:
         mock_response = MagicMock()
         mock_response.get_identity.return_value = identity_dict
+        # A real pysaml2 response always carries an assertion ID; give this
+        # stub one too so the replay gate's fail-closed default (a missing
+        # ID) doesn't fire on tests that aren't exercising that path.
+        assertion = MagicMock()
+        assertion.id = f"_{uuid4().hex}"
+        mock_response.assertions = [assertion]
+        mock_response.assertion = assertion
         mock_client.parse_authn_request_response.return_value = mock_response
     else:
         mock_client.parse_authn_request_response.return_value = None
@@ -462,24 +536,164 @@ class TestSamlACS:
         assert "error=auth_failed" in response.headers["location"]
 
     @patch("app.api.saml_routes.get_saml_client")
-    def test_acs_unexpected_exception_propagates(self, mock_get_client, client, seed_saml_mode):
-        """POST /api/saml/acs: an exception type outside the narrowed catch
-        (RuntimeError/OSError/SAMLError/SourceNotFound -- CertificateError is
-        already handled by the signature-specific except above it) is a
-        genuinely unexpected bug -- it must NOT be folded into
-        /login?error=auth_failed. It propagates through run_in_threadpool and
-        out of the route entirely, caught only by main.py's app-wide
-        SecurityHeadersMiddleware/global exception handler, which returns the
-        generic sanitized "internal_error" JSON response (not a 302) -- see
-        saml_routes.py's comment, mrj4001 review PR #656 item 6 / #672."""
-        mock_get_client.side_effect = TypeError("unexpected bug, not an auth failure")
+    def test_acs_unexpected_exception_from_parsing_is_caught_and_redirects(
+        self, mock_get_client, client, seed_saml_mode
+    ):
+        """D10 (mrj4001 review, PR #781 threads r3967362882 #11 /
+        r3966560287): _parse_saml_assertion is the untrusted-input parsing
+        boundary, so it now has a bare `except Exception` after its typed
+        clauses -- ANY exception raised while parsing (including a
+        genuinely unexpected one, not only pysaml2's typed exceptions) fails
+        closed to a sanitized redirect instead of a stack-trace-bearing 500.
+        This supersedes the previous contract for this function specifically
+        (mrj4001 review, PR #656 item 6 / #672) -- see
+        test_acs_unexpected_exception_outside_parsing_boundary_still_propagates
+        below for the part of the ACS pipeline the catch-all does NOT cover."""
+        mock_get_client.side_effect = TypeError("unexpected bug during parsing")
         response = client.post(
             "/api/saml/acs",
             data={"SAMLResponse": "base64data"},
             follow_redirects=False,
         )
+        assert response.status_code == 302
+        assert response.headers["location"] == "/login?error=auth_failed"
+        assert COOKIE_NAME not in {c.name for c in response.cookies.jar}
+
+    @patch("app.api.saml_routes.provision_user")
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_unexpected_exception_outside_parsing_boundary_still_propagates(
+        self, mock_get_client, mock_provision, client, seed_saml_mode, mock_saml_identity
+    ):
+        """D10's catch-all is scoped to _parse_saml_assertion only -- a
+        genuinely unexpected bug elsewhere in the ACS pipeline (here:
+        provisioning, which runs after parsing succeeds) must still surface
+        as a 500, not get folded into /login?error=auth_failed (mrj4001
+        review PR #656 item 6 / #672, unaffected by D10)."""
+        mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
+        mock_provision.side_effect = TypeError("unexpected bug, not an auth failure")
+        response = client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data", "RelayState": "/"},
+            follow_redirects=False,
+        )
         assert response.status_code == 500
         assert response.json()["error"] == "internal_error"
+
+
+class TestSamlAcsExceptionTaxonomy:
+    """D9 #9-#11 (mrj4001 review, PR #781 thread r3967362882): every other
+    ACS test stubs parse_authn_request_response() with a valid response or
+    None. These exercise the real pysaml2 exception types the parser raises
+    for signature failure, an expired assertion, and audience/recipient
+    mismatch -- proving each produces a sanitized redirect with no session
+    cookie and no provisioned user."""
+
+    @pytest.mark.parametrize("exc", [
+        SigverError("bad signature"),
+        IncorrectlySigned("not correctly signed"),
+    ], ids=["SigverError", "IncorrectlySigned"])
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_signature_failure_redirects_without_cookie_or_user(
+        self, mock_get_client, exc, client, db, seed_saml_mode
+    ):
+        """#9: ACS signature-validation failure."""
+        mock_client = MagicMock()
+        mock_client.parse_authn_request_response.side_effect = exc
+        mock_get_client.return_value = mock_client
+        response = client.post(
+            "/api/saml/acs", data={"SAMLResponse": "base64data"}, follow_redirects=False
+        )
+        assert response.status_code == 302
+        assert response.headers["location"] == "/login?error=auth_failed"
+        assert COOKIE_NAME not in {c.name for c in response.cookies.jar}
+        assert db.query(User).filter(User.email == "testuser@med.cornell.edu").first() is None
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_expired_assertion_redirects_without_cookie(
+        self, mock_get_client, client, db, seed_saml_mode
+    ):
+        """#10: ResponseLifetimeExceed -- pysaml2's expired-assertion exception."""
+        mock_client = MagicMock()
+        mock_client.parse_authn_request_response.side_effect = ResponseLifetimeExceed("too old")
+        mock_get_client.return_value = mock_client
+        response = client.post(
+            "/api/saml/acs", data={"SAMLResponse": "base64data"}, follow_redirects=False
+        )
+        assert response.status_code == 302
+        assert response.headers["location"] == "/login?error=auth_failed"
+        assert COOKIE_NAME not in {c.name for c in response.cookies.jar}
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_audience_restriction_failure_redirects_without_500(
+        self, mock_get_client, client, db, seed_saml_mode
+    ):
+        """#11 (audience): pysaml2's audience check raises a BARE Exception
+        (saml2/response.py's for_me()), not a SAMLError subclass -- only
+        D10's catch-all handles this. Mutant M4: dropping that catch-all
+        makes this fail (500 instead of a sanitized redirect)."""
+        mock_client = MagicMock()
+        mock_client.parse_authn_request_response.side_effect = Exception(
+            "AudienceRestrictions conditions not satisfied!"
+        )
+        mock_get_client.return_value = mock_client
+        response = client.post(
+            "/api/saml/acs", data={"SAMLResponse": "base64data"}, follow_redirects=False
+        )
+        assert response.status_code == 302
+        assert response.headers["location"] == "/login?error=auth_failed"
+        assert COOKIE_NAME not in {c.name for c in response.cookies.jar}
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_recipient_mismatch_redirects_without_cookie(
+        self, mock_get_client, client, db, seed_saml_mode
+    ):
+        """#11 (recipient): saml2.response.VerificationError -- a SAMLError
+        subclass, caught by the existing typed clause."""
+        mock_client = MagicMock()
+        mock_client.parse_authn_request_response.side_effect = VerificationError(
+            "No valid recipient"
+        )
+        mock_get_client.return_value = mock_client
+        response = client.post(
+            "/api/saml/acs", data={"SAMLResponse": "base64data"}, follow_redirects=False
+        )
+        assert response.status_code == 302
+        assert response.headers["location"] == "/login?error=auth_failed"
+        assert COOKIE_NAME not in {c.name for c in response.cookies.jar}
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_destination_mismatch_none_response_redirects(self, mock_get_client, client, seed_saml_mode):
+        """#11 (destination): a Destination mismatch makes
+        parse_authn_request_response return None rather than raise -- same
+        code path as test_acs_invalid_assertion_redirects_error, pinned here
+        explicitly alongside its audience/recipient siblings."""
+        mock_get_client.return_value = _mock_saml_client(identity_dict=None)
+        response = client.post(
+            "/api/saml/acs", data={"SAMLResponse": "base64data"}, follow_redirects=False
+        )
+        assert response.status_code == 302
+        assert response.headers["location"] == "/login?error=auth_failed"
+
+    @patch("app.api.saml_routes.get_saml_client")
+    def test_acs_calls_parser_with_no_outstanding_map(
+        self, mock_get_client, client, db, seed_saml_mode, mock_saml_identity
+    ):
+        """#12 half of the fallback (mrj4001 review, PR #781 thread
+        r3967362882): IdP-initiated SSO requires the ACS to never constrain
+        parsing to an outstanding-request map. See
+        TestGetSamlClient.test_config_allows_unsolicited_responses for the
+        other half."""
+        mock_get_client.return_value = _mock_saml_client(mock_saml_identity)
+        client.post(
+            "/api/saml/acs",
+            data={"SAMLResponse": "base64data", "RelayState": "/"},
+            follow_redirects=False,
+        )
+        call = mock_get_client.return_value.parse_authn_request_response
+        call.assert_called_once()
+        args, kwargs = call.call_args
+        assert "outstanding" not in kwargs
+        assert len(args) == 2  # (saml_response, BINDING_HTTP_POST) only
 
 
 class TestSamlMetadata:
