@@ -6,6 +6,6 @@
   "5.4 bare swallows (`except Exception: pass`)": 3,
   "7.1 print() in library code (T201)": 1243,
   "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)": 4,
-  "8.3 missing annotations (ANN*, RUF012)": 598,
+  "8.3 missing annotations (ANN*, RUF012)": 577,
   "8.3 typing syntax (UP*, RUF013)": 240
 }

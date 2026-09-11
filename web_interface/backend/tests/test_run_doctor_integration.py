@@ -86,7 +86,7 @@ def _capture_posts(monkeypatch):
         posts.append(json)
         return SimpleNamespace(status_code=200)
 
-    monkeypatch.setattr(notifications.requests, "post", _ok_post)
+    monkeypatch.setattr(notifications._SESSION, "post", _ok_post)
     return posts
 
 
@@ -150,6 +150,7 @@ def test_doctor_runs_by_default_and_publishes(monkeypatch, tmp_path, db):
     assert files == ["/x/cv_wcm.docx", str(report)]
 
     # Two cards posted (started + terminal); the terminal one has the line.
+    notifications.flush()
     assert len(posts) == 2
     assert _facts(posts[-1])["Doctor"] == "1 findings (top: segmentation)"
 
@@ -176,5 +177,6 @@ def test_doctor_crash_never_fails_run(monkeypatch, tmp_path, db, caplog):
     db.expire_all()
     assert db.query(Run).filter(Run.id == "DOC_BOOM").first().status == "complete"
     assert any("Run doctor failed" in r.message for r in caplog.records)
+    notifications.flush()
     assert len(posts) == 2
     assert "Doctor" not in _facts(posts[-1])

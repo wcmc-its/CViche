@@ -271,6 +271,12 @@ async def lifespan(app: FastAPI):
         from app.saml_replay import check_deployed_posture
         check_deployed_posture(auth_mode, storage_backend)
         logger.info("✅ Auth mode: %s", auth_mode or "simple (default)")
+        from app.services.notifications import validate_configuration
+        notif_status = validate_configuration()
+        logger.info(
+            "✅ Notifications: configured=%s valid=%s",
+            notif_status["configured"], notif_status["valid"],
+        )
         load_consent_text()
         logger.info("✅ Consent text loaded")
         check_consent_integrity(db)
@@ -326,6 +332,8 @@ async def lifespan(app: FastAPI):
             pass
     await event_emitter.shutdown()
     await broker.shutdown()
+    from app.services.notifications import flush as flush_notifications
+    flush_notifications()
     logger.info("👋 Shutting down CViche Pipeline Viewer")
 
 
@@ -419,6 +427,10 @@ def readyz(response: Response, db: Session = Depends(get_db)):
         checks["db"] = {"ok": True}
     except Exception as exc:
         checks["db"] = {"ok": False, "error": str(exc)}
+
+    from app.services.notifications import validate_configuration
+    notif_status = validate_configuration()
+    checks["notifications"] = {"ok": True, **notif_status}
 
     storage_backend = cviche_storage_backend
     if storage_backend == "s3":

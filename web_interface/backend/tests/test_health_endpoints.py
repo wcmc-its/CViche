@@ -40,6 +40,26 @@ class TestReadyz:
         assert body["status"] == "ready"
         assert body["checks"]["db"] == {"ok": True}
 
+    def test_readyz_reports_notifications_unconfigured(self, client, monkeypatch):
+        """#782 D4: /readyz surfaces notification-config state without ever
+        failing readiness on it (ok stays True either way)."""
+        monkeypatch.delenv("CVICHE_TEAMS_WEBHOOK_URL", raising=False)
+        response = client.get("/readyz")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["checks"]["notifications"] == {
+            "ok": True, "configured": False, "valid": False,
+        }
+
+    def test_readyz_reports_notifications_configured_and_valid(self, client, monkeypatch):
+        monkeypatch.setenv("CVICHE_TEAMS_WEBHOOK_URL", "https://webhook.example/teams")
+        response = client.get("/readyz")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["checks"]["notifications"] == {
+            "ok": True, "configured": True, "valid": True,
+        }
+
     def test_readyz_broken_db_returns_503(self, client):
         from app.main import app
 
