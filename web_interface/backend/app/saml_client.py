@@ -1,5 +1,6 @@
 """pysaml2 SP client factory, certificate generation, and SAML attribute extraction."""
 import logging
+import os
 import shutil
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
@@ -36,7 +37,10 @@ def _find_xmlsec1() -> str:
         "/usr/bin/xmlsec1",            # Linux
     ]
     for path in candidates:
-        if Path(path).exists():
+        # A candidate that exists but isn't executable (e.g. a partial
+        # package install) must fall through to the PATH lookup below, not
+        # be handed to pysaml2/xmlsec as if it were runnable.
+        if Path(path).exists() and os.access(path, os.X_OK):
             return path
 
     # Fall back to PATH lookup
@@ -180,12 +184,20 @@ def _cwid_from(uid: str | None, eppn: str | None) -> str | None:
     """Derive the CWID identity anchor from released attributes.
 
     Prefer an explicit `uid`; else the local-part of the ePPN
-    (<cwid>@med.cornell.edu). Returns None if neither is usable.
+    (<cwid>@med.cornell.edu). Returns None if neither is usable -- including
+    an ePPN with an empty local part (e.g. "@med.cornell.edu"), which must
+    yield None, not "" (mrj4001 review, PR #781 thread r3967362882 #21): a
+    falsy-but-non-None cwid would reach provisioning as a garbage identity
+    anchor instead of the ValueError extract_user_attrs raises for "no CWID
+    derivable". The SP trusts exactly one registered IdP (docs/sp-
+    registration.md); an unexpected ePPN domain is accepted as-is -- no
+    domain allowlist here.
     """
     if uid:
         return uid.strip().lower()
     if eppn and "@" in eppn:
-        return eppn.split("@", 1)[0].strip().lower()
+        local = eppn.split("@", 1)[0].strip().lower()
+        return local or None
     return None
 
 
