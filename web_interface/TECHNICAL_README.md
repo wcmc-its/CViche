@@ -121,7 +121,7 @@ uvicorn app.main:app --reload --port 8000
 
 The backend resolves its connection from four separate settings -- `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` -- looked up by `get_config` (environment variable first, then the `db:` section of `auth_config.yaml`). There is no `DATABASE_URL` setting; all four are required and `create_cviche_engine` raises at boot if any is empty.
 
-By default the engine authenticates with an RDS IAM token over TLS. Setting `DB_PASSWORD` switches it to password auth without TLS, which is how the local compose stack reaches its MariaDB container.
+`DB_AUTH_MODE` selects the credential, and defaults to `iam`: an RDS IAM token over TLS, with the server certificate verified against the CA bundle vendored at `web_interface/backend/rds_ca/`. Setting `DB_AUTH_MODE=password` switches to password auth without TLS, which is how the local compose stack reaches its MariaDB container; that mode requires `DB_PASSWORD` and refuses to start without it. Any other value fails at boot. `DB_PASSWORD` on its own no longer changes the mode -- a stray password in a deployed environment must not be able to downgrade IAM + verified TLS to an unauthenticated connection.
 
 ### 3. Frontend Setup
 
@@ -153,7 +153,8 @@ The frontend runs on port 3000 by default and proxies `/api` and `/ws` requests 
 |----------|----------|---------|-------------|
 | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER` | Yes | none | MariaDB connection parameters. Resolved individually by `get_config` (env, then `auth_config.yaml`'s `db:` section) and passed to `create_cviche_engine`. Boot fails if any is empty. |
 | `MIGRATE_USER` | Yes | none | DB user Alembic connects as (`alembic/env.py`). Distinct from `DB_USER`; both must be set. |
-| `DB_PASSWORD` | No | unset | When set, password auth without TLS instead of RDS IAM tokens. Local dev only. |
+| `DB_AUTH_MODE` | No | `iam` | Which database credential the engine uses: `iam` (RDS IAM token over certificate-verified TLS) or `password` (local compose only). Any other value, including an explicitly empty one, raises at boot. |
+| `DB_PASSWORD` | If `password` | unset | Password for `DB_AUTH_MODE=password`. Local dev only. Ignored entirely under `iam`, so it cannot silently downgrade a deployed instance; `password` mode with this unset or empty refuses to start. |
 | `CVICHE_SESSION_SECRET` | Yes (prod) | Random (dev only) | Secret key for signing session cookies with `itsdangerous`. If not set, a random key is generated on startup and a warning is logged. Sessions will not survive server restarts in dev. |
 | `CVICHE_SECURE_COOKIES` | No | `true` | Set to `false` for HTTP-only deployments without TLS. When `true`, the browser requires HTTPS to set the session cookie. If the cookie silently fails to set and login does not work, this is the most likely cause. |
 | `CVICHE_ALLOWED_ORIGINS` | No | `http://localhost:3000,http://localhost:5173` | Comma-separated list of allowed CORS origins. Also used for Origin/Referer CSRF checking on state-changing requests. |
