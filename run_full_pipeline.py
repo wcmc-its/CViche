@@ -68,16 +68,22 @@ Outputs:
     - Stage 6:  src/unified_pipeline/outputs/stage_6_wcm_documents/{uid}_wcm.docx
 """
 
+import contextvars
+import functools
+import hashlib
 import sys
 import json
 import logging
+import logging.config
 import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from datetime import timedelta
 
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent / 'src'))
 
+from unified_pipeline.core.prompt_logger import set_current_run_id
 from unified_pipeline.llm_client import format_models_used
 from unified_pipeline.segmentation.chunked_chat_hierarchy_extractor import get_cv_hierarchy_chunked
 from unified_pipeline.stage_1b_hierarchy_mapper import run_stage_1b
@@ -93,41 +99,205 @@ from unified_pipeline.stage_5d_citation_formatter import run_stage_5d
 from unified_pipeline.stage_6_word_template import run_stage6
 
 logger = logging.getLogger(__name__)
+# "__main__" when this file is run as the CLI, "run_full_pipeline" when a test
+# imports it. configure_cli_logging() and the stderr filter both key off the
+# real name so the handlers land on this logger either way.
+_NARRATION_LOGGER = logger.name
 
 
-def get_stage_order():
+class _NarrationOnly(logging.Filter):
+    """Let the stdout handler take the narration (INFO and below) and nothing else."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < logging.WARNING
+
+
+class _NotNarration(logging.Filter):
+    """Keep this CLI's narration off stderr -- it already went to stdout, unprefixed.
+
+    Every other logger's INFO still reaches the stderr handler, which is where
+    the stage modules' own logging has always gone.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not (record.name == _NARRATION_LOGGER
+                    and record.levelno < logging.WARNING)
+
+
+def configure_cli_logging() -> None:
+    """Wire this CLI's two output streams. Called from __main__, and by the
+    tests that assert on either stream.
+
+    stdout: this module's INFO records, formatted as the message and nothing
+    else. That is the narration AND a cross-process contract --
+    scripts/run_corpus_batch.sh:142-147 greps `Top-level sections:`,
+    `Total headers:`, `Entries extracted:`, `Entries classified:` and an
+    ANCHORED `^Models: ` out of this stdout, so a timestamp or level in front
+    of a line blanks a column of summary.tsv. CODING_STANDARDS.md 7.1 names it;
+    src/unified_pipeline/tests/test_run_full_pipeline_stdout_contract.py pins it.
+
+    stderr: everything else, timestamped -- WARNING and above from here
+    (stage-failure notices and their tracebacks) plus every other logger. The
+    two filters are the whole split: narration goes to exactly one stream.
+
+    dictConfig, not basicConfig (project convention), and deliberately not
+    web_interface/backend/app/logging_config.py's configure_logging():
+    CODING_STANDARDS.md 1.4 -- the pipeline core does not import the web
+    backend.
+    """
+    logging.config.dictConfig({
+        "version": 1,
+        "disable_existing_loggers": False,
+        "filters": {
+            "narration_only": {"()": _NarrationOnly},
+            "not_narration": {"()": _NotNarration},
+        },
+        "formatters": {
+            "plain": {"format": "%(asctime)s %(levelname)s %(name)s %(message)s"},
+            "message_only": {"format": "%(message)s"},
+        },
+        "handlers": {
+            "default": {
+                "class": "logging.StreamHandler",
+                "formatter": "plain",
+                "stream": "ext://sys.stderr",
+                "filters": ["not_narration"],
+            },
+            "narration": {
+                "class": "logging.StreamHandler",
+                "formatter": "message_only",
+                "stream": "ext://sys.stdout",
+                "filters": ["narration_only"],
+            },
+        },
+        "loggers": {
+            _NARRATION_LOGGER: {
+                "level": "INFO",
+                "handlers": ["narration"],
+                # WARNING and above still travel up to the stderr handler; the
+                # filters above decide which stream each record lands on.
+                "propagate": True,
+            },
+        },
+        "root": {"level": "INFO", "handlers": ["default"]},
+    })
+
+# '3' is a CLI alias for "run 3a then 3b", not a stage with a runner of its own.
+_COMPOSITE_STAGE = '3'
+# Nothing runs after stage 6, so its failure notice does not promise to continue.
+_FINAL_STAGE = '6'
+# The only stages that open the source document. Everything else works from the
+# JSON artifacts an earlier run left behind -- including stage 4, which reads
+# Path(docx_path).stem and never the file -- so a standalone --stage rerun of
+# those does not need the .docx to still be on disk.
+_STAGES_READING_THE_DOCX = ('1a', '1b', '2')
+_BANNER_WIDTH = 80
+
+
+def get_stage_order() -> list[str]:
     """Return ordered list of stage identifiers."""
     return ['1a', '1b', '2', '3a', '3b', '3', '4', '4.5', '5', '5b', '5c', '5d', '6']
 
 
-def failed_stages(all_results):
+# The MINIMUM prerequisite each stage can start from, in one place.
+#
+# Before #780's review the registry stopped at stage 4 and stages 4.5-6 resolved
+# their inputs by globbing the outputs tree instead -- two competing
+# dependency-resolution mechanisms, one of which could pick a previous run's
+# artifact. This map is the only one; STAGE_INPUT_PREFERENCE below says which
+# *better* input a stage will use when the run produced one.
+STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
+    '1a': (),
+    '1b': ('1a',),
+    '2': ('1b',),
+    '3a': ('1a',),
+    '3b': ('2', '3a'),
+    '3': ('1a', '2'),      # --stage 3 runs 3a then 3b
+    '4': ('3b',),
+    '4.5': ('4',),
+    '5': ('4',),
+    '5b': ('4',),
+    '5c': ('4',),
+    '5d': ('4',),
+    '6': ('4',),
+}
+
+# Which predecessor output each stage prefers as its input, best first. A stage
+# not listed here takes its input from a named prerequisite instead (stage 1b
+# from 1a, stage 2 from 1b, stage 3b from 3a) rather than from a preference
+# chain.
+STAGE_INPUT_PREFERENCE: dict[str, tuple[str, ...]] = {
+    '4.5': ('4',),
+    '5': ('4',),
+    '5b': ('5', '4'),
+    '5c': ('5b', '5', '4'),
+    '5d': ('5c', '5b', '5', '4'),
+    '6': ('5d', '5c', '5b', '5', '4'),
+}
+
+
+@dataclass(frozen=True)
+class StageResult:
+    """What one stage produced.
+
+    Replaces the per-stage ``dict`` with optional ``error`` / ``skipped`` /
+    ``cost`` / ``output_file`` keys that every reader had to guess at (#780
+    review). ``cost=None`` means *not known*, which is deliberately distinct
+    from ``0.0``: stage 5b's cost is unreadable when its output file is missing
+    or corrupt, and #489 is exactly the incident where that read as a genuine
+    zero.
+    """
+
+    stage: str
+    output_file: str | None = None
+    duration_seconds: float = 0.0
+    cost: float | None = None
+    error: str | None = None
+    skipped_reason: str | None = None
+    stats: Mapping[str, object] = field(default_factory=dict)
+
+    @property
+    def succeeded(self) -> bool:
+        return self.error is None and self.skipped_reason is None
+
+
+def _produced_a_file(output_file: str | None) -> bool:
+    """True only when the recorded output exists on disk *as a file*.
+
+    A recorded path is not evidence: ``{'output_file': '/path/missing.docx'}``
+    used to count as success, which left #443's failure mode half open -- exit
+    0 with no deliverable. A directory at that path is not a document either.
+    """
+    return bool(output_file) and Path(output_file).is_file()
+
+
+def failed_stages(results: Mapping[str, StageResult]) -> list[str]:
     """Return the names of stages that did not produce what they were asked to.
 
-    Every stage wrapper below records its exception as
-    ``all_results['stage_X'] = {'error': ...}`` and carries on. Nothing ever
-    read that key back: a stage-6 crash printed a warning, then printed
-    PIPELINE COMPLETE and exited 0 with no document on disk (#443). Batch
-    tooling that filters on the exit column -- which is what any reasonable
-    consumer does -- counted two zero-output runs of 96 as successes.
+    Every stage runs inside ``run_stage``, which records its exception as
+    ``results['stage_X'].error`` and carries on. Nothing ever read that back: a
+    stage-6 crash printed a warning, then printed PIPELINE COMPLETE and exited 0
+    with no document on disk (#443). Batch tooling that filters on the exit
+    column -- which is what any reasonable consumer does -- counted two
+    zero-output runs of 96 as successes.
 
     Counted as failed:
 
     - a stage that stored an ``error``
     - a stage that was reached but skipped for a missing prerequisite, which
       only happens downstream of an earlier failure
-    - stage 6 with no ``output_file``, because stage 6 is the deliverable: if it
-      produced no document the run produced nothing, whatever else succeeded
+    - stage 6 whose ``output_file`` is not a file on disk, because stage 6 is
+      the deliverable: if it produced no document the run produced nothing,
+      whatever else succeeded
 
-    A stage absent from ``all_results`` never ran (``--stage`` targeted a
-    different one) and is not a failure.
+    A stage absent from ``results`` never ran (``--stage`` targeted a different
+    one) and is not a failure.
     """
     failed = []
-    for name, result in all_results.items():
-        if not isinstance(result, dict):
-            continue
-        if 'error' in result or 'skipped' in result:
+    for name, result in results.items():
+        if result.error is not None or result.skipped_reason is not None:
             failed.append(name)
-        elif name == 'stage_6' and not result.get('output_file'):
+        elif name == 'stage_6' and not _produced_a_file(result.output_file):
             failed.append(name)
     return failed
 
@@ -147,8 +317,22 @@ def format_duration(seconds: float) -> str:
         return f"{hours}h {mins}m {secs:.1f}s"
 
 
-def get_output_paths(document_uid: str) -> dict:
-    """Get expected output file paths for each stage."""
+def get_output_paths(document_uid: str) -> dict[str, Path]:
+    """Expected output file path for EVERY stage.
+
+    Each entry mirrors the writing module's own naming, so a standalone
+    ``--stage`` run can find an input by its exact path instead of a
+    ``*{uid}*`` glob:
+
+    - 5:  ``stage_5_pubmed_enrichment.py:49,717`` (``OUTPUT_DIR``, ``{uid}_enriched.json``)
+    - 5b: ``stage_5b_institution_enrichment.py:59,421``
+    - 5c: ``stage_5c_teaching_formatter.py:32,414``
+    - 5d: ``stage_5d_citation_formatter.py:30,381``
+    - 6:  ``stage_6_word_template.py:269,900``
+
+    Those five modules name their output from the ``document_uid`` carried in
+    their input JSON, which every stage propagates unchanged from stage 1a.
+    """
     base = Path('src/unified_pipeline/outputs')
     return {
         '1a': base / 'stage_1a_segmentation' / f'{document_uid}_segmented.json',
@@ -158,40 +342,34 @@ def get_output_paths(document_uid: str) -> dict:
         '3b': base / 'stage_3b_classified_entries' / f'{document_uid}_classified.json',
         '4': base / 'stage_4_field_extraction' / f'{document_uid}_fields.json',
         '4.5': base / 'stage_4_5_research_summary' / f'{document_uid}_research_summary.json',
+        '5': base / 'stage_5_enrichment' / f'{document_uid}_enriched.json',
+        '5b': base / 'stage_5b_institution_enrichment' / f'{document_uid}_institution_enriched.json',
+        '5c': base / 'stage_5c_teaching_formatted' / f'{document_uid}_teaching_formatted.json',
+        '5d': base / 'stage_5d_citation_formatted' / f'{document_uid}_citation_formatted.json',
+        '6': base / 'stage_6_wcm_documents' / f'{document_uid}_wcm.docx',
     }
 
 
-def check_prerequisites(start_stage: str, document_uid: str) -> tuple:
+def check_prerequisites(start_stage: str, document_uid: str) -> tuple[bool, str | None, str | None]:
     """
     Check that prerequisite outputs exist for starting at a given stage.
+
+    Resolves through STAGE_DEPENDENCIES, so every stage is validated -- before
+    #780's review the map stopped at stage 4 and ``--stage 5c`` skipped
+    validation entirely.
 
     Returns:
         (success: bool, missing_file: str or None, required_stage: str or None)
     """
     paths = get_output_paths(document_uid)
-
-    # Map each stage to its required prerequisite(s)
-    # Some stages need multiple prerequisites
-    prerequisites = {
-        '1a': [],           # No prerequisite
-        '1b': ['1a'],       # Needs Stage 1a
-        '2': ['1b'],        # Needs Stage 1b
-        '3a': ['1a'],       # Needs Stage 1a (hierarchy)
-        '3b': ['2', '3a'],  # Needs Stage 2 (entries) and Stage 3a (header mappings)
-        '3': ['1a', '2'],   # Needs Stage 1a and Stage 2 (will run 3a then 3b)
-        '4': ['3b'],        # Needs Stage 3b (classified entries)
-    }
-
-    prereqs = prerequisites.get(start_stage, [])
-    for prereq in prereqs:
+    for prereq in STAGE_DEPENDENCIES.get(start_stage, ()):
         prereq_path = paths[prereq]
         if not prereq_path.exists():
             return False, str(prereq_path), prereq
-
     return True, None, None
 
 
-def resolve_cv_path(cv_path_or_uid: str) -> tuple:
+def resolve_cv_path(cv_path_or_uid: str) -> tuple[str, str]:
     """
     Resolve CV path from either a full path or just the document UID.
 
@@ -226,949 +404,771 @@ def resolve_cv_path(cv_path_or_uid: str) -> tuple:
     return cv_path_or_uid, cv_path_or_uid
 
 
-def main():
-    # Parse arguments
-    if len(sys.argv) < 2:
-        print("Usage: python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE]")
-        print()
-        print("Arguments:")
-        print("  cv_path_or_uid : Path to Word document OR just the document UID")
-        print("                   (if UID only, looks in data/sample_cvs/word/)")
-        print("  --stage STAGE  : Run ONLY this stage: '1a', '1b', '2', '3a', '3b', '3', or '4'")
-        print("                   (omit for full pipeline)")
-        print()
-        print("Examples:")
-        print("  # Full pipeline")
-        print("  python3 run_full_pipeline.py 2097_Upton_Cv")
-        print()
-        print("  # Run only Stage 2")
-        print("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 2")
-        print()
-        print("  # Run only Stage 3a (header taxonomy mapping)")
-        print("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3a")
-        print()
-        print("  # Run only Stage 3b (entry classification)")
-        print("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3b")
-        print()
-        print("  # Run both 3a and 3b")
-        print("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3")
-        print()
-        print("  # Run only Stage 4 (field extraction)")
-        print("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 4")
+# prompt_logger._RUN_ID_RE caps a run id at 10 chars of [A-Za-z0-9_-]; that
+# module is off limits for this ticket, so document_uid (routinely longer,
+# e.g. 'sample_vasquez_cv') is hashed down to this length rather than passed
+# through as-is.
+_RUN_SCOPE_ID_LEN = 10
+
+
+def resolve_cv_path_for_run(cv_path_or_uid: str) -> tuple[str, str]:
+    """resolve_cv_path(), then scope this process's prompt-log writes to the
+    resolved document for the rest of the run (#686 -- the CLI never scoped
+    its writes, so every run's transcripts landed in one shared flat dir).
+    """
+    cv_path, document_uid = resolve_cv_path(cv_path_or_uid)
+    run_scope_id = hashlib.sha256(document_uid.encode()).hexdigest()[:_RUN_SCOPE_ID_LEN]
+    set_current_run_id(run_scope_id)
+    return cv_path, document_uid
+
+
+def _scope_prompt_logger_per_run(fn: Callable[[], int]) -> Callable[[], int]:
+    """Decorator: run fn inside a fresh copy of the current contextvars
+    Context, so set_current_run_id() -- called deep inside fn, via
+    resolve_cv_path_for_run() -- only ever mutates that copy. No module-level
+    state is needed to undo it: the copy is discarded when fn returns OR
+    raises (including sys.exit()'s SystemExit), so prompt_logger's ContextVar
+    reverts on its own in the caller's real context -- no token, no global,
+    no explicit reset call. Applied to main() itself rather than called
+    inside it so main()'s line count never changes: a decorator line is not
+    part of a FunctionDef node's own lineno..end_lineno span."""
+    @functools.wraps(fn)
+    def wrapper() -> int:
+        return contextvars.copy_context().run(fn)
+    return wrapper
+
+
+@dataclass
+class PipelineContext:
+    """Everything a stage needs to know about the run it is part of.
+
+    ``outputs`` holds only what THIS run produced, keyed by stage id. That is
+    the whole point of it: stages 5b/5c/5d/6 used to rediscover their input by
+    globbing ``*{uid}*`` in the outputs tree and taking ``candidates[0]``, so a
+    previous run's artifact could be rendered as if it were this run's (#780
+    review). ``results`` is the reporting record and may also carry artifacts
+    that a ``--stage`` run found already on disk.
+    """
+
+    cv_path: Path
+    document_uid: str
+    target_stage: str | None = None
+    outputs: dict[str, str] = field(default_factory=dict)
+    results: dict[str, StageResult] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # Stage 4 is handed cv_path and locates stage 3b's output from
+        # Path(docx_path).stem (stage_4_field_extractor.py:104-106), so the two
+        # identities must agree. resolve_cv_path() always returns them equal;
+        # this fails loudly rather than silently extracting a different CV if
+        # that ever stops being true.
+        if self.cv_path.stem != self.document_uid:
+            raise ValueError(
+                f"resolved CV path stem {self.cv_path.stem!r} does not match "
+                f"document uid {self.document_uid!r}; stage 4 resolves its input "
+                f"from the path stem and would read another document's entries")
+
+    def should_run(self, stage: str) -> bool:
+        """Whether this run executes ``stage``."""
+        if self.target_stage is None:
+            return True  # Full pipeline - run all stages
+        if self.target_stage == _COMPOSITE_STAGE:
+            # --stage 3 means run both 3a and 3b
+            return stage in ('3a', '3b')
+        return stage == self.target_stage  # Single stage mode - only run the target
+
+    def record(self, stage: str, result: StageResult) -> None:
+        """Store a stage's result, and its artifact if it produced one."""
+        self.results[f'stage_{stage}'] = result
+        if result.output_file:
+            self.outputs[stage] = result.output_file
+
+    def best_input(self, *stages: str) -> str | None:
+        """The best available input among ``stages``, best first.
+
+        In a full run the answer comes only from what this run produced: an
+        artifact this run did not write does not exist as far as the pipeline is
+        concerned. Disk is consulted only in standalone ``--stage`` mode, where
+        reading an earlier run's artifact is the explicit intent -- and then by
+        the stage's exact expected path, never by a substring glob.
+        """
+        for stage in stages:
+            produced = self.outputs.get(stage)
+            if produced:
+                return produced
+        if self.target_stage is None:
+            return None
+        expected = get_output_paths(self.document_uid)
+        for stage in stages:
+            path = expected[stage]
+            if path.is_file():
+                return str(path)
+        return None
+
+
+@dataclass(frozen=True)
+class PipelineResult:
+    """The whole run: every stage's result, wall time, and what failed."""
+
+    results: Mapping[str, StageResult]
+    total_duration_seconds: float
+    failed: list[str]
+
+    @property
+    def total_cost(self) -> float:
+        """Derived, never accumulated -- a new costed stage cannot be forgotten."""
+        return sum(result.cost or 0.0 for result in self.results.values())
+
+    @property
+    def exit_code(self) -> int:
+        return 1 if self.failed else 0
+
+
+def _banner(title: str) -> None:
+    """The rule/title/rule block each stage opens with."""
+    logger.info("=" * _BANNER_WIDTH)
+    logger.info("%s", title)
+    logger.info("=" * _BANNER_WIDTH)
+    logger.info("")
+
+
+def _requirement_label(stages: tuple[str, ...], all_required: bool = False) -> str:
+    """Human name for the inputs a stage needed, in preference order."""
+    if all_required:
+        return " and ".join(f"Stage {stage}" for stage in stages)
+    if len(stages) == 1:
+        return f"Stage {stages[0]}"
+    if len(stages) == 2:
+        return f"Stage {stages[0]} or {stages[1]}"
+    return f"Stage {', '.join(stages[:-1])}, or {stages[-1]}"
+
+
+def _skipped(stage: str, requirement: str) -> StageResult:
+    """Record a stage that could not start because its input was never produced."""
+    logger.info("  Skipped: %s output required", requirement)
+    return StageResult(stage=stage, skipped_reason=f"{requirement} required")
+
+
+def run_stage(ctx: PipelineContext, stage: str,
+              fn: Callable[[PipelineContext], StageResult]) -> StageResult:
+    """Run one stage inside the pipeline's single failure boundary.
+
+    One place owns timing, the try/except, the traceback, and result storage --
+    so every stage, stage 1a included, behaves identically when it raises. Stage
+    1a used to run outside any handler: a segmentation failure escaped main(),
+    so no summary printed and failed_stages() never ran.
+    """
+    start = time.perf_counter()
+    try:
+        result = fn(ctx)
+    except Exception as e:
+        # Continue-on-error is the CLI's documented behaviour, so this catches
+        # everything -- but it never swallows: the traceback goes to the logger
+        # and the reason is carried into the summary and the exit code.
+        logger.exception("Stage %s failed", stage)
+        logger.warning("  Warning: Stage %s failed: %s: %s", stage, type(e).__name__, e)
+        if stage != _FINAL_STAGE:
+            logger.warning("  Continuing with remaining stages...")
+        result = StageResult(stage=stage, error=f"{type(e).__name__}: {e}")
+    result = replace(result, duration_seconds=time.perf_counter() - start)
+    if result.succeeded:
+        logger.info("  Time: %s", format_duration(result.duration_seconds))
+    logger.info("")
+    ctx.record(stage, result)
+    return result
+
+
+def _count_headers(nodes: list[dict]) -> int:
+    """Total header nodes in a hierarchy, including every nested child."""
+    count = len(nodes)
+    for node in nodes:
+        count += _count_headers(node.get('children', []))
+    return count
+
+
+def _hierarchy_lines(nodes: list[dict], depth: int = 0) -> list[str]:
+    """Indented ``[LEVEL] text`` lines for the human-readable stage 1a dump."""
+    lines: list[str] = []
+    for node in nodes:
+        indent = "  " * depth
+        level = node.get('level', 'H1')
+        text = node.get('text', '')
+        lines.append(f"{indent}[{level}] {text}")
+        lines.extend(_hierarchy_lines(node.get('children', []), depth + 1))
+    return lines
+
+
+def _write_hierarchy_txt(txt_file: Path, document_uid: str, hierarchy: list[dict]) -> None:
+    """Write stage 1a's .txt companion next to its JSON."""
+    with open(txt_file, 'w') as f:
+        f.write(f"CV Hierarchy: {document_uid}\n")
+        f.write("=" * _BANNER_WIDTH + "\n\n")
+        for line in _hierarchy_lines(hierarchy):
+            f.write(line + "\n")
+
+
+def _stage_1a(ctx: PipelineContext) -> StageResult:
+    """Segmentation: the CV's header hierarchy, from the docx."""
+    _banner("STAGE 1A: HIERARCHY EXTRACTION")
+
+    hierarchy, stats = get_cv_hierarchy_chunked(cv_path=str(ctx.cv_path))
+
+    output_dir = Path('src/unified_pipeline/outputs/stage_1a_segmentation')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_file = output_dir / f"{ctx.document_uid}_segmented.json"
+    total_headers = _count_headers(hierarchy)
+
+    with open(output_file, 'w') as f:
+        json.dump({'document_uid': ctx.document_uid,
+                   'hierarchy': hierarchy,
+                   'meta': stats}, f, indent=2)
+    _write_hierarchy_txt(output_file.with_suffix('.txt'), ctx.document_uid, hierarchy)
+
+    cost = stats.get('extraction_cost', 0)
+    logger.info("")
+    logger.info("Stage 1a Complete")
+    logger.info("  Output: %s", output_file)
+    logger.info("  Top-level sections: %s", len(hierarchy))
+    logger.info("  Total headers: %s", total_headers)
+    logger.info("  Cost: $%.4f", cost)
+    return StageResult(stage='1a', output_file=str(output_file), cost=cost,
+                       stats={'num_sections': len(hierarchy),
+                              'total_headers': total_headers,
+                              'meta': stats})
+
+
+def _stage_1b(ctx: PipelineContext) -> StageResult:
+    """Hierarchy mapping: header nodes to docx element indices. No LLM."""
+    _banner("STAGE 1B: HIERARCHY MAPPING (NO LLM)")
+
+    hierarchy_json_path = ctx.best_input('1a')
+    if not hierarchy_json_path:
+        return _skipped('1b', _requirement_label(STAGE_DEPENDENCIES['1b']))
+
+    data, path = run_stage_1b(docx_path=str(ctx.cv_path),
+                              hierarchy_json_path=hierarchy_json_path)
+    logger.info("")
+    logger.info("Stage 1b Complete")
+    logger.info("  Output: %s", path)
+    logger.info("  Total sections: %s", data['meta']['total_sections'])
+    logger.info("  Leaf sections: %s", data['meta']['leaf_sections'])
+    return StageResult(stage='1b', output_file=str(path),
+                       stats={'total_sections': data['meta']['total_sections'],
+                              'leaf_sections': data['meta']['leaf_sections']})
+
+
+def _stage_2(ctx: PipelineContext) -> StageResult:
+    """Entry extraction: entries and their text, per leaf section."""
+    _banner("STAGE 2: ENTRY EXTRACTION")
+
+    hierarchy_json_path = ctx.best_input('1b')
+    if not hierarchy_json_path:
+        return _skipped('2', _requirement_label(STAGE_DEPENDENCIES['2']))
+
+    data, path = run_stage_2(docx_path=str(ctx.cv_path),
+                             hierarchy_json_path=str(hierarchy_json_path))
+    cost = data.get('total_cost', 0)
+    entries_found = data.get('total_entries', 0)
+    logger.info("")
+    logger.info("Stage 2 Complete")
+    logger.info("  Output: %s", path)
+    logger.info("  Entries extracted: %s", entries_found)
+    logger.info("  Cost: $%.4f", cost)
+    return StageResult(stage='2', output_file=str(path), cost=cost,
+                       stats={'total_entries': entries_found})
+
+
+def _stage_3a(ctx: PipelineContext) -> StageResult:
+    """Header taxonomy mapping: CV headers to taxonomy codes."""
+    _banner("STAGE 3A: HEADER TAXONOMY MAPPING")
+
+    # run_stage_3a resolves stage 1a's file itself, from document_uid; the guard
+    # is still the pipeline's, so a failed 1a skips 3a instead of erroring in it.
+    if not ctx.best_input('1a'):
+        return _skipped('3a', _requirement_label(STAGE_DEPENDENCIES['3a']))
+
+    result = run_stage_3a(document_uid=ctx.document_uid)
+    cost = result['stats']['cost']
+    logger.info("")
+    logger.info("Stage 3a Complete")
+    logger.info("  Output: %s", result['output_path'])
+    logger.info("  Header nodes mapped: %s", result['node_count'])
+    logger.info("  Cost: $%.4f", cost)
+    return StageResult(stage='3a', output_file=str(result['output_path']), cost=cost,
+                       stats={'node_count': result['node_count']})
+
+
+def _stage_3b(ctx: PipelineContext) -> StageResult:
+    """Entry classification: taxonomy code per entry, from header + content."""
+    _banner("STAGE 3B: ENTRY CLASSIFICATION")
+
+    missing = tuple(stage for stage in STAGE_DEPENDENCIES['3b'] if not ctx.best_input(stage))
+    if missing:
+        return _skipped('3b', _requirement_label(missing, all_required=True))
+
+    result = run_stage_3b(document_uid=ctx.document_uid,
+                          stage_3a_path=ctx.best_input('3a'))
+    cost = result['stats']['cost']
+    logger.info("")
+    logger.info("Stage 3b Complete")
+    logger.info("  Output: %s", result['output_path'])
+    logger.info("  Entries classified: %s", result['total_entries'])
+    logger.info("  Cost: $%.4f", cost)
+    return StageResult(stage='3b', output_file=str(result['output_path']), cost=cost,
+                       stats={'entries_classified': result['total_entries'],
+                              'code_distribution': result.get('code_distribution', {})})
+
+
+def _stage_4(ctx: PipelineContext) -> StageResult:
+    """Field extraction: structured fields per classified entry."""
+    _banner("STAGE 4: FIELD EXTRACTION")
+
+    if not ctx.best_input('3b'):
+        return _skipped('4', _requirement_label(STAGE_DEPENDENCIES['4']))
+
+    # The resolved path, not a reconstructed f"{uid}.docx": process_cv reads only
+    # Path(docx_path).stem (stage_4_field_extractor.py:104-106) to locate stage
+    # 3b's output, and PipelineContext guarantees that stem == document_uid, so
+    # this carries the same identity without the working-directory coupling.
+    result = run_stage_4(docx_path=str(ctx.cv_path))
+    output = result['output']
+    cost = output.get('total_cost', 0)
+    logger.info("")
+    logger.info("Stage 4 Complete")
+    logger.info("  Output: %s", result['output_path'])
+    logger.info("  Entries with fields: %s", output.get('stats', {}).get('extracted', 0))
+    logger.info("  Cost: $%.4f", cost)
+    return StageResult(stage='4', output_file=str(result['output_path']), cost=cost,
+                       stats={'entries_extracted': output.get('total_entries', 0),
+                              'extraction_stats': output.get('stats', {})})
+
+
+def _stage_4_5(ctx: PipelineContext) -> StageResult:
+    """Research summary: biosketch-style M1 paragraph."""
+    _banner("STAGE 4.5: RESEARCH SUMMARY GENERATION")
+
+    input_path = ctx.best_input(*STAGE_INPUT_PREFERENCE['4.5'])
+    if not input_path:
+        return _skipped('4.5', _requirement_label(STAGE_INPUT_PREFERENCE['4.5']))
+
+    output_path = run_stage_4_5(input_path=input_path, verbose=True)
+    with open(output_path) as f:
+        data = json.load(f)
+    info = data.get('research_summary', {})
+    logger.info("")
+    logger.info("Stage 4.5 Complete")
+    logger.info("  Output: %s", output_path)
+    logger.info("  Method: %s", info.get('method', 'unknown'))
+    logger.info("  M1 Score: %.2f", info.get('m1_score', 0))
+    logger.info("  Summary length: %s chars", info.get('summary_length', 0))
+    return StageResult(stage='4.5', output_file=str(output_path),
+                       stats={'method': info.get('method', 'unknown'),
+                              'm1_score': info.get('m1_score', 0),
+                              'summary_length': info.get('summary_length', 0)})
+
+
+def _stage_5(ctx: PipelineContext) -> StageResult:
+    """PubMed enrichment: publication metadata for matched citations."""
+    _banner("STAGE 5: PUBMED ENRICHMENT")
+
+    input_path = ctx.best_input(*STAGE_INPUT_PREFERENCE['5'])
+    if not input_path:
+        return _skipped('5', _requirement_label(STAGE_INPUT_PREFERENCE['5']))
+
+    result = run_stage5(stage4_path=input_path, verbose=True)
+    # The stage's own answer, not a path rebuilt here from the uid: rebuilding
+    # reported an artifact that stage 5 had not necessarily written.
+    output_path = result['output_path']
+    logger.info("")
+    logger.info("Stage 5 Complete")
+    logger.info("  Output: %s", output_path)
+    return StageResult(stage='5', output_file=str(output_path))
+
+
+def _read_stage_5b_cost(output_path: str) -> float | None:
+    """Stage 5b's own reported cost, or None when its output cannot be read.
+
+    None is not 0.0: #489 is the incident where a corrupt or missing stage 5b
+    output was swallowed and reported as a genuine $0.00.
+    """
+    try:
+        with open(output_path) as f:
+            data = json.load(f)
+    except Exception as e:
+        logger.warning("Could not read stage 5b cost from %s: %s: %s",
+                       output_path, type(e).__name__, e)
+        return None
+    return data.get('institution_enrichment_stats', {}).get('cost', 0.0)
+
+
+def _stage_5b(ctx: PipelineContext) -> StageResult:
+    """Institution enrichment: city/state on institution-bearing entries."""
+    _banner("STAGE 5B: INSTITUTION ENRICHMENT")
+
+    input_path = ctx.best_input(*STAGE_INPUT_PREFERENCE['5b'])
+    if not input_path:
+        return _skipped('5b', _requirement_label(STAGE_INPUT_PREFERENCE['5b']))
+
+    output_path = run_stage5b(input_path=input_path, verbose=True)
+    cost = _read_stage_5b_cost(output_path)
+    logger.info("")
+    logger.info("Stage 5b Complete")
+    logger.info("  Output: %s", output_path)
+    if cost is None:
+        logger.info("  Cost: unknown (failed to read institution enrichment stats)")
+    elif cost > 0:
+        logger.info("  Cost: $%.4f", cost)
+    return StageResult(stage='5b', output_file=str(output_path), cost=cost)
+
+
+def _stage_5c(ctx: PipelineContext) -> StageResult:
+    """Teaching formatter: readable K-code entries."""
+    _banner("STAGE 5C: TEACHING FORMATTER")
+
+    input_path = ctx.best_input(*STAGE_INPUT_PREFERENCE['5c'])
+    if not input_path:
+        return _skipped('5c', _requirement_label(STAGE_INPUT_PREFERENCE['5c']))
+
+    output_path = run_stage_5c(input_path=input_path, verbose=True)
+    logger.info("")
+    logger.info("Stage 5c Complete")
+    logger.info("  Output: %s", output_path)
+    return StageResult(stage='5c', output_file=str(output_path))
+
+
+def _stage_5d(ctx: PipelineContext) -> StageResult:
+    """Citation formatter: Vancouver format for non-enriched citations."""
+    _banner("STAGE 5D: CITATION FORMATTER (NON-ENRICHED)")
+
+    input_path = ctx.best_input(*STAGE_INPUT_PREFERENCE['5d'])
+    if not input_path:
+        return _skipped('5d', _requirement_label(STAGE_INPUT_PREFERENCE['5d']))
+
+    output_path = run_stage_5d(input_path=input_path, verbose=True)
+    logger.info("")
+    logger.info("Stage 5d Complete")
+    logger.info("  Output: %s", output_path)
+    return StageResult(stage='5d', output_file=str(output_path))
+
+
+def _stage_6(ctx: PipelineContext) -> StageResult:
+    """WCM Word template: the deliverable document."""
+    _banner("STAGE 6: WCM WORD TEMPLATE GENERATION")
+
+    input_path = ctx.best_input(*STAGE_INPUT_PREFERENCE['6'])
+    if not input_path:
+        return _skipped('6', _requirement_label(STAGE_INPUT_PREFERENCE['6']))
+
+    output_path = run_stage6(input_path=input_path, verbose=True)
+    logger.info("")
+    logger.info("Stage 6 Complete")
+    logger.info("  Output: %s", output_path)
+    return StageResult(stage='6', output_file=str(output_path))
+
+
+_STAGE_RUNNERS: dict[str, Callable[[PipelineContext], StageResult]] = {
+    '1a': _stage_1a,
+    '1b': _stage_1b,
+    '2': _stage_2,
+    '3a': _stage_3a,
+    '3b': _stage_3b,
+    '4': _stage_4,
+    '4.5': _stage_4_5,
+    '5': _stage_5,
+    '5b': _stage_5b,
+    '5c': _stage_5c,
+    '5d': _stage_5d,
+    '6': _stage_6,
+}
+
+
+def _load_existing_results(ctx: PipelineContext) -> None:
+    """In ``--stage`` mode, record earlier stages' artifacts already on disk.
+
+    They are recorded for the summary only -- never in ``ctx.outputs`` -- so a
+    full run can never take an input it did not itself produce.
+    """
+    if ctx.target_stage is None:
+        return
+    expected = get_output_paths(ctx.document_uid)
+    if not ctx.should_run('1a') and expected['1a'].is_file():
+        with open(expected['1a']) as f:
+            hierarchy = json.load(f).get('hierarchy', [])
+        ctx.results['stage_1a'] = StageResult(
+            stage='1a', output_file=str(expected['1a']),
+            stats={'num_sections': len(hierarchy),
+                   'total_headers': _count_headers(hierarchy)})
+    for stage in ('1b', '2', '3a'):
+        if not ctx.should_run(stage) and expected[stage].is_file():
+            ctx.results[f'stage_{stage}'] = StageResult(
+                stage=stage, output_file=str(expected[stage]))
+
+
+def run_pipeline(ctx: PipelineContext) -> PipelineResult:
+    """Run every stage this context selects, in order, through run_stage()."""
+    start = time.perf_counter()
+    _load_existing_results(ctx)
+    for stage in get_stage_order():
+        if stage == _COMPOSITE_STAGE:
+            continue  # an alias for 3a+3b, not a runner of its own
+        if ctx.should_run(stage):
+            run_stage(ctx, stage, _STAGE_RUNNERS[stage])
+    return PipelineResult(results=dict(ctx.results),
+                          total_duration_seconds=time.perf_counter() - start,
+                          failed=failed_stages(ctx.results))
+
+
+# Stage label -> the padded prefix the summary prints it under. Padding is part
+# of the output, so it lives with the label rather than being recomputed.
+_SUMMARY_LABELS: dict[str, str] = {
+    '1a': 'Stage 1a:',
+    '1b': 'Stage 1b:',
+    '2': 'Stage 2: ',
+    '3a': 'Stage 3a:',
+    '3b': 'Stage 3b:',
+    '4': 'Stage 4: ',
+    '4.5': 'Stage 4.5:',
+    '5': 'Stage 5: ',
+    '5b': 'Stage 5b:',
+    '5c': 'Stage 5c:',
+    '5d': 'Stage 5d:',
+    '6': 'Stage 6: ',
+}
+
+# Stages that report a cost of their own. Stage 5b is handled separately: its
+# cost can be unknown (#489), which is not the same as zero.
+_COST_REPORTING_STAGES = ('1a', '2', '3a', '3b', '4')
+_CODE_DISTRIBUTION_LIMIT = 10
+
+
+def _print_outputs(result: PipelineResult) -> None:
+    logger.info("Outputs:")
+    for stage, label in _SUMMARY_LABELS.items():
+        stage_result = result.results.get(f'stage_{stage}')
+        if stage_result is not None and stage_result.output_file:
+            logger.info("  %s %s", label, stage_result.output_file)
+    logger.info("")
+
+
+def _print_timing(result: PipelineResult) -> None:
+    logger.info("Timing:")
+    for stage, label in _SUMMARY_LABELS.items():
+        stage_result = result.results.get(f'stage_{stage}')
+        if (stage_result is not None and stage_result.succeeded
+                and stage_result.duration_seconds > 0):
+            logger.info("  %s %s", label, format_duration(stage_result.duration_seconds))
+    logger.info("  Total:    %s", format_duration(result.total_duration_seconds))
+    logger.info("")
+
+
+def _print_costs(result: PipelineResult) -> None:
+    logger.info("Costs:")
+    for stage in _COST_REPORTING_STAGES:
+        stage_result = result.results.get(f'stage_{stage}')
+        if stage_result is not None and stage_result.succeeded and stage_result.cost is not None:
+            logger.info("  %s $%.4f", _SUMMARY_LABELS[stage], stage_result.cost)
+    stage_5b = result.results.get('stage_5b')
+    if stage_5b is not None and stage_5b.succeeded:
+        if stage_5b.cost is None:
+            logger.info("  Stage 5b: unknown (institution enrichment stats unreadable)")
+        elif stage_5b.cost > 0:
+            logger.info("  %s $%.4f", _SUMMARY_LABELS['5b'], stage_5b.cost)
+    logger.info("  Total:    $%.4f", result.total_cost)
+    logger.info("")
+
+
+def _print_processing_stats(result: PipelineResult) -> None:
+    logger.info("Processing Stats:")
+    stage_1a = result.results.get('stage_1a')
+    if stage_1a is not None and 'num_sections' in stage_1a.stats:
+        logger.info("  Top-level sections: %s", stage_1a.stats['num_sections'])
+        logger.info("  Total headers: %s", stage_1a.stats['total_headers'])
+    stage_2 = result.results.get('stage_2')
+    if stage_2 is not None and 'total_entries' in stage_2.stats:
+        logger.info("  Entries extracted: %s", stage_2.stats['total_entries'])
+    stage_3a = result.results.get('stage_3a')
+    if stage_3a is not None and 'node_count' in stage_3a.stats:
+        logger.info("  Header nodes mapped: %s", stage_3a.stats['node_count'])
+    stage_3b = result.results.get('stage_3b')
+    if stage_3b is not None and 'entries_classified' in stage_3b.stats:
+        logger.info("  Entries classified: %s", stage_3b.stats['entries_classified'])
+    stage_4 = result.results.get('stage_4')
+    if stage_4 is not None and 'entries_extracted' in stage_4.stats:
+        logger.info("  Fields extracted: %s", stage_4.stats['entries_extracted'])
+    _print_code_distribution(stage_3b)
+    logger.info("")
+
+
+def _print_code_distribution(stage_3b: StageResult | None) -> None:
+    if stage_3b is None:
+        return
+    code_dist = stage_3b.stats.get('code_distribution') or {}
+    if not code_dist:
+        return
+    logger.info("")
+    logger.info("Code Distribution (top %s):", _CODE_DISTRIBUTION_LIMIT)
+    ranked = sorted(code_dist.items(), key=lambda item: -item[1])[:_CODE_DISTRIBUTION_LIMIT]
+    for code, count in ranked:
+        logger.info("  %s: %s", code, count)
+
+
+def print_summary(result: PipelineResult, ctx: PipelineContext) -> None:
+    """The run's operator-facing report.
+
+    Four of its lines are a cross-process contract, not decoration:
+    ``scripts/run_corpus_batch.sh:142-147`` greps ``Top-level sections:``,
+    ``Total headers:``, ``Entries extracted:``, ``Entries classified:`` and an
+    anchored ``^Models: `` out of this stdout into ``summary.tsv``. Pinned by
+    ``src/unified_pipeline/tests/test_run_full_pipeline_stdout_contract.py``.
+    """
+    logger.info("=" * _BANNER_WIDTH)
+    logger.info("%s", "PIPELINE COMPLETE WITH ERRORS" if result.failed else "PIPELINE COMPLETE")
+    logger.info("=" * _BANNER_WIDTH)
+    logger.info("Document: %s", ctx.document_uid)
+    logger.info("Models: %s", format_models_used())
+    logger.info("")
+    if result.failed:
+        logger.info("Failed stages:")
+        for name in result.failed:
+            stage_result = result.results[name]
+            reason = (stage_result.error or stage_result.skipped_reason
+                      or 'produced no output document')
+            logger.info("  %s: %s", name, reason)
+        logger.info("")
+    _print_outputs(result)
+    _print_timing(result)
+    _print_costs(result)
+    _print_processing_stats(result)
+
+
+def _print_usage() -> None:
+    logger.info("Usage: python3 run_full_pipeline.py <cv_path_or_uid> [--stage STAGE]")
+    logger.info("")
+    logger.info("Arguments:")
+    logger.info("  cv_path_or_uid : Path to Word document OR just the document UID")
+    logger.info("                   (if UID only, looks in data/sample_cvs/word/)")
+    logger.info("  --stage STAGE  : Run ONLY this stage: '1a', '1b', '2', '3a', '3b', '3', or '4'")
+    logger.info("                   (omit for full pipeline)")
+    logger.info("")
+    logger.info("Examples:")
+    logger.info("  # Full pipeline")
+    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv")
+    logger.info("")
+    logger.info("  # Run only Stage 2")
+    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 2")
+    logger.info("")
+    logger.info("  # Run only Stage 3a (header taxonomy mapping)")
+    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3a")
+    logger.info("")
+    logger.info("  # Run only Stage 3b (entry classification)")
+    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3b")
+    logger.info("")
+    logger.info("  # Run both 3a and 3b")
+    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 3")
+    logger.info("")
+    logger.info("  # Run only Stage 4 (field extraction)")
+    logger.info("  python3 run_full_pipeline.py 2097_Upton_Cv --stage 4")
+
+
+def parse_args(argv: list[str]) -> tuple[str, str | None]:
+    """(cv_path_or_uid, target_stage). Exits 1 on a missing or invalid argument."""
+    if len(argv) < 2:
+        _print_usage()
         sys.exit(1)
 
-    # First positional argument is the CV path or UID
-    cv_path, document_uid = resolve_cv_path(sys.argv[1])
-
-    # Parse optional flags
     target_stage = None  # None = run all stages; otherwise run only that stage
     valid_stages = get_stage_order()
-
     i = 2  # Start after the cv_path_or_uid argument
-    while i < len(sys.argv):
-        arg = sys.argv[i]
-        if arg == "--stage" and i + 1 < len(sys.argv):
-            target_stage = sys.argv[i + 1]
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--stage" and i + 1 < len(argv):
+            target_stage = argv[i + 1]
             if target_stage not in valid_stages:
-                print(f"Error: Invalid stage '{target_stage}'. Use one of: {', '.join(valid_stages)}")
+                logger.error("Error: Invalid stage '%s'. Use one of: %s",
+                             target_stage, ', '.join(valid_stages))
                 sys.exit(1)
             i += 2
         else:
             i += 1
+    return argv[1], target_stage
 
-    # Check prerequisites if running a specific stage
+
+def _exit_if_prerequisites_missing(target_stage: str, document_uid: str) -> None:
+    ok, missing_file, required_stage = check_prerequisites(target_stage, document_uid)
+    if ok:
+        return
+    logger.error("Error: Cannot run stage %s", target_stage)
+    logger.error("  Missing prerequisite: Stage %s output", required_stage)
+    logger.error("  Expected file: %s", missing_file)
+    logger.error("  Run the prerequisite stage first, or run without --stage for full pipeline.")
+    sys.exit(1)
+
+
+def _cv_is_missing(cv_path: str, target_stage: str | None) -> bool:
+    """Report an unresolvable first argument as what it is.
+
+    resolve_cv_path() hands back whatever it was given when nothing matched, so
+    a typo or an unsupported extension used to travel all the way into the
+    context and surface as a stem/uid mismatch -- an accurate message about the
+    wrong thing. The stem/uid guard stays for the case it is actually about.
+
+    Scoped to the runs that actually open the document: a full run, or a
+    standalone _STAGES_READING_THE_DOCX one. `--stage 5b` on last week's stage-4
+    artifact is a legitimate rerun and must not need the .docx back.
+    """
+    if target_stage is not None and target_stage not in _STAGES_READING_THE_DOCX:
+        return False
+    if Path(cv_path).is_file():
+        return False
+    logger.error("Error: CV not found: %s", cv_path)
+    logger.error("  Give a path to a .docx, or a document UID present in "
+                 "data/sample_cvs/word/.")
+    return True
+
+
+@_scope_prompt_logger_per_run
+def main() -> int:
+    cv_path_or_uid, target_stage = parse_args(sys.argv)
+    cv_path, document_uid = resolve_cv_path_for_run(cv_path_or_uid)
+
+    if _cv_is_missing(cv_path, target_stage):
+        return 1
+
     if target_stage and target_stage != "1a":
-        ok, missing_file, required_stage = check_prerequisites(target_stage, document_uid)
-        if not ok:
-            print(f"Error: Cannot run stage {target_stage}")
-            print(f"  Missing prerequisite: Stage {required_stage} output")
-            print(f"  Expected file: {missing_file}")
-            print()
-            print(f"  Run the prerequisite stage first, or run without --stage for full pipeline.")
-            sys.exit(1)
+        _exit_if_prerequisites_missing(target_stage, document_uid)
 
-    print("=" * 80)
+    logger.info("=" * _BANNER_WIDTH)
     if target_stage:
-        print(f"CV PROCESSING PIPELINE - STAGE {target_stage.upper()} ONLY")
+        logger.info("CV PROCESSING PIPELINE - STAGE %s ONLY", target_stage.upper())
     else:
-        print(f"CV PROCESSING PIPELINE (V15)")
-    print("=" * 80)
-    print(f"Input: {cv_path}")
-    print(f"Document UID: {document_uid}")
-    print()
-
-    # Track all results, costs, and timing
-    all_results = {}
-    total_cost = 0.0
-    stage1a_cost = 0.0
-    stage_times = {}  # Track duration of each stage
-    pipeline_start_time = time.time()
-
-    # Helper to check if we should run a stage
-    def should_run(stage: str) -> bool:
-        if target_stage is None:
-            return True  # Full pipeline - run all stages
-        if target_stage == '3':
-            # --stage 3 means run both 3a and 3b
-            return stage in ('3a', '3b')
-        return stage == target_stage  # Single stage mode - only run the target
-
-    # Get output paths for loading previous stage results
-    output_paths = get_output_paths(document_uid)
-
-    # Helper to count headers in hierarchy
-    def count_headers(nodes):
-        count = len(nodes)
-        for node in nodes:
-            count += count_headers(node.get('children', []))
-        return count
-
-    # ========== STAGE 1A: HIERARCHY EXTRACTION ==========
-    stage1a_result = None
-
-    if should_run('1a'):
-        print("=" * 80)
-        print("STAGE 1A: HIERARCHY EXTRACTION")
-        print("=" * 80)
-        print()
-
-        stage_start = time.time()
-
-        # Use chunked_chat_hierarchy_extractor (V9 architecture)
-        hierarchy, stats = get_cv_hierarchy_chunked(
-            cv_path=cv_path
-        )
-
-        # Save output to standard location
-        output_dir = Path('src/unified_pipeline/outputs/stage_1a_segmentation')
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_file = output_dir / f"{document_uid}_segmented.json"
-
-        total_headers = count_headers(hierarchy)
-
-        # Build result structure
-        stage1_output = {
-            'document_uid': document_uid,
-            'hierarchy': hierarchy,
-            'meta': stats
-        }
-
-        with open(output_file, 'w') as f:
-            json.dump(stage1_output, f, indent=2)
-
-        # Also save human-readable .txt version
-        txt_file = output_file.with_suffix('.txt')
-        with open(txt_file, 'w') as f:
-            f.write(f"CV Hierarchy: {document_uid}\n")
-            f.write("=" * 80 + "\n\n")
-
-            def write_hierarchy(nodes, depth=0):
-                for node in nodes:
-                    indent = "  " * depth
-                    level = node.get('level', 'H1')
-                    text = node.get('text', '')
-                    f.write(f"{indent}[{level}] {text}\n")
-                    if node.get('children'):
-                        write_hierarchy(node['children'], depth + 1)
-
-            write_hierarchy(hierarchy)
-
-        stage1a_cost = stats.get('extraction_cost', 0)
-        total_cost += stage1a_cost
-
-        stage_duration = time.time() - stage_start
-        stage_times['1a'] = stage_duration
-
-        # Store result for later stages
-        stage1a_result = {
-            'output_file': str(output_file),
-            'num_sections': len(hierarchy),
-            'total_headers': total_headers,
-            'stats': stats,
-            'duration': stage_duration
-        }
-        all_results['stage_1a'] = stage1a_result
-
-        print()
-        print("Stage 1a Complete")
-        print(f"  Output: {output_file}")
-        print(f"  Top-level sections: {len(hierarchy)}")
-        print(f"  Total headers: {total_headers}")
-        print(f"  Cost: ${stage1a_cost:.4f}")
-        print(f"  Time: {format_duration(stage_duration)}")
-        print()
-    else:
-        # Load existing Stage 1a output (needed for later stages or summary)
-        stage1a_file = output_paths['1a']
-        if stage1a_file.exists():
-            with open(stage1a_file) as f:
-                stage1a_data = json.load(f)
-            stage1a_result = {
-                'output_file': str(stage1a_file),
-                'num_sections': len(stage1a_data.get('hierarchy', [])),
-                'total_headers': count_headers(stage1a_data.get('hierarchy', [])),
-                'stats': stage1a_data.get('meta', {})
-            }
-            all_results['stage_1a'] = stage1a_result
-            if target_stage is None:  # Only show skip message in full pipeline mode
-                print(f"[Skipped] Stage 1a - using existing output: {stage1a_file}")
-
-    # ========== STAGE 1B: HIERARCHY MAPPING ==========
-    stage1b_path = None
-
-    if should_run('1b'):
-        print("=" * 80)
-        print("STAGE 1B: HIERARCHY MAPPING (NO LLM)")
-        print("=" * 80)
-        print()
-
-        stage_start = time.time()
-
-        try:
-            stage1b_data, stage1b_path = run_stage_1b(
-                docx_path=cv_path,
-                hierarchy_json_path=stage1a_result['output_file']
-            )
-            stage_duration = time.time() - stage_start
-            stage_times['1b'] = stage_duration
-
-            all_results['stage_1b'] = {
-                'output_file': str(stage1b_path),
-                'total_sections': stage1b_data['meta']['total_sections'],
-                'leaf_sections': stage1b_data['meta']['leaf_sections'],
-                'duration': stage_duration
-            }
-            print()
-            print("Stage 1b Complete")
-            print(f"  Output: {stage1b_path}")
-            print(f"  Total sections: {stage1b_data['meta']['total_sections']}")
-            print(f"  Leaf sections: {stage1b_data['meta']['leaf_sections']}")
-            print(f"  Time: {format_duration(stage_duration)}")
-            print()
-        except Exception as e:
-            print(f"  Warning: Stage 1b failed: {e}")
-            print("  Continuing with remaining stages...")
-            all_results['stage_1b'] = {'error': f"{type(e).__name__}: {e}"}
-            print()
-    else:
-        # Load existing Stage 1b output path
-        stage1b_path = output_paths['1b']
-        if stage1b_path.exists():
-            all_results['stage_1b'] = {'output_file': str(stage1b_path)}
-            if target_stage is None:  # Only show skip message in full pipeline mode
-                print(f"[Skipped] Stage 1b - using existing output: {stage1b_path}")
-
-    # ========== STAGE 2: ENTRY EXTRACTION ==========
-    stage2_path = None
-
-    if should_run('2'):
-        print("=" * 80)
-        print("STAGE 2: ENTRY EXTRACTION")
-        print("=" * 80)
-        print()
-
-        stage_start = time.time()
-
-        if stage1b_path:
-            try:
-                stage2_data, stage2_path = run_stage_2(
-                    docx_path=cv_path,
-                    hierarchy_json_path=str(stage1b_path)
-                )
-                stage2_cost = stage2_data.get('total_cost', 0)
-                total_cost += stage2_cost
-                entries_found = stage2_data.get('total_entries', 0)
-
-                stage_duration = time.time() - stage_start
-                stage_times['2'] = stage_duration
-
-                all_results['stage_2'] = {
-                    'output_file': str(stage2_path),
-                    'total_entries': entries_found,
-                    'cost': stage2_cost,
-                    'duration': stage_duration
-                }
-                print()
-                print("Stage 2 Complete")
-                print(f"  Output: {stage2_path}")
-                print(f"  Entries extracted: {entries_found}")
-                print(f"  Cost: ${stage2_cost:.4f}")
-                print(f"  Time: {format_duration(stage_duration)}")
-                print()
-            except Exception as e:
-                print(f"  Warning: Stage 2 failed: {e}")
-                print("  Continuing with remaining stages...")
-                all_results['stage_2'] = {'error': f"{type(e).__name__}: {e}"}
-                print()
-        else:
-            print("  Skipped: Stage 1b output required")
-            all_results['stage_2'] = {'skipped': 'Stage 1b required'}
-            print()
-    else:
-        # Load existing Stage 2 output path
-        stage2_path = output_paths['2']
-        if stage2_path.exists():
-            all_results['stage_2'] = {'output_file': str(stage2_path)}
-            if target_stage is None:  # Only show skip message in full pipeline mode
-                print(f"[Skipped] Stage 2 - using existing output: {stage2_path}")
-
-    # ========== STAGE 3A: HEADER TAXONOMY MAPPING ==========
-    stage3a_path = None
-    stage3a_cost = 0.0
-
-    if should_run('3a'):
-        print("=" * 80)
-        print("STAGE 3A: HEADER TAXONOMY MAPPING")
-        print("=" * 80)
-        print()
-
-        stage_start = time.time()
-
-        try:
-            stage3a_result = run_stage_3a(
-                document_uid=document_uid
-            )
-            stage3a_path = stage3a_result['output_path']
-            stage3a_cost = stage3a_result['stats']['cost']
-            total_cost += stage3a_cost
-
-            stage_duration = time.time() - stage_start
-            stage_times['3a'] = stage_duration
-
-            all_results['stage_3a'] = {
-                'output_file': stage3a_path,
-                'node_count': stage3a_result['node_count'],
-                'cost': stage3a_cost,
-                'duration': stage_duration
-            }
-            print()
-            print("Stage 3a Complete")
-            print(f"  Output: {stage3a_path}")
-            print(f"  Header nodes mapped: {stage3a_result['node_count']}")
-            print(f"  Cost: ${stage3a_cost:.4f}")
-            print(f"  Time: {format_duration(stage_duration)}")
-            print()
-        except Exception as e:
-            print(f"  Warning: Stage 3a failed: {e}")
-            all_results['stage_3a'] = {'error': f"{type(e).__name__}: {e}"}
-            print()
-    else:
-        # Load existing Stage 3a output path
-        stage3a_path = output_paths['3a']
-        if stage3a_path.exists():
-            stage3a_path = str(stage3a_path)
-            all_results['stage_3a'] = {'output_file': stage3a_path}
-            if target_stage is None:  # Only show skip message in full pipeline mode
-                print(f"[Skipped] Stage 3a - using existing output: {stage3a_path}")
-
-    # ========== STAGE 3B: ENTRY CLASSIFICATION ==========
-    stage3b_cost = 0.0
-
-    if should_run('3b'):
-        print("=" * 80)
-        print("STAGE 3B: ENTRY CLASSIFICATION")
-        print("=" * 80)
-        print()
-
-        stage_start = time.time()
-
-        # Stage 3b requires Stage 2 and Stage 3a outputs
-        if stage2_path and stage3a_path:
-            try:
-                stage3b_result = run_stage_3b(
-                    document_uid=document_uid,
-                    stage_3a_path=stage3a_path
-                )
-                stage3b_cost = stage3b_result['stats']['cost']
-                total_cost += stage3b_cost
-
-                stage_duration = time.time() - stage_start
-                stage_times['3b'] = stage_duration
-
-                all_results['stage_3b'] = {
-                    'output_file': stage3b_result['output_path'],
-                    'entries_classified': stage3b_result['total_entries'],
-                    'cost': stage3b_cost,
-                    'code_distribution': stage3b_result.get('code_distribution', {}),
-                    'duration': stage_duration
-                }
-                print()
-                print("Stage 3b Complete")
-                print(f"  Output: {stage3b_result['output_path']}")
-                print(f"  Entries classified: {stage3b_result['total_entries']}")
-                print(f"  Cost: ${stage3b_cost:.4f}")
-                print(f"  Time: {format_duration(stage_duration)}")
-                print()
-            except Exception as e:
-                print(f"  Warning: Stage 3b failed: {e}")
-                all_results['stage_3b'] = {'error': f"{type(e).__name__}: {e}"}
-                print()
-        else:
-            missing = []
-            if not stage2_path:
-                missing.append("Stage 2")
-            if not stage3a_path:
-                missing.append("Stage 3a")
-            print(f"  Skipped: {' and '.join(missing)} output required")
-            all_results['stage_3b'] = {'skipped': f'{", ".join(missing)} required'}
-            print()
-
-    # ========== STAGE 4: FIELD EXTRACTION ==========
-    stage4_cost = 0.0
-    stage3b_output_path = None
-
-    # Get Stage 3b output path (either just ran or from existing)
-    if 'stage_3b' in all_results and 'output_file' in all_results['stage_3b']:
-        stage3b_output_path = all_results['stage_3b']['output_file']
-    elif output_paths['3b'].exists():
-        stage3b_output_path = str(output_paths['3b'])
-
-    if should_run('4'):
-        print("=" * 80)
-        print("STAGE 4: FIELD EXTRACTION")
-        print("=" * 80)
-        print()
-
-        stage_start = time.time()
-
-        if stage3b_output_path:
-            try:
-                # run_stage_4 expects a document path/UID, not the 3b output path
-                stage4_result = run_stage_4(
-                    docx_path=f"{document_uid}.docx"  # Uses UID to find 3b output
-                )
-                stage4_output = stage4_result['output']
-                stage4_cost = stage4_output.get('total_cost', 0)
-                total_cost += stage4_cost
-
-                stage_duration = time.time() - stage_start
-                stage_times['4'] = stage_duration
-
-                all_results['stage_4'] = {
-                    'output_file': stage4_result['output_path'],
-                    'entries_extracted': stage4_output.get('total_entries', 0),
-                    'cost': stage4_cost,
-                    'stats': stage4_output.get('stats', {}),
-                    'duration': stage_duration
-                }
-                print()
-                print("Stage 4 Complete")
-                print(f"  Output: {stage4_result['output_path']}")
-                print(f"  Entries with fields: {stage4_output.get('stats', {}).get('extracted', 0)}")
-                print(f"  Cost: ${stage4_cost:.4f}")
-                print(f"  Time: {format_duration(stage_duration)}")
-                print()
-            except Exception as e:
-                print(f"  Warning: Stage 4 failed: {e}")
-                import traceback
-                traceback.print_exc()
-                all_results['stage_4'] = {'error': f"{type(e).__name__}: {e}"}
-                print()
-        else:
-            print("  Skipped: Stage 3b output required")
-            all_results['stage_4'] = {'skipped': 'Stage 3b required'}
-            print()
-
-    # ========== STAGE 4.5: RESEARCH SUMMARY GENERATION ==========
-    stage45_cost = 0.0
-    stage4_output_path = None
-
-    # Get Stage 4 output path (either just ran or from existing)
-    if 'stage_4' in all_results and 'output_file' in all_results['stage_4']:
-        stage4_output_path = all_results['stage_4']['output_file']
-    elif output_paths['4'].exists():
-        stage4_output_path = str(output_paths['4'])
-
-    if should_run('4.5'):
-        print("=" * 80)
-        print("STAGE 4.5: RESEARCH SUMMARY GENERATION")
-        print("=" * 80)
-        print()
-
-        stage_start = time.time()
-
-        if stage4_output_path:
-            try:
-                stage45_output_path = run_stage_4_5(
-                    input_path=stage4_output_path,
-                    verbose=True
-                )
-
-                # Read the output to get stats
-                with open(stage45_output_path, 'r') as f:
-                    stage45_data = json.load(f)
-
-                stage_duration = time.time() - stage_start
-                stage_times['4.5'] = stage_duration
-
-                research_summary_info = stage45_data.get('research_summary', {})
-                all_results['stage_4.5'] = {
-                    'output_file': stage45_output_path,
-                    'method': research_summary_info.get('method', 'unknown'),
-                    'm1_score': research_summary_info.get('m1_score', 0),
-                    'summary_length': research_summary_info.get('summary_length', 0),
-                    'duration': stage_duration
-                }
-                print()
-                print("Stage 4.5 Complete")
-                print(f"  Output: {stage45_output_path}")
-                print(f"  Method: {research_summary_info.get('method', 'unknown')}")
-                print(f"  M1 Score: {research_summary_info.get('m1_score', 0):.2f}")
-                print(f"  Summary length: {research_summary_info.get('summary_length', 0)} chars")
-                print(f"  Time: {format_duration(stage_duration)}")
-                print()
-            except Exception as e:
-                print(f"  Warning: Stage 4.5 failed: {e}")
-                import traceback
-                traceback.print_exc()
-                all_results['stage_4.5'] = {'error': f"{type(e).__name__}: {e}"}
-                print()
-        else:
-            print("  Skipped: Stage 4 output required")
-            all_results['stage_4.5'] = {'skipped': 'Stage 4 required'}
-            print()
-
-    # ========== STAGE 5: PUBMED ENRICHMENT ==========
-    stage5_output_path = None
-    if should_run('5'):
-        print("=" * 80)
-        print("STAGE 5: PUBMED ENRICHMENT")
-        print("=" * 80)
-        print()
-
-        stage_start = time.time()
-
-        # Find input (prefer Stage 4 output)
-        input_for_stage5 = stage4_output_path
-        if not input_for_stage5:
-            # Try to find existing Stage 4 output
-            stage4_dir = Path('src/unified_pipeline/outputs/stage_4_field_extraction')
-            candidates = list(stage4_dir.glob(f"*{document_uid}*_fields.json"))
-            if candidates:
-                input_for_stage5 = str(candidates[0])
-
-        if input_for_stage5:
-            try:
-                stage5_result = run_stage5(
-                    stage4_path=input_for_stage5,
-                    verbose=True
-                )
-                # run_stage5 returns a dict; output path is in stage_5_enrichment
-                stage5_output_path = f"src/unified_pipeline/outputs/stage_5_enrichment/{document_uid}_enriched.json"
-
-                stage_duration = time.time() - stage_start
-                stage_times['5'] = stage_duration
-
-                all_results['stage_5'] = {
-                    'output_file': stage5_output_path,
-                    'result': stage5_result,
-                    'duration': stage_duration
-                }
-                print()
-                print("Stage 5 Complete")
-                print(f"  Output: {stage5_output_path}")
-                print(f"  Time: {format_duration(stage_duration)}")
-                print()
-            except Exception as e:
-                print(f"  Warning: Stage 5 failed: {e}")
-                all_results['stage_5'] = {'error': f"{type(e).__name__}: {e}"}
-                print()
-        else:
-            print("  Skipped: Stage 4 output required")
-            all_results['stage_5'] = {'skipped': 'Stage 4 required'}
-            print()
-
-    # ========== STAGE 5B: INSTITUTION ENRICHMENT ==========
-    stage5b_output_path = None
-    if should_run('5b'):
-        print("=" * 80)
-        print("STAGE 5B: INSTITUTION ENRICHMENT")
-        print("=" * 80)
-        print()
-
-        stage_start = time.time()
-
-        # Find input (prefer Stage 5 output, fall back to Stage 4)
-        input_for_stage5b = stage5_output_path or stage4_output_path
-        if not input_for_stage5b:
-            # Try to find existing outputs
-            for stage_dir, pattern in [
-                ('stage_5_enrichment', '*_enriched.json'),
-                ('stage_4_field_extraction', '*_fields.json')
-            ]:
-                candidates = list(Path(f'src/unified_pipeline/outputs/{stage_dir}').glob(f"*{document_uid}*{pattern.split('*')[1]}"))
-                if candidates:
-                    input_for_stage5b = str(candidates[0])
-                    break
-
-        if input_for_stage5b:
-            try:
-                stage5b_output_path = run_stage5b(
-                    input_path=input_for_stage5b,
-                    verbose=True
-                )
-
-                # Read output to get enrichment stats and cost
-                stage5b_cost = 0.0
-                stage5b_cost_unknown = False
-                try:
-                    with open(stage5b_output_path, 'r') as f:
-                        stage5b_data = json.load(f)
-                    stage5b_stats = stage5b_data.get('institution_enrichment_stats', {})
-                    stage5b_cost = stage5b_stats.get('cost', 0.0)
-                    total_cost += stage5b_cost
-                except Exception as e:
-                    logger.warning(
-                        "Could not read stage 5b cost from %s: %s: %s",
-                        stage5b_output_path, type(e).__name__, e
-                    )
-                    stage5b_cost_unknown = True
-
-                stage_duration = time.time() - stage_start
-                stage_times['5b'] = stage_duration
-
-                all_results['stage_5b'] = {
-                    'output_file': stage5b_output_path,
-                    'cost': stage5b_cost,
-                    'cost_unknown': stage5b_cost_unknown,
-                    'duration': stage_duration
-                }
-                print()
-                print("Stage 5b Complete")
-                print(f"  Output: {stage5b_output_path}")
-                if stage5b_cost_unknown:
-                    print("  Cost: unknown (failed to read institution enrichment stats)")
-                elif stage5b_cost > 0:
-                    print(f"  Cost: ${stage5b_cost:.4f}")
-                print(f"  Time: {format_duration(stage_duration)}")
-                print()
-            except Exception as e:
-                print(f"  Warning: Stage 5b failed: {e}")
-                all_results['stage_5b'] = {'error': f"{type(e).__name__}: {e}"}
-                print()
-        else:
-            print("  Skipped: Stage 4 or 5 output required")
-            all_results['stage_5b'] = {'skipped': 'Stage 4 or 5 required'}
-            print()
-
-    # ========== STAGE 5C: TEACHING FORMATTER ==========
-    stage5c_output_path = None
-    if should_run('5c'):
-        print("=" * 80)
-        print("STAGE 5C: TEACHING FORMATTER")
-        print("=" * 80)
-        print()
-
-        stage_start = time.time()
-
-        # Find input (prefer Stage 5b > 5 > 4)
-        input_for_stage5c = stage5b_output_path or stage5_output_path or stage4_output_path
-        if not input_for_stage5c:
-            # Try to find existing outputs
-            for stage_dir, pattern in [
-                ('stage_5b_institution_enrichment', '*_institution_enriched.json'),
-                ('stage_5_enrichment', '*_enriched.json'),
-                ('stage_4_field_extraction', '*_fields.json')
-            ]:
-                candidates = list(Path(f'src/unified_pipeline/outputs/{stage_dir}').glob(f"*{document_uid}*{pattern.split('*')[1]}"))
-                if candidates:
-                    input_for_stage5c = str(candidates[0])
-                    break
-
-        if input_for_stage5c:
-            try:
-                stage5c_output_path = run_stage_5c(
-                    input_path=input_for_stage5c,
-                    verbose=True
-                )
-
-                stage_duration = time.time() - stage_start
-                stage_times['5c'] = stage_duration
-
-                all_results['stage_5c'] = {
-                    'output_file': stage5c_output_path,
-                    'duration': stage_duration
-                }
-                print()
-                print("Stage 5c Complete")
-                print(f"  Output: {stage5c_output_path}")
-                print(f"  Time: {format_duration(stage_duration)}")
-                print()
-            except Exception as e:
-                print(f"  Warning: Stage 5c failed: {e}")
-                import traceback
-                traceback.print_exc()
-                all_results['stage_5c'] = {'error': f"{type(e).__name__}: {e}"}
-                print()
-        else:
-            print("  Skipped: Stage 4, 5, or 5b output required")
-            all_results['stage_5c'] = {'skipped': 'Earlier stage output required'}
-            print()
-
-    # ========== STAGE 5D: CITATION FORMATTER ==========
-    stage5d_output_path = None
-    if should_run('5d'):
-        print("=" * 80)
-        print("STAGE 5D: CITATION FORMATTER (NON-ENRICHED)")
-        print("=" * 80)
-        print()
-
-        stage_start = time.time()
-
-        # Find input (prefer Stage 5c > 5b > 5 > 4)
-        input_for_stage5d = stage5c_output_path or stage5b_output_path or stage5_output_path or stage4_output_path
-        if not input_for_stage5d:
-            # Try to find existing outputs
-            for stage_dir, pattern in [
-                ('stage_5c_teaching_formatted', '*_teaching_formatted.json'),
-                ('stage_5b_institution_enrichment', '*_institution_enriched.json'),
-                ('stage_5_enrichment', '*_enriched.json'),
-                ('stage_4_field_extraction', '*_fields.json')
-            ]:
-                candidates = list(Path(f'src/unified_pipeline/outputs/{stage_dir}').glob(f"*{document_uid}*{pattern.split('*')[1]}"))
-                if candidates:
-                    input_for_stage5d = str(candidates[0])
-                    break
-
-        if input_for_stage5d:
-            try:
-                stage5d_output_path = run_stage_5d(
-                    input_path=input_for_stage5d,
-                    verbose=True
-                )
-
-                stage_duration = time.time() - stage_start
-                stage_times['5d'] = stage_duration
-
-                all_results['stage_5d'] = {
-                    'output_file': stage5d_output_path,
-                    'duration': stage_duration
-                }
-                print()
-                print("Stage 5d Complete")
-                print(f"  Output: {stage5d_output_path}")
-                print(f"  Time: {format_duration(stage_duration)}")
-                print()
-            except Exception as e:
-                print(f"  Warning: Stage 5d failed: {e}")
-                import traceback
-                traceback.print_exc()
-                all_results['stage_5d'] = {'error': f"{type(e).__name__}: {e}"}
-                print()
-        else:
-            print("  Skipped: Earlier stage output required")
-            all_results['stage_5d'] = {'skipped': 'Earlier stage output required'}
-            print()
-
-    # ========== STAGE 6: WCM WORD TEMPLATE ==========
-    stage6_output_path = None
-    if should_run('6'):
-        print("=" * 80)
-        print("STAGE 6: WCM WORD TEMPLATE GENERATION")
-        print("=" * 80)
-        print()
-
-        stage_start = time.time()
-
-        # Find input - ALWAYS search for best available file (prefer Stage 5d > 5c > 5b > 5 > 4)
-        # This handles cases where later stages were run separately
-        input_for_stage6 = None
-        for stage_dir, pattern in [
-            ('stage_5d_citation_formatted', f'*{document_uid}*_citation_formatted.json'),
-            ('stage_5c_teaching_formatted', f'*{document_uid}*_teaching_formatted.json'),
-            ('stage_5b_institution_enrichment', f'*{document_uid}*_institution_enriched.json'),
-            ('stage_5_enrichment', f'*{document_uid}*_enriched.json'),
-            ('stage_4_field_extraction', f'*{document_uid}*_fields.json')
-        ]:
-            candidates = list(Path(f'src/unified_pipeline/outputs/{stage_dir}').glob(pattern))
-            if candidates:
-                input_for_stage6 = str(candidates[0])
-                break
-
-        # Fall back to variables if no files found (shouldn't happen normally)
-        if not input_for_stage6:
-            input_for_stage6 = stage5d_output_path or stage5c_output_path or stage5b_output_path or stage5_output_path or stage4_output_path
-
-        if input_for_stage6:
-            try:
-                stage6_output_path = run_stage6(
-                    input_path=input_for_stage6,
-                    verbose=True
-                )
-
-                stage_duration = time.time() - stage_start
-                stage_times['6'] = stage_duration
-
-                all_results['stage_6'] = {
-                    'output_file': stage6_output_path,
-                    'duration': stage_duration
-                }
-                print()
-                print("Stage 6 Complete")
-                print(f"  Output: {stage6_output_path}")
-                print(f"  Time: {format_duration(stage_duration)}")
-                print()
-            except Exception as e:
-                print(f"  Warning: Stage 6 failed: {e}")
-                import traceback
-                traceback.print_exc()
-                all_results['stage_6'] = {'error': f"{type(e).__name__}: {e}"}
-                print()
-        else:
-            print("  Skipped: Stage 4, 5, or 5b output required")
-            all_results['stage_6'] = {'skipped': 'Earlier stage output required'}
-            print()
-
-    # ========== SUMMARY ==========
-    total_duration = time.time() - pipeline_start_time
-
-    failed = failed_stages(all_results)
-
-    print("=" * 80)
-    print("PIPELINE COMPLETE WITH ERRORS" if failed else "PIPELINE COMPLETE")
-    print("=" * 80)
-    print(f"Document: {document_uid}")
-    print(f"Models: {format_models_used()}")
-    print()
-    if failed:
-        print("Failed stages:")
-        for name in failed:
-            result = all_results.get(name) or {}
-            reason = (result.get('error') or result.get('skipped')
-                      or 'produced no output document')
-            print(f"  {name}: {reason}")
-        print()
-    print("Outputs:")
-    if stage1a_result:
-        print(f"  Stage 1a: {stage1a_result['output_file']}")
-    if 'stage_1b' in all_results and 'output_file' in all_results['stage_1b']:
-        print(f"  Stage 1b: {all_results['stage_1b']['output_file']}")
-    if 'stage_2' in all_results and 'output_file' in all_results['stage_2']:
-        print(f"  Stage 2:  {all_results['stage_2']['output_file']}")
-    if 'stage_3a' in all_results and 'output_file' in all_results['stage_3a']:
-        print(f"  Stage 3a: {all_results['stage_3a']['output_file']}")
-    if 'stage_3b' in all_results and 'output_file' in all_results['stage_3b']:
-        print(f"  Stage 3b: {all_results['stage_3b']['output_file']}")
-    if 'stage_4' in all_results and 'output_file' in all_results['stage_4']:
-        print(f"  Stage 4:  {all_results['stage_4']['output_file']}")
-    if 'stage_4.5' in all_results and 'output_file' in all_results['stage_4.5']:
-        print(f"  Stage 4.5: {all_results['stage_4.5']['output_file']}")
-    if 'stage_5' in all_results and 'output_file' in all_results['stage_5']:
-        print(f"  Stage 5:  {all_results['stage_5']['output_file']}")
-    if 'stage_5b' in all_results and 'output_file' in all_results['stage_5b']:
-        print(f"  Stage 5b: {all_results['stage_5b']['output_file']}")
-    if 'stage_5c' in all_results and 'output_file' in all_results['stage_5c']:
-        print(f"  Stage 5c: {all_results['stage_5c']['output_file']}")
-    if 'stage_5d' in all_results and 'output_file' in all_results['stage_5d']:
-        print(f"  Stage 5d: {all_results['stage_5d']['output_file']}")
-    if 'stage_6' in all_results and 'output_file' in all_results['stage_6']:
-        print(f"  Stage 6:  {all_results['stage_6']['output_file']}")
-    print()
-    print("Timing:")
-    if '1a' in stage_times:
-        print(f"  Stage 1a: {format_duration(stage_times['1a'])}")
-    if '1b' in stage_times:
-        print(f"  Stage 1b: {format_duration(stage_times['1b'])}")
-    if '2' in stage_times:
-        print(f"  Stage 2:  {format_duration(stage_times['2'])}")
-    if '3a' in stage_times:
-        print(f"  Stage 3a: {format_duration(stage_times['3a'])}")
-    if '3b' in stage_times:
-        print(f"  Stage 3b: {format_duration(stage_times['3b'])}")
-    if '4' in stage_times:
-        print(f"  Stage 4:  {format_duration(stage_times['4'])}")
-    if '4.5' in stage_times:
-        print(f"  Stage 4.5: {format_duration(stage_times['4.5'])}")
-    if '5' in stage_times:
-        print(f"  Stage 5:  {format_duration(stage_times['5'])}")
-    if '5b' in stage_times:
-        print(f"  Stage 5b: {format_duration(stage_times['5b'])}")
-    if '5c' in stage_times:
-        print(f"  Stage 5c: {format_duration(stage_times['5c'])}")
-    if '5d' in stage_times:
-        print(f"  Stage 5d: {format_duration(stage_times['5d'])}")
-    if '6' in stage_times:
-        print(f"  Stage 6:  {format_duration(stage_times['6'])}")
-    print(f"  Total:    {format_duration(total_duration)}")
-    print()
-    print("Costs:")
-    if stage1a_cost > 0:
-        print(f"  Stage 1a: ${stage1a_cost:.4f}")
-    if 'stage_2' in all_results and 'cost' in all_results['stage_2']:
-        print(f"  Stage 2:  ${all_results['stage_2']['cost']:.4f}")
-    if 'stage_3a' in all_results and 'cost' in all_results['stage_3a']:
-        print(f"  Stage 3a: ${all_results['stage_3a']['cost']:.4f}")
-    if 'stage_3b' in all_results and 'cost' in all_results['stage_3b']:
-        print(f"  Stage 3b: ${all_results['stage_3b']['cost']:.4f}")
-    if 'stage_4' in all_results and 'cost' in all_results['stage_4']:
-        print(f"  Stage 4:  ${all_results['stage_4']['cost']:.4f}")
-    if 'stage_5b' in all_results and all_results['stage_5b'].get('cost_unknown'):
-        print("  Stage 5b: unknown (institution enrichment stats unreadable)")
-    elif 'stage_5b' in all_results and 'cost' in all_results['stage_5b'] and all_results['stage_5b']['cost'] > 0:
-        print(f"  Stage 5b: ${all_results['stage_5b']['cost']:.4f}")
-    print(f"  Total:    ${total_cost:.4f}")
-    print()
-    print("Processing Stats:")
-    if stage1a_result:
-        print(f"  Top-level sections: {stage1a_result['num_sections']}")
-        print(f"  Total headers: {stage1a_result['total_headers']}")
-    if 'stage_2' in all_results and 'total_entries' in all_results['stage_2']:
-        print(f"  Entries extracted: {all_results['stage_2']['total_entries']}")
-    if 'stage_3a' in all_results and 'node_count' in all_results['stage_3a']:
-        print(f"  Header nodes mapped: {all_results['stage_3a']['node_count']}")
-    if 'stage_3b' in all_results and 'entries_classified' in all_results['stage_3b']:
-        print(f"  Entries classified: {all_results['stage_3b']['entries_classified']}")
-    if 'stage_4' in all_results and 'entries_extracted' in all_results['stage_4']:
-        print(f"  Fields extracted: {all_results['stage_4']['entries_extracted']}")
-
-    # Show code distribution if available
-    if 'stage_3b' in all_results and 'code_distribution' in all_results['stage_3b']:
-        code_dist = all_results['stage_3b']['code_distribution']
-        if code_dist:
-            print()
-            print("Code Distribution (top 10):")
-            sorted_codes = sorted(code_dist.items(), key=lambda x: -x[1])[:10]
-            for code, count in sorted_codes:
-                print(f"  {code}: {count}")
-    print()
+        logger.info("CV PROCESSING PIPELINE (V15)")
+    logger.info("=" * _BANNER_WIDTH)
+    logger.info("Input: %s", cv_path)
+    logger.info("Document UID: %s", document_uid)
+    logger.info("")
+
+    ctx = PipelineContext(cv_path=Path(cv_path), document_uid=document_uid,
+                          target_stage=target_stage)
+    result = run_pipeline(ctx)
+    print_summary(result, ctx)
 
     # Continue-on-error is kept deliberately -- the partial stage artifacts are
     # worth having for diagnosis. What changes is that the run stops claiming
     # success it did not have.
-    return 1 if failed else 0
+    return result.exit_code
 
 
 if __name__ == '__main__':
-    # Only the CLI entry point needs this, not a test that imports this module
-    # and calls main() directly: nothing in this file (or any non-test
-    # src/unified_pipeline module) configures a logging handler, so the stage
-    # narration migrated from print() to logger.* in #643's review round
-    # (98c0884) was silently dropped -- Python's root logger has only a
-    # last-resort WARNING-only handler, and CLI runs went quiet.
+    # Only the CLI entry point configures logging, not a test that imports this
+    # module and calls main() directly (it calls configure_cli_logging() itself
+    # when it needs the streams). Nothing else in this file or in any non-test
+    # src/unified_pipeline module configures a handler, and Python's root logger
+    # has only a last-resort WARNING-only one.
     #
-    # dictConfig, not logging.basicConfig() (project convention -- see
-    # web_interface/backend/app/logging_config.py's module docstring), but
-    # deliberately NOT that module's configure_logging(): CODING_STANDARDS.md
-    # 1.4 -- "the pipeline core does not import the web backend" -- exists
-    # precisely because reaching into web_interface/backend/app/ from the
-    # pipeline side makes the CLI unable to run without the web app's config
-    # layout. This is self-contained instead: no cross-boundary import, no
-    # sys.stdout swap to track (that only happens inside the web
-    # orchestrator's own process), so a plain "ext://sys.stdout" is fine.
-    import logging.config
-    logging.config.dictConfig({
-        "version": 1,
-        "disable_existing_loggers": False,
-        "formatters": {
-            "plain": {"format": "%(asctime)s %(levelname)s %(name)s %(message)s"},
-        },
-        "handlers": {
-            "default": {
-                "class": "logging.StreamHandler",
-                "formatter": "plain",
-                "stream": "ext://sys.stdout",
-            },
-        },
-        "root": {"level": "INFO", "handlers": ["default"]},
-    })
+    # See configure_cli_logging(): narration and the five lines
+    # scripts/run_corpus_batch.sh greps go to stdout as bare messages;
+    # WARNING and above, tracebacks included, go to timestamped stderr. Both
+    # streams still land in a batch log -- run_corpus_batch.sh:122,124 redirect
+    # the run with `> "$log" 2>&1`.
+    configure_cli_logging()
     sys.exit(main())

@@ -149,23 +149,26 @@ def test_connection_error_then_200_retries(monkeypatch):
 
 # --------------------------------------------------- (b) exhausted -> graceful
 
-def test_three_429s_gives_up_gracefully(monkeypatch, capsys):
+def test_three_429s_gives_up_gracefully(monkeypatch, caplog):
     enricher, session, sleeps = _make(monkeypatch, [FakeResponse(429)] * 3)
-    records = enricher._fetch_pubmed_batch([PMID])
+    with caplog.at_level(logging.INFO, logger=stage5.__name__):
+        records = enricher._fetch_pubmed_batch([PMID])
     assert records == {}  # same degraded shape as before
     assert len(session.calls) == 3
     assert sleeps == [1.0, 2.0]
     assert enricher.stats['api_errors'] == 1
-    assert '❌ API error' in capsys.readouterr().out
+    assert any('❌ API error' in r.getMessage() for r in caplog.records)
 
 
-def test_id_converter_gives_up_gracefully(monkeypatch, capsys):
+def test_id_converter_gives_up_gracefully(monkeypatch, caplog):
     enricher, _, sleeps = _make(monkeypatch, [FakeResponse(429)] * 3)
-    result = enricher._convert_pmcids_to_pmids(['PMC1234567'])
+    with caplog.at_level(logging.INFO, logger=stage5.__name__):
+        result = enricher._convert_pmcids_to_pmids(['PMC1234567'])
     assert result == {}
     assert sleeps == [1.0, 2.0]
     assert enricher.stats['api_errors'] == 1
-    assert '❌ ID conversion error' in capsys.readouterr().out
+    assert any('❌ ID conversion error' in r.getMessage() for r in caplog.records)
+    assert all(r.exc_info is None for r in caplog.records)
 
 
 def test_doi_search_retries_5xx_then_succeeds(monkeypatch):
@@ -242,15 +245,15 @@ def test_sanitizer_redacts_api_key():
     assert 'db=pubmed' in cleaned  # rest of the message preserved
 
 
-def test_logged_error_is_redacted_end_to_end(monkeypatch, capsys):
+def test_logged_error_is_redacted_end_to_end(monkeypatch, caplog):
     leaky_url = ('https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi'
                  '?db=pubmed&api_key=dummy-test-key&retmode=xml')
     enricher, _, _ = _make(
         monkeypatch, [FakeResponse(404, url=leaky_url)], api_key='dummy-test-key')
-    enricher._fetch_pubmed_batch([PMID])
-    out = capsys.readouterr().out
-    assert 'dummy-test-key' not in out
-    assert 'api_key=***' in out
+    with caplog.at_level(logging.INFO, logger=stage5.__name__):
+        enricher._fetch_pubmed_batch([PMID])
+    assert not any('dummy-test-key' in r.getMessage() for r in caplog.records)
+    assert any('api_key=***' in r.getMessage() for r in caplog.records)
 
 
 # ------------------------------------ (g) DOI-path outcome classification
@@ -320,17 +323,20 @@ def test_new_status_matches_doctor_failed_vocabulary():
 
 # --------------------------- (h) ERROR body once per failure class per run
 
-def test_api_error_body_logged_once_per_class(monkeypatch, caplog, capsys):
+def test_api_error_body_logged_once_per_class(monkeypatch, caplog):
     enricher, _, _ = _make(
         monkeypatch, [FakeResponse(400, content=API_KEY_INVALID_BODY)] * 2,
         api_key='dummy-test-key')
     entries = [(_doi_entry(), DOI), (_doi_entry(), DOI)]
-    with caplog.at_level(logging.ERROR, logger=stage5.__name__):
+    with caplog.at_level(logging.INFO, logger=stage5.__name__):
         results = enricher._enrich_by_doi(entries)
     assert [r['enrichment_status'] for r in results] == ['doi_lookup_failed'] * 2
-    assert len(caplog.records) == 1  # bad key 400s every call; body logged once
-    # per-citation verbose diagnostics remain on stdout
-    assert capsys.readouterr().out.count('⚠️ DOI search error') == 2
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    info_records = [r for r in caplog.records if r.levelno == logging.INFO]
+    assert len(error_records) == 1  # bad key 400s every call; body logged once
+    # per-citation verbose diagnostics now go through the logger at INFO
+    assert sum('⚠️ DOI search error' in r.getMessage() for r in info_records) == 2
+    assert all(r.exc_info is None for r in caplog.records)
 
 
 def test_distinct_failure_classes_each_logged(monkeypatch, caplog):
