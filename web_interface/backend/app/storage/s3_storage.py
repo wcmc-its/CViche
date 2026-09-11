@@ -14,9 +14,40 @@ from urllib.parse import quote
 
 import yaml
 
-from app.storage.base import RunStorage
+from app.storage.base import (
+    RunStorage,
+    StorageKeyExists,
+    validate_key,
+    validate_run_id,
+    validate_run_key,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class StorageDeleteError(RuntimeError):
+    """Raised when a DeleteObjects call succeeds but reports per-key Errors.
+
+    S3 answers a bulk delete with 200 even when some keys were NOT removed
+    (AccessDenied on one key, a KMS fault, ...), listing them under "Errors".
+    Counting the batch as deleted would let the lifecycle reaper report a run
+    as cleaned up while objects remain (PR #779 review, item 1).
+    """
+
+
+def _validate_s3_key_text(key: str, *, allow_empty: bool) -> None:
+    """S3-side key checks on top of validate_key (PR #779 review, item 9).
+
+    A NUL byte is not a namespace escape, so base.validate_key does not reject
+    it, but no legitimate key carries one and S3 would store the literal byte.
+    An empty key is legal for LIST prefixes (list_files(run_id, "")) and
+    illegal for every object operation, which would otherwise read or write
+    the namespace root "cviche/runs/{run_id}/" as if it were a file.
+    """
+    if "\x00" in key:
+        raise ValueError(f"storage key must not contain a NUL byte: {key!r}")
+    if not allow_empty and not key:
+        raise ValueError("storage key must be non-empty for an object operation")
 
 
 class S3RunStorage(RunStorage):
@@ -63,8 +94,21 @@ class S3RunStorage(RunStorage):
             config=Config(signature_version="s3v4"),
         )
 
-    def _s3_key(self, run_id: str, key: str) -> str:
-        """Build the full S3 key for a run artifact."""
+    def _s3_key(self, run_id: str, key: str, *, allow_empty: bool = False) -> str:
+        """Build the full S3 key for a run artifact.
+
+        Validates at the boundary so put_file, put_file_exclusive, get_file,
+        list_files, get_download_url and exists all inherit the same invariant
+        from one place. S3 keys are opaque strings, so ".." cannot escape the
+        bucket, but it does silently MISPLACE an object into a sibling
+        namespace (run_id "../other" yields the literal key
+        "cviche/runs/../other/..."), which is the same isolation break.
+
+        Only list_files passes allow_empty=True: "" is a valid list prefix
+        (the whole run) but never a valid object key (PR #779 review, item 9).
+        """
+        validate_run_key(run_id, key)
+        _validate_s3_key_text(key, allow_empty=allow_empty)
         return f"{self._prefix}/runs/{run_id}/{key}"
 
     def put_file(self, run_id: str, key: str, data: bytes) -> None:
@@ -72,7 +116,29 @@ class S3RunStorage(RunStorage):
         self._s3.put_object(Bucket=self._bucket, Key=s3_key, Body=data)
         logger.debug("Uploaded s3://%s/%s (%d bytes)", self._bucket, s3_key, len(data))
 
+    def put_file_exclusive(self, run_id: str, key: str, data: bytes) -> None:
+        s3_key = self._s3_key(run_id, key)
+        try:
+            self._s3.put_object(
+                Bucket=self._bucket, Key=s3_key, Body=data, IfNoneMatch="*",
+            )
+        except self._s3.exceptions.ClientError as e:
+            # S3 answers a failed IfNoneMatch precondition with a 412 whose
+            # error code is PreconditionFailed -- that, and only that, means
+            # "the key already exists" (#685). Any other ClientError is a real
+            # outage/permissions fault and must propagate, not be mistaken for
+            # a collision.
+            code = e.response.get("Error", {}).get("Code", "")
+            if code == "PreconditionFailed":
+                raise StorageKeyExists(f"{run_id}/{key} already exists") from e
+            raise
+        logger.debug(
+            "Uploaded s3://%s/%s (%d bytes, exclusive)", self._bucket, s3_key, len(data),
+        )
+
     def put_global(self, key: str, data: bytes) -> None:
+        validate_key(key)
+        _validate_s3_key_text(key, allow_empty=False)
         s3_key = f"{self._prefix}/{key}"
         self._s3.put_object(Bucket=self._bucket, Key=s3_key, Body=data)
         logger.debug("Uploaded s3://%s/%s (%d bytes)", self._bucket, s3_key, len(data))
@@ -94,21 +160,51 @@ class S3RunStorage(RunStorage):
             for obj in page.get("Contents", []):
                 batch.append({"Key": obj["Key"]})
                 if len(batch) == 1000:
-                    self._s3.delete_objects(Bucket=self._bucket, Delete={"Objects": batch})
-                    deleted += len(batch)
+                    deleted += self._delete_batch(batch)
                     batch = []
         if batch:
-            self._s3.delete_objects(Bucket=self._bucket, Delete={"Objects": batch})
-            deleted += len(batch)
+            deleted += self._delete_batch(batch)
         if deleted:
             logger.debug("Deleted %d object(s) under s3://%s/%s", deleted, self._bucket, s3_prefix)
         return deleted
 
+    def _delete_batch(self, batch: list[dict]) -> int:
+        """One DeleteObjects call; returns how many keys S3 confirms deleted.
+
+        PR #779 review, item 1: the count comes from the response's "Deleted"
+        list, not len(batch), and any "Errors" entry raises so a partial
+        failure is never reported as a clean cleanup.
+        """
+        response = self._s3.delete_objects(Bucket=self._bucket, Delete={"Objects": batch})
+        errors = response.get("Errors", [])
+        if errors:
+            for err in errors:
+                logger.error(
+                    "DeleteObjects left s3://%s/%s in place: %s %s",
+                    self._bucket, err.get("Key"), err.get("Code"), err.get("Message", ""),
+                )
+            failed = ", ".join(f"{err.get('Key')} ({err.get('Code')})" for err in errors)
+            raise StorageDeleteError(
+                f"{len(errors)} object(s) not deleted from s3://{self._bucket}: {failed}"
+            )
+        return len(response.get("Deleted", []))
+
     def delete_run(self, run_id: str) -> int:
-        # Everything under {prefix}/runs/{run_id}/
+        # Everything under {prefix}/runs/{run_id}/. Validated explicitly:
+        # this prefix is built here, NOT through _s3_key, so it would not
+        # otherwise inherit the boundary check -- and a malformed id turns a
+        # routing bug into a bulk delete of the wrong namespace.
+        validate_run_id(run_id)
         return self._delete_by_prefix(f"{self._prefix}/runs/{run_id}/")
 
     def delete_global_prefix(self, prefix: str) -> int:
+        # Same reasoning as delete_run: a destructive prefix built outside
+        # _s3_key needs the boundary check spelled out.
+        validate_key(prefix)
+        # An empty prefix would resolve to "{self._prefix}/" and pass the
+        # non-empty check in _delete_by_prefix, wiping the whole store; the
+        # base contract says the backend refuses it (PR #779 review, item 9).
+        _validate_s3_key_text(prefix, allow_empty=False)
         return self._delete_by_prefix(f"{self._prefix}/{prefix}")
 
     def get_file(self, run_id: str, key: str) -> bytes:
@@ -132,7 +228,7 @@ class S3RunStorage(RunStorage):
             raise
 
     def list_files(self, run_id: str, prefix: str = "") -> list[str]:
-        s3_prefix = self._s3_key(run_id, prefix)
+        s3_prefix = self._s3_key(run_id, prefix, allow_empty=True)
         keys: list[str] = []
         paginator = self._s3.get_paginator("list_objects_v2")
 
