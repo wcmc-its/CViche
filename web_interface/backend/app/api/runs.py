@@ -2,7 +2,6 @@
 import hashlib
 import json
 import logging
-import shutil
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.orm import Session, selectinload
@@ -15,7 +14,7 @@ from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.pipeline import concurrency
 from app.auth import get_current_user
-from app.api.upload import generate_run_id, UPLOAD_DIR
+from app.api.upload import UPLOAD_DIR, create_run_archive
 from app.services.run_service import check_run_access
 from app.rate_limiter import check_rate_limit
 from app.errors import not_found, bad_request
@@ -332,47 +331,52 @@ async def restart_run(
             },
         )
 
-    # Generate new run and copy the original input to the new run's local path.
-    new_run_id = generate_run_id()
-    stored_name = f"{new_run_id}.{original_run.file_type}"
-    new_file = UPLOAD_DIR / stored_name
-    shutil.copy2(str(original_file), str(new_file))
-
-    # Durably archive the new run's input to storage, exactly as /upload does.
-    # The local copy above lives only on THIS pod; with multiple replicas behind
-    # the load balancer a later start/retry routinely lands on another pod, where
-    # only this S3 object can re-materialize the input. Without it the restarted
-    # run is unstartable the moment a request hits a different pod -- the very
-    # "Uploaded file not found / Original file no longer available" failure this
-    # restart exists to recover from. FATAL on failure, mirroring /upload: a child
-    # whose input can't be recovered should not be created at all. (issue #180)
+    # Allocate a new run id and durably archive the original input under it,
+    # exactly as /upload does. The pod-local copy lives only on THIS pod;
+    # with multiple replicas behind the load balancer a later start/retry
+    # routinely lands on another pod, where only the durable archive can
+    # re-materialize the input. Both the pod-local copy and the archive are
+    # exclusive creates: a run-id collision on either regenerates the id and
+    # retries (#685) rather than silently overwriting another run's file. A
+    # failure here (a real storage fault, or every retry colliding) is
+    # therefore FATAL, mirroring /upload: a child whose input can't be
+    # recovered should not be created at all. (issue #180)
     content = original_file.read_bytes()
-    storage = get_storage()
-    manifest = json.dumps({
-        "run_id": new_run_id,
-        "original_filename": original_run.filename,
-        "stored_as": stored_name,
-        "file_type": original_run.file_type,
-        "size_bytes": len(content),
-        "sha256": hashlib.sha256(content).hexdigest(),
-        "restarted_from": run_id,  # provenance: the run this was restarted from
-        "uploaded_at": datetime.now().isoformat(),
-        "user_email": current_user.email,
-    }, indent=2).encode("utf-8")
+
+    def _build_manifest(new_run_id: str, stored_name: str) -> bytes:
+        return json.dumps({
+            "run_id": new_run_id,
+            "original_filename": original_run.filename,
+            "stored_as": stored_name,
+            "file_type": original_run.file_type,
+            "size_bytes": len(content),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "restarted_from": run_id,  # provenance: the run this was restarted from
+            "uploaded_at": datetime.now().isoformat(),
+            "user_email": current_user.email,
+        }, indent=2).encode("utf-8")
+
+    def _write_local(path: Path) -> None:
+        # Exclusive create, exactly like /upload's pod-local write. A
+        # non-exclusive copy here was a live defect: on a drawn id that
+        # collides with a run whose pod-local input exists on THIS pod, the
+        # copy overwrote that file, and the durable manifest write then
+        # raised StorageKeyExists, whose cleanup unlinked it -- destroying
+        # the other run's local input. Raising FileExistsError instead lets
+        # create_run_archive regenerate the id and retry, touching nothing.
+        # The bytes are already in memory (read above), so write them
+        # directly rather than copying the file a second time.
+        with open(path, "xb") as f:
+            f.write(content)
+
     try:
-        storage.put_file(new_run_id, f"input/{stored_name}", content)
-        storage.put_file(new_run_id, "input/manifest.json", manifest)
+        new_run_id, _, _, manifest = create_run_archive(
+            content, original_run.file_type, _build_manifest, _write_local,
+        )
     except Exception as e:
         logger.error(
-            "Durable archive of restarted input failed; aborting restart (run=%s): %s",
-            new_run_id, e,
+            "Durable archive of restarted input failed; aborting restart: %s", e,
         )
-        # No run row has been committed, so there is nothing to roll back. Remove
-        # the ephemeral local copy so the failed attempt leaves nothing behind.
-        try:
-            new_file.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise HTTPException(
             status_code=502,
             detail={
@@ -383,6 +387,7 @@ async def restart_run(
                 ),
             },
         )
+    storage = get_storage()
 
     # Cross-run, browsable-by-submitter index (best-effort; never fail the
     # restart). Mirrors /upload so restarted runs are findable by submitter too.

@@ -1,6 +1,7 @@
 """Correcting a stage-4 record that is not yet in canonical form (#398).
 
-`text.py` canonicalises a value and `fields.py` canonicalises a field's shape;
+The value modules canonicalise a value and `fields.py` canonicalises a field's
+shape;
 this canonicalises the record itself, in the two ways the corpus shows it
 arriving wrong:
 

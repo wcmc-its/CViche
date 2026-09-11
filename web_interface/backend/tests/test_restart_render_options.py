@@ -17,7 +17,7 @@ import asyncio
 from unittest.mock import patch, MagicMock
 
 
-def test_restart_inherits_render_options(db):
+def test_restart_inherits_render_options(db, tmp_path):
     from app.api import runs as runs_api
     from app.models import Run, User
 
@@ -43,13 +43,19 @@ def test_restart_inherits_render_options(db):
     db.commit()
 
     # Neutralize the side-effecting helpers: access check returns the original
-    # run, rate limit passes, and the file-presence/copy steps are no-ops so we
-    # don't touch the real UPLOAD_DIR.
+    # run, rate limit passes, the file-presence/read steps are no-ops, and
+    # UPLOAD_DIR points at a temp dir -- restart's pod-local write is a real
+    # exclusive open() now, so it must not land in the repo's uploads/.
+    upload_dir = tmp_path / "uploads"
+    upload_dir.mkdir()
+
     with patch.object(runs_api, "check_run_access", return_value=original), \
          patch.object(runs_api, "check_rate_limit", return_value=None), \
          patch.object(runs_api, "_materialize_input_if_missing", return_value=None), \
          patch.object(runs_api, "get_storage", return_value=MagicMock()), \
-         patch("shutil.copy2", return_value=None), \
+         patch.object(runs_api, "UPLOAD_DIR", upload_dir), \
+         patch("app.api.upload.UPLOAD_DIR", upload_dir), \
+         patch("app.api.upload.get_storage", return_value=MagicMock()), \
          patch("pathlib.Path.read_bytes", return_value=b"PK\x03\x04fake-docx"), \
          patch("pathlib.Path.unlink", return_value=None), \
          patch("pathlib.Path.exists", return_value=True):
