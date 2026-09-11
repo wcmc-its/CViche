@@ -20,7 +20,7 @@ editing this file, not just stage 4 (CODING_STANDARDS.md §7.3).
 """
 import re
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 try:
     from docx.table import Table
@@ -252,7 +252,7 @@ class ResearchSupportSection:
                         if spacing_para is not None:
                             last_element = spacing_para
 
-    def _create_grant_table(self, fields: Dict, code: str, entry: Dict = None, insert_after_element=None, owner_name: str = '') -> Optional[Table]:
+    def _create_grant_table(self, fields: dict, code: str, entry: dict | None = None, insert_after_element: object | None = None, owner_name: str = '') -> Table | None:
         """Create an individual grant table with the WCM data model.
 
         Args:
@@ -346,9 +346,13 @@ class ResearchSupportSection:
         if not pi_name and owner_name and 'principal' in role.lower() and 'investigator' in role.lower():
             pi_name = owner_name
 
-        # Format costs as currency
-        costs = fields.get('annual_direct_costs') or fields.get('total_funding', '')
-        costs_formatted = _format_currency(costs)
+        # Format costs as currency. `or` on the raw value treated a real $0 as
+        # missing (round-2 review of #481, point 4): the fallback is decided on
+        # what annual_direct_costs *renders*, so 0 wins and only a value that
+        # renders nothing (None, blank, non-amount) falls through.
+        costs_formatted = _format_currency(fields.get('annual_direct_costs'))
+        if not costs_formatted:
+            costs_formatted = _format_currency(fields.get('total_funding', ''))
 
         # Carry the grant/award identifier in Award Source. The WCM template has no
         # grant-number row -- its block is exactly these 8 rows plus optional goals --

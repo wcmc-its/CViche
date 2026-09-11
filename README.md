@@ -313,7 +313,8 @@ The pipeline runs on Claude (Anthropic) models via Bedrock by default. To use Op
 |----------|-------------|---------|
 | `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` | Database connection parameters, resolved individually (env first, then `auth_config.yaml`'s `db:` section). There is no `DATABASE_URL` code path. | none — all four are required, the engine factory hard-raises without them |
 | `MIGRATE_USER` | DB user Alembic connects as. Separate from `DB_USER`. | none |
-| `DB_PASSWORD` | When set, the engine uses password auth instead of RDS IAM tokens and skips TLS. Local dev only; deployed environments leave it unset. | unset (IAM auth) |
+| `DB_AUTH_MODE` | Selects the database auth path: `iam` (RDS IAM token + TLS, with the server certificate verified against the vendored RDS CA bundle) or `password` (local compose only). Any other value fails closed at engine construction. | `iam` |
+| `DB_PASSWORD` | Password for `DB_AUTH_MODE=password`; required in that mode and the engine raises without it. **Ignored entirely when `DB_AUTH_MODE` is `iam`** — setting it cannot downgrade a deployed instance off IAM+TLS. | unset |
 | `CVICHE_STORAGE_BACKEND` | Storage backend: `local` or `s3` | `local` |
 | `CVICHE_S3_BUCKET` | S3 bucket name (required when storage backend is `s3`) | -- |
 | `CVICHE_S3_PREFIX` | S3 key prefix | `cviche` |

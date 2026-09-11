@@ -45,6 +45,7 @@ boundary, so tabs become ", " rather than rendering as a run of whitespace.
 `field_of_study` is appended only when it is not already contained in the type,
 which is common once the tab join has run.
 """
+import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -57,6 +58,8 @@ from ..resolution import (
     _recover_institution_from_nearby_entries,
 )
 from ..sorting import sort_entries_reverse_chronological
+
+logger = logging.getLogger(__name__)
 
 # The generic postdoctoral code, used both as a member of the table below and
 # as the fallback when an entry carries no routing code of its own.
@@ -302,18 +305,23 @@ class PostdocTrainingSection:
         if not training_entries:
             return
 
-        if self.verbose:
-            print(f"Filling Postdoctoral Training ({len(training_entries)} entries)...")
+        logger.info("Filling Postdoctoral Training (%d entries)...", len(training_entries))
 
         # Try to find the POSTDOCTORAL section
         training_idx = self._find_paragraph_with_text("POSTDOCTORAL")
         if training_idx is None:
             training_idx = self._find_paragraph_with_text("TRAINING")
         if training_idx is None:
+            logger.warning(
+                "Postdoctoral Training: section heading not found in "
+                "template; %d entries not rendered", len(training_entries))
             return
 
         table = self._find_table_after_paragraph(training_idx)
         if not table:
+            logger.warning(
+                "Postdoctoral Training: table not found after section "
+                "heading; %d entries not rendered", len(training_entries))
             return
 
         _clear_table_data(table, keep_header=True)

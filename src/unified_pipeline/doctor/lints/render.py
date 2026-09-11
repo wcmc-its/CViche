@@ -12,7 +12,8 @@ module, so they move together and stop being module-global.
 Bodies are unmodified. `run_doctor` re-exports every name it exported before.
 """
 import re
-from typing import Dict, List, Optional, Tuple
+from collections import Counter
+from typing import Dict, List, NamedTuple, Tuple
 
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.core.template_boilerplate import (
@@ -48,8 +49,13 @@ DEAD_SECTION_MIN_LINES = 3
 # Lint 8: an entry is a fused multi-record candidate at this many record-like
 # lines. _looks_like_record only sees pipe/tab rows; employment/appointment
 # records are date-range-prefixed comma lines ("Jun 2020-Jun 2025, Assistant
-# Professor"), caught by the prefix pattern when the line carries a payload
-# beyond the bare date range.
+# Professor"), caught by `_is_date_record_line` when the line carries a
+# payload beyond the bare date range. A bare date line (`_is_bare_date_line`)
+# counts toward this floor too -- it is a split-off date column, so the entry
+# fuses several records -- but is not itself a record to verify (#446 review
+# T1.6 / #746: on the farm those lines used to be counted AND reported as
+# records, so a Bostwick committee entry read '1 of 3 records absent' when
+# two of the three were '2006-2010, 2012, 2013' and '2004 –2020 2004-2010').
 UNRENDERED_MIN_RECORD_LINES = 2
 
 
@@ -57,6 +63,72 @@ RECORD_DATE_LINE_MIN_CHARS = 20
 
 
 _RECORD_DATE_PREFIX_RE = re.compile(r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]")
+
+
+# What may follow the leading date's dash on a RECORD line (#446 review
+# T1.6 / #746): the end of the range -- a 1-4 digit year, because stage 2
+# glues the payload onto a two-digit end year ('2008-15Associate
+# Professor', '1996-8<TAB>Research Fellowship') -- or an open-ended word,
+# a field separator, or a capitalised payload word (a role, a title, a
+# name). Running prose that merely opens with a date continues in
+# lowercase ('2020 - the year our program expanded ...'), which is what a
+# length-only rule admits. Measured over the 66-CV farm's stage-4 text
+# (#725 review r3923589271 pt 6, re-measured 2026-09-05): the length-only
+# rule admits 226 date-prefixed lines; this one keeps 203 and drops
+# exactly the 23 that carry no worded payload at all -- every one a bare
+# date list ('February 2018 – Present', '2004 –2020 2004-2010').
+# ponytail: a prose sentence whose first word after the dash is
+# capitalised still passes -- no corpus instance yet, and the opposite
+# failure (a real record no longer counted, so never re-verified) is the
+# worse one; revisit with a corpus instance.
+_RECORD_DATE_CONTINUATION_RE = re.compile(
+    r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]\s*"
+    r"(?:\d{1,4}|(?i:present|current|ongoing|now|to date|date)(?![a-z])"
+    r"|[\t,:;|]|[A-Z])")
+
+
+# The leading date or date range of a record line, stripped before asking
+# whether a worded payload follows it.
+_RECORD_DATE_RANGE_RE = re.compile(
+    r"^(?:[A-Za-z]{3,9}\.? )?\d{4}\s*[-–—]\s*"
+    r"(?:(?:[A-Za-z]{3,9}\.? )?\d{1,4}"
+    r"|(?i:present|current|ongoing|now|to date|date)(?![a-z]))?")
+
+
+_RECORD_PAYLOAD_RE = re.compile(r"[A-Za-z]{2,}")
+
+
+def _date_payload(line: str) -> str | None:
+    """What follows the leading date range of a date-prefixed line of at
+    least RECORD_DATE_LINE_MIN_CHARS, or None when the line is not
+    date-prefixed at all."""
+    if len(line) < RECORD_DATE_LINE_MIN_CHARS:
+        return None
+    if not _RECORD_DATE_PREFIX_RE.match(line):
+        return None
+    date_range = _RECORD_DATE_RANGE_RE.match(line)
+    return line[date_range.end():] if date_range else line
+
+
+def _is_date_record_line(line: str) -> bool:
+    """A date-prefixed line that is a record rather than prose or a bare
+    date range: continuing past the dash the way a record does
+    (`_RECORD_DATE_CONTINUATION_RE`) and carrying a worded payload beyond
+    the date range itself."""
+    payload = _date_payload(line)
+    if payload is None or not _RECORD_DATE_CONTINUATION_RE.match(line):
+        return False
+    return bool(_RECORD_PAYLOAD_RE.search(payload))
+
+
+def _is_bare_date_line(line: str) -> bool:
+    """A date-prefixed line that is dates and nothing else ('2006-2010,
+    2012, 2013', 'February 2018 – Present'): a record's date column that
+    stage 2 split from its payload. Evidence that the entry fuses several
+    records -- so it counts toward the lint-8 floor -- but never a record
+    that can be verified against the output on its own."""
+    payload = _date_payload(line)
+    return payload is not None and not _RECORD_PAYLOAD_RE.search(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -112,7 +184,7 @@ def _is_appendix_noise(text: str) -> bool:
     return is_source_boilerplate(normed)
 
 
-def lint_output_hygiene(blocks: List[Tuple[str, str]]) -> List[Dict]:
+def lint_output_hygiene(blocks: list[tuple[str, str]]) -> list[dict]:
     """Bracketed taxonomy-code leaks anywhere in the output, plus appendix
     size and boilerplate lines rendered as appendix entries."""
     findings = []
@@ -127,11 +199,39 @@ def lint_output_hygiene(blocks: List[Tuple[str, str]]) -> List[Dict]:
             f"{len(leaks)} bracketed taxonomy-code leak(s) in output text",
             [leak[:100] for leak in leaks[:5]]))
 
+    # Paragraph-only invariant (#446 review T1.9 / #725 review r3923589271
+    # pt 9), enforced, not just documented: stage 6 renders the appendix --
+    # the catch-all for content that did not map to a template section --
+    # as numbered/bulleted PARAGRAPHS only, never as a table or list block.
+    # Measured directly against the 65 real *_wcm.docx stage_6_wcm_documents
+    # farm outputs: 33 of them carry a "T. APPENDIX" section, and 0 of those
+    # 33 contain a table block anywhere inside it -- but scanning only
+    # `kind == "p"` blocks to find entries would silently miss one on a
+    # future document that DOES break the invariant, so a non-paragraph
+    # block inside the appendix range is its own finding.
     paras = [text for kind, text in blocks if kind == "p"]
     appendix_at = next((i for i, t in enumerate(paras)
                         if t.strip() == _APPENDIX_HEADER), None)
     if appendix_at is None:
         return findings
+
+    non_paragraph_count = 0
+    in_appendix = False
+    for kind, text in blocks:
+        stripped = str(text).strip()
+        if kind == "p":
+            if stripped == _APPENDIX_HEADER:
+                in_appendix = True
+                continue
+            if in_appendix and _output_section_header(stripped):
+                in_appendix = False
+        elif in_appendix:
+            non_paragraph_count += 1
+    if non_paragraph_count:
+        findings.append(_finding(
+            "output_hygiene", "WARN",
+            f"{non_paragraph_count} non-paragraph block(s) inside the "
+            "appendix -- entries there are only scanned as paragraphs"))
 
     entries = []
     for text in paras[appendix_at + 1:]:
@@ -155,21 +255,77 @@ def lint_output_hygiene(blocks: List[Tuple[str, str]]) -> List[Dict]:
     return findings
 
 
+# A leading list-label ("B. ", "3) ") on one side only, stripped before
+# splitting into coordinate segments.
+_NAME_LABEL_RE = re.compile(r"^[A-Za-z0-9]{1,3}[.)]\s+")
+
+
+_NAME_TOKEN_RE = re.compile(r"[a-z0-9]+")
+
+
+def _name_tokens(text: str) -> set[str]:
+    stripped = _NAME_LABEL_RE.sub("", _norm(text))
+    return {tok for tok in _NAME_TOKEN_RE.findall(stripped) if len(tok) > 1}
+
+
 def _names_match(a: str, b: str) -> bool:
+    """Whole-WORD token containment (#446 review T1.3), not a bare 6-char
+    substring: the old rule matched 'education' as a fragment INSIDE the
+    single word 'educational' -- a cross-word-boundary partial match, not a
+    real name relationship -- confirmed live: the farm's own 'education' and
+    'educational contributions' output headers collide under it. Splitting
+    into whole-word tokens and requiring the shorter name's token set to be
+    a SUBSET of the longer's closes that (different words, no shared token)
+    while still matching a name against a longer, more specific header that
+    legitimately carries it as one of its own words: 'Honors' inside
+    'B. Honors and Awards', and -- corpus-verified via the doctor A/B gate,
+    see the D1(b) note in the PR body -- 'Research Presentations' inside a
+    'RESEARCH' output section it must still be recognized as belonging to.
+
+    This alone does not decide dead_sections: a spurious match CAN fabricate
+    a finding when it is the only candidate a bare single-word source name
+    picks up (#725 review r3923589271 pt 3 -- 'Research' coincidentally
+    matching an unrelated, genuinely empty 'Research Administration' output
+    section fires a WARN even when the real content rendered correctly
+    under a differently-named section, since nothing else was checked).
+    lint_dead_sections guards against exactly that case; see its docstring.
+
+    Since 13e9e0d, lint_dead_sections consults this function at all only for
+    a multi-word source name -- a single-word source name matches only on an
+    exact normalized name, never on this token-containment fallback. So the
+    'Honors' inside 'B. Honors and Awards' pair above no longer counts for
+    dead_sections: a single-word source whose only output candidate is that
+    kind of compound heading is not reported dead through this path."""
     if not a or not b:
         return False
     if a == b:
         return True
-    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
-    return len(shorter) >= 6 and shorter in longer
+    ta, tb = _name_tokens(a), _name_tokens(b)
+    if not ta or not tb:
+        return False
+    shorter, longer = (ta, tb) if len(ta) <= len(tb) else (tb, ta)
+    return shorter <= longer
 
 
-def lint_dead_sections(stage2: Dict,
-                       blocks: List[Tuple[str, str]]) -> List[Dict]:
+def lint_dead_sections(stage2: dict,
+                       blocks: list[tuple[str, str]]) -> list[dict]:
     """A source section with several substantive lines (grouped by each
     entry's top-level hierarchy header, stage 2) whose name-matched WCM
     output section holds nothing beyond template scaffolding — neither
-    paragraphs nor tables."""
+    paragraphs nor tables.
+
+    Candidate selection (#725 review r3923589271 pt 3): an exact
+    normalized-name match is used alone when one exists. Absent that, a
+    bare single-word source name (one token: 'Research', 'Honors') is too
+    generic to trust on fuzzy token containment by itself -- it can
+    coincidentally hit an unrelated, genuinely empty compound section name
+    ('Research Administration') while the real content renders correctly
+    under a third, differently-named section, fabricating a WARN with
+    nothing actually missing -- so a single-word name only matches
+    exactly. A multi-word source name ('Research Presentations') still
+    falls back to `_names_match`'s token containment, which is what the
+    farm's 2100_Mocco true positive (matching the shorter 'RESEARCH' output
+    section) needs."""
     per_h1: Dict[str, int] = {}
     for e in stage2.get("entries", []):
         if e.get("element_type") in ("header", "break"):
@@ -190,15 +346,31 @@ def lint_dead_sections(stage2: Dict,
             continue
         if current is None:
             continue
-        current[2] += sum(1 for line in str(text).split("\n")
-                          if len(_norm(line)) >= SUBSTANTIVE_LINE_CHARS
-                          and not is_template_instruction(line))
+        # A table cell carries a name, a year, an amount -- short by design.
+        # SUBSTANTIVE_LINE_CHARS is calibrated for prose paragraphs and would
+        # read a real table's own rows as empty (#446 review T1.4); any
+        # non-blank table line counts as rendered content on its own, while
+        # a paragraph line still needs the length floor.
+        for line in str(text).split("\n"):
+            if is_template_instruction(line):
+                continue
+            if kind == "table":
+                if _norm(line):
+                    current[2] += 1
+            elif len(_norm(line)) >= SUBSTANTIVE_LINE_CHARS:
+                current[2] += 1
 
     findings = []
     for h1, n_lines in sorted(per_h1.items()):
         if h1 == "(none)" or n_lines < DEAD_SECTION_MIN_LINES:
             continue
-        matched = [s for s in sections if _names_match(h1, s[1])]
+        exact = [s for s in sections if s[1] == h1]
+        if exact:
+            matched = exact
+        elif len(_name_tokens(h1)) > 1:
+            matched = [s for s in sections if _names_match(h1, s[1])]
+        else:
+            matched = []
         if matched and all(s[2] == 0 for s in matched):
             findings.append(_finding(
                 "dead_sections", "WARN",
@@ -207,11 +379,18 @@ def lint_dead_sections(stage2: Dict,
     return findings
 
 
-def _record_lines(text) -> List[str]:
+def _record_lines(text: object) -> list[str]:
+    """Record-like lines of an entry: pipe/tab rows, plus date-prefixed lines
+    that pass `_is_date_record_line` (a record, not prose or a bare range)."""
     return [line.strip() for line in str(text or "").split("\n")
-            if _looks_like_record(line)
-            or (len(line.strip()) >= RECORD_DATE_LINE_MIN_CHARS
-                and _RECORD_DATE_PREFIX_RE.match(line.strip()))]
+            if _looks_like_record(line) or _is_date_record_line(line.strip())]
+
+
+def _bare_date_lines(text: object) -> int:
+    """How many lines of an entry are a bare date column (see
+    `_is_bare_date_line`)."""
+    return sum(1 for line in str(text or "").split("\n")
+               if _is_bare_date_line(line.strip()))
 
 
 def _line_token_sets(blocks: List[Tuple[str, str]]) -> List[set]:
@@ -225,28 +404,93 @@ def _line_token_sets(blocks: List[Tuple[str, str]]) -> List[set]:
             if line.strip()]
 
 
+# Lint 8, the token-overlap side (#446 review T1.5 / #746). Two records can
+# share most of their 5+-letter tokens and still be different records:
+# within one CV the owner's surname is on every citation line and the home
+# institution on most, so those tokens vouch for nothing, and two citations
+# by the same authors in the same journal differ in exactly their year. A
+# token on at least this share of the output's lines -- and on at least this
+# many lines, so a short document does not disqualify its own content -- is
+# UBIQUITOUS and is left out of the overlap. Measured over the 65 rendered
+# farm outputs the rule marks ~8 tokens per document: the template's own
+# column labels ('dates', 'institution', 'title'), the home institution
+# ('weill', 'cornell') and the owner's surname -- 541 of the 65,291
+# (token, document) pairs.
+RENDER_UBIQUITOUS_LINE_SHARE = 0.05
+
+
+RENDER_UBIQUITOUS_MIN_LINES = 10
+
+
+class RenderedLines(NamedTuple):
+    """Per-line views of the rendered output that lint 8 scores each record
+    against. Read the fields by name, not by position."""
+    tokens: list[set[str]]      # distinctive 5+-letter tokens per line
+    years: list[set[str]]       # years per line, for the date-agreement check
+    ubiquitous: frozenset[str]  # tokens on RENDER_UBIQUITOUS_LINE_SHARE+ of lines
+
+
+def _ubiquitous_tokens(line_token_sets: list[set[str]]) -> frozenset[str]:
+    """Tokens on at least RENDER_UBIQUITOUS_LINE_SHARE of the output lines
+    (and at least RENDER_UBIQUITOUS_MIN_LINES of them)."""
+    counts: Counter[str] = Counter()
+    for tokens in line_token_sets:
+        counts.update(tokens)
+    floor = max(RENDER_UBIQUITOUS_MIN_LINES,
+                RENDER_UBIQUITOUS_LINE_SHARE * len(line_token_sets))
+    return frozenset(tok for tok, n in counts.items() if n >= floor)
+
+
+def _rendered_lines(blocks: list[tuple[str, str]]) -> RenderedLines:
+    """The per-line token sets, per-line year sets and ubiquitous-token set
+    of the rendered output, built once per document."""
+    lines = [line for _, text in blocks for line in str(text).split("\n")
+             if line.strip()]
+    tokens = [_long_word_tokens(line) for line in lines]
+    years = [set(_YEAR_RE.findall(line)) for line in lines]
+    return RenderedLines(tokens, years, _ubiquitous_tokens(tokens))
+
+
+def _line_vouches(tokens: set[str], record_years: set[str],
+                  line_tokens: set[str], line_years: set[str]) -> bool:
+    """One output line vouches for a record chunk when it carries the
+    overlap share of the chunk's distinctive tokens AND does not carry a
+    different year: a dated line that disagrees on the year is a different
+    record sharing the same words, not this record reformatted. A line with
+    no year of its own (stage 5c/5d put the date on a separate bullet)
+    cannot disagree, and falls back to the token overlap alone."""
+    if len(tokens & line_tokens) / len(tokens) < RENDER_TOKEN_OVERLAP:
+        return False
+    if record_years and line_years and not (record_years & line_years):
+        return False
+    return True
+
+
 def _record_rendered(line: str, haystack: str,
-                     line_token_sets: List[set]) -> Optional[bool]:
+                     output: RenderedLines) -> bool | None:
     """Whether one record line surfaces in the output: verbatim piece first,
-    then per-output-line token overlap. Verbatim absence alone proves nothing
-    (stage 6 reformats dates/fields), so False requires a token-verifiable
-    miss; a line without enough distinctive tokens is None, not missing."""
+    then per-output-line overlap of the record's DISTINCTIVE tokens (the
+    output's ubiquitous tokens left out) on a line whose year does not
+    contradict the record's. Verbatim absence alone proves nothing (stage 6
+    reformats dates/fields), so False requires a token-verifiable miss; a
+    line without enough distinctive tokens is None, not missing."""
     if any(piece in haystack for piece in _entry_pieces(line)):
         return True
+    record_years = set(_YEAR_RE.findall(line))
     rendered = None
     for chunk in [line] + entry_fragments(line):
-        tokens = _long_word_tokens(chunk)
+        tokens = _long_word_tokens(chunk) - output.ubiquitous
         if len(tokens) < RENDER_TOKEN_MIN_COUNT:
             continue
-        if any(len(tokens & line_tokens) / len(tokens) >= RENDER_TOKEN_OVERLAP
-               for line_tokens in line_token_sets):
+        if any(_line_vouches(tokens, record_years, line_tokens, line_years)
+               for line_tokens, line_years in zip(output.tokens, output.years)):
             return True
         rendered = False
     return rendered
 
 
-def lint_unrendered_records(stage4: Dict,
-                            blocks: List[Tuple[str, str]]) -> List[Dict]:
+def lint_unrendered_records(stage4: dict,
+                            blocks: list[tuple[str, str]]) -> list[dict]:
     """Per-record render check over fused multi-record stage-4 entries: the
     structured-fields-only render paths keep the extracted record and drop
     the unextracted remainder lines with no bullet fallback (#221). No
@@ -257,17 +501,17 @@ def lint_unrendered_records(stage4: Dict,
     # each record against per-OUTPUT-LINE token sets so common academic words
     # scattered across unrelated sections can't vouch for a dropped record.
     h = _haystacks(blocks)
-    line_tokens = _line_token_sets(blocks)
+    output = _rendered_lines(blocks)
     findings = []
     for e in stage4.get("entries", []):
         code = e.get("taxonomy_code")
         if code == "T":
             continue
         records = _record_lines(e.get("text"))
-        if len(records) < UNRENDERED_MIN_RECORD_LINES:
+        if len(records) + _bare_date_lines(e.get("text")) < UNRENDERED_MIN_RECORD_LINES:
             continue
         absent = [r for r in records
-                  if _record_rendered(r, h.text, line_tokens) is False]
+                  if _record_rendered(r, h.text, output) is False]
         if not absent:
             continue
         findings.append(_finding(
@@ -383,7 +627,36 @@ _US_STATE_ABBREVS = {
     "WI", "WY", "DC"}
 
 
-def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
+# Explicit ordered alias tuples per honors-table column role, matched on
+# word boundaries (#446 review T1.7): unrestricted substring matching
+# returned the first COLUMN containing any key, with no precedence between
+# roles, so a compound header could in principle map two roles to the same
+# column. The fixed stage-6 header ('name of award', 'organization',
+# 'date awarded (yyyy)') matches identically under either rule -- these are
+# for header variation defense-in-depth, not a live corpus fix (0/65 farm
+# honors tables use a header other than the fixed one).
+_AWARD_NAME_ALIASES = ("name of award", "award", "honor")
+
+
+_AWARD_ORG_ALIASES = ("organization", "granting")
+
+
+_AWARD_DATE_ALIASES = ("date awarded", "date", "yyyy", "year")
+
+
+def _alias_col(header: list[str], aliases: tuple[str, ...]) -> int | None:
+    """First header column whose text contains one of `aliases` as a whole
+    word/phrase, in alias order -- the first alias that matches ANY column
+    wins, same first-match precedence as the substring rule it replaces."""
+    for alias in aliases:
+        pattern = re.compile(rf"\b{re.escape(alias)}\b")
+        for idx, h in enumerate(header):
+            if pattern.search(h):
+                return idx
+    return None
+
+
+def lint_table_shape(tables: list[list[list[str]]]) -> list[dict]:
     """Honors-like tables whose rows are mis-shaped (#229): the stage-6
     multi-award fallback puts citation blobs in the name cell, leaks state
     abbreviations into the organization column, leaves the date column empty
@@ -398,26 +671,27 @@ def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
         if "name of award" not in header_all and "date awarded" not in header_all:
             continue
 
-        def col(*keys):
-            for idx, h in enumerate(header):
-                if any(k in h for k in keys):
-                    return idx
-            return None
-
-        name_i = col("award", "honor")
-        org_i = col("organization", "granting")
-        date_i = col("date", "yyyy", "year")
+        name_i = _alias_col(header, _AWARD_NAME_ALIASES)
+        org_i = _alias_col(header, _AWARD_ORG_ALIASES)
+        date_i = _alias_col(header, _AWARD_DATE_ALIASES)
         if name_i is None:
             continue
-        rows = [r for r in tbl[1:] if any(r)]
         defective_rows = set()
         defects: List[str] = []
+        non_blank_rows = 0
 
         def flag(rn, msg):
             defective_rows.add(rn)
             defects.append(f"row {rn}: {msg}")
 
-        for rn, row in enumerate(rows, start=1):
+        # Enumerate the ORIGINAL rows -- not a pre-filtered blanks-removed
+        # list -- so a defect's reported row number is the actual source
+        # table row, not its position after blank rows above it were
+        # dropped (#446 review T1.8).
+        for rn, row in enumerate(tbl[1:], start=1):
+            if not any(row):
+                continue
+            non_blank_rows += 1
             name = row[name_i] if name_i < len(row) else ""
             org = row[org_i] if org_i is not None and org_i < len(row) else ""
             date = row[date_i] if date_i is not None and date_i < len(row) else ""
@@ -435,12 +709,13 @@ def lint_table_shape(tables: List[List[List[str]]]) -> List[Dict]:
             # norm; half the table is not. Threshold on either the share of
             # rows or the absolute defect count, so a short table with two bad
             # rows out of three still warns (#438).
-            ratio = len(defective_rows) / len(rows) if rows else 0.0
+            ratio = (len(defective_rows) / non_blank_rows
+                     if non_blank_rows else 0.0)
             findings.append(_finding(
                 "table_shape",
                 "WARN" if (ratio >= TABLE_SHAPE_WARN_ROW_RATIO
                            or len(defects) >= TABLE_SHAPE_WARN_DEFECTS) else "INFO",
-                f"honors table: {len(defective_rows)}/{len(rows)} row(s) "
+                f"honors table: {len(defective_rows)}/{non_blank_rows} row(s) "
                 f"malformed ({len(defects)} defect(s)) — #229",
                 defects[:6]))
     return findings
@@ -496,7 +771,7 @@ def _passage_key(text) -> str:
     return " ".join(_PASSAGE_PUNCT_RE.sub(" ", _norm("\n".join(lines))).split())
 
 
-def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
+def lint_duplicate_passages(blocks: list[tuple[str, str]]) -> list[dict]:
     """Stretches of DUPLICATE_PASSAGE_MIN_BLOCKS+ consecutive rendered blocks
     that appear twice in the output document — one source record reaching the
     faculty-facing docx more than once (#439).
@@ -534,6 +809,17 @@ def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
     distances = {b - a for positions in windows.values() if len(positions) > 1
                  for a, b in zip(positions, positions[1:])}
 
+    # `distances` is built globally across every repeated window in the
+    # document, so a distance earned by one stretch can also happen to match
+    # a DIFFERENT stretch's own occurrences (e.g. stretch A repeats at
+    # positions 0, 6, 12 -- earning distance 6 -- while an unrelated stretch B
+    # repeats at distance 12 elsewhere; the distance-12 scan then re-pairs
+    # A's occurrence at 0 with its own occurrence at 12, which distance 6
+    # already charged via the 0-6 and 6-12 pairs). Track each match's SECOND
+    # occurrence range in index space and skip a match that overlaps a range
+    # already charged, so each redundant copy is counted once regardless of
+    # how many distances re-derive it (#446 review, fb73705 rework).
+    charged_second_ranges: list[tuple[int, int]] = []
     passages: List[Tuple[int, int, int]] = []
     for distance in sorted(distances):
         i = 0
@@ -546,9 +832,13 @@ def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
             j = i
             while j + 1 < n - distance and keys[j + 1] == keys[j + 1 + distance]:
                 j += 1
+            second_range = (i + distance, i + distance + (j - i + 1) - 1)
             if (j - i + 1 >= span
-                    and any(_YEAR_RE.search(keys[t]) for t in range(i, j + 1))):
+                    and any(_YEAR_RE.search(keys[t]) for t in range(i, j + 1))
+                    and not any(s <= second_range[1] and second_range[0] <= e
+                                for s, e in charged_second_ranges)):
                 passages.append((i, i + distance, j - i + 1))
+                charged_second_ranges.append(second_range)
             i = j + 1
     if len(passages) < DUPLICATE_PASSAGE_WARN_COUNT:
         return []
@@ -565,4 +855,81 @@ def lint_duplicate_passages(blocks: List[Tuple[str, str]]) -> List[Dict]:
         "duplicate_passages", "WARN",
         f"{len(passages)} passage(s) of >={span} consecutive rendered blocks "
         f"appear twice — one record reached the output document more than once",
+        evidence)]
+
+
+# duplicate_passages requires a run of >=2 CONSECUTIVE repeated blocks, so a
+# record occupying exactly ONE block is invisible to it by construction --
+# and that is the common shape for the most frequent duplication in the
+# corpus: a numbered citation rendered twice at different list numbers (#446).
+# This is a separate rule, not a tuning of duplicate_passages: identity here
+# is one enumerated paragraph's own normalized body, not a stretch of
+# neighbouring blocks, and it is scoped to the output SECTION a
+# consecutive-block rule never had to consider -- a CV may legitimately list
+# the same work under two different section headings ("Peer-reviewed" and
+# "Selected"), so a repeat across a section boundary is not a defect.
+#
+# Window and floor are both measured choices, not assumed ones: 6 is the
+# window #446's own detection methodology used ("within 6 citations of each
+# other"), and 20 characters is the floor the corpus probe used on the
+# normalized body so a short repeated fragment ("See above.") standing alone
+# between two unrelated records cannot count as a duplicated record.
+DUPLICATE_RECORD_WINDOW = 6
+
+
+DUPLICATE_RECORD_MIN_CHARS = 20
+
+
+DUPLICATE_RECORD_WARN_COUNT = 1
+
+
+def lint_duplicate_records(blocks: list[tuple[str, str]]) -> list[dict]:
+    """A single numbered/bulleted paragraph block whose normalized body
+    repeats at a different list position within DUPLICATE_RECORD_WINDOW
+    enumerated blocks of its first occurrence, in the SAME output section
+    (#446) -- the shape duplicate_passages cannot see because it requires
+    >=2 consecutive repeated blocks, and 55.2% of substantive records in the
+    corpus occupy exactly one.
+
+    Section scope is tracked with `_output_section_header`; the match state
+    is reset on every section change, so a publication legitimately listed
+    under two different headings never fires -- that is the same record two
+    sections chose to carry, not a duplicate. A blank spacer paragraph does
+    not match the enumerator prefix, so it is skipped rather than consuming a
+    window slot or breaking one, same as `lint_duplicate_passages`.
+    """
+    current_section: str | None = None
+    recent: list[tuple[str, int, int]] = []  # (key, enum_index, block_index)
+    enum_index = 0
+    pairs: list[tuple[int, int]] = []
+
+    for i, (kind, text) in enumerate(blocks):
+        header = _output_section_header(text) if kind == "p" else None
+        if header is not None:
+            if header != current_section:
+                current_section = header
+                recent = []
+            continue
+        if kind != "p" or not _PASSAGE_ENUMERATOR_RE.match(str(text or "")):
+            continue
+        enum_index += 1
+        key = _passage_key(text)
+        if len(key) < DUPLICATE_RECORD_MIN_CHARS:
+            continue
+        recent = [r for r in recent
+                  if enum_index - r[1] <= DUPLICATE_RECORD_WINDOW]
+        match = next((r for r in recent if r[0] == key), None)
+        if match is not None:
+            pairs.append((match[2], i))
+        recent.append((key, enum_index, i))
+
+    if len(pairs) < DUPLICATE_RECORD_WARN_COUNT:
+        return []
+
+    evidence = [f"block {first} repeats at {second}: "
+                f"{str(blocks[first][1])[:100]}" for first, second in pairs[:5]]
+    return [_finding(
+        "duplicate_records", "WARN",
+        f"{len(pairs)} duplicated record(s) — the same enumerated entry "
+        f"appears twice within the same output section",
         evidence)]
