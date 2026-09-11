@@ -5,6 +5,7 @@ import threading
 import time
 from dataclasses import FrozenInstanceError
 from unittest.mock import patch, MagicMock
+from uuid import uuid4
 
 import pytest
 
@@ -1104,6 +1105,13 @@ def _mock_saml_client(identity_dict):
     mock_client = MagicMock()
     mock_response = MagicMock()
     mock_response.get_identity.return_value = identity_dict
+    # A real pysaml2 response always carries an assertion ID; give this stub
+    # one too so the replay gate's fail-closed default (a missing ID) doesn't
+    # fire on tests that aren't exercising that path.
+    assertion = MagicMock()
+    assertion.id = f"_{uuid4().hex}"
+    mock_response.assertions = [assertion]
+    mock_response.assertion = assertion
     mock_client.parse_authn_request_response.return_value = mock_response
     return mock_client
 
