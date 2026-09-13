@@ -876,8 +876,6 @@ def score_stage3b_fallback_ratio(outputs_dir: Path) -> tuple[float, str, int | N
     if exceeded:
         return 1.0, f"hard-fail cap={STAGE3B_FALLBACK_HARD_FAIL_CAP}: {detail}", \
             STAGE3B_FALLBACK_HARD_FAIL_CAP
-    if detail:
-        return 0.0, detail, None
     return 0.0, _missing_or_unreadable_detail("classified.json", reason) if data is None \
         else "within threshold", None
 
