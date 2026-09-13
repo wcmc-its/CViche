@@ -153,10 +153,10 @@ def test_known_lints_has_no_duplicates_and_is_not_empty():
     """Guard the guard: an empty or duplicated tuple would pass the checks above."""
     known = _module().KNOWN_LINTS
     assert len(known) == len(set(known)), f"duplicate entries in KNOWN_LINTS: {known}"
-    assert len(known) == 18, (
-        f"KNOWN_LINTS changed size ({len(known)}, was 17). That is fine if a "
-        f"lint was genuinely added or removed -- update this count and say so "
-        f"in the commit message."
+    assert len(known) == 19, (
+        f"KNOWN_LINTS changed size ({len(known)}, was 18 -- #745 added "
+        f"no_output). That is fine if a lint was genuinely added or removed "
+        f"-- update this count and say so in the commit message."
     )
 
 
@@ -209,6 +209,7 @@ RUN_DOCTOR_IMPORT_SURFACE = (
     "lint_duplicate_passages",
     "lint_enrichment_failures",
     "lint_missed_headers",
+    "lint_no_output",
     "lint_output_hygiene",
     "lint_owner_contact_missing",
     "lint_pipe_leaks",
@@ -243,8 +244,9 @@ def test_run_doctor_symbol_is_still_importable(name):
 
 def test_the_surface_list_is_not_silently_empty():
     """A refactor that emptied the tuple would make the test above vacuous."""
-    assert len(RUN_DOCTOR_IMPORT_SURFACE) == 33, (
-        "the pinned run_doctor import surface changed size -- if that is "
+    assert len(RUN_DOCTOR_IMPORT_SURFACE) == 34, (
+        "the pinned run_doctor import surface changed size (#745 added "
+        "lint_no_output) -- if that is "
         "intentional, update the count and say why in the commit message"
     )
 
@@ -264,7 +266,7 @@ def test_known_lints_literal_expected_order():
         "dead_sections", "unrendered_records", "enrichment_failures",
         "stage6_render_warnings", "dedup_drops", "pipe_leaks", "table_shape",
         "duplicate_passages", "duplicate_records", "owner_contact_missing",
-        "pipeline_errors_present",
+        "pipeline_errors_present", "no_output",
     )
 
 
@@ -376,15 +378,16 @@ def test_run_doctor_report_shape_and_values(tmp_path):
 
 # --- contract 4: review round 2 on #725 (run_doctor.py thread) ---------------
 
-def test_known_lints_is_the_registry_order_plus_the_two_gates():
+def test_known_lints_is_the_registry_order_plus_the_three_gates():
     """Item 5: the dispatch order is now an OBJECT (`LINT_REGISTRY`) rather
     than a block of if-statements. KNOWN_LINTS must be that order followed
-    by the two hard-fail gates, which keep their hand-written dispatch; this
-    is the one place the two are pinned against each other at runtime, not
-    through the AST."""
+    by the three hard-fail gates, which keep their hand-written dispatch
+    (owner_contact_missing/pipeline_errors_present, joined by no_output in
+    #745); this is the one place the two are pinned against each other at
+    runtime, not through the AST."""
     mod = _module()
     assert tuple(spec.lint_id for spec in mod.LINT_REGISTRY) + (
-        "owner_contact_missing", "pipeline_errors_present",
+        "owner_contact_missing", "pipeline_errors_present", "no_output",
     ) == tuple(mod.KNOWN_LINTS)
 
 

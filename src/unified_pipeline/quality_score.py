@@ -320,6 +320,27 @@ def cv_owner_name_missing(fields_data) -> bool:
     return (not full_name) and (not first_name or not last_name)
 
 
+#: The hard-fail cap for a run that produced no rendered docx at all (#745
+#: comment, 2026-09-12: web204 lost stage 6 to #812 and scored 88 GREEN
+#: because score_sparse_tables/score_broken_format's neutral 0.5-with-no-docx
+#: fraction is exactly as good as a mediocre-but-real docx). Set BELOW
+#: score_cv_owner's 25 and score_pipeline_errors' 40: "nothing to deliver" is
+#: more severe than either -- both of those caps still describe a run that
+#: produced *something* a human could look at.
+NO_OUTPUT_CAP = 20
+
+
+def no_docx_produced(outputs_dir: Path) -> bool:
+    """True only when the run's output directory has NO docx at all -- the
+    absent case _load_docx reports as ``"no docx found"``. Deliberately
+    narrower than "doc is None": an ambiguous match (more than one *.docx) or
+    a present-but-corrupt file is a different failure, already scored by
+    score_sparse_tables/score_broken_format's own 0.5 neutral fraction, and
+    is not "nothing was produced" the way a genuinely missing file is."""
+    _, reason = _load_docx(outputs_dir)
+    return reason == "no docx found"
+
+
 # ---------------------------------------------------------------------------
 # Dimension scorers  -- each returns (penalty_fraction, detail, hard_fail_cap)
 # ---------------------------------------------------------------------------
@@ -740,6 +761,21 @@ def score_duplicate_ratio(outputs_dir: Path) -> tuple[float, str, None]:
     return fraction, detail, None
 
 
+def score_no_output(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Whether the run produced a rendered docx AT ALL -- 'nothing to
+    deliver', the single most severe outcome a run can have (#745). Weight 0:
+    this is a pure gate, not a scored dimension -- score_sparse_tables and
+    score_broken_format already assign their own (unchanged) 0.5 neutral
+    fraction when there is no docx to inspect, so giving this a nonzero
+    weight would raise the score of every OTHER run in the corpus (a bigger
+    TOTAL_WEIGHT denominator with no matching penalty) purely because this
+    dimension was added, not because anything about those runs changed.
+    """
+    if no_docx_produced(outputs_dir):
+        return 1.0, f"no docx produced; hard-fail cap={NO_OUTPUT_CAP}", NO_OUTPUT_CAP
+    return 0.0, "docx present (or absence is ambiguous/unreadable, scored elsewhere)", None
+
+
 # ---------------------------------------------------------------------------
 # Dimension registry  -- single source of truth (name, weight, scorer fn)
 # ---------------------------------------------------------------------------
@@ -752,6 +788,7 @@ DIMENSIONS = [
     ("Broken table / raw formatting artifacts in docx", 10, score_broken_format),
     ("Field-extraction sparseness (entry-level)", 8, score_field_sparseness),
     ("Duplicate-entry ratio (de-dup / fragmentation health)", 10, score_duplicate_ratio),
+    ("No rendered output produced at all (HARD-FAIL gate)", 0, score_no_output),
 ]
 TOTAL_WEIGHT = sum(w for _, w, _ in DIMENSIONS)
 

@@ -38,6 +38,7 @@ from unified_pipeline.quality_score import (  # noqa: E402
     score_cv_owner,
     score_duplicate_ratio,
     score_field_sparseness,
+    score_no_output,
     score_pipeline_errors,
     score_run,
     score_sparse_tables,
@@ -567,11 +568,14 @@ def test_load_docx_multiple_docx_ambiguous(tmp_path):
 
 def test_edge_empty_output_directory(tmp_path):
     """An existing but completely empty output directory: every dimension
-    falls to its own 'absent' case; the cv_owner hard-fail cap (25) wins."""
+    falls to its own 'absent' case. Two hard-fail caps fire -- cv_owner (25,
+    no fields.json) and #745's no_output (20, no docx at all) -- and the
+    lower one wins: 'nothing was produced' is more severe than 'produced
+    something with no name in it'."""
     result = score_run(tmp_path)
-    assert result["totalScore"] == 25
+    assert result["totalScore"] == 20
     assert result["band"].startswith("RED")
-    assert result["hard_fail_caps_applied"] == [25]
+    assert result["hard_fail_caps_applied"] == [25, 20]
 
 
 def test_edge_nonexistent_directory_raises(tmp_path):
@@ -773,11 +777,11 @@ def test_score_run_complete_evidence_is_flagged_complete(tmp_path):
 
 
 def test_score_run_incomplete_evidence_is_flagged_and_score_unchanged(tmp_path):
-    """The empty-directory score is still 25/RED (test_edge_empty_output_directory);
-    what changes is that the result now says the 25 was computed with no
-    evidence at all, as both a field and a flag after the hard-fail flag."""
+    """The empty-directory score is still 20/RED (test_edge_empty_output_directory);
+    what changes is that the result now says the 20 was computed with no
+    evidence at all, as both a field and a flag after the hard-fail flags."""
     result = score_run(tmp_path)
-    assert result["totalScore"] == 25 and result["band"].startswith("RED")
+    assert result["totalScore"] == 20 and result["band"].startswith("RED")
     assert result["data_complete"] is False
     assert result["missing_evidence"] == [
         "no fields.json found", "no classified.json found",
@@ -993,3 +997,39 @@ def test_score_dimensions_over_corrupt_docx_still_half_penalty(tmp_path):
         fraction, reason, cap = scorer(tmp_path)
         assert fraction == 0.5 and cap is None
         assert reason.startswith("docx open error: BadZipFile:"), reason
+
+
+# --------------------------------------------------------------------- D19
+# #745 no_output: a new hard-fail dimension, weight 0 (a pure gate -- see
+# quality_score.py's own comment on why a nonzero weight would move every
+# OTHER run's score too).
+# --------------------------------------------------------------------- D19
+
+def test_no_output_caps_at_20_with_no_docx_at_all(tmp_path):
+    """web204 (#745): a run with real stage-4 output but no docx at all."""
+    _write_json(tmp_path, "X_fields.json", {"cv_owner": {"full_name": "Jane Q. Public"}})
+    fraction, detail, cap = score_no_output(tmp_path)
+    assert fraction == 1.0
+    assert cap == 20
+    assert "no docx produced" in detail
+
+
+def test_no_output_quiet_when_a_docx_exists(tmp_path):
+    _make_docx(["hello"]).save(tmp_path / "out.docx")
+    fraction, _detail, cap = score_no_output(tmp_path)
+    assert fraction == 0.0 and cap is None
+
+
+def test_no_output_is_not_the_same_failure_as_ambiguous_or_corrupt(tmp_path):
+    """no_docx_produced is deliberately narrower than 'doc is None':
+    'more than one docx' and 'a docx exists but won't parse' are different
+    failures, already scored by score_sparse_tables/score_broken_format's
+    own 0.5 neutral fraction, not this gate."""
+    _garbage(tmp_path)  # a present-but-corrupt "docx"
+    fraction, _detail, cap = score_no_output(tmp_path)
+    assert fraction == 0.0 and cap is None
+
+    _make_docx(["a"]).save(tmp_path / "a.docx")
+    _make_docx(["b"]).save(tmp_path / "b.docx")
+    fraction, _detail, cap = score_no_output(tmp_path)
+    assert fraction == 0.0 and cap is None

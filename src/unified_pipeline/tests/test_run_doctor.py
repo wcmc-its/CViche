@@ -39,6 +39,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_duplicate_passages,
     lint_enrichment_failures,
     lint_missed_headers,
+    lint_no_output,
     lint_output_hygiene,
     lint_owner_contact_missing,
     lint_pipe_leaks,
@@ -1158,6 +1159,32 @@ def test_pipeline_errors_quiet_on_benign_and_absent_error_fields():
     assert lint_pipeline_errors({}) == []
 
 
+# ------------------------------------------------ #745: no_output (hard fail) -----
+
+def test_no_output_errors_when_stage4_reached_but_nothing_rendered():
+    findings = lint_no_output(True, False, False)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["lint"] == "no_output"
+    assert finding["severity"] == "ERROR"
+    assert "No output produced" in finding["message"]
+    assert "20" in finding["message"]
+
+
+def test_no_output_quiet_when_either_artifact_exists():
+    assert lint_no_output(True, True, False) == []
+    assert lint_no_output(True, False, True) == []
+    assert lint_no_output(True, True, True) == []
+
+
+def test_no_output_quiet_when_stage4_never_ran():
+    """An incomplete run that never reached stage 4 has no output YET -- not
+    the same failure as one that ran the whole pipeline and produced
+    nothing, the same distinction owner_contact_missing already draws via
+    _DELIVERABLE."""
+    assert lint_no_output(False, False, False) == []
+
+
 # ------------------------------------------------------------ full doctor runs
 
 _UID = "89TEST"
@@ -1233,7 +1260,14 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    assert len(payload["findings"]) == 18  # one skip per lint in KNOWN_LINTS
+    # One skip per lint in KNOWN_LINTS (18), except no_output: it never even
+    # reached stage 4, so its "has_stage4 and not has_docx..." condition is
+    # False and it emits NOTHING, not a skip -- it is dispatched by hand
+    # (booleans, not `_ready()`-checked content) precisely so an incomplete
+    # run like this one is silent rather than reported as "no output" (#745).
+    # KNOWN_LINTS is 19 long (18 + no_output), so the count stays 18.
+    assert len(payload["findings"]) == 18
+    assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
     assert payload["counts"]["ERROR"] == 0

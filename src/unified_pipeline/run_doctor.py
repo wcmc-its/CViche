@@ -55,7 +55,7 @@ Lints, ranked by the severity of the failure class they catch:
                           ONE-block shape duplicate_passages cannot see by
                           construction (#446)
 
-Lints 14-15 are the quality-score HARD-FAIL gates and sit outside that
+Lints 14-16 are the quality-score HARD-FAIL gates and sit outside that
 ranking: they are the only ERROR-by-construction lints, because each one on
 its own caps quality_score.py's final score into the RED do-not-deliver band.
 Without them an undeliverable run reported worst=WARN like every healthy one
@@ -72,6 +72,11 @@ independent confirmation that the gate itself is calibrated:
 15. pipeline_errors_present a fatal error (NameError, traceback) recorded in an
                           'error' field of stage_2/stage_3b/stage_4 — the JSON
                           the deployed scorer globs — capped at 40
+16. no_output             a run that reached stage 4 but produced NEITHER a
+                          stage-6 docx nor its render-warnings report at all
+                          — nothing to deliver — capped at 20 (#745: web204
+                          scored 88 GREEN with this reported only as an INFO
+                          'skipped: missing stage_6_docx')
 
 Usage:
 
@@ -197,6 +202,7 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     lint_segmentation,
 )
 from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
+    lint_no_output,
     lint_pipeline_errors,
 )
 
@@ -260,6 +266,7 @@ KNOWN_LINTS = (
     "duplicate_records",
     "owner_contact_missing",
     "pipeline_errors_present",
+    "no_output",
 )
 
 
@@ -286,6 +293,11 @@ LINT_PREVALENCE = {
     "bucket_status": 0.014,
     "under_extraction": 0.014,
     "pipeline_errors_present": 0.001,
+    # Measured on the 2026-09-11 batch's clean re-run (40 CVs, a DIFFERENT
+    # and much smaller corpus than the 73/125-run measurements above -- same
+    # rough-order-of-magnitude caveat as duplicate_records): web204 is the
+    # one uid of 40 with no stage-6 output at all (1/40 = 0.025).
+    "no_output": 0.025,
 }
 
 
@@ -841,6 +853,17 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
     else:
         ready("pipeline_errors_present", stage_2=stage_2, stage_3b=stage_3b,
               stage_4=stage_4)
+
+    # no_output (#745): a third hand-dispatched hard-fail gate, alongside the
+    # two above. Booleans, not loaded content -- `paths[...]` truthiness is
+    # exactly "does this file exist", which is what the gate asks -- so it
+    # cannot go through LINT_REGISTRY/`_ready()`, the same reason
+    # owner_contact_missing/pipeline_errors_present don't either. It does not
+    # replace the render lints' own per-artifact "skipped: missing
+    # stage_6_docx"/"missing stage_6_report" INFO -- both still fire.
+    _run_lint("no_output", lint_no_output,
+              (bool(paths["stage_4"]), bool(paths["stage_6_docx"]),
+               bool(paths["stage_6_report"])), findings)
 
     counts = {severity: 0 for severity in SEVERITY_ORDER}
     for f in findings:
