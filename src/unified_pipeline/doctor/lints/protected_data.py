@@ -7,8 +7,9 @@ not anticipate -- and this is the only artifact where "did it actually
 reach the page a reader opens" can be asked at all.
 
 One responsibility: scan the RENDERED docx's paragraphs and table cells
-for three things, and say only the block/section and the label or shape
-class in the finding -- NEVER the matched value, because this JSON is
+for the policy's label and value shapes, plus a bare full date inside the
+Personal Data block, and say only the block/section and the policy
+CATEGORY in the finding -- NEVER the matched value, because this JSON is
 copied into Teams cards and issues (#820's own report was found by
 grepping a docx by hand for exactly this reason).
 
@@ -26,8 +27,7 @@ from unified_pipeline.stage6.normalization.pii import (
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
     _MONTH_NAMES,
-    _SSN_VALUE_SHAPE_RE,
-    _pii_fragments,
+    _pii_matches,
 )
 from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE
 
@@ -40,11 +40,6 @@ from ..shared import _finding, _output_section_header
 # by exact text match; that filter became dead code with the scope split
 # (0 of 105 rendered farm docx change with or without it) and was removed.
 
-# The placeholder `_pii_label_text` returns for a fragment with no label at
-# all (a bare SSN value shape) -- those are reported once, by the dedicated
-# SSN-shape scan below, not a second time here under a placeholder "label".
-_BARE_VALUE_PLACEHOLDER = "(bare SSN value shape)"
-
 # Section names (as `_output_section_header` normalizes them) whose blocks
 # get the full policy: the two places the pre-render pass applies it.
 _PERSONAL_DATA_SECTION = "personal data"
@@ -54,29 +49,6 @@ _SECTION_PERSONAL_DATA_TABLE = "Personal Data table"
 _SECTION_APPENDIX = "Appendix"
 _SECTION_BODY_TABLE = "body table"
 _SECTION_BODY_PARAGRAPH = "body paragraph"
-
-
-def _pii_label_text(fragment: object, max_len: int = 40) -> str:
-    """The LABEL half of a PII fragment, safe to put in a message: never the
-    protected value. Everything up to and including the first colon; for a
-    colon-less fragment (a DOB/SSN value glued straight to its stem, the
-    bare "married to" phrase, or a bare SSN value shape with no label at
-    all) only the leading alphabetic stem, or `_BARE_VALUE_PLACEHOLDER` when
-    there isn't one.
-
-    Lives here, not in `pii.py`: it only reformats a fragment STRING
-    `_pii_fragments` already returned, needs no access to the label
-    vocabulary, and this is its only caller -- the doctor JSON is copied
-    into Teams cards and issues, so the finding names the LABEL class,
-    never the matched value (#820 piece 3).
-    """
-    fragment = str(fragment or "")
-    colon = fragment.find(":")
-    if colon != -1:
-        return fragment[:colon + 1].strip()[:max_len]
-    m = re.match(r"\s*[A-Za-z .'’()/-]+", fragment)
-    stem = m.group(0).strip() if m else ""
-    return stem[:max_len] if stem else _BARE_VALUE_PLACEHOLDER
 
 
 #: A bare full date, ANY of the three shapes the issue names -- checked only
@@ -159,19 +131,17 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
         section = sections[i]
         where = _section_label(kind, section)
 
-        for fragment in _pii_fragments(stripped, _scan_scope(section)):
-            label = _pii_label_text(fragment)
-            if label == _BARE_VALUE_PLACEHOLDER:
-                continue  # reported once, below, by the dedicated SSN scan
+        # One finding per merged match, named by its POLICY CATEGORY -- the
+        # same vocabulary the notice and the Word comment use -- never by
+        # the matched text: a label-text excerpt of a colon-less fragment
+        # ("Born January 2, 1970" -> "Born January") would carry part of
+        # the value into a Teams card. The bare-SSN and visa value shapes
+        # are ALL_CODES policy rows, so they are found here in any section.
+        for match in _pii_matches(stripped, _scan_scope(section)):
             findings.append(_finding(
                 "protected_data_in_output", "ERROR",
-                f"protected personal data label {label!r} found in {where} "
+                f"protected personal data ({match.category}) found in {where} "
                 f"-- value withheld from this finding"))
-
-        for _match in _SSN_VALUE_SHAPE_RE.finditer(stripped):
-            findings.append(_finding(
-                "protected_data_in_output", "ERROR",
-                f"an SSN-shaped value found in {where}"))
 
         if section == _PERSONAL_DATA_SECTION:
             for _match in _BARE_DATE_RE.finditer(stripped):

@@ -49,18 +49,25 @@ def _t(text: str) -> tuple[str, str]:
 # --------------------------------------------------------------------------
 
 def test_a_labeled_pii_fragment_in_a_body_paragraph_is_flagged():
-    """A fragment-initial label reaching an ordinary body paragraph (e.g. a
-    numbered Appendix line) -- the shape `pii.py`'s detector has caught
-    since #473, deliberately used here (rather than a label buried after
-    ANOTHER label in the same fragment, #820's own unanchored-matching
-    fix) so this test is meaningful against `pii.py` as it stands at EVERY
-    commit of this ticket, not only after piece 1 lands."""
+    """A label reaching an ordinary body paragraph. The finding names the
+    POLICY CATEGORY ("spouse"), not the matched text: the same vocabulary
+    the notice and the Word comment use, and nothing of the value."""
     blocks = [_p("Husband: Pat Example, MD")]
     findings = lint_protected_data_in_output(blocks)
     assert len(findings) == 1
     assert findings[0]["severity"] == "ERROR"
-    assert "Husband:" in findings[0]["message"]
+    assert "(spouse)" in findings[0]["message"]
     assert "Pat Example" not in findings[0]["message"], "value leaked into the finding"
+    assert "Husband" not in findings[0]["message"]
+
+
+def test_a_colonless_fragment_never_puts_part_of_its_value_in_the_finding():
+    """Round-2 regression: a label-text excerpt of "Born January 2, 1970"
+    was "Born January" -- the birth month in a Teams card."""
+    findings = lint_protected_data_in_output([_p("T. APPENDIX"), _p("• Born January 2, 1970")])
+    assert len(findings) == 1
+    assert "January" not in findings[0]["message"]
+    assert "(date of birth)" in findings[0]["message"]
 
 
 def test_a_labeled_pii_fragment_in_a_table_cell_is_flagged():
@@ -71,13 +78,13 @@ def test_a_labeled_pii_fragment_in_a_table_cell_is_flagged():
 
 
 def test_a_bare_ssn_shaped_value_anywhere_is_flagged_once():
-    """Label or not -- the SSN value shape alone is the signal. Reported
-    once, not twice, even though `_pii_fragments` also returns it (as a
-    labelless fragment) -- see the placeholder filter in the lint."""
+    """Label or not -- the SSN value shape alone is the signal (an ALL_CODES
+    policy row, so any section). Reported once."""
     blocks = [_p("Reference number on file: 123-45-6789")]
     findings = lint_protected_data_in_output(blocks)
     assert len(findings) == 1
-    assert "SSN-shaped" in findings[0]["message"]
+    assert "(social security number)" in findings[0]["message"]
+    assert "123-45-6789" not in findings[0]["message"]
 
 
 def test_a_bare_date_inside_the_personal_data_block_is_flagged():

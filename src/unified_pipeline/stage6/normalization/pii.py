@@ -462,12 +462,6 @@ def _pii_fragments(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX) -
     return [text[m.start:m.end] for m in _pii_matches(text, scope)]
 
 
-# Kept by name for `doctor/lints/protected_data.py`, which scans rendered
-# text for this one shape on its own (a bare SSN anywhere is a finding even
-# where no label matched) -- the policy row's own string, compiled once.
-_SSN_VALUE_SHAPE_RE = re.compile(_BARE_SSN_SHAPE)
-
-
 # ---------------------------------------------------------------------------
 # Value provenance
 # ---------------------------------------------------------------------------
