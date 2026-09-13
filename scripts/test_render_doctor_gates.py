@@ -171,6 +171,97 @@ def test_norm_still_distinguishes_real_content_differences():
     assert dgc.norm(a) != dgc.norm(b)
 
 
+def test_norm_excludes_metrics_so_a_trend_number_never_reads_as_changed():
+    # Round-2 review F1: metrics (#816) carries no severity of its own, so a
+    # routine denominator shift (honors_rows, appendix_share, ...) must not
+    # make norm() -- and therefore CHANGED/PASS/FAIL -- see this uid as
+    # regressed when findings are identical.
+    a = {"findings": [{"lint": "table_shape", "severity": "WARN"}],
+         "metrics": {"honors_rows": 40, "appendix_share": 0.1}}
+    b = {"findings": [{"lint": "table_shape", "severity": "WARN"}],
+         "metrics": {"honors_rows": 90, "appendix_share": 0.4}}
+    assert dgc.norm(a) == dgc.norm(b)
+
+
+def test_metrics_diff_reports_per_key_old_and_new():
+    a = {"metrics": {"honors_rows": 40, "stage3b_fallback_ratio": 0.01}}
+    b = {"metrics": {"honors_rows": 90, "stage3b_fallback_ratio": 0.01}}
+    assert dgc._metrics_diff(a, b) == [("honors_rows", 40, 90)]
+
+
+def test_metrics_diff_empty_when_metrics_identical_or_absent():
+    a = {"metrics": {"honors_rows": 40}}
+    b = {"metrics": {"honors_rows": 40}}
+    assert dgc._metrics_diff(a, b) == []
+    assert dgc._metrics_diff({}, {}) == []
+    # A key present on only one side is a difference too.
+    assert dgc._metrics_diff({"metrics": {"x": 1}}, {"metrics": {}}) == [("x", 1, None)]
+
+
+def _write_report(path, uid, findings, metrics=None):
+    path.write_text(json.dumps({
+        uid: {"document_uid": uid, "root": "/r", "artifacts": {}, "findings": findings,
+              "counts": {}, "worst_severity": None, "metrics": metrics or {}},
+        dgc.FAILED_KEY: {},
+    }))
+
+
+def test_doctor_compare_main_passes_when_only_metrics_differ():
+    # The whole point of F1: a metrics-only difference must PASS and exit 0,
+    # while still telling a human reader what changed.
+    with tempfile.TemporaryDirectory() as tmp:
+        a_path, b_path = Path(tmp) / "a.json", Path(tmp) / "b.json"
+        finding = [{"lint": "table_shape", "severity": "WARN"}]
+        _write_report(a_path, "uid1", finding, {"honors_rows": 40})
+        _write_report(b_path, "uid1", finding, {"honors_rows": 90})
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = dgc.main([str(a_path), str(b_path)])
+        assert rc == 0
+        text = out.getvalue()
+        assert "CHANGED 0" in text
+        assert "PASS - no doctor finding changed" in text
+        assert "metrics CHANGED (reported only, never fails the gate): 1 uid(s), 1 key(s)" in text
+        assert "uid1 honors_rows: 40 -> 90" in text
+
+
+def test_doctor_compare_main_still_fails_on_a_findings_change_regardless_of_metrics():
+    with tempfile.TemporaryDirectory() as tmp:
+        a_path, b_path = Path(tmp) / "a.json", Path(tmp) / "b.json"
+        _write_report(a_path, "uid1", [{"lint": "table_shape", "severity": "WARN"}],
+                      {"honors_rows": 40})
+        _write_report(b_path, "uid1", [{"lint": "table_shape", "severity": "INFO"}],
+                      {"honors_rows": 40})
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = dgc.main([str(a_path), str(b_path)])
+        assert rc == 1
+        text = out.getvalue()
+        assert "CHANGED 1" in text
+        assert "FAIL" in text
+        # metrics are identical here -- no metrics section at all.
+        assert "metrics CHANGED" not in text
+
+
+def test_doctor_compare_main_silent_on_metrics_when_reports_have_none():
+    # Legacy/pre-#816 shaped reports (no "metrics" key at all): output must
+    # be exactly what it was before metrics existed -- no new section.
+    with tempfile.TemporaryDirectory() as tmp:
+        a_path, b_path = Path(tmp) / "a.json", Path(tmp) / "b.json"
+        a_path.write_text(json.dumps({
+            "uid1": {"findings": []}, dgc.FAILED_KEY: {}}))
+        b_path.write_text(json.dumps({
+            "uid1": {"findings": []}, dgc.FAILED_KEY: {}}))
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = dgc.main([str(a_path), str(b_path)])
+        assert rc == 0
+        assert "metrics CHANGED" not in out.getvalue()
+
+
 def test_doctor_failure_guard_trips_on_either_arm():
     assert dgc._failure_guard_problems({"uid1": "boom"}, {})
     assert dgc._failure_guard_problems({}, {"uid1": "boom"})

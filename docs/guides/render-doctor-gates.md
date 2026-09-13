@@ -104,7 +104,7 @@ pre-existing, not introduced here), 58 had a locally-available source docx.
   original reused-dir bug): refused to compare, FAIL, without reading a
   single docx.
 
-**doctor_gate / doctor_gate_compare:**
+**doctor_gate / doctor_gate_compare:** `CHANGED`/`PASS`/`FAIL` below is driven by `findings` only -- `metrics` (#816) differences are reported per uid/key but never fail the gate (doctor_gate_compare.py's module docstring).
 - `--source-dir` on vs. off, same farm: `missed_headers` 0 live / 66 skipped
   -> 46 live / 8 skipped; `segmentation` 0 live / 66 skipped -> 21 live / 8
   skipped. Every other lint identical. Confirms defect 4's fix directly.
