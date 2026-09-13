@@ -33,16 +33,12 @@ from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE
 
 from ..shared import _finding, _output_section_header
 
-# The WCM template's own blank DEA slot, rendered on EVERY output whether
-# or not the source CV named one (#821: the template put it there, not
-# this pipeline) -- confirmed during the #820 corpus scan: scanning all
-# 95 batch-farm + 65 corpus-farm rendered docx, every one of 182
-# "DEA number:" label hits was this exact string, verbatim or with a
-# trailing space. Excluded by exact text match, the same device
-# `quality_score.py`'s `_TEMPLATE_TAB_CELL_TEXT` uses for the template's
-# own incidental raw tab: penalizing the template's own boilerplate is not
-# a genuine leak.
-_TEMPLATE_DEA_SLOT_TEXT = "DEA number: (optional)"
+# The WCM template's own blank "DEA number: (optional)" slot, rendered on
+# EVERY output in the Licensure section (#821: the template put it there),
+# needs no exclusion of its own: DEA is a PERSONAL_AND_APPENDIX row, and
+# the Licensure section is scanned at ALL_CODES scope. Round 1 excluded it
+# by exact text match; that filter became dead code with the scope split
+# (0 of 105 rendered farm docx change with or without it) and was removed.
 
 # The placeholder `_pii_label_text` returns for a fragment with no label at
 # all (a bare SSN value shape) -- those are reported once, by the dedicated
@@ -122,13 +118,6 @@ def _block_sections(blocks: list[tuple[str, str]]) -> list[str | None]:
     return sections
 
 
-def _personal_data_block_indices(blocks: list[tuple[str, str]]) -> set[int]:
-    """Indices into `blocks` that fall inside the Personal Data section --
-    the block set the bare-date check is confined to."""
-    return {i for i, section in enumerate(_block_sections(blocks))
-            if section == _PERSONAL_DATA_SECTION}
-
-
 def _scan_scope(section: str | None) -> str:
     """The policy scope a rendered block is checked at: the full policy in
     the Personal Data block and the Appendix, the unambiguous rows elsewhere
@@ -171,8 +160,6 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
         where = _section_label(kind, section)
 
         for fragment in _pii_fragments(stripped, _scan_scope(section)):
-            if fragment.strip() == _TEMPLATE_DEA_SLOT_TEXT:
-                continue
             label = _pii_label_text(fragment)
             if label == _BARE_VALUE_PLACEHOLDER:
                 continue  # reported once, below, by the dedicated SSN scan

@@ -21,7 +21,6 @@ if str(_SRC) not in sys.path:
 from docx import Document  # noqa: E402
 
 from unified_pipeline.doctor.lints.protected_data import (  # noqa: E402
-    _TEMPLATE_DEA_SLOT_TEXT,
     lint_protected_data_in_output,
 )
 from unified_pipeline.quality_score import (  # noqa: E402
@@ -117,12 +116,16 @@ def test_a_bare_date_outside_the_personal_data_block_is_not_flagged():
 
 
 def test_the_templates_own_blank_dea_slot_is_not_flagged():
-    """Rendered on EVERY output regardless of source-CV content (#821) --
-    confirmed template boilerplate, excluded by exact text match the same
-    way `quality_score._TEMPLATE_TAB_CELL_TEXT` excludes the template's own
-    incidental tab."""
-    blocks = [_t(_TEMPLATE_DEA_SLOT_TEXT)]
+    """Rendered on EVERY output regardless of source-CV content (#821), in
+    the Licensure section -- out of the DEA row's scope by construction
+    (PERSONAL_AND_APPENDIX), so no text-match exclusion is needed. The same
+    label in the Appendix IS a finding."""
+    blocks = [_p("LICENSURE"), _t("DEA number: (optional)")]
     assert lint_protected_data_in_output(blocks) == []
+    blocks = [_t("DEA number: (optional)")]
+    assert lint_protected_data_in_output(blocks) == []
+    blocks = [_p("T. APPENDIX"), _p("• DEA number: AB1234567")]
+    assert len(lint_protected_data_in_output(blocks)) == 1
 
 
 def test_an_isbn_shaped_number_is_not_flagged():
@@ -265,9 +268,11 @@ def test_the_withheld_notice_paragraph_is_never_a_finding():
     a leak finding."""
     blocks = [_p("T. APPENDIX"), _p(f"• {PII_REDACTED_NOTICE}")]
     assert lint_protected_data_in_output(blocks) == []
-    # and the same text with a label-shaped category appended stays exempt
-    blocks = [_p(f"• {PII_REDACTED_NOTICE} Marital Status: withheld")]
+    # and the notice paragraph stays exempt even when a label-shaped
+    # category sits in it after a separator (which WOULD match elsewhere)
+    blocks = [_p(f"• {PII_REDACTED_NOTICE}; Marital Status: withheld")]
     assert lint_protected_data_in_output(blocks) == []
+    assert len(lint_protected_data_in_output([_p("x; Marital Status: withheld")])) == 1
 
 
 def test_the_word_comment_text_is_clean_and_lives_outside_the_body(tmp_path):
