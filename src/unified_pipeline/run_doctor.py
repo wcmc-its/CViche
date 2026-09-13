@@ -72,6 +72,17 @@ independent confirmation that the gate itself is calibrated:
 15. pipeline_errors_present a fatal error (NameError, traceback) recorded in an
                           'error' field of stage_2/stage_3b/stage_4 — the JSON
                           the deployed scorer globs — capped at 40
+16. protected_data_in_output a date of birth, SSN, or other protected-data
+                          label/value shape reaches the rendered docx's
+                          paragraphs or table cells — the last line of
+                          defence behind the pre-render detector and deny
+                          pass (#820); capped at 25, same as the owner gate.
+                          Unlike 14/15 this one IS an ordinary
+                          `LINT_REGISTRY` row (it only needs the docx, not a
+                          missing-artifact special case), but it is still
+                          ERROR-by-construction and still caps the score, so
+                          it is listed here rather than in the ranked list
+                          above.
 
 Usage:
 
@@ -196,6 +207,9 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     lint_missed_headers,
     lint_segmentation,
 )
+from unified_pipeline.doctor.lints.protected_data import (  # noqa: F401,E402
+    lint_protected_data_in_output,
+)
 from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_pipeline_errors,
 )
@@ -258,6 +272,7 @@ KNOWN_LINTS = (
     "table_shape",
     "duplicate_passages",
     "duplicate_records",
+    "protected_data_in_output",
     "owner_contact_missing",
     "pipeline_errors_present",
 )
@@ -268,6 +283,9 @@ KNOWN_LINTS = (
 # every other entry in this table was measured on (#438's 73 scored runs /
 # #446's 125 rendered corpus outputs) -- the two are not comparable counts,
 # only comparable ROUGH ORDER-OF-MAGNITUDE signals for `lint_surprise`.
+# protected_data_in_output's is a THIRD, smaller, more recent basis still:
+# the #820 retro-scan of 89 canonical batch outputs + 65 farm outputs (one
+# uid), 1/154.
 LINT_PREVALENCE = {
     "output_hygiene": 0.877,
     "table_shape": 0.562,
@@ -286,6 +304,7 @@ LINT_PREVALENCE = {
     "bucket_status": 0.014,
     "under_extraction": 0.014,
     "pipeline_errors_present": 0.001,
+    "protected_data_in_output": 0.006,
 }
 
 
@@ -771,6 +790,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("table_shape", lint_table_shape, ("table_rows",)),
     LintSpec("duplicate_passages", lint_duplicate_passages, ("blocks",)),
     LintSpec("duplicate_records", lint_duplicate_records, ("blocks",)),
+    LintSpec("protected_data_in_output", lint_protected_data_in_output, ("blocks",)),
 )
 
 

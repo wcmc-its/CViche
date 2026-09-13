@@ -1233,7 +1233,7 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    assert len(payload["findings"]) == 18  # one skip per lint in KNOWN_LINTS
+    assert len(payload["findings"]) == 19  # one skip per lint in KNOWN_LINTS
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
     assert payload["counts"]["ERROR"] == 0
