@@ -313,6 +313,17 @@ LINT_PREVALENCE = {
     "bucket_status": 0.014,
     "under_extraction": 0.014,
     "pipeline_errors_present": 0.001,
+    # #810: zero of the 2026-09-11 batch's 40 uids tripped the gate -- every
+    # ratio stayed under STAGE3B_FALLBACK_RATIO_THRESHOLD (max observed
+    # 0.0004, three orders of magnitude under it). The only known real
+    # positive is web30's own partial-outage numbers, from a DIFFERENT
+    # slice-batch corpus (~worktrees/batch-slices) not otherwise represented
+    # in this table. Same zero-observed rarity class as
+    # pipeline_errors_present above -- same floor, made explicit here rather
+    # than left to lint_surprise's absent-key default (which is also 0.001,
+    # so this row changes no ranking; it only stops the value from reading
+    # as an oversight).
+    "stage3b_fallback_ratio": 0.001,
     # Measured on the 2026-09-11 batch's clean re-run (40 CVs, a DIFFERENT
     # and much smaller corpus than the 73/125-run measurements above -- same
     # rough-order-of-magnitude caveat as duplicate_records): web204 is the
