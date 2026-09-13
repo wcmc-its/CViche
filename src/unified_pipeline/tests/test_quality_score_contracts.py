@@ -33,6 +33,7 @@ from unified_pipeline.quality_score import (  # noqa: E402
     band_for,
     linear_interp,
     missing_evidence,
+    no_output_produced,
     quality_gate,
     score_broken_format,
     score_cv_owner,
@@ -1034,6 +1035,48 @@ def test_no_output_is_not_the_same_failure_as_ambiguous_or_corrupt(tmp_path):
     _make_docx(["b"]).save(tmp_path / "b.docx")
     fraction, _detail, cap = score_no_output(tmp_path)
     assert fraction == 0.0 and cap is None
+
+
+# --------------------------------------------- round-2 N4: score_no_output and
+# doctor.lints.runtime.lint_no_output must agree on "nothing to deliver" BY
+# CONSTRUCTION -- both call quality_score.no_output_produced rather than each
+# inlining their own version of the AND-of-absence condition.
+
+def test_no_output_produced_is_the_and_of_absence():
+    """positive: neither artifact -> True. negative: either artifact present
+    -> False. The score's caller can't see the report at all (its outputs_dir
+    never receives it), so it must pass has_report=False explicitly -- the
+    default -- which degenerates the predicate to docx-absence alone for it,
+    not a second definition of "missing"."""
+    assert no_output_produced(has_docx=False, has_report=False) is True
+    assert no_output_produced(has_docx=False) is True  # score's call shape
+    assert no_output_produced(has_docx=True, has_report=False) is False
+    assert no_output_produced(has_docx=False, has_report=True) is False
+    assert no_output_produced(has_docx=True, has_report=True) is False
+
+
+def test_score_no_output_and_lint_no_output_agree_via_the_shared_predicate(tmp_path):
+    """Both hard-fail gates driven from the SAME has_docx value must reach
+    the same verdict -- deleting either one's call to no_output_produced (in
+    favour of its own inlined condition) is exactly what this catches if the
+    two conditions are ever edited to drift apart."""
+    from unified_pipeline.doctor.lints.runtime import lint_no_output
+
+    # no docx at all: score hard-fails, and so does the doctor (report absent
+    # too, since the score's caller has no report input at all).
+    has_docx = not qs.no_docx_produced(tmp_path)
+    assert has_docx is False
+    fraction, _detail, cap = score_no_output(tmp_path)
+    assert (fraction, cap) == (1.0, 20)
+    assert lint_no_output(True, has_docx, False) != []
+
+    # a docx exists: neither gate fires.
+    _make_docx(["hello"]).save(tmp_path / "out.docx")
+    has_docx = not qs.no_docx_produced(tmp_path)
+    assert has_docx is True
+    fraction, _detail, cap = score_no_output(tmp_path)
+    assert (fraction, cap) == (0.0, None)
+    assert lint_no_output(True, has_docx, False) == []
 
 
 def test_stage3b_fallback_ratio_caps_at_40_on_the_web30_outage_numbers(tmp_path):

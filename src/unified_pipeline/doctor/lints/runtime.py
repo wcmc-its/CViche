@@ -44,6 +44,7 @@ from unified_pipeline.quality_score import (
     NO_OUTPUT_CAP,
     STAGE3B_FALLBACK_HARD_FAIL_CAP,
     iter_error_fields,
+    no_output_produced,
     stage3b_fallback_ratio_exceeded,
 )
 
@@ -121,8 +122,11 @@ def lint_no_output(has_stage4: bool, has_docx: bool, has_report: bool) -> list[d
     loaded artifact CONTENT -- the registry's `_ready()` convention is for
     the latter. It runs alongside, not instead of, the ordinary 'skipped:
     missing stage_6_docx'/'missing stage_6_report' INFO the render lints
-    already emit for each artifact individually."""
-    if has_stage4 and not has_docx and not has_report:
+    already emit for each artifact individually. The absence condition itself
+    is `quality_score.no_output_produced` (round-2 N4), the same predicate
+    `score_no_output` calls, so the two hard-fail gates cannot drift apart on
+    what counts as 'nothing to deliver'."""
+    if has_stage4 and no_output_produced(has_docx=has_docx, has_report=has_report):
         return [_finding(
             "no_output", "ERROR",
             f"HARD-FAIL gate 'No output produced': neither a stage-6 docx "

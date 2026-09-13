@@ -341,6 +341,27 @@ def no_docx_produced(outputs_dir: Path) -> bool:
     return reason == "no docx found"
 
 
+def no_output_produced(has_docx: bool, has_report: bool = False) -> bool:
+    """The single hard-fail predicate for 'nothing to deliver' (round-2 N4):
+    no docx AND no render-warnings report either -- ``doctor.lints.runtime
+    .lint_no_output`` and ``score_no_output`` below both call this instead of
+    each inlining their own version of the condition, so they cannot drift
+    apart the way #825 flagged for the other two hard-fail gates.
+
+    The score's ``outputs_dir`` is a flat directory `scripts/score_one.py`
+    collects (mirroring `quality_score_service.py`'s production copy) that
+    never receives the render-warnings JSON at all (its NEEDED_SUFFIXES list
+    has no `_render_warnings.json`) -- `score_no_output` therefore has no
+    report visibility and MUST pass ``has_report=False`` explicitly rather
+    than guessing, which degenerates this predicate to docx-absence alone for
+    that caller. That is not a second definition: stage 6 always saves the
+    docx before the report (`stage_6_word_template.py`), so 'report without
+    docx' cannot happen on a real run and both callers agree in practice; if
+    the score ever gains report visibility, passing the real value here is
+    the only change needed to make it agree by construction too."""
+    return (not has_docx) and (not has_report)
+
+
 #: #810 decision 4: stage 3b's own batch-fallback ratio. `lint_pipeline_errors`
 #: / `score_pipeline_errors` above can only see a failure recorded as an
 #: `error` STRING; the batch-fallback path (`stage3b/classify.py:258-271`)
@@ -838,7 +859,8 @@ def score_no_output(outputs_dir: Path) -> tuple[float, str, int | None]:
     TOTAL_WEIGHT denominator with no matching penalty) purely because this
     dimension was added, not because anything about those runs changed.
     """
-    if no_docx_produced(outputs_dir):
+    has_docx = not no_docx_produced(outputs_dir)
+    if no_output_produced(has_docx=has_docx):
         return 1.0, f"no docx produced; hard-fail cap={NO_OUTPUT_CAP}", NO_OUTPUT_CAP
     return 0.0, "docx present (or absence is ambiguous/unreadable, scored elsewhere)", None
 
