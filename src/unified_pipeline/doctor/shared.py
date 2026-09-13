@@ -10,10 +10,13 @@ line -- run_doctor and every lint module depend on this, and it depends on
 neither.
 """
 import re
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 from unified_pipeline.core.render_check import entry_fragments
 from unified_pipeline.segmentation_regression import _norm, _squash
+
+if TYPE_CHECKING:
+    from docx.document import Document as DocumentType
 
 
 # Lint 5: a squashed text piece shorter than this matches by accident; a
@@ -165,7 +168,7 @@ def _table_lines(tbl) -> list[str]:
     return lines
 
 
-def docx_body_blocks(doc) -> list[tuple[str, str]]:
+def docx_body_blocks(doc: "DocumentType") -> list[tuple[str, str]]:
     """Body-order blocks of an OPEN python-docx Document: ("p", text) per
     paragraph, ("table", _table_lines joined by newlines) per table. Grants
     render as one Word table per grant, so any output check must read

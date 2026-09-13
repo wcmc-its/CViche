@@ -815,16 +815,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self.doc = Document(self.template_path)
 
         # #820 piece 2: one pre-render deny pass over every entry, every
-        # code -- before this, `pii.py` was consulted at exactly two sites
-        # (the A-coded personal-data block and the A-coded appendix
-        # orphans), so a PII label on any OTHER code reached its section
-        # renderer or the Appendix unfiltered. Runs once, here, before any
-        # `_fill_*` call below reads an entry's text or extracted_fields.
-        # Scope is decided from the SAME routing set the appendix batch
-        # below is built from (RENDER_ROUTED_CODES) and the section names
-        # from TAXONOMY_TO_SECTION -- passed in, not re-declared. The
-        # result is read by `_unconsumed_personal_data_batch` (the notice)
-        # and `_add_remaining_to_appendix` (the Word comment on it), and
+        # code, before any `_fill_*` call reads an entry's text or fields
+        # (see `stage6/pii_pass.py`). Scope comes from the SAME routing set
+        # the appendix batch below is built from, passed in rather than
+        # re-declared. The result feeds `_unconsumed_personal_data_batch`
+        # (the notice) and `_add_remaining_to_appendix` (the comment on it);
         # `_fill_personal_data`'s docx recovery appends to it.
         self._pii_result = run_pii_pass(
             entries_by_code, routed_codes=RENDER_ROUTED_CODES,
