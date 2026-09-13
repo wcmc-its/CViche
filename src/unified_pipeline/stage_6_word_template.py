@@ -157,6 +157,7 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     normalize_retired_code,
     segment_already_rendered,
 )
+from unified_pipeline.stage6.pii_pass import apply_protected_data_pass
 from unified_pipeline.stage6.sections import (  # noqa: F401
     AdministrativeActivitiesSection,
     AppendixSection,
@@ -807,6 +808,17 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         # Flatten all entries for fallback searches
         all_entries = [entry for entries in entries_by_code.values() for entry in entries]
+
+        # #820 piece 2: one pre-render deny pass over every entry, every
+        # code -- before this, `pii.py` was consulted at exactly two sites
+        # (the A-coded personal-data block and the A-coded appendix
+        # orphans), so a PII label on any OTHER code reached its section
+        # renderer or the Appendix unfiltered. Runs once, here, before any
+        # `_fill_*` call below reads an entry's text or extracted_fields.
+        # `_pii_something_withheld` is read by `_unconsumed_personal_data_batch`
+        # to decide whether to emit the shared withheld notice, so a run
+        # withholding content on a non-A code still tells the reader.
+        self._pii_something_withheld = apply_protected_data_pass(all_entries)
 
         # Fill each section
         self._fill_personal_data(entries_by_code.get('A', []), cv_owner, document_uid, all_entries, original_doc_path)
@@ -2390,31 +2402,36 @@ Now analyze the text above:"""
         batch: List[Tuple[str, str, float]] = []
         redacted = 0
         for entry in getattr(self, '_unconsumed_personal_data', []):
-            # The PII scan reads RAW text, the render reads cleaned text, and
-            # the order matters: _clean_inline_tabs rewrites '\t' to ': ' and
-            # ' | ' to ' — ', which are exactly the fragment boundaries
-            # _pii_fragments splits on. Scanning the cleaned text merges a PII
-            # cell into its neighbour and the label no longer starts a
-            # fragment, so the entry renders. Pinned by
-            # test_pii_in_a_tab_separated_cell_is_still_caught.
+            # #820 piece 2: read the pre-render pass's own verdict
+            # (`entry['_pii_withheld']`), not a second PII scan. By this
+            # point `apply_protected_data_pass` has already stripped
+            # `entry['text']` and any PII-keyed `extracted_fields` of
+            # everything it found, so re-running `_pii_fragments`/
+            # `_PII_FIELD_KEY_RE` here would find nothing to redact on and
+            # silently render an entry that was supposed to be withheld
+            # whole -- the two call sites must not diverge from the pass.
+            if entry.get('_pii_withheld'):
+                redacted += 1
+                continue
             raw_text = entry.get('text', '') or ''
             text = _clean_inline_tabs(raw_text).strip()
             if not text:
-                continue
-            fields = entry.get('extracted_fields') or {}
-            if (_pii_fragments(raw_text)
-                    or any(_PII_FIELD_KEY_RE.match(k) for k in fields)):
-                redacted += 1
                 continue
             if _squash(text) in haystack:
                 continue
             batch.append((text, 'A', 0))
 
-        if redacted:
+        # One notice per document, not one per entry, and not scoped to A-
+        # coded orphans: `self._pii_something_withheld` is the pre-render
+        # pass's document-wide flag (`generate()`), so content withheld from
+        # a rendered section -- not just an appendix orphan -- still tells
+        # the reader something was removed.
+        notice_added = getattr(self, '_pii_something_withheld', False)
+        if notice_added:
             # One notice per document, not one per entry: the point is that the
             # reader knows something was withheld, not how many times.
             batch.append((PII_REDACTED_NOTICE, 'A', 0))
-        self.stats['personal_data_recovered'] = len(batch) - (1 if redacted else 0)
+        self.stats['personal_data_recovered'] = len(batch) - (1 if notice_added else 0)
         self.stats['personal_data_redacted'] = redacted
         return batch
 

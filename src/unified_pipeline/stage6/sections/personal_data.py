@@ -76,7 +76,7 @@ except ImportError as exc:
     ) from exc
 
 from ..formatting import _set_cell_text, _set_font
-from ..normalization import _address_cell_text, _from_pii_fragment, _labels_its_own_address_slots, _labels_its_own_phone_slots, _phone_cell_text, _pii_fragments
+from ..normalization import _address_cell_text, _from_pii_fragment, _labels_its_own_address_slots, _labels_its_own_phone_slots, _phone_cell_text
 from ..parsing import _extract_name_from_uid
 
 logger = logging.getLogger(__name__)
@@ -280,7 +280,15 @@ class PersonalDataSection:
             # Office address row renders "Cincinnati, Ohio" today, taken
             # straight from "PLACE OF BIRTH: Cincinnati, Ohio" by the address
             # catch-all below.
-            pii_fragments = _pii_fragments(entry.get('text', ''))
+            #
+            # Read from the #820 pre-render pass (`_pii_pass.py`), not
+            # recomputed here: by this point `entry['text']` has already had
+            # its PII fragments STRIPPED by that pass, so re-running
+            # `_pii_fragments` against it would find nothing. The pass
+            # stores what it found -- computed against the ORIGINAL text --
+            # on the entry precisely so this check can still answer "did
+            # this extracted_fields value come from a PII fragment?"
+            pii_fragments = entry.get('_pii_fragments', [])
 
             # Determine type based on original text labels
             extracted_phone = fields.get('phone')
@@ -417,7 +425,9 @@ class PersonalDataSection:
         if not work_email and all_entries:
             for entry in all_entries:
                 text = entry.get('text', '')
-                entry_pii_fragments = _pii_fragments(text)
+                # Read from the #820 pass, not recomputed -- see the
+                # per-entry loop above for why.
+                entry_pii_fragments = entry.get('_pii_fragments', [])
                 # Look for email pattern
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', text)
                 if email_match and not _from_pii_fragment(email_match.group(0), entry_pii_fragments):
