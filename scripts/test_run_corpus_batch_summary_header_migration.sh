@@ -58,5 +58,16 @@ second_header="$(head -1 "$results/summary.tsv")"
   || { echo "FAIL: a second run rewrote an already-widened header: $second_header"; exit 1; }
 echo "already-widened header is left alone (idempotent) ok"
 
+# A results dir with no summary.tsv at all must still get the normal fresh
+# 12-column header (the pre-existing branch of this same if/else) -- the
+# widening branch above must not be the only path that produces one.
+fresh="$tmp/_fresh_batch_runs"
+mkdir -p "$fresh"
+"$SCRIPT" "$tmp" 0 "$fresh" > /dev/null 2>&1
+fresh_header="$(head -1 "$fresh/summary.tsv")"
+[ "$fresh_header" = "$header" ] \
+  || { echo "FAIL: a fresh results dir must get the normal 12-column header: $fresh_header"; exit 1; }
+echo "a results dir with no summary.tsv gets a fresh 12-column header ok"
+
 echo
 echo "all run_corpus_batch summary.tsv header migration checks passed"
