@@ -335,9 +335,13 @@ def _route_q2_entries(q2_entries: list[dict]) -> tuple[list[dict], list[dict]]:
         text = entry.get('text', '')
         text_lower = text.lower()
         fields = entry.get('extracted_fields', {}) or {}
-        role = (fields.get('role', '') or '').lower()
-        committee = (fields.get('committee_name', '') or '').lower()
-        org = (fields.get('organization', '') or '').lower()
+        # #812 round 2: a structured (list/dict) committee_name/role/organization
+        # raised AttributeError on `.lower()` here, upstream of every
+        # `.text =` site this ticket otherwise fixed -- coerce first so the
+        # routing check is always given a string (#812 finding 3).
+        role = _cell_text(fields.get('role', '')).lower()
+        committee = _cell_text(fields.get('committee_name', '')).lower()
+        org = _cell_text(fields.get('organization', '')).lower()
 
         lines = entry_lines(text)
         if len(lines) > 1:
@@ -460,8 +464,11 @@ def _journal_name_cell_text(value: object, taxonomy_code: str) -> str:
         pieces: list[str] = []
         for item in value:
             name = _cell_text(item)
-            start_date = item.get('start_date') or ''
-            end_date = item.get('end_date') or ''
+            # #812 round 2: a per-item start_date/end_date can itself be
+            # structured (same defect class this whole ticket fixes one
+            # level up) -- coerce before format_date_range below.
+            start_date = _cell_text(item.get('start_date') or '')
+            end_date = _cell_text(item.get('end_date') or '')
             if not name or not (start_date or end_date):
                 pieces = []
                 break
@@ -632,8 +639,14 @@ class ServiceSection:
                 if not committee:
                     committee = organization
                     organization = ''
-                start_date = fields.get('start_date') or ''
-                end_date = fields.get('end_date') or ''
+                # #812 round 2: a structured (list/dict) start_date/end_date
+                # reaches format_date_range() unrendered otherwise -- it only
+                # str()s its inputs, so a list/dict prints its Python repr
+                # into the dates cell instead of raising. Coerce before the
+                # `or ''` so a falsy coerced result (None/[] -> '') still
+                # collapses the same way the original code did.
+                start_date = _cell_text(fields.get('start_date') or '')
+                end_date = _cell_text(fields.get('end_date') or '')
                 dates = format_date_range(start_date, end_date, taxonomy_code) or ''
 
                 # If we don't have structured fields, parse from raw text
@@ -699,8 +712,13 @@ class ServiceSection:
             # Check if extracted_fields has valid data - prefer using LLM extraction over raw parsing
             organization = fields.get('organization', '')
             role = fields.get('role', '')
-            start_date = fields.get('start_date', '')
-            end_date = fields.get('end_date', '')
+            # #812 round 2: coerced here (not just inside _add_extramural_row
+            # below) because format_date_range() runs BEFORE that call --
+            # organization/role reach _add_extramural_row raw and are safe
+            # (it coerces them itself), but these two feed format_date_range
+            # directly a few lines down.
+            start_date = _cell_text(fields.get('start_date', ''))
+            end_date = _cell_text(fields.get('end_date', ''))
 
             # If we have at least organization or role from extraction, use that
             # The LLM extraction is more reliable than trying to parse garbled table text
@@ -913,8 +931,11 @@ class ServiceSection:
                 journal = _journal_name_cell_text(journal_name_value, taxonomy_code)
             else:
                 journal = _cell_text(fields.get('organization') or fields.get('committee_name'))
-            start_date = fields.get('start_date', '') or fields.get('year', '')
-            end_date = fields.get('end_date', '')
+            # #812 round 2: coerce before format_date_range (see
+            # _fill_service_boards above for why -- it only str()s a
+            # structured value's Python repr into the cell).
+            start_date = _cell_text(fields.get('start_date', '') or fields.get('year', ''))
+            end_date = _cell_text(fields.get('end_date', ''))
             dates = format_date_range(start_date, end_date, taxonomy_code)
 
             if not journal:
@@ -1042,8 +1063,10 @@ class ServiceSection:
                         elif _squash(panel_name) not in _squash(organization):
                             organization = f"{organization} - {panel_name}"
 
-                    start_date = fields.get('start_date', '')
-                    end_date = fields.get('end_date', '')
+                    # #812 round 2: coerce before format_date_range (see
+                    # _fill_service_boards above).
+                    start_date = _cell_text(fields.get('start_date', ''))
+                    end_date = _cell_text(fields.get('end_date', ''))
                     dates = format_date_range(start_date, end_date, taxonomy_code)
 
                     # For Q4B/Q4C entries, try to parse role from raw text if missing

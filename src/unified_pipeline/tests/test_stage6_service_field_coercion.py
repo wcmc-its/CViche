@@ -3,7 +3,7 @@ non-str stage-4 field value.
 
 web204 (2026-09-11 corpus batch, the largest CV in it at 2,938 entries) lost
 its entire WCM output because one Q4C entry ("Editorial Board Member for:
-<journal>, 2003 - 2004; <journal>, 2014 - Present; ..." -- several editorial
+<journal>, <year> - <year>; <journal>, <year> - Present; ..." -- several editorial
 boards fused into one entry) came back from stage 4 with `journal_name` as a
 list of `{"name": ..., "start_date": ..., "end_date": ...}` dicts instead of a
 string. `_fill_other_service` assigned that straight to `row.cells[1].text`;
@@ -34,19 +34,34 @@ exactly how the `_add_table_row` collision took down 52/66 corpus CVs with
 the full suite green (see that test's docstring). Neither name is defined by
 any of the other 22 section mixins (confirmed by grep below).
 
-A separate, pre-existing, OUT-OF-SCOPE defect surfaced while writing this
-file: `_route_q2_entries` (service.py, the Q2 -> Q4D reroute every Q2 entry
-passes through in `_fill_service` BEFORE `_fill_service_boards` ever runs)
-calls `.lower()` directly on `committee_name`/`role`/`organization` with no
-coercion, so a structured value in any of those three fields on a Q2 entry
-still crashes stage 6 today -- before it ever reaches the (now-fixed)
-`.text =` sites this ticket covers. `test_q2_structured_committee_name_is_
-coerced_when_called_directly` below calls `_fill_service_boards` directly,
-bypassing the router, specifically to demonstrate this ticket's fix in
-isolation from that separate bug. Not fixed here: `_route_q2_entries` has no
-`.text =` assignment, and #812's task is scoped to `service.py`'s `.text =`
-sites (`grep -n '\\.text = ' service.py`), not the file's every string
-operation.
+Round 2 (verify-D-812, findings 1-3) closed three gaps this file's first
+pass left open:
+
+- Finding 1 (BLOCKER): the `dates` cell was never coerced -- each of
+  `_fill_service_boards`, `_fill_extramural_leadership`, `_fill_journal_
+  reviewing` and `_fill_other_service` calls `format_date_range()` directly
+  on raw `fields.get('start_date'/'end_date')`. `format_date_for_section`
+  only `str()`s its input rather than raising, so a structured date rendered
+  its Python repr into the cell instead of crashing -- invisible to every
+  test in Part 3, which only varied non-date fields.
+- Finding 2 (BLOCKER, test coverage): three of the coercions this ticket's
+  first pass ALREADY added had no test that would fail if their `_cell_text`
+  wrapper were deleted -- `role` in `_fill_other_service`, `panel_name`, and
+  `role` in `_add_extramural_row` (mutants M1/M9/M12 in verify-D-812, all
+  survived with the rest of the suite green).
+- Finding 3 (MAJOR): `_route_q2_entries` (service.py, the Q2 -> Q4D reroute
+  every Q2 entry passes through in `_fill_service` BEFORE
+  `_fill_service_boards` ever runs) called `.lower()` directly on raw
+  `committee_name`/`role`/`organization`, so a structured value in any of
+  those three fields on a Q2 entry crashed stage 6 before it ever reached
+  the (already-fixed) `.text =` sites -- a real gap in "fix the class", not
+  a `.text =` site technicality. Now coerced there too.
+
+Part 4 below covers all three. `test_q2_structured_committee_name_is_
+coerced_when_called_directly` still calls `_fill_service_boards` directly,
+bypassing the router, to isolate that function's own coercion from the
+router's (now also fixed, and separately tested by
+`test_q2_list_committee_name_survives_router_end_to_end`).
 
     python3 -m pytest src/unified_pipeline/tests/test_stage6_service_field_coercion.py -p no:cacheprovider
 
@@ -109,12 +124,12 @@ def test_list_of_str_generic_joins():
 def test_list_of_dict_with_dates_joins_ranges():
     """The exact #812 shape: web204's Q4C multi-journal entry."""
     value = [
-        {"name": "Fictional Journal of Widget Science", "start_date": "2003", "end_date": "2004"},
-        {"name": "Fictional Advances in Gadget Technology", "start_date": "2014", "end_date": "present"},
+        {"name": "Fictional Journal of Widget Science", "start_date": "1901", "end_date": "1902"},
+        {"name": "Fictional Advances in Gadget Technology", "start_date": "1950", "end_date": "present"},
     ]
     assert _journal_name_cell_text(value, Q4C) == (
-        "Fictional Journal of Widget Science (2003-2004); "
-        "Fictional Advances in Gadget Technology (2014-Present)"
+        "Fictional Journal of Widget Science (1901-1902); "
+        "Fictional Advances in Gadget Technology (1950-Present)"
     )
 
 
@@ -155,7 +170,7 @@ def test_one_record_missing_date_falls_back_whole():
     plain name join, including the one that did have a date: the ticket
     describes one fallback for the whole value, not a per-record mix."""
     value = [
-        {"name": "Fictional Journal A", "start_date": "2003", "end_date": "2004"},
+        {"name": "Fictional Journal A", "start_date": "1901", "end_date": "1902"},
         {"name": "Fictional Journal B"},
     ]
     assert _journal_name_cell_text(value, Q4C) == "Fictional Journal A; Fictional Journal B"
@@ -167,7 +182,7 @@ def test_record_with_no_name_like_key_falls_back_whole():
     check and the whole value falls back to the generic coercer, which drops
     the contentless record and keeps the real one."""
     value = [
-        {"name": "Fictional Journal A", "start_date": "2003", "end_date": "2004"},
+        {"name": "Fictional Journal A", "start_date": "1901", "end_date": "1902"},
         {},
     ]
     assert _journal_name_cell_text(value, Q4C) == "Fictional Journal A"
@@ -234,16 +249,16 @@ def test_q4c_list_of_dict_journal_name_renders_joined_text_end_to_end(tmp_path):
     entries = [
         _entry("A", name="Jane Q. Public, MD"),
         _entry("Q4C", role="Editorial Board Member", journal_name=[
-            {"name": "Fictional Journal of Widget Science", "start_date": "2003", "end_date": "2004"},
-            {"name": "Fictional Advances in Gadget Technology", "start_date": "2014", "end_date": "present"},
+            {"name": "Fictional Journal of Widget Science", "start_date": "1901", "end_date": "1902"},
+            {"name": "Fictional Advances in Gadget Technology", "start_date": "1950", "end_date": "present"},
         ]),
     ]
     doc = _render(tmp_path, entries)
     rows = list(_rows_containing(doc, "Fictional Journal of Widget Science"))
     assert len(rows) == 1, f"expected exactly one matching row, found {rows}"
     assert rows[0][0] == (
-        "Editorial Board Member, Fictional Journal of Widget Science (2003-2004); "
-        "Fictional Advances in Gadget Technology (2014-Present)"
+        "Editorial Board Member, Fictional Journal of Widget Science (1901-1902); "
+        "Fictional Advances in Gadget Technology (1950-Present)"
     )
 
 
@@ -323,11 +338,9 @@ def test_q3_dict_agency_and_panel_name_end_to_end(tmp_path):
 
 def test_q2_structured_committee_name_is_coerced_when_called_directly(tmp_path):
     """`_fill_service_boards` itself coerces correctly; called directly to
-    isolate that from the separate, pre-existing `_route_q2_entries` defect
-    documented in the module docstring (every Q2 entry goes through that
-    router first in the real pipeline, and it calls `.lower()` on
-    `committee_name`/`role`/`organization` with no coercion of its own --
-    out of this ticket's `.text =`-site scope)."""
+    isolate that from the round-1 `_route_q2_entries` defect this ticket's
+    round 2 fixes below (`test_q2_list_committee_name_survives_router_end_to_end`).
+    Every Q2 entry goes through that router first in the real pipeline."""
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document(gen.template_path)
     entries = [_entry(
@@ -341,6 +354,161 @@ def test_q2_structured_committee_name_is_coerced_when_called_directly(tmp_path):
     assert rows[0][0] == "Fictional Board Alpha; Fictional Board Beta"
     assert rows[0][1] == "Member"
     assert rows[0][3] == "2010-2012"
+
+
+# ---------------------------------------------------------------------------
+# Part 4 (round 2, verify-D-812 findings 1-3): the dates parts, the three
+# uncovered role/panel_name coercion sites (M1/M9/M12), and the Q2 router
+# (`_route_q2_entries`) coercion.
+# ---------------------------------------------------------------------------
+
+def test_q2_list_start_date_is_coerced_when_called_directly():
+    """Finding 1 (BLOCKER): `_fill_service_boards` computed
+    `format_date_range(fields.get('start_date') or '', ...)` with no
+    coercion -- `format_date_for_section` only `str()`s its input, so a
+    list/dict start_date rendered its Python repr into the dates cell
+    instead of raising or joining. Kills a mutant that drops the `_cell_text`
+    wrapper at either read."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    entries = [_entry(
+        "Q2",
+        committee_name="Fictional Board Gamma",
+        role="Member", start_date=["1930"], end_date="1931",
+    )]
+    gen._fill_service_boards(entries)
+    rows = list(_rows_containing(gen.doc, "Fictional Board Gamma"))
+    assert len(rows) == 1
+    assert rows[0][3] == "1930-1931"
+
+
+def test_q1_list_start_date_is_coerced_end_to_end(tmp_path):
+    """Finding 1 (BLOCKER): `_fill_extramural_leadership` calls
+    `format_date_range()` directly on raw `fields.get('start_date'/'end_date')`
+    BEFORE `_add_extramural_row` ever runs -- that function's own coercion
+    (killing M3/M12 below) never sees the damage already done upstream."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q1", organization="Fictional Org Three", role="Fictional Trustee",
+               start_date=["1940"], end_date="1941"),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Org Three"))
+    assert len(rows) == 1
+    assert rows[0][2] == "1940-1941"
+
+
+def test_q4d_dict_start_date_is_coerced_end_to_end(tmp_path):
+    """Finding 1 (BLOCKER), the ticket's own dict-date example:
+    `start_date={"year": "1992"}` has no key `_COMMITTEE_NAME_KEYS`
+    recognises, so `_cell_text` falls back to joining the dict's own values
+    -- yielding the bare year, not a repr. Exercises `_fill_journal_reviewing`'s
+    date coercion (a plain `organization`, not `journal_name`, so the journal
+    cell itself is unaffected by this ticket's other fix)."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q4D", organization="Fictional Journal E",
+               start_date={"year": "1992"}, end_date="1997"),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Journal E"))
+    assert len(rows) == 1
+    assert rows[0][1] == "1992-1997"
+
+
+def test_q3_list_start_date_is_coerced_end_to_end(tmp_path):
+    """Finding 1 (BLOCKER): `_fill_other_service`'s own
+    `format_date_range()` call reads raw `fields.get('start_date'/'end_date')`."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q3", agency="Fictional Agency Two",
+               start_date=["1961"], end_date="1962"),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Agency Two"))
+    assert len(rows) == 1
+    assert rows[0][2] == "1961-1962"
+
+
+def test_q4c_list_of_dict_journal_name_per_item_list_date_is_coerced():
+    """Finding 1's own class one level deeper: a per-item `start_date`/
+    `end_date` inside a `journal_name` list-of-dicts record can itself be
+    structured (not just the top-level `fields.get('start_date')` reads
+    above). Added defensively alongside the other dates sites -- not named
+    by the ticket's three call sites, but the same defect class in code this
+    ticket already touches."""
+    value = [{"name": "Fictional Journal F", "start_date": ["1970"], "end_date": "1971"}]
+    assert _journal_name_cell_text(value, Q4C) == "Fictional Journal F (1970-1971)"
+
+
+def test_q3_list_role_is_coerced_end_to_end(tmp_path):
+    """Finding 2 (BLOCKER, M1): `_fill_other_service`'s `role = fields.get('role', '')`
+    read had no test that would fail if its `_cell_text` wrapper were dropped
+    -- mutant M1 survived verify-D-812 with 49 tests passing. Exercises the
+    3-column branch's `row.cells[0].text = role`."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q3", agency="Fictional Agency Three",
+               role=["Fictional Role Chair", "Fictional Role Member"]),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Agency Three"))
+    assert len(rows) == 1
+    assert rows[0][0] == "Fictional Role Chair; Fictional Role Member"
+
+
+def test_q3_list_panel_name_is_coerced_end_to_end(tmp_path):
+    """Finding 2 (BLOCKER, M9): `panel_name` had no test that would fail if
+    its `_cell_text` wrapper were dropped -- mutant M9 survived verify-D-812.
+    `organization`/`committee_name`/`agency`/`journal_name` are all left
+    empty so `panel_name` alone becomes the organization cell
+    (`_fill_other_service`'s `if not organization: organization = panel_name`
+    branch), isolating this coercion from the OR-chain's own."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q3", panel_name=["Fictional Panel A", "Fictional Panel B"]),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Panel A"))
+    assert len(rows) == 1
+    assert rows[0][1] == "Fictional Panel A; Fictional Panel B"
+
+
+def test_q1_list_role_is_coerced_end_to_end(tmp_path):
+    """Finding 2 (BLOCKER, M12): `_add_extramural_row`'s `role` coercion had
+    no test that would fail if its `_cell_text` wrapper were dropped --
+    mutant M12 survived verify-D-812 (the existing Q1 test only varied
+    `organization`)."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q1", organization="Fictional Org Four",
+               role=["Fictional Role A", "Fictional Role B"],
+               start_date="1950", end_date="1951"),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Org Four"))
+    assert len(rows) == 1
+    assert rows[0][1] == "Fictional Role A; Fictional Role B"
+
+
+def test_q2_list_committee_name_survives_router_end_to_end(tmp_path):
+    """Finding 3 (MAJOR): `_route_q2_entries` ran `.lower()` directly on raw
+    `committee_name`/`role`/`organization` -- a structured `committee_name`
+    raised `AttributeError: 'list' object has no attribute 'lower'` there,
+    before `_fill_service_boards` (or its own, already-fixed, coercion) ever
+    ran. Drives the REAL `_fill_service` entrypoint end to end through
+    `generate()` -- unlike `test_q2_structured_committee_name_is_coerced_when_
+    called_directly` above, which calls `_fill_service_boards` directly and
+    so cannot exercise the router at all."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q2", committee_name=["Fictional Board Delta", "Fictional Board Epsilon"],
+               role="Member", start_date="1980", end_date="1981"),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Board Delta"))
+    assert len(rows) == 1
+    assert rows[0][0] == "Fictional Board Delta; Fictional Board Epsilon"
 
 
 if __name__ == "__main__":
