@@ -296,12 +296,52 @@ def test_person_field_keys_accept_a_suffix():
         assert not _PII_FIELD_KEY_RE.match(keeper), f"false positive {keeper!r}"
 
 
-def test_research_vocabulary_is_not_denied():
-    """gender/sex/race/ethnicity/religion are deliberately NOT on the list:
-    they are ordinary research vocabulary and occur as publication titles."""
+def test_research_vocabulary_still_off_the_list_is_not_denied():
+    """sex/race are still deliberately NOT on the list -- ordinary research
+    vocabulary that occurs as publication titles, unchanged by #820.
+
+    `gender`/`ethnicity`/`religion` moved OFF this list in #820 (the issue's
+    comment: withholding protected-class attributes on a rendered CV
+    outweighs the residual risk of a colon-terminated title beginning with
+    one of those exact words) -- see
+    `test_protected_class_labels_deny_only_the_colon_form` for the accepted
+    trade-off and the bare-word forms ("Gender Medicine", "Health Sciences")
+    that still must not match."""
     for keeper in [
-        "Gender: A Review of the Literature",
         "Sex: differences in galanin expression",
         "Race: reporting practices in clinical trials",
+    ]:
+        assert not _pii_fragments(keeper), f"false positive on {keeper!r}"
+
+
+def test_protected_class_labels_deny_only_the_colon_form():
+    """#820 comment: religion/ethnicity/gender/veteran status/disability/
+    health/blood type join the vocabulary as colon-terminated labels --
+    every one of these leaked on a real CV before this ticket.
+
+    The colon terminator is the same guard #473 built for
+    marital-status/spouse/children, applied to this class for the first
+    time: a bare occurrence of the word, with no colon directly after it,
+    must still pass through untouched -- these are the ticket's own named
+    negative controls (`docs` A-820, MUST NOT list) and the accepted,
+    disclosed trade-off is that a *colon-terminated* title starting with one
+    of these words ("Gender: A Review of the Literature") is now denied too.
+    """
+    for pii in [
+        "Religion: Catholic",
+        "Ethnicity: Hispanic",
+        "Gender: Female",
+        "Veteran Status: Yes",
+        "Disability: None",
+        "Health: Good",
+        "Blood Type: O+",
+    ]:
+        assert _pii_fragments(pii), f"missed {pii!r}"
+    for keeper in [
+        "Health Sciences",
+        "Public Health",
+        "Gender Medicine",
+        "Veterans Affairs Medical Center",
+        "Age-related macular degeneration",
     ]:
         assert not _pii_fragments(keeper), f"false positive on {keeper!r}"
