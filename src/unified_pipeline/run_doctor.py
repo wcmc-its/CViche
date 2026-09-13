@@ -912,45 +912,17 @@ def _build_metrics(views: dict) -> dict:
     return metrics
 
 
-def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
-    """Run every lint whose artifacts exist under root for this document uid.
-    Never raises on missing/unreadable artifacts, never raises out of a lint
-    (`_run_lint` turns that into an ERROR finding) and never calls sys.exit
-    — the backend calls this in-process; the CLI wraps it."""
-    root = Path(root)
-    paths = {key: _find_artifact(root, uid, key) for key in _ARTIFACTS}
-    source_path = Path(source) if source else _find_source(root, uid)
-
-    # Artifacts that exist but failed to load or validate, keyed by the label
-    # their loader passed to _note -- which MUST match the input kwarg name _ready() checks
-    # (so a None input is traced back to a broken file vs a genuinely absent
-    # one). The source docx feeds two independent readers; they take separate
-    # labels so a reader that fails alone is attributed to the right lint.
-    unreadable: Dict[str, str] = {}
-    def _note(label, detail):
-        unreadable[label] = detail
-
-    views: dict[str, object] = {
-        key: _load_json(paths[key], key, _note, _ARTIFACTS[key])
-        for key in _JSON_ARTIFACTS}
-    views["source_lines"] = (_try(lambda: iter_source_lines(str(source_path)), "source", _note)
-                             if source_path else None)
-    views["candidates"] = (_try(lambda: iter_header_candidates(str(source_path)), "candidates", _note)
-                           if source_path else None)
-    views["blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note)
-                       if paths["stage_6_docx"] else None)
-    views["table_rows"] = (_try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note)
-                           if paths["stage_6_docx"] else None)
-
-    findings: List[Dict] = []
-    ready = partial(_ready, unreadable=unreadable, findings=findings)
-
-    for spec in LINT_REGISTRY:
-        inputs = {_VIEW_LABELS[view]: views[view] for view in spec.inputs}
-        if ready(spec.lint_id, **inputs):
-            _run_lint(spec.lint_id, spec.rule,
-                      [views[view] for view in spec.inputs], findings)
-
+def _run_hand_dispatched_gates(views: dict, paths: dict, uid: str,
+                               unreadable: dict[str, str],
+                               findings: list[dict], ready: Callable[..., bool]) -> None:
+    """The three hard-fail gates `run_doctor()` dispatches by hand rather
+    than through `LINT_REGISTRY`, because none of them fits `_ready()`'s
+    "this exact loaded artifact is present" convention: owner_contact_missing
+    and pipeline_errors_present each read a DIFFERENT completeness condition
+    (see their own comments below), and no_output's three inputs are
+    artifact PATHS, never loaded content. Split out of `run_doctor()` (round-2
+    N1, a pure move: same bodies, same call sites, only the disclosure length
+    changes) so that function stays at a glance-able size."""
     stage_2, stage_3b, stage_4 = views["stage_2"], views["stage_3b"], views["stage_4"]
     # score_cv_owner caps at 25 for an ABSENT *_fields.json as well as an empty
     # cv_owner name, so this lint breaks the house "missing artifact -> skip"
@@ -990,6 +962,48 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
     _run_lint("no_output", lint_no_output,
               (bool(paths["stage_4"]), bool(paths["stage_6_docx"]),
                bool(paths["stage_6_report"])), findings)
+
+
+def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
+    """Run every lint whose artifacts exist under root for this document uid.
+    Never raises on missing/unreadable artifacts, never raises out of a lint
+    (`_run_lint` turns that into an ERROR finding) and never calls sys.exit
+    — the backend calls this in-process; the CLI wraps it."""
+    root = Path(root)
+    paths = {key: _find_artifact(root, uid, key) for key in _ARTIFACTS}
+    source_path = Path(source) if source else _find_source(root, uid)
+
+    # Artifacts that exist but failed to load or validate, keyed by the label
+    # their loader passed to _note -- which MUST match the input kwarg name _ready() checks
+    # (so a None input is traced back to a broken file vs a genuinely absent
+    # one). The source docx feeds two independent readers; they take separate
+    # labels so a reader that fails alone is attributed to the right lint.
+    unreadable: Dict[str, str] = {}
+    def _note(label, detail):
+        unreadable[label] = detail
+
+    views: dict[str, object] = {
+        key: _load_json(paths[key], key, _note, _ARTIFACTS[key])
+        for key in _JSON_ARTIFACTS}
+    views["source_lines"] = (_try(lambda: iter_source_lines(str(source_path)), "source", _note)
+                             if source_path else None)
+    views["candidates"] = (_try(lambda: iter_header_candidates(str(source_path)), "candidates", _note)
+                           if source_path else None)
+    views["blocks"] = (_try(lambda: read_docx_blocks(str(paths["stage_6_docx"])), "stage_6_docx", _note)
+                       if paths["stage_6_docx"] else None)
+    views["table_rows"] = (_try(lambda: read_docx_table_rows(str(paths["stage_6_docx"])), "stage_6_docx", _note)
+                           if paths["stage_6_docx"] else None)
+
+    findings: List[Dict] = []
+    ready = partial(_ready, unreadable=unreadable, findings=findings)
+
+    for spec in LINT_REGISTRY:
+        inputs = {_VIEW_LABELS[view]: views[view] for view in spec.inputs}
+        if ready(spec.lint_id, **inputs):
+            _run_lint(spec.lint_id, spec.rule,
+                      [views[view] for view in spec.inputs], findings)
+
+    _run_hand_dispatched_gates(views, paths, uid, unreadable, findings, ready)
 
     counts = {severity: 0 for severity in SEVERITY_ORDER}
     for f in findings:
