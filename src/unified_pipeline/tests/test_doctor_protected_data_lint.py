@@ -41,9 +41,13 @@ def _t(text: str) -> tuple[str, str]:
 # --------------------------------------------------------------------------
 
 def test_a_labeled_pii_fragment_in_a_body_paragraph_is_flagged():
-    """web057's real shape: a spouse label reaching a numbered Appendix
-    line, which renders as an ordinary body paragraph."""
-    blocks = [_p("2. Personal Information:: Husband: Pat Example, MD")]
+    """A fragment-initial label reaching an ordinary body paragraph (e.g. a
+    numbered Appendix line) -- the shape `pii.py`'s detector has caught
+    since #473, deliberately used here (rather than a label buried after
+    ANOTHER label in the same fragment, #820's own unanchored-matching
+    fix) so this test is meaningful against `pii.py` as it stands at EVERY
+    commit of this ticket, not only after piece 1 lands."""
+    blocks = [_p("Husband: Pat Example, MD")]
     findings = lint_protected_data_in_output(blocks)
     assert len(findings) == 1
     assert findings[0]["severity"] == "ERROR"
@@ -181,7 +185,7 @@ def _write_flat_docx(tmp_path: Path, paragraphs: list[str]) -> Path:
 
 
 def test_end_to_end_through_read_docx_blocks(tmp_path):
-    out = _write_docx(tmp_path, ["Married to Pat Example"])
+    out = _write_docx(tmp_path, ["Marital Status: Married"])
     blocks = read_docx_blocks(str(out))
     findings = lint_protected_data_in_output(blocks)
     assert len(findings) == 1
@@ -203,7 +207,7 @@ def test_run_doctor_reports_the_lint_and_caps_nothing_it_does_not_own(tmp_path):
 
 
 def test_quality_score_caps_red_on_a_leaking_docx(tmp_path):
-    _write_flat_docx(tmp_path, ["Married to Pat Example"])
+    _write_flat_docx(tmp_path, ["Marital Status: Married"])
     fraction, detail, cap = score_protected_data(tmp_path)
     assert cap == 25
     assert fraction == 1.0
