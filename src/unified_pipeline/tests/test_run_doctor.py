@@ -23,13 +23,13 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.quality_score import score_cv_owner  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
-    APPENDIX_WARN_ENTRIES,
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     MISSED_HEADERS_WARN_COUNT,
-    TABLE_SHAPE_WARN_DEFECTS,
-    TABLE_SHAPE_WARN_ROW_RATIO,
     lint_surprise,
     rank_lints,
+    appendix_entry_count,
+    honors_table_totals,
+    unrouted_code_counts,
     iter_header_candidates,
     lint_bucket_status,
     lint_classified_unrendered,
@@ -434,9 +434,24 @@ def test_taxonomy_code_coverage_fires_for_a_code_with_no_render_route():
     ]}
     findings = lint_taxonomy_code_coverage(stage3b)
     assert len(findings) == 1
-    assert findings[0]["severity"] == "WARN"
+    # #816: always INFO now -- the unrouted-code counts moved to the
+    # doctor's `metrics` block (unrouted_code_entries).
+    assert findings[0]["severity"] == "INFO"
     assert "N2" in findings[0]["message"]
     assert "2 entries" in findings[0]["message"]
+
+
+def test_unrouted_code_counts_matches_the_lints_own_by_code_dict():
+    """#816: the doctor's `metrics` block reads this SAME dict the lint
+    above builds its findings from."""
+    stage3b = {"entries": [
+        _entry("Postdoctoral Fellowship", taxonomy_code="N2", start=1),
+        _entry("Mentored Research Scholar Grant", taxonomy_code="N2", start=2),
+        _entry("Another orphan code", taxonomy_code="N1", start=3),
+        _entry("A grant", taxonomy_code="M2A", start=4),
+    ]}
+    assert unrouted_code_counts(stage3b) == {"N2": 2, "N1": 1}
+    assert unrouted_code_counts({"entries": []}) == {}
 
 
 def test_taxonomy_code_coverage_quiet_for_a_routed_code():
@@ -506,13 +521,17 @@ def test_output_hygiene_flags_boilerplate_in_appendix():
     assert "3" in count["message"]
 
 
-def test_output_hygiene_warns_on_oversized_appendix():
+def test_output_hygiene_appendix_count_stays_info_regardless_of_size():
+    """#816: the appendix-size threshold was retired -- this finding is
+    always INFO now, and the count moves to the doctor's `metrics` block
+    (appendix_entries/appendix_share) instead of a per-run WARN."""
     bullets = [("p", f"• Unmapped leftover entry with descriptive text number {i}")
-               for i in range(APPENDIX_WARN_ENTRIES + 1)]
+               for i in range(20)]
     blocks = [("p", "T. APPENDIX"), ("p", "The following content:")] + bullets
     count = next(f for f in lint_output_hygiene(blocks)
                  if "appendix holds" in f["message"])
-    assert count["severity"] == "WARN"
+    assert count["severity"] == "INFO"
+    assert "20" in count["message"]
 
 
 def test_output_hygiene_flags_a_non_paragraph_block_inside_the_appendix():
@@ -548,6 +567,21 @@ def test_output_hygiene_quiet_on_clean_output():
     ]
     findings = lint_output_hygiene(blocks)
     assert all(f["severity"] == "INFO" for f in findings)
+
+
+def test_appendix_entry_count_matches_the_lints_own_count():
+    blocks = [
+        ("p", "T. APPENDIX"),
+        ("p", "The following content:"),
+        ("p", "• one"), ("p", "• two"), ("p", "• three"),
+    ]
+    assert appendix_entry_count(blocks) == 3
+
+
+def test_appendix_entry_count_is_none_with_no_appendix_section():
+    """None (not 0) when the document has no appendix at all -- distinct
+    from an appendix that exists and is empty (#816)."""
+    assert appendix_entry_count([("p", "D. GRANTS")]) is None
 
 
 # ---------------------------------------------------------- lint 7: dead sections
@@ -879,7 +913,9 @@ def test_table_shape_flags_malformed_honors_rows():
     findings = lint_table_shape(tables)
     assert len(findings) == 1
     f = findings[0]
-    assert f["lint"] == "table_shape" and f["severity"] == "WARN"
+    # #816: always INFO now -- the malformed-row count moved to the doctor's
+    # `metrics` block (honors_malformed_rows/honors_rows).
+    assert f["lint"] == "table_shape" and f["severity"] == "INFO"
     assert "2/3 row(s) malformed" in f["message"]
     assert any("state abbrev" in e for e in f["evidence"])
     assert any("blob" in e for e in f["evidence"])
@@ -896,6 +932,25 @@ def test_table_shape_ignores_non_honors_tables_and_clean_rows():
                           "Indiana University", "2013"]],
     ]
     assert lint_table_shape(tables) == []
+
+
+def test_honors_table_totals_sums_across_multiple_tables():
+    """#816: the doctor's `metrics` block sums the SAME per-row predicate
+    the finding is built from, over every honors-shaped table, ignoring
+    non-honors ones entirely."""
+    tables = [
+        [["Committee", "Role"], [_BLOB, "Chair"]],  # not honors-shaped
+        [_HONORS_HEADER,
+         [_BLOB, "MD", ""],  # malformed
+         ["Distinguished Teaching Award", "Indiana University", "2013"]],
+        [_HONORS_HEADER,
+         ["Another Award", "Cornell University", "2015"]],  # clean
+    ]
+    assert honors_table_totals(tables) == (1, 3)
+
+
+def test_honors_table_totals_zero_with_no_honors_tables():
+    assert honors_table_totals([[["Committee", "Role"], [_BLOB, "Chair"]]]) == (0, 0)
 
 
 # ----------------------------------------------- lint 14: duplicate passages
@@ -1328,18 +1383,112 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     assert payload["counts"]["ERROR"] == 0
     assert payload["counts"]["WARN"] == 0
     assert all(v is None for v in payload["artifacts"].values())
+    assert payload["metrics"] == {}
 
 
 def test_run_doctor_clean_run_end_to_end(tmp_path):
     root = _build_clean_run(tmp_path)
     payload = run_doctor(root, _UID)
     assert set(payload) == {"document_uid", "root", "artifacts", "findings",
-                            "counts", "worst_severity"}
+                            "counts", "worst_severity", "metrics"}
     assert all(v is not None for v in payload["artifacts"].values())
     assert not any("skipped" in f["message"] for f in payload["findings"])
     assert payload["counts"]["ERROR"] == 0
     assert payload["counts"]["WARN"] == 0
     assert payload["worst_severity"] == "INFO"
+    # #816: appendix_entries/appendix_share are present even at 0/0.0 -- an
+    # EMPTY appendix is still a measured appendix, distinct from the "no
+    # appendix at all" None that omits the key entirely (see the dedicated
+    # metrics tests below). source_coverage_pct is populated because
+    # source/stage_1a/stage_2 are all present; no honors table, no unrouted
+    # code and no meta.stats in this fixture, so those four keys are absent.
+    assert payload["metrics"] == {
+        "appendix_entries": 0, "appendix_share": 0.0, "source_coverage_pct": 100.0}
+
+
+# ------------------------------------------------------------- #816: metrics
+
+def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
+    """One `_build_metrics` call over a run carrying all seven inputs at
+    once: an appendix with real entries, an honors table with a malformed
+    row, an unrouted code, a stage-3b fallback ratio, and both yield stats."""
+    from unified_pipeline.run_doctor import _build_metrics
+
+    stage3b = {
+        "entries": [
+            _entry("Postdoctoral Fellowship", taxonomy_code="N2", start=1),
+            _entry("A grant", taxonomy_code="M2A", start=2),
+        ],
+        "meta": {"stats": {
+            "failed_batches": 41, "llm_batches": 83,
+            "fallback_entries": 510, "entries_classified": 1019,
+            "t_validation": {"t_entries_reviewed": 93, "t_entries_reclassified": 28},
+            "fragment_reconnection": {"fragments_reviewed": 7, "fragments_reconnected": 3},
+        }},
+    }
+    blocks = [
+        ("p", "T. APPENDIX"),
+        ("p", "The following content from the original CV was not "
+              "successfully mapped to this CV format:"),
+        ("p", "• Unmapped leftover entry one"),
+        ("p", "• Unmapped leftover entry two"),
+    ]
+    table_rows = [
+        [_HONORS_HEADER,
+         [_BLOB, "MD", ""],
+         ["Distinguished Teaching Award", "Indiana University", "2013"]],
+    ]
+    views = {
+        "blocks": blocks, "stage_3b": stage3b, "table_rows": table_rows,
+        "source_lines": ["GRANTS", "A grant text line here for coverage"],
+        "stage_1a": _STAGE1A,
+        "stage_2": {"entries": [_entry("A grant text line here for coverage",
+                                       start=1)]},
+    }
+
+    metrics = _build_metrics(views)
+
+    assert metrics["appendix_entries"] == 2
+    assert metrics["appendix_share"] == round(2 / 2, 4)
+    assert metrics["honors_malformed_rows"] == 1
+    assert metrics["honors_rows"] == 2
+    assert metrics["unrouted_code_entries"] == {"N2": 1}
+    assert metrics["stage3b_fallback_ratio"] == round(510 / 1019, 4)
+    assert metrics["t_validation_yield"] == round(28 / 93, 4)
+    assert metrics["fragment_reconnection_yield"] == round(3 / 7, 4)
+    assert "source_coverage_pct" in metrics
+
+
+def test_build_metrics_omits_rather_than_reports_a_misleading_zero(tmp_path):
+    """A metric whose denominator is 0, or whose input is entirely absent,
+    must be OMITTED, not reported as a 0 that reads as measured-and-clean."""
+    from unified_pipeline.run_doctor import _build_metrics
+
+    assert _build_metrics({}) == {}
+    assert _build_metrics({"blocks": None, "stage_3b": None,
+                           "table_rows": None}) == {}
+    # blocks present with NO appendix section at all -> appendix_entries is
+    # None (not 0), so nothing is reported for it.
+    assert _build_metrics({"blocks": [("p", "D. GRANTS")]}) == {}
+    # stage_3b present but with an empty entries list: appendix_share's
+    # denominator is 0, so the ratio is omitted even though appendix_entries
+    # (computed from blocks alone) is not.
+    metrics = _build_metrics({
+        "blocks": [("p", "T. APPENDIX"), ("p", "boilerplate:"),
+                   ("p", "• one leftover entry")],
+        "stage_3b": {"entries": []},
+    })
+    assert metrics == {"appendix_entries": 1}
+
+
+def test_build_metrics_never_raises_on_a_malformed_stage3b(tmp_path):
+    """run_doctor() wraps _build_metrics in its own try/except (belt and
+    braces), but the function itself should already degrade gracefully on
+    a stage_3b shaped nothing like the real artifact."""
+    from unified_pipeline.run_doctor import _build_metrics
+
+    assert _build_metrics({"stage_3b": {"entries": "not a list"}}) == {}
+    assert _build_metrics({"stage_3b": {"meta": "not a dict"}}) == {}
 
 
 def test_run_doctor_reports_corrupt_artifact_as_error_not_missing(tmp_path):
@@ -1773,8 +1922,11 @@ def test_classified_unrendered_severity_tracks_total_entries_lost():
     assert many[0]["severity"] == "WARN"
 
 
-def test_table_shape_severity_tracks_how_malformed_the_table_is():
-    """A couple of bad rows in a long table is normal; a bad short table is not."""
+def test_table_shape_stays_info_regardless_of_how_malformed_the_table_is():
+    """#816 retired table_shape's own magnitude threshold: a couple of bad
+    rows in a long table and half a short table both stay INFO now -- the
+    malformed-row count is a `metrics` value (honors_malformed_rows/
+    honors_rows), not a per-run severity signal."""
     header = ["Name of Award", "Granting Organization", "Date Awarded"]
 
     def tbl(bad, total):
@@ -1790,7 +1942,7 @@ def test_table_shape_severity_tracks_how_malformed_the_table_is():
     short_bad = lint_table_shape(tbl(3, 4))
     assert long_mild and short_bad, "the lint must still fire in both cases"
     assert long_mild[0]["severity"] == "INFO", "1/40 malformed rows is not a WARN"
-    assert short_bad[0]["severity"] == "WARN", "3/4 malformed rows is"
+    assert short_bad[0]["severity"] == "INFO", "3/4 malformed rows is INFO too now"
 
 
 def test_rare_lints_outrank_ubiquitous_ones_however_often_they_fire():

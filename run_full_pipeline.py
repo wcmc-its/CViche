@@ -130,7 +130,7 @@ def configure_cli_logging() -> None:
 
     stdout: this module's INFO records, formatted as the message and nothing
     else. That is the narration AND a cross-process contract --
-    scripts/run_corpus_batch.sh:145-156 greps `Top-level sections:`,
+    scripts/run_corpus_batch.sh:152-163 greps `Top-level sections:`,
     `Total headers:`, `Entries extracted:`, `Entries classified:`,
     `Entries defaulted:` (#810) and an ANCHORED `^Models: ` out of this
     stdout, so a timestamp or level in front of a line blanks a column of
@@ -1036,7 +1036,7 @@ def print_summary(result: PipelineResult, ctx: PipelineContext) -> None:
     """The run's operator-facing report.
 
     Five of its lines are a cross-process contract, not decoration:
-    ``scripts/run_corpus_batch.sh:145-156`` greps ``Top-level sections:``,
+    ``scripts/run_corpus_batch.sh:152-163`` greps ``Top-level sections:``,
     ``Total headers:``, ``Entries extracted:``, ``Entries classified:``,
     ``Entries defaulted:`` (#810) and an anchored ``^Models: `` out of this
     stdout into ``summary.tsv``. Pinned by

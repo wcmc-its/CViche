@@ -62,12 +62,19 @@ OUTDIR="$RESULTS/outputs"; LOGDIR="$RESULTS/logs"; SUMMARY="$RESULTS/summary.tsv
 WCM_SRC="src/unified_pipeline/outputs/stage_6_wcm_documents"
 OUTPUTS_ROOT="src/unified_pipeline/outputs"
 DOCTOR_TSV="$RESULTS/doctor.tsv"; DOCTOR_DIR="$RESULTS/doctor"
+METRICS_TSV="$RESULTS/metrics.tsv"
 SCORES_TSV="$RESULTS/scores.tsv"
 mkdir -p "$OUTDIR" "$LOGDIR"
 [ -f "$SCORES_TSV" ] || printf 'date\tsha\tcv\tscore\tband\traw_before_caps\ttop_penalties\n' > "$SCORES_TSV"
 if [ "$DOCTOR" = "1" ]; then
   mkdir -p "$DOCTOR_DIR"
   [ -f "$DOCTOR_TSV" ] || printf 'date\tsha\tcv\tworst\tERROR\tWARN\tINFO\ttop_lints\n' > "$DOCTOR_TSV"
+  # #816: batch-trend numbers (appendix share, honors malformed-row rate,
+  # unrouted taxonomy codes, stage-3b fallback ratio, source coverage %,
+  # T-validation/fragment-reconnection yields), one row per CV, distinct
+  # from doctor.tsv's per-run findings. Header created here, same as the
+  # two TSVs above; doctor_one.py --metrics-tsv only ever appends.
+  [ -f "$METRICS_TSV" ] || printf 'uid\tappendix_entries\tappendix_share\thonors_malformed_rows\thonors_rows\tunrouted_code_entries\tsource_coverage_pct\tstage3b_fallback_ratio\tt_validation_yield\tfragment_reconnection_yield\n' > "$METRICS_TSV"
 fi
 
 # provenance for this invocation
@@ -159,7 +166,7 @@ for f in "$INPUT_DIR"/*.docx; do
 
   # optional: run the deterministic doctor over this run's stage artifacts and record findings
   if [ "$DOCTOR" = "1" ]; then
-    dline=$(PYTHONPATH=src python3 scripts/doctor_one.py "$OUTPUTS_ROOT" "$stem" "$f" "$DOCTOR_DIR/${stem}.json" 2>>"$log") || dline=$'error\t\t\t\t'
+    dline=$(PYTHONPATH=src python3 scripts/doctor_one.py "$OUTPUTS_ROOT" "$stem" "$f" "$DOCTOR_DIR/${stem}.json" --metrics-tsv "$METRICS_TSV" 2>>"$log") || dline=$'error\t\t\t\t'
     printf '%s\t%s\t%s\t%s\n' "$ts" "$SHA" "$stem" "$dline" >> "$DOCTOR_TSV"
     echo "   doctor: $(printf '%s' "$dline" | cut -f1) (E/W/I $(printf '%s' "$dline" | cut -f2-4 | tr '\t' '/'))"
   fi

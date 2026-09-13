@@ -29,7 +29,8 @@ Lints, ranked by the severity of the failure class they catch:
                           a partial Bedrock outage defaulted 510 of 1019
                           entries and scored 91 GREEN, doctor WARN only)
 6. output_hygiene         bracketed taxonomy-code leaks ('• [M2A]'), appendix
-                          size, boilerplate rendered in the appendix
+                          size (moved to the `metrics` block, #816),
+                          boilerplate rendered in the appendix
 7. dead_sections          substantive source sections whose name-matched WCM
                           output section is empty
 8. unrendered_records     record lines of a fused multi-record stage-4 entry
@@ -51,7 +52,9 @@ Lints, ranked by the severity of the failure class they catch:
 13. table_shape           honors-table rows that are mis-shaped: citation
                           blobs in the name cell, empty date column with a
                           year in the name, state-abbrev organizations,
-                          organization duplicated inside the name (#229)
+                          organization duplicated inside the name (#229) --
+                          the malformed-row count moved to the `metrics`
+                          block (#816); the finding itself stays INFO
 14. duplicate_passages    stretches of 3+ CONSECUTIVE rendered blocks that
                           appear twice in the output document — one record
                           reaching the faculty-facing docx more than once
@@ -86,6 +89,12 @@ independent confirmation that the gate itself is calibrated:
                           scored 88 GREEN with this reported only as an INFO
                           'skipped: missing stage_6_docx')
 
+The doctor also returns a `metrics` dict alongside `findings` (#816): numbers
+a batch layer can trend over many runs -- Appendix share, the honors-table
+malformed-row rate, unrouted taxonomy codes, stage 3b's fallback ratio,
+source coverage %, and the T-validation/fragment-reconnection yields -- with
+no severity of their own. See `_build_metrics`.
+
 Usage:
 
     PYTHONPATH=src python -m unified_pipeline.run_doctor <root> <uid> \
@@ -112,7 +121,8 @@ from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate
-from unified_pipeline.segmentation_regression import iter_source_lines
+from unified_pipeline.quality_score import stage3b_fallback_ratios
+from unified_pipeline.segmentation_regression import compute_metrics, iter_source_lines
 
 # Lint rules and their primitives now live in the doctor/ package (#493).
 # Re-exported here rather than updating callers: five files import 33 names
@@ -154,6 +164,7 @@ from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     lint_dedup_drops,
     lint_taxonomy_code_coverage,
     lint_under_extraction,
+    unrouted_code_counts,
 )
 from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     _OWNER_CAP,
@@ -162,7 +173,6 @@ from unified_pipeline.doctor.lints.enrichment import (  # noqa: F401,E402
     lint_owner_contact_missing,
 )
 from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
-    APPENDIX_WARN_ENTRIES,
     DEAD_SECTION_MIN_LINES,
     DUPLICATE_PASSAGE_MIN_BLOCKS,
     DUPLICATE_PASSAGE_WARN_COUNT,
@@ -173,8 +183,6 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     PIPE_CLUSTER_MIN,
     PIPE_LEAK_MIN_SEPS,
     RECORD_DATE_LINE_MIN_CHARS,
-    TABLE_SHAPE_WARN_DEFECTS,
-    TABLE_SHAPE_WARN_ROW_RATIO,
     UNRENDERED_MIN_RECORD_LINES,
     _APPENDIX_ENTRY_RE,
     _APPENDIX_HEADER,
@@ -193,6 +201,8 @@ from unified_pipeline.doctor.lints.render import (  # noqa: F401,E402
     _passage_key,
     _record_lines,
     _record_rendered,
+    appendix_entry_count,
+    honors_table_totals,
     lint_dead_sections,
     lint_duplicate_passages,
     lint_duplicate_records,
@@ -797,6 +807,100 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
 )
 
 
+def _build_metrics(views: dict) -> dict:
+    """Batch-trend numbers, as distinct from the per-run findings above
+    (#816): things that are true of the PIPELINE in general -- how big the
+    Appendix usually runs, how often stage 3b falls back to default codes --
+    belong in a trend line, not a per-run WARN. `output_hygiene`'s appendix
+    count, `table_shape`'s honors-malformed-row count and
+    `taxonomy_code_coverage`'s unrouted-code counts fired on 37, 24 and 10 of
+    40 runs respectively in the 2026-09-11 batch and carried no per-run
+    information (#438's class) -- their lints now report those numbers here
+    instead of in a WARN, alongside three metrics with no lint of their own
+    yet (`stage3b_fallback_ratio` from #810, `t_validation_yield` and
+    `fragment_reconnection_yield` from #818).
+
+    Corpus-outlier promotion (the p75/p90 convention #438 introduced for
+    `missed_headers`) is explicitly OUT of scope here -- that is a batch-
+    layer concern over many runs' worth of these numbers, not something one
+    run's doctor call can compute. Numbers only, no severity.
+
+    Every number is read from the artifact directly or from a function a
+    finding above already calls (`appendix_entry_count`, `honors_table_
+    totals`, `unrouted_code_counts`, `stage3b_fallback_ratios`,
+    `compute_metrics`) -- never a second definition of the same predicate
+    (§1.5). A metric whose inputs are absent, or whose denominator is 0, is
+    simply omitted rather than reported as a misleading 0. Each of the four
+    sections below (appendix, honors tables, stage-3b-derived, source
+    coverage) is independent and individually guarded: a stage_3b shaped
+    nothing like the real artifact drops only the stage-3b-derived metrics,
+    not the appendix or coverage ones computed from other views -- run_doctor()
+    additionally wraps the whole call, but that would discard every metric
+    over one bad section rather than just the section that broke."""
+    metrics: dict[str, object] = {}
+    blocks = views.get("blocks")
+    stage_3b = views.get("stage_3b")
+
+    try:
+        if blocks is not None:
+            appendix_entries = appendix_entry_count(blocks)
+            if appendix_entries is not None:
+                metrics["appendix_entries"] = appendix_entries
+                if isinstance(stage_3b, dict):
+                    classified = len(stage_3b.get("entries") or [])
+                    if classified:
+                        metrics["appendix_share"] = round(
+                            appendix_entries / classified, 4)
+    except Exception:
+        logger.exception("run_doctor: appendix metrics crashed")
+
+    try:
+        table_rows = views.get("table_rows")
+        if table_rows is not None:
+            malformed, total = honors_table_totals(table_rows)
+            if total:
+                metrics["honors_malformed_rows"] = malformed
+                metrics["honors_rows"] = total
+    except Exception:
+        logger.exception("run_doctor: honors-table metrics crashed")
+
+    try:
+        if isinstance(stage_3b, dict):
+            unrouted = unrouted_code_counts(stage_3b)
+            if unrouted:
+                metrics["unrouted_code_entries"] = unrouted
+
+            ratios = stage3b_fallback_ratios(stage_3b)
+            if ratios:
+                metrics["stage3b_fallback_ratio"] = round(max(ratios.values()), 4)
+
+            stats = stage_3b.get("meta") or {}
+            stats = stats.get("stats") or {} if isinstance(stats, dict) else {}
+            tv = stats.get("t_validation") or {}
+            reviewed = tv.get("t_entries_reviewed") if isinstance(tv, dict) else None
+            if reviewed:
+                metrics["t_validation_yield"] = round(
+                    tv.get("t_entries_reclassified", 0) / reviewed, 4)
+            fr = stats.get("fragment_reconnection") or {}
+            f_reviewed = fr.get("fragments_reviewed") if isinstance(fr, dict) else None
+            if f_reviewed:
+                metrics["fragment_reconnection_yield"] = round(
+                    fr.get("fragments_reconnected", 0) / f_reviewed, 4)
+    except Exception:
+        logger.exception("run_doctor: stage3b-derived metrics crashed")
+
+    try:
+        source_lines, stage_1a, stage_2 = (
+            views.get("source_lines"), views.get("stage_1a"), views.get("stage_2"))
+        if source_lines is not None and stage_1a is not None and stage_2 is not None:
+            metrics["source_coverage_pct"] = compute_metrics(
+                source_lines, stage_1a, stage_2)["text_coverage_pct"]
+    except Exception:
+        logger.exception("run_doctor: source-coverage metric crashed")
+
+    return metrics
+
+
 def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
     """Run every lint whose artifacts exist under root for this document uid.
     Never raises on missing/unreadable artifacts, never raises out of a lint
@@ -881,6 +985,12 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
         counts[f["severity"]] += 1
     worst = next((s for s in SEVERITY_ORDER if counts[s]), None)
 
+    try:
+        metrics = _build_metrics(views)
+    except Exception:
+        logger.exception("run_doctor: metrics computation crashed for %s", uid)
+        metrics = {}
+
     return {
         "document_uid": uid,
         "root": str(root),
@@ -891,6 +1001,7 @@ def run_doctor(root: Path, uid: str, source: Path | None = None) -> dict:
         "findings": findings,
         "counts": counts,
         "worst_severity": worst,
+        "metrics": metrics,
     }
 
 

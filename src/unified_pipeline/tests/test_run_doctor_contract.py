@@ -192,12 +192,9 @@ def test_the_lint_prefix_is_not_a_reliable_rule_marker():
 #: Adding to this list is fine. REMOVING from it is a breaking change, and it is
 #: the one the split is most likely to make by accident.
 RUN_DOCTOR_IMPORT_SURFACE = (
-    "APPENDIX_WARN_ENTRIES",
     "CLASSIFIED_UNRENDERED_WARN_ENTRIES",
     "DUPLICATE_PASSAGE_MIN_BLOCKS",
     "MISSED_HEADERS_WARN_COUNT",
-    "TABLE_SHAPE_WARN_DEFECTS",
-    "TABLE_SHAPE_WARN_ROW_RATIO",
     "_docx_text",
     "_find_artifact",
     "_find_source",
@@ -246,10 +243,13 @@ def test_run_doctor_symbol_is_still_importable(name):
 
 def test_the_surface_list_is_not_silently_empty():
     """A refactor that emptied the tuple would make the test above vacuous."""
-    assert len(RUN_DOCTOR_IMPORT_SURFACE) == 35, (
-        "the pinned run_doctor import surface changed size (#810 added "
-        "lint_stage3b_fallback_ratio) -- if that is "
-        "intentional, update the count and say why in the commit message"
+    assert len(RUN_DOCTOR_IMPORT_SURFACE) == 32, (
+        "the pinned run_doctor import surface changed size -- if that is "
+        "intentional, update the count and say why in the commit message "
+        "(#816 removed APPENDIX_WARN_ENTRIES/TABLE_SHAPE_WARN_DEFECTS/"
+        "TABLE_SHAPE_WARN_ROW_RATIO, now dead once their severity thresholds "
+        "were retired; #810/#745 added lint_stage3b_fallback_ratio/"
+        "lint_no_output: 33 - 3 + 2 = 32)"
     )
 
 
