@@ -367,14 +367,14 @@ def test_q2_list_start_date_is_coerced_when_called_directly():
     `format_date_range(fields.get('start_date') or '', ...)` with no
     coercion -- `format_date_for_section` only `str()`s its input, so a
     list/dict start_date rendered its Python repr into the dates cell
-    instead of raising or joining. Kills a mutant that drops the `_cell_text`
-    wrapper at either read."""
+    instead of raising or joining. Both parts are structured (list) so this
+    kills a mutant dropping the `_cell_text` wrapper at EITHER read."""
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document(gen.template_path)
     entries = [_entry(
         "Q2",
         committee_name="Fictional Board Gamma",
-        role="Member", start_date=["1930"], end_date="1931",
+        role="Member", start_date=["1930"], end_date=["1931"],
     )]
     gen._fill_service_boards(entries)
     rows = list(_rows_containing(gen.doc, "Fictional Board Gamma"))
@@ -386,11 +386,13 @@ def test_q1_list_start_date_is_coerced_end_to_end(tmp_path):
     """Finding 1 (BLOCKER): `_fill_extramural_leadership` calls
     `format_date_range()` directly on raw `fields.get('start_date'/'end_date')`
     BEFORE `_add_extramural_row` ever runs -- that function's own coercion
-    (killing M3/M12 below) never sees the damage already done upstream."""
+    (killing M3/M12) never sees the damage already done upstream. Both
+    parts are structured (list) so this kills a mutant dropping the
+    `_cell_text` wrapper at EITHER read."""
     entries = [
         _entry("A", name="Jane Q. Public, MD"),
         _entry("Q1", organization="Fictional Org Three", role="Fictional Trustee",
-               start_date=["1940"], end_date="1941"),
+               start_date=["1940"], end_date=["1941"]),
     ]
     doc = _render(tmp_path, entries)
     rows = list(_rows_containing(doc, "Fictional Org Three"))
@@ -402,13 +404,15 @@ def test_q4d_dict_start_date_is_coerced_end_to_end(tmp_path):
     """Finding 1 (BLOCKER), the ticket's own dict-date example:
     `start_date={"year": "1992"}` has no key `_COMMITTEE_NAME_KEYS`
     recognises, so `_cell_text` falls back to joining the dict's own values
-    -- yielding the bare year, not a repr. Exercises `_fill_journal_reviewing`'s
-    date coercion (a plain `organization`, not `journal_name`, so the journal
-    cell itself is unaffected by this ticket's other fix)."""
+    -- yielding the bare year, not a repr. `end_date` is a list, so together
+    this kills a mutant dropping the `_cell_text` wrapper at EITHER read.
+    Exercises `_fill_journal_reviewing`'s date coercion (a plain
+    `organization`, not `journal_name`, so the journal cell itself is
+    unaffected by this ticket's other fix)."""
     entries = [
         _entry("A", name="Jane Q. Public, MD"),
         _entry("Q4D", organization="Fictional Journal E",
-               start_date={"year": "1992"}, end_date="1997"),
+               start_date={"year": "1992"}, end_date=["1997"]),
     ]
     doc = _render(tmp_path, entries)
     rows = list(_rows_containing(doc, "Fictional Journal E"))
@@ -418,11 +422,13 @@ def test_q4d_dict_start_date_is_coerced_end_to_end(tmp_path):
 
 def test_q3_list_start_date_is_coerced_end_to_end(tmp_path):
     """Finding 1 (BLOCKER): `_fill_other_service`'s own
-    `format_date_range()` call reads raw `fields.get('start_date'/'end_date')`."""
+    `format_date_range()` call reads raw `fields.get('start_date'/'end_date')`.
+    Both parts are structured (list) so this kills a mutant dropping the
+    `_cell_text` wrapper at EITHER read."""
     entries = [
         _entry("A", name="Jane Q. Public, MD"),
         _entry("Q3", agency="Fictional Agency Two",
-               start_date=["1961"], end_date="1962"),
+               start_date=["1961"], end_date=["1962"]),
     ]
     doc = _render(tmp_path, entries)
     rows = list(_rows_containing(doc, "Fictional Agency Two"))
@@ -434,10 +440,11 @@ def test_q4c_list_of_dict_journal_name_per_item_list_date_is_coerced():
     """Finding 1's own class one level deeper: a per-item `start_date`/
     `end_date` inside a `journal_name` list-of-dicts record can itself be
     structured (not just the top-level `fields.get('start_date')` reads
-    above). Added defensively alongside the other dates sites -- not named
-    by the ticket's three call sites, but the same defect class in code this
-    ticket already touches."""
-    value = [{"name": "Fictional Journal F", "start_date": ["1970"], "end_date": "1971"}]
+    above). Both parts are structured (list) so this kills a mutant dropping
+    the `_cell_text` wrapper at EITHER read. Added defensively alongside the
+    other dates sites -- not named by the ticket's three call sites, but the
+    same defect class in code this ticket already touches."""
+    value = [{"name": "Fictional Journal F", "start_date": ["1970"], "end_date": ["1971"]}]
     assert _journal_name_cell_text(value, Q4C) == "Fictional Journal F (1970-1971)"
 
 
