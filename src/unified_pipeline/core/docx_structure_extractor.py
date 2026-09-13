@@ -510,6 +510,21 @@ def looks_like_section_header(text: str) -> tuple[bool, float]:
     return is_header, confidence
 
 
+def row_has_nonblank_value_cells(row: list[dict[str, Any]]) -> bool:
+    """Return True if any cell after row[0] carries non-blank text.
+
+    Distinguishes a form-style label|value row (e.g. "Name:" | "<value>")
+    from a genuine sub-header row: a single-cell row, or a multi-cell row
+    whose trailing cells are all blank, has nothing to lose by being
+    emitted as a header (see issue #811).
+    """
+    for cell in row[1:]:
+        cell_value = cell.get("text", "") if isinstance(cell, dict) else str(cell)
+        if cell_value.strip():
+            return True
+    return False
+
+
 def get_table_first_cell_text(table: Table) -> str:
     """Extract text from the first cell of first row of a table."""
     if not table.rows:
@@ -809,7 +824,8 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
 
                         is_row_header, row_header_conf = looks_like_section_header(cell_text)
 
-                        if is_row_header and cell_text:
+                        # A non-blank trailing cell means "Name:" is a form label, not a header (#811).
+                        if is_row_header and cell_text and not row_has_nonblank_value_cells(row):
                             # Emit accumulated content rows first
                             if current_content_rows:
                                 content_text = "\n".join(
