@@ -1621,6 +1621,51 @@ def test_run_doctor_owner_gate_skips_when_the_run_produced_nothing(tmp_path):
         "skipped: missing stage_2, stage_3b, stage_4"
 
 
+# --------------------------------- round-2 F3: test the WIRE, not just the
+# rule -- both hard-fail gates above are dispatched from run_doctor() by a
+# `_run_lint(...)` call the rule-level tests never exercise; deleting either
+# call (verifier mutant m20 and its stage3b_fallback_ratio counterpart) left
+# the full `test_run_doctor.py` green because nothing drove the gate through
+# run_doctor() itself, only through the bare lint function.
+
+def test_run_doctor_wires_no_output_through_to_the_verdict(tmp_path):
+    """web204: stage 4 ran, stage 6 never did (#812) -- run_doctor() itself,
+    not just lint_no_output(), must surface the ERROR. Deleting the
+    `_run_lint("no_output", ...)` call in run_doctor() (m20) leaves this red
+    while every rule-level no_output test stays green."""
+    root = _build_clean_run(tmp_path)
+    for leftover in (root / "stage_6_wcm_documents").glob(f"{_UID}*"):
+        leftover.unlink()
+
+    payload = run_doctor(root, _UID)
+
+    assert payload["worst_severity"] == "ERROR"
+    no_output = [f for f in payload["findings"] if f["lint"] == "no_output"]
+    assert len(no_output) == 1
+    assert no_output[0]["severity"] == "ERROR"
+
+
+def test_run_doctor_wires_stage3b_fallback_ratio_through_to_the_verdict(tmp_path):
+    """web30's own outage numbers, driven through run_doctor() end to end --
+    not just lint_stage3b_fallback_ratio() in isolation. Deleting run_doctor's
+    dispatch of this lint (the LINT_REGISTRY row / its `_run_lint` call) must
+    fail this while the rule-level tests above stay green."""
+    root = _build_clean_run(tmp_path)
+    classified = root / "stage_3b_classified_entries" / f"{_UID}_cv_classified.json"
+    data = json.loads(classified.read_text())
+    data["meta"] = {"stats": {"failed_batches": 41, "llm_batches": 83,
+                              "fallback_entries": 510, "entries_classified": 1019}}
+    classified.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    assert payload["worst_severity"] == "ERROR"
+    fallback = [f for f in payload["findings"]
+               if f["lint"] == "stage3b_fallback_ratio"]
+    assert len(fallback) == 1
+    assert fallback[0]["severity"] == "ERROR"
+
+
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):
     """_ready's contract: a None input is an ERROR "unreadable" when the file
     existed but would not parse, never the benign "missing". The error scan
@@ -1803,6 +1848,81 @@ def test_missed_headers_true_positive_still_fires_after_814():
     found = lint_missed_headers(["PROFESSIONAL SOCIETIES"], stage1a, {"entries": []})
     assert len(found) == 1
     assert "PROFESSIONAL SOCIETIES" in found[0]["message"]
+
+
+# ---------------------------------------------------- round-2 F1: a standalone
+# candidate matching a known title by PREFIX or SUFFIX alone, with no next
+# candidate to join against -- the verifier's mutant m11 (`_key_matches_title`
+# -> `return False`, deleting the whole prefix/suffix branch) survived every
+# existing test because none of them requires that branch to ever return True;
+# the "wrapped header" test above is satisfied by the JOIN's exact match
+# instead. These two are the missing positive coverage.
+
+def test_missed_headers_standalone_prefix_of_a_known_title():
+    """A candidate that is a genuine, substantial PREFIX of a known title,
+    with no following candidate to join against, must be recognised -- not
+    just the two-line-join case above. Ratio 44/53 = 0.83, well past the
+    round-2 F2 length-ratio guard."""
+    stage1a = {"hierarchy": [{
+        "text": "COMMITTEE ON RESEARCH INTEGRITY AND ETHICS OVERSIGHT",
+        "children": []}]}
+    assert lint_missed_headers(
+        ["COMMITTEE ON RESEARCH INTEGRITY AND ETHICS"], stage1a,
+        {"entries": []}) == []
+
+
+def test_missed_headers_standalone_suffix_of_a_known_title():
+    """The SUFFIX mirror of the prefix case above: a candidate that is the
+    tail of a known title on its own, with no preceding candidate. Ratio
+    34/47 = 0.72."""
+    stage1a = {"hierarchy": [{
+        "text": "SOCIETY FOR EXPERIMENTAL BIOLOGY AND MEDICINE",
+        "children": []}]}
+    assert lint_missed_headers(
+        ["EXPERIMENTAL BIOLOGY AND MEDICINE"], stage1a,
+        {"entries": []}) == []
+
+
+# ------------------------------------------------------- round-2 F2: prefix/
+# suffix matching must run against stage-1a titles (`known`) only, never
+# against stage-2 entry hierarchy paths (`paths`) -- exact matching may still
+# use `paths` (an entry filed under a header IS that header, verbatim).
+# web200 (batch-3): the standalone bold label 'UK GOVERNMENT' was silenced as
+# a suffix of an unrelated section; see MIN_KEY_TO_TITLE_RATIO's docstring.
+
+def test_missed_headers_exact_match_still_allowed_via_stage2_paths():
+    """Exact matching against a stage-2 entry hierarchy path is unaffected by
+    the round-2 F2 restriction -- only prefix/suffix narrowed to `known`."""
+    stage2 = {"entries": [{"hierarchy": ["GRANTS ADMINISTRATION COMMITTEE"]}]}
+    assert lint_missed_headers(
+        ["GRANTS ADMINISTRATION COMMITTEE"], {"hierarchy": []}, stage2) == []
+
+
+def test_missed_headers_prefix_suffix_never_matches_via_stage2_paths_only():
+    """A candidate that is a substantial, high-ratio suffix of a stage-2
+    entry hierarchy path -- but of NO stage-1a title -- must still be
+    reported: prefix/suffix matching only ever looks at `known` (round-2
+    F2). Ratio 30/59 = 0.51, comfortably past the length-ratio guard, so a
+    silent match here can only be explained by matching against `paths`."""
+    stage2 = {"entries": [{
+        "hierarchy": ["COMMITTEE MEMBERSHIP FOR THE REGIONAL EXAMPLE AGENCY BOARD"]}]}
+    found = lint_missed_headers(
+        ["REGIONAL EXAMPLE AGENCY BOARD"], {"hierarchy": []}, stage2)
+    assert len(found) == 1
+    assert "REGIONAL EXAMPLE AGENCY BOARD" in found[0]["message"]
+
+
+def test_missed_headers_low_ratio_suffix_of_a_known_title_still_fires():
+    """web200 (batch-3): a standalone bold label short enough to clear the
+    absolute-length guard, but far shorter than the unrelated known title it
+    happens to trail, must still be reported -- the F2 length-ratio guard
+    (MIN_KEY_TO_TITLE_RATIO), not just the known/paths restriction, is what
+    keeps this a real finding (synthetic values; ratio 16/44 = 0.36)."""
+    stage1a = {"hierarchy": [{
+        "text": "EXPERIENCE IN WORKING WITH REGIONAL COUNCIL", "children": []}]}
+    found = lint_missed_headers(["REGIONAL COUNCIL"], stage1a, {"entries": []})
+    assert len(found) == 1
+    assert "REGIONAL COUNCIL" in found[0]["message"]
 
 
 def test_artifact_resolution_does_not_steal_a_longer_uids_files(tmp_path):

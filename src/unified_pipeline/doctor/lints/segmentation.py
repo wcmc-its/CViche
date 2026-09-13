@@ -83,6 +83,18 @@ _ENUM_PREFIX_RE = re.compile(r"^(?:[ivxlc]+\.\s*|\d+(?:\.\d+)*\.?\s*|[a-z]\.\s*)
 MIN_HEADER_KEY_CHARS = 12
 MIN_HEADER_KEY_WORDS = 2
 
+#: Second guard (round-2 fix for F2): a candidate must cover at least this
+#: fraction of the matched title's length, not just clear the absolute-length
+#: guard above. Without it a genuinely unrelated but coincidentally wordy
+#: candidate silences itself against any longer title it happens to trail --
+#: web200's standalone bold label 'UK GOVERNMENT' (14 chars, 2 words -- past
+#: MIN_HEADER_KEY_CHARS/WORDS) is a real suffix of the unrelated H1
+#: 'EXPERIENCE IN WORKING WITH UK GOVERNMENT' (41 chars, ratio 0.34) and was
+#: silenced as a false negative. The wrapped-header case this matching exists
+#: for keeps a high ratio: one physical line of 'SERVICE ON NATIONAL GRANT
+#: REVIEW PANELS, STUDY SECTIONS,' is 58 of the 68-char joined title (0.85).
+MIN_KEY_TO_TITLE_RATIO = 0.5
+
 
 def _header_key(text: str) -> str:
     """Comparison key for header matching: normalized, trailing ':' dropped,
@@ -108,15 +120,29 @@ def _is_substantial_key(key: str) -> bool:
 
 def _key_matches_title(key: str, titles: set[str]) -> bool:
     """Is `key` (already past the exact-match check) a prefix or suffix of
-    some known hierarchy title, after the short-candidate guard (#814)?
+    some KNOWN stage-1a title, after the short-candidate guard (#814) and the
+    length-ratio guard (round-2 F2)?
+
+    `titles` must be stage-1a titles only (`known`), never stage-2 entry
+    hierarchy paths (`paths`): a path repeats whatever stage-1a title its
+    entries were filed under, so widening the match surface to `paths` adds
+    no title this function doesn't already see via `known` and only grows
+    the odds of a coincidental, unrelated match -- exact matching (the
+    caller's `normed in titles` check) is where `paths` still belongs, since
+    an entry filed under a header IS that header, verbatim.
 
     Covers a header wrapped over two source lines: one physical line is a
     genuine prefix of the joined title on its own ('SERVICE ON NATIONAL GRANT
-    REVIEW PANELS, STUDY SECTIONS,' is a prefix of '... SECTIONS, COMMITTEES')
-    even before the two lines are joined below."""
+    REVIEW PANELS, STUDY SECTIONS,' is a prefix of '... SECTIONS, COMMITTEES',
+    ratio 0.85) even before the two lines are joined below."""
     if not _is_substantial_key(key):
         return False
-    return any(title.startswith(key) or title.endswith(key) for title in titles)
+    for title in titles:
+        if len(key) < len(title) * MIN_KEY_TO_TITLE_RATIO:
+            continue
+        if title.startswith(key) or title.endswith(key):
+            return True
+    return False
 
 
 def lint_missed_headers(candidates: list[str], stage1a: dict,
@@ -149,14 +175,14 @@ def lint_missed_headers(candidates: list[str], stage1a: dict,
         # title by prefix.
         nxt = candidates[i + 1] if i + 1 < n else None
         joined = _header_key(f"{cand} {nxt}") if nxt is not None else ""
-        if joined and (joined in titles or _key_matches_title(joined, titles)):
+        if joined and (joined in titles or _key_matches_title(joined, known)):
             seen.add(normed)
             seen.add(_header_key(nxt))
             skip_next = True
             continue
 
         seen.add(normed)
-        if normed in titles or _key_matches_title(normed, titles):
+        if normed in titles or _key_matches_title(normed, known):
             continue
         findings.append(_finding(
             "missed_headers", "WARN",
