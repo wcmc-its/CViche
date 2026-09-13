@@ -1608,6 +1608,54 @@ def test_missed_headers_ignores_trailing_colon():
     assert found[0]["lint"] == "missed_headers"
 
 
+# ------------------------------------------------ #814: enumeration prefixes
+# and wrapped headers in missed_headers
+
+def test_missed_headers_ignores_a_roman_numeral_enumeration_prefix():
+    """web199: stage 1a promotes 'I.  CURRENT POSITION' to the hierarchy node
+    'CURRENT POSITION', without the numeral -- comparing the raw forms
+    reported all 11 of web199's sections as missing."""
+    stage1a = {"hierarchy": [{"text": "CURRENT POSITION", "children": []}]}
+    assert lint_missed_headers(["I.  CURRENT POSITION"], stage1a, {"entries": []}) == []
+    # a different roman numeral, multi-letter
+    stage1a_xi = {"hierarchy": [{"text": "BIBLIOGRAPHY", "children": []}]}
+    assert lint_missed_headers(["XI.  BIBLIOGRAPHY"], stage1a_xi, {"entries": []}) == []
+
+
+def test_missed_headers_joins_a_header_wrapped_over_two_source_lines():
+    """web228: the source wraps one long header over two physical lines,
+    which stage 1a correctly joins into a single hierarchy node -- neither
+    physical line matches the joined title alone (5 of 7 findings on that
+    CV were this)."""
+    stage1a = {"hierarchy": [{
+        "text": "SERVICE ON NATIONAL GRANT REVIEW PANELS, STUDY SECTIONS, COMMITTEES",
+        "children": []}]}
+    candidates = ["SERVICE ON NATIONAL GRANT REVIEW PANELS, STUDY SECTIONS,",
+                 "COMMITTEES:"]
+    assert lint_missed_headers(candidates, stage1a, {"entries": []}) == []
+
+
+def test_missed_headers_short_candidate_does_not_match_by_prefix():
+    """A short candidate ('AND') must not silently match a longer, unrelated
+    title just because it happens to be a prefix or suffix of it -- the
+    over-normalisation guard #814 added."""
+    stage1a = {"hierarchy": [{
+        "text": "AND SOME COMPLETELY UNRELATED LONG TITLE", "children": []}]}
+    found = lint_missed_headers(["AND"], stage1a, {"entries": []})
+    assert len(found) == 1
+    assert "AND" in found[0]["message"]
+
+
+def test_missed_headers_true_positive_still_fires_after_814():
+    """A header genuinely absent from segmentation must still be reported --
+    #814's normalisation additions (enumeration stripping, prefix/suffix
+    matching) must not silence a real miss."""
+    stage1a = {"hierarchy": [{"text": "EDUCATION", "children": []}]}
+    found = lint_missed_headers(["PROFESSIONAL SOCIETIES"], stage1a, {"entries": []})
+    assert len(found) == 1
+    assert "PROFESSIONAL SOCIETIES" in found[0]["message"]
+
+
 def test_artifact_resolution_does_not_steal_a_longer_uids_files(tmp_path):
     """uid 'web05' must not resolve to 'web050_entries.json'.
 
