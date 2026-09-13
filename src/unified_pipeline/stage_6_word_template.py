@@ -157,7 +157,13 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     normalize_retired_code,
     segment_already_rendered,
 )
-from unified_pipeline.stage6.pii_pass import apply_protected_data_pass
+from unified_pipeline.stage6.pii_pass import (  # noqa: F401
+    PII_REDACTED_NOTICE,
+    WITHHELD_COMMENT_AUTHOR,
+    PiiPassResult,
+    run_pii_pass,
+    withheld_comment_text,
+)
 from unified_pipeline.stage6.sections import (  # noqa: F401
     AdministrativeActivitiesSection,
     AppendixSection,
@@ -426,11 +432,9 @@ RENDER_ROUTED_CODES = frozenset({
 # ordinary keys out.
 
 
-PII_REDACTED_NOTICE = (
-    "[Personal data from the source CV was withheld here "
-    "(e.g. date or place of birth, marital status, family members' names). "
-    "Review the original CV if this content is needed.]"
-)
+# PII_REDACTED_NOTICE moved to `stage6/pii_pass.py` (#820 round 2) so the
+# doctor lint can skip the notice paragraph without importing this module;
+# re-exported above for the existing importers.
 
 
 
@@ -491,6 +495,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._comment_id = 0
         self._revision_id = 0
         self._comments = []  # Store comments to add to comments.xml
+
+        # What the #820 pre-render pass withheld this run -- set by generate();
+        # empty means no notice and no comment. Per-instance, never shared.
+        self._pii_result = PiiPassResult()
 
         # Content overflow tracking: entries where extraction lost significant content
         self._overflow_entries = []  # List of (entry, para, taxonomy_code) tuples
@@ -806,19 +814,24 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Load template
         self.doc = Document(self.template_path)
 
-        # Flatten all entries for fallback searches
-        all_entries = [entry for entries in entries_by_code.values() for entry in entries]
-
         # #820 piece 2: one pre-render deny pass over every entry, every
         # code -- before this, `pii.py` was consulted at exactly two sites
         # (the A-coded personal-data block and the A-coded appendix
         # orphans), so a PII label on any OTHER code reached its section
         # renderer or the Appendix unfiltered. Runs once, here, before any
         # `_fill_*` call below reads an entry's text or extracted_fields.
-        # `_pii_something_withheld` is read by `_unconsumed_personal_data_batch`
-        # to decide whether to emit the shared withheld notice, so a run
-        # withholding content on a non-A code still tells the reader.
-        self._pii_something_withheld = apply_protected_data_pass(all_entries)
+        # Scope is decided from the SAME routing set the appendix batch
+        # below is built from (RENDER_ROUTED_CODES) and the section names
+        # from TAXONOMY_TO_SECTION -- passed in, not re-declared. The
+        # result is read by `_unconsumed_personal_data_batch` (the notice)
+        # and `_add_remaining_to_appendix` (the Word comment on it), and
+        # `_fill_personal_data`'s docx recovery appends to it.
+        self._pii_result = run_pii_pass(
+            entries_by_code, routed_codes=RENDER_ROUTED_CODES,
+            section_names=TAXONOMY_TO_SECTION)
+
+        # Flatten all entries for fallback searches
+        all_entries = [entry for entries in entries_by_code.values() for entry in entries]
 
         # Fill each section
         self._fill_personal_data(entries_by_code.get('A', []), cv_owner, document_uid, all_entries, original_doc_path)
@@ -2239,6 +2252,15 @@ Now analyze the text above:"""
             entry_para = self.doc.add_paragraph()
             run = entry_para.add_run(f"• {segment_text}")
             _set_font(run)
+            if segment_text == PII_REDACTED_NOTICE:
+                # The A-820 addendum: ONE sidebar comment on the notice
+                # saying what the policy removed -- categories, counts and
+                # sections, never a value. Not a classification comment, so
+                # it is emitted whatever `emit_comments` says (#153).
+                self._add_word_comment(
+                    entry_para, withheld_comment_text(self._pii_result.withheld),
+                    author=WITHHELD_COMMENT_AUTHOR, always=True)
+                continue
             self._add_word_comment(
                 entry_para,
                 f"Originally classified {original_code}; could not be mapped "
@@ -2404,7 +2426,7 @@ Now analyze the text above:"""
         for entry in getattr(self, '_unconsumed_personal_data', []):
             # #820 piece 2: read the pre-render pass's own verdict
             # (`entry['_pii_withheld']`), not a second PII scan. By this
-            # point `apply_protected_data_pass` has already stripped
+            # point `run_pii_pass` has already stripped
             # `entry['text']` and any PII-keyed `extracted_fields` of
             # everything it found, so re-running `_pii_fragments`/
             # `_PII_FIELD_KEY_RE` here would find nothing to redact on and
@@ -2422,11 +2444,12 @@ Now analyze the text above:"""
             batch.append((text, 'A', 0))
 
         # One notice per document, not one per entry, and not scoped to A-
-        # coded orphans: `self._pii_something_withheld` is the pre-render
-        # pass's document-wide flag (`generate()`), so content withheld from
-        # a rendered section -- not just an appendix orphan -- still tells
-        # the reader something was removed.
-        notice_added = getattr(self, '_pii_something_withheld', False)
+        # coded orphans: `self._pii_result.withheld` is the pre-render
+        # pass's document-wide record (`generate()`), so content withheld
+        # from a rendered section -- not just an appendix orphan -- still
+        # tells the reader something was removed. Empty when nothing was
+        # actually cut, so a PII-free document gets no notice at all.
+        notice_added = bool(self._pii_result.withheld)
         if notice_added:
             # One notice per document, not one per entry: the point is that the
             # reader knows something was withheld, not how many times.
@@ -2606,18 +2629,25 @@ Now analyze the text above:"""
         for comment_info in comments_to_add:
             self._add_word_comment(para, comment_info['text'], author=comment_info['author'])
 
-    def _add_word_comment(self, para: Paragraph, comment_text: str, author: str = "CV Pipeline"):
+    def _add_word_comment(self, para: Paragraph, comment_text: str, author: str = "CV Pipeline",
+                          always: bool = False):
         """Add a Word comment to a paragraph that appears in the sidebar.
 
         Creates proper Word comment structure with:
         - commentRangeStart/End markers in document
         - commentReference in the text
         - comment content stored for comments.xml
+
+        A multi-line `comment_text` renders one comment paragraph per line
+        (`_create_comments_xml`).
         """
         # Issue #153: when classification comments are disabled, emit nothing.
         # Skipping here means no commentReference is added and _comments stays
         # empty, so _finalize_comments never creates a comments.xml part.
-        if not self.emit_comments:
+        # `always=True` is for the one comment that is NOT a classification
+        # comment -- the withheld-data summary (A-820 addendum) -- which the
+        # reader must see whatever that toggle says.
+        if not self.emit_comments and not always:
             return
         try:
             comment_id = str(self._comment_id)
@@ -2876,11 +2906,15 @@ Now analyze the text above:"""
             escaped_author = html.escape(comment["author"], quote=True)
 
             lines.append(f'<w:comment w:id="{comment["id"]}" w:author="{escaped_author}" w:date="{comment["date"]}">')
-            lines.append('<w:p>')
-            lines.append('<w:r>')
-            lines.append(f'<w:t>{escaped_text}</w:t>')
-            lines.append('</w:r>')
-            lines.append('</w:p>')
+            # One comment paragraph per text line: a newline inside a
+            # single w:t collapses to a space in Word, which would run the
+            # withheld-data summary's bullets together.
+            for text_line in escaped_text.split("\n"):
+                lines.append('<w:p>')
+                lines.append('<w:r>')
+                lines.append(f'<w:t xml:space="preserve">{text_line}</w:t>')
+                lines.append('</w:r>')
+                lines.append('</w:p>')
             lines.append('</w:comment>')
 
         lines.append('</w:comments>')

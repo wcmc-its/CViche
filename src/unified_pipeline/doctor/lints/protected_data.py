@@ -11,10 +11,25 @@ for three things, and say only the block/section and the label or shape
 class in the finding -- NEVER the matched value, because this JSON is
 copied into Teams cards and issues (#820's own report was found by
 grepping a docx by hand for exactly this reason).
+
+Scope mirrors the pass (§1.5, one definition of "where the ambiguous rows
+apply"): the Personal Data block and the Appendix get the FULL policy; every
+other section gets the rows unambiguous as a label, so a rendered
+book-chapter title "Children: ..." in Book Chapters is not a finding while
+the same line in the Appendix is. `quality_score.score_protected_data`
+calls this same function on the same blocks (#825), so the doctor and the
+scorer cannot disagree about a document.
 """
 import re
 
-from unified_pipeline.stage6.normalization.pii import _pii_fragments
+from unified_pipeline.stage6.normalization.pii import (
+    SCOPE_ALL_CODES,
+    SCOPE_PERSONAL_AND_APPENDIX,
+    _MONTH_NAMES,
+    _SSN_VALUE_SHAPE_RE,
+    _pii_fragments,
+)
+from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE
 
 from ..shared import _finding, _output_section_header
 
@@ -29,24 +44,20 @@ from ..shared import _finding, _output_section_header
 # a genuine leak.
 _TEMPLATE_DEA_SLOT_TEXT = "DEA number: (optional)"
 
-# A bare SSN, label or not -- piece 3's OWN named requirement (#820: "a
-# bare SSN value shape ... anywhere (label or not)"), independent of
-# whatever `pii.py`'s label vocabulary catches. `pii.py` gains its own copy
-# of this same shape in the #820 piece-1 commit, for `_pii_fragments`'
-# unrelated job (value-provenance denial on an ENTRY, before render) --
-# the two are deliberately not shared, so that this lint's contract does
-# not depend on commit order: piece 3 lands FIRST (this ticket's own "3,
-# then 2, then 1" sequencing) and must be independently correct and green
-# before piece 1 exists at all. Distinguishing shape from a phone number
-# (3-3-4) is the middle group's width (2 digits); guarded against matching
-# inside a longer dash-run (an ISBN, an ORCID) on both sides, not just
-# `\b` -- see `pii.py`'s copy for the corpus false-positive this closes.
-_SSN_VALUE_SHAPE_RE = re.compile(r"(?<![\d-])\d{3}-\d{2}-\d{4}(?![\d-])")
-
 # The placeholder `_pii_label_text` returns for a fragment with no label at
 # all (a bare SSN value shape) -- those are reported once, by the dedicated
 # SSN-shape scan below, not a second time here under a placeholder "label".
 _BARE_VALUE_PLACEHOLDER = "(bare SSN value shape)"
+
+# Section names (as `_output_section_header` normalizes them) whose blocks
+# get the full policy: the two places the pre-render pass applies it.
+_PERSONAL_DATA_SECTION = "personal data"
+_APPENDIX_SECTION = "appendix"
+
+_SECTION_PERSONAL_DATA_TABLE = "Personal Data table"
+_SECTION_APPENDIX = "Appendix"
+_SECTION_BODY_TABLE = "body table"
+_SECTION_BODY_PARAGRAPH = "body paragraph"
 
 
 def _pii_label_text(fragment: object, max_len: int = 40) -> str:
@@ -71,18 +82,12 @@ def _pii_label_text(fragment: object, max_len: int = 40) -> str:
     stem = m.group(0).strip() if m else ""
     return stem[:max_len] if stem else _BARE_VALUE_PLACEHOLDER
 
-_MONTH_NAMES = (
-    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?"
-    r"|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
-)
 
 #: A bare full date, ANY of the three shapes the issue names -- checked only
-#: inside the Personal Data block (see `_personal_data_block_indices`); a
-#: labeled date anywhere else in the document is already `_pii_fragments`'s
-#: job. Defined here, not in `pii.py`: this is a value-shape check over
-#: RENDERED TEXT with no label at all, a different job from the label
-#: vocabulary `pii.py` owns, and importing it would not save a second copy
-#: of anything -- there is only one copy either way.
+#: inside the Personal Data block; a labeled date anywhere else in the
+#: document is already `_pii_fragments`'s job. `_MONTH_NAMES` is `pii.py`'s
+#: own (one definition); the composition is this lint's, because it is a
+#: value-shape check over RENDERED TEXT with no label at all.
 _BARE_DATE_RE = re.compile(
     r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
     r"|\b" + _MONTH_NAMES + r"\s+\d{1,2},\s*\d{4}\b"
@@ -91,10 +96,10 @@ _BARE_DATE_RE = re.compile(
 )
 
 
-def _personal_data_block_indices(blocks: list[tuple[str, str]]) -> set[int]:
-    """Indices into `blocks` that fall inside the Personal Data section:
-    from its header paragraph (exclusive) to the next recognized WCM
-    section header (exclusive), or the end of the document.
+def _block_sections(blocks: list[tuple[str, str]]) -> list[str | None]:
+    """The normalized WCM section name each block falls under: from its
+    section header paragraph (exclusive) to the next recognized header, or
+    None before the first header.
 
     Reuses `_output_section_header` -- the SAME section-boundary primitive
     `lint_dead_sections` already uses to bound a source section against the
@@ -104,38 +109,68 @@ def _personal_data_block_indices(blocks: list[tuple[str, str]]) -> set[int]:
     immediately followed by the one table that is the Personal Data table,
     then the next section's header paragraph ("EDUCATION").
     """
-    indices: set[int] = set()
-    in_block = False
-    for i, (kind, text) in enumerate(blocks):
-        stripped = str(text).strip()
+    sections: list[str | None] = []
+    current: str | None = None
+    for kind, text in blocks:
         if kind == "p":
-            name = _output_section_header(stripped)
+            name = _output_section_header(str(text).strip())
             if name is not None:
-                in_block = name.strip().lower() == "personal data"
+                current = name.strip().lower()
+                sections.append(None)  # the header paragraph itself
                 continue
-        if in_block:
-            indices.add(i)
-    return indices
+        sections.append(current)
+    return sections
+
+
+def _personal_data_block_indices(blocks: list[tuple[str, str]]) -> set[int]:
+    """Indices into `blocks` that fall inside the Personal Data section --
+    the block set the bare-date check is confined to."""
+    return {i for i, section in enumerate(_block_sections(blocks))
+            if section == _PERSONAL_DATA_SECTION}
+
+
+def _scan_scope(section: str | None) -> str:
+    """The policy scope a rendered block is checked at: the full policy in
+    the Personal Data block and the Appendix, the unambiguous rows elsewhere
+    -- the same split `stage6/pii_pass.py` renders under."""
+    if section in (_PERSONAL_DATA_SECTION, _APPENDIX_SECTION):
+        return SCOPE_PERSONAL_AND_APPENDIX
+    return SCOPE_ALL_CODES
+
+
+def _section_label(kind: str, section: str | None) -> str:
+    if section == _PERSONAL_DATA_SECTION:
+        return _SECTION_PERSONAL_DATA_TABLE
+    if section == _APPENDIX_SECTION:
+        return _SECTION_APPENDIX
+    return _SECTION_BODY_TABLE if kind == "table" else _SECTION_BODY_PARAGRAPH
 
 
 def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
     """Protected personal data visible in the rendered document.
 
     Hard-fail, like `owner_contact_missing`/`pipeline_errors_present`:
-    `quality_score.score_protected_data` reuses this same scan (#825: the
+    `quality_score.score_protected_data` calls this same scan (#825: the
     doctor and the scorer's gate lists must not diverge) and caps a run
-    carrying this finding into the RED band.
+    carrying any finding into the RED band.
+
+    The withheld notice paragraph (`PII_REDACTED_NOTICE`) is skipped: it
+    names categories, and a category name that ever coincides with a label
+    pattern must not turn the notice itself into a finding. The Word
+    comment that accompanies it lives in the comments part, which is not a
+    body block and so is never scanned here.
     """
     findings: list[dict] = []
-    pd_indices = _personal_data_block_indices(blocks)
+    sections = _block_sections(blocks)
 
     for i, (kind, text) in enumerate(blocks):
         stripped = str(text)
-        section = ("Personal Data table" if i in pd_indices
-                   else "Appendix/body table" if kind == "table"
-                   else "body paragraph")
+        if PII_REDACTED_NOTICE in stripped:
+            continue
+        section = sections[i]
+        where = _section_label(kind, section)
 
-        for fragment in _pii_fragments(stripped):
+        for fragment in _pii_fragments(stripped, _scan_scope(section)):
             if fragment.strip() == _TEMPLATE_DEA_SLOT_TEXT:
                 continue
             label = _pii_label_text(fragment)
@@ -143,15 +178,15 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
                 continue  # reported once, below, by the dedicated SSN scan
             findings.append(_finding(
                 "protected_data_in_output", "ERROR",
-                f"protected personal data label {label!r} found in {section} "
+                f"protected personal data label {label!r} found in {where} "
                 f"-- value withheld from this finding"))
 
         for _match in _SSN_VALUE_SHAPE_RE.finditer(stripped):
             findings.append(_finding(
                 "protected_data_in_output", "ERROR",
-                f"an SSN-shaped value found in {section}"))
+                f"an SSN-shaped value found in {where}"))
 
-        if i in pd_indices:
+        if section == _PERSONAL_DATA_SECTION:
             for _match in _BARE_DATE_RE.finditer(stripped):
                 findings.append(_finding(
                     "protected_data_in_output", "ERROR",

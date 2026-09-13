@@ -76,7 +76,15 @@ except ImportError as exc:
     ) from exc
 
 from ..formatting import _set_cell_text, _set_font
-from ..normalization import _address_cell_text, _from_pii_fragment, _labels_its_own_address_slots, _labels_its_own_phone_slots, _phone_cell_text
+from ..normalization import (
+    WithheldItem,
+    _address_cell_text,
+    _from_pii_fragment,
+    _labels_its_own_address_slots,
+    _labels_its_own_phone_slots,
+    _phone_cell_text,
+    _pii_category_of,
+)
 from ..parsing import _extract_name_from_uid
 
 logger = logging.getLogger(__name__)
@@ -190,6 +198,46 @@ def _classify_contact_label(label: str) -> str | None:
     if head in _PERSON_NAME_LABELS:
         return _FIELD_NAME
     return None
+
+
+#: The section a docx-recovered value would have rendered in -- the only
+#: place `_recover_contact_fields_from_docx` writes to.
+_PERSONAL_DATA_SECTION_LABEL = "Personal Data"
+
+
+def _withhold_recovered(value: str | None, source_text: str,
+                        withheld: list[WithheldItem]) -> str | None:
+    """`value`, unless it was lifted out of a protected-data fragment of
+    `source_text` -- the docx row or paragraph it came from -- in which
+    case None, with the policy category recorded on `withheld`.
+
+    The SAME gate the entry path applies (`_from_pii_fragment`, via
+    `_pii_category_of`): #820's own "Related" note says the #550/#730
+    recovery must go through it, and it did not -- with `--source-dir`,
+    web198 rendered a `Birth Place:` line into the Office-address cell
+    because its source table's value cell WAS that line and this scan took
+    it verbatim (the doctor lint fired on both arms). Recorded, not just
+    dropped, so the notice and the Word comment name it.
+    """
+    if not value:
+        return value
+    category = _pii_category_of(value, source_text)
+    if category is None:
+        return value
+    withheld.append(WithheldItem(category, _PERSONAL_DATA_SECTION_LABEL, None))
+    return None
+
+
+def _withhold_recovered_lines(block: str | None, source_text: str,
+                              withheld: list[WithheldItem]) -> str | None:
+    """A multi-line recovered address with every protected line removed
+    (`_withhold_recovered` per line); None when nothing is left, so the
+    caller's `if not office_address` guard keeps looking."""
+    if not block:
+        return block
+    kept = [line for line in block.split('\n')
+            if _withhold_recovered(line, source_text, withheld) is not None]
+    return '\n'.join(kept) or None
 
 
 class _RecoveredContact(NamedTuple):
@@ -590,6 +638,12 @@ class PersonalDataSection:
             )
             return given
 
+        # Every value this scan takes is gated by provenance against the
+        # docx line it came from and, when withheld, recorded on the pass
+        # result `generate()` holds -- the same list the notice and the
+        # Word comment are built from.
+        withheld = self._pii_result.withheld
+
         # First check tables (common format: label in col 0, value in col 1).
         # Every table, not the first three: which table holds the contact
         # block is a layout property of the CV, and a cover or education table
@@ -613,36 +667,52 @@ class PersonalDataSection:
                         break
                 value = value_cell.text.strip()
                 field = _classify_contact_label(label_cell.text)
+                # The row as one text, for the protected-data gate below:
+                # a value is denied by provenance against the fragments of
+                # the line it came from, exactly as the entry path does.
+                row_text = f"{label_cell.text}\t{value}"
 
                 # Extract name if not yet found (or only have last name)
                 if field == _FIELD_NAME and not name_is_complete:
                     if value and len(value) > 2:
-                        name = value
-                        name_is_complete = True
-                        if self.verbose:
-                            print(f"  Found name from table: {name}")
+                        recovered_name = _withhold_recovered(value, row_text, withheld)
+                        if recovered_name is not None:
+                            name = recovered_name
+                            name_is_complete = True
+                            if self.verbose:
+                                print(f"  Found name from table: {name}")
 
                 # Extract address if not yet found
                 # Note: Business address cells often contain embedded phone/fax/email
                 elif field == _FIELD_OFFICE_ADDRESS and not office_address:
                     if value and len(value) > 5:
-                        office_address, office_phone, work_email = (
+                        block_address, block_phone, block_email = (
                             self._parse_address_block(
                                 value, office_phone, work_email))
+                        office_address = _withhold_recovered_lines(
+                            block_address, row_text, withheld)
+                        # Only a value the block itself supplied is gated:
+                        # one already classified from the A entries is not
+                        # this row's to withhold.
+                        if not office_phone:
+                            office_phone = _withhold_recovered(block_phone, row_text, withheld)
+                        if not work_email:
+                            work_email = _withhold_recovered(block_email, row_text, withheld)
 
                 # Extract phone if not yet found
                 elif field == _FIELD_OFFICE_PHONE and not office_phone:
                     if value and len(value) > 5:
-                        office_phone = value
-                        if self.verbose:
+                        office_phone = _withhold_recovered(value, row_text, withheld)
+                        if self.verbose and office_phone:
                             print(f"  Found phone from table: {office_phone}")
 
                 # Extract email if not yet found
                 elif field == _FIELD_WORK_EMAIL and not work_email:
                     email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', value)
                     if email_match:
-                        work_email = email_match.group(0)
-                        if self.verbose:
+                        work_email = _withhold_recovered(
+                            email_match.group(0), row_text, withheld)
+                        if self.verbose and work_email:
                             print(f"  Found email from table: {work_email}")
 
         # Also check paragraphs for email (if not found in tables). Every
@@ -654,10 +724,12 @@ class PersonalDataSection:
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+',
                                         para.text.strip())
                 if email_match:
-                    work_email = email_match.group(0)
-                    if self.verbose:
+                    work_email = _withhold_recovered(
+                        email_match.group(0), para.text, withheld)
+                    if self.verbose and work_email:
                         print(f"  Found email from paragraph: {work_email}")
-                    break
+                    if work_email:
+                        break
 
         return _RecoveredContact(name, name_is_complete, work_email,
                                  office_phone, office_address)

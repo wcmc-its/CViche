@@ -132,6 +132,10 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
     _long_word_tokens,
     _magnitude_severity,
     _output_section_header,
+    _cell_text,
+    _docx_text,
+    _table_lines,
+    docx_body_blocks,
 )
 from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
@@ -447,47 +451,11 @@ def iter_header_candidates(docx_path: str) -> list[str]:
     return candidates
 
 
-def _docx_text(element) -> str:
-    """All ``w:t`` text under a docx element in document order. Unlike
-    python-docx's ``.text``, this INCLUDES text inside tracked-change ``<w:ins>``
-    runs and EXCLUDES ``<w:delText>`` — the accepted-changes view a reader sees.
-    Stage 6 inserts LLM-enriched content (research summaries, reformatted
-    citations) as tracked INSERTIONS, so a reader that ignores ``<w:ins>``
-    under-reports what actually rendered and false-flags content as 'unrendered'
-    (issue #249: M1 summaries and reformatted citations read as dropped)."""
-    from docx.oxml.ns import qn
-    return "".join(node.text or "" for node in element.iter(qn("w:t")))
-
-
-def _cell_text(cell) -> str:
-    """Track-change-aware equivalent of ``cell.text``: the cell's own paragraphs
-    (nested tables excluded, matching python-docx), including ``<w:ins>`` text."""
-    return "\n".join(_docx_text(p._p) for p in cell.paragraphs)
-
-
-def _table_lines(tbl) -> List[str]:
-    """Text lines of one Word table: each non-empty cell, nested tables
-    recursed into (cell.text never surfaces them), and every row with more
-    than one non-empty cell ALSO joined as one line — a record rendered as a
-    structured row (label/value cells) keeps its tokens together the way one
-    source line does only in the joined view. KEEP IN SYNC with the by-name
-    mirror in stage_6_word_template.py's _rendered_output_lines() (the #221
-    recovery pass, PR #225): both sides must agree on what counts as
-    rendered. Extra lines only ever prove presence — strictly fewer false
-    'absent' verdicts, never more."""
-    lines: List[str] = []
-    for row in tbl.rows:
-        cell_texts = []
-        for cell in row.cells:
-            ctext = _cell_text(cell)
-            if ctext.strip():
-                cell_texts.append(ctext)
-                lines.append(ctext)
-            for nested in cell.tables:
-                lines.extend(_table_lines(nested))
-        if len(cell_texts) > 1:
-            lines.append(" | ".join(" ".join(t.split()) for t in cell_texts))
-    return lines
+# `_docx_text`, `_cell_text`, `_table_lines` and the body-order block walk
+# moved to `doctor/shared.py` (#820 round 2) so `quality_score.py` can read a
+# rendered document through the SAME reader the lints use without importing
+# this module (a cycle: run_doctor -> lints.enrichment -> quality_score).
+# Re-exported by name above for the five files that import them from here.
 
 
 def read_docx_blocks(docx_path: str) -> List[Tuple[str, str]]:
@@ -495,17 +463,7 @@ def read_docx_blocks(docx_path: str) -> List[Tuple[str, str]]:
     _table_lines joined by newlines) per table. Grants render as one Word
     table per grant, so any output check must read tables AND paragraphs."""
     Document = _get_docx_document()
-    from docx.oxml.ns import qn
-    from docx.table import Table
-
-    doc = Document(docx_path)
-    blocks: List[Tuple[str, str]] = []
-    for child in doc.element.body.iterchildren():
-        if child.tag == qn("w:p"):
-            blocks.append(("p", _docx_text(child)))
-        elif child.tag == qn("w:tbl"):
-            blocks.append(("table", "\n".join(_table_lines(Table(child, doc)))))
-    return blocks
+    return docx_body_blocks(Document(docx_path))
 
 
 def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:

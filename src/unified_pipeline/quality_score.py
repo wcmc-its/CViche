@@ -26,7 +26,10 @@ and a clean run scores 100::
     raw = 100 * (1 - sum(weight_i * fraction_i) / sum(weight_i))
 
 Two dimensions are hard-fail gates: a fatal pipeline error or a missing CV
-owner name caps the final score regardless of the other dimensions.
+owner name caps the final score regardless of the other dimensions. A third
+gate -- protected personal data in the rendered docx (#820) -- caps the score
+the same way but carries NO weight (``CAP_ONLY_GATES``), so a clean run's raw
+score is unchanged by its existence.
 
 The result also says what the score was computed *without*: ``data_complete``
 is False and ``missing_evidence`` names each scored artifact that was absent,
@@ -73,25 +76,17 @@ if TYPE_CHECKING:
     from docx.document import Document as DocumentType
     from docx.oxml.table import CT_Tc
     from docx.table import Table
-    from docx.text.paragraph import Paragraph
 
 # #820/#825: the doctor's protected_data_in_output lint and this module's
-# score_protected_data must not diverge, so both read the SAME
-# doctor-owned constants (the template's own blank DEA slot, excluded as
-# boilerplate; the bare-SSN-value shape; the bare-date shape, checked only
-# inside the Personal Data block) plus the SAME label detector
-# (`_pii_fragments`, pii.py). Safe direction: neither
-# `stage6.normalization.pii` nor `doctor.lints.protected_data` imports this
-# module, so this does not create the cycle `quality_score -> run_doctor ->
-# doctor.lints.enrichment -> quality_score` would (run_doctor.py itself is
-# never imported here).
-from unified_pipeline.doctor.lints.protected_data import (
-    _BARE_DATE_RE,
-    _SSN_VALUE_SHAPE_RE,
-    _TEMPLATE_DEA_SLOT_TEXT,
-)
-from unified_pipeline.doctor.shared import _output_section_header
-from unified_pipeline.stage6.normalization.pii import _pii_fragments
+# score_protected_data must not diverge, so the scorer CALLS the lint on
+# the same body-order blocks (`docx_body_blocks`, the reader
+# `run_doctor.read_docx_blocks` wraps) rather than keeping a second scan.
+# Safe direction: neither `doctor.shared` nor `doctor.lints.protected_data`
+# imports this module, so this does not create the cycle `quality_score ->
+# run_doctor -> doctor.lints.enrichment -> quality_score` would (run_doctor.py
+# itself is never imported here).
+from unified_pipeline.doctor.lints.protected_data import lint_protected_data_in_output
+from unified_pipeline.doctor.shared import docx_body_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -439,77 +434,24 @@ def score_cv_owner(outputs_dir: Path) -> tuple[float, str, int | None]:
     return clamp(fraction), detail, None
 
 
-def _personal_data_paragraph_range(paragraphs: list[Paragraph]) -> tuple[int, int] | None:
-    """(start, end) indices into `paragraphs` spanning the Personal Data
-    section's OWN paragraphs (its header exclusive, the next recognized WCM
-    section header exclusive) -- None when no "PERSONAL DATA" header is
-    found at all. Paragraph-only, deliberately: `doc.tables[0]` (below) is
-    always the Personal Data table regardless of paragraph position --
-    verified against the WCM template (`score_broken_format`'s own docstring
-    names its table index directly) and every rendered farm docx during the
-    #820 corpus scan -- so this only needs to bound the SURROUNDING
-    paragraphs, not reconstruct interleaved body order the way
-    `run_doctor.read_docx_blocks` does for the doctor's own version of this
-    same check."""
-    start = None
-    for i, p in enumerate(paragraphs):
-        name = _output_section_header(p.text.strip())
-        if name is None:
-            continue
-        if start is None:
-            if name.strip().lower() == "personal data":
-                start = i + 1
-            continue
-        return (start, i)
-    return (start, len(paragraphs)) if start is not None else None
-
-
 def score_protected_data(outputs_dir: Path) -> tuple[float, str, int | None]:
     """Protected personal data (date of birth, SSN, other #820 label/value
-    shapes) reaching the rendered docx. Missing name is a hard-fail
-    (cap=25) -- same cap as `score_cv_owner`, and for the same reason:
-    withholding what this run produced is exactly the "cannot be
-    delivered" question that gate already caps.
+    shapes) reaching the rendered docx. A cap-only gate (#820 round 2), NOT
+    a scored dimension: it never moves the raw score of a clean run, so
+    every batch scored before it existed stays comparable; a leaking run is
+    capped to 25 -- same cap as `score_cv_owner`, and for the same reason:
+    withholding what this run produced is exactly the "cannot be delivered"
+    question that gate already caps.
 
-    Reuses run_doctor's own `protected_data_in_output` lint building
-    blocks (`_pii_fragments` from pii.py; `_SSN_VALUE_SHAPE_RE`, the
-    template's own blank DEA slot exclusion, and the bare-date shape from
-    `doctor.lints.protected_data`) so the doctor and the scorer cannot
-    drift apart on what counts (#825) -- see the module import comment
-    above for why this is a safe import
-    direction rather than the second copy #820's own MUST NOT list bars.
+    The findings are run_doctor's own `protected_data_in_output` lint over
+    the same body-order blocks (#825: one scan, not two that drift).
     """
     doc, reason = _load_docx(outputs_dir)
     if doc is None:
         return 0.5, reason, None
-
-    hits = 0
-    for p in doc.paragraphs:
-        for fragment in _pii_fragments(p.text):
-            if fragment.strip() != _TEMPLATE_DEA_SLOT_TEXT:
-                hits += 1
-        hits += sum(1 for _ in _SSN_VALUE_SHAPE_RE.finditer(p.text))
-
-    for tbl in doc.tables:
-        for row in tbl.rows:
-            for cell in row.cells:
-                text = cell.text
-                for fragment in _pii_fragments(text):
-                    if fragment.strip() != _TEMPLATE_DEA_SLOT_TEXT:
-                        hits += 1
-                hits += sum(1 for _ in _SSN_VALUE_SHAPE_RE.finditer(text))
-
-    if doc.tables:
-        for row in doc.tables[0].rows:
-            for cell in row.cells:
-                hits += len(_BARE_DATE_RE.findall(cell.text))
-    pd_range = _personal_data_paragraph_range(doc.paragraphs)
-    if pd_range:
-        for p in doc.paragraphs[pd_range[0]:pd_range[1]]:
-            hits += len(_BARE_DATE_RE.findall(p.text))
-
+    hits = len(lint_protected_data_in_output(docx_body_blocks(doc)))
     if hits:
-        return 1.0, f"protected_data_hits={hits}; hard-fail cap=25", 25
+        return 1.0, f"protected_data_hits={hits}; hard-fail cap={PROTECTED_DATA_CAP}", PROTECTED_DATA_CAP
     return 0.0, "protected_data_hits=0", None
 
 
@@ -840,7 +782,6 @@ def score_duplicate_ratio(outputs_dir: Path) -> tuple[float, str, None]:
 DIMENSIONS = [
     ("Pipeline/API errors present (HARD-FAIL gate)", 25, score_pipeline_errors),
     ("CV owner name / contact populated (HARD-FAIL gate)", 15, score_cv_owner),
-    ("Protected personal data absent from rendered docx (HARD-FAIL gate)", 15, score_protected_data),
     ("T-bucket share (stage_3b catch-all over-use)", 15, score_t_bucket),
     ("Sparse / under-filled tables in generated docx", 12, score_sparse_tables),
     ("Broken table / raw formatting artifacts in docx", 10, score_broken_format),
@@ -848,6 +789,18 @@ DIMENSIONS = [
     ("Duplicate-entry ratio (de-dup / fragmentation health)", 10, score_duplicate_ratio),
 ]
 TOTAL_WEIGHT = sum(w for _, w, _ in DIMENSIONS)
+
+#: The cap a protected-data leak applies (`score_protected_data`).
+PROTECTED_DATA_CAP = 25
+
+#: Gates that CAP the final score but carry no weight (#820 round 2): they
+#: are not in DIMENSIONS, so TOTAL_WEIGHT and every clean run's raw score
+#: are exactly what they were before the gate existed -- a batch scored
+#: last month is still comparable to one scored today. Same (fraction,
+#: detail, cap) contract as a dimension scorer; only the cap is read.
+CAP_ONLY_GATES = [
+    ("Protected personal data absent from rendered docx (HARD-FAIL gate)", score_protected_data),
+]
 
 
 def band_for(score: int) -> str:
@@ -886,6 +839,12 @@ def score_run(run_output_dir: str | Path, run_id: str | None = None) -> dict:
         if cap is not None:
             hard_fail_caps.append(cap)
             flags.append(f"HARD-FAIL cap={cap}: {name} (fraction={fraction:.2f})")
+
+    for name, gate in CAP_ONLY_GATES:
+        fraction, detail, cap = gate(outputs_dir)
+        if cap is not None:
+            hard_fail_caps.append(cap)
+            flags.append(f"HARD-FAIL cap={cap}: {name} ({detail})")
 
     # Normalized so a fully-penalized run scores 0 and a clean run scores 100.
     raw = 100.0 * (1 - penalty / TOTAL_WEIGHT)
