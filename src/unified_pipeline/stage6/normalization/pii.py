@@ -106,14 +106,19 @@ class WithholdRule:
     ``label`` is a verbose-mode regex alternative for the LABEL (the colon
     is appended by the engine, once, so every label row shares the same
     terminator rule); ``shape`` is a complete regex for a VALUE shape that
-    needs no label at all (a bare SSN, "O-1 Visa", "Married to ..."). A row
-    carries exactly one of the two.
+    needs no label at all (a bare SSN, "O-1 Visa"). A row carries exactly
+    one of the two. ``anchored`` makes a shape row obey the label rows'
+    position rule -- fragment-initial or after a separator, extent to the
+    next hard delimiter -- for a phrase that is a label without a colon
+    ("Married to <name>"): the same words inside prose ("a method married
+    to clinical judgement", three farm abstracts) are not a label.
     """
     category: str
     scope: str
     decided_by: str
     label: str | None = None
     shape: str | None = None
+    anchored: bool = False
 
 
 # Building blocks shared by several rows -- kept as plain strings so a row
@@ -223,10 +228,10 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
       | husband (?: [’'] s )? (?: \s* name )?
     """),
     # "Married to <name>" carries no colon and no shaped value -- the phrase
-    # is the whole signal. Guarded like `born`: "Newly-married to" cannot
-    # glue onto it from the wrong side.
+    # is the whole signal, so it is anchored like a label. Guarded like
+    # `born`: "Newly-married to" cannot glue onto it from the wrong side.
     WithholdRule(CAT_SPOUSE, SCOPE_ALL_CODES, DECIDED_820,
-                 shape=_STEM_GUARD + r"married \s+ to \b"),
+                 shape=_STEM_GUARD + r"married \s+ to \b", anchored=True),
     WithholdRule(CAT_EMERGENCY_CONTACT, SCOPE_ALL_CODES, DECIDED_821_PENDING,
                  label=r"emergency \s* contact"),
     WithholdRule(CAT_VISA, SCOPE_ALL_CODES, DECIDED_821_PENDING,
@@ -431,7 +436,7 @@ def _pii_matches(text: str | None, scope: str = SCOPE_PERSONAL_AND_APPENDIX) -> 
         return []
     found: list[PiiMatch] = []
     for rule, pattern in _rules_for_scope(scope):
-        if rule.label is not None:
+        if rule.label is not None or rule.anchored:
             found.extend(PiiMatch(s, e, rule.category)
                          for s, e in _label_spans(text, pattern))
         else:
