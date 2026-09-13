@@ -21,6 +21,13 @@ Lints, ranked by the severity of the failure class they catch:
                           extraction coverage (14.9%-coverage mega-entry)
 5. classified_unrendered  3b taxonomy codes none of whose entries surface in
                           the stage-6 output document (text or tables)
+5a. stage3b_fallback_ratio a hard-fail gate (see the bottom of this list): a
+                          large share of stage 3b's classification batches
+                          failed, or entries fell back to a default code --
+                          recorded as NUMBERS in meta.stats, invisible to
+                          pipeline_errors_present's error-string scan (#810:
+                          a partial Bedrock outage defaulted 510 of 1019
+                          entries and scored 91 GREEN, doctor WARN only)
 6. output_hygiene         bracketed taxonomy-code leaks ('• [M2A]'), appendix
                           size, boilerplate rendered in the appendix
 7. dead_sections          substantive source sections whose name-matched WCM
@@ -55,9 +62,10 @@ Lints, ranked by the severity of the failure class they catch:
                           ONE-block shape duplicate_passages cannot see by
                           construction (#446)
 
-Lints 14-16 are the quality-score HARD-FAIL gates and sit outside that
-ranking: they are the only ERROR-by-construction lints, because each one on
-its own caps quality_score.py's final score into the RED do-not-deliver band.
+Lints 14-16 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
+HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
+construction lints, because each one on its own caps quality_score.py's final
+score into the RED do-not-deliver band.
 Without them an undeliverable run reported worst=WARN like every healthy one
 (#437). Each calls quality_score.py's own predicate over the same artifacts
 the scorer reads, so the doctor reports the gate rather than a second
@@ -204,6 +212,7 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
 from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_no_output,
     lint_pipeline_errors,
+    lint_stage3b_fallback_ratio,
 )
 
 
@@ -254,6 +263,7 @@ KNOWN_LINTS = (
     "under_extraction",
     "classified_unrendered",
     "taxonomy_code_coverage",
+    "stage3b_fallback_ratio",
     "output_hygiene",
     "dead_sections",
     "unrendered_records",
@@ -773,6 +783,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("under_extraction", lint_under_extraction, ("stage_4",)),
     LintSpec("classified_unrendered", lint_classified_unrendered, ("stage_3b", "blocks")),
     LintSpec("taxonomy_code_coverage", lint_taxonomy_code_coverage, ("stage_3b",)),
+    LintSpec("stage3b_fallback_ratio", lint_stage3b_fallback_ratio, ("stage_3b",)),
     LintSpec("output_hygiene", lint_output_hygiene, ("blocks",)),
     LintSpec("dead_sections", lint_dead_sections, ("stage_2", "blocks")),
     LintSpec("unrendered_records", lint_unrendered_records, ("stage_4", "blocks")),

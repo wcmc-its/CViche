@@ -44,6 +44,7 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_owner_contact_missing,
     lint_pipe_leaks,
     lint_pipeline_errors,
+    lint_stage3b_fallback_ratio,
     lint_taxonomy_code_coverage,
     lint_segmentation,
     lint_stage6_warnings,
@@ -1159,6 +1160,61 @@ def test_pipeline_errors_quiet_on_benign_and_absent_error_fields():
     assert lint_pipeline_errors({}) == []
 
 
+# ------------------------------ #810: stage3b_fallback_ratio (hard fail) ----
+#
+# Synthesized from the outage's own log line (~/worktrees/batch-slices/s4/
+# _batch_runs/logs/web30.log): "Stage 3b (web30): 41 of 83 classification
+# batches failed; 510 entries fell back to default codes" against a total of
+# 1019 entries_classified (batch-3 artifact). The clean re-run's own values
+# (0 failed of 80 batches, 0 fallback of 1037 entries) are the negative case.
+
+def _stage3b_stats(**stats):
+    return {"meta": {"stats": stats}}
+
+
+def test_stage3b_fallback_ratio_errors_on_the_web30_outage_numbers():
+    stage3b = _stage3b_stats(failed_batches=41, llm_batches=83,
+                             fallback_entries=510, entries_classified=1019)
+    findings = lint_stage3b_fallback_ratio(stage3b)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["lint"] == "stage3b_fallback_ratio"
+    assert finding["severity"] == "ERROR"
+    assert "stage-3b fallback ratio" in finding["message"]
+    assert "40" in finding["message"]  # same cap as pipeline_errors_present
+
+
+def test_stage3b_fallback_ratio_quiet_on_the_clean_rerun_numbers():
+    stage3b = _stage3b_stats(failed_batches=0, llm_batches=80,
+                             fallback_entries=0, entries_classified=1037)
+    assert lint_stage3b_fallback_ratio(stage3b) == []
+
+
+def test_stage3b_fallback_ratio_quiet_on_missing_keys_not_a_crash():
+    """An artifact from before c6402bf added these counters must not crash
+    or false-positive -- (False, None), same convention as every other
+    missing-evidence case in this module."""
+    assert lint_stage3b_fallback_ratio({}) == []
+    assert lint_stage3b_fallback_ratio({"meta": {}}) == []
+    assert lint_stage3b_fallback_ratio(
+        _stage3b_stats(failed_batches=5)) == []  # llm_batches absent
+
+
+def test_stage3b_fallback_ratio_boundary_at_the_threshold():
+    from unified_pipeline.quality_score import STAGE3B_FALLBACK_RATIO_THRESHOLD
+
+    at_threshold = _stage3b_stats(
+        failed_batches=int(STAGE3B_FALLBACK_RATIO_THRESHOLD * 100),
+        llm_batches=100, fallback_entries=0, entries_classified=1)
+    assert lint_stage3b_fallback_ratio(at_threshold) == [], \
+        "exactly at the threshold must not exceed it"
+
+    just_over = _stage3b_stats(
+        failed_batches=int(STAGE3B_FALLBACK_RATIO_THRESHOLD * 100) + 1,
+        llm_batches=100, fallback_entries=0, entries_classified=1)
+    assert len(lint_stage3b_fallback_ratio(just_over)) == 1
+
+
 # ------------------------------------------------ #745: no_output (hard fail) -----
 
 def test_no_output_errors_when_stage4_reached_but_nothing_rendered():
@@ -1260,13 +1316,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (18), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (19), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    # KNOWN_LINTS is 19 long (18 + no_output), so the count stays 18.
-    assert len(payload["findings"]) == 18
+    assert len(payload["findings"]) == 19
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

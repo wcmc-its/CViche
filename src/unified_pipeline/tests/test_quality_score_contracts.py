@@ -42,6 +42,7 @@ from unified_pipeline.quality_score import (  # noqa: E402
     score_pipeline_errors,
     score_run,
     score_sparse_tables,
+    score_stage3b_fallback_ratio,
     score_t_bucket,
 )
 
@@ -999,11 +1000,11 @@ def test_score_dimensions_over_corrupt_docx_still_half_penalty(tmp_path):
         assert reason.startswith("docx open error: BadZipFile:"), reason
 
 
-# --------------------------------------------------------------------- D19
-# #745 no_output: a new hard-fail dimension, weight 0 (a pure gate -- see
-# quality_score.py's own comment on why a nonzero weight would move every
-# OTHER run's score too).
-# --------------------------------------------------------------------- D19
+# --------------------------------------------------------------------- D21
+# #745 no_output / #810 stage3b_fallback_ratio: two new hard-fail
+# dimensions, both weight 0 (pure gates -- see quality_score.py's own
+# comment on why a nonzero weight would move every OTHER run's score too).
+# --------------------------------------------------------------------- D21
 
 def test_no_output_caps_at_20_with_no_docx_at_all(tmp_path):
     """web204 (#745): a run with real stage-4 output but no docx at all."""
@@ -1033,3 +1034,47 @@ def test_no_output_is_not_the_same_failure_as_ambiguous_or_corrupt(tmp_path):
     _make_docx(["b"]).save(tmp_path / "b.docx")
     fraction, _detail, cap = score_no_output(tmp_path)
     assert fraction == 0.0 and cap is None
+
+
+def test_stage3b_fallback_ratio_caps_at_40_on_the_web30_outage_numbers(tmp_path):
+    _write_json(tmp_path, "X_classified.json", _classified(stats={
+        "failed_batches": 41, "llm_batches": 83,
+        "fallback_entries": 510, "entries_classified": 1019}))
+    fraction, detail, cap = score_stage3b_fallback_ratio(tmp_path)
+    assert fraction == 1.0
+    assert cap == 40
+    assert "hard-fail cap=40" in detail
+
+
+def test_stage3b_fallback_ratio_quiet_on_the_clean_rerun_numbers(tmp_path):
+    _write_json(tmp_path, "X_classified.json", _classified(stats={
+        "failed_batches": 0, "llm_batches": 80,
+        "fallback_entries": 0, "entries_classified": 1037}))
+    fraction, _detail, cap = score_stage3b_fallback_ratio(tmp_path)
+    assert fraction == 0.0 and cap is None
+
+
+def test_stage3b_fallback_ratio_quiet_when_classified_json_is_absent(tmp_path):
+    """No classified.json at all (an incomplete run) must not crash or
+    false-positive -- distinct from score_t_bucket's 1.0-fraction convention
+    for the same absence, because this dimension is a pure gate (weight 0)."""
+    fraction, detail, cap = score_stage3b_fallback_ratio(tmp_path)
+    assert fraction == 0.0 and cap is None
+    assert "no classified.json found" in detail
+
+
+def test_new_hard_fail_dimensions_do_not_move_a_clean_runs_score(tmp_path):
+    """Adding weight-0 dimensions must not change TOTAL_WEIGHT's effect on a
+    run that trips neither gate -- both scorers return fraction 0.0 with
+    weight 0, so the composite is byte-identical to before these two
+    dimensions existed."""
+    root = _complete_run_dir(tmp_path)
+    _make_docx(["hello"], tables=[[["a", "b"], ["c", "d"]]]).save(root / "out.docx")
+    before = score_run(root)
+    # Re-score after confirming neither new gate fired -- there is no
+    # 'before this PR' run_doctor to diff against in-process, so this
+    # instead pins that both new dimensions are present but silent.
+    dims = {d["name"]: d for d in before["dimensionScores"]}
+    assert dims["No rendered output produced at all (HARD-FAIL gate)"]["max"] == 0
+    assert dims["Stage-3b batch-fallback ratio (HARD-FAIL gate)"]["max"] == 0
+    assert before["hard_fail_caps_applied"] == []

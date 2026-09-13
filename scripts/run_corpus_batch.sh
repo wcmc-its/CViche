@@ -76,7 +76,10 @@ BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 MODEL_LABEL="${MODEL:-default}"
 
-HEADER=$'date\tsha\tmodel\tcv\texit\twcm_output\tkb\tsections\theaders\tentries\tclassified'
+# 'defaulted' is APPENDED at the end (#810), never inserted -- existing
+# columns keep their positions, since the merge scripts and scores.tsv joins
+# read summary.tsv by index.
+HEADER=$'date\tsha\tmodel\tcv\texit\twcm_output\tkb\tsections\theaders\tentries\tclassified\tdefaulted'
 [ -f "$SUMMARY" ] || printf '%s\n' "$HEADER" > "$SUMMARY"
 
 # The loop below only ever sees *.docx -- the pipeline's readers don't handle
@@ -142,12 +145,17 @@ for f in "$INPUT_DIR"/*.docx; do
   sec=$(grep -oE 'Top-level sections: [0-9]+' "$log" | grep -oE '[0-9]+' | tail -1)
   hdr=$(grep -oE 'Total headers: [0-9]+'      "$log" | grep -oE '[0-9]+' | tail -1)
   ent=$(grep -oE 'Entries extracted: [0-9]+'  "$log" | grep -oE '[0-9]+' | tail -1)
+  # #810: 'classified' is now entries that received a REAL taxonomy code
+  # (run_full_pipeline.py logs llm_classified under this same literal, so the
+  # column header is unchanged); 'defaulted' is the new, appended column for
+  # entries that fell back to a default code on an LLM failure.
   cls=$(grep -oE 'Entries classified: [0-9]+' "$log" | grep -oE '[0-9]+' | tail -1)
+  dft=$(grep -oE 'Entries defaulted: [0-9]+'  "$log" | grep -oE '[0-9]+' | tail -1)
   # Scraped, not echoed: the old column repeated whatever was passed in, so it
   # could not tell two model configurations apart and said 'default' either way.
   mdl=$(grep -oE '^Models: .*' "$log" | tail -1 | sed 's/^Models: //' | tr '\t' ' ')
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$ts" "$SHA" "${mdl:-$MODEL_LABEL}" "$stem" "$rc" "$out" "${kb:-}" "${sec:-}" "${hdr:-}" "${ent:-}" "${cls:-}" >> "$SUMMARY"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$ts" "$SHA" "${mdl:-$MODEL_LABEL}" "$stem" "$rc" "$out" "${kb:-}" "${sec:-}" "${hdr:-}" "${ent:-}" "${cls:-}" "${dft:-}" >> "$SUMMARY"
 
   # optional: run the deterministic doctor over this run's stage artifacts and record findings
   if [ "$DOCTOR" = "1" ]; then

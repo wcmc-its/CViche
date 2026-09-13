@@ -153,10 +153,11 @@ def test_known_lints_has_no_duplicates_and_is_not_empty():
     """Guard the guard: an empty or duplicated tuple would pass the checks above."""
     known = _module().KNOWN_LINTS
     assert len(known) == len(set(known)), f"duplicate entries in KNOWN_LINTS: {known}"
-    assert len(known) == 19, (
-        f"KNOWN_LINTS changed size ({len(known)}, was 18 -- #745 added "
-        f"no_output). That is fine if a lint was genuinely added or removed "
-        f"-- update this count and say so in the commit message."
+    assert len(known) == 20, (
+        f"KNOWN_LINTS changed size ({len(known)}, was 19 -- #810 added "
+        f"stage3b_fallback_ratio). That is fine if a lint was genuinely "
+        f"added or removed -- update this count and say so in the commit "
+        f"message."
     )
 
 
@@ -215,6 +216,7 @@ RUN_DOCTOR_IMPORT_SURFACE = (
     "lint_pipe_leaks",
     "lint_pipeline_errors",
     "lint_segmentation",
+    "lint_stage3b_fallback_ratio",
     "lint_stage6_warnings",
     "lint_surprise",
     "lint_table_shape",
@@ -244,9 +246,9 @@ def test_run_doctor_symbol_is_still_importable(name):
 
 def test_the_surface_list_is_not_silently_empty():
     """A refactor that emptied the tuple would make the test above vacuous."""
-    assert len(RUN_DOCTOR_IMPORT_SURFACE) == 34, (
-        "the pinned run_doctor import surface changed size (#745 added "
-        "lint_no_output) -- if that is "
+    assert len(RUN_DOCTOR_IMPORT_SURFACE) == 35, (
+        "the pinned run_doctor import surface changed size (#810 added "
+        "lint_stage3b_fallback_ratio) -- if that is "
         "intentional, update the count and say why in the commit message"
     )
 
@@ -262,7 +264,8 @@ def test_known_lints_literal_expected_order():
     fails even when the AST-derived side was reordered to match."""
     assert tuple(_module().KNOWN_LINTS) == (
         "segmentation", "missed_headers", "bucket_status", "under_extraction",
-        "classified_unrendered", "taxonomy_code_coverage", "output_hygiene",
+        "classified_unrendered", "taxonomy_code_coverage",
+        "stage3b_fallback_ratio", "output_hygiene",
         "dead_sections", "unrendered_records", "enrichment_failures",
         "stage6_render_warnings", "dedup_drops", "pipe_leaks", "table_shape",
         "duplicate_passages", "duplicate_records", "owner_contact_missing",
