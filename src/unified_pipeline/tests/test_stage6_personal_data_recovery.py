@@ -321,6 +321,22 @@ def test_email_field_fallback_does_not_harvest_from_a_pii_fragment_on_any_code(t
     assert "pat.example@example.com" not in text
 
 
+def test_pass_runs_before_dedup_so_a_dropped_near_duplicate_is_still_scanned(tmp_path):
+    """`_recover_unrendered_records` re-scans the PRE-dedup entries, so an
+    entry dedup drops can still put a record line on the page. The pass
+    therefore runs before the pre-dedup snapshot: the dropped
+    near-duplicate's SSN is recorded (notice emitted) rather than skipped.
+    With the pass after dedup this document carried no notice."""
+    kept = ("2001 - 2002\tExample Award for Distinguished Example Work, Example Society of Examples\n"
+            "2003 - 2004\tExample Prize for Outstanding Example Research, Example Foundation of Examples")
+    dropped = ("2001 - 2002\tExample Award for Distinguished Example Work, Example Society\n"
+               "2003 - 2004\tExample Prize for Outstanding Example Research; SSN: 123-45-6789")
+    text = _render(tmp_path, [_entry(kept, "H"), _entry(dropped, "H", idx=1)])
+    assert "123-45-6789" not in text
+    assert PII_REDACTED_NOTICE in text
+    assert "Example Award for Distinguished Example Work" in text
+
+
 # --------------------------------------------------------------------------
 # the Word comment on the notice (A-820 addendum)
 # --------------------------------------------------------------------------

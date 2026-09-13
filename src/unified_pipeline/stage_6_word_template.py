@@ -780,6 +780,16 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if mismatch_corrections > 0:
                 print(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
 
+        # #820 piece 2: one pre-render deny pass over every entry, every
+        # code, BEFORE the pre-dedup snapshot below -- a near-duplicate
+        # dedup drops is still re-scanned by `_recover_unrendered_records`
+        # (see `stage6/pii_pass.py`). Scope comes from the SAME routing set
+        # the appendix batch is built from. Read by the notice, the comment
+        # on it, and `_fill_personal_data`'s docx recovery (which appends).
+        self._pii_result = run_pii_pass(
+            entries_by_code, routed_codes=RENDER_ROUTED_CODES,
+            section_names=TAXONOMY_TO_SECTION)
+
         # Deduplicate within each code group.
         # Position/training codes (D1, D2, D3, C, B1) represent career progression
         # stages that share most words but differ in rank — use date-aware dedup
@@ -813,17 +823,6 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         # Load template
         self.doc = Document(self.template_path)
-
-        # #820 piece 2: one pre-render deny pass over every entry, every
-        # code, before any `_fill_*` call reads an entry's text or fields
-        # (see `stage6/pii_pass.py`). Scope comes from the SAME routing set
-        # the appendix batch below is built from, passed in rather than
-        # re-declared. The result feeds `_unconsumed_personal_data_batch`
-        # (the notice) and `_add_remaining_to_appendix` (the comment on it);
-        # `_fill_personal_data`'s docx recovery appends to it.
-        self._pii_result = run_pii_pass(
-            entries_by_code, routed_codes=RENDER_ROUTED_CODES,
-            section_names=TAXONOMY_TO_SECTION)
 
         # Flatten all entries for fallback searches
         all_entries = [entry for entries in entries_by_code.values() for entry in entries]
