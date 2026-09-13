@@ -518,5 +518,33 @@ def test_q2_list_committee_name_survives_router_end_to_end(tmp_path):
     assert rows[0][0] == "Fictional Board Delta; Fictional Board Epsilon"
 
 
+def test_q2_list_role_and_organization_survive_router_and_render_end_to_end(tmp_path):
+    """verify-D-812-R2 finding 1 (re-rated BLOCKER): four coercions the PR
+    adds had no test that would fail if dropped -- `role` (M14) and
+    `organization` (M15) in `_fill_service_boards` (service.py:622-623,
+    round-1 code), and `role` (R2) and `organization` (R3) in
+    `_route_q2_entries` (service.py:342,344, round-2 code). One entry with
+    BOTH fields as lists, driven through the REAL `_fill_service` entrypoint
+    via `generate()`, kills all four: if a router coercion is dropped,
+    `.lower()` on the raw list raises `AttributeError` before
+    `_fill_service_boards` ever runs (the #812 crash class); if a
+    `_fill_service_boards` coercion is dropped, the raw list reaches
+    `row.cells[n].text =` unjoined (the #660 silent-concatenation class)."""
+    entries = [
+        _entry("A", name="Jane Q. Public, MD"),
+        _entry("Q2", committee_name="Fictional Board Zeta",
+               role=["Fictional Role A", "Fictional Role B"],
+               organization=["Fictional Org P", "Fictional Org Q"],
+               start_date="1960", end_date="1962"),
+    ]
+    doc = _render(tmp_path, entries)
+    rows = list(_rows_containing(doc, "Fictional Board Zeta"))
+    assert len(rows) == 1
+    assert rows[0][0] == "Fictional Board Zeta"
+    assert rows[0][1] == "Fictional Role A; Fictional Role B"
+    assert rows[0][2] == "Fictional Org P; Fictional Org Q"
+    assert rows[0][3] == "1960-1962"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))
