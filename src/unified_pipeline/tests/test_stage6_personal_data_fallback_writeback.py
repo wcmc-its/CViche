@@ -743,3 +743,94 @@ def test_split_phone_entry_never_renders_a_truncated_number(
     rows, _ = _render(tmp_path, [_a(text, {"phone": raw})])
     assert rows["cell phone:"] == expected_cell
     assert rows["office telephone:"] == expected_office
+
+
+# --------------------------------------------------------------------------
+# #820 round 2: the docx recovery goes through the same protected-data gate
+# as the entry path (#820's "Related" note on #550/#730). With --source-dir,
+# web198's source table had a "Home Address:" label cell whose VALUE cell was
+# a "Birth Place:" line, and the scan rendered that line into the Office
+# address cell on both arms.
+# --------------------------------------------------------------------------
+
+def _docx_texts(docx_path) -> str:
+    doc = Document(str(docx_path))
+    return "\n".join(n.text or "" for n in doc.element.body.iter(W_T))
+
+
+def test_recovered_address_value_that_is_a_birth_place_line_is_withheld(tmp_path):
+    """The web198 shape: a label cell an address classifier accepts, a
+    value cell that is protected data. Nothing of it reaches the table,
+    and the withheld notice + comment name the category."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Home Address: 1 Example Street", "Birth Place: Example City, EX"),
+    ])
+    rows, gen = _render(tmp_path, entries=[_a("Office phone: 212-555-0100",
+                                              {"phone": "212-555-0100"})],
+                        original_doc_path=str(src))
+    rendered = _docx_texts(tmp_path / "out.docx")
+    assert "Example City" not in rendered, "a birth place rendered as the Office address"
+    assert rows.get("office address:", "") == ""
+    assert [i.category for i in gen._pii_result.withheld] == ["place of birth"]
+    assert gen._pii_result.withheld[0].section_label == "Personal Data"
+    assert gen._pii_result.withheld[0].entry_index is None
+
+
+def test_recovered_address_keeps_its_clean_lines_and_drops_the_protected_one(tmp_path):
+    """Line-level, like the entry path's value-level gate: the street lines
+    render, the one protected line inside the same cell does not."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("BUSINESS ADDRESS:", "1 Example Street\nExample City, EX 00000\n"
+                              "Date of Birth: 01/02/1970"),
+    ])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert "1 Example Street" in rows["office address:"]
+    assert "01/02/1970" not in _docx_texts(tmp_path / "out.docx")
+    assert [i.category for i in gen._pii_result.withheld] == ["date of birth"]
+
+
+def test_recovered_phone_email_and_name_from_a_protected_row_are_withheld(tmp_path):
+    """Every recovered value kind goes through the gate, not just the
+    address: an emergency contact's phone and email in a phone/email row,
+    and a spouse's name in a name row."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Name:", "Wife's name: Pat Example"),
+        ("Phone:", "Emergency contact: Pat Example 212-555-0199"),
+        ("E-mail:", "Emergency contact: pat.example@example.com"),
+    ])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    rendered = _docx_texts(tmp_path / "out.docx")
+    assert "Pat Example" not in rendered
+    assert "212-555-0199" not in rendered
+    assert "pat.example@example.com" not in rendered
+    assert sorted(i.category for i in gen._pii_result.withheld) == sorted(
+        ["spouse", "emergency contact", "emergency contact"])
+
+
+def test_recovered_paragraph_email_inside_a_protected_fragment_is_withheld(tmp_path):
+    """The paragraph email scan (no table) is gated the same way, and keeps
+    looking past a withheld one."""
+    src = tmp_path / "source.docx"
+    doc = Document()
+    doc.add_paragraph("Emergency contact: Pat Example, pat.example@example.com")
+    doc.add_paragraph("Work: roe@med.example.edu")
+    doc.save(str(src))
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows["work email:"] == "roe@med.example.edu"
+    assert "pat.example@example.com" not in _docx_texts(tmp_path / "out.docx")
+    assert [i.category for i in gen._pii_result.withheld] == ["emergency contact"]
+
+
+def test_a_clean_recovery_records_nothing_withheld(tmp_path):
+    """Negative control: the positive-control fixture (a real contact block)
+    is recovered in full and the withheld list stays empty -- no notice, no
+    comment."""
+    src = tmp_path / "source.docx"
+    _make_source_docx(src)
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows["work email:"] == "plo4@pitt.edu"
+    assert gen._pii_result.withheld == []
+    assert "withheld" not in _docx_texts(tmp_path / "out.docx")

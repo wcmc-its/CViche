@@ -373,12 +373,20 @@ _PII_LABEL_RE = re.compile(
 )
 
 
+# A list marker is not a word: "• Children: ..." (the Appendix renders
+# every bullet this way) and "12. Date of Birth: ..." are fragment-initial
+# labels for the doctor lint's purposes, which reads RENDERED text.
+_LIST_MARKER_RE = re.compile(r"^(?:[•·\-–—*]|\d{1,3}[.)])$")
+
+
 def _boundary_ok(prefix_since_last_delim: str) -> bool:
     """True when a label match is fragment-initial OR immediately follows
     one of the issue's separators: `,`, `:`, `(`, or start-of-line (`;` is
-    a hard split upstream, so it is covered by the empty-prefix case)."""
+    a hard split upstream, so it is covered by the empty-prefix case). A
+    bare list marker counts as start-of-line."""
     stripped = prefix_since_last_delim.strip()
-    return stripped == "" or stripped[-1] in ",:("
+    return (stripped == "" or stripped[-1] in ",:("
+            or bool(_LIST_MARKER_RE.match(stripped)))
 
 
 def _label_spans(text: str, pattern: re.Pattern) -> list[tuple[int, int]]:

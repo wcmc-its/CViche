@@ -30,6 +30,8 @@ inside <w:ins> tracked changes and under-reports by 11-19% (#461).
 
 import json
 import sys
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 
 from docx import Document
@@ -38,6 +40,11 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.normalization.pii import SCOPE_ALL_CODES  # noqa: E402
+from unified_pipeline.stage6.pii_pass import (  # noqa: E402
+    WITHHELD_COMMENT_AUTHOR,
+    WITHHELD_COMMENT_HEADER,
+)
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     PII_REDACTED_NOTICE,
     WCMTemplateGenerator,
@@ -53,8 +60,8 @@ def _all_text(docx_path) -> str:
     return "\n".join(n.text or "" for n in doc.element.body.iter(W_T))
 
 
-def _render(tmp_path, entries, cv_owner=None) -> str:
-    gen = WCMTemplateGenerator(verbose=False)
+def _render(tmp_path, entries, cv_owner=None, **generator_kwargs) -> str:
+    gen = WCMTemplateGenerator(verbose=False, **generator_kwargs)
     gen._reconsider_appendix_entries = lambda: None
     ip, op = tmp_path / "in.json", tmp_path / "out.docx"
     payload = {"document_uid": "TESTPD", "entries": entries}
@@ -63,6 +70,26 @@ def _render(tmp_path, entries, cv_owner=None) -> str:
     ip.write_text(json.dumps(payload))
     gen.generate(str(ip), str(op), research_summary_path=None)
     return _all_text(op)
+
+
+def _entry(text, code, fields=None, idx=0):
+    return {"text": text, "taxonomy_code": code,
+            "extracted_fields": fields or {}, "element_idx_start": idx}
+
+
+def _comments(docx_path) -> list[tuple[str, str]]:
+    """(author, text) of every comment in the docx's comments part, text
+    lines joined with newlines; [] when the part does not exist."""
+    with zipfile.ZipFile(docx_path) as z:
+        if "word/comments.xml" not in z.namelist():
+            return []
+        root = ET.fromstring(z.read("word/comments.xml"))
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    out = []
+    for c in root.iter(f"{W}comment"):
+        lines = ["".join(t.text or "" for t in p.iter(f"{W}t")) for p in c.iter(f"{W}p")]
+        out.append((c.get(f"{W}author"), "\n".join(lines)))
+    return out
 
 
 def _a(text, fields=None, idx=0):
@@ -241,6 +268,114 @@ def test_pii_in_a_tab_separated_cell_is_still_caught(tmp_path):
     assert PII_REDACTED_NOTICE in text
 
 
+def test_web057_shape_is_withheld_from_a_t_coded_appendix_line(tmp_path):
+    """#820's local instance, end to end: a T-coded line with the spouse
+    label buried after another label (`Personal Information:: Husband:`)
+    -- the unanchored-matching case, through the real Appendix path."""
+    text = _render(tmp_path, [
+        _entry("Personal Information:: Husband: Pat Example, MD", "T"),
+        _entry("Foreign Languages: French", "T"),
+    ])
+    assert "Pat Example" not in text, "spouse name reached the Appendix"
+    assert PII_REDACTED_NOTICE in text
+    assert "French" in text
+
+
+def test_notice_is_keyed_on_something_withheld_not_on_appendix_redaction(tmp_path):
+    """M20: the notice used to be keyed on the A-orphan redaction count.
+    PII withheld from a RENDERED section (an F1 entry's text) with no
+    A-coded orphan at all must still produce the notice."""
+    text = _render(tmp_path, [
+        _entry("Medical license, Example State; SSN: 123-45-6789", "F1",
+               {"license_number": "X1", "state": "Example State"}),
+    ])
+    assert "123-45-6789" not in text
+    assert PII_REDACTED_NOTICE in text
+
+
+def test_no_notice_when_the_only_label_is_out_of_scope(tmp_path):
+    """The round-1 false notice: an ambiguous label on a routed content
+    code is not withheld, so nothing is recorded and the document carries
+    neither the notice nor a comment (the render gate's CHANGED 0)."""
+    text = _render(tmp_path, [
+        _entry("Children: Research, Practice and Policy. Example Press, 2001.", "S4",
+               {"title": "Children: Research, Practice and Policy",
+                "authors": "Roe J", "year": "2001", "publisher": "Example Press"}),
+        _entry("DEA number: AB1234567", "F1", {"license_number": "AB1234567"}),
+    ])
+    assert "Children: Research" in text, "a content-code title was withheld"
+    assert PII_REDACTED_NOTICE not in text
+    assert _comments(tmp_path / "out.docx") == []
+
+
+def test_email_field_fallback_does_not_harvest_from_a_pii_fragment_on_any_code(tmp_path):
+    """M23: the all-entries email fallback (`personal_data.py`, the
+    `_pii_fragments` read at its second site) must consult the pass's
+    stored fragments -- a T-coded emergency-contact entry whose
+    `extracted_fields['email']` was lifted from the fragment must not
+    supply the Work email slot."""
+    text = _render(tmp_path, [
+        _entry("Emergency Contact: Pat Example, pat.example@example.com", "T",
+               {"email": "pat.example@example.com"}),
+    ])
+    assert "pat.example@example.com" not in text
+
+
+# --------------------------------------------------------------------------
+# the Word comment on the notice (A-820 addendum)
+# --------------------------------------------------------------------------
+
+def test_withheld_notice_carries_one_word_comment_listing_categories(tmp_path):
+    """Round trip: save, reopen the package, read the comment part back.
+    Exactly one comment, on the notice, author "CViche", listing both
+    categories with counts and sections and NOT the values -- and present
+    with `emit_comments=False` (it is not a classification comment, #153)."""
+    text = _render(tmp_path, [
+        _entry("Date of Birth: 01/02/1970", "A"),
+        _entry("Visa Status: O-1", "T"),
+    ], emit_comments=False)
+    assert "01/02/1970" not in text and "O-1" not in text
+    assert PII_REDACTED_NOTICE in text
+    comments = _comments(tmp_path / "out.docx")
+    assert len(comments) == 1, comments
+    author, body = comments[0]
+    assert author == WITHHELD_COMMENT_AUTHOR
+    lines = body.split("\n")
+    assert lines[0] == WITHHELD_COMMENT_HEADER
+    assert " • date of birth — 1 item, Personal Data" in lines
+    assert " • visa / immigration status — 1 item, Appendix" in lines
+    assert "01/02/1970" not in body and "O-1" not in body, "a withheld value re-leaked into the comment"
+
+
+def test_withheld_comment_is_anchored_on_the_notice_paragraph(tmp_path):
+    _render(tmp_path, [_entry("Date of Birth: 01/02/1970", "A")], emit_comments=False)
+    doc = Document(str(tmp_path / "out.docx"))
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    anchored = [p for p in doc.paragraphs
+                if p._p.find(f"{W}commentRangeStart") is not None]
+    assert len(anchored) == 1
+    assert PII_REDACTED_NOTICE in anchored[0].text
+
+
+def test_withheld_comment_is_the_only_comment_even_with_classification_comments_on(tmp_path):
+    """With emit_comments=True the Appendix's other bullets get their
+    classification comments; the notice paragraph gets ONLY the withheld
+    summary, not a second "Originally classified A" comment."""
+    _render(tmp_path, [
+        _entry("Date of Birth: 01/02/1970", "A"),
+        _entry("Foreign Languages: French", "A"),
+    ], emit_comments=True)
+    comments = _comments(tmp_path / "out.docx")
+    assert len([c for c in comments if c[0] == WITHHELD_COMMENT_AUTHOR]) == 1
+    assert any("Originally classified" in body for _, body in comments), (
+        "the classification comments were not emitted with emit_comments=True")
+    doc = Document(str(tmp_path / "out.docx"))
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    notice = [p for p in doc.paragraphs if PII_REDACTED_NOTICE in p.text]
+    assert len(notice) == 1
+    assert len(notice[0]._p.findall(f"{W}commentRangeStart")) == 1
+
+
 # --------------------------------------------------------------------------
 # the deny predicate itself
 # --------------------------------------------------------------------------
@@ -300,18 +435,24 @@ def test_research_vocabulary_still_off_the_list_is_not_denied():
     """sex/race are still deliberately NOT on the list -- ordinary research
     vocabulary that occurs as publication titles, unchanged by #820.
 
-    `gender`/`ethnicity`/`religion` moved OFF this list in #820 (the issue's
-    comment: withholding protected-class attributes on a rendered CV
-    outweighs the residual risk of a colon-terminated title beginning with
-    one of those exact words) -- see
-    `test_protected_class_labels_deny_only_the_colon_form` for the accepted
-    trade-off and the bare-word forms ("Gender Medicine", "Health Sciences")
-    that still must not match."""
+    `gender`/`ethnicity`/`religion` ARE on the list since #820, but only at
+    the Personal Data / Appendix scope (`SCOPE_PERSONAL_AND_APPENDIX`): the
+    #473 control "Gender: A Review of the Literature" is restored for every
+    routed content code, where the ambiguous rows never apply -- see
+    `test_protected_class_labels_deny_only_the_colon_form` for the two
+    scopes side by side."""
     for keeper in [
         "Sex: differences in galanin expression",
         "Race: reporting practices in clinical trials",
     ]:
         assert not _pii_fragments(keeper), f"false positive on {keeper!r}"
+    for content_title in [
+        "Gender: A Review of the Literature",
+        "Children: Research, Practice and Policy",
+        "Health: A Journal Title",
+    ]:
+        assert not _pii_fragments(content_title, SCOPE_ALL_CODES), (
+            f"content-code false positive on {content_title!r}")
 
 
 def test_protected_class_labels_deny_only_the_colon_form():
@@ -323,9 +464,10 @@ def test_protected_class_labels_deny_only_the_colon_form():
     marital-status/spouse/children, applied to this class for the first
     time: a bare occurrence of the word, with no colon directly after it,
     must still pass through untouched -- these are the ticket's own named
-    negative controls (`docs` A-820, MUST NOT list) and the accepted,
-    disclosed trade-off is that a *colon-terminated* title starting with one
-    of these words ("Gender: A Review of the Literature") is now denied too.
+    negative controls (`docs` A-820, MUST NOT list). A *colon-terminated*
+    title starting with one of these words ("Gender: A Review of the
+    Literature") is denied ONLY where the entry is A-coded or Appendix-bound
+    (#820 round 2's scope split); on a routed content code it renders.
     """
     for pii in [
         "Religion: Catholic",

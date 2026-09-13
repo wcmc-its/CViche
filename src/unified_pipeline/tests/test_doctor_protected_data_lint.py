@@ -24,8 +24,17 @@ from unified_pipeline.doctor.lints.protected_data import (  # noqa: E402
     _TEMPLATE_DEA_SLOT_TEXT,
     lint_protected_data_in_output,
 )
-from unified_pipeline.quality_score import score_protected_data  # noqa: E402
+from unified_pipeline.quality_score import (  # noqa: E402
+    CAP_ONLY_GATES,
+    DIMENSIONS,
+    PROTECTED_DATA_CAP,
+    TOTAL_WEIGHT,
+    score_protected_data,
+    score_run,
+)
 from unified_pipeline.run_doctor import read_docx_blocks, run_doctor  # noqa: E402
+from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE, withheld_comment_text  # noqa: E402
+from unified_pipeline.stage6.normalization.pii import WithheldItem  # noqa: E402
 
 
 def _p(text: str) -> tuple[str, str]:
@@ -218,3 +227,101 @@ def test_quality_score_does_not_cap_a_clean_docx(tmp_path):
     fraction, detail, cap = score_protected_data(tmp_path)
     assert cap is None
     assert fraction == 0.0
+
+
+# --------------------------------------------------------------------------
+# #820 round 2: scope by section, the notice/comment exemption, and the
+# cap-only score gate
+# --------------------------------------------------------------------------
+
+def test_ambiguous_label_is_a_finding_in_the_appendix_but_not_in_a_content_section():
+    """The lint's scope mirrors the pass: "Children:" is protected data in
+    the Appendix (and the Personal Data block) and a book-chapter title in
+    Book Chapters."""
+    body = [
+        _p("BIBLIOGRAPHY"),
+        _p("Children: Research, Practice and Policy. Example Press, 2001."),
+    ]
+    assert lint_protected_data_in_output(body) == []
+    appendix = [_p("T. APPENDIX"), _p("• Children: Ann, Bob")]
+    findings = lint_protected_data_in_output(appendix)
+    assert len(findings) == 1
+    assert "Appendix" in findings[0]["message"]
+    personal = [_p("PERSONAL DATA"), _t("Gender: Female"), _p("EDUCATION")]
+    assert len(lint_protected_data_in_output(personal)) == 1
+
+
+def test_unambiguous_label_is_a_finding_in_any_section():
+    body = [_p("HONORS"), _p("Award; Date of Birth: 01/02/1970")]
+    findings = lint_protected_data_in_output(body)
+    assert len(findings) == 1
+    assert "01/02/1970" not in findings[0]["message"]
+
+
+def test_the_withheld_notice_paragraph_is_never_a_finding():
+    """The notice names categories ("marital status", "family members'
+    names"); the lint must skip that paragraph outright, so a category
+    name coinciding with a label pattern can never turn the notice into
+    a leak finding."""
+    blocks = [_p("T. APPENDIX"), _p(f"• {PII_REDACTED_NOTICE}")]
+    assert lint_protected_data_in_output(blocks) == []
+    # and the same text with a label-shaped category appended stays exempt
+    blocks = [_p(f"• {PII_REDACTED_NOTICE} Marital Status: withheld")]
+    assert lint_protected_data_in_output(blocks) == []
+
+
+def test_the_word_comment_text_is_clean_and_lives_outside_the_body(tmp_path):
+    """The comment lists categories only; scanned directly it yields no
+    finding, and `read_docx_blocks` never sees the comments part at all."""
+    text = withheld_comment_text([
+        WithheldItem("date of birth", "Personal Data", 0),
+        WithheldItem("marital status", "Appendix", 1),
+        WithheldItem("social security number", "Appendix", 2),
+    ])
+    assert lint_protected_data_in_output([_p("T. APPENDIX")] + [_p(line) for line in text.split("\n")]) == []
+    out = _write_docx(tmp_path, [f"• {PII_REDACTED_NOTICE}"])
+    blocks = read_docx_blocks(str(out))
+    assert all("Withheld by" not in t for _, t in blocks)
+    assert lint_protected_data_in_output(blocks) == []
+
+
+def test_protected_data_is_a_cap_only_gate_not_a_dimension():
+    """Round-2 finding: the gate was a weight-15 dimension, inflating every
+    clean run's raw score (TOTAL_WEIGHT 95 -> 110). It is a cap only."""
+    assert score_protected_data not in [scorer for _, _, scorer in DIMENSIONS]
+    assert score_protected_data in [gate for _, gate in CAP_ONLY_GATES]
+    assert TOTAL_WEIGHT == 95
+
+
+def test_score_run_caps_a_leaking_docx_red_without_moving_the_raw_score(tmp_path):
+    _write_flat_docx(tmp_path, ["Marital Status: Married"])
+    leaking = score_run(tmp_path)
+    (tmp_path / f"{_UID}_wcm.docx").unlink()
+    _write_flat_docx(tmp_path, ["Office address: 123 Main St"])
+    clean = score_run(tmp_path)
+    assert leaking["raw_score_before_caps"] == clean["raw_score_before_caps"]
+    assert leaking["total_weight"] == clean["total_weight"] == 95
+    assert len(leaking["dimensionScores"]) == len(clean["dimensionScores"])
+    assert PROTECTED_DATA_CAP in leaking["hard_fail_caps_applied"]
+    assert leaking["totalScore"] <= PROTECTED_DATA_CAP
+    assert leaking["band"].startswith("RED")
+    assert any("Protected personal data" in f for f in leaking["flags"])
+    assert not any("Protected personal data" in f for f in clean["flags"])
+
+
+def test_score_protected_data_reads_the_same_blocks_as_the_doctor(tmp_path):
+    """#825: the scorer calls the lint on the same body-order blocks, so a
+    table-cell leak the doctor reports is the leak the scorer caps on."""
+    doc = Document()
+    doc.add_paragraph("PERSONAL DATA")
+    table = doc.add_table(rows=1, cols=2)
+    table.rows[0].cells[0].text = "Office address:"
+    table.rows[0].cells[1].text = "01/02/1970"
+    doc.add_paragraph("EDUCATION")
+    doc.save(str(tmp_path / f"{_UID}_wcm.docx"))
+    fraction, detail, cap = score_protected_data(tmp_path)
+    assert cap == PROTECTED_DATA_CAP
+    doctor_hits = len(lint_protected_data_in_output(
+        read_docx_blocks(str(tmp_path / f"{_UID}_wcm.docx"))))
+    assert doctor_hits >= 1
+    assert f"protected_data_hits={doctor_hits}" in detail
