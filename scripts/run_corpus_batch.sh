@@ -87,7 +87,20 @@ MODEL_LABEL="${MODEL:-default}"
 # columns keep their positions, since the merge scripts and scores.tsv joins
 # read summary.tsv by index.
 HEADER=$'date\tsha\tmodel\tcv\texit\twcm_output\tkb\tsections\theaders\tentries\tclassified\tdefaulted'
-[ -f "$SUMMARY" ] || printf '%s\n' "$HEADER" > "$SUMMARY"
+if [ -f "$SUMMARY" ]; then
+  # round-2 N6: a summary.tsv from before #810 has the old 11-column header
+  # (no 'defaulted') -- appending this run's 12-cell rows under it silently
+  # would leave every reader that keys columns off the header line
+  # misaligned. Cheapest honest fix: widen the header in place, once. The
+  # OLD rows are never rewritten, so under the new header they simply read
+  # as an empty 'defaulted' cell by position -- the same as any short
+  # trailing TSV row already reads, never a fabricated 0.
+  if ! head -1 "$SUMMARY" | grep -q $'\tdefaulted$'; then
+    sed -i.bak '1s/$/\tdefaulted/' "$SUMMARY" && rm -f "$SUMMARY.bak"
+  fi
+else
+  printf '%s\n' "$HEADER" > "$SUMMARY"
+fi
 
 # The loop below only ever sees *.docx -- the pipeline's readers don't handle
 # other formats yet (#524 is the separate initiative for that). A directory
