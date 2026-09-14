@@ -1,10 +1,12 @@
-import { Link } from 'react-router-dom'
+import { useEffect } from 'react'
+import { Link, useLocation } from 'react-router-dom'
 import { HelpCircle, ArrowLeft } from 'lucide-react'
 
 const sections = [
   { id: 'what-is-cviche', label: 'What is CViche?' },
   { id: 'getting-started', label: 'Getting Started' },
   { id: 'understanding-results', label: 'Understanding Your Results' },
+  { id: 'data-retention', label: 'Data Retention Policy' },
   { id: 'faq', label: 'Frequently Asked Questions' },
   { id: 'contact', label: 'Contact & Support' },
 ]
@@ -19,6 +21,10 @@ const handleScrollTo = (e: React.MouseEvent, id: string) => {
 }
 
 export default function HelpPage() {
+  const { hash } = useLocation()
+  useEffect(() => {
+    if (hash) document.getElementById(hash.slice(1))?.scrollIntoView()
+  }, [hash])
   return (
     <main
       className="flex items-start justify-center min-h-screen p-4 pt-12"
@@ -141,6 +147,31 @@ export default function HelpPage() {
                 If something looks wrong in your results{'\u2014'}missing publications, entries in the wrong section, or
                 formatting issues{'\u2014'}use the feedback form on your run page to report the specific problem. This
                 helps us improve CViche for everyone.
+              </p>
+            </div>
+          </section>
+
+          <hr className="border-t border-gray-200 my-6" />
+
+          {/* Data retention policy (Faculty Affairs, 2026-09). Linked from the upload attestation. */}
+          <section id="data-retention">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Data Retention Policy</h2>
+            <div className="space-y-3 text-sm text-gray-700 leading-relaxed">
+              <p>
+                For every run, CViche retains the original CV you uploaded, the intermediate outputs produced at each
+                stage of processing, and the final WCM-formatted document.
+              </p>
+              <p>
+                This material is used to improve the system&apos;s performance and to test proposed changes before they
+                are released. It is stored on WCM infrastructure and is accessible only to you and CViche
+                administrators.
+              </p>
+              <p>
+                To request removal of a run, contact Paul Albert at{' '}
+                <a href="mailto:paa2013@med.cornell.edu" className="text-primary-600 hover:underline">
+                  paa2013@med.cornell.edu
+                </a>
+                .
               </p>
             </div>
           </section>
