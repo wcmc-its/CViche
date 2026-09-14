@@ -183,6 +183,7 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     TeachingSection,
 )
 from unified_pipeline.stage6.sections.appendix import (
+    UnmappedEntry,
     build_appendix_diversion_warnings,
 )
 
@@ -397,8 +398,16 @@ RENDER_ROUTED_CODES = frozenset({
 })
 
 
-
-
+def _merge_appendix_diversion_warnings(
+    issues: list[dict], written: list[UnmappedEntry], recovered: list[str],
+) -> list[dict]:
+    """Append #531/#531-R2 per-(code, reason) Appendix-diversion warnings
+    (from what `_fill_appendix`/`_add_remaining_to_appendix` report they
+    wrote, never re-derived from the document) to *issues*; unchanged when
+    there is nothing to add."""
+    if not written and not recovered:
+        return issues
+    return issues + build_appendix_diversion_warnings(written, recovered, RENDER_ROUTED_CODES)
 
 
 # Personal data that must not be carried onto a WCM CV. Source CVs routinely
@@ -871,23 +880,19 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # second time. They are recovered after every section has rendered, by
         # _unconsumed_personal_data_batch.
 
-        written_appendix_entries: list[dict] = []
+        written_appendix_entries: list[UnmappedEntry] = []
         if unmapped_entries:
             written_appendix_entries = self._fill_appendix(unmapped_entries)
 
         # Route content-overflow entries as tracked-change bullets
         self._route_overflow_entries()
 
-        # Reconsider appendix entries - reclassify segments to appropriate sections
-        self._reconsider_appendix_entries()
-
-        # Post-render safety net: re-emit record lines the structured render
-        # dropped (#221). Runs after the overflow/reconsider passes so their
-        # inserts count as rendered, and before comment finalization and
-        # instruction-box removal (anchor lookups are text-based). Scans the
-        # PRE-dedup entries so records fused into a deduped-away entry are
-        # still checked.
-        self._recover_unrendered_records(pre_dedup_entries_by_code)
+        # Reconsider appendix entries (reclassify segments to other sections)
+        # then recover unrendered records (#221, after reconsider so its
+        # inserts count as rendered) -- both bullet leftover content into the
+        # Appendix and report back each bullet's code (#531-R2 finding F1).
+        recovered_appendix_codes = list(self._reconsider_appendix_entries() or [])
+        recovered_appendix_codes += self._recover_unrendered_records(pre_dedup_entries_by_code) or []
 
         # Finalize comments (add to comments.xml)
         self._finalize_comments()
@@ -915,16 +920,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Run post-generation validation to catch common issues
         validation_issues = self._validate_output()
 
-        # One warning per taxonomy code actually diverted to the Appendix
-        # (#531) -- computed from what _fill_appendix reports it wrote, not
-        # re-derived from the rendered document, so it can't be fooled by
-        # #534's later T1/T2 split or #249's tracked-change blind spot.
-        # Appended to the SAME list _validate_output() returns: one sidecar
-        # shape, one doctor re-emission path (lint_stage6_warnings), no new
-        # KNOWN_LINTS row.
-        if written_appendix_entries:
-            validation_issues = validation_issues + build_appendix_diversion_warnings(
-                written_appendix_entries, RENDER_ROUTED_CODES)
+        # Appendix-diversion warnings (#531, #531-R2) -- see the helper's
+        # own docstring for what it merges and why.
+        validation_issues = _merge_appendix_diversion_warnings(
+            validation_issues, written_appendix_entries, recovered_appendix_codes)
 
         if validation_issues:
             print(f"\n{'!'*60}")
@@ -1906,7 +1905,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             taxonomy_code = entry.get('taxonomy_code', '?')
             print(f"  Queued for reconsideration: {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
 
-    def _reconsider_appendix_entries(self):
+    def _reconsider_appendix_entries(self) -> list[str]:
         """Analyze appendix-pending entries and reclassify segments to appropriate sections.
 
         For each entry queued for appendix, this method:
@@ -1914,9 +1913,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         2. Uses LLM to classify each segment to a taxonomy code
         3. Routes segments to appropriate WCM sections as bullets
         4. Only truly unmappable content remains for the appendix
+
+        Returns the taxonomy code of each bullet `_add_remaining_to_appendix`
+        actually wrote for the entries that stayed unmappable (#531-R2
+        finding F1) -- `[]` when nothing was pending or everything was
+        reclassified elsewhere.
         """
         if not self._appendix_pending:
-            return
+            return []
 
         if self.verbose:
             print(f"\nReconsidering {len(self._appendix_pending)} appendix entries...")
@@ -1961,11 +1965,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 remaining_for_appendix.append((segment_text, new_code, 0.0))
 
         # Add remaining unmappable content to appendix
+        recovered_codes: list[str] = []
         if remaining_for_appendix:
-            self._add_remaining_to_appendix(remaining_for_appendix)
+            recovered_codes = self._add_remaining_to_appendix(remaining_for_appendix)
 
         if self.verbose and segments_to_route:
             print(f"  Reclassified {len(segments_to_route)} segments to other sections")
+
+        return recovered_codes
 
     def _reclassify_entry_segments(self, text: str, original_code: str) -> List[Tuple[str, str]]:
         """Use LLM to segment and reclassify content from an appendix entry.
@@ -2205,8 +2212,16 @@ Now analyze the text above:"""
         # Fallback to end of section
         return self._find_section_end_paragraph_idx(header_idx)
 
-    def _add_remaining_to_appendix(self, remaining: List[Tuple[str, str, float]]):
-        """Add remaining unmappable segments to the appendix."""
+    def _add_remaining_to_appendix(self, remaining: List[Tuple[str, str, float]]) -> list[str]:
+        """Add remaining unmappable segments to the appendix as bullet lines.
+
+        Returns the taxonomy code of each segment actually written -- one
+        entry per "• text" bullet, in write order -- the same "report back
+        what was actually consumed" contract `_fill_appendix` and the
+        passthrough writers use (#531-R2 finding F1). A segment this method
+        drops (blank, template-instruction, source-boilerplate) is NOT in
+        the returned list.
+        """
         # Filter BEFORE creating the section header so an all-noise batch
         # doesn't leave an empty T. APPENDIX behind (#213).
         remaining = [
@@ -2216,7 +2231,7 @@ Now analyze the text above:"""
             and not is_source_boilerplate(text)
         ]
         if not remaining:
-            return
+            return []
 
         # Find or create the T. APPENDIX section
         appendix_idx = self._find_paragraph_with_text("T. APPENDIX")
@@ -2249,6 +2264,8 @@ Now analyze the text above:"""
                 f"to a template section.",
                 author="Classification",
             )
+
+        return [code for _, code, _ in remaining]
 
     def _rendered_output_lines(self) -> List[str]:
         """Every rendered text line of the in-memory document: body paragraphs
@@ -2286,7 +2303,7 @@ Now analyze the text above:"""
             walk_table(tbl)
         return lines
 
-    def _recover_unrendered_records(self, entries_by_code: Dict[str, List[Dict]]):
+    def _recover_unrendered_records(self, entries_by_code: Dict[str, List[Dict]]) -> list[str]:
         """Post-render safety net (#221): re-emit record lines the structured
         render dropped.
 
@@ -2302,9 +2319,14 @@ Now analyze the text above:"""
         fallback. Lines that cannot be VERIFIED absent are never re-inserted:
         duplicating faculty-facing content is worse than leaving a loss for the
         offline doctor to flag.
+
+        Returns the taxonomy code of each bullet `_add_remaining_to_appendix`
+        actually wrote for the lines that landed in the appendix fallback
+        (#531-R2 finding F1) -- `[]` when the pass is disabled or nothing
+        fell through to the appendix.
         """
         if not self.recover_unrendered_records:
-            return
+            return []
 
         out_lines = self._rendered_output_lines()
         haystack = "\x00".join(_squash(line) for line in out_lines)
@@ -2371,12 +2393,15 @@ Now analyze the text above:"""
 
         appendix_batch.extend(self._unconsumed_personal_data_batch(haystack))
 
+        recovered_codes: list[str] = []
         if appendix_batch:
-            self._add_remaining_to_appendix(appendix_batch)
+            recovered_codes = self._add_remaining_to_appendix(appendix_batch)
 
         if self.verbose and n_recovered:
             print(f"  Recovered {n_recovered} unrendered record line(s) "
                   f"({len(appendix_batch)} routed to appendix)")
+
+        return recovered_codes
 
     def _unconsumed_personal_data_batch(self, haystack: str
                                         ) -> List[Tuple[str, str, float]]:

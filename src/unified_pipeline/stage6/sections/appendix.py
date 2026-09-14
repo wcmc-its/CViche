@@ -135,24 +135,86 @@ class UnmappedEntry(TypedDict, total=False):
 AppendixLine = tuple[UnmappedEntry, str]
 
 
-# Why a taxonomy code's entries were diverted to the Appendix (#531). Named
-# constants rather than inline strings because they are a comparison target
-# for `_appendix_diversion_reason` and, once emitted, a re-emission key for
-# the doctor -- a typo in one spelling and the other would silently create a
-# third, undocumented reason.
+# Why a taxonomy code's entries were diverted to the Appendix (#531,
+# #531-R2). Named constants rather than inline strings because they are a
+# comparison target for `_appendix_diversion_reason` and, once emitted, a
+# re-emission key for the doctor -- a typo in one spelling and the other
+# would silently create a third, undocumented reason.
 REASON_NO_RENDER_ROUTE = "no_render_route"
 REASON_RENDERER_DECLINED = "renderer_declined"
+# A record `_add_remaining_to_appendix` bulleted on behalf of
+# `_reconsider_appendix_entries` / `_recover_unrendered_records` (#531-R2
+# finding F1) -- distinct from the two reasons above because it is not
+# about routing at all: the code MAY be fully routed (`RENDER_ROUTED_CODES`
+# member), the structured render for it simply did not find this specific
+# record. Applies regardless of the code's own routing status.
+REASON_RECOVERED_UNRENDERED = "recovered_unrendered"
 
-# Human-readable text for each reason, used only inside `message` -- the
-# `reason` field itself stays the stable machine key above. Only M1 produces
-# REASON_RENDERER_DECLINED today (the discard in `generate()` when no
-# research summary rendered); if a second renderer-declined case is ever
-# added, this needs a per-code (not per-reason) message instead of a shared
-# string.
+# E, G and J -- the three passthrough sections (`stage6/sections/
+# passthrough.py`'s module docstring: "Sections E, G and J: the passthrough
+# sections (#398)"). None of the three is in `RENDER_ROUTED_CODES` (they
+# have no taxonomy-code dispatch of their own -- the passthrough writers
+# select by source hierarchy, not code), so an unconsumed E/G/J entry would
+# otherwise read as REASON_NO_RENDER_ROUTE, which is false:
+# `_fill_passthrough_sections` IS their renderer, and it declined this
+# specific entry (label or table shape did not match) rather than there
+# being no route at all (#531-R2 finding F2). Defined once, here: no
+# existing constant covers exactly this triple without also pulling in N4
+# (`doctor/lints/extraction.py`'s `_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES`
+# is a DIFFERENT set, for a different lint, and N4 is not a passthrough
+# section -- reusing it here would misclassify N4 the same way F2 is fixing
+# for E/G/J), and passthrough.py itself is outside this ticket's write set.
+_PASSTHROUGH_CODES = frozenset({'E', 'G', 'J'})
+
+# Human-readable text for the two routing-based reasons, used only inside
+# `message` -- the `reason` field itself stays the stable machine key above.
+# REASON_RENDERER_DECLINED covers two different mechanisms with two
+# different messages (the M1 no-research-summary discard, and the E/G/J
+# passthrough refusal) so it is NOT looked up here; see `_diversion_message`.
+# REASON_RECOVERED_UNRENDERED's message is also code-specific (repeats the
+# code) so it is built directly in `_diversion_message` too.
 _REASON_TEXT = {
     REASON_NO_RENDER_ROUTE: "no stage 6 section is routed to render this taxonomy code",
     REASON_RENDERER_DECLINED: "no research summary rendered",
 }
+
+
+def _plural_entries(count: int) -> str:
+    """'entry' for 1, 'entries' otherwise -- the noun in `_diversion_message`."""
+    return "entry" if count == 1 else "entries"
+
+
+def _plural_was(count: int) -> str:
+    """'was' for 1, 'were' otherwise -- REASON_RECOVERED_UNRENDERED's verb,
+    the one message shape whose grammar needs subject-verb agreement."""
+    return "was" if count == 1 else "were"
+
+
+def _diversion_message(code: str, count: int, reason: str) -> str:
+    """The Appendix-diversion warning's human-readable `message` (#531,
+    #531-R2). Three shapes, by *reason*:
+
+    - REASON_RECOVERED_UNRENDERED: always names *code* twice (the code that
+      classified the record, spelled out rather than left implicit, since
+      this reason has nothing to do with routing).
+    - REASON_RENDERER_DECLINED for a passthrough code (E/G/J,
+      `_PASSTHROUGH_CODES`): names the passthrough writer specifically --
+      the generic `_REASON_TEXT` string is for the OTHER
+      REASON_RENDERER_DECLINED case (M1) and would misdescribe this one.
+    - Everything else: the shared `_REASON_TEXT` lookup.
+    """
+    noun = _plural_entries(count)
+    if reason == REASON_RECOVERED_UNRENDERED:
+        verb = _plural_was(count)
+        return (f"{code}: {count} {noun} classified {code} {verb} not "
+                f"found in the rendered document and {verb} recovered into "
+                f"the Appendix")
+    if reason == REASON_RENDERER_DECLINED and code in _PASSTHROUGH_CODES:
+        return (f"{code}: {count} {noun} diverted to the Appendix — the "
+                f"passthrough writer for {code} declined them (source "
+                f"section label did not match)")
+    return (f"{code}: {count} {noun} diverted to the Appendix — "
+            f"{_REASON_TEXT[reason]}")
 
 
 class AppendixDiversionWarning(TypedDict):
@@ -175,48 +237,73 @@ class AppendixDiversionWarning(TypedDict):
 
 
 def _appendix_diversion_reason(code: str, render_routed_codes: frozenset[str]) -> str:
-    """Which of the two ways *code*'s entries ended up diverted to the
-    Appendix. *render_routed_codes* is `RENDER_ROUTED_CODES`
+    """Which of the two ROUTING-based ways *code*'s entries ended up
+    diverted to the Appendix as NUMBERED lines (`_fill_appendix`'s own
+    output -- the third reason, REASON_RECOVERED_UNRENDERED, is not routing
+    -based and is assigned directly by its caller, never through this
+    function). *render_routed_codes* is `RENDER_ROUTED_CODES`
     (`stage_6_word_template.py`) -- the AUTHORITATIVE routed-code set, not
     the per-call `mapped_codes` copy `generate()` mutates (the M1 discard).
-    A code absent from `render_routed_codes` never had a renderer at all
-    (`REASON_NO_RENDER_ROUTE`); a code present in it still reached the
-    Appendix only because this run's `mapped_codes` copy discarded it
-    (`REASON_RENDERER_DECLINED`) -- passed the frozenset rather than the
-    discard reason itself because today there is exactly one discard case
-    (M1) and the two-way split is all `generate()` needs to convey.
+    A passthrough code (`_PASSTHROUGH_CODES`) is always REASON_RENDERER_
+    DECLINED -- checked FIRST, since E/G/J are never in `render_routed_codes`
+    and would otherwise fall into the next branch (#531-R2 finding F2).
+    Otherwise: a code absent from `render_routed_codes` never had a renderer
+    at all (`REASON_NO_RENDER_ROUTE`); a code present in it still reached
+    the Appendix only because this run's `mapped_codes` copy discarded it
+    (`REASON_RENDERER_DECLINED`, the M1 case) -- passed the frozenset rather
+    than the discard reason itself because today there is exactly one such
+    discard case and the two-way split is all `generate()` needs to convey.
     """
+    if code in _PASSTHROUGH_CODES:
+        return REASON_RENDERER_DECLINED
     if code not in render_routed_codes:
         return REASON_NO_RENDER_ROUTE
     return REASON_RENDERER_DECLINED
 
 
 def build_appendix_diversion_warnings(
-    written: Sequence[UnmappedEntry], render_routed_codes: frozenset[str],
+    written: Sequence[UnmappedEntry],
+    recovered_codes: Sequence[str],
+    render_routed_codes: frozenset[str],
 ) -> list[AppendixDiversionWarning]:
-    """One `appendix_diversion` warning per taxonomy code actually present in
-    *written* -- the entries `_fill_appendix` put on the page as numbered
-    lines, i.e. AFTER `_appendix_drop_reason` filtering (#531). Sorted by
-    code so the sidecar is deterministic. An entry with no `taxonomy_code`
-    groups under `"?"` rather than being silently skipped -- the count must
-    still reconcile against the docx line total (EXPECTED OUTCOME 5).
+    """One `appendix_diversion` warning per (taxonomy code, reason) pair
+    actually present in the Appendix (#531, #531-R2 finding F1). Two input
+    streams, both post-filter (nothing dropped survives either):
+
+    - *written*: the entries `_fill_appendix` put on the page as NUMBERED
+      lines, i.e. AFTER `_appendix_drop_reason` filtering. Reason is
+      `_appendix_diversion_reason`'s routing-based split.
+    - *recovered_codes*: one taxonomy code per "bullet" line
+      `_add_remaining_to_appendix` wrote on behalf of
+      `_reconsider_appendix_entries` / `_recover_unrendered_records` --
+      always REASON_RECOVERED_UNRENDERED, regardless of the code's own
+      routing status, since these exist because a specific record did not
+      render, not because its code lacks a route.
+
+    Sorted by (code, reason) so the sidecar is deterministic and, when one
+    code has entries in both streams (e.g. some T lines numbered, others
+    bulleted), its two warnings are adjacent. An entry/code with no
+    `taxonomy_code` groups under `"?"` rather than being silently skipped --
+    the total count must still reconcile against the docx line total
+    (EXPECTED OUTCOME 5 / F1 self-consistency).
     """
-    counts: Counter[str] = Counter()
+    counts: Counter[tuple[str, str]] = Counter()
     for entry in written:
-        counts[entry.get("taxonomy_code") or "?"] += 1
+        code = entry.get("taxonomy_code") or "?"
+        counts[(code, _appendix_diversion_reason(code, render_routed_codes))] += 1
+    for code in recovered_codes:
+        counts[(code or "?", REASON_RECOVERED_UNRENDERED)] += 1
 
     warnings: list[AppendixDiversionWarning] = []
-    for code in sorted(counts):
-        count = counts[code]
-        reason = _appendix_diversion_reason(code, render_routed_codes)
+    for code, reason in sorted(counts):
+        count = counts[(code, reason)]
         warnings.append({
             "check": "appendix_diversion",
             "code": code,
             "section": "T. APPENDIX",
             "count": count,
             "reason": reason,
-            "message": (f"{code}: {count} entries diverted to the Appendix "
-                        f"— {_REASON_TEXT[reason]}"),
+            "message": _diversion_message(code, count, reason),
             "evidence": [],
         })
     return warnings
