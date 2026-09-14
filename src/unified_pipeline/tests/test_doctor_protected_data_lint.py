@@ -105,15 +105,43 @@ def test_a_bare_date_written_as_month_day_year_is_flagged():
 
 
 def test_a_home_address_label_in_personal_data_is_flagged():
-    """#821: home address/phone are now a policy row (CAT_HOME_CONTACT),
-    caught by the same generic scan as every other category -- no
-    Licensure-style special case needed since the row's own scope already
-    covers the Personal Data block."""
+    """#821: home address/phone is a policy row (CAT_HOME_CONTACT). A label
+    and its value on the SAME "line" (no `\\n` between them, as free text
+    or an Appendix bullet renders it) is caught by the generic scan, same
+    as every other category."""
     blocks = [_p("PERSONAL DATA"), _t("Home address: 1 Example St")]
     findings = lint_protected_data_in_output(blocks)
     assert len(findings) == 1
     assert "(home address / phone)" in findings[0]["message"]
     assert "1 Example St" not in findings[0]["message"]
+
+
+def test_a_home_address_value_on_the_table_rows_own_next_line_is_flagged():
+    """#821 regression: the Personal Data TABLE renders a row as
+    "<label>:\\n<value>\\n" (`read_docx_blocks` dumps a table row's cells
+    `\\n`-joined), and `\\n` is one of `_pii_matches`' own hard fragment
+    boundaries -- the generic scan's label span stops right at the label,
+    never reaching a value on the very next line, so it alone reported
+    zero findings for this shape (farm uid 0WT89A, a real leak, matched
+    nothing under the generic scan by itself). `_home_contact_value_leaked`
+    is the dedicated probe that closes it."""
+    blocks = [_p("PERSONAL DATA"),
+              _t("Home address:\n1 Example St, Springfield, ST 00000\n"
+                 "Cell phone:\n555-111-2222")]
+    findings = lint_protected_data_in_output(blocks)
+    assert len(findings) == 1
+    assert "(home address / phone)" in findings[0]["message"]
+    assert "1 Example St" not in findings[0]["message"]
+
+
+def test_an_empty_home_address_row_followed_by_another_label_is_not_flagged():
+    """The table-row probe's own negative control: an empty "Home address:"
+    row is immediately followed by the next row's bare label ("Cell
+    phone:") in the SAME dump shape -- that label has no digit, so it must
+    not be misread as the home address's own value."""
+    blocks = [_p("PERSONAL DATA"),
+              _t("Home address:\nCell phone:\n555-111-2222")]
+    assert lint_protected_data_in_output(blocks) == []
 
 
 def test_an_office_address_is_not_flagged():
