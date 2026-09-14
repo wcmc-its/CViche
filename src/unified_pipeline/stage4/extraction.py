@@ -840,6 +840,7 @@ def extract_fields_from_mapped_entries(
     batch_size: int = 10,
     document_uid: str = "",
     cancel_check: Callable[[], None] | None = None,
+    docx_path: str | None = None,
 ) -> ExtractionResult:
     """
     Extract structured fields from all mapped entries.
@@ -852,6 +853,10 @@ def extract_fields_from_mapped_entries(
             batch iteration. It should raise to abort the run (the web
             orchestrator passes its check_cancelled). None (the standalone CLI
             default) is a no-op.
+        docx_path: Optional path to the source .docx, threaded straight
+            through to `extract_cv_owner_name`'s #456 side-channel tier. None
+            (the default) keeps owner-name extraction identical to before
+            #456.
     """
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
@@ -866,7 +871,7 @@ def extract_fields_from_mapped_entries(
     logger.info("Field schemas: v%s (%d taxonomy codes)", FIELD_SCHEMA_VERSION, len(schemas))
 
     # Extract CV owner's name for target_name identification
-    cv_owner_name = extract_cv_owner_name(document_uid, mapped_entries)
+    cv_owner_name = extract_cv_owner_name(document_uid, mapped_entries, docx_path=docx_path)
     if cv_owner_name.get('last_name'):
         logger.info(
             "CV Owner: %s (last name: %s)",

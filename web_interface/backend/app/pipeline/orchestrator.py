@@ -1165,7 +1165,14 @@ class PipelineOrchestrator:
                 stage4_result = await self._run_with_stdout_capture(
                     run_stage_4,
                     step_number,
-                    docx_path=f"{self.document_uid}.docx",
+                    # The resolved path, not a reconstructed f"{uid}.docx":
+                    # process_cv still only uses Path(docx_path).stem to
+                    # locate stage 3b output (same as before), but the #456
+                    # side-channel owner-name tier needs a real, openable
+                    # file to ever fire on this driver -- see
+                    # run_full_pipeline.py:733 for the CLI driver, which
+                    # already passes the real path for the same reason.
+                    docx_path=cv_path,
                     # Stage 4 is the heaviest stage (~130 LLM calls across
                     # batches); pass an intra-stage cancel check so an abort
                     # lands mid-stage. check_cancelled() is sync, so it's safe

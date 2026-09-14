@@ -9,8 +9,9 @@ This is significantly cheaper and faster than vision-based approaches.
 """
 
 import json
+import re
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict
 from docx import Document
 from docx.shared import RGBColor, Pt
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -998,6 +999,148 @@ def extract_docx_structure(docx_path: str) -> dict[str, Any]:
             "num_empty": num_empty
         }
     }
+
+
+class OwnerSideChannel(TypedDict):
+    """Text that lives outside the main body-element stream, for stage 4's
+    owner-name fallback to consult when the body yielded no name (#456).
+
+    Never merged into `extract_unified_elements`/`extract_docx_structure`'s
+    `elements` list and never touches `unified_idx`/`para_idx` -- see
+    `extract_owner_side_channel`'s docstring for why.
+    """
+
+    sdt_lines: list[str]
+    header_lines: list[str]
+    footer_lines: list[str]
+
+
+def _side_channel_paragraph_text(p_elem: CT_P) -> str:
+    """Text of a raw `<w:p>` lxml element, same tag walk as `get_paragraph_text`
+    (w:t / w:br / w:cr -> newline / w:tab -> space), but operating directly on
+    the element rather than a python-docx `Paragraph` wrapper -- sdt-nested
+    paragraphs have no such wrapper (python-docx has no `w:sdt` API; see the
+    module-level note in `get_paragraph_text`'s docstring)."""
+    from docx.oxml.ns import qn
+
+    wt, wbr, wcr, wtab = qn('w:t'), qn('w:br'), qn('w:cr'), qn('w:tab')
+    parts = []
+    for node in p_elem.iter(wt, wbr, wcr, wtab):
+        if node.tag == wt:
+            if node.text:
+                parts.append(node.text)
+        elif node.tag == wtab:
+            parts.append(' ')
+        else:  # w:br / w:cr -> line break
+            parts.append('\n')
+    return ''.join(parts)
+
+
+def _is_page_field_only_paragraph(para: Paragraph, text: str) -> bool:
+    """True if `text` (already `get_paragraph_text(para)`, stripped) is wholly
+    accounted for by a PAGE/NUMPAGES field -- the header/footer text a
+    side-channel consumer must skip, since it is pagination chrome, not
+    letterhead identity/contact content."""
+    from docx.oxml.ns import qn
+
+    w_instr_text, w_fld_simple = qn('w:instrText'), qn('w:fldSimple')
+    instr_parts = [node.text or '' for node in para._p.iter(w_instr_text)]
+    instr_parts += [node.get(qn('w:instr'), '') or '' for node in para._p.iter(w_fld_simple)]
+    instr = ' '.join(instr_parts).upper()
+    if 'PAGE' not in instr and 'NUMPAGES' not in instr:
+        return False
+    residual = re.sub(r'[0-9]+', '', text)
+    residual = re.sub(r'(?i)\bpage\b|\bof\b', '', residual).strip()
+    return len(residual) <= 2
+
+
+def _header_footer_paragraph_lines(containers: list[Any]) -> list[str]:
+    """Non-empty paragraph texts from a list of `_Header`/`_Footer` containers
+    (one already-resolved `section.header` or `section.footer` per section),
+    in order, deduped by element identity (sections sharing a "linked to
+    previous" header/footer part return the same underlying element)."""
+    lines: list[str] = []
+    seen: set[int] = set()
+    for container in containers:
+        for para in container.paragraphs:
+            if id(para._p) in seen:
+                continue
+            seen.add(id(para._p))
+            text = get_paragraph_text(para).strip()
+            if not text:
+                continue
+            if _is_page_field_only_paragraph(para, text):
+                continue
+            lines.append(text)
+    return lines
+
+
+def extract_owner_side_channel(docx_path: str) -> OwnerSideChannel:
+    """Read CV-owner-identifying text from parts the main body walk never
+    opens (#456): a body-level `w:sdt` (Word content-control) wrapping whole
+    paragraphs, and the letterhead in `word/header*.xml` / `word/footer*.xml`.
+
+    `extract_unified_elements`/`extract_docx_structure` above dispatch only
+    on `isinstance(element, CT_P)` / `isinstance(element, CT_Tbl)` while
+    walking `doc.element.body`'s direct children -- a `w:sdt` element matches
+    neither, so python-docx has no wrapper for it and its entire subtree
+    (including any `w:p` inside) is silently skipped. Neither function opens
+    a header/footer OPC part at all.
+
+    This is an ADDITIVE, separate read. It never touches `elements`,
+    `unified_idx`, or `para_idx`, and its output is never merged into the
+    element stream those two functions return: `doc.paragraphs` (used as a
+    fallback index by `stage_2_entry_extraction.py:1118/1153/1226/1245`)
+    only enumerates direct-body `CT_P` children, so inlining an sdt paragraph
+    into the stream would shift every subsequent `para_idx` and silently
+    desync that fallback -- exactly the corruption the #456 issue's comment
+    warns against. Consumed only by stage 4's owner-name fallback tier
+    (`stage4/owner_name.py`), and only when the body-derived pass found no
+    name.
+
+    Args:
+        docx_path: Path to the .docx file. Opens it independently -- shares
+            no state with `extract_unified_elements`/`extract_docx_structure`.
+
+    Returns:
+        OwnerSideChannel: three lists of non-empty paragraph texts, each in
+        document order and deduped by element identity.
+        - sdt_lines: every `w:p` anywhere under a `w:sdtContent` in
+          `doc.element.body` -- body-level content controls AND ones nested
+          inside table cells.
+        - header_lines / footer_lines: paragraphs from every section's
+          header/footer, skipping any paragraph whose only content is a
+          PAGE/NUMPAGES field (see `_is_page_field_only_paragraph`).
+    """
+    from docx.oxml.ns import qn
+
+    doc = Document(docx_path)
+
+    w_p, w_sdt_content = qn('w:p'), qn('w:sdtContent')
+
+    sdt_lines: list[str] = []
+    seen_sdt_paragraphs: set[int] = set()
+    for p_elem in doc.element.body.iter(w_p):
+        ancestor = p_elem.getparent()
+        in_sdt = False
+        while ancestor is not None:
+            if ancestor.tag == w_sdt_content:
+                in_sdt = True
+                break
+            ancestor = ancestor.getparent()
+        if not in_sdt:
+            continue
+        if id(p_elem) in seen_sdt_paragraphs:
+            continue
+        seen_sdt_paragraphs.add(id(p_elem))
+        text = _side_channel_paragraph_text(p_elem).strip()
+        if text:
+            sdt_lines.append(text)
+
+    header_lines = _header_footer_paragraph_lines([section.header for section in doc.sections])
+    footer_lines = _header_footer_paragraph_lines([section.footer for section in doc.sections])
+
+    return OwnerSideChannel(sdt_lines=sdt_lines, header_lines=header_lines, footer_lines=footer_lines)
 
 
 def normalize_style_name(style_name: str) -> dict[str, Any]:
