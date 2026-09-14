@@ -186,6 +186,7 @@ from unified_pipeline.stage6.sections.appendix import (
     UnmappedEntry,
     build_appendix_diversion_warnings,
 )
+from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 
 logger = logging.getLogger(__name__)
 from unified_pipeline.core.template_boilerplate import (
@@ -404,10 +405,15 @@ def _merge_appendix_diversion_warnings(
     """Append #531/#531-R2 per-(code, reason) Appendix-diversion warnings
     (from what `_fill_appendix`/`_add_remaining_to_appendix` report they
     wrote, never re-derived from the document) to *issues*; unchanged when
-    there is nothing to add."""
+    there is nothing to add. Passes `PASSTHROUGH_CODES` down rather than
+    letting `appendix.py` import it from `passthrough.py` directly -- both
+    are `stage6/sections/*` peers (CODING_STANDARDS.md 1.3, `[gate]`); this
+    module is not a peer of either and is free to import both (#531-R3
+    task 4)."""
     if not written and not recovered:
         return issues
-    return issues + build_appendix_diversion_warnings(written, recovered, RENDER_ROUTED_CODES)
+    return issues + build_appendix_diversion_warnings(
+        written, recovered, RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
 
 
 # Personal data that must not be carried onto a WCM CV. Source CVs routinely

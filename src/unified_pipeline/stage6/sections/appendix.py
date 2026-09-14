@@ -150,21 +150,30 @@ REASON_RENDERER_DECLINED = "renderer_declined"
 # record. Applies regardless of the code's own routing status.
 REASON_RECOVERED_UNRENDERED = "recovered_unrendered"
 
-# E, G and J -- the three passthrough sections (`stage6/sections/
-# passthrough.py`'s module docstring: "Sections E, G and J: the passthrough
-# sections (#398)"). None of the three is in `RENDER_ROUTED_CODES` (they
-# have no taxonomy-code dispatch of their own -- the passthrough writers
-# select by source hierarchy, not code), so an unconsumed E/G/J entry would
-# otherwise read as REASON_NO_RENDER_ROUTE, which is false:
-# `_fill_passthrough_sections` IS their renderer, and it declined this
-# specific entry (label or table shape did not match) rather than there
-# being no route at all (#531-R2 finding F2). Defined once, here: no
-# existing constant covers exactly this triple without also pulling in N4
-# (`doctor/lints/extraction.py`'s `_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES`
-# is a DIFFERENT set, for a different lint, and N4 is not a passthrough
-# section -- reusing it here would misclassify N4 the same way F2 is fixing
-# for E/G/J), and passthrough.py itself is outside this ticket's write set.
-_PASSTHROUGH_CODES = frozenset({'E', 'G', 'J'})
+# E, G and J -- the three passthrough sections. None of the three is in
+# `RENDER_ROUTED_CODES` (they have no taxonomy-code dispatch of their own --
+# the passthrough writers select by source hierarchy, not code), so an
+# unconsumed E/G/J entry would otherwise read as REASON_NO_RENDER_ROUTE,
+# which is false: `_fill_passthrough_sections` IS their renderer, and it
+# declined this specific entry (label or table shape did not match) rather
+# than there being no route at all (#531-R2 finding F2).
+#
+# `PASSTHROUGH_CODES` is `stage6/sections/passthrough.py`'s own constant
+# (#531-R3 task 4 / finding F-R2-4) -- but `appendix.py` does NOT import it:
+# both modules are `stage6/sections/*` peers, and CODING_STANDARDS.md 1.3
+# ("Peers do not import peers" -- [gate]) forbids exactly that edge (a real
+# regression this round hit: `check_standards.py` flagged "1.3 peers do not
+# import peers 0 -> 1" the first time this was written as a direct import;
+# reverted to this parameter-threading approach, the same one
+# `render_routed_codes` below already uses for the same reason --
+# `RENDER_ROUTED_CODES` lives in `stage_6_word_template.py`, which is not a
+# `sections/*` peer and is free to import both `appendix.py` and
+# `passthrough.py` and pass each module's constant down as an argument).
+# No existing constant elsewhere covers exactly the E/G/J triple without
+# also pulling in N4 (`doctor/lints/extraction.py`'s
+# `_RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES` is a DIFFERENT set, for a
+# different lint, and N4 is not a passthrough section -- reusing it here
+# would misclassify N4 the same way F2 is fixing for E/G/J).
 
 # Human-readable text for the two routing-based reasons, used only inside
 # `message` -- the `reason` field itself stays the stable machine key above.
@@ -190,7 +199,8 @@ def _plural_was(count: int) -> str:
     return "was" if count == 1 else "were"
 
 
-def _diversion_message(code: str, count: int, reason: str) -> str:
+def _diversion_message(code: str, count: int, reason: str,
+                        passthrough_codes: frozenset[str]) -> str:
     """The Appendix-diversion warning's human-readable `message` (#531,
     #531-R2). Three shapes, by *reason*:
 
@@ -198,9 +208,14 @@ def _diversion_message(code: str, count: int, reason: str) -> str:
       classified the record, spelled out rather than left implicit, since
       this reason has nothing to do with routing).
     - REASON_RENDERER_DECLINED for a passthrough code (E/G/J,
-      `_PASSTHROUGH_CODES`): names the passthrough writer specifically --
-      the generic `_REASON_TEXT` string is for the OTHER
-      REASON_RENDERER_DECLINED case (M1) and would misdescribe this one.
+      *passthrough_codes* -- `stage6/sections/passthrough.py`'s
+      `PASSTHROUGH_CODES`, passed in rather than imported; see the module
+      docstring comment above `_REASON_TEXT` for why): names the passthrough
+      writer specifically -- the generic `_REASON_TEXT` string is for the
+      OTHER REASON_RENDERER_DECLINED case (M1) and would misdescribe this
+      one. Phrased passive ("refused by...") rather than "...declined
+      them": the pronoun read wrong in the singular ("1 entry ... declined
+      them") (#531-R3 finding r11).
     - Everything else: the shared `_REASON_TEXT` lookup.
     """
     noun = _plural_entries(count)
@@ -209,9 +224,9 @@ def _diversion_message(code: str, count: int, reason: str) -> str:
         return (f"{code}: {count} {noun} classified {code} {verb} not "
                 f"found in the rendered document and {verb} recovered into "
                 f"the Appendix")
-    if reason == REASON_RENDERER_DECLINED and code in _PASSTHROUGH_CODES:
-        return (f"{code}: {count} {noun} diverted to the Appendix — the "
-                f"passthrough writer for {code} declined them (source "
+    if reason == REASON_RENDERER_DECLINED and code in passthrough_codes:
+        return (f"{code}: {count} {noun} diverted to the Appendix — "
+                f"refused by the passthrough writer for {code} (source "
                 f"section label did not match)")
     return (f"{code}: {count} {noun} diverted to the Appendix — "
             f"{_REASON_TEXT[reason]}")
@@ -236,7 +251,8 @@ class AppendixDiversionWarning(TypedDict):
     evidence: list[str]
 
 
-def _appendix_diversion_reason(code: str, render_routed_codes: frozenset[str]) -> str:
+def _appendix_diversion_reason(code: str, render_routed_codes: frozenset[str],
+                                passthrough_codes: frozenset[str]) -> str:
     """Which of the two ROUTING-based ways *code*'s entries ended up
     diverted to the Appendix as NUMBERED lines (`_fill_appendix`'s own
     output -- the third reason, REASON_RECOVERED_UNRENDERED, is not routing
@@ -244,17 +260,20 @@ def _appendix_diversion_reason(code: str, render_routed_codes: frozenset[str]) -
     function). *render_routed_codes* is `RENDER_ROUTED_CODES`
     (`stage_6_word_template.py`) -- the AUTHORITATIVE routed-code set, not
     the per-call `mapped_codes` copy `generate()` mutates (the M1 discard).
-    A passthrough code (`_PASSTHROUGH_CODES`) is always REASON_RENDERER_
-    DECLINED -- checked FIRST, since E/G/J are never in `render_routed_codes`
-    and would otherwise fall into the next branch (#531-R2 finding F2).
-    Otherwise: a code absent from `render_routed_codes` never had a renderer
-    at all (`REASON_NO_RENDER_ROUTE`); a code present in it still reached
-    the Appendix only because this run's `mapped_codes` copy discarded it
-    (`REASON_RENDERER_DECLINED`, the M1 case) -- passed the frozenset rather
-    than the discard reason itself because today there is exactly one such
-    discard case and the two-way split is all `generate()` needs to convey.
+    *passthrough_codes* is `stage6/sections/passthrough.py`'s
+    `PASSTHROUGH_CODES`, likewise passed in rather than imported (see the
+    module docstring comment near `_REASON_TEXT`). A passthrough code is
+    always REASON_RENDERER_DECLINED -- checked FIRST, since E/G/J are never
+    in `render_routed_codes` and would otherwise fall into the next branch
+    (#531-R2 finding F2). Otherwise: a code absent from `render_routed_codes`
+    never had a renderer at all (`REASON_NO_RENDER_ROUTE`); a code present
+    in it still reached the Appendix only because this run's `mapped_codes`
+    copy discarded it (`REASON_RENDERER_DECLINED`, the M1 case) -- passed
+    the frozenset rather than the discard reason itself because today there
+    is exactly one such discard case and the two-way split is all
+    `generate()` needs to convey.
     """
-    if code in _PASSTHROUGH_CODES:
+    if code in passthrough_codes:
         return REASON_RENDERER_DECLINED
     if code not in render_routed_codes:
         return REASON_NO_RENDER_ROUTE
@@ -265,6 +284,7 @@ def build_appendix_diversion_warnings(
     written: Sequence[UnmappedEntry],
     recovered_codes: Sequence[str],
     render_routed_codes: frozenset[str],
+    passthrough_codes: frozenset[str],
 ) -> list[AppendixDiversionWarning]:
     """One `appendix_diversion` warning per (taxonomy code, reason) pair
     actually present in the Appendix (#531, #531-R2 finding F1). Two input
@@ -280,6 +300,16 @@ def build_appendix_diversion_warnings(
       routing status, since these exist because a specific record did not
       render, not because its code lacks a route.
 
+    *passthrough_codes* (`stage6/sections/passthrough.py`'s
+    `PASSTHROUGH_CODES`, #531-R3 task 4) is threaded through to
+    `_appendix_diversion_reason` and `_diversion_message` rather than
+    imported here -- `appendix.py` and `passthrough.py` are both
+    `stage6/sections/*` peers, and CODING_STANDARDS.md 1.3 ("Peers do not
+    import peers", `[gate]`) forbids that import edge; the caller
+    (`generate()` in `stage_6_word_template.py`, which is not a `sections/*`
+    peer) imports both modules' constants and passes them down, the same
+    way it already does for `render_routed_codes`.
+
     Sorted by (code, reason) so the sidecar is deterministic and, when one
     code has entries in both streams (e.g. some T lines numbered, others
     bulleted), its two warnings are adjacent. An entry/code with no
@@ -290,7 +320,8 @@ def build_appendix_diversion_warnings(
     counts: Counter[tuple[str, str]] = Counter()
     for entry in written:
         code = entry.get("taxonomy_code") or "?"
-        counts[(code, _appendix_diversion_reason(code, render_routed_codes))] += 1
+        reason = _appendix_diversion_reason(code, render_routed_codes, passthrough_codes)
+        counts[(code, reason)] += 1
     for code in recovered_codes:
         counts[(code or "?", REASON_RECOVERED_UNRENDERED)] += 1
 
@@ -303,7 +334,7 @@ def build_appendix_diversion_warnings(
             "section": "T. APPENDIX",
             "count": count,
             "reason": reason,
-            "message": _diversion_message(code, count, reason),
+            "message": _diversion_message(code, count, reason, passthrough_codes),
             "evidence": [],
         })
     return warnings
