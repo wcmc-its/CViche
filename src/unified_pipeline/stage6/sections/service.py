@@ -479,6 +479,50 @@ def _journal_name_cell_text(value: object, taxonomy_code: str) -> str:
     return _cell_text(value)
 
 
+def _service_boards_dates_text(fields: dict, taxonomy_code: str) -> str:
+    """Coerce `start_date`/`end_date` before `format_date_range` for a
+    Service on Boards (Q2) row.
+
+    #812 round 2: `format_date_for_section` only `str()`s its input rather
+    than raising, so a structured (list/dict) date printed its Python repr
+    into the dates cell instead of crashing. Coerce before the `or ''` so a
+    falsy coerced result (`None`/`[]` -> `''`) still collapses the same way
+    the original code did (a pure move of `_fill_service_boards`'s round-2
+    prelude, round 3, verify-D-812-R2 finding 2 -- no formula changed)."""
+    start_date = _cell_text(fields.get('start_date') or '')
+    end_date = _cell_text(fields.get('end_date') or '')
+    return format_date_range(start_date, end_date, taxonomy_code) or ''
+
+
+def _other_service_organization_text(fields: dict, taxonomy_code: str) -> str:
+    """Compute the organization/agency cell text for an Other Service row.
+
+    Q3 uses `agency`; others use `organization`/`committee_name`. Q4B/Q4C
+    (editorial) use `journal_name` -- the one candidate that can carry a
+    list of per-journal `{name, start_date, end_date}` records (#812,
+    web204's multi-journal Q4C entry) -- only reached when the other three
+    are all empty, so it routes through the date-aware journal coercer
+    instead of the plain one this chain otherwise uses (a pure move of
+    `_fill_other_service`'s round-2 prelude, round 3, verify-D-812-R2
+    finding 2 -- no formula changed)."""
+    organization = (fields.get('organization', '') or
+                    fields.get('committee_name', '') or
+                    fields.get('agency', ''))
+    if organization:
+        return _cell_text(organization)
+    return _journal_name_cell_text(fields.get('journal_name', ''), taxonomy_code)
+
+
+def _other_service_dates_text(fields: dict, taxonomy_code: str) -> str:
+    """Coerce `start_date`/`end_date` before `format_date_range` for an
+    Other Service row (#812 round 2; see `_service_boards_dates_text` above
+    for the defect this guards -- a pure move, round 3, verify-D-812-R2
+    finding 2, no formula changed)."""
+    start_date = _cell_text(fields.get('start_date', ''))
+    end_date = _cell_text(fields.get('end_date', ''))
+    return format_date_range(start_date, end_date, taxonomy_code)
+
+
 class ServiceSection:
     """Section Q writers, mixed into `WCMTemplateGenerator`."""
 
@@ -639,15 +683,7 @@ class ServiceSection:
                 if not committee:
                     committee = organization
                     organization = ''
-                # #812 round 2: a structured (list/dict) start_date/end_date
-                # reaches format_date_range() unrendered otherwise -- it only
-                # str()s its inputs, so a list/dict prints its Python repr
-                # into the dates cell instead of raising. Coerce before the
-                # `or ''` so a falsy coerced result (None/[] -> '') still
-                # collapses the same way the original code did.
-                start_date = _cell_text(fields.get('start_date') or '')
-                end_date = _cell_text(fields.get('end_date') or '')
-                dates = format_date_range(start_date, end_date, taxonomy_code) or ''
+                dates = _service_boards_dates_text(fields, taxonomy_code)
 
                 # If we don't have structured fields, parse from raw text
                 if not committee:
@@ -1033,22 +1069,7 @@ class ServiceSection:
                     taxonomy_code = entry.get('taxonomy_code', 'Q4')
 
                     role = _cell_text(fields.get('role', ''))
-                    # Q3 uses 'agency', others use 'organization' or 'committee_name'
-                    # Q4B/Q4C (editorial) use 'journal_name'. journal_name is the
-                    # one candidate that can carry a list of per-journal
-                    # {name, start_date, end_date} records (#812, web204's
-                    # multi-journal Q4C entry) -- only reached when the other
-                    # three are all empty, so it goes through the date-aware
-                    # coercer instead of the plain one the rest of this chain
-                    # uses.
-                    organization = (fields.get('organization', '') or
-                                    fields.get('committee_name', '') or
-                                    fields.get('agency', ''))
-                    if organization:
-                        organization = _cell_text(organization)
-                    else:
-                        organization = _journal_name_cell_text(
-                            fields.get('journal_name', ''), taxonomy_code)
+                    organization = _other_service_organization_text(fields, taxonomy_code)
 
                     # Q3 carries the study-section name in 'panel_name'.
                     # Append it to the agency/organization chain above --
@@ -1063,11 +1084,7 @@ class ServiceSection:
                         elif _squash(panel_name) not in _squash(organization):
                             organization = f"{organization} - {panel_name}"
 
-                    # #812 round 2: coerce before format_date_range (see
-                    # _fill_service_boards above).
-                    start_date = _cell_text(fields.get('start_date', ''))
-                    end_date = _cell_text(fields.get('end_date', ''))
-                    dates = format_date_range(start_date, end_date, taxonomy_code)
+                    dates = _other_service_dates_text(fields, taxonomy_code)
 
                     # For Q4B/Q4C entries, try to parse role from raw text if missing
                     if not role and taxonomy_code in EDITORIAL_BOARD_CODES:
