@@ -803,6 +803,30 @@ def test_recovery_stops_at_a_withheld_office_address_row_instead_of_taking_the_n
     assert [i.category for i in gen._pii_result.withheld] == ["place of birth"]
 
 
+def test_recovery_takes_the_next_row_when_the_first_had_nothing_withheld(tmp_path):
+    """#820 R4 (verifier round 3 finding 1, MR3c): the guard at
+    `personal_data.py` around ``office_address_withheld`` must tell "this
+    row supplied no address" apart from "this row's address was withheld" --
+    only the latter should stop the scan. A phone-only Office Address row
+    parses to an empty address block but withholds nothing (there is no
+    protected data in it), so `len(withheld) > withheld_before` stays False
+    and `office_address_withheld` must stay False too: the SECOND, genuine
+    address row still fills the slot. Dropping that conjunct (stopping on
+    ANY empty-address row) would leave the slot empty instead -- see the
+    mutant proof in the report."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Office Address:", "Phone: 212-555-0100"),
+        ("Office Address:", "42 Example Ave, Example City, EX 00000"),
+    ])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert "42 Example Ave" in rows.get("office address:", ""), (
+        "the office address slot stayed empty even though nothing in the "
+        "first (phone-only) row was withheld"
+    )
+    assert gen._pii_result.withheld == []
+
+
 def test_recovered_address_keeps_its_clean_lines_and_drops_the_protected_one(tmp_path):
     """Line-level, like the entry path's value-level gate: the street lines
     render, the one protected line inside the same cell does not."""
