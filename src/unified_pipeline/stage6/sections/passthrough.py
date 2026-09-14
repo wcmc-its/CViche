@@ -666,17 +666,11 @@ class PassthroughSection:
         self.stats['entries_inserted'] += 1
 
 
-# The taxonomy-code-like section letters `_fill_passthrough_sections`
-# writes -- E, G, J -- derived from that method's own "Sections handled:"
-# docstring list (`- E. EMPLOYMENT STATUS`, `- G. ...`, `- J. ...`,
-# passthrough.py:339-341), one bullet per call in its three-call return
-# statement (:355-357), rather than hand-typed as a set literal a second
-# time (#531-R2's `appendix.py:_PASSTHROUGH_CODES` was exactly that first
-# hand-typed literal; #531-R3 replaces it with this import).
-# `test_passthrough_codes_matches_docstring_and_pinned_value` parses the
-# same docstring independently so the derivation and its source cannot
-# drift apart unnoticed.
-_SECTION_BULLET_RE = re.compile(r'^\s*-\s+([A-Z])\.\s', re.MULTILINE)
-
-PASSTHROUGH_CODES: frozenset[str] = frozenset(
-    _SECTION_BULLET_RE.findall(PassthroughSection._fill_passthrough_sections.__doc__ or ''))
+# The section codes `_fill_passthrough_sections` writes (E, G, J). This is
+# the ONE home for that set: `generate()` threads it into the Appendix
+# diversion reporting (#531) rather than `appendix.py` importing a peer
+# (CODING_STANDARDS 1.3). A plain literal, not a docstring derivation -- the
+# writer selects by hierarchy label, so there is no runtime structure to
+# derive it from; `test_passthrough_codes_matches_pinned_value_and_its_own_docstring_source`
+# pins it against the "Sections handled:" docstring so the two cannot drift.
+PASSTHROUGH_CODES: frozenset[str] = frozenset({'E', 'G', 'J'})

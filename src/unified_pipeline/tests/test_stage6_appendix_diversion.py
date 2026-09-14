@@ -558,24 +558,23 @@ def test_reconsider_appendix_entries_real_tail_wires_recovered_codes(tmp_path):
 # ------------------------------------------------------------------ task 4
 
 def test_passthrough_codes_matches_pinned_value_and_its_own_docstring_source():
-    """Task 4 (#531-R3): `PASSTHROUGH_CODES` lives in `passthrough.py`,
-    derived from `_fill_passthrough_sections`'s own "Sections handled:"
-    docstring bullets (passthrough.py:339-341 -- "- E. EMPLOYMENT STATUS",
-    "- G. ...", "- J. ..."), never hand-typed as a set literal a second time
-    (appendix.py's prior-round `_PASSTHROUGH_CODES` was exactly that first
-    hand-typed literal; it is now deleted). `appendix.py` does NOT import
+    """Task 4 (#531-R3): `PASSTHROUGH_CODES` lives in `passthrough.py` as a
+    plain literal -- the writer selects by hierarchy label, so there is no
+    runtime structure to derive it from -- and is pinned here against
+    `_fill_passthrough_sections`'s own "Sections handled:" docstring bullets
+    (passthrough.py:339-341 -- "- E. EMPLOYMENT STATUS", "- G. ...",
+    "- J. ..."). appendix.py's prior-round `_PASSTHROUGH_CODES` literal is
+    deleted, so the set exists once. `appendix.py` does NOT import
     this constant -- both modules are `stage6/sections/*` peers and
     CODING_STANDARDS.md 1.3 forbids that edge -- it is threaded in as a
     parameter by `generate()` (`stage_6_word_template.py`, not a `sections/*`
     peer) instead, the same way `RENDER_ROUTED_CODES` already is; see
     `appendix.py`'s module-level comment above `_REASON_TEXT`.
 
-    Pinned to the known triple AND re-derived here independently (the same
-    regex shape passthrough.py's own derivation uses, applied by this test
-    to the docstring text itself) so the production derivation and the
-    docstring it reads from cannot silently drift apart -- a bullet added,
-    removed or reworded there without a matching `PASSTHROUGH_CODES` change
-    fails this test, not just the pinned-value half.
+    Pinned to the known triple AND cross-checked against the docstring's
+    section bullets so the literal and the sections the writer documents
+    cannot silently drift apart -- a bullet added, removed or reworded there
+    without a matching `PASSTHROUGH_CODES` change fails this test.
     """
     assert PASSTHROUGH_CODES == frozenset({'E', 'G', 'J'})
     doc = PassthroughSection._fill_passthrough_sections.__doc__ or ""
