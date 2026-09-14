@@ -256,6 +256,37 @@ def test_side_channel_line_and_char_caps_are_enforced(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# #456-R2 F4: a corrupt-but-existing docx_path must not raise -- it must log
+# a warning and fall through to fallback_from_uid, matching the docstring's
+# own claim (which was previously false: a real non-zip file propagated
+# PackageNotFoundError straight out of the tier and failed the web driver).
+# ---------------------------------------------------------------------------
+
+def test_corrupt_docx_path_falls_through_without_raising(monkeypatch, tmp_path, caplog):
+    def fake_call_llm(**kwargs):
+        return _llm_result(_name_reply())
+
+    monkeypatch.setattr(owner_name, "call_llm", fake_call_llm)
+    # extract_owner_side_channel is NOT stubbed here -- this test exercises
+    # the real function against a genuinely corrupt file (an ASCII file with
+    # a .docx extension), so Document(docx_path) really raises
+    # PackageNotFoundError and the tier's own try/except must catch it.
+
+    corrupt_path = tmp_path / "corrupt.docx"
+    corrupt_path.write_text("not a docx at all, just ascii text")
+
+    with caplog.at_level("WARNING", logger="unified_pipeline.stage4.owner_name"):
+        result = owner_name.extract_cv_owner_name(
+            "2024_Rivera_CV", [{"text": "narrative body text"}], docx_path=str(corrupt_path),
+        )
+
+    assert result["last_name"] == "Rivera"  # fallback_from_uid, unchanged
+    warnings = [r.message for r in caplog.records if "owner side channel unreadable" in r.message]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("2024_Rivera_CV: owner side channel unreadable:")
+
+
+# ---------------------------------------------------------------------------
 # #456-R2 F3, mutant m5: sdt/header/footer lines must ALL reach the prompt,
 # in that order -- not just whichever channel happened to be tested alone
 # above. `combined = channel['sdt_lines']` (dropping header/footer) survived

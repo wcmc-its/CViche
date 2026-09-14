@@ -10,7 +10,9 @@ import logging
 import re
 from pathlib import Path
 from typing import Any, NamedTuple
+from zipfile import BadZipFile
 
+from docx.opc.exceptions import PackageNotFoundError
 from pydantic import BaseModel, Field, ValidationError
 
 from unified_pipeline.core.docx_structure_extractor import extract_owner_side_channel
@@ -128,7 +130,7 @@ def _run_owner_name_llm(content_lines: list[str]) -> dict[str, str] | None:
     }
 
 
-def _owner_side_channel_content_lines(docx_path: str) -> tuple[list[str], str]:
+def _owner_side_channel_content_lines(document_uid: str, docx_path: str) -> tuple[list[str], str]:
     """The #456 side-channel tier's input: sdt_lines, then header_lines, then
     footer_lines, capped at OWNER_SIDE_CHANNEL_MAX_LINES total lines each
     truncated to OWNER_SIDE_CHANNEL_MAX_CHARS. Also returns which channel
@@ -137,11 +139,20 @@ def _owner_side_channel_content_lines(docx_path: str) -> tuple[list[str], str]:
     since all three feed one combined prompt rather than three separate LLM
     calls.
 
-    Returns ([], '') when `docx_path` cannot be opened as a CV owner name is
-    optional context; this is not an error the caller should surface, only a
-    reason to fall through to `fallback_from_uid`.
+    Returns ([], '') when `docx_path` exists (the caller already checked
+    `Path.is_file()`) but is not a readable/valid .docx package -- a CV owner
+    name is optional context, so a corrupt file here is a reason to log and
+    fall through to `fallback_from_uid`, never to raise and fail the whole
+    stage 4 run (#456-R2 F4: a plain non-zip file previously propagated
+    `PackageNotFoundError` straight out of this tier, past this docstring's
+    own claim, and failed the web driver's run).
     """
-    channel = extract_owner_side_channel(docx_path)
+    try:
+        channel = extract_owner_side_channel(docx_path)
+    except (PackageNotFoundError, BadZipFile, OSError) as exc:
+        logger.warning("%s: owner side channel unreadable: %s", document_uid, exc)
+        return [], ''
+
     if channel['sdt_lines']:
         first_channel = 'sdt'
     elif channel['header_lines']:
@@ -244,7 +255,7 @@ def extract_cv_owner_name(
             return False
         if not docx_path or not Path(docx_path).is_file():
             return False
-        lines, channel = _owner_side_channel_content_lines(docx_path)
+        lines, channel = _owner_side_channel_content_lines(document_uid, docx_path)
         if not lines:
             return False
         side_result = _run_owner_name_llm(lines)
