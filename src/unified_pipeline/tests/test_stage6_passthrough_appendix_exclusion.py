@@ -34,6 +34,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.sections.appendix import REASON_RENDERER_DECLINED  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 _APPENDIX_HEADER = "T. APPENDIX"
@@ -145,3 +146,29 @@ def test_accepted_affiliation_entry_not_duplicated_refused_entry_stays_in_append
         "refused G entry (too short to be routed) must still reach the Appendix")
     # #531: same exclusion, checked through the new per-code count.
     assert _appendix_diversion_count(sidecar, "T") == 1
+
+
+def test_refused_g_entry_reason_is_renderer_declined_accepted_produces_no_warning(tmp_path):
+    """#531-R2 finding F2: an unconsumed G-CODED entry (not just T-coded, as
+    the two tests above use) reads as `renderer_declined`, never
+    `no_render_route` -- `_fill_passthrough_sections` IS G's renderer and
+    declined this entry (too short), it is not that no section routes G at
+    all. The accepted G entry produces no appendix_diversion warning."""
+    entries = [
+        _OWNER_ENTRY,
+        {  # Accepted, G-coded this time.
+            "text": "Member, DISTINCTIVE_G2_ACCEPTED_AFFIL Research Institute",
+            "taxonomy_code": "G", "hierarchy": ["G. INSTITUTIONAL/HOSPITAL AFFILIATION"],
+            "extracted_fields": {}, "element_idx_start": 5,
+        },
+        {  # Refused: <= 5 chars, below the writer's own admission threshold.
+            "text": "Q2",
+            "taxonomy_code": "G", "hierarchy": ["G. INSTITUTIONAL/HOSPITAL AFFILIATION"],
+            "extracted_fields": {}, "element_idx_start": 6,
+        },
+    ]
+    _doc, sidecar = _render(tmp_path, entries)
+    diversions = [w for w in sidecar["warnings"]
+                  if w.get("check") == "appendix_diversion" and w["code"] == "G"]
+    assert [(w["reason"], w["count"]) for w in diversions] == [
+        (REASON_RENDERER_DECLINED, 1)]

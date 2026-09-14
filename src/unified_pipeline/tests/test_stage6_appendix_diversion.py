@@ -1,10 +1,23 @@
-"""Per-code Appendix-diversion warnings (#531): stage 6 knows exactly which
-taxonomy codes it diverted to `T. APPENDIX`, how many entries each carried,
-and why -- and until now threw all of it away. `_fill_appendix` reports back
-the entries it actually wrote (post `_appendix_drop_reason` filtering), and
-`generate()` turns that into one `appendix_diversion` warning per code,
-appended to the same `validation_issues` list `_validate_output()` returns,
-before the `<uid>_render_warnings.json` sidecar is written.
+"""Per-(code, reason) Appendix-diversion warnings (#531, #531-R2): stage 6
+knows exactly which taxonomy codes it diverted to `T. APPENDIX`, how many
+entries each carried, and why -- and until now threw all of it away.
+
+Two writers into `T. APPENDIX`, both made to report back what they wrote:
+- `_fill_appendix` reports the entries it wrote as NUMBERED lines (post
+  `_appendix_drop_reason` filtering) -- reason is `no_render_route` (no
+  section routed for the code), or `renderer_declined` (a section IS routed
+  -- E/G/J's passthrough writer or the M1 research-summary path -- but
+  declined this run's entries).
+- `_add_remaining_to_appendix` reports the taxonomy code of each "bullet"
+  line it writes on behalf of `_reconsider_appendix_entries` /
+  `_recover_unrendered_records` -- reason is always `recovered_unrendered`
+  (#531-R2 finding F1): these exist because a specific record did not
+  render, independent of whether its code is routed at all.
+
+`generate()` merges both into one `appendix_diversion` warning per
+(code, reason), appended to the same `validation_issues` list
+`_validate_output()` returns, before the `<uid>_render_warnings.json`
+sidecar is written.
 
 Two layers:
 - pure-function tests against `build_appendix_diversion_warnings` /
@@ -15,12 +28,17 @@ Two layers:
   sidecar JSON written to disk -- the ticket's self-consistency contract
   only means anything if the count comes from the real write path, not a
   hand-built dict. `_reconsider_appendix_entries` is neutralized (LLM-driven,
-  irrelevant to this feature) so every render here is deterministic and
-  credential-free; `recover_unrendered_records=False` isolates this feature's
-  own appendix additions from the separate #221 post-render recovery pass,
-  which can also append to `T. APPENDIX` via `_add_remaining_to_appendix`
-  (see the module docstring in appendix.py and B-531's report for why that
-  pass cannot MOVE what `_fill_appendix` already wrote, only add more).
+  irrelevant to this feature, and not reachable without credentials) so
+  every render here is deterministic and credential-free --
+  `test_recovered_unrendered_*` drives the real `_add_remaining_to_appendix`
+  directly through that same override, with a synthetic (line, code,
+  coverage) batch, rather than the unreachable LLM segmentation path.
+  `recover_unrendered_records=False` isolates most tests here from the
+  separate #221 post-render recovery pass, which can also append to
+  `T. APPENDIX` via `_add_remaining_to_appendix` (see the module docstring
+  in appendix.py and B-531's report for why that pass cannot MOVE what
+  `_fill_appendix` already wrote, only add more) -- the F1 tests turn it
+  back on deliberately to exercise that second writer.
 
 Self-contained: no DB, no network, no PII. Synthetic entries only.
 
@@ -41,6 +59,7 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     REASON_NO_RENDER_ROUTE,
+    REASON_RECOVERED_UNRENDERED,
     REASON_RENDERER_DECLINED,
     _appendix_diversion_reason,
     build_appendix_diversion_warnings,
@@ -67,13 +86,22 @@ def test_reason_renderer_declined_for_a_code_in_render_routed_codes():
     assert _appendix_diversion_reason("M1", RENDER_ROUTED_CODES) == REASON_RENDERER_DECLINED
 
 
+def test_reason_renderer_declined_for_a_passthrough_code_not_in_render_routed_codes():
+    # F2: E/G/J are NOT in RENDER_ROUTED_CODES (no taxonomy-code dispatch of
+    # their own) but must still classify as renderer_declined, not
+    # no_render_route -- _fill_passthrough_sections IS their renderer.
+    for code in ("E", "G", "J"):
+        assert _appendix_diversion_reason(code, RENDER_ROUTED_CODES) == REASON_RENDERER_DECLINED
+        assert code not in RENDER_ROUTED_CODES  # the premise F2 fixes
+
+
 def _entry(code: str) -> dict:
     return {"taxonomy_code": code}
 
 
 def test_build_warnings_one_unrouted_code_three_entries():
     written = [_entry("N2"), _entry("N2"), _entry("N2")]
-    warnings = build_appendix_diversion_warnings(written, RENDER_ROUTED_CODES)
+    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES)
     assert len(warnings) == 1
     w = warnings[0]
     assert w["check"] == "appendix_diversion"
@@ -89,21 +117,63 @@ def test_build_warnings_one_unrouted_code_three_entries():
 
 def test_build_warnings_two_unrouted_codes_sorted_by_code():
     written = [_entry("N2"), _entry("M4A"), _entry("M4A")]
-    warnings = build_appendix_diversion_warnings(written, RENDER_ROUTED_CODES)
+    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES)
     assert [w["code"] for w in warnings] == ["M4A", "N2"]
     assert [w["count"] for w in warnings] == [2, 1]
     assert all(w["reason"] == REASON_NO_RENDER_ROUTE for w in warnings)
 
 
 def test_build_warnings_empty_written_list_returns_no_warnings():
-    assert build_appendix_diversion_warnings([], RENDER_ROUTED_CODES) == []
+    assert build_appendix_diversion_warnings([], [], RENDER_ROUTED_CODES) == []
 
 
 def test_build_warnings_evidence_always_empty_never_entry_text():
     written = [{"taxonomy_code": "N2", "text": "some real CV sentence"}]
-    warnings = build_appendix_diversion_warnings(written, RENDER_ROUTED_CODES)
+    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES)
     assert warnings[0]["evidence"] == []
     assert "some real CV sentence" not in json.dumps(warnings)
+
+
+def test_build_warnings_entry_with_no_taxonomy_code_groups_under_question_mark():
+    # F5: the "?" bucket -- entry.get("taxonomy_code") is falsy, not KeyError.
+    # "?" is in neither _PASSTHROUGH_CODES nor RENDER_ROUTED_CODES, so it
+    # reads as no_render_route, same as any other never-routed code.
+    warnings = build_appendix_diversion_warnings([{"text": "no code here"}], [], RENDER_ROUTED_CODES)
+    assert len(warnings) == 1
+    assert warnings[0]["code"] == "?"
+    assert warnings[0]["reason"] == REASON_NO_RENDER_ROUTE
+
+
+def test_build_warnings_recovered_codes_produce_recovered_unrendered_reason():
+    warnings = build_appendix_diversion_warnings([], ["D1", "D1"], RENDER_ROUTED_CODES)
+    assert len(warnings) == 1
+    w = warnings[0]
+    assert w["code"] == "D1"
+    assert w["count"] == 2
+    assert w["reason"] == REASON_RECOVERED_UNRENDERED
+    assert w["message"] == (
+        "D1: 2 entries classified D1 were not found in the rendered "
+        "document and were recovered into the Appendix")
+
+
+def test_build_warnings_recovered_singular_count_is_grammatical():
+    # F5 singular case, for the recovered_unrendered message's verb agreement.
+    w = build_appendix_diversion_warnings([], ["D1"], RENDER_ROUTED_CODES)[0]
+    assert w["message"] == (
+        "D1: 1 entry classified D1 was not found in the rendered document "
+        "and was recovered into the Appendix")
+
+
+def test_build_warnings_same_code_both_streams_two_warnings_sorted():
+    # A code with BOTH a numbered warning (no_render_route) and a recovered
+    # one (recovered_unrendered) yields two distinct (code, reason) rows,
+    # sorted with reason as the tiebreak -- "no_render_route" < "recovered_
+    # unrendered" alphabetically.
+    warnings = build_appendix_diversion_warnings([_entry("T"), _entry("T")], ["T"], RENDER_ROUTED_CODES)
+    assert [(w["code"], w["reason"], w["count"]) for w in warnings] == [
+        ("T", REASON_NO_RENDER_ROUTE, 2),
+        ("T", REASON_RECOVERED_UNRENDERED, 1),
+    ]
 
 
 # ------------------------------------------------------------------ wire tests
@@ -199,7 +269,7 @@ def test_positive_m1_discard_path_reason_renderer_declined(tmp_path):
     assert diversions[0]["count"] == 1
     assert diversions[0]["reason"] == REASON_RENDERER_DECLINED
     assert diversions[0]["message"] == (
-        "M1: 1 entries diverted to the Appendix — no research summary rendered")
+        "M1: 1 entry diverted to the Appendix — no research summary rendered")
 
 
 def test_dropped_entries_blank_boilerplate_header_are_not_counted(tmp_path):
@@ -239,6 +309,81 @@ def test_passthrough_consumed_entries_are_not_counted(tmp_path):
         "the passthrough-accepted entry duplicated into the appendix_diversion count")
 
 
+# ------------------------------------------------ F1: recovered_unrendered
+
+def test_recovered_unrendered_one_routed_code_bullet(tmp_path):
+    """A bullet `_add_remaining_to_appendix` writes on behalf of the
+    overflow-reconsider pass reports back as one `recovered_unrendered`
+    warning (#531-R2 finding F1) -- driven directly (real LLM segmentation
+    needs credentials this suite doesn't have); the code (D1) IS in
+    RENDER_ROUTED_CODES, proving the reason is independent of routing."""
+    entries = [_OWNER_ENTRY,
+               _t_entry("Distinguished Teaching Award 2020 from the medical school",
+                        "H", ["Honors"], 1)]
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: gen._add_remaining_to_appendix(
+        [("SYNTHETIC_RECOVERED_D1 grant renewal record", "D1", 0.0)])
+    data = {"document_uid": "T531K", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+    sidecar = json.loads((tmp_path / "T531K_render_warnings.json").read_text())
+    diversions = _diversion_warnings(sidecar)
+    assert diversions == [{
+        "check": "appendix_diversion", "code": "D1", "section": "T. APPENDIX",
+        "count": 1, "reason": REASON_RECOVERED_UNRENDERED,
+        "message": ("D1: 1 entry classified D1 was not found in the rendered "
+                    "document and was recovered into the Appendix"),
+        "evidence": [],
+    }]
+
+
+def test_recovered_unrendered_mixed_with_numbered_same_code_two_warnings_sorted(tmp_path):
+    """One N2 entry reaches `_fill_appendix` as a numbered line
+    (`no_render_route`) while a synthetic N2 bullet is separately recovered
+    (`recovered_unrendered`) -- two distinct warnings for the SAME code,
+    sorted by (code, reason) so they are adjacent (#531-R2 finding F1)."""
+    entries = [_OWNER_ENTRY,
+               _t_entry("N2_ONE reviewed grant applications for the Foundation "
+                        "for Anesthesia Education and Research", "N2", ["Peer Review"], 1)]
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: gen._add_remaining_to_appendix(
+        [("SYNTHETIC_RECOVERED_N2 record line", "N2", 0.0)])
+    data = {"document_uid": "T531L", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+    sidecar = json.loads((tmp_path / "T531L_render_warnings.json").read_text())
+    diversions = _diversion_warnings(sidecar)
+    assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
+        ("N2", REASON_NO_RENDER_ROUTE, 1),
+        ("N2", REASON_RECOVERED_UNRENDERED, 1),
+    ]
+
+
+def test_recovered_unrendered_no_bullets_no_such_warning(tmp_path):
+    """`_reconsider_appendix_entries` bulleting nothing (an empty
+    `_add_remaining_to_appendix` batch) produces no `recovered_unrendered`
+    warning at all -- the merge is purely additive per stream, same as the
+    existing no-appendix-at-all negative case."""
+    entries = [_OWNER_ENTRY,
+               _t_entry("N2_ONE reviewed grant applications for the Foundation "
+                        "for Anesthesia Education and Research", "N2", ["Peer Review"], 1)]
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: gen._add_remaining_to_appendix([])
+    data = {"document_uid": "T531M", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+    sidecar = json.loads((tmp_path / "T531M_render_warnings.json").read_text())
+    diversions = _diversion_warnings(sidecar)
+    assert [(w["code"], w["reason"]) for w in diversions] == [("N2", REASON_NO_RENDER_ROUTE)]
+    assert all(w["reason"] != REASON_RECOVERED_UNRENDERED for w in diversions)
+
+
 def test_end_to_end_generate_writes_warning_into_sidecar_json(tmp_path):
     """The sidecar file on disk, read back exactly as run_doctor reads it --
     not just the in-memory validation_issues list."""
@@ -261,7 +406,7 @@ def test_end_to_end_generate_writes_warning_into_sidecar_json(tmp_path):
     assert diversions == [{
         "check": "appendix_diversion", "code": "N2", "section": "T. APPENDIX",
         "count": 1, "reason": REASON_NO_RENDER_ROUTE,
-        "message": ("N2: 1 entries diverted to the Appendix — no stage 6 "
+        "message": ("N2: 1 entry diverted to the Appendix — no stage 6 "
                     "section is routed to render this taxonomy code"),
         "evidence": [],
     }]
@@ -320,7 +465,7 @@ def test_negative_existing_checks_output_unchanged_when_diversion_also_fires(tmp
          "evidence": []},
         {"check": "appendix_diversion", "code": "N2", "section": "T. APPENDIX",
          "count": 1, "reason": REASON_NO_RENDER_ROUTE,
-         "message": ("N2: 1 entries diverted to the Appendix — no stage "
+         "message": ("N2: 1 entry diverted to the Appendix — no stage "
                      "6 section is routed to render this taxonomy code"),
          "evidence": []},
     ]
