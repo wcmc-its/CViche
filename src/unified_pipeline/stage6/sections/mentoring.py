@@ -239,31 +239,35 @@ def _training_grant_is_sparse(fields: Mapping[str, Any]) -> bool:
 
 
 def _program_leadership_line(fields: Mapping[str, Any], text: str) -> str:
-    """One N1 line: the non-empty parts of role/program_name/institution,
-    joined with ', ', then the date range in parentheses when either date is
-    present alongside at least one of the three.
+    """One N1 line: the entry's own `text`, stripped, rendered verbatim.
 
-    None of role/program_name/institution present -> the entry's own `text`,
-    even when a date is present on its own (#529 round 2, F6): a bare date
-    range (e.g. "(2019-2022)") carries less than the Appendix line it
-    replaces, so a date-only entry falls back to its full text instead of
-    shrinking to just the dates.
+    Rounds 1-2 assembled the line from role/program_name/institution/dates,
+    which silently shortened any entry where stage 4 extracted only SOME of
+    those fields -- a role-only entry rendered as one word even though its
+    source line said more. N1's template slot is a free-text line ("Describe
+    activity; include dates"), not a table, exactly like the N4 outcome
+    lines one heading down already render `text` verbatim, so this does the
+    same (#529 round 3): no field assembly when there is text to use as-is.
+
+    Falls back to the non-empty role/program_name/institution/date-range
+    fields joined with ', ' ONLY when `text` itself is empty or missing --
+    the sole remaining use of `extracted_fields` here, kept so a stage-4
+    record with fields but no narrative `text` still renders a line instead
+    of being silently dropped.
     """
+    stripped = (text or '').strip()
+    if stripped:
+        return stripped
+
     role = str(fields.get('role') or '').strip()
     program_name = str(fields.get('program_name') or '').strip()
     institution = str(fields.get('institution') or '').strip()
-
-    if not (role or program_name or institution):
-        return (text or '').strip()
-
-    line = ', '.join(part for part in (role, program_name, institution) if part)
     start = str(fields.get('start_date') or '').strip()
     end = str(fields.get('end_date') or '').strip()
-    if start or end:
-        date_range = format_date_range(start, end, 'N1')
-        if date_range:
-            line = f"{line} ({date_range})"
-    return line
+    date_range = format_date_range(start, end, 'N1') if (start or end) else ''
+
+    return ', '.join(
+        part for part in (role, program_name, institution, date_range) if part)
 
 
 def _partition_mentoring_entries(

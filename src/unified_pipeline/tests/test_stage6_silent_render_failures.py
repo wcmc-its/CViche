@@ -321,43 +321,61 @@ def test_mentoring_real_template_body_order():
 
 # --- N1/N2: pure builders (#529) -------------------------------------------------
 
-def test_program_leadership_line_full_fields_joined_with_dates():
+def test_program_leadership_line_uses_text_verbatim_when_present():
+    """(a) The line equals the entry `text` exactly (stripped) -- no field
+    assembly at all (#529 round 3)."""
     fields = {'role': 'Director', 'program_name': 'Scholars Program',
               'institution': 'Test University', 'start_date': '2019',
               'end_date': '2022'}
-    assert _program_leadership_line(fields, 'raw text') == \
-        'Director, Scholars Program, Test University (2019-2022)'
+    assert _program_leadership_line(fields, '  Directed the Scholars Program.  ') == \
+        'Directed the Scholars Program.'
 
 
-def test_program_leadership_line_degrades_role_only():
-    assert _program_leadership_line({'role': 'Director'}, 'raw text') == 'Director'
+def test_program_leadership_line_ignores_fields_when_text_present():
+    """A role-only entry keeps its FULL text rather than shrinking to just
+    the field -- the round 1-2 defect this round fixes (#529 round 3)."""
+    assert _program_leadership_line(
+        {'role': 'Director'}, 'Directed a mentoring initiative in 2019.') == \
+        'Directed a mentoring initiative in 2019.'
 
 
-def test_program_leadership_line_degrades_program_and_institution_only():
-    fields = {'program_name': 'Scholars Program', 'institution': 'Test University'}
-    assert _program_leadership_line(fields, 'raw text') == \
+def test_program_leadership_line_empty_text_falls_back_to_joined_fields():
+    """(b) Empty `text` with fields present -> the non-empty fields joined
+    with ', ' -- the only fallback (#529 round 3)."""
+    fields = {'role': 'Director', 'program_name': 'Scholars Program',
+              'institution': 'Test University', 'start_date': '2019',
+              'end_date': '2022'}
+    assert _program_leadership_line(fields, '') == \
+        'Director, Scholars Program, Test University, 2019-2022'
+
+
+def test_program_leadership_line_empty_text_falls_back_to_partial_fields():
+    assert _program_leadership_line({'role': 'Director'}, '') == 'Director'
+    assert _program_leadership_line(
+        {'program_name': 'Scholars Program', 'institution': 'Test University'}, '') == \
         'Scholars Program, Test University'
 
 
-def test_program_leadership_line_dates_only_falls_back_to_text():
-    """None of role/program_name/institution present -> the entry's own
-    `text`, even with both dates present (#529 round 2, F6): a bare
-    "(2019-2022)" carries less than the Appendix line it replaces."""
-    fields = {'start_date': '2019', 'end_date': '2022'}
-    assert _program_leadership_line(fields, 'Directed a mentoring initiative.') == \
-        'Directed a mentoring initiative.'
+def test_program_leadership_line_empty_text_and_fields_is_empty_string():
+    """Never a blank paragraph: `_fill_program_leadership` checks for a
+    non-empty line before inserting, so this is the one input that produces
+    no line at all rather than an inserted blank one (#529 round 3)."""
+    assert _program_leadership_line({}, '') == ''
+    assert _program_leadership_line({}, '   ') == ''
 
 
-def test_program_leadership_line_all_five_keys_empty_falls_back_to_text():
-    assert _program_leadership_line({}, '  Directed a mentoring initiative.  ') == \
-        'Directed a mentoring initiative.'
+def test_program_leadership_line_none_text_is_safe():
+    """(d) `None`/missing `text` is safe -- falls back to fields exactly
+    like an empty string does (#529 round 3)."""
+    assert _program_leadership_line({'role': 'Director'}, None) == 'Director'
+    assert _program_leadership_line({}, None) == ''
 
 
-def test_program_leadership_line_none_values_are_safe():
+def test_program_leadership_line_none_field_values_are_safe():
     fields = {'role': None, 'program_name': None, 'institution': None,
               'start_date': None, 'end_date': None}
-    assert _program_leadership_line(fields, 'raw text') == 'raw text'
     assert _program_leadership_line(fields, None) == ''
+    assert _program_leadership_line(fields, '') == ''
 
 
 def test_training_grant_rows_full_fields():
@@ -425,13 +443,13 @@ def test_n1_missing_anchor_falls_back_to_mentoring_header(caplog):
     gen.doc.add_paragraph("MENTORING")
 
     with caplog.at_level(logging.WARNING, logger=MENTORING_LOGGER):
-        gen._fill_mentoring({'N1': [_n1(role='Director')]})
+        gen._fill_mentoring({'N1': [_n1()]})
 
     assert [w.getMessage() for w in _warnings(caplog, MENTORING_LOGGER)] == [
         "Mentoring: 'Leadership and mentoring in programs (Describe "
         "activity; include dates)' heading not found; 1 entries rendered "
         "under MENTORING instead"]
-    assert _body_after(gen.doc, "MENTORING", 1) == [('p', 'Director')]
+    assert _body_after(gen.doc, "MENTORING", 1) == [('p', 'N1 entry')]
 
 
 def test_n2_missing_anchor_falls_back_to_mentoring_header(caplog):
@@ -450,28 +468,29 @@ def test_n2_missing_anchor_falls_back_to_mentoring_header(caplog):
     assert gen.doc.tables[0].rows[0].cells[1].text == 'National Test Institute'
 
 
-def test_n1_real_template_three_lines_in_order_with_partial_fields():
-    """Real template: three N1 entries land after "Leadership and
-    mentoring in programs..." in input order, each degrading to whatever
-    fields it has (#529). The third has only dates -- none of
-    role/program_name/institution -- so it renders its own `text` rather
-    than a bare date range (#529 round 2, F6)."""
+def test_n1_real_template_three_lines_in_order_text_verbatim_and_fallback():
+    """(c) Real template: three N1 entries land after "Leadership and
+    mentoring in programs..." in input order (#529). The first two render
+    their own `text` verbatim -- unshortened, even though the second's
+    fields alone would describe less -- and the third has no `text` at all
+    so it falls back to its non-empty fields joined with ', ' (#529
+    round 3)."""
     gen = _template_generator()
     entries_by_code = {
         'N1': [
-            _n1(role='Director'),
-            _n1(program_name='Scholars Program', institution='Test University'),
-            _n1(start_date='2019', end_date='2022',
-                text='Directed a mentoring program before 2019 records began.'),
+            _n1(role='Director', text='Directed the Scholars Program from 2015-2020.'),
+            _n1(program_name='Scholars Program', institution='Test University',
+                text='Served as a mentor to junior faculty in the program.'),
+            _n1(role='Advisor', institution='Test University', text=''),
         ],
     }
 
     gen._fill_mentoring(entries_by_code)
 
     assert _body_after(gen.doc, N1_HEADING, 3) == [
-        ('p', 'Director'),
-        ('p', 'Scholars Program, Test University'),
-        ('p', 'Directed a mentoring program before 2019 records began.'),
+        ('p', 'Directed the Scholars Program from 2015-2020.'),
+        ('p', 'Served as a mentor to junior faculty in the program.'),
+        ('p', 'Advisor, Test University'),
     ]
     assert gen.stats['entries_inserted'] == 3
 
@@ -594,10 +613,10 @@ def test_n1_n2_only_entries_still_render_when_no_n3_n4_content():
     with ONLY N1/N2 content must not hit `_fill_mentoring`'s early return
     for an empty mentee/outcome partition (#529)."""
     gen = _template_generator()
-    gen._fill_mentoring({'N1': [_n1(role='Director')],
+    gen._fill_mentoring({'N1': [_n1()],
                          'N2': [_n2(agency='National Test Institute')]})
 
-    assert _body_after(gen.doc, N1_HEADING, 1) == [('p', 'Director')]
+    assert _body_after(gen.doc, N1_HEADING, 1) == [('p', 'N1 entry')]
     n2_region = _body_after(gen.doc, N2_HEADING, 2)
     assert n2_region[0] == ('p', N2_INSTRUCTION)
     assert n2_region[1] == ('tbl', 'National Test Institute')
