@@ -871,7 +871,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # second time. They are recovered after every section has rendered, by
         # _unconsumed_personal_data_batch.
 
-        written_appendix_entries: List[Dict] = []
+        written_appendix_entries: list[dict] = []
         if unmapped_entries:
             written_appendix_entries = self._fill_appendix(unmapped_entries)
 
