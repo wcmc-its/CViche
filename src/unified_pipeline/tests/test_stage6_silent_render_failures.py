@@ -55,6 +55,8 @@ from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
     MenteeRecord,
     N1_HEADING,
     N2_HEADING,
+    N2_INSTRUCTION,
+    _looks_like_training_grant_table,
     _program_leadership_line,
     _training_grant_is_sparse,
     _training_grant_rows,
@@ -307,8 +309,12 @@ def test_mentoring_real_template_body_order():
     assert past[:2] == [('tbl', 'Carol C'), ('p', '')]
     assert past[2][1].startswith('Duplicate table below')
     assert _body_after(gen.doc, "MENTORING", 1) == [('p', 'One mentee now leads a lab.')]
-    # Two placeholders out, three mentee tables in.
-    assert len(gen.doc.tables) == template_tables - 2 + 3
+    # Two mentee placeholders out, three mentee tables in; the N2 placeholder
+    # also disappears as a side effect -- `_fill_mentoring` calls
+    # `_fill_training_grants([])` first, and its removal is now
+    # unconditional-but-guarded (#529 round 2, F3), so it fires even though
+    # this test has no N2 entries.
+    assert len(gen.doc.tables) == template_tables - 3 + 3
     assert gen.stats['tables_populated'] == 3
     assert gen.stats['entries_inserted'] == 5
 
@@ -423,8 +429,8 @@ def test_n1_missing_anchor_falls_back_to_mentoring_header(caplog):
 
     assert [w.getMessage() for w in _warnings(caplog, MENTORING_LOGGER)] == [
         "Mentoring: 'Leadership and mentoring in programs (Describe "
-        "activity; include dates)' heading not found in template; "
-        "1 entries not rendered"]
+        "activity; include dates)' heading not found; 1 entries rendered "
+        "under MENTORING instead"]
     assert _body_after(gen.doc, "MENTORING", 1) == [('p', 'Director')]
 
 
@@ -438,7 +444,8 @@ def test_n2_missing_anchor_falls_back_to_mentoring_header(caplog):
 
     assert [w.getMessage() for w in _warnings(caplog, MENTORING_LOGGER)] == [
         "Mentoring: 'Institutional Training Grants and Mentored Trainee "
-        "Grants' heading not found in template; 1 entries not rendered"]
+        "Grants' heading not found; 1 entries rendered under MENTORING "
+        "instead"]
     assert len(gen.doc.tables) == 1
     assert gen.doc.tables[0].rows[0].cells[1].text == 'National Test Institute'
 
@@ -446,13 +453,16 @@ def test_n2_missing_anchor_falls_back_to_mentoring_header(caplog):
 def test_n1_real_template_three_lines_in_order_with_partial_fields():
     """Real template: three N1 entries land after "Leadership and
     mentoring in programs..." in input order, each degrading to whatever
-    fields it has (#529)."""
+    fields it has (#529). The third has only dates -- none of
+    role/program_name/institution -- so it renders its own `text` rather
+    than a bare date range (#529 round 2, F6)."""
     gen = _template_generator()
     entries_by_code = {
         'N1': [
             _n1(role='Director'),
             _n1(program_name='Scholars Program', institution='Test University'),
-            _n1(start_date='2019', end_date='2022'),
+            _n1(start_date='2019', end_date='2022',
+                text='Directed a mentoring program before 2019 records began.'),
         ],
     }
 
@@ -488,23 +498,95 @@ def test_n2_real_template_tables_in_order_placeholder_removed_sparse_as_line():
     gen._fill_mentoring(entries_by_code)
 
     n2_region = _body_after(gen.doc, N2_HEADING, 6)
-    assert n2_region[0] == ('tbl', 'National Test Institute (T32-100) (Mentor)')
-    assert n2_region[1] == ('p', '')
-    assert n2_region[2] == ('tbl', 'Regional Test Foundation')
-    assert n2_region[3] == ('p', '')
-    assert n2_region[4] == (
+    assert n2_region[0] == ('p', N2_INSTRUCTION)
+    assert n2_region[1] == ('tbl', 'National Test Institute (T32-100) (Mentor)')
+    assert n2_region[2] == ('p', '')
+    assert n2_region[3] == ('tbl', 'Regional Test Foundation')
+    assert n2_region[4] == ('p', '')
+    assert n2_region[5] == (
         'p', 'A sparse training-grant line with no identifying field.')
-    assert n2_region[5][0] == 'p' and n2_region[5][1].startswith('Duplicate table below')
     body = list(gen.doc.element.body)
-    n2_idx = next(i for i, el in enumerate(body) if el.tag == qn('w:p')
-                  and Paragraph(el, gen.doc).text.strip() == N2_HEADING)
-    table_a = Table(body[n2_idx + 1], gen.doc)
+    instruction_idx = next(
+        i for i, el in enumerate(body) if el.tag == qn('w:p')
+        and Paragraph(el, gen.doc).text.strip() == N2_INSTRUCTION)
+    table_a = Table(body[instruction_idx + 1], gen.doc)
     assert [row.cells[1].text for row in table_a.rows] == [
         'National Test Institute (T32-100) (Mentor)', 'Test Training Program A', '2018-2021']
     # One placeholder out, two grant tables in; the sparse entry built none.
     assert len(gen.doc.tables) == template_tables - 1 + 2
     assert gen.stats['tables_populated'] == 2
     assert gen.stats['entries_inserted'] == 3
+
+
+def test_n2_real_template_tables_after_heading_when_instruction_paragraph_missing():
+    """F1 fallback (#529 round 2): with the instruction paragraph absent
+    from the template, N2's tables anchor on the heading itself instead of
+    raising or landing under the wrong content."""
+    gen = _template_generator()
+    instruction_idx = next(
+        i for i, p in enumerate(gen.doc.paragraphs)
+        if p.text.strip() == N2_INSTRUCTION)
+    instruction_element = gen.doc.paragraphs[instruction_idx]._element
+    instruction_element.getparent().remove(instruction_element)
+    assert gen._find_paragraph_exact(N2_INSTRUCTION) is None
+
+    gen._fill_mentoring({'N2': [_n2(agency='National Test Institute')]})
+
+    assert _body_after(gen.doc, N2_HEADING, 1) == [('tbl', 'National Test Institute')]
+
+
+def test_n2_foreign_table_after_heading_survives_the_shape_guard():
+    """Shape guard, negative path (#529 round 2, F3): a table that does not
+    look like N2's own placeholder is never removed, even though it is the
+    first (and only) table `_first_table_after` finds; the new N2 table is
+    inserted ahead of it, after the heading."""
+    gen = _new_generator()
+    gen.doc.add_paragraph(N2_HEADING)
+    foreign = gen.doc.add_table(rows=5, cols=2)
+    foreign.rows[0].cells[0].text = 'Something else:'
+    assert not _looks_like_training_grant_table(foreign)
+
+    gen._fill_mentoring({'N2': [_n2(agency='National Test Institute')]})
+
+    assert len(gen.doc.tables) == 2
+    # New N2 table, its spacer paragraph, then the foreign table -- still
+    # there, unharmed.
+    region = _body_after(gen.doc, N2_HEADING, 3)
+    assert region[0] == ('tbl', 'National Test Institute')
+    assert region[1] == ('p', '')
+    assert region[2] == ('tbl', '')
+    tables_by_label = {t.rows[0].cells[0].text: t for t in gen.doc.tables}
+    assert 'Something else:' in tables_by_label
+    assert len(tables_by_label['Something else:'].rows) == 5
+
+
+def test_n2_real_template_no_entries_removes_placeholder_region_otherwise_unchanged():
+    """F3's removal policy: unconditional-but-guarded. With NO N2 entries at
+    all, the placeholder table is still removed (#836's real-pipeline
+    cascade already does this on every render, N2 content or not -- see the
+    PR description), but every other element in the MENTORING -> Mentees
+    body region is untouched at the XML level (#529 round 2, F3)."""
+    from lxml import etree
+
+    def region_elements(doc):
+        body = list(doc.element.body)
+        start = next(i for i, el in enumerate(body) if el.tag == qn('w:p')
+                     and Paragraph(el, doc).text.strip() == 'MENTORING')
+        end = next(i for i, el in enumerate(body) if el.tag == qn('w:p')
+                   and Paragraph(el, doc).text.strip() == 'Mentees')
+        return body[start:end]
+
+    gen = _template_generator()
+    before = region_elements(gen.doc)
+    assert sum(1 for el in before if el.tag == qn('w:tbl')) == 1
+    before_non_tables = [etree.tostring(el) for el in before if el.tag != qn('w:tbl')]
+
+    gen._fill_mentoring({})
+
+    after = region_elements(gen.doc)
+    after_non_tables = [etree.tostring(el) for el in after if el.tag != qn('w:tbl')]
+    assert after_non_tables == before_non_tables
+    assert not any(el.tag == qn('w:tbl') for el in after)
 
 
 def test_n1_n2_only_entries_still_render_when_no_n3_n4_content():
@@ -516,28 +598,9 @@ def test_n1_n2_only_entries_still_render_when_no_n3_n4_content():
                          'N2': [_n2(agency='National Test Institute')]})
 
     assert _body_after(gen.doc, N1_HEADING, 1) == [('p', 'Director')]
-    assert _body_after(gen.doc, N2_HEADING, 1) == [('tbl', 'National Test Institute')]
-
-
-def test_mentoring_no_n1_n2_or_n3_n4_entries_leaves_the_region_byte_identical():
-    """No-op contract (#529): with nothing to render at all, the MENTORING
-    -> Mentees body region is untouched at the XML level, not just visually."""
-    from lxml import etree
-
-    def region(doc):
-        body = list(doc.element.body)
-        start = next(i for i, el in enumerate(body) if el.tag == qn('w:p')
-                     and Paragraph(el, doc).text.strip() == 'MENTORING')
-        end = next(i for i, el in enumerate(body) if el.tag == qn('w:p')
-                   and Paragraph(el, doc).text.strip() == 'Mentees')
-        return [etree.tostring(el) for el in body[start:end]]
-
-    gen = _template_generator()
-    before = region(gen.doc)
-
-    gen._fill_mentoring({})
-
-    assert region(gen.doc) == before
+    n2_region = _body_after(gen.doc, N2_HEADING, 2)
+    assert n2_region[0] == ('p', N2_INSTRUCTION)
+    assert n2_region[1] == ('tbl', 'National Test Institute')
 
 
 # --- other education: template structure, three-column rendering -----------------

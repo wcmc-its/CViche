@@ -72,6 +72,14 @@ MENTEES_FALLBACK_TEXT = "Mentees"
 N1_HEADING = "Leadership and mentoring in programs (Describe activity; include dates)"
 N2_HEADING = "Institutional Training Grants and Mentored Trainee Grants"
 
+# The instruction paragraph directly under N2_HEADING (template para 141),
+# and N2's real insertion anchor (#529 round 2, F1): the template ships
+# heading -> instruction -> placeholder table, and the tables this section
+# builds belong after the instruction, not between it and the heading.
+# Falls back to N2_HEADING when this paragraph is missing.
+N2_INSTRUCTION = ("Duplicate table below as needed. Examples include serving "
+                   "as PI or Mentor on T32, K01, K08, K23 or other mentored grants.")
+
 # Spacing paragraph between mentee tables: 6pt before and after, in
 # twentieths of a point (w:spacing units).
 MENTEE_TABLE_SPACING_TWIPS = '120'
@@ -200,8 +208,8 @@ def _looks_like_training_grant_table(table: Table) -> bool:
 
     `_first_table_after`'s forward scan (used by `_remove_template_table_after`
     for N3A/N3B) has no awareness of what table it lands on, and a
-    pre-existing, out-of-scope cascade in `research_support.py`
-    (`_fill_research_support`'s "Past (Completed) Funding"/"Pending
+    pre-existing, out-of-scope cascade in `research_support.py` (issue #836:
+    `_fill_research_support`'s "Past (Completed) Funding"/"Pending
     Funding" buckets, whose own unbounded `_find_table_after_paragraph`
     scan finds no table in their own template section and instead walks
     into MENTORING's) already removes this exact table on every real
@@ -528,8 +536,8 @@ class MentoringSection:
         anchor = self._paragraph_element(self._find_paragraph_exact(N1_HEADING))
         if anchor is None:
             logger.warning(
-                "Mentoring: '%s' heading not found in template; "
-                "%d entries not rendered", N1_HEADING, len(entries))
+                "Mentoring: '%s' heading not found; %d entries rendered "
+                "under MENTORING instead", N1_HEADING, len(entries))
             anchor = self._paragraph_element(self._find_paragraph_exact(MENTORING_HEADING))
             if anchor is None:
                 return
@@ -542,27 +550,43 @@ class MentoringSection:
     def _fill_training_grants(self, entries: Sequence[Mapping[str, Any]]) -> None:
         """N2 ("Institutional Training Grants and Mentored Trainee Grants"):
         one 3-row table per entry, same shape as the template's own
-        placeholder, which is removed once before the first table goes in
-        (#529). A sparse entry (no title, agency or grant number -- nothing
-        a table would show) renders as a plain line instead; N2 has no other
-        route out of the Appendix, so it is never dropped. Missing-anchor
-        fallback matches `_fill_program_leadership`.
+        placeholder, inserted after the instruction paragraph ("Duplicate
+        table below as needed...") rather than the heading itself, so
+        document order stays heading -> instruction -> tables, the order
+        the template ships with (#529 round 2, F1). Falls back to the
+        heading when the instruction paragraph is missing.
+
+        The placeholder removal is unconditional-but-guarded (#529 round 2,
+        F3): `_remove_training_grant_placeholder` runs whenever an anchor
+        is found at all, whether or not there are N2 entries to render, and
+        only ever deletes a table that actually looks like N2's own. On the
+        real pipeline this is a no-op either way: issue #836's cascade in
+        `research_support.py` has already removed the table before
+        `_fill_mentoring` runs, on every render, N2 content or not.
+
+        A sparse entry (no title, agency or grant number -- nothing a table
+        would show) renders as a plain line instead; N2 has no other route
+        out of the Appendix, so it is never dropped. Missing-anchor
+        fallback (only reached when there are entries to place) matches
+        `_fill_program_leadership`.
         """
+        anchor_idx = self._find_paragraph_exact(N2_INSTRUCTION)
+        if anchor_idx is None:
+            anchor_idx = self._find_paragraph_exact(N2_HEADING)
+        anchor = self._paragraph_element(anchor_idx)
+        if anchor is not None:
+            self._remove_training_grant_placeholder(anchor)
+
         if not entries:
             return
-        anchor = self._paragraph_element(self._find_paragraph_exact(N2_HEADING))
+
         if anchor is None:
             logger.warning(
-                "Mentoring: '%s' heading not found in template; "
-                "%d entries not rendered", N2_HEADING, len(entries))
+                "Mentoring: '%s' heading not found; %d entries rendered "
+                "under MENTORING instead", N2_HEADING, len(entries))
             anchor = self._paragraph_element(self._find_paragraph_exact(MENTORING_HEADING))
             if anchor is None:
                 return
-        else:
-            placeholder = _first_table_after(anchor)
-            if placeholder is not None and _looks_like_training_grant_table(
-                    Table(placeholder, self.doc)):
-                placeholder.getparent().remove(placeholder)
 
         for entry in reversed(entries):
             fields = entry.get('extracted_fields') or {}
@@ -572,6 +596,18 @@ class MentoringSection:
                     self._insert_mentoring_line(text, anchor, entry)
                 continue
             self._create_training_grant_table(fields, entry, anchor)
+
+    def _remove_training_grant_placeholder(self, anchor: BaseOxmlElement) -> None:
+        """Remove the table after ``anchor`` only when its header row reads
+        N2's own placeholder label (#529 round 2, F3). Unconditional (called
+        whether or not N2 has entries to render) but guarded: never deletes
+        a table it does not recognize as its own -- the #836 cascade this
+        guards against found and emptied an unrelated section's table on
+        `web199` when the removal was unconditional AND unguarded."""
+        table_element = _first_table_after(anchor)
+        if table_element is not None and _looks_like_training_grant_table(
+                Table(table_element, self.doc)):
+            table_element.getparent().remove(table_element)
 
     def _create_training_grant_table(
         self,
