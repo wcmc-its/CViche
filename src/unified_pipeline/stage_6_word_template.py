@@ -687,7 +687,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
                     print(f"Loaded cv_owner_location from Stage 4 output")
             except Exception as e:
-                # Non-fatal: geographic-scope classification just falls back to its default. Still say so -- a permission error or a truncated stage-4 JSON should not vanish without a trace.
+                # Non-fatal: geographic-scope classification just falls back to its
+                # default. Still say so -- a permission error or a truncated stage-4
+                # JSON should not vanish without a trace.
                 if self.verbose:
                     print(f"  Warning: Could not load cv_owner_location from Stage 4: {e}")
         return cv_owner_location
