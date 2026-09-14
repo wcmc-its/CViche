@@ -258,6 +258,28 @@ def _is_bullet_paragraph(para: Paragraph) -> bool:
     return pPr is not None and pPr.find(qn('w:numPr')) is not None
 
 
+#: Punctuation a PII cut can leave dangling on the kept residual (#821 R2
+#: F3 / #834): `pii_pass.py`'s `_cut_spans` removes exactly the withheld
+#: SPAN `pii.py`'s `_pii_matches` found, which stops short of whichever
+#: hard delimiter (`\n`, `\t`, `|`, `;`, or a run of whitespace --
+#: `normalization/pii.py`'s own `_PII_FRAGMENT_SPLIT_RE`) used to separate
+#: it from a kept neighbour: "Home Phone: 555-1234; Citizenship: US" ->
+#: "; Citizenship: US" after the cut. `,` and `:` are deliberately absent
+#: from this set -- they are ALLOWED PRECEDING punctuation for a label
+#: match (`pii.py`'s `_boundary_ok`), not hard splits, so they never sit
+#: alone at a residual's edge the way the four above do; stripping them
+#: too would eat real content ("U.S." or a trailing "expires 2028:" left
+#: as the last kept fragment).
+_DANGLING_SEPARATOR_RE = re.compile(r'^[|;\s]+|[|;\s]+$')
+
+
+def _strip_dangling_separators(text: str) -> str:
+    """A PII cut's residual, its own leftover fragment-delimiter
+    punctuation trimmed off both ends (#821 R2 F3 / #834; see
+    `_DANGLING_SEPARATOR_RE`)."""
+    return _DANGLING_SEPARATOR_RE.sub('', text)
+
+
 
 
 
@@ -2454,30 +2476,53 @@ Now analyze the text above:"""
           member's own name/title banner, which renders from `cv_owner` rather
           than from the A entry -- 75 of 76 are already on the page, and
           appending them would be pure duplication.
-        - PII-withheld entries are dropped from this batch entirely rather
-          than rendered. Here the whole entry is denied, unlike the
-          consumption path: this entry renders nothing, so discarding it
-          costs nothing, and fragment-level filtering would keep the birth
-          date and drop only its label. The caller (`_recover_unrendered_
-          records`) is the one that tells the reader something was withheld,
-          via the single document-wide notice.
+        - A PII-withheld entry renders its RESIDUAL text -- `entry['text']`
+          after `run_pii_pass` (#820 piece 2, `pii_pass.py`) has already cut
+          only the withheld fragment(s) out of it (`_cut_spans`), not the
+          whole entry (#821 R2 F3 / #834: a fused orphan carrying BOTH a
+          withheld fragment and unrelated content -- e.g. "Home Phone: ..."
+          fused with "Citizenship: US" -- used to lose the citizenship line
+          too, because the whole entry was denied on the fragment-level
+          pass's OWN `_pii_withheld` flag, a category mismatch: that flag
+          means "this entry was TOUCHED", not "this entry is entirely PII").
+          Rendering the residual only applies when the pass actually cut a
+          RAW-TEXT fragment (`entry['_pii_fragments']` non-empty): a
+          field-key-only withhold (the PII lived in `extracted_fields`,
+          e.g. `marital_status_spouse`, and never appeared in `entry['text']`
+          at all) leaves the raw text completely untouched -- usually the
+          entry's own uninformative label ("Additional information") with
+          nothing left to say once its one associated value is gone, so
+          that whole entry stays denied, same as before this fix. Likewise
+          a raw-text cut whose residual comes out empty (the whole text WAS
+          the withheld value, e.g. a bare "Date of Birth: ...") still
+          contributes nothing. Either way the single document-wide notice
+          already tells the reader something was withheld.
         """
         batch: List[Tuple[str, str, float]] = []
         redacted = 0
         for entry in getattr(self, '_unconsumed_personal_data', []):
-            # #820 piece 2: read the pre-render pass's own verdict
-            # (`entry['_pii_withheld']`), not a second PII scan. By this
-            # point `run_pii_pass` has already stripped
-            # `entry['text']` and any PII-keyed `extracted_fields` of
-            # everything it found, so re-running `_pii_fragments`/
-            # `_PII_FIELD_KEY_RE` here would find nothing to redact on and
-            # silently render an entry that was supposed to be withheld
-            # whole -- the two call sites must not diverge from the pass.
-            if entry.get('_pii_withheld'):
-                redacted += 1
-                continue
+            # #820 piece 2 / #821 R2 F3: read the pre-render pass's own
+            # verdict (`entry['_pii_withheld']`) and its already-cut
+            # `entry['text']`, not a second PII scan. By this point
+            # `run_pii_pass` has already stripped every in-scope fragment
+            # and PII-keyed `extracted_fields` entry it found, so
+            # re-running `_pii_fragments`/`_PII_FIELD_KEY_RE` here would
+            # find nothing left to redact on -- the two call sites must not
+            # diverge from the pass. What remains in `entry['text']` is, by
+            # construction, content the policy did NOT withhold.
             raw_text = entry.get('text', '') or ''
             text = _clean_inline_tabs(raw_text).strip()
+            if entry.get('_pii_withheld'):
+                # A raw-text cut (`_pii_fragments` non-empty) can leave a
+                # real residual; a field-key-only withhold cannot (the raw
+                # text was never touched) -- see the method docstring.
+                if entry.get('_pii_fragments'):
+                    text = _strip_dangling_separators(text).strip()
+                    if text and _squash(text) not in haystack:
+                        batch.append((text, 'A', 0))
+                        continue
+                redacted += 1
+                continue
             if not text:
                 continue
             if _squash(text) in haystack:

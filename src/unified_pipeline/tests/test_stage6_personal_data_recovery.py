@@ -256,7 +256,14 @@ def test_appendix_removal_catches_raw_text_and_field_key_pii_alike(tmp_path: Pat
     batch still renders. `test_pii_orphan_is_redacted_with_a_visible_notice`
     and `test_pii_named_only_by_field_key_is_caught` pin the two halves
     separately; this pins them together in one batch, which is what item 1
-    actually asks for."""
+    actually asks for.
+
+    #821 R2 F3 (issue #834) narrowed the raw-text-cut half of this to a
+    per-VALUE deny (see the test right below) -- this test's middle entry
+    stays a whole-ENTRY deny on purpose: its PII lives ONLY in
+    `extracted_fields`, so `run_pii_pass` never touches `entry['text']` at
+    all ("Additional information" is never cut), and there is no residual
+    fragment for the #834 fix to have anything to recover."""
     text = _render(tmp_path, [
         _a("Date of Birth: 04/01/1958"),
         _a("Additional information", {"marital_status_spouse": "Pat Roe"}),
@@ -269,6 +276,34 @@ def test_appendix_removal_catches_raw_text_and_field_key_pii_alike(tmp_path: Pat
     assert "Pat Roe" not in text, "field-key-only PII value reached the document"
     assert PII_REDACTED_NOTICE in text, "content was withheld with no indication"
     assert "French" in text, "a non-PII sibling in the same batch was dropped too"
+
+
+def test_appendix_residual_survives_a_fused_withheld_and_kept_fragment(tmp_path: Path) -> None:
+    """#821 R2 F3 (issue #834): an A-coded orphan whose raw text FUSES a
+    withheld fragment with unrelated, non-PII content used to lose the
+    WHOLE entry -- `_unconsumed_personal_data_batch` denied by ENTRY
+    (`entry['_pii_withheld']`), the same granularity the appendix path
+    deliberately uses for an entry that renders nothing on its own, but
+    this entry is not "nothing": `run_pii_pass` (`pii_pass.py`'s
+    `_cut_spans`) already cut only the withheld SPAN out of `entry['text']`,
+    so the kept fragment survives in the entry's own residual text and
+    should have reached the Appendix all along (the corpus shape: web32's
+    fused "Home Phone" + "Citizenship" orphan). The residual renders as an
+    ordinary Appendix bullet with its dangling separator punctuation
+    trimmed (`_strip_dangling_separators`) and its normal classification
+    comment attached, same as any other appendix line."""
+    text = _render(tmp_path, [
+        _a("Home Phone: 555-123-4567; Citizenship: US"),
+    ], emit_comments=True)
+    assert "Citizenship: US" in text, (
+        "the kept fragment was dropped along with its withheld sibling"
+    )
+    assert "555-123-4567" not in text, "the withheld home phone reached the document"
+    assert PII_REDACTED_NOTICE in text
+    comments = _comments(tmp_path / "out.docx")
+    assert any("Originally classified" in body for _, body in comments), (
+        "the recovered residual line lost its usual classification comment"
+    )
 
 
 def test_pii_in_a_tab_separated_cell_is_still_caught(tmp_path):
