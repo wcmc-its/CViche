@@ -59,6 +59,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.normalization.pii import CAT_HOME_CONTACT  # noqa: E402
 from unified_pipeline.stage6.sections import personal_data as personal_data_module  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator, run_stage6  # noqa: E402
 
@@ -527,13 +528,55 @@ def test_a_structured_phone_naming_both_slots_fills_both_rows(tmp_path):
 def test_a_home_labelled_phone_fills_neither_phone_row(tmp_path):
     """The WCM template has no home-phone row, and squatting in one of the
     two it does have took the office row on web113 and skipped the real
-    business number as already-set."""
-    rows, _gen = _render(tmp_path, entries=[
+    business number as already-set.
+
+    #821 makes the never-rendering a recorded policy fact rather than an
+    accident: a "Home phone:" label is now a policy row (CAT_HOME_CONTACT),
+    so `run_pii_pass` records it withheld too."""
+    rows, gen = _render(tmp_path, entries=[
         _a("Home phone: 555-111-2222", {"phone": "555-111-2222"}),
     ])
 
     assert rows.get("office telephone:", "") == ""
     assert rows.get("cell phone:", "") == ""
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
+
+
+def test_a_reformatted_home_phone_does_not_leak_into_office(tmp_path):
+    """Regression: `run_pii_pass` cuts the WHOLE entry text when the #821
+    home-contact label IS the entry's only content, leaving `text` empty
+    for `_fill_personal_data`'s own 'home'/'office' classification. When
+    `extracted_fields['phone']` is reformatted from the raw label line (a
+    real corpus shape -- stage 4 normalizes "555.111.2222" to
+    "555-111-2222"), `_from_pii_fragment`'s containment check can fail to
+    null it upstream too, so nothing catches it: `has_home` reads False on
+    the now-empty text and the number falls through to the OFFICE
+    telephone row -- worse than the #442-class drop this file otherwise
+    guards against. `_label_word_present` (personal_data.py) is the fix:
+    it also reads the pass's own pre-strip `_pii_fragments`."""
+    rows, gen = _render(tmp_path, entries=[
+        _a("Home phone: 555.111.2222", {"phone": "555-111-2222"}),
+    ])
+
+    assert rows.get("office telephone:", "") == ""
+    assert rows.get("cell phone:", "") == ""
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
+
+
+def test_a_reformatted_home_address_does_not_leak_into_office(tmp_path):
+    """The address-block twin of the phone regression above: stage 4
+    enriches "Home Address: 12 Elm St" with a city/state the raw label
+    line never had, so the enriched value is not a verbatim substring of
+    the cut fragment either."""
+    rows, gen = _render(tmp_path, entries=[
+        _a("Home Address: 12 Elm St", {"address": "12 Elm St, Rye, NY 10580"}),
+    ])
+
+    assert rows.get("home address:", "") == ""
+    assert rows.get("office address:", "") == "", (
+        "a home address leaked into the office row"
+    )
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
 
 
 # --------------------------------------------------------------------------
@@ -542,14 +585,23 @@ def test_a_home_labelled_phone_fills_neither_phone_row(tmp_path):
 
 def test_a_structured_address_naming_both_slots_fills_both_rows(tmp_path):
     """#442: a dict naming home and office was forced whole into whichever
-    slot the raw text happened to label."""
-    rows, _gen = _render(tmp_path, entries=[
+    slot the raw text happened to label.
+
+    #821: the home half is now withheld with notice -- a structured dict
+    carries no text label at all for `pii.py`'s policy table to match
+    ("Contact" is the entry's whole raw text here), so this is exactly the
+    path `_fill_personal_data`'s unconditional home_address/home_phone
+    guard exists for (see that guard's own comment). Office address is
+    unaffected."""
+    rows, gen = _render(tmp_path, entries=[
         _a("Contact", {"address": {"home_address": "10 Bank Street, New York, NY",
                                    "office_address": "1300 York Avenue, New York, NY"}}),
     ])
 
-    assert rows.get("home address:") == "10 Bank Street, New York, NY"
+    assert rows.get("home address:", "") == ""
+    assert "10 Bank Street" not in rows.get("home address:", "")
     assert rows.get("office address:") == "1300 York Avenue, New York, NY"
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
 
 
 # --------------------------------------------------------------------------

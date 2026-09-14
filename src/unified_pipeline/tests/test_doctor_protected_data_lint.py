@@ -104,6 +104,47 @@ def test_a_bare_date_written_as_month_day_year_is_flagged():
     assert any("Personal Data block" in f["message"] for f in findings)
 
 
+def test_a_home_address_label_in_personal_data_is_flagged():
+    """#821: home address/phone are now a policy row (CAT_HOME_CONTACT),
+    caught by the same generic scan as every other category -- no
+    Licensure-style special case needed since the row's own scope already
+    covers the Personal Data block."""
+    blocks = [_p("PERSONAL DATA"), _t("Home address: 1 Example St")]
+    findings = lint_protected_data_in_output(blocks)
+    assert len(findings) == 1
+    assert "(home address / phone)" in findings[0]["message"]
+    assert "1 Example St" not in findings[0]["message"]
+
+
+def test_an_office_address_is_not_flagged():
+    """Negative control paired with the home-address test above -- #821
+    left the office address/phone rows unaffected."""
+    blocks = [_p("PERSONAL DATA"), _t("Office address: 1 Example St")]
+    assert lint_protected_data_in_output(blocks) == []
+
+
+def test_a_real_dea_value_reaching_licensure_is_flagged():
+    """#821 regression guard: `stage6/sections/licensure.py`'s
+    `_fill_dea_npi` never writes a value into this cell any more, so this
+    only fires if that changes back. Gated on the block also naming "DEA"
+    (see `_DEA_LABEL_PRESENT_RE`'s own comment) so a same-shaped STATE
+    licence number in the Licensure section's OTHER table is not a false
+    positive -- see the negative control right below."""
+    blocks = [_p("LICENSURE"), _t("DEA number: (optional)\nAB1234567")]
+    findings = lint_protected_data_in_output(blocks)
+    assert len(findings) == 1
+    assert "(DEA number)" in findings[0]["message"]
+    assert "AB1234567" not in findings[0]["message"]
+
+
+def test_a_state_licence_number_of_the_same_shape_is_not_flagged():
+    """The Licensure-section DEA probe requires the block to name "DEA" --
+    an ordinary state licence table (no such mention) must not false-
+    positive on a coincidentally DEA-shaped licence number."""
+    blocks = [_p("LICENSURE"), _t("New York\tAB1234567\t03/2019\t03/2021")]
+    assert lint_protected_data_in_output(blocks) == []
+
+
 # --------------------------------------------------------------------------
 # negative controls
 # --------------------------------------------------------------------------
@@ -123,10 +164,14 @@ def test_a_bare_date_outside_the_personal_data_block_is_not_flagged():
 
 
 def test_the_templates_own_blank_dea_slot_is_not_flagged():
-    """Rendered on EVERY output regardless of source-CV content (#821), in
-    the Licensure section -- out of the DEA row's scope by construction
-    (PERSONAL_AND_APPENDIX), so no text-match exclusion is needed. The same
-    label in the Appendix IS a finding."""
+    """Rendered on EVERY output regardless of source-CV content, in the
+    Licensure section. The generic scan skips it by construction (DEA is a
+    PERSONAL_AND_APPENDIX row, Licensure is scanned at ALL_CODES); the
+    #821 Licensure-specific probe (`_DEA_VALUE_RE`) also skips it, because
+    "(optional)" is one character short of the 9-char shape it looks for --
+    see `test_a_real_dea_value_reaching_licensure_is_flagged` for the case
+    where a real value DOES reach this section. The same label in the
+    Appendix IS a finding (that row's own scope reaches the Appendix)."""
     blocks = [_p("LICENSURE"), _t("DEA number: (optional)")]
     assert lint_protected_data_in_output(blocks) == []
     blocks = [_t("DEA number: (optional)")]

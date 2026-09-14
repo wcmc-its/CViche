@@ -92,6 +92,8 @@ from .pii import (  # noqa: F401
     _PII_LABEL_RE,
     _PII_FIELD_KEY_RE,
     _PII_FRAGMENT_SPLIT_RE,
+    CAT_DEA,
+    CAT_HOME_CONTACT,
     WithheldItem,
     _squash,
     _pii_fragments,

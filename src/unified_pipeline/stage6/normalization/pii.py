@@ -48,9 +48,12 @@ from `license_number`). Every rule therefore carries a scope:
   trade-off. A routed content entry (S4, R, F1, ...) never sees these.
 
 The DEA rule is the worked example: a `DEA #:` line in the Appendix is
-withheld, but an F1 (Licensure) entry -- routed, not A -- is out of scope,
-so the WCM template's own DEA slot is the user's #821 decision, not this
-module's.
+withheld, but an F1 (Licensure) entry -- routed, not A -- is out of THIS
+row's scope, deliberately (see the row's own comment below). #821 (settled
+2026-09-14) withholds the template's DEA slot too, but
+`stage6/sections/licensure.py` enforces that decision at render time
+rather than through this row's scope, because scope alone cannot: some
+entries classify as DEA by a number SHAPE with no "DEA" text at all.
 """
 import re
 from dataclasses import dataclass
@@ -70,6 +73,9 @@ SCOPE_PERSONAL_AND_APPENDIX = "PERSONAL_AND_APPENDIX"
 DECIDED_820 = "#820"
 #: Withheld by this pipeline's default pending the user's #821 decision.
 DECIDED_821_PENDING = "#821 pending"
+#: Paul's #821 decision comment (2026-09-14): DEA template slot and home
+#: address/phone both move from render to withhold-with-notice.
+DECIDED_821 = "https://github.com/wcmc-its/CViche/issues/821#issuecomment-5671621909"
 
 # Category labels -- the vocabulary the withheld notice and the Word comment
 # speak in. Named once so a row, a field-key rule and a comment line cannot
@@ -97,6 +103,7 @@ CAT_DISABILITY = "disability"
 CAT_HEALTH = "health"
 CAT_BLOOD_TYPE = "blood type"
 CAT_DEA = "DEA number"
+CAT_HOME_CONTACT = "home address / phone"
 
 
 @dataclass(frozen=True)
@@ -258,16 +265,46 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
     WithholdRule(CAT_HEALTH, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820, label=r"health"),
     WithholdRule(CAT_BLOOD_TYPE, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_820,
                  label=r"blood \s* type"),
-    # Never reaches an F1 (Licensure) entry: F1 is routed, so only the
-    # ALL_CODES rows apply there -- the template's DEA slot is #821's call.
-    WithholdRule(CAT_DEA, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_821_PENDING,
+    # #821 (settled 2026-09-14): withhold with notice, including the
+    # template's own DEA slot. This row's SCOPE stays
+    # PERSONAL_AND_APPENDIX -- it still never reaches an F1 (Licensure)
+    # entry's TEXT, deliberately: `_classify_licensure_entry`
+    # (stage6/sections/licensure.py) checks `license_type`/raw text before
+    # falling back to a number-SHAPE tiebreak, and only when the entry
+    # names no state. Widening this row to SCOPE_ALL_CODES would have the
+    # pre-render pass cut "DEA" out of the entry's text before that
+    # classifier ever runs; a state-bearing DEA entry would then match no
+    # label at all, skip the shape tiebreak (state present), fall through
+    # to KIND_LICENSE and render the real number as an ordinary licence
+    # row -- worse than doing nothing, and unreachable by a text-only
+    # fix since some DEA entries classify by NUMBER SHAPE ALONE with no
+    # "DEA" text at all (`test_shape_fallback_dea_two_letters_seven_
+    # alphanumeric`), which this row could never match either way.
+    # `_resolve_licensure` (licensure.py) withholds every entry it
+    # classifies as DEA -- by label OR by shape -- before the docx is
+    # written, and records it on the same `_pii_result.withheld` list this
+    # row's own matches feed, so the notice/comment mechanism is not
+    # duplicated. A stray `DEA #:` line in the Appendix is still withheld
+    # by this row exactly as before.
+    WithholdRule(CAT_DEA, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_821,
                  label=r"dea (?: \s* (?: \# | number | registration ) )?"),
+    # #821: a home address or home phone label anywhere in scope (an
+    # A-coded entry, or an Appendix-bound orphan whose ONLY content is a
+    # home phone -- the template has no phone row for it, so before this
+    # row such an orphan reached the Appendix unfiltered). A value that
+    # reaches `sections/personal_data.py` by a path with no text label at
+    # all (a structured `address: {home_address: ..., office_address:
+    # ...}` dict) carries no fragment for this row to match either --
+    # `_fill_personal_data` withholds `home_address`/`home_phone`
+    # unconditionally at write time for that reason, same as DEA above.
+    WithholdRule(CAT_HOME_CONTACT, SCOPE_PERSONAL_AND_APPENDIX, DECIDED_821,
+                 label=r"home \s* (?: address | phone | telephone | tel\.? )"),
 )
 
 # --- what is NOT in the table, and why (#821 defaults / public) -------------
-# home address / home phone -- template slots, render;  citizenship /
-# nationality -- render;  personal email -- render;  NPI -- a public
-# identifier, render.  Third-party contacts in an unlabelled References
+# citizenship / nationality -- render;  personal email -- render;
+# NPI -- a public identifier, render.  Third-party contacts in an
+# unlabelled References
 # section -- a separate follow-up issue, not this table.
 
 

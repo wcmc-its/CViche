@@ -81,6 +81,7 @@ except ImportError as exc:
 
 from ..formatting import _set_cell_text, _set_font
 from ..normalization import (
+    CAT_HOME_CONTACT,
     WithheldItem,
     _address_cell_text,
     _from_pii_fragment,
@@ -207,6 +208,29 @@ def _classify_contact_label(label: str) -> str | None:
 #: The section a docx-recovered value would have rendered in -- the only
 #: place `_recover_contact_fields_from_docx` writes to.
 _PERSONAL_DATA_SECTION_LABEL = "Personal Data"
+
+
+def _label_word_present(word: str, text: str, pii_fragments: list[str]) -> bool:
+    """Whether `word` (already lowercase) labels this entry -- read from
+    `text` AND from the pass's own pre-strip `pii_fragments`.
+
+    #821's home-address/phone policy row can consume the WHOLE entry text
+    (an entry whose sole content is "Home Address: 12 Elm St" has no other
+    delimiter for the label span to stop at), destroying the "home"/
+    "office" signal the phone/address classification below depends on
+    BEFORE it ever runs -- an entry whose `extracted_fields` value differs
+    from the raw text's own (stage 4 adding a city/state the label line
+    never had, `test_a_structured_address_naming_both_slots_fills_both_
+    rows`'s sibling test) then fails `_from_pii_fragment`'s containment
+    check too, so nothing upstream catches it either: `text` reads empty,
+    the address falls through the now-blind 'home' check to the OFFICE
+    catch-all, and a home address renders in the OFFICE cell -- worse than
+    the #442 drop this same file's docstring already calls out. The
+    fragments hold the ORIGINAL text `run_pii_pass` matched, exactly what
+    is needed to recover the signal."""
+    if word in text:
+        return True
+    return any(word in frag.lower() for frag in pii_fragments)
 
 
 def _withhold_recovered(value: str | None, source_text: str,
@@ -367,7 +391,7 @@ class PersonalDataSection:
                 # Check if text contains multiple phone type labels
                 has_mobile = 'cell' in text or 'mobile' in text
                 has_work = 'office' in text or 'work' in text
-                has_home = 'home' in text
+                has_home = _label_word_present('home', text, pii_fragments)
 
                 if _labels_its_own_phone_slots(extracted_phone):
                     # A structured phone names its own halves, so trust those
@@ -428,7 +452,7 @@ class PersonalDataSection:
                         home_address = _address_cell_text(extracted_address, 'home')
                     if not office_address:
                         office_address = _address_cell_text(extracted_address, 'office')
-                elif 'home' in text:
+                elif _label_word_present('home', text, pii_fragments):
                     if not home_address:
                         home_address = _address_cell_text(extracted_address, 'home')
                 elif 'office' in text or 'work' in text or 'business' in text or not office_address:
@@ -546,6 +570,30 @@ class PersonalDataSection:
             today = datetime.now().strftime("%B %-d, %Y")  # e.g., "February 1, 2026"
             run = para.add_run(f"Date of preparation: {today}")
             _set_font(run)
+
+        # #821: a home address or home phone is withheld with notice,
+        # UNCONDITIONALLY -- not by re-checking `home_address`/`home_phone`
+        # against a PII fragment. Both values can already have arrived with
+        # no text label to match at all (a structured `address: {home_
+        # address: ..., office_address: ...}` dict, routed by its own key
+        # names in the per-entry loop above, `_labels_its_own_address_
+        # slots`) -- the #821 policy row in `pii.py` still closes the
+        # Appendix leak for a home-phone-only unconsumed orphan (there is
+        # no home-phone table row at all, so before this row such an entry
+        # reached the Appendix as raw text), but cannot be the only guard
+        # on these two destinations. Office address/phone are unaffected.
+        if home_address:
+            self._pii_result.withheld.append(
+                WithheldItem(CAT_HOME_CONTACT, _PERSONAL_DATA_SECTION_LABEL, None))
+            home_address = None
+        if home_phone:
+            # Never reaches a template row (there is no home-phone cell),
+            # so nothing here changes what renders -- this turns that
+            # silence into a recorded policy fact instead of an accident,
+            # per #821.
+            self._pii_result.withheld.append(
+                WithheldItem(CAT_HOME_CONTACT, _PERSONAL_DATA_SECTION_LABEL, None))
+            home_phone = None
 
         # Fill email, phone, and address in the PERSONAL DATA table (Table 1).
         # Lifted out to `_write_personal_data_table_cells` (#820 R3, pure

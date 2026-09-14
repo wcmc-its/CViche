@@ -24,6 +24,7 @@ scorer cannot disagree about a document.
 import re
 
 from unified_pipeline.stage6.normalization.pii import (
+    CAT_DEA,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
     _MONTH_NAMES,
@@ -34,16 +35,37 @@ from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE
 from ..shared import _finding, _output_section_header
 
 # The WCM template's own blank "DEA number: (optional)" slot, rendered on
-# EVERY output in the Licensure section (#821: the template put it there),
-# needs no exclusion of its own: DEA is a PERSONAL_AND_APPENDIX row, and
-# the Licensure section is scanned at ALL_CODES scope. Round 1 excluded it
-# by exact text match; that filter became dead code with the scope split
-# (0 of 105 rendered farm docx change with or without it) and was removed.
+# EVERY output in the Licensure section, needs no exclusion of its own: DEA
+# is a PERSONAL_AND_APPENDIX row, and the Licensure section is scanned at
+# ALL_CODES scope. Round 1 excluded it by exact text match; that filter
+# became dead code with the scope split (0 of 105 rendered farm docx change
+# with or without it) and was removed.
+#
+# #821 withholds the template's DEA slot too, but deliberately not by
+# widening this row's scope (`stage6/normalization/pii.py`'s own comment on
+# the row explains why) -- `stage6/sections/licensure.py` enforces it at
+# render time instead. That means the generic scan below still cannot see
+# a DEA leak in the Licensure section by construction, so `_DEA_VALUE_RE`
+# below is this lint's OWN probe for it, scoped to the Licensure section
+# only and gated on the block ALSO naming "DEA" (the identifiers table's
+# own cell text, "DEA number: (optional)") -- a bare value-shape scan alone
+# would also fire on a state licence number of the same 2-letter/7-alnum
+# shape sitting in the Licensure table's OTHER (state-licence) block, which
+# never mentions "DEA" at all. A real DEA-shaped VALUE reaching a block
+# that names DEA is a regression (the renderer never writes one there any
+# more); the bare "DEA number: (optional)" label is a template artifact on
+# every output and must never be a finding by itself -- "optional" is 8
+# characters, one short of the 9 this shape requires, so it never matches.
+_DEA_VALUE_RE = re.compile(r'\b[A-Za-z]{2}[A-Za-z0-9]{7}\b')
+_DEA_LABEL_PRESENT_RE = re.compile(r'\bdea\b', re.IGNORECASE)
 
 # Section names (as `_output_section_header` normalizes them) whose blocks
 # get the full policy: the two places the pre-render pass applies it.
 _PERSONAL_DATA_SECTION = "personal data"
 _APPENDIX_SECTION = "appendix"
+#: #821's own probe (see `_DEA_VALUE_RE` above) -- not part of the FULL
+#: policy pair above, since the label itself must stay unflagged there.
+_LICENSURE_SECTION = "licensure"
 
 _SECTION_PERSONAL_DATA_TABLE = "Personal Data table"
 _SECTION_APPENDIX = "Appendix"
@@ -148,5 +170,13 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
                 findings.append(_finding(
                     "protected_data_in_output", "ERROR",
                     "a bare date found in the Personal Data block"))
+
+        if (section == _LICENSURE_SECTION
+                and _DEA_LABEL_PRESENT_RE.search(stripped)):
+            for _match in _DEA_VALUE_RE.finditer(stripped):
+                findings.append(_finding(
+                    "protected_data_in_output", "ERROR",
+                    f"protected personal data ({CAT_DEA}) found in {where} "
+                    f"-- value withheld from this finding"))
 
     return findings

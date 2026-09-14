@@ -46,6 +46,7 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     CAT_FAMILY,
     CAT_GENDER,
     CAT_HEALTH,
+    CAT_HOME_CONTACT,
     CAT_MARITAL_STATUS,
     CAT_PASSPORT,
     CAT_PLACE_OF_BIRTH,
@@ -55,12 +56,18 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
     CAT_SSN,
     CAT_VETERAN,
     CAT_VISA,
+    DECIDED_820,
+    DECIDED_821,
+    DECIDED_821_PENDING,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
     WITHHOLD_POLICY,
     WithheldItem,
     _pii_fragments,
     _pii_matches,
+)
+from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
+    _resolve_licensure,
 )
 from unified_pipeline.stage6.pii_pass import (  # noqa: E402
     APPENDIX_SECTION_LABEL,
@@ -153,6 +160,10 @@ PROBE_TABLE = [
     ("Dependents: 2", CAT_CHILDREN, _PERSONAL_ONLY),
     ("Salary: $1", CAT_SALARY, _ALL),
     ("Honorarium: $1", CAT_SALARY, _ALL),
+    # #821 (settled): home address/phone move from render to withhold,
+    # Personal Data/Appendix only -- an office address/phone is unaffected.
+    ("Home address: 1 Example St", CAT_HOME_CONTACT, _PERSONAL_ONLY),
+    ("Home phone: 555-111-2222", CAT_HOME_CONTACT, _PERSONAL_ONLY),
     # --- #473 negative controls, as content-coded rows too -------------
     ("Children: Research, Practice and Policy. Example Press, 2001.",
      CAT_CHILDREN, _PERSONAL_ONLY),
@@ -174,7 +185,6 @@ PROBE_TABLE = [
     ("(212) 555-1234", None, _NEVER),
     ("NPI: 1234567890", None, _NEVER),
     ("Citizenship: Example", None, _NEVER),
-    ("Home address: 1 Example St", None, _NEVER),
     ("ISBN: 978-2-1234-567-1", None, _NEVER),
     ("Sex: differences in galanin expression", None, _NEVER),
     ("Race: reporting practices in clinical trials", None, _NEVER),
@@ -214,7 +224,7 @@ def test_every_policy_row_has_a_probe_that_reaches_it():
 def test_every_policy_row_carries_a_scope_and_a_decision():
     for rule in WITHHOLD_POLICY:
         assert rule.scope in (SCOPE_ALL_CODES, SCOPE_PERSONAL_AND_APPENDIX), rule
-        assert rule.decided_by in ("#820", "#821 pending"), rule
+        assert rule.decided_by in (DECIDED_820, DECIDED_821_PENDING, DECIDED_821), rule
         assert (rule.label is None) != (rule.shape is None), rule
 
 
@@ -229,12 +239,31 @@ def test_the_scope_split_is_generate_s_own_routing_predicate():
         assert _entry_scope(code, RENDER_ROUTED_CODES) == SCOPE_ALL_CODES
 
 
-def test_dea_never_reaches_a_licensure_entry():
-    """The template's DEA slot is #821's decision (a routed F1 entry is out
-    of the ambiguous scope); a stray `DEA #:` line in the Appendix is
-    withheld."""
+def test_dea_pii_pass_scope_unchanged_licensure_withholds_it_at_render():
+    """#821 (settled): the template's DEA slot IS now withheld -- but not
+    by widening this row's scope (`pii.py`'s own comment on the row
+    explains why: an entry that classifies as DEA purely by number SHAPE,
+    with no "DEA" text at all, could never be caught by a text row either
+    way, and cutting the label out of a state-bearing entry's text would
+    make `_classify_licensure_entry` fall through to KIND_LICENSE and
+    render the real number as an ordinary licence row -- worse than doing
+    nothing). So the pass still never touches an F1 entry's text for DEA,
+    exactly as before #821, and `_resolve_licensure`
+    (stage6/sections/licensure.py) is what withholds it, unconditionally,
+    whether classified by label or by shape. A stray `DEA #:` line in the
+    Appendix is still withheld by this row.
+
+    See test_stage6_licensure_pii_policy.py for the render-level proof
+    (the DEA slot cell empty, the Word comment present)."""
     assert not _denied("DEA number: AB1234567", "F1")
     assert _denied("DEA number: AB1234567", "T")
+
+    result = _resolve_licensure([
+        {"text": "DEA AB1234567",
+         "extracted_fields": {"license_number": "AB1234567", "date": "2019"}},
+    ])
+    assert result.dea_withheld is True
+    assert result.identifiers.dea is None
 
 
 def test_unanchored_matching_is_a_label_after_a_separator_not_a_bare_word():

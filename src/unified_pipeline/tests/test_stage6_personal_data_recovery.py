@@ -212,6 +212,21 @@ def test_pii_orphan_is_redacted_with_a_visible_notice(tmp_path):
     assert "Canada" in text, "non-PII entry withheld along with the PII"
 
 
+def test_home_phone_only_orphan_is_withheld_not_appended(tmp_path):
+    """#821: the template has no home-phone row, so an entry supplying only
+    a home phone was ALREADY unconsumed by `_fill_personal_data` (nothing
+    excludes `home_phone` from the appendix-orphan check the way a
+    classified value does) -- before the #821 policy row, that raw entry
+    text reached the Appendix unfiltered as a safety-net "orphan"
+    (test_unconsumed_entry_reaches_the_appendix, above, is exactly that
+    mechanism). Now it is withheld with notice like everything else."""
+    text = _render(tmp_path, [
+        _a("Home phone: 555-111-2222", {"phone": "555-111-2222"}),
+    ])
+    assert "555-111-2222" not in text, "a home phone reached the document"
+    assert PII_REDACTED_NOTICE in text
+
+
 def test_one_redaction_notice_per_document(tmp_path):
     text = _render(tmp_path, [
         _a("Date of Birth: 12/13/1947"),
@@ -298,16 +313,41 @@ def test_notice_is_keyed_on_something_withheld_not_on_appendix_redaction(tmp_pat
 def test_no_notice_when_the_only_label_is_out_of_scope(tmp_path):
     """The round-1 false notice: an ambiguous label on a routed content
     code is not withheld, so nothing is recorded and the document carries
-    neither the notice nor a comment (the render gate's CHANGED 0)."""
+    neither the notice nor a comment (the render gate's CHANGED 0).
+
+    An F1 DEA entry used to ride alongside this as a second "out of scope"
+    example; #821 flipped that decision (see
+    test_dea_in_licensure_is_withheld_with_notice_and_comment below), so it
+    is no longer a valid negative control here and was removed rather than
+    updated in place -- the S4 title is this test's whole subject."""
     text = _render(tmp_path, [
         _entry("Children: Research, Practice and Policy. Example Press, 2001.", "S4",
                {"title": "Children: Research, Practice and Policy",
                 "authors": "Roe J", "year": "2001", "publisher": "Example Press"}),
-        _entry("DEA number: AB1234567", "F1", {"license_number": "AB1234567"}),
     ])
     assert "Children: Research" in text, "a content-code title was withheld"
     assert PII_REDACTED_NOTICE not in text
     assert _comments(tmp_path / "out.docx") == []
+
+
+def test_dea_in_licensure_is_withheld_with_notice_and_comment(tmp_path):
+    """#821: a licensure DEA entry is withheld with notice through the full
+    render path -- the slot renders no value, the document-wide notice
+    paragraph appears, and the Word comment names "DEA number" under
+    "Licensure" (the same vocabulary/mechanism every other withheld
+    category uses -- see WITHHELD_COMMENT_HEADER)."""
+    text = _render(tmp_path, [
+        _entry("DEA registration AB1234567", "F1", {"license_number": "AB1234567"}),
+    ])
+    assert "AB1234567" not in text
+    assert PII_REDACTED_NOTICE in text
+    comments = _comments(tmp_path / "out.docx")
+    assert len(comments) == 1
+    author, comment_text = comments[0]
+    assert author == WITHHELD_COMMENT_AUTHOR
+    assert comment_text.startswith(WITHHELD_COMMENT_HEADER)
+    assert "DEA number" in comment_text
+    assert "Licensure" in comment_text
 
 
 def test_email_field_fallback_does_not_harvest_from_a_pii_fragment_on_any_code(tmp_path):
