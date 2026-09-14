@@ -363,6 +363,12 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                 <span>
                   {ATTESTATIONS[submissionType].text}{' '}
                   <span className="block text-xs text-gray-500 mt-1">
+                    The full text of the CV is sent to a third-party AI service (currently Anthropic&apos;s Claude on
+                    Amazon Bedrock; the provider may change, for example to OpenAI). CViche withholds some personal
+                    details such as date of birth or Social Security number from the output document, but not before
+                    the AI processes the CV, so do not include anything you would not want these systems to see.
+                  </span>
+                  <span className="block text-xs text-gray-500 mt-1">
                     The original CV, intermediate outputs, and final output are retained to improve CViche and test
                     proposed changes. See the{' '}
                     <a href="/help#data-retention" target="_blank" rel="noopener" className="text-primary-600 hover:underline">data retention policy</a>.

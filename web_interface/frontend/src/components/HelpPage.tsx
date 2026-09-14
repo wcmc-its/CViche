@@ -214,10 +214,12 @@ export default function HelpPage() {
                 <p className="text-sm font-semibold text-gray-900 mb-1">Is my data secure?</p>
                 <p>
                   Your uploaded CV is stored on a secure WCM server and is only accessible to you and CViche
-                  administrators. However, CV content is sent to OpenAI for AI processing. Do not include sensitive
-                  personal information such as Social Security numbers or dates of birth in your CV. By using CViche,
-                  you acknowledge that your CV content will be processed by OpenAI. If this is not acceptable, please
-                  do not use the service.
+                  administrators. However, the full text of the CV is sent to a third-party AI service for processing
+                  (currently Anthropic&apos;s Claude on Amazon Bedrock; the provider may change, for example to OpenAI).
+                  CViche withholds some personal details such as date of birth or Social Security number from the
+                  output document, but that happens after the AI has processed the CV. Do not include anything you
+                  would not want these systems to see. By using CViche, you acknowledge that your CV content will be
+                  processed by a third-party AI service. If this is not acceptable, please do not use the service.
                 </p>
               </div>
               <div>
