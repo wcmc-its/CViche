@@ -138,19 +138,35 @@ def _build_duplicate_text_two_cells_docx(path: str) -> None:
 
 
 def test_duplicate_text_in_a_distinct_cell_is_not_recovered_content(tmp_path):
-    """Negative case: a trailing cell that is a genuinely separate cell (not
-    a gridSpan duplicate) but repeats the label's own text must NOT satisfy
-    the header-left/content-right "distinct content" requirement -- the row
-    stays content-only, same as any other label|value row with no real
-    value, rather than emitting a bogus "MAILING ADDRESS" header paired with
-    duplicated "MAILING ADDRESS" content."""
+    """A trailing cell that is a genuinely separate cell (not a gridSpan
+    duplicate) but repeats the label's own text must NOT satisfy the
+    header-left/content-right "distinct content" requirement -- no content
+    is recovered for it (`row_has_distinct_nonblank_value_cells` excludes a
+    trailing cell that matches the label).
+
+    #811 round 3, finding 1: `row_has_nonblank_value_cells` now applies the
+    SAME label-text exclusion as its own gate (a trailing cell equal to
+    cell 0's text is not a value), as the predicate-only replacement for the
+    `_tc`-identity dedup this ticket reverted out of `extract_table_metadata`
+    (that dedup drifted the `data` row shape stage 2 reads -- see the
+    module's finding-1 comment on `row_has_nonblank_value_cells`). Reading
+    `data` alone, a genuinely-distinct cell that happens to repeat cell 0's
+    text is indistinguishable from a horizontally merged (gridSpan) cell
+    that repeats it structurally -- so this row is now treated like the
+    gridSpan case (`test_merged_gridspan_subheader_row_stays_table_header`):
+    "MAILING ADDRESS" keeps its table_header. This shape (two distinct table
+    cells with byte-identical text immediately after a real header-like
+    label) was not observed in the 2026-09-11 corpus batch."""
     docx_path = str(tmp_path / "duplicate_text_two_cells.docx")
     _build_duplicate_text_two_cells_docx(docx_path)
 
     elements = extract_unified_elements(docx_path)["elements"]
     table_headers = [e for e in elements if e.get("type") == "table_header"]
+    table_contents = [e for e in elements if e.get("type") == "table_content"]
+    content_text = "\n".join(e["text"] for e in table_contents)
 
-    assert not any(e["text"] == "MAILING ADDRESS" for e in table_headers)
+    assert any(e["text"] == "MAILING ADDRESS" for e in table_headers)
+    assert "MAILING ADDRESS | MAILING ADDRESS" not in content_text
 
 
 def _build_below_confidence_floor_docx(path: str) -> None:
@@ -343,8 +359,14 @@ def _build_whitespace_only_value_docx(path: str) -> None:
 def test_whitespace_only_value_cell_stays_table_header(tmp_path):
     """Negative case: a trailing cell containing only whitespace must be
     treated the same as a blank cell -- "Certification:" stays a
-    table_header (kills the mutant that drops `.strip()` in
-    row_has_nonblank_value_cells)."""
+    table_header. NOTE (#811 round 2 finding 3 / round 3 finding 3): dropping
+    the `.strip()` call in `row_has_nonblank_value_cells` is an EQUIVALENT
+    mutant for this test and does not make it fail --
+    `extract_table_metadata:` (`get_cell_text(cell).strip()`) already strips
+    every cell's text before it ever reaches this predicate, so an
+    all-whitespace cell arrives here as `""` either way. This test pins the
+    OBSERVABLE BEHAVIOUR (whitespace-only stays a header), not that
+    particular line."""
     docx_path = str(tmp_path / "whitespace_value.docx")
     _build_whitespace_only_value_docx(docx_path)
 
@@ -355,3 +377,40 @@ def test_whitespace_only_value_cell_stays_table_header(tmp_path):
 
     assert any(e["text"] == "Certification:" for e in table_headers)
     assert "Certification:" not in content_text
+
+
+def _build_row0_form_label_multiline_docx(path: str) -> None:
+    """Row 0's cell 0 is a colon-terminated form label (#811 round 1 shape)
+    whose text is itself multi-line: a short header-like first line
+    ("Certification:") followed by a continuation line over 50 chars, with
+    the WHOLE cell also ending in a colon so `row0_is_form_label` is True."""
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+
+    table.cell(0, 0).text = (
+        "Certification:\n"
+        "Board certified in Synthetic Medicine with additional detail here:"
+    )
+    table.cell(0, 1).text = "Synthetic Value"
+
+    doc.save(path)
+
+
+def test_row_zero_multiline_form_label_content_not_duplicated(tmp_path):
+    """Positive case (#811 round 3, finding 6 / mutant M10): a row-0 form
+    label whose cell 0 is multi-line and exceeds 50 chars after the header
+    line must not have its continuation text recovered twice. `table_rows`
+    already includes row 0 whole when `row0_is_form_label` is True, so it
+    reaches the per-row walk on its own; the `not row0_is_form_label` guard
+    on the "remaining content after the header line" block must suppress
+    that block's own separate seeding of the same text, or the row is
+    duplicated in `current_content_rows`."""
+    docx_path = str(tmp_path / "row0_form_label_multiline.docx")
+    _build_row0_form_label_multiline_docx(docx_path)
+
+    elements = extract_unified_elements(docx_path)["elements"]
+    table_contents = [e for e in elements if e.get("type") == "table_content"]
+    content_text = "\n".join(e["text"] for e in table_contents)
+
+    assert content_text.count("Board certified in Synthetic Medicine") == 1
+    assert content_text.count("Synthetic Value") == 1

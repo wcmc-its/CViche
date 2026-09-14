@@ -348,20 +348,7 @@ def extract_table_metadata(table: Table, idx: int) -> dict[str, Any]:
 
     for row_idx, row in enumerate(table.rows):
         cells_data = []
-        # python-docx repeats a horizontally merged (gridSpan) cell once per
-        # spanned column, so row.cells returns the SAME _tc object at each
-        # spanned col_idx. Without this dedup, a merged single-cell header row
-        # like "GRANTS" (spanning 3 columns) arrives here as three identical
-        # cells, which the per-row walk misreads as a label|value form row and
-        # demotes to content ("GRANTS | GRANTS | GRANTS") -- #811 round 2.
-        # Same idiom as the vertical-merge dedup below (~line 660), scoped to
-        # one row instead of the whole table.
-        seen_tcs_in_row = set()
         for col_idx, cell in enumerate(row.cells):
-            if cell._tc in seen_tcs_in_row:
-                continue
-            seen_tcs_in_row.add(cell._tc)
-
             # FIX: cell.text sometimes returns empty string for cells with complex formatting
             # or malformed XML (e.g., <w:rPr> inside <w:t> instead of as sibling)
             cell_text = get_cell_text(cell).strip()
@@ -524,16 +511,32 @@ def looks_like_section_header(text: str) -> tuple[bool, float]:
 
 
 def row_has_nonblank_value_cells(row: list[dict[str, Any]]) -> bool:
-    """Return True if any cell after row[0] carries non-blank text.
+    """Return True if any cell after row[0] carries non-blank text that
+    DIFFERS (case-insensitively) from row[0]'s own text.
 
     Distinguishes a form-style label|value row (e.g. "Name:" | "<value>")
-    from a genuine sub-header row: a single-cell row, or a multi-cell row
-    whose trailing cells are all blank, has nothing to lose by being
-    emitted as a header (see issue #811).
+    from a genuine sub-header row: a single-cell row, a multi-cell row whose
+    trailing cells are all blank, or a horizontally merged (gridSpan) row
+    whose trailing cells just echo cell 0's own text, has nothing to lose by
+    being emitted as a header (see issue #811).
+
+    The row[0]-text exclusion is the predicate-only alternative to deduping
+    `extract_table_metadata`'s `data` rows by `_tc` identity (#811 round 3,
+    finding 1): that dedup shrank the cell count of every gridSpan CONTENT
+    row too, silently changing the row shape stage 2 reads off `data` for
+    `split_merged_row_into_pseudo_rows`. This predicate reads `data` as-is
+    (unchanged from origin/dev) and only affects header/content routing
+    here in `extract_unified_elements`. Trade-off: a row with two textually
+    IDENTICAL but structurally distinct trailing cells (not a gridSpan
+    duplicate) is now indistinguishable from a genuine merge and is treated
+    the same way -- not observed in the corpus.
     """
+    label_norm = row[0].get("text", "") if row and isinstance(row[0], dict) else (str(row[0]) if row else "")
+    label_norm = label_norm.strip().casefold()
     for cell in row[1:]:
         cell_value = cell.get("text", "") if isinstance(cell, dict) else str(cell)
-        if cell_value.strip():
+        cell_value = cell_value.strip()
+        if cell_value and cell_value.casefold() != label_norm:
             return True
     return False
 
@@ -552,19 +555,35 @@ HEADER_LEFT_CONTENT_RIGHT_MIN_CONFIDENCE = 0.6
 
 def row_has_distinct_nonblank_value_cells(row: list[dict[str, Any]], label_text: str) -> bool:
     """Return True if any cell after row[0] has non-blank text that DIFFERS
-    (case-insensitively) from the row's own label text.
+    (case-insensitively) both from the row's own label text AND from every
+    other trailing cell already counted.
 
     Defense in depth for the header-left/content-right path (#811 round 2):
     guards against a horizontally merged (gridSpan) cell whose duplicate
-    copies repeat the label text itself rather than carrying real content,
-    on top of the dedup already applied in extract_table_metadata.
+    copies repeat the label text itself rather than carrying real content.
+    The "from each other" dedup (#811 round 3, finding 1) replaces the
+    `_tc`-identity dedup that used to run in `extract_table_metadata` --
+    reverted because it drifted the `data` row shape stage 2 reads -- with a
+    text-identity dedup scoped to this boolean check only, so a gridSpan
+    VALUE cell repeating itself across spanned columns still counts as ONE
+    distinct value, not several. (For an `any()`-style boolean this is
+    behaviourally equivalent to the from-cell-0-only check on every case the
+    corpus and test suite exercise: the first qualifying trailing cell
+    always short-circuits the loop before a later duplicate is ever
+    inspected.)
     """
     label_norm = label_text.strip().casefold()
+    seen = {label_norm}
     for cell in row[1:]:
         cell_value = cell.get("text", "") if isinstance(cell, dict) else str(cell)
         cell_value = cell_value.strip()
-        if cell_value and cell_value.casefold() != label_norm:
-            return True
+        if not cell_value:
+            continue
+        cell_norm = cell_value.casefold()
+        if cell_norm in seen:
+            continue
+        seen.add(cell_norm)
+        return True
     return False
 
 
@@ -631,6 +650,122 @@ def flatten_table_to_text(table_data: dict[str, Any], skip_first_row: bool = Fal
             row_texts.append("\t".join(non_empty))
 
     return "\n".join(row_texts)
+
+
+def _classify_subheader_row_content(
+    cell_text: str, row_header_conf: float, row: list[dict[str, Any]]
+) -> tuple[bool, bool]:
+    """Return `(has_value_cells, header_left_content_right)` for a table row
+    whose first cell looks like a section header (#811 round 1/2): whether
+    it carries a non-blank, non-label trailing value at all, and whether
+    that value additionally qualifies for the header-left/content-right
+    layout (real header, no colon, distinct content -- web064).
+
+    Pure move out of `extract_unified_elements` (#811 round 3, finding 2).
+    """
+    has_value_cells = row_has_nonblank_value_cells(row)
+    header_left_content_right = has_value_cells and is_header_left_content_right_row(
+        cell_text, row_header_conf, row
+    )
+    return has_value_cells, header_left_content_right
+
+
+def _handle_table_row_zero(
+    table_data: dict[str, Any],
+    first_cell_text: str,
+    header_confidence: float,
+    unified_idx: int,
+    num_tables: int,
+) -> tuple[list[dict[str, Any]], int, int, list[list[dict[str, Any]]], list[list[dict[str, Any]]]]:
+    """Handle a table's row 0 once its first cell has already tested as
+    header-like: emit it as a `table_header` element, UNLESS it is itself a
+    form-style label|value row (#811 round 2, web207 "NAME: | <value>"), in
+    which case it is left for the per-row walk to recover as content
+    instead. Also seeds `current_content_rows` with any text found after the
+    header line in the same cell (e.g. "K. EXTRAMURAL...\\nAssociation of
+    Pediatric...").
+
+    Pure move out of `extract_unified_elements` (#811 round 3, finding 2) --
+    behaviour unchanged. Caller only calls this once it has confirmed
+    `first_cell_text` looks like a header, so the form-label check below
+    does not need to re-test that.
+
+    Deliberately NOT reusing the header-left/content-right escape
+    (`is_header_left_content_right_row`) here: routing a non-colon row 0
+    into the per-row walk below also exposes it to that walk's separate
+    `\\n\\n`-embedded-header splitter, which builds single-cell synthetic
+    rows and silently drops row 0's OTHER cells (found on web206's
+    "Assistant Professor of Instruction" -- a real, non-colon,
+    confidence-0.5 header whose row 1 date range vanished when misrouted
+    this way). A row 0 header-left/content-right layout (e.g. "CURRENT
+    POSITION" | <address>) is out of this ticket's scope and keeps today's
+    existing table-level header behavior.
+
+    Returns:
+        (new_elements, unified_idx, num_table_headers_emitted, table_rows,
+         current_content_rows)
+    """
+    row_0 = table_data["data"][0] if table_data["data"] else []
+    row0_is_form_label = (
+        first_cell_text.rstrip().endswith(":")
+        and row_has_nonblank_value_cells(row_0)
+    )
+
+    new_elements: list[dict[str, Any]] = []
+    num_table_headers_emitted = 0
+    lines = first_cell_text.strip().split('\n')
+
+    if not row0_is_form_label:
+        # Use just the first line as the header text
+        header_text = lines[0].strip()
+
+        # Emit table header as paragraph-like element
+        new_elements.append({
+            "unified_idx": unified_idx,
+            "type": "table_header",
+            "text": header_text,
+            "table_index": num_tables,
+            "header_confidence": header_confidence,
+            "is_header_candidate": True,
+            # Add some paragraph-like metadata for header detection
+            "bold": True,  # Assume table headers are bold-like
+            "style": "TableHeader",
+            "alignment": None,
+            "font_size": None,
+        })
+        unified_idx += 1
+        num_table_headers_emitted += 1
+
+        # Scan remaining rows for sub-headers
+        # Some tables have multiple sections with headers in first cell of rows
+        table_rows = table_data["data"][1:] if table_data["data"] else []
+    else:
+        # Row 0 is a form label, not a table header -- let it flow
+        # through the per-row walk below like any other row, so it
+        # is recovered as content (#811 round 2).
+        table_rows = table_data["data"] if table_data["data"] else []
+
+    current_content_rows: list[list[dict[str, Any]]] = []
+
+    # IMPORTANT: Check if row 0's first cell has content AFTER the header line
+    # This captures cases where a header line is followed by actual content
+    # in the same cell (e.g., "K. EXTRAMURAL...\nAssociation of Pediatric...")
+    # Only applies when row 0 was actually emitted as the table header above.
+    if not row0_is_form_label and len(lines) > 1:
+        remaining_content = '\n'.join(lines[1:]).strip()
+        # Only treat as content if there's substantial text (multiple lines or >50 chars)
+        # This avoids treating single-line noise as content
+        if remaining_content and (len(remaining_content) > 50 or remaining_content.count('\n') >= 2):
+            # Get the rest of row 0 (other cells) to pair with the remaining content
+            if len(row_0) > 1:
+                # Create a modified row with the remaining content in cell 0
+                modified_row = [{"text": remaining_content}] + row_0[1:]
+                current_content_rows.append(modified_row)
+            else:
+                # Single-cell row - just use the remaining content
+                current_content_rows.append([{"text": remaining_content}])
+
+    return new_elements, unified_idx, num_table_headers_emitted, table_rows, current_content_rows
 
 
 def extract_unified_elements(docx_path: str) -> dict[str, Any]:
@@ -742,78 +877,18 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
             first_cell_text = get_table_first_cell_text(table)
             is_header, header_confidence = looks_like_section_header(first_cell_text)
 
-            row_0 = table_data["data"][0] if table_data["data"] else []
-            # The table's OWN row 0 can be a form-style label|value row too (#811
-            # round 2, web207 "NAME: | <value>"), not a real table header. Scoped
-            # to the literal form-label shape (colon-terminated label, non-blank
-            # trailing cell) -- deliberately NOT reusing the header-left/content-
-            # right escape (is_header_left_content_right_row) here: routing a
-            # non-colon row 0 into the per-row walk below also exposes it to that
-            # walk's separate `\n\n`-embedded-header splitter, which builds
-            # single-cell synthetic rows and silently drops row 0's OTHER cells
-            # (found on web206's "Assistant Professor of Instruction" -- a real,
-            # non-colon, confidence-0.5 header whose row 1 date range vanished
-            # when misrouted this way). A row 0 header-left/content-right layout
-            # (e.g. "CURRENT POSITION" | <address>) is out of this ticket's scope
-            # and keeps today's existing table-level header behavior.
-            row0_is_form_label = (
-                bool(is_header and first_cell_text)
-                and first_cell_text.rstrip().endswith(":")
-                and row_has_nonblank_value_cells(row_0)
-            )
-
             if is_header and first_cell_text:
-                lines = first_cell_text.strip().split('\n')
-
-                if not row0_is_form_label:
-                    # Use just the first line as the header text
-                    header_text = lines[0].strip()
-
-                    # Emit table header as paragraph-like element
-                    elements.append({
-                        "unified_idx": unified_idx,
-                        "type": "table_header",
-                        "text": header_text,
-                        "table_index": num_tables,
-                        "header_confidence": header_confidence,
-                        "is_header_candidate": True,
-                        # Add some paragraph-like metadata for header detection
-                        "bold": True,  # Assume table headers are bold-like
-                        "style": "TableHeader",
-                        "alignment": None,
-                        "font_size": None,
-                    })
-                    unified_idx += 1
-                    num_table_headers += 1
-
-                    # Scan remaining rows for sub-headers
-                    # Some tables have multiple sections with headers in first cell of rows
-                    table_rows = table_data["data"][1:] if table_data["data"] else []
-                else:
-                    # Row 0 is a form label, not a table header -- let it flow
-                    # through the per-row walk below like any other row, so it
-                    # is recovered as content (#811 round 2).
-                    table_rows = table_data["data"] if table_data["data"] else []
-
-                current_content_rows = []
-
-                # IMPORTANT: Check if row 0's first cell has content AFTER the header line
-                # This captures cases where a header line is followed by actual content
-                # in the same cell (e.g., "K. EXTRAMURAL...\nAssociation of Pediatric...")
-                # Only applies when row 0 was actually emitted as the table header above.
-                if not row0_is_form_label and len(lines) > 1:
-                    remaining_content = '\n'.join(lines[1:]).strip()
-                    # Only treat as content if there's substantial text (multiple lines or >50 chars)
-                    # This avoids treating single-line noise as content
-                    if remaining_content and (len(remaining_content) > 50 or remaining_content.count('\n') >= 2):
-                        # Get the rest of row 0 (other cells) to pair with the remaining content
-                        if len(row_0) > 1:
-                            # Create a modified row with the remaining content in cell 0
-                            modified_row = [{"text": remaining_content}] + row_0[1:]
-                            current_content_rows.append(modified_row)
-                        else:
-                            # Single-cell row - just use the remaining content
-                            current_content_rows.append([{"text": remaining_content}])
+                (
+                    row0_elements,
+                    unified_idx,
+                    row0_num_headers,
+                    table_rows,
+                    current_content_rows,
+                ) = _handle_table_row_zero(
+                    table_data, first_cell_text, header_confidence, unified_idx, num_tables
+                )
+                elements.extend(row0_elements)
+                num_table_headers += row0_num_headers
 
                 for row_idx, row in enumerate(table_rows):
                     # Check if first cell of this row is a sub-header
@@ -913,12 +988,11 @@ def extract_unified_elements(docx_path: str) -> dict[str, Any]:
                             continue
 
                         is_row_header, row_header_conf = looks_like_section_header(cell_text)
-                        has_value_cells = row_has_nonblank_value_cells(row)
                         # A real section header with distinct content on the right (no
                         # colon, high confidence) keeps its header AND recovers the
                         # content, instead of being demoted to content-only (#811 round 2,
                         # web064: "WORK ADDRESS | <address>").
-                        header_left_content_right = has_value_cells and is_header_left_content_right_row(
+                        has_value_cells, header_left_content_right = _classify_subheader_row_content(
                             cell_text, row_header_conf, row
                         )
 
