@@ -24,6 +24,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
+from docx.enum.section import WD_SECTION  # noqa: E402
 from docx.oxml import parse_xml  # noqa: E402
 from docx.oxml.ns import nsdecls, qn  # noqa: E402
 
@@ -102,6 +103,24 @@ def test_sdt_lines_are_deduped_and_in_document_order(tmp_path):
     assert channel["sdt_lines"] == ["First Line", "Second Line"]
 
 
+def test_forty_paragraph_sdt_is_stable_across_repeated_runs(tmp_path):
+    """#456 verifier finding 1: an `id()`-keyed dedup set over lxml element
+    proxies drops lines nondeterministically (a 40-paragraph body-level sdt
+    was observed dropping to 35). `body.iter(w:p)` already yields each node
+    exactly once by construction, so no dedup set is needed; this pins that
+    all 40 lines survive, identically, across repeated independent calls."""
+    doc = Document()
+    doc.add_paragraph("before")
+    after = doc.add_paragraph("after")
+    texts = [f"L{i:03d}" for i in range(40)]
+    _splice_body_level_sdt(after, texts)
+    path = _save(doc, tmp_path)
+
+    for _ in range(3):
+        channel = extract_owner_side_channel(path)
+        assert channel["sdt_lines"] == texts
+
+
 # ---------------------------------------------------------------------------
 # header_lines / footer_lines
 # ---------------------------------------------------------------------------
@@ -126,6 +145,81 @@ def test_footer_paragraph_is_collected(tmp_path):
     channel = extract_owner_side_channel(_save(doc, tmp_path))
 
     assert channel["footer_lines"] == ["Synthetic Contact Block"]
+
+
+def test_first_page_only_header_is_collected_when_default_header_is_empty(tmp_path):
+    """#456 round-2 verifier finding 5: 6 corpus files carry the owner name
+    ONLY in the section's first-page header, with an empty (unwritten,
+    still-linked) default header. `section.header` alone misses these;
+    `first_page_header` must be read too."""
+    doc = Document()
+    doc.add_paragraph("body")
+    doc.sections[0].different_first_page_header_footer = True
+    doc.sections[0].first_page_header.is_linked_to_previous = False
+    doc.sections[0].first_page_header.add_paragraph("Synthetic First Page Owner")
+    # default header deliberately left untouched (still linked, no definition)
+
+    channel = extract_owner_side_channel(_save(doc, tmp_path))
+
+    assert channel["header_lines"] == ["Synthetic First Page Owner"]
+
+
+def test_three_sections_distinct_headers_plus_one_first_page_header(tmp_path):
+    """Determinism proof (#456-R2 F1): three sections with distinct 5-line
+    default headers, one of which also has a distinct 5-line first-page
+    header -> 20 lines total, identical across 3 independent calls."""
+    doc = Document()
+    doc.add_paragraph("s0 body")
+    doc.sections[0].header.is_linked_to_previous = False
+    for i in range(5):
+        doc.sections[0].header.add_paragraph(f"S0H{i}")
+
+    doc.add_section(WD_SECTION.NEW_PAGE)
+    doc.add_paragraph("s1 body")
+    doc.sections[1].header.is_linked_to_previous = False
+    for i in range(5):
+        doc.sections[1].header.add_paragraph(f"S1H{i}")
+    doc.sections[1].different_first_page_header_footer = True
+    doc.sections[1].first_page_header.is_linked_to_previous = False
+    for i in range(5):
+        doc.sections[1].first_page_header.add_paragraph(f"S1FPH{i}")
+
+    doc.add_section(WD_SECTION.NEW_PAGE)
+    doc.add_paragraph("s2 body")
+    doc.sections[2].header.is_linked_to_previous = False
+    for i in range(5):
+        doc.sections[2].header.add_paragraph(f"S2H{i}")
+
+    path = _save(doc, tmp_path)
+    expected = (
+        [f"S0H{i}" for i in range(5)]
+        + [f"S1H{i}" for i in range(5)]
+        + [f"S1FPH{i}" for i in range(5)]
+        + [f"S2H{i}" for i in range(5)]
+    )
+    for _ in range(3):
+        channel = extract_owner_side_channel(path)
+        assert channel["header_lines"] == expected
+        assert len(channel["header_lines"]) == 20
+
+
+def test_second_section_header_linked_to_previous_is_not_duplicated(tmp_path):
+    """A section whose header inherits the prior section's definition
+    (`is_linked_to_previous`) must contribute its lines exactly once, not
+    once per section that shares the part."""
+    doc = Document()
+    doc.add_paragraph("s0 body")
+    doc.sections[0].header.is_linked_to_previous = False
+    doc.sections[0].header.add_paragraph("Shared Header Owner")
+
+    doc.add_section(WD_SECTION.NEW_PAGE)
+    doc.add_paragraph("s1 body")
+    # section 1's header is left linked to previous (default) -- it must not
+    # add a second copy of "Shared Header Owner"
+
+    channel = extract_owner_side_channel(_save(doc, tmp_path))
+
+    assert channel["header_lines"] == ["Shared Header Owner"]
 
 
 def test_header_with_only_a_page_field_is_skipped(tmp_path):

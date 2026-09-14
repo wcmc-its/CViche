@@ -1056,16 +1056,32 @@ def _is_page_field_only_paragraph(para: Paragraph, text: str) -> bool:
 
 def _header_footer_paragraph_lines(containers: list[Any]) -> list[str]:
     """Non-empty paragraph texts from a list of `_Header`/`_Footer` containers
-    (one already-resolved `section.header` or `section.footer` per section),
-    in order, deduped by element identity (sections sharing a "linked to
-    previous" header/footer part return the same underlying element)."""
+    (the default/first-page/even-page header or footer proxies for one or
+    more sections), in order, deduped by underlying OPC part name.
+
+    A section whose `is_linked_to_previous` is True has no definition of its
+    own -- it inherits the previous section's part -- so it is skipped before
+    any paragraph access; touching `.paragraphs`/`.part` on a linked proxy
+    would call python-docx's `_get_or_add_definition()`, which *adds* a new
+    part for a linked first-page/even-page header/footer that has never been
+    given one. Checking `is_linked_to_previous` itself never mutates.
+
+    The remaining containers are deduped by `str(container.part.partname)` --
+    a stable OPC part name -- never by `id()` of an lxml element proxy or a
+    python-docx wrapper: those proxies are created fresh on every attribute
+    access and freed the moment they go out of scope, so `id()` collides
+    across genuinely distinct elements and misses genuine duplicates
+    depending on allocator/GC state (#456 verifier finding 1)."""
     lines: list[str] = []
-    seen: set[int] = set()
+    seen_partnames: set[str] = set()
     for container in containers:
+        if container is None or container.is_linked_to_previous:
+            continue
+        partname = str(container.part.partname)
+        if partname in seen_partnames:
+            continue
+        seen_partnames.add(partname)
         for para in container.paragraphs:
-            if id(para._p) in seen:
-                continue
-            seen.add(id(para._p))
             text = get_paragraph_text(para).strip()
             if not text:
                 continue
@@ -1104,13 +1120,23 @@ def extract_owner_side_channel(docx_path: str) -> OwnerSideChannel:
 
     Returns:
         OwnerSideChannel: three lists of non-empty paragraph texts, each in
-        document order and deduped by element identity.
+        document order.
         - sdt_lines: every `w:p` anywhere under a `w:sdtContent` in
           `doc.element.body` -- body-level content controls AND ones nested
-          inside table cells.
+          inside table cells. `body.iter(w:p)` yields each `w:p` node exactly
+          once in document order by construction (it is a single depth-first
+          walk of the live tree), so no dedup set is needed or used here --
+          an `id()`-keyed `seen` set over lxml element proxies was tried and
+          removed: proxies are recreated and freed as they're touched, and a
+          freed proxy's address can be reused by a later, genuinely distinct
+          element, so `id()` equality is not element identity (#456 verifier
+          finding 1 -- a 40-paragraph sdt was dropping to 35 lines).
         - header_lines / footer_lines: paragraphs from every section's
-          header/footer, skipping any paragraph whose only content is a
-          PAGE/NUMPAGES field (see `_is_page_field_only_paragraph`).
+          default, first-page, and even-page header/footer, skipping any
+          section proxy that inherits its definition from a previous section
+          (`is_linked_to_previous`) and any paragraph whose only content is a
+          PAGE/NUMPAGES field (see `_is_page_field_only_paragraph` and
+          `_header_footer_paragraph_lines`).
     """
     from docx.oxml.ns import qn
 
@@ -1119,7 +1145,6 @@ def extract_owner_side_channel(docx_path: str) -> OwnerSideChannel:
     w_p, w_sdt_content = qn('w:p'), qn('w:sdtContent')
 
     sdt_lines: list[str] = []
-    seen_sdt_paragraphs: set[int] = set()
     for p_elem in doc.element.body.iter(w_p):
         ancestor = p_elem.getparent()
         in_sdt = False
@@ -1130,15 +1155,17 @@ def extract_owner_side_channel(docx_path: str) -> OwnerSideChannel:
             ancestor = ancestor.getparent()
         if not in_sdt:
             continue
-        if id(p_elem) in seen_sdt_paragraphs:
-            continue
-        seen_sdt_paragraphs.add(id(p_elem))
         text = _side_channel_paragraph_text(p_elem).strip()
         if text:
             sdt_lines.append(text)
 
-    header_lines = _header_footer_paragraph_lines([section.header for section in doc.sections])
-    footer_lines = _header_footer_paragraph_lines([section.footer for section in doc.sections])
+    header_containers: list[Any] = []
+    footer_containers: list[Any] = []
+    for section in doc.sections:
+        header_containers.extend([section.header, section.first_page_header, section.even_page_header])
+        footer_containers.extend([section.footer, section.first_page_footer, section.even_page_footer])
+    header_lines = _header_footer_paragraph_lines(header_containers)
+    footer_lines = _header_footer_paragraph_lines(footer_containers)
 
     return OwnerSideChannel(sdt_lines=sdt_lines, header_lines=header_lines, footer_lines=footer_lines)
 
