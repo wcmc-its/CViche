@@ -327,6 +327,8 @@ TAXONOMY_TO_SECTION = MappingProxyType({
     # NOTE: M4 clinical trial codes removed - clinical trials now use M2A/M2B/M2C based on status
 
     # Mentoring
+    'N1': 'mentoring_leadership',
+    'N2': 'training_grants',
     'N3A': 'current_mentees',
     'N3B': 'past_mentees',
 
@@ -384,6 +386,9 @@ RENDER_ROUTED_CODES = frozenset({
            # in generate(): only routed when the summary actually rendered.
     'M2A', 'M2B', 'M2C',  # Research Support (grants and clinical trials)
     'M2D',  # Patents & Innovations
+    'N1',  # Mentoring - Leadership and mentoring in programs (#529)
+    'N2',  # Mentoring - Institutional Training Grants and Mentored Trainee
+           # Grants (#529)
     'N3A', 'N3B',  # Mentoring (current/past mentees)
     'O',   # Institutional Leadership
     'P',   # Administrative Committees
@@ -1237,6 +1242,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             'M2C': 'Pending Funding',
             # Mentoring (N codes)
             'N': 'Mentees',
+            'N1': 'Leadership and mentoring in programs (Describe activity; include dates)',
+            'N2': 'Institutional Training Grants and Mentored Trainee Grants',
             'N3A': 'Current Mentees:',
             'N3B': 'Past Mentees:',
             # Leadership (O codes)

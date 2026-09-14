@@ -50,6 +50,7 @@ from ..formatting import (
     _set_cell_vertical_alignment,
     _set_font,
     _set_table_border,
+    format_date_range,
 )
 from ..normalization import _clean_inline_tabs
 from ..parsing import _is_mentee_record, _is_mentoring_outcome
@@ -63,6 +64,13 @@ CURRENT_MENTEES_HEADING = "Current Mentees:"
 PAST_MENTEES_HEADING = "Past Mentees:"
 MENTORING_HEADING = "MENTORING"
 MENTEES_FALLBACK_TEXT = "Mentees"
+
+# N1/N2 template slots, immediately above the mentee headings (#529). Both
+# strings are unique substrings of the template's own boilerplate (scout
+# C2-mentoring.md §8), so _find_paragraph_exact carries no collision risk
+# the way a bare "mentoring"/"leadership" search would.
+N1_HEADING = "Leadership and mentoring in programs (Describe activity; include dates)"
+N2_HEADING = "Institutional Training Grants and Mentored Trainee Grants"
 
 # Spacing paragraph between mentee tables: 6pt before and after, in
 # twentieths of a point (w:spacing units).
@@ -137,6 +145,81 @@ def _is_ongoing_mentorship(fields: Mapping[str, Any]) -> bool:
     if 'present' in end_lower or end_lower in ('ongoing', 'current', 'now'):
         return True
     return bool(start_date and not end_date)
+
+
+def _training_grant_rows(fields: Mapping[str, Any]) -> list[tuple[str, str]]:
+    """The three (label, value) rows of an N2 training-grant table, same
+    labels as the template's own placeholder table (#529).
+
+    N2's live extraction schema (config-merged, `field_schemas_v1.1.json`)
+    has no `title`/`pi_role` keys the way M2A/B/C do -- the real keys are
+    `grant_title` and `role` -- so this does not share `research_support.py`'s
+    `_create_grant_table` field reads; it is a smaller, N2-specific set.
+    The role has no row of its own in the template's 3-row table, so it is
+    folded into Award Source as a parenthetical -- the instruction line asks
+    for PI-vs-Mentor, and this is the only cell that can carry it (judgement
+    call, see the PR description).
+
+    Duration calls `format_date_range` directly (not the `self`-bound
+    `_format_grant_duration` research_support.py's grant table uses) so this
+    stays a pure, document-free function; it is the same underlying
+    formatter either way (`_format_grant_duration` is exactly this call).
+    """
+    agency = str(fields.get('agency') or '').strip()
+    grant_number = str(fields.get('grant_number') or '').strip()
+    role = str(fields.get('role') or '').strip()
+
+    award_source = agency
+    if grant_number and grant_number.casefold() not in award_source.casefold():
+        award_source = f"{award_source} ({grant_number})" if award_source else grant_number
+    if role:
+        award_source = f"{award_source} ({role})" if award_source else f"({role})"
+
+    title = (str(fields.get('grant_title') or '').strip()
+             or str(fields.get('title') or '').strip()
+             or str(fields.get('text') or '').strip())
+
+    start = str(fields.get('start_date') or '').strip()
+    end = str(fields.get('end_date') or '').strip()
+    duration = format_date_range(start, end, 'N2')
+
+    return [
+        ('Award Source (funding agency, type of grant):', award_source),
+        ('Project title:', title),
+        ('Duration of support (mm/yyyy-mm/yyyy):', duration),
+    ]
+
+
+def _training_grant_is_sparse(fields: Mapping[str, Any]) -> bool:
+    """True when an N2 entry has nothing a table would show: no title (by
+    any of the three precedence keys), no agency, no grant number. Renders
+    as a plain line instead -- the table path is N2's only route out of the
+    Appendix, so a sparse entry must not be dropped (#529)."""
+    return not (
+        fields.get('grant_title') or fields.get('title') or fields.get('text')
+        or fields.get('agency') or fields.get('grant_number')
+    )
+
+
+def _program_leadership_line(fields: Mapping[str, Any], text: str) -> str:
+    """One N1 line: the non-empty parts of role/program_name/institution,
+    joined with ', ', then the date range in parentheses when either date is
+    present. All five keys empty -> the entry's own `text` (#529)."""
+    role = str(fields.get('role') or '').strip()
+    program_name = str(fields.get('program_name') or '').strip()
+    institution = str(fields.get('institution') or '').strip()
+    start = str(fields.get('start_date') or '').strip()
+    end = str(fields.get('end_date') or '').strip()
+
+    if not (role or program_name or institution or start or end):
+        return (text or '').strip()
+
+    line = ', '.join(part for part in (role, program_name, institution) if part)
+    if start or end:
+        date_range = format_date_range(start, end, 'N1')
+        if date_range:
+            line = f"{line} ({date_range})" if line else f"({date_range})"
+    return line
 
 
 def _partition_mentoring_entries(
@@ -286,13 +369,22 @@ class MentoringSection:
         entries_by_code: Mapping[str, Sequence[Mapping[str, Any]]],
     ) -> None:
         """Render section N: a table per mentee under "Current Mentees:" and
-        "Past Mentees:", aggregate lines under the same headings, and N4
-        outcome lines under the MENTORING header.
+        "Past Mentees:", aggregate lines under the same headings, N4 outcome
+        lines under the MENTORING header, N1 lines under "Leadership and
+        mentoring in programs..." and N2 tables under "Institutional
+        Training Grants..." (#529).
 
         Rendering only -- `_partition_mentoring_entries` has already decided
         which entry goes where. A heading the template lacks is logged with
         the count it drops; nothing returns silently.
         """
+        # N1/N2 have their own template anchors and no interaction with the
+        # mentee partition below -- called first so a CV with ONLY N1/N2
+        # entries (no N3A/N3B/N4) still renders instead of hitting the
+        # partition's early return just below.
+        self._fill_program_leadership(entries_by_code.get('N1', []))
+        self._fill_training_grants(entries_by_code.get('N2', []))
+
         partition = _partition_mentoring_entries(entries_by_code)
         if partition.is_empty:
             return
@@ -387,6 +479,102 @@ class MentoringSection:
         table_element = _first_table_after(anchor)
         if table_element is not None:
             table_element.getparent().remove(table_element)
+
+    def _fill_program_leadership(self, entries: Sequence[Mapping[str, Any]]) -> None:
+        """N1 ("Leadership and Mentoring in Programs"): one plain line per
+        entry under its own template slot, directly above N2's (#529). A
+        missing anchor falls back to the MENTORING header itself, same as
+        every other content this section renders when its specific heading
+        is gone -- entries are never silently dropped.
+        """
+        if not entries:
+            return
+        anchor = self._paragraph_element(self._find_paragraph_exact(N1_HEADING))
+        if anchor is None:
+            logger.warning(
+                "Mentoring: '%s' heading not found in template; "
+                "%d entries not rendered", N1_HEADING, len(entries))
+            anchor = self._paragraph_element(self._find_paragraph_exact(MENTORING_HEADING))
+            if anchor is None:
+                return
+        for entry in reversed(entries):
+            fields = entry.get('extracted_fields') or {}
+            line = _clean_inline_tabs(_program_leadership_line(fields, entry.get('text') or ''))
+            if line:
+                self._insert_mentoring_line(line, anchor, entry)
+
+    def _fill_training_grants(self, entries: Sequence[Mapping[str, Any]]) -> None:
+        """N2 ("Institutional Training Grants and Mentored Trainee Grants"):
+        one 3-row table per entry, same shape as the template's own
+        placeholder, which is removed once before the first table goes in
+        (#529). A sparse entry (no title, agency or grant number -- nothing
+        a table would show) renders as a plain line instead; N2 has no other
+        route out of the Appendix, so it is never dropped. Missing-anchor
+        fallback matches `_fill_program_leadership`.
+        """
+        if not entries:
+            return
+        anchor = self._paragraph_element(self._find_paragraph_exact(N2_HEADING))
+        if anchor is None:
+            logger.warning(
+                "Mentoring: '%s' heading not found in template; "
+                "%d entries not rendered", N2_HEADING, len(entries))
+            anchor = self._paragraph_element(self._find_paragraph_exact(MENTORING_HEADING))
+            if anchor is None:
+                return
+        else:
+            self._remove_template_table_after(anchor)
+
+        for entry in reversed(entries):
+            fields = entry.get('extracted_fields') or {}
+            if _training_grant_is_sparse(fields):
+                text = _clean_inline_tabs((entry.get('text') or '').strip())
+                if text:
+                    self._insert_mentoring_line(text, anchor, entry)
+                continue
+            self._create_training_grant_table(fields, entry, anchor)
+
+    def _create_training_grant_table(
+        self,
+        fields: Mapping[str, Any],
+        entry: Mapping[str, Any],
+        anchor: BaseOxmlElement,
+    ) -> Table:
+        """One N2 grant's 3-row label/value table, built fresh (Pattern B --
+        no template table survives to clone) and placed directly after
+        ``anchor`` with a spacer, exactly as `_create_mentee_table_with_spacing`
+        does one heading over (#529)."""
+        rows = _training_grant_rows(fields)
+        table = self.doc.add_table(rows=len(rows), cols=2)
+        _set_table_border(table, color='808080', size=4)
+
+        first_cell_para = None
+        for i, (label, value) in enumerate(rows):
+            row = table.rows[i]
+            label_cell = row.cells[0]
+            label_cell.text = label
+            _set_cell_vertical_alignment(label_cell, 'center')
+            for para in label_cell.paragraphs:
+                if i == 0 and first_cell_para is None:
+                    first_cell_para = para
+                for run in para.runs:
+                    _set_font(run, bold=True)
+
+            value_cell = row.cells[1]
+            value_cell.text = value
+            _set_cell_vertical_alignment(value_cell, 'center')
+            for para in value_cell.paragraphs:
+                for run in para.runs:
+                    _set_font(run)
+
+        if first_cell_para:
+            self._add_entry_comments(first_cell_para, entry)
+
+        _insert_after(anchor, table._tbl)
+        _insert_after(table._tbl, _mentee_spacing_paragraph())
+        self.stats['tables_populated'] += 1
+        self.stats['entries_inserted'] += 1
+        return table
 
     def _render_mentee_group(
         self,

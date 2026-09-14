@@ -424,16 +424,18 @@ def test_classified_unrendered_quiet_when_reformatted_downstream():
 # --------------------------------------------------- lint: taxonomy code coverage
 
 def test_taxonomy_code_coverage_fires_for_a_code_with_no_render_route():
-    # N2 is exactly #529's example: a real, confidently-classified code stage
-    # 6 has never had a renderer for.
+    # N2 was #529's original example; #529 gave it a render route, so this
+    # now uses M4 -- #291's still-parked status-aware-routing gap (see
+    # test_taxonomy_code_render_coverage.py's _KNOWN_GAPS) -- a real,
+    # confidently-classified code stage 6 has no renderer for today.
     stage3b = {"entries": [
-        _entry("Postdoctoral Fellowship $26,000", taxonomy_code="N2", start=1),
-        _entry("Mentored Research Scholar Grant", taxonomy_code="N2", start=2),
+        _entry("Postdoctoral Fellowship $26,000", taxonomy_code="M4", start=1),
+        _entry("Mentored Research Scholar Grant", taxonomy_code="M4", start=2),
     ]}
     findings = lint_taxonomy_code_coverage(stage3b)
     assert len(findings) == 1
     assert findings[0]["severity"] == "WARN"
-    assert "N2" in findings[0]["message"]
+    assert "M4" in findings[0]["message"]
     assert "2 entries" in findings[0]["message"]
 
 

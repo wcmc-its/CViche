@@ -51,7 +51,14 @@ from docx.table import Table  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
 from unified_pipeline.stage6.formatting import DetachedAnchorError, _insert_after  # noqa: E402
-from unified_pipeline.stage6.sections.mentoring import MenteeRecord  # noqa: E402
+from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
+    MenteeRecord,
+    N1_HEADING,
+    N2_HEADING,
+    _program_leadership_line,
+    _training_grant_is_sparse,
+    _training_grant_rows,
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 MENTORING_LOGGER = 'unified_pipeline.stage6.sections.mentoring'
@@ -304,6 +311,227 @@ def test_mentoring_real_template_body_order():
     assert len(gen.doc.tables) == template_tables - 2 + 3
     assert gen.stats['tables_populated'] == 3
     assert gen.stats['entries_inserted'] == 5
+
+
+# --- N1/N2: pure builders (#529) -------------------------------------------------
+
+def test_program_leadership_line_full_fields_joined_with_dates():
+    fields = {'role': 'Director', 'program_name': 'Scholars Program',
+              'institution': 'Test University', 'start_date': '2019',
+              'end_date': '2022'}
+    assert _program_leadership_line(fields, 'raw text') == \
+        'Director, Scholars Program, Test University (2019-2022)'
+
+
+def test_program_leadership_line_degrades_role_only():
+    assert _program_leadership_line({'role': 'Director'}, 'raw text') == 'Director'
+
+
+def test_program_leadership_line_degrades_program_and_institution_only():
+    fields = {'program_name': 'Scholars Program', 'institution': 'Test University'}
+    assert _program_leadership_line(fields, 'raw text') == \
+        'Scholars Program, Test University'
+
+
+def test_program_leadership_line_degrades_dates_only():
+    fields = {'start_date': '2019', 'end_date': '2022'}
+    assert _program_leadership_line(fields, 'raw text') == '(2019-2022)'
+
+
+def test_program_leadership_line_all_five_keys_empty_falls_back_to_text():
+    assert _program_leadership_line({}, '  Directed a mentoring initiative.  ') == \
+        'Directed a mentoring initiative.'
+
+
+def test_program_leadership_line_none_values_are_safe():
+    fields = {'role': None, 'program_name': None, 'institution': None,
+              'start_date': None, 'end_date': None}
+    assert _program_leadership_line(fields, 'raw text') == 'raw text'
+    assert _program_leadership_line(fields, None) == ''
+
+
+def test_training_grant_rows_full_fields():
+    fields = {'agency': 'National Test Institute', 'grant_number': 'T32-999',
+              'role': 'Mentor', 'grant_title': 'Test Training Program',
+              'start_date': '2018', 'end_date': '2021'}
+    assert _training_grant_rows(fields) == [
+        ('Award Source (funding agency, type of grant):',
+         'National Test Institute (T32-999) (Mentor)'),
+        ('Project title:', 'Test Training Program'),
+        ('Duration of support (mm/yyyy-mm/yyyy):', '2018-2021'),
+    ]
+
+
+def test_training_grant_rows_grant_number_already_in_agency_is_not_repeated():
+    fields = {'agency': 'National Test Institute T32-999', 'grant_number': 'T32-999'}
+    assert _training_grant_rows(fields)[0] == (
+        'Award Source (funding agency, type of grant):',
+        'National Test Institute T32-999')
+
+
+def test_training_grant_rows_title_precedence_grant_title_then_title():
+    assert _training_grant_rows({'grant_title': 'A', 'title': 'B'})[1] == \
+        ('Project title:', 'A')
+    assert _training_grant_rows({'title': 'B'})[1] == ('Project title:', 'B')
+
+
+def test_training_grant_rows_none_values_are_safe():
+    fields = {'agency': None, 'grant_number': None, 'role': None,
+              'grant_title': None, 'title': None, 'start_date': None, 'end_date': None}
+    assert _training_grant_rows(fields) == [
+        ('Award Source (funding agency, type of grant):', ''),
+        ('Project title:', ''),
+        ('Duration of support (mm/yyyy-mm/yyyy):', ''),
+    ]
+
+
+def test_training_grant_is_sparse_true_when_no_identifying_field():
+    assert _training_grant_is_sparse({}) is True
+    assert _training_grant_is_sparse({'role': 'Mentor'}) is True
+
+
+def test_training_grant_is_sparse_false_when_any_identifying_field_present():
+    assert _training_grant_is_sparse({'grant_number': 'T32-1'}) is False
+    assert _training_grant_is_sparse({'agency': 'A'}) is False
+    assert _training_grant_is_sparse({'grant_title': 'A'}) is False
+
+
+# --- N1/N2: rendering into their template slots (#529) ---------------------------
+
+def _n1(**fields) -> dict:
+    text = fields.pop('text', 'N1 entry')
+    return {'taxonomy_code': 'N1', 'text': text, 'extracted_fields': fields}
+
+
+def _n2(**fields) -> dict:
+    text = fields.pop('text', 'N2 entry')
+    return {'taxonomy_code': 'N2', 'text': text, 'extracted_fields': fields}
+
+
+def test_n1_missing_anchor_falls_back_to_mentoring_header(caplog):
+    """Blank Document() with only MENTORING: warning emitted, the entry
+    still renders (as a fallback line), nothing raised (#529)."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+
+    with caplog.at_level(logging.WARNING, logger=MENTORING_LOGGER):
+        gen._fill_mentoring({'N1': [_n1(role='Director')]})
+
+    assert [w.getMessage() for w in _warnings(caplog, MENTORING_LOGGER)] == [
+        "Mentoring: 'Leadership and mentoring in programs (Describe "
+        "activity; include dates)' heading not found in template; "
+        "1 entries not rendered"]
+    assert _body_after(gen.doc, "MENTORING", 1) == [('p', 'Director')]
+
+
+def test_n2_missing_anchor_falls_back_to_mentoring_header(caplog):
+    """Same fallback shape as N1, for the table-shaped code (#529)."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+
+    with caplog.at_level(logging.WARNING, logger=MENTORING_LOGGER):
+        gen._fill_mentoring({'N2': [_n2(agency='National Test Institute')]})
+
+    assert [w.getMessage() for w in _warnings(caplog, MENTORING_LOGGER)] == [
+        "Mentoring: 'Institutional Training Grants and Mentored Trainee "
+        "Grants' heading not found in template; 1 entries not rendered"]
+    assert len(gen.doc.tables) == 1
+    assert gen.doc.tables[0].rows[0].cells[1].text == 'National Test Institute'
+
+
+def test_n1_real_template_three_lines_in_order_with_partial_fields():
+    """Real template: three N1 entries land after "Leadership and
+    mentoring in programs..." in input order, each degrading to whatever
+    fields it has (#529)."""
+    gen = _template_generator()
+    entries_by_code = {
+        'N1': [
+            _n1(role='Director'),
+            _n1(program_name='Scholars Program', institution='Test University'),
+            _n1(start_date='2019', end_date='2022'),
+        ],
+    }
+
+    gen._fill_mentoring(entries_by_code)
+
+    assert _body_after(gen.doc, N1_HEADING, 3) == [
+        ('p', 'Director'),
+        ('p', 'Scholars Program, Test University'),
+        ('p', '(2019-2022)'),
+    ]
+    assert gen.stats['entries_inserted'] == 3
+
+
+def test_n2_real_template_tables_in_order_placeholder_removed_sparse_as_line():
+    """Real template: two N2 entries -> placeholder table gone, two 3-row
+    tables after "Institutional Training Grants..." in input order with a
+    spacer between; a third, sparse entry renders as one plain line and
+    adds no table (#529)."""
+    gen = _template_generator()
+    template_tables = len(gen.doc.tables)
+    entries_by_code = {
+        'N2': [
+            _n2(grant_title='Test Training Program A', agency='National Test Institute',
+                grant_number='T32-100', role='Mentor', start_date='2018', end_date='2021'),
+            _n2(title='Test Training Program B', agency='Regional Test Foundation',
+                start_date='2020', end_date='2023'),
+            _n2(text='A sparse training-grant line with no identifying field.'),
+        ],
+    }
+
+    gen._fill_mentoring(entries_by_code)
+
+    n2_region = _body_after(gen.doc, N2_HEADING, 6)
+    assert n2_region[0] == ('tbl', 'National Test Institute (T32-100) (Mentor)')
+    assert n2_region[1] == ('p', '')
+    assert n2_region[2] == ('tbl', 'Regional Test Foundation')
+    assert n2_region[3] == ('p', '')
+    assert n2_region[4] == (
+        'p', 'A sparse training-grant line with no identifying field.')
+    assert n2_region[5][0] == 'p' and n2_region[5][1].startswith('Duplicate table below')
+    body = list(gen.doc.element.body)
+    n2_idx = next(i for i, el in enumerate(body) if el.tag == qn('w:p')
+                  and Paragraph(el, gen.doc).text.strip() == N2_HEADING)
+    table_a = Table(body[n2_idx + 1], gen.doc)
+    assert [row.cells[1].text for row in table_a.rows] == [
+        'National Test Institute (T32-100) (Mentor)', 'Test Training Program A', '2018-2021']
+    # One placeholder out, two grant tables in; the sparse entry built none.
+    assert len(gen.doc.tables) == template_tables - 1 + 2
+    assert gen.stats['tables_populated'] == 2
+    assert gen.stats['entries_inserted'] == 3
+
+
+def test_n1_n2_only_entries_still_render_when_no_n3_n4_content():
+    """N1/N2 must not depend on the N3/N4 partition being non-empty -- a CV
+    with ONLY N1/N2 content must not hit `_fill_mentoring`'s early return
+    for an empty mentee/outcome partition (#529)."""
+    gen = _template_generator()
+    gen._fill_mentoring({'N1': [_n1(role='Director')],
+                         'N2': [_n2(agency='National Test Institute')]})
+
+    assert _body_after(gen.doc, N1_HEADING, 1) == [('p', 'Director')]
+    assert _body_after(gen.doc, N2_HEADING, 1) == [('tbl', 'National Test Institute')]
+
+
+def test_mentoring_no_n1_n2_or_n3_n4_entries_leaves_the_region_byte_identical():
+    """No-op contract (#529): with nothing to render at all, the MENTORING
+    -> Mentees body region is untouched at the XML level, not just visually."""
+    from lxml import etree
+
+    def region(doc):
+        body = list(doc.element.body)
+        start = next(i for i, el in enumerate(body) if el.tag == qn('w:p')
+                     and Paragraph(el, doc).text.strip() == 'MENTORING')
+        end = next(i for i, el in enumerate(body) if el.tag == qn('w:p')
+                   and Paragraph(el, doc).text.strip() == 'Mentees')
+        return [etree.tostring(el) for el in body[start:end]]
+
+    gen = _template_generator()
+    before = region(gen.doc)
+
+    gen._fill_mentoring({})
+
+    assert region(gen.doc) == before
 
 
 # --- other education: template structure, three-column rendering -----------------
