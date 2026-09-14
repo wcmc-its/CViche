@@ -25,6 +25,7 @@ import re
 
 from unified_pipeline.stage6.normalization.pii import (
     CAT_DEA,
+    CAT_HOME_CONTACT,
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
     _MONTH_NAMES,
@@ -58,6 +59,53 @@ from ..shared import _finding, _output_section_header
 # characters, one short of the 9 this shape requires, so it never matches.
 _DEA_VALUE_RE = re.compile(r'\b[A-Za-z]{2}[A-Za-z0-9]{7}\b')
 _DEA_LABEL_PRESENT_RE = re.compile(r'\bdea\b', re.IGNORECASE)
+
+# The Personal Data table's own "Home address:" row is a static template
+# label too, unlike every OTHER row of this lint's full policy (DOB, SSN,
+# spouse, ... only ever appear because the SOURCE cv's free text used that
+# label -- the template itself never prints one). `_withhold_home_contact`
+# (personal_data.py) leaves the value cell EMPTY when there is nothing to
+# render, and `_pii_matches`' label span still matches the bare label with
+# nothing after it (a #442-shaped false positive discovered rendering the
+# 66-CV farm for this ticket: EVERY output fired once on the bare row).
+# Matched only against the merged fragment `_pii_matches` itself returns --
+# not a second scan -- so a genuine leak with real content after the label
+# is unaffected.
+_HOME_CONTACT_LABEL_ONLY_RE = re.compile(
+    r'^\s*home\s*(?:address|phone|telephone|tel\.?)\s*:\s*$', re.IGNORECASE)
+
+# The generic scan above is ALSO blind to a genuine home-address/phone leak
+# in the Personal Data TABLE specifically -- discovered on the same farm
+# render, not hypothetical: `read_docx_blocks` dumps a table row as
+# "<label>:\n<value>\n<label>: | <value>\n<next label>:\n...", and `\n` is
+# one of `_pii_matches`'s own hard fragment boundaries, so the label's span
+# stops before a value on the very next "line" ever becomes part of the
+# same fragment -- 0WT89A's real "510 East 86th Street..." matched nothing
+# at all under the generic scan alone, bare label exclusion or not. Scoped
+# to the Personal Data section (mirroring the DEA probe's Licensure scope)
+# and keyed off a digit rather than hand-listing every other row label
+# ("Cell phone:", "Work email:", ...) this table can put right after an
+# EMPTY home-address/phone row: a real address or phone value always
+# carries one (a street number, a zip, the phone digits themselves), the
+# next row's bare label never does.
+_HOME_CONTACT_LABEL_RE = re.compile(
+    r'home\s*(?:address|phone|telephone|tel\.?)\s*:', re.IGNORECASE)
+
+
+def _home_contact_value_leaked(block_text: str) -> bool:
+    for m in _HOME_CONTACT_LABEL_RE.finditer(block_text):
+        after = block_text[m.end():].split('\n')
+        same_line = after[0]
+        if same_line.strip():
+            # A value inline with its label on ONE "line" (no `\n` between
+            # them) is exactly what the generic scan above already
+            # matches as one merged fragment -- counting it here too
+            # would double the finding for the same leak.
+            continue
+        next_line = after[1] if len(after) > 1 else ''
+        if re.search(r'\d', next_line):
+            return True
+    return False
 
 # Section names (as `_output_section_header` normalizes them) whose blocks
 # get the full policy: the two places the pre-render pass applies it.
@@ -160,6 +208,10 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
         # the value into a Teams card. The bare-SSN and visa value shapes
         # are ALL_CODES policy rows, so they are found here in any section.
         for match in _pii_matches(stripped, _scan_scope(section)):
+            if (match.category == CAT_HOME_CONTACT
+                    and _HOME_CONTACT_LABEL_ONLY_RE.match(
+                        stripped[match.start:match.end])):
+                continue
             findings.append(_finding(
                 "protected_data_in_output", "ERROR",
                 f"protected personal data ({match.category}) found in {where} "
@@ -170,6 +222,12 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
                 findings.append(_finding(
                     "protected_data_in_output", "ERROR",
                     "a bare date found in the Personal Data block"))
+
+            if _home_contact_value_leaked(stripped):
+                findings.append(_finding(
+                    "protected_data_in_output", "ERROR",
+                    f"protected personal data ({CAT_HOME_CONTACT}) found in "
+                    f"{where} -- value withheld from this finding"))
 
         if (section == _LICENSURE_SECTION
                 and _DEA_LABEL_PRESENT_RE.search(stripped)):

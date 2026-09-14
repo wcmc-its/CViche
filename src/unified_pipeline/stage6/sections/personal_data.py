@@ -233,6 +233,37 @@ def _label_word_present(word: str, text: str, pii_fragments: list[str]) -> bool:
     return any(word in frag.lower() for frag in pii_fragments)
 
 
+def _withhold_home_contact(
+        withheld: list[WithheldItem], home_address: str | None,
+        home_phone: str | None) -> tuple[str | None, str | None]:
+    """(home_address, home_phone) with either withheld to None (#821),
+    recorded on `withheld` -- the SAME list the document-wide notice
+    paragraph and Word comment are built from.
+
+    Unconditional, not a re-check against a PII fragment: `home_address`
+    can already have arrived with no text label to match at all -- a
+    structured `address: {home_address: ..., office_address: ...}` dict is
+    routed by its own key names (`_labels_its_own_address_slots`), not by
+    reading the entry's text -- so the #821 policy row in `pii.py` (which
+    still closes the Appendix leak for a home-phone-only unconsumed
+    orphan, since the template has no home-phone row at all for it to
+    reach otherwise) cannot be the only guard on these two destinations.
+    `home_phone` never reaches a template cell either way -- this makes
+    that a recorded policy fact instead of an accident. Office
+    address/phone are unaffected; lifted out of `_fill_personal_data` as a
+    pure move (§3.2) so its own length does not carry this block.
+    """
+    if home_address:
+        withheld.append(
+            WithheldItem(CAT_HOME_CONTACT, _PERSONAL_DATA_SECTION_LABEL, None))
+        home_address = None
+    if home_phone:
+        withheld.append(
+            WithheldItem(CAT_HOME_CONTACT, _PERSONAL_DATA_SECTION_LABEL, None))
+        home_phone = None
+    return home_address, home_phone
+
+
 def _withhold_recovered(value: str | None, source_text: str,
                         withheld: list[WithheldItem]) -> str | None:
     """`value`, unless it was lifted out of a protected-data fragment of
@@ -570,31 +601,7 @@ class PersonalDataSection:
             today = datetime.now().strftime("%B %-d, %Y")  # e.g., "February 1, 2026"
             run = para.add_run(f"Date of preparation: {today}")
             _set_font(run)
-
-        # #821: a home address or home phone is withheld with notice,
-        # UNCONDITIONALLY -- not by re-checking `home_address`/`home_phone`
-        # against a PII fragment. Both values can already have arrived with
-        # no text label to match at all (a structured `address: {home_
-        # address: ..., office_address: ...}` dict, routed by its own key
-        # names in the per-entry loop above, `_labels_its_own_address_
-        # slots`) -- the #821 policy row in `pii.py` still closes the
-        # Appendix leak for a home-phone-only unconsumed orphan (there is
-        # no home-phone table row at all, so before this row such an entry
-        # reached the Appendix as raw text), but cannot be the only guard
-        # on these two destinations. Office address/phone are unaffected.
-        if home_address:
-            self._pii_result.withheld.append(
-                WithheldItem(CAT_HOME_CONTACT, _PERSONAL_DATA_SECTION_LABEL, None))
-            home_address = None
-        if home_phone:
-            # Never reaches a template row (there is no home-phone cell),
-            # so nothing here changes what renders -- this turns that
-            # silence into a recorded policy fact instead of an accident,
-            # per #821.
-            self._pii_result.withheld.append(
-                WithheldItem(CAT_HOME_CONTACT, _PERSONAL_DATA_SECTION_LABEL, None))
-            home_phone = None
-
+        home_address, home_phone = _withhold_home_contact(self._pii_result.withheld, home_address, home_phone)  # #821
         # Fill email, phone, and address in the PERSONAL DATA table (Table 1).
         # Lifted out to `_write_personal_data_table_cells` (#820 R3, pure
         # move -- §3.2) so this function's own length does not carry it.
