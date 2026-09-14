@@ -676,6 +676,22 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         if removed and self.verbose:
             print(f"Removed {removed} WCM-template instruction box(es)")
 
+    def _load_cv_owner_location_from_stage4(self, document_uid: str, cv_owner_location: dict[str, Any]) -> dict[str, Any]:
+        stage4_dir = Path(__file__).parent / "outputs" / "stage_4_field_extraction"
+        stage4_candidates = list(stage4_dir.glob(f"*{document_uid}*_fields.json"))
+        if stage4_candidates:
+            try:
+                with open(stage4_candidates[0], 'r') as f:
+                    stage4_data = json.load(f)
+                cv_owner_location = stage4_data.get('cv_owner_location', {})
+                if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
+                    print(f"Loaded cv_owner_location from Stage 4 output")
+            except Exception as e:
+                # Non-fatal: geographic-scope classification just falls back to its default. Still say so -- a permission error or a truncated stage-4 JSON should not vanish without a trace.
+                if self.verbose:
+                    print(f"  Warning: Could not load cv_owner_location from Stage 4: {e}")
+        return cv_owner_location
+
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
                  original_doc_path: str = None) -> str:
         """
@@ -704,21 +720,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         # If cv_owner_location not in input file, try to load from Stage 4 output
         if not cv_owner_location or not cv_owner_location.get('inference_success'):
-            stage4_dir = Path(__file__).parent / "outputs" / "stage_4_field_extraction"
-            stage4_candidates = list(stage4_dir.glob(f"*{document_uid}*_fields.json"))
-            if stage4_candidates:
-                try:
-                    with open(stage4_candidates[0], 'r') as f:
-                        stage4_data = json.load(f)
-                    cv_owner_location = stage4_data.get('cv_owner_location', {})
-                    if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
-                        print(f"Loaded cv_owner_location from Stage 4 output")
-                except Exception as e:
-                    # Non-fatal: geographic-scope classification just falls back
-                    # to its default. Still say so -- a permission error or a
-                    # truncated stage-4 JSON should not vanish without a trace.
-                    if self.verbose:
-                        print(f"  Warning: Could not load cv_owner_location from Stage 4: {e}")
+            cv_owner_location = self._load_cv_owner_location_from_stage4(document_uid, cv_owner_location)
 
         # Store location context for geographic scope classification
         self.cv_owner_location = cv_owner_location if cv_owner_location and cv_owner_location.get('inference_success') else None
