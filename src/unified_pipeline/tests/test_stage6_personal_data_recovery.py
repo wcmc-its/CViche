@@ -40,7 +40,10 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage6.normalization.pii import SCOPE_ALL_CODES  # noqa: E402
+from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
+    SCOPE_ALL_CODES,
+    _PII_FIELD_KEY_RE,
+)
 from unified_pipeline.stage6.pii_pass import (  # noqa: E402
     WITHHELD_COMMENT_AUTHOR,
     WITHHELD_COMMENT_HEADER,
@@ -48,7 +51,6 @@ from unified_pipeline.stage6.pii_pass import (  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     PII_REDACTED_NOTICE,
     WCMTemplateGenerator,
-    _PII_FIELD_KEY_RE,
     _pii_fragments,
 )
 
@@ -363,6 +365,37 @@ def test_withheld_notice_carries_one_word_comment_listing_categories(tmp_path):
     assert "01/02/1970" not in body and "O-1" not in body, "a withheld value re-leaked into the comment"
 
 
+def test_the_comment_element_splits_one_w_p_per_line(tmp_path):
+    """`_create_comments_xml` must emit one <w:p> per line of the comment
+    text, not join every line into a single paragraph's <w:t> -- Word
+    collapses an embedded newline inside one <w:t> to a space, running the
+    header, every bullet and the footer together on one line (#820 R3
+    finding 2). The round-trip helper `_comments()` re-groups text by
+    whatever <w:p> boundaries already exist, so it reads a single paragraph
+    holding embedded '\\n' characters identically to one <w:p> per line and
+    cannot tell them apart -- this test reads the raw <w:p> COUNT instead."""
+    text = _render(tmp_path, [
+        _entry("Date of Birth: 01/02/1970", "A"),
+        _entry("Visa Status: O-1", "T"),
+    ], emit_comments=False)
+    assert PII_REDACTED_NOTICE in text
+    with zipfile.ZipFile(tmp_path / "out.docx") as z:
+        root = ET.fromstring(z.read("word/comments.xml"))
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    comments = root.findall(f"{W}comment")
+    assert len(comments) == 1, comments
+    paragraphs = comments[0].findall(f"{W}p")
+    # header line + one bullet per category (date of birth, visa) + footer.
+    expected = 1 + 2 + 1
+    assert len(paragraphs) == expected, [
+        "".join(t.text or "" for t in p.iter(f"{W}t")) for p in paragraphs]
+    # And every <w:p> holds exactly one line's worth of text -- no line was
+    # merged into its neighbor.
+    for p in paragraphs:
+        line_text = "".join(t.text or "" for t in p.iter(f"{W}t"))
+        assert "\n" not in line_text
+
+
 def test_withheld_comment_is_anchored_on_the_notice_paragraph(tmp_path):
     _render(tmp_path, [_entry("Date of Birth: 01/02/1970", "A")], emit_comments=False)
     doc = Document(str(tmp_path / "out.docx"))
@@ -390,6 +423,29 @@ def test_withheld_comment_is_the_only_comment_even_with_classification_comments_
     notice = [p for p in doc.paragraphs if PII_REDACTED_NOTICE in p.text]
     assert len(notice) == 1
     assert len(notice[0]._p.findall(f"{W}commentRangeStart")) == 1
+
+
+def test_notice_and_comment_still_emitted_with_recovery_disabled(tmp_path):
+    """#820 R3 finding 3: `recover_unrendered_records=False` must disable
+    ONLY the #221 record-line recovery -- never the withheld notice and its
+    Word comment. The pass has already stripped the PII from the entry text
+    either way; before this fix both were built inside
+    `_recover_unrendered_records`, gated behind
+    `if not self.recover_unrendered_records: return`, so setting the flag
+    False silently suppressed the reader's only indication that something
+    was withheld -- a second, silent loss stacked on top of the first."""
+    text = _render(tmp_path, [
+        _entry("SSN: 123-45-6789", "A"),
+    ], recover_unrendered_records=False)
+    assert "123-45-6789" not in text, "an SSN reached the rendered document"
+    assert PII_REDACTED_NOTICE in text, (
+        "the withheld notice was suppressed by an unrelated recovery flag")
+    comments = _comments(tmp_path / "out.docx")
+    assert len(comments) == 1, comments
+    author, body = comments[0]
+    assert author == WITHHELD_COMMENT_AUTHOR
+    assert "social security number" in body.lower()
+    assert "123-45-6789" not in body
 
 
 # --------------------------------------------------------------------------
