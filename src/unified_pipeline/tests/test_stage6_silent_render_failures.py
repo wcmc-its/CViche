@@ -495,6 +495,30 @@ def test_n1_real_template_three_lines_in_order_text_verbatim_and_fallback():
     assert gen.stats['entries_inserted'] == 3
 
 
+def test_n1_entry_with_empty_text_and_no_fields_inserts_no_blank_line():
+    """An N1 entry with nothing to say -- empty `text`, no populated fields --
+    must not become a blank paragraph under the heading (#529 round 3). The
+    `if line:` guard in `_fill_program_leadership` is what keeps it out; the
+    two real entries around it still render, in order, and the counter only
+    counts what was written."""
+    gen = _template_generator()
+    entries_by_code = {
+        'N1': [
+            _n1(text='First real line.'),
+            _n1(text='', role='', program_name=None),
+            _n1(text='Second real line.'),
+        ],
+    }
+
+    gen._fill_mentoring(entries_by_code)
+
+    assert _body_after(gen.doc, N1_HEADING, 2) == [
+        ('p', 'First real line.'),
+        ('p', 'Second real line.'),
+    ]
+    assert gen.stats['entries_inserted'] == 2
+
+
 def test_n2_real_template_tables_in_order_placeholder_removed_sparse_as_line():
     """Real template: two N2 entries -> placeholder table gone, two 3-row
     tables land AFTER the instruction paragraph ("Duplicate table below
