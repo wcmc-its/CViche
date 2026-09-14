@@ -63,7 +63,7 @@ what that guard checks.
 """
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -263,7 +263,33 @@ def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
     return None
 
 
-def _resolve_licensure(entries: Sequence[Mapping[str, Any]]) -> LicensureResult:
+def _strip_dea_lines(text: str) -> str:
+    """Remove only the DEA label/value line(s) of a (possibly fused) F1
+    entry's raw text, keeping every other line intact (#821 R2 F4).
+
+    `_resolve_licensure` used to blank a DEA-classified entry's `text`
+    entirely; that also erased any real state-licence record lines fused
+    into the SAME entry (one entry, classified once, by label or shape
+    anywhere in its text -- see `_classify_licensure_entry`), which took
+    them out of reach of `generate()`'s #221 post-render recovery pass too,
+    since that pass reads `entry['text']` directly. A line is stripped when
+    it names DEA (`_DEA_LABEL_RE`) or carries a DEA-shaped token
+    (`_DEA_SHAPE_RE`, matched per alphanumeric token so it cannot also
+    consume a same-length state licence number sitting on the SAME line as
+    unrelated content)."""
+    kept = []
+    for line in str(text or '').split('\n'):
+        if _DEA_LABEL_RE.search(line):
+            continue
+        if any(_DEA_SHAPE_RE.match(tok)
+               for tok in re.findall(r'[A-Za-z0-9]+', line)):
+            continue
+        kept.append(line)
+    return '\n'.join(kept)
+
+
+def _resolve_licensure(
+        entries: Sequence[MutableMapping[str, Any]]) -> LicensureResult:
     """Decide the whole of section F1 without touching a document.
 
     Sorts, normalizes, classifies, routes each entry to the licence table or
@@ -282,19 +308,23 @@ def _resolve_licensure(entries: Sequence[Mapping[str, Any]]) -> LicensureResult:
     keep-first-and-warn dedup does not apply to DEA any more: nothing is
     ever claimed, so there is nothing to conflict.
 
-    A DEA-classified `raw` entry's OWN `text` is blanked in place, the one
-    exception to "no side effects" this function has: `generate()`'s #221
-    post-render recovery (`_recover_unrendered_records`) re-scans every
-    entry's raw text line by line afterwards and re-inserts any line it
-    cannot verify rendered, reading `entry['text']` directly rather than
-    this section's own output -- exactly the class of leak
-    `stage6/pii_pass.py` closes for every OTHER category by mutating
-    `entry['text']` in place before anything downstream can read it (see
-    that module's docstring). A single-line DEA entry never reaches that
-    recovery pass at all (it requires >= 2 fused record lines), but a DEA
-    number fused into a multi-line F1 entry alongside a real licence line
-    does, so the same mutation is applied here too, at the only point
-    that knows an entry was classified as DEA.
+    A DEA-classified `raw` entry's `text` has its DEA line(s) stripped
+    (`_strip_dea_lines`) in place, the one exception to "no side effects"
+    this function has: `generate()`'s #221 post-render recovery
+    (`_recover_unrendered_records`) re-scans every entry's raw text line by
+    line afterwards and re-inserts any line it cannot verify rendered,
+    reading `entry['text']` directly rather than this section's own output
+    -- exactly the class of leak `stage6/pii_pass.py` closes for every OTHER
+    category by mutating `entry['text']` in place before anything downstream
+    can read it (see that module's docstring). A single-line DEA entry never
+    reaches that recovery pass at all (it requires >= 2 fused record lines
+    to even be considered), but a DEA number fused into a multi-line F1
+    entry alongside real licence lines does, so the DEA content is stripped
+    here too, at the only point that knows an entry was classified as
+    DEA -- narrowly, so the fused licence lines survive for that pass to
+    find, rather than being discarded along with the DEA line (#821 R2 F4:
+    a whole-text blank silently dropped a fused entry's real licence lines
+    from #221 recovery).
     """
     npi_number: str | None = None
     dea_withheld = False
@@ -313,7 +343,7 @@ def _resolve_licensure(entries: Sequence[Mapping[str, Any]]) -> LicensureResult:
             continue
         if kind == KIND_DEA:
             dea_withheld = True
-            raw['text'] = ''
+            raw['text'] = _strip_dea_lines(entry.original_text)
             continue
 
         record = _license_record(entry)

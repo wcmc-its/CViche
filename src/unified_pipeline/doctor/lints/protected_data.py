@@ -80,8 +80,9 @@ _HOME_CONTACT_LABEL_ONLY_RE = re.compile(
 # "<label>:\n<value>\n<label>: | <value>\n<next label>:\n...", and `\n` is
 # one of `_pii_matches`'s own hard fragment boundaries, so the label's span
 # stops before a value on the very next "line" ever becomes part of the
-# same fragment -- 0WT89A's real "510 East 86th Street..." matched nothing
-# at all under the generic scan alone, bare label exclusion or not. Scoped
+# same fragment -- a farm uid's real street-address value (a street number
+# followed by a street name) matched nothing at all under the generic scan
+# alone, bare label exclusion or not. Scoped
 # to the Personal Data section (mirroring the DEA probe's Licensure scope)
 # and keyed off a digit rather than hand-listing every other row label
 # ("Cell phone:", "Work email:", ...) this table can put right after an
@@ -113,7 +114,22 @@ _PERSONAL_DATA_SECTION = "personal data"
 _APPENDIX_SECTION = "appendix"
 #: #821's own probe (see `_DEA_VALUE_RE` above) -- not part of the FULL
 #: policy pair above, since the label itself must stay unflagged there.
+#: Matched by PREFIX (`_is_licensure_section` below), not `==`: the real
+#: WCM template's own header normalizes to "licensure, board certification"
+#: (`wcm_template_scaffold_strings.json`), not the bare word alone -- an
+#: exact-match probe (round-1 #821-R2) never fired on any real render, only
+#: on the unit tests' fabricated `_p("LICENSURE")` header (F2).
 _LICENSURE_SECTION = "licensure"
+
+
+def _is_licensure_section(section: str | None) -> bool:
+    """True for the Licensure section under either header shape: the bare
+    word (tests, and any narrower template revision) or the real template's
+    combined "licensure, board certification" (`_norm`'s own whitespace/
+    case folding is already done by `_block_sections` -- this only adds the
+    prefix)."""
+    return section is not None and section.startswith(_LICENSURE_SECTION)
+
 
 _SECTION_PERSONAL_DATA_TABLE = "Personal Data table"
 _SECTION_APPENDIX = "Appendix"
@@ -229,7 +245,7 @@ def lint_protected_data_in_output(blocks: list[tuple[str, str]]) -> list[dict]:
                     f"protected personal data ({CAT_HOME_CONTACT}) found in "
                     f"{where} -- value withheld from this finding"))
 
-        if (section == _LICENSURE_SECTION
+        if (_is_licensure_section(section)
                 and _DEA_LABEL_PRESENT_RE.search(stripped)):
             for _match in _DEA_VALUE_RE.finditer(stripped):
                 findings.append(_finding(

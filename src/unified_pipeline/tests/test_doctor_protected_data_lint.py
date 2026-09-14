@@ -23,6 +23,7 @@ from docx import Document  # noqa: E402
 from unified_pipeline.doctor.lints.protected_data import (  # noqa: E402
     lint_protected_data_in_output,
 )
+from unified_pipeline.doctor.shared import docx_body_blocks  # noqa: E402
 from unified_pipeline.quality_score import (  # noqa: E402
     CAP_ONLY_GATES,
     DIMENSIONS,
@@ -34,6 +35,7 @@ from unified_pipeline.quality_score import (  # noqa: E402
 from unified_pipeline.run_doctor import read_docx_blocks, run_doctor  # noqa: E402
 from unified_pipeline.stage6.pii_pass import PII_REDACTED_NOTICE, withheld_comment_text  # noqa: E402
 from unified_pipeline.stage6.normalization.pii import WithheldItem  # noqa: E402
+from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 
 def _p(text: str) -> tuple[str, str]:
@@ -171,6 +173,65 @@ def test_a_state_licence_number_of_the_same_shape_is_not_flagged():
     positive on a coincidentally DEA-shaped licence number."""
     blocks = [_p("LICENSURE"), _t("New York\tAB1234567\t03/2019\t03/2021")]
     assert lint_protected_data_in_output(blocks) == []
+
+
+def test_a_real_dea_value_reaching_the_real_templates_licensure_section_is_flagged():
+    """#821 R2 F2 regression guard: an exact `section == "licensure"` probe
+    never fired on any real render -- the bundled WCM template's own header
+    paragraph is "LICENSURE, BOARD CERTIFICATION", which `_output_section_
+    header`/`_norm` fold to "licensure, board certification", not the bare
+    word the OTHER test above's fabricated `_p("LICENSURE")` fixture uses.
+    Drives the real template through `_fill_licensure`, the same pattern
+    `test_stage6_licensure_render.py` uses, so a future header-wording
+    change breaks THIS test instead of shipping the probe dead again.
+
+    `_fill_licensure` withholds the DEA number (#821), so the value is
+    hand-edited back into the slot afterward -- the same regression
+    `doctor_one.py`, run over a hand-edited farm docx, proved this probe
+    must catch."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_licensure([
+        {"taxonomy_code": "F1", "text": "DEA registration AB1234567",
+         "extracted_fields": {"license_number": "AB1234567"}},
+    ])
+    dea_npi_table = None
+    for table in gen.doc.tables:
+        for row in table.rows:
+            if 'dea number' in row.cells[0].text.lower():
+                dea_npi_table = table
+                break
+        if dea_npi_table:
+            break
+    assert dea_npi_table is not None, "template's DEA/NPI table not found"
+    for row in dea_npi_table.rows:
+        if 'dea number' in row.cells[0].text.lower():
+            row.cells[1].text = "AB1234567"
+
+    findings = lint_protected_data_in_output(docx_body_blocks(gen.doc))
+    dea_findings = [f for f in findings if "(DEA number)" in f["message"]]
+    # `_table_lines` (doctor/shared.py) emits BOTH the per-cell line and,
+    # for any row with more than one non-empty cell, a second "label |
+    # value" joined line -- a real leaked value in a two-cell row is always
+    # seen twice, the same duplication the ticket's own doctor_one.py probe
+    # observed for the pre-existing home-address finding (2 findings for
+    # one real leak). Not `>= 1`: pin the exact count so a change to that
+    # duplication (or to this probe) is visible here.
+    assert len(dea_findings) == 2
+    assert all("AB1234567" not in f["message"] for f in dea_findings)
+
+
+def test_the_real_templates_licensure_section_is_not_flagged_when_dea_is_withheld():
+    """Negative control / #821 policy proof on the SAME real template: DEA
+    withheld exactly as `_fill_licensure` leaves it (empty slot, no value
+    written) fires no finding at all."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen.doc = Document(gen.template_path)
+    gen._fill_licensure([
+        {"taxonomy_code": "F1", "text": "DEA registration AB1234567",
+         "extracted_fields": {"license_number": "AB1234567"}},
+    ])
+    assert lint_protected_data_in_output(docx_body_blocks(gen.doc)) == []
 
 
 # --------------------------------------------------------------------------

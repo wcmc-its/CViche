@@ -120,12 +120,26 @@ def test_resolve_licensure_dea_withheld_flag_and_text_mutation():
 # ---------------------------------------------------------------------------
 
 def test_221_recovery_does_not_reinsert_a_fused_dea_line():
+    """#821 R2 F4: `_resolve_licensure` now strips only the DEA line(s) out
+    of a DEA-classified entry's raw text (`_strip_dea_lines`), not the
+    whole entry -- so a fused F1 entry's real state-licence lines stay
+    available to the #221 recovery pass (`_recover_unrendered_records`,
+    which reads `entry['text']` directly). Both licence lines are
+    record-shaped per `_record_lines` (>60 chars, pipe-delimited),
+    dated, and name a state and a licence number, so they actually clear
+    `UNRENDERED_MIN_RECORD_LINES` and get scanned -- round 1's version of
+    this test used two short prose lines that never did (verifier F4: the
+    test passed on the mutant that removed the blank because neither line
+    was ever a candidate for recovery in the first place). Asserts BOTH
+    halves of the fix: the licence lines ARE recovered, and no DEA-shaped
+    token reaches the document either way."""
     gen = _generator()
     entry = {
         "taxonomy_code": "F1",
         "text": "\n".join([
             "DEA registration AB1234567",
-            "Renewal note filed in 2024 with reference 99118",
+            "State of New Jersey | License 887744 | Issued 05/2016 | Expires 05/2026",
+            "Commonwealth of Vermont | Medical Certificate 224466 | Granted 09/2017 | Renewal due 09/2027",
         ]),
         "extracted_fields": {"license_number": "AB1234567"},
     }
@@ -134,5 +148,41 @@ def test_221_recovery_does_not_reinsert_a_fused_dea_line():
     gen._recover_unrendered_records({"F1": [entry]})
 
     texts = [p.text for p in gen.doc.paragraphs]
-    assert not any("AB1234567" in t for t in texts)
-    assert not any("99118" in t for t in texts)
+    joined = "\n".join(texts)
+    assert "887744" in joined, "the New Jersey licence line was not recovered"
+    assert "224466" in joined, "the Vermont licence line was not recovered"
+    assert not any("AB1234567" in t for t in texts), \
+        "the DEA number leaked into the document"
+
+
+def test_221_recovery_does_not_reinsert_a_record_shaped_dea_line():
+    """Negative case `_strip_dea_lines` exists for: a DEA line that is
+    ITSELF record-shaped (long, pipe-delimited, dated -- exactly what
+    `_record_lines` looks for) would be picked up and re-inserted verbatim
+    by the #221 recovery pass if it reached `entry['text']` unstripped --
+    the precise leak the round-1 verifier's g7 mutant (the blank/strip
+    call removed) produced. Two non-DEA sibling licence lines keep the
+    entry at 3 record-shaped lines before the strip (>= 2 after it), so the
+    entry is not skipped by the `UNRENDERED_MIN_RECORD_LINES` gate either
+    way -- this fixture actually exercises the strip rather than being
+    saved by the entry being too short to scan at all."""
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "F1",
+        "text": "\n".join([
+            "DEA Number AB1234567 | Schedule II | Issued 03/2015 | Expires 03/2018",
+            "State of Connecticut | License 335577 | Issued 01/2018 | Expires 01/2028",
+            "Commonwealth of Massachusetts | Certificate 446688 | Granted 02/2019 | Renewal due 02/2029",
+        ]),
+        "extracted_fields": {"license_number": "AB1234567"},
+    }
+
+    gen._fill_licensure([entry])
+    gen._recover_unrendered_records({"F1": [entry]})
+
+    texts = [p.text for p in gen.doc.paragraphs]
+    joined = "\n".join(texts)
+    assert not any("AB1234567" in t for t in texts), \
+        "the record-shaped DEA line leaked into the document"
+    assert "335577" in joined, "the Connecticut licence line was not recovered"
+    assert "446688" in joined, "the Massachusetts licence line was not recovered"
