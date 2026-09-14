@@ -12,6 +12,7 @@ at the module attribute -- no Bedrock/OpenAI, no real .docx parsing.
 Synthetic names only.
 """
 
+import io
 import json
 import sys
 from pathlib import Path
@@ -21,6 +22,8 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 import unified_pipeline.stage4.owner_name as owner_name  # noqa: E402
+import unified_pipeline.stage4.extraction as extraction  # noqa: E402
+import unified_pipeline.stage_4_field_extractor as stage_4_field_extractor  # noqa: E402
 
 
 def _llm_result(content, total_tokens=10, cost=0.001):
@@ -250,3 +253,139 @@ def test_side_channel_line_and_char_caps_are_enforced(monkeypatch, tmp_path):
     # the long_line occupies one slot, leaving MAX_LINES - 1 of many_lines.
     included = sum(1 for marker in many_lines if marker in prompt_text)
     assert included == owner_name.OWNER_SIDE_CHANNEL_MAX_LINES - 1
+
+
+# ---------------------------------------------------------------------------
+# #456-R2 F3, mutant m5: sdt/header/footer lines must ALL reach the prompt,
+# in that order -- not just whichever channel happened to be tested alone
+# above. `combined = channel['sdt_lines']` (dropping header/footer) survived
+# the full suite before this test existed.
+# ---------------------------------------------------------------------------
+
+def test_side_channel_combines_sdt_header_and_footer_lines_in_order(monkeypatch, tmp_path):
+    prompts = []
+
+    def fake_call_llm(**kwargs):
+        prompts.append(kwargs["messages"][-1]["content"])
+        return _llm_result(_name_reply())
+
+    monkeypatch.setattr(owner_name, "call_llm", fake_call_llm)
+    monkeypatch.setattr(
+        owner_name, "extract_owner_side_channel",
+        lambda p: {
+            "sdt_lines": ["SDTMARK Owner"],
+            "header_lines": ["HDRMARK Owner"],
+            "footer_lines": ["FTRMARK Owner"],
+        },
+    )
+
+    owner_name.extract_cv_owner_name("web997", [], docx_path=_touch(tmp_path))
+
+    assert len(prompts) == 1
+    prompt_text = prompts[0]
+    assert "SDTMARK Owner" in prompt_text
+    assert "HDRMARK Owner" in prompt_text
+    assert "FTRMARK Owner" in prompt_text
+    # sdt -> header -> footer is the contract order (extract_owner_side_channel's
+    # docstring, `_owner_side_channel_content_lines`).
+    assert (
+        prompt_text.index("SDTMARK Owner")
+        < prompt_text.index("HDRMARK Owner")
+        < prompt_text.index("FTRMARK Owner")
+    )
+
+
+# ---------------------------------------------------------------------------
+# #456-R2 F3, mutants m7a/m7b: `docx_path` must reach `extract_cv_owner_name`
+# across BOTH hops of the wire -- process_cv -> extract_fields_from_mapped_
+# entries (m7a) and extract_fields_from_mapped_entries -> extract_cv_owner_
+# name (m7b). Either kwarg silently dropped left the full 3257-test suite
+# green before these two tests existed.
+# ---------------------------------------------------------------------------
+
+def test_extraction_passes_docx_path_to_extract_cv_owner_name(monkeypatch):
+    """m7b: extract_fields_from_mapped_entries -> extract_cv_owner_name."""
+    captured = {}
+
+    def fake_owner_name(document_uid, mapped_entries, docx_path=None):
+        captured["docx_path"] = docx_path
+        return {
+            "first_name": "", "middle_name": "", "last_name": "",
+            "suffix": "", "full_name": "", "full_name_with_credentials": "",
+        }
+
+    monkeypatch.setattr(extraction, "extract_cv_owner_name", fake_owner_name)
+    monkeypatch.setattr(extraction, "extract_fields_batch", lambda *a, **k: (_ for _ in ()).throw(
+        AssertionError("no entries -- extract_fields_batch must not be called")
+    ))
+
+    extraction.extract_fields_from_mapped_entries(
+        [], document_uid="web996", docx_path="/synthetic/path/web996.docx",
+    )
+
+    assert captured["docx_path"] == "/synthetic/path/web996.docx"
+
+
+def test_process_cv_passes_its_docx_path_to_extract_fields_from_mapped_entries(monkeypatch, tmp_path):
+    """m7a: process_cv -> extract_fields_from_mapped_entries.
+
+    The stage-3b JSON lookup is stubbed (a synthetic, empty entries payload)
+    so this test needs no real corpus file: `Path.exists` is patched to
+    report True only for the one expected stage-3b path (delegating to the
+    real implementation for every other path, tmp_path's own files
+    included), and this module's bare `open` name is shadowed (module-level
+    only -- never touches the `open` builtin other modules see) to hand back
+    that synthetic payload for that one path.
+    """
+    cv_path = str(tmp_path / "synthetic_cv.docx")
+    Path(cv_path).write_bytes(b"not a real docx; process_cv never opens this file itself")
+    document_uid = Path(cv_path).stem
+
+    expected_stage3b = (
+        Path(stage_4_field_extractor.__file__).parent
+        / "outputs" / "stage_3b_classified_entries" / f"{document_uid}_classified.json"
+    )
+    expected_output_dir = Path(stage_4_field_extractor.__file__).parent / "outputs" / "stage_4_field_extraction"
+    expected_output_path = expected_output_dir / f"{document_uid}_fields.json"
+
+    real_exists = Path.exists
+    real_mkdir = Path.mkdir
+
+    def fake_exists(self):
+        if self == expected_stage3b:
+            return True
+        return real_exists(self)
+
+    def fake_mkdir(self, *args, **kwargs):
+        # process_cv unconditionally mkdir's its real output dir -- never
+        # actually touch the repo's real outputs/ tree from a test.
+        if self == expected_output_dir:
+            return None
+        return real_mkdir(self, *args, **kwargs)
+
+    def fake_open(path, mode="r", *args, **kwargs):
+        p = Path(path)
+        if p == expected_stage3b:
+            return io.StringIO(json.dumps({"entries": []}))
+        if p == expected_output_path:
+            return io.StringIO()  # process_cv's own output write, discarded
+        raise AssertionError(f"unexpected open() inside process_cv test: {path}")
+
+    captured = {}
+
+    def fake_extract(mapped_entries, **kwargs):
+        captured["docx_path"] = kwargs.get("docx_path")
+        return {
+            "entries": [], "cv_owner": {}, "cv_owner_location": {},
+            "total_cost": 0.0, "total_tokens": 0,
+            "stats": {"extracted": 0, "skipped": 0},
+        }
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+    monkeypatch.setattr(Path, "mkdir", fake_mkdir)
+    monkeypatch.setattr(stage_4_field_extractor, "open", fake_open, raising=False)
+    monkeypatch.setattr(stage_4_field_extractor, "extract_fields_from_mapped_entries", fake_extract)
+
+    stage_4_field_extractor.process_cv(cv_path)
+
+    assert captured["docx_path"] == cv_path
