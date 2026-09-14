@@ -135,6 +135,93 @@ class UnmappedEntry(TypedDict, total=False):
 AppendixLine = tuple[UnmappedEntry, str]
 
 
+# Why a taxonomy code's entries were diverted to the Appendix (#531). Named
+# constants rather than inline strings because they are a comparison target
+# for `_appendix_diversion_reason` and, once emitted, a re-emission key for
+# the doctor -- a typo in one spelling and the other would silently create a
+# third, undocumented reason.
+REASON_NO_RENDER_ROUTE = "no_render_route"
+REASON_RENDERER_DECLINED = "renderer_declined"
+
+# Human-readable text for each reason, used only inside `message` -- the
+# `reason` field itself stays the stable machine key above. Only M1 produces
+# REASON_RENDERER_DECLINED today (the discard in `generate()` when no
+# research summary rendered); if a second renderer-declined case is ever
+# added, this needs a per-code (not per-reason) message instead of a shared
+# string.
+_REASON_TEXT = {
+    REASON_NO_RENDER_ROUTE: "no stage 6 section is routed to render this taxonomy code",
+    REASON_RENDERER_DECLINED: "no research summary rendered",
+}
+
+
+class AppendixDiversionWarning(TypedDict):
+    """One `_validate_output`-shaped warning naming a taxonomy code's
+    Appendix diversion (#531) -- same `check`/`section`/`message`/`evidence`
+    keys the three existing sidecar checks use
+    (`stage_6_word_template.py:_validate_output`), plus the two structured
+    keys `lint_stage6_warnings` cannot recover from `message` alone: `code`
+    and `count`. `evidence` is always `[]` by design -- this check reports a
+    count, never entry text (PII surface; the Appendix itself already
+    carries the text)."""
+
+    check: str
+    code: str
+    section: str
+    count: int
+    reason: str
+    message: str
+    evidence: list[str]
+
+
+def _appendix_diversion_reason(code: str, render_routed_codes: frozenset[str]) -> str:
+    """Which of the two ways *code*'s entries ended up diverted to the
+    Appendix. *render_routed_codes* is `RENDER_ROUTED_CODES`
+    (`stage_6_word_template.py`) -- the AUTHORITATIVE routed-code set, not
+    the per-call `mapped_codes` copy `generate()` mutates (the M1 discard).
+    A code absent from `render_routed_codes` never had a renderer at all
+    (`REASON_NO_RENDER_ROUTE`); a code present in it still reached the
+    Appendix only because this run's `mapped_codes` copy discarded it
+    (`REASON_RENDERER_DECLINED`) -- passed the frozenset rather than the
+    discard reason itself because today there is exactly one discard case
+    (M1) and the two-way split is all `generate()` needs to convey.
+    """
+    if code not in render_routed_codes:
+        return REASON_NO_RENDER_ROUTE
+    return REASON_RENDERER_DECLINED
+
+
+def build_appendix_diversion_warnings(
+    written: Sequence[UnmappedEntry], render_routed_codes: frozenset[str],
+) -> list[AppendixDiversionWarning]:
+    """One `appendix_diversion` warning per taxonomy code actually present in
+    *written* -- the entries `_fill_appendix` put on the page as numbered
+    lines, i.e. AFTER `_appendix_drop_reason` filtering (#531). Sorted by
+    code so the sidecar is deterministic. An entry with no `taxonomy_code`
+    groups under `"?"` rather than being silently skipped -- the count must
+    still reconcile against the docx line total (EXPECTED OUTCOME 5).
+    """
+    counts: Counter[str] = Counter()
+    for entry in written:
+        counts[entry.get("taxonomy_code") or "?"] += 1
+
+    warnings: list[AppendixDiversionWarning] = []
+    for code in sorted(counts):
+        count = counts[code]
+        reason = _appendix_diversion_reason(code, render_routed_codes)
+        warnings.append({
+            "check": "appendix_diversion",
+            "code": code,
+            "section": "T. APPENDIX",
+            "count": count,
+            "reason": reason,
+            "message": (f"{code}: {count} entries diverted to the Appendix "
+                        f"— {_REASON_TEXT[reason]}"),
+            "evidence": [],
+        })
+    return warnings
+
+
 def _appendix_drop_reason(text: str, rendered: str) -> str | None:
     """The `DROP_*` reason *text* stays out of the appendix, or None to keep it.
 
@@ -212,21 +299,31 @@ def _describe_dropped(dropped: Counter[str]) -> str:
 class AppendixSection:
     """Section T writers, mixed into `WCMTemplateGenerator`."""
 
-    def _fill_appendix(self, unmapped_entries: Sequence[UnmappedEntry]) -> None:
+    def _fill_appendix(
+        self, unmapped_entries: Sequence[UnmappedEntry]
+    ) -> list[UnmappedEntry]:
         """Write Section T for the entries that reached no other section.
 
         Filtering and grouping are the module-level functions above; this
         method and the two `_write_appendix_*` helpers only put the result on
         the page, in S. BIBLIOGRAPHY's style.
+
+        Returns the entries actually written as numbered Appendix lines --
+        *unmapped_entries* minus whatever `_appendix_drop_reason` (or an
+        empty *unmapped_entries*) dropped -- the same "report back what was
+        actually consumed" contract `_fill_passthrough_sections` already
+        uses (#531). `_group_by_source_heading` only reorders `lines`, it
+        drops nothing further, so this is exactly the numbered-line set the
+        caller can count per taxonomy code.
         """
         if not unmapped_entries:
-            return
+            return []
 
         lines, dropped = _filter_unmapped_entries(unmapped_entries)
         if dropped:
             logger.info("Appendix: %s", _describe_dropped(dropped))
         if not lines:
-            return
+            return []
 
         if self.verbose:
             logger.info("Adding Appendix (%d unmapped entries)...", len(lines))
@@ -235,6 +332,8 @@ class AppendixSection:
         groups = _group_by_source_heading(lines)
         for position, (heading, group) in enumerate(groups.items()):
             self._write_appendix_group(heading, group, first=position == 0)
+
+        return [entry for entry, _ in lines]
 
     def _write_appendix_intro(self, dropped: Counter[str]) -> None:
         """The section header, its explanatory sentence and, when anything was

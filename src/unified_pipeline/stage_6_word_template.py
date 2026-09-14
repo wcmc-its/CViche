@@ -182,6 +182,9 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     ServiceSection,
     TeachingSection,
 )
+from unified_pipeline.stage6.sections.appendix import (
+    build_appendix_diversion_warnings,
+)
 
 logger = logging.getLogger(__name__)
 from unified_pipeline.core.template_boilerplate import (
@@ -868,8 +871,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # second time. They are recovered after every section has rendered, by
         # _unconsumed_personal_data_batch.
 
+        written_appendix_entries: List[Dict] = []
         if unmapped_entries:
-            self._fill_appendix(unmapped_entries)
+            written_appendix_entries = self._fill_appendix(unmapped_entries)
 
         # Route content-overflow entries as tracked-change bullets
         self._route_overflow_entries()
@@ -910,6 +914,18 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         # Run post-generation validation to catch common issues
         validation_issues = self._validate_output()
+
+        # One warning per taxonomy code actually diverted to the Appendix
+        # (#531) -- computed from what _fill_appendix reports it wrote, not
+        # re-derived from the rendered document, so it can't be fooled by
+        # #534's later T1/T2 split or #249's tracked-change blind spot.
+        # Appended to the SAME list _validate_output() returns: one sidecar
+        # shape, one doctor re-emission path (lint_stage6_warnings), no new
+        # KNOWN_LINTS row.
+        if written_appendix_entries:
+            validation_issues = validation_issues + build_appendix_diversion_warnings(
+                written_appendix_entries, RENDER_ROUTED_CODES)
+
         if validation_issues:
             print(f"\n{'!'*60}")
             print("VALIDATION WARNINGS")
