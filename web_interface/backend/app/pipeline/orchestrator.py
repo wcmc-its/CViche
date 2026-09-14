@@ -1165,8 +1165,7 @@ class PipelineOrchestrator:
                 stage4_result = await self._run_with_stdout_capture(
                     run_stage_4,
                     step_number,
-                    # real path, not f"{uid}.docx" -- the owner-name side channel opens it (#456)
-                    docx_path=cv_path,
+                    docx_path=cv_path,  # real path, not f"{uid}.docx" -- the owner-name side channel opens it (#456)
                     # Stage 4 is the heaviest stage (~130 LLM calls across
                     # batches); pass an intra-stage cancel check so an abort
                     # lands mid-stage. check_cancelled() is sync, so it's safe
