@@ -97,8 +97,6 @@ from unified_pipeline.stage6.normalization import (  # noqa: F401
     _ALL_PHONE_SLOT_KEYS,
     _labels_its_own_phone_slots,
     _phone_cell_text,
-    _PII_LABEL_RE,
-    _PII_FIELD_KEY_RE,
     _PII_FRAGMENT_SPLIT_RE,
     _squash,
     _pii_fragments,
@@ -667,6 +665,66 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         if removed and self.verbose:
             print(f"Removed {removed} WCM-template instruction box(es)")
 
+    def _resolve_original_doc_path(
+            self, document_uid: str, original_doc_path: str | None
+    ) -> str | None:
+        """The original document path if not already given, or None.
+
+        Every live run is: only `render_gate.py --source-dir` and stage 6's
+        own tests pass one, and `SAMPLE_CV_DIR` is an empty directory in the
+        deployed image (see the constant). Anchored on the module-relative
+        `SAMPLE_CV_DIR` constant plus the process CWD, instead of a stack of
+        brittle '..'/.parent chains that broke silently on any restructure.
+
+        Split out of `generate()` as a PURE move (#820 R3, §3.2): identical
+        body, no behaviour change.
+        """
+        if original_doc_path:
+            return original_doc_path
+        possible_paths = [
+            SAMPLE_CV_DIR / f"{document_uid}.docx",
+            SAMPLE_CV_DIR / f"{document_uid}.doc",
+            Path('data/sample_cvs/word') / f"{document_uid}.docx",  # relative to CWD
+        ]
+        for path in possible_paths:
+            if path.exists():
+                original_doc_path = str(path.resolve())
+                if self.verbose:
+                    print(f"Found original document: {original_doc_path}")
+                break
+        else:
+            if self.verbose:
+                print(f"No original document found for {document_uid} in "
+                      f"{SAMPLE_CV_DIR} or ./data/sample_cvs/word")
+        return original_doc_path
+
+    def _load_research_summary_data(
+            self, research_summary_path: str | None, input_path: str,
+            document_uid: str) -> dict | None:
+        """Stage 4.5 research-summary JSON, given explicitly or auto-found
+        next to `input_path`; None when neither exists.
+
+        Split out of `generate()` as a PURE move (#820 R3, §3.2): identical
+        body, no behaviour change.
+        """
+        if research_summary_path and os.path.exists(research_summary_path):
+            with open(research_summary_path, 'r') as f:
+                research_summary_data = json.load(f)
+            if self.verbose:
+                print(f"Loaded research summary from Stage 4.5: {research_summary_path}")
+            return research_summary_data
+
+        # Try to find it automatically
+        input_dir = Path(input_path).parent.parent
+        auto_summary_path = input_dir / "stage_4_5_research_summary" / f"{document_uid}_research_summary.json"
+        if auto_summary_path.exists():
+            with open(auto_summary_path, 'r') as f:
+                research_summary_data = json.load(f)
+            if self.verbose:
+                print(f"Auto-loaded research summary from: {auto_summary_path}")
+            return research_summary_data
+        return None
+
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
                  original_doc_path: str = None) -> str:
         """
@@ -719,45 +777,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if primary:
                 print(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
-        # Try to find original document if not provided -- which every live run
-        # is: only render_gate.py --source-dir and stage 6's tests pass one, and
-        # SAMPLE_CV_DIR is an empty directory in the deployed image (see the
-        # constant). Anchored on the module-relative
-        # SAMPLE_CV_DIR constant plus the process CWD, instead of a stack of
-        # brittle '..'/.parent chains that broke silently on any restructure.
-        if not original_doc_path:
-            possible_paths = [
-                SAMPLE_CV_DIR / f"{document_uid}.docx",
-                SAMPLE_CV_DIR / f"{document_uid}.doc",
-                Path('data/sample_cvs/word') / f"{document_uid}.docx",  # relative to CWD
-            ]
-            for path in possible_paths:
-                if path.exists():
-                    original_doc_path = str(path.resolve())
-                    if self.verbose:
-                        print(f"Found original document: {original_doc_path}")
-                    break
-            else:
-                if self.verbose:
-                    print(f"No original document found for {document_uid} in "
-                          f"{SAMPLE_CV_DIR} or ./data/sample_cvs/word")
-
-        # Load Stage 4.5 research summary if available
-        research_summary_data = None
-        if research_summary_path and os.path.exists(research_summary_path):
-            with open(research_summary_path, 'r') as f:
-                research_summary_data = json.load(f)
-            if self.verbose:
-                print(f"Loaded research summary from Stage 4.5: {research_summary_path}")
-        else:
-            # Try to find it automatically
-            input_dir = Path(input_path).parent.parent
-            auto_summary_path = input_dir / "stage_4_5_research_summary" / f"{document_uid}_research_summary.json"
-            if auto_summary_path.exists():
-                with open(auto_summary_path, 'r') as f:
-                    research_summary_data = json.load(f)
-                if self.verbose:
-                    print(f"Auto-loaded research summary from: {auto_summary_path}")
+        # Original-document discovery and the Stage 4.5 research-summary load
+        # are lifted out to their own helpers (#820 R3, pure moves -- §3.2):
+        # identical bodies, no behaviour change.
+        original_doc_path = self._resolve_original_doc_path(
+            document_uid, original_doc_path)
+        research_summary_data = self._load_research_summary_data(
+            research_summary_path, input_path, document_uid)
 
         if self.verbose:
             print(f"\n{'='*60}")
@@ -2314,74 +2340,93 @@ Now analyze the text above:"""
         fallback. Lines that cannot be VERIFIED absent are never re-inserted:
         duplicating faculty-facing content is worse than leaving a loss for the
         offline doctor to flag.
-        """
-        if not self.recover_unrendered_records:
-            return
 
+        `self.recover_unrendered_records=False` disables ONLY the record-line
+        recovery above -- never the #820 withheld notice and its Word comment
+        below. Those must reach the reader whenever `_pii_result.withheld` is
+        non-empty regardless of this flag (#820 R3 finding 3): the pass has
+        already stripped the PII either way, and gating the reader's only
+        indication of that behind an unrelated recovery toggle was a second,
+        silent loss on top of the first.
+        """
         out_lines = self._rendered_output_lines()
         haystack = "\x00".join(_squash(line) for line in out_lines)
-        line_token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line)))
-                           for line in out_lines]
 
         appendix_batch = []   # (text, code, coverage) for _add_remaining_to_appendix
         n_recovered = 0
 
-        for code, entries in entries_by_code.items():
-            if code == 'T':
-                # Appendix catch-all — _fill_appendix already carries these.
-                continue
-            for entry in entries:
-                records = _record_lines(entry.get('text'))
-                if len(records) < UNRENDERED_MIN_RECORD_LINES:
-                    continue  # not a fused multi-record entry
-                fields = entry.get('extracted_fields') or {}
-                coverage = (entry.get('extraction_coverage') or {}).get(
-                    'extraction_coverage_percent', 0)
-                for line in records:
-                    if _record_rendered(line, haystack, line_token_sets) is not False:
-                        # Rendered (possibly reformatted), or too short to
-                        # verify either way — never re-insert.
-                        continue
-                    if segment_already_rendered(line, fields):
-                        # The record that DID render from extracted fields: a
-                        # grant table splits its tokens across label/value
-                        # rows, so the token check alone can miss it (#209).
-                        continue
-                    if (not re.search(r'\d', line)
-                            and line.count('\t') + line.count('|') >= 2
-                            and _is_column_header_row(line)):
-                        # Multi-column rows with no year/number payload AND
-                        # majority column-label words are tabular header rows
-                        # ("State/Country  License Number  Status ...")
-                        # satisfying the tab-record heuristic — not CV
-                        # records. A dateless multi-cell row of real content
-                        # (committee membership: "Member | Committee on X |
-                        # Organization") is still recovered.
-                        continue
-                    if is_template_instruction(line) or is_source_boilerplate(line):
-                        continue
-                    inserted = self._insert_reconsidered_segment(
-                        line, code,
-                        comment=(
-                            f"Recovered: this record from the source CV was not "
-                            f"rendered by the structured {code} section. "
-                            f"Review placement and formatting."
-                        ))
-                    if not inserted:
-                        appendix_batch.append((line, code, coverage))
-                    # Count the re-inserted line as rendered so a
-                    # near-identical variant in another pre-dedup entry
-                    # (trailing period, 'Sep' vs 'Sept') is verified rendered
-                    # instead of inserted a second time — dedup drops entries
-                    # precisely because they near-duplicate a kept one, so
-                    # exact-squash matching is not enough.
-                    haystack += "\x00" + _squash(line)
-                    line_token_sets.append(
-                        set(_RENDER_TOKEN_RE.findall(_norm(line))))
-                    self.stats['unrendered_records_recovered'] += 1
-                    n_recovered += 1
+        if self.recover_unrendered_records:
+            line_token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line)))
+                               for line in out_lines]
 
-        appendix_batch.extend(self._unconsumed_personal_data_batch(haystack))
+            for code, entries in entries_by_code.items():
+                if code == 'T':
+                    # Appendix catch-all — _fill_appendix already carries these.
+                    continue
+                for entry in entries:
+                    records = _record_lines(entry.get('text'))
+                    if len(records) < UNRENDERED_MIN_RECORD_LINES:
+                        continue  # not a fused multi-record entry
+                    fields = entry.get('extracted_fields') or {}
+                    coverage = (entry.get('extraction_coverage') or {}).get(
+                        'extraction_coverage_percent', 0)
+                    for line in records:
+                        if _record_rendered(line, haystack, line_token_sets) is not False:
+                            # Rendered (possibly reformatted), or too short to
+                            # verify either way — never re-insert.
+                            continue
+                        if segment_already_rendered(line, fields):
+                            # The record that DID render from extracted fields: a
+                            # grant table splits its tokens across label/value
+                            # rows, so the token check alone can miss it (#209).
+                            continue
+                        if (not re.search(r'\d', line)
+                                and line.count('\t') + line.count('|') >= 2
+                                and _is_column_header_row(line)):
+                            # Multi-column rows with no year/number payload AND
+                            # majority column-label words are tabular header rows
+                            # ("State/Country  License Number  Status ...")
+                            # satisfying the tab-record heuristic — not CV
+                            # records. A dateless multi-cell row of real content
+                            # (committee membership: "Member | Committee on X |
+                            # Organization") is still recovered.
+                            continue
+                        if is_template_instruction(line) or is_source_boilerplate(line):
+                            continue
+                        inserted = self._insert_reconsidered_segment(
+                            line, code,
+                            comment=(
+                                f"Recovered: this record from the source CV was not "
+                                f"rendered by the structured {code} section. "
+                                f"Review placement and formatting."
+                            ))
+                        if not inserted:
+                            appendix_batch.append((line, code, coverage))
+                        # Count the re-inserted line as rendered so a
+                        # near-identical variant in another pre-dedup entry
+                        # (trailing period, 'Sep' vs 'Sept') is verified rendered
+                        # instead of inserted a second time — dedup drops entries
+                        # precisely because they near-duplicate a kept one, so
+                        # exact-squash matching is not enough.
+                        haystack += "\x00" + _squash(line)
+                        line_token_sets.append(
+                            set(_RENDER_TOKEN_RE.findall(_norm(line))))
+                        self.stats['unrendered_records_recovered'] += 1
+                        n_recovered += 1
+
+            # Unconsumed A-coded orphans (#316) are part of the SAME record-
+            # recovery safety net the flag above governs -- gated with it,
+            # unlike the notice below.
+            appendix_batch.extend(self._unconsumed_personal_data_batch(haystack))
+
+        if self._pii_result.withheld:
+            # The withheld notice is NOT part of the recovery safety net: the
+            # #820 pass has already stripped the PII from `entry['text']`
+            # regardless of this flag, so suppressing the reader's only
+            # indication of that behind an unrelated toggle was a second,
+            # silent loss on top of the first (#820 R3 finding 3). One
+            # notice per document, not one per entry.
+            appendix_batch.append((PII_REDACTED_NOTICE, 'A', 0))
 
         if appendix_batch:
             self._add_remaining_to_appendix(appendix_batch)
@@ -2409,11 +2454,13 @@ Now analyze the text above:"""
           member's own name/title banner, which renders from `cv_owner` rather
           than from the A entry -- 75 of 76 are already on the page, and
           appending them would be pure duplication.
-        - PII entries are replaced by a single notice rather than dropped
-          silently. Here the whole entry is denied, unlike the consumption
-          path: this entry renders nothing, so discarding it costs nothing,
-          and fragment-level filtering would keep the birth date and drop only
-          its label.
+        - PII-withheld entries are dropped from this batch entirely rather
+          than rendered. Here the whole entry is denied, unlike the
+          consumption path: this entry renders nothing, so discarding it
+          costs nothing, and fragment-level filtering would keep the birth
+          date and drop only its label. The caller (`_recover_unrendered_
+          records`) is the one that tells the reader something was withheld,
+          via the single document-wide notice.
         """
         batch: List[Tuple[str, str, float]] = []
         redacted = 0
@@ -2437,18 +2484,12 @@ Now analyze the text above:"""
                 continue
             batch.append((text, 'A', 0))
 
-        # One notice per document, not one per entry, and not scoped to A-
-        # coded orphans: `self._pii_result.withheld` is the pre-render
-        # pass's document-wide record (`generate()`), so content withheld
-        # from a rendered section -- not just an appendix orphan -- still
-        # tells the reader something was removed. Empty when nothing was
-        # actually cut, so a PII-free document gets no notice at all.
-        notice_added = bool(self._pii_result.withheld)
-        if notice_added:
-            # One notice per document, not one per entry: the point is that the
-            # reader knows something was withheld, not how many times.
-            batch.append((PII_REDACTED_NOTICE, 'A', 0))
-        self.stats['personal_data_recovered'] = len(batch) - (1 if notice_added else 0)
+        # The withheld notice itself is NOT added here: it must reach the
+        # reader whenever `self._pii_result.withheld` is non-empty regardless
+        # of `self.recover_unrendered_records`, and this method only runs
+        # when that flag is on (#820 R3 finding 3) -- `_recover_unrendered_
+        # records` appends the notice itself, unconditionally.
+        self.stats['personal_data_recovered'] = len(batch)
         self.stats['personal_data_redacted'] = redacted
         return batch
 
