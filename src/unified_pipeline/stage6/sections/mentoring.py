@@ -190,6 +190,31 @@ def _training_grant_rows(fields: Mapping[str, Any]) -> list[tuple[str, str]]:
     ]
 
 
+def _looks_like_training_grant_table(table: Table) -> bool:
+    """True when `table`'s header row looks like N2's own placeholder --
+    row 0, cell 0 reading "Award Source (funding agency, type of grant):".
+
+    `_first_table_after`'s forward scan (used by `_remove_template_table_after`
+    for N3A/N3B) has no awareness of what table it lands on, and a
+    pre-existing, out-of-scope cascade in `research_support.py`
+    (`_fill_research_support`'s "Past (Completed) Funding"/"Pending
+    Funding" buckets, whose own unbounded `_find_table_after_paragraph`
+    scan finds no table in their own template section and instead walks
+    into MENTORING's) already removes this exact table on every real
+    render, before `_fill_mentoring` ever runs. So the table N2's own scan
+    finds is, in practice, always some LATER, unrelated section's
+    placeholder -- removing it unconditionally would extend that cascade
+    one link further. Same defensive shape check `_looks_like_leadership_table`
+    (leadership.py) uses for the same reason (#664 item 2).
+    """
+    if not table.rows:
+        return False
+    header_cells = table.rows[0].cells
+    if not header_cells:
+        return False
+    return 'award source' in header_cells[0].text.strip().lower()
+
+
 def _training_grant_is_sparse(fields: Mapping[str, Any]) -> bool:
     """True when an N2 entry has nothing a table would show: no title (by
     any of the three precedence keys), no agency, no grant number. Renders
@@ -523,7 +548,10 @@ class MentoringSection:
             if anchor is None:
                 return
         else:
-            self._remove_template_table_after(anchor)
+            placeholder = _first_table_after(anchor)
+            if placeholder is not None and _looks_like_training_grant_table(
+                    Table(placeholder, self.doc)):
+                placeholder.getparent().remove(placeholder)
 
         for entry in reversed(entries):
             fields = entry.get('extracted_fields') or {}
