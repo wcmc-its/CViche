@@ -162,8 +162,12 @@ def _training_grant_rows(fields: Mapping[str, Any]) -> list[tuple[str, str]]:
 
     Duration calls `format_date_range` directly (not the `self`-bound
     `_format_grant_duration` research_support.py's grant table uses) so this
-    stays a pure, document-free function; it is the same underlying
-    formatter either way (`_format_grant_duration` is exactly this call).
+    stays a pure, document-free function. Not exactly the same call (#529
+    round 2, F5): `_format_grant_duration` (research_support.py:889-900)
+    also falls back to `fields.get('date')` when `start_date` is absent, for
+    clinical-trial schemas that key duration off `date` instead. N2's schema
+    has no `date` key, so the two agree in practice, but the claim that they
+    are the same call was wrong.
     """
     agency = str(fields.get('agency') or '').strip()
     grant_number = str(fields.get('grant_number') or '').strip()
