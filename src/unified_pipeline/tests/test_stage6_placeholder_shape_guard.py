@@ -244,7 +244,17 @@ def test_n2s_exact_label_after_past_funding_is_not_removed():
     assert n2_table.rows[0].cells[0].text == N2_LABEL
 
 
-def test_mentoring_name_of_committee_after_current_mentees_is_untouched_while_name_is_removed():
+def test_mentoring_name_of_committee_after_current_mentees_is_untouched_when_it_is_the_first_table():
+    # F3 (round-1 verifier of #836): this test's ORIGINAL name
+    # ("...while_name_is_removed") claimed the real `Name` table gets
+    # removed here, but it does not -- `_first_table_after` returns only
+    # the FIRST table below the anchor (the foreign `Name of Committee`
+    # one), the guard rejects it, and the scan stops there: nothing under
+    # Current Mentees: is removed at all, so the real `Name` placeholder
+    # survives by accident of ordering, not because the guard fired on it.
+    # It was also the ONLY test killing mutant d4 (guard always True) --
+    # renamed to what it actually asserts; the removal path itself is
+    # exercised by the sibling test below (`Name` table FIRST).
     gen = WCMTemplateGenerator(verbose=False)
     doc = Document()
     doc.add_paragraph('MENTORING')
@@ -265,6 +275,31 @@ def test_mentoring_name_of_committee_after_current_mentees_is_untouched_while_na
     remaining_labels = [t.rows[0].cells[0].text for t in gen.doc.tables]
     assert remaining_labels.count('Name of Committee') == 1
     assert remaining_labels.count('Name') == 1
+    assert any(c.text == 'Ada Testowner' for t in gen.doc.tables for c in t.rows[0].cells)
+
+
+def test_mentoring_name_table_first_is_removed_while_name_of_committee_survives():
+    # F3's second half: with the real `Name` placeholder FIRST after the
+    # heading, `_first_table_after` finds it, the guard accepts it, and the
+    # removal actually runs -- this and the test above together kill
+    # mutant d4 (guard always True) on the WIRE, not on fixture ordering
+    # alone.
+    gen = WCMTemplateGenerator(verbose=False)
+    doc = Document()
+    doc.add_paragraph('MENTORING')
+    doc.add_paragraph('Current Mentees:')
+    name_table = doc.add_table(rows=6, cols=2)
+    name_table.rows[0].cells[0].text = 'Name'
+    foreign_table = doc.add_table(rows=1, cols=3)
+    foreign_table.rows[0].cells[0].text = 'Name of Committee'
+    doc.add_paragraph('Past Mentees:')
+    gen.doc = doc
+
+    gen._fill_mentoring({'N3A': [_mentee('Ada Testowner')]})
+
+    remaining_labels = [t.rows[0].cells[0].text for t in gen.doc.tables]
+    assert remaining_labels.count('Name') == 0
+    assert remaining_labels.count('Name of Committee') == 1
     assert any(c.text == 'Ada Testowner' for t in gen.doc.tables for c in t.rows[0].cells)
 
 
@@ -320,3 +355,58 @@ def test_real_template_one_entry_leaves_n2_and_mentee_placeholders_in_place():
     assert 'Award Source:' in after
     assert N2_LABEL in after
     assert after.count('Name') == 2
+
+
+def test_real_template_l3_content_with_no_grants_or_mentees_leaves_both_mentee_placeholders_intact():
+    """Ticket D-836-R2, TASK 2 item 3: the combined real-template proof --
+    #836's guards (research_support, mentoring) plus #841's clinical_practice
+    guard, run in `generate()`'s own order, on a document with zero grants
+    and zero mentees but one L3 entry.
+
+    Before #836 the Past/Pending funding steps would have eaten N2's
+    placeholder and one mentee placeholder; before #841 L3 would then have
+    accepted whichever mentee table was left (N2's own label is rejected by
+    `_clinical_header_match` -- it contains "funding" -- so on #836 alone
+    the corpus population is exactly clinical L3/L2/L1 content with no
+    grants and no current mentees). With both fixes, N2's placeholder stops
+    the funding cascade, both mentee tables never get built (there are no
+    mentee entries at all in this fixture) so both survive as pristine
+    6-row placeholders, and the L3 entry falls back to a bullet under
+    Clinical Leadership -- never written into either mentee table.
+    """
+    gen = _real_template_generator()
+
+    gen._fill_research_support({}, None, 'synthetic-uid', current_year=2026)
+    gen._fill_mentoring({})
+    l3_entry = {
+        'text': 'Director, Synthetic Wound Care Program',
+        'extracted_fields': {
+            'role': 'Director, Synthetic Wound Care Program',
+            'institution': 'Synthetic Medical Center',
+            'start_date': '2020',
+            'end_date': '2023',
+        },
+    }
+    gen._fill_clinical_practice({'L3': [l3_entry]})
+
+    assert gen.stats['tables_populated'] == 0
+
+    name_tables = [t for t in gen.doc.tables if t.rows[0].cells[0].text.strip() == 'Name']
+    assert len(name_tables) == 2
+    for t in name_tables:
+        assert len(t.rows) == 6
+        # Vertical label/value layout -- column 0 is the field LABEL on
+        # every row ("Name", "Site/Position", ...), column 1 is the VALUE.
+        # Pristine placeholder: every value cell is still empty.
+        assert all(row.cells[1].text.strip() == '' for row in t.rows)
+
+    leadership_idx = gen._find_paragraph_with_text('Clinical Leadership')
+    assert leadership_idx is not None
+    bullet_texts = [p.text for p in gen.doc.paragraphs
+                     if 'Synthetic Wound Care Program' in p.text]
+    assert bullet_texts == ['Director, Synthetic Wound Care Program, '
+                             'Synthetic Medical Center, 2020-2023']
+    # The bullet lands after the Clinical Leadership heading, not before it.
+    bullet_para_idx = next(i for i, p in enumerate(gen.doc.paragraphs)
+                            if 'Synthetic Wound Care Program' in p.text)
+    assert bullet_para_idx > leadership_idx
