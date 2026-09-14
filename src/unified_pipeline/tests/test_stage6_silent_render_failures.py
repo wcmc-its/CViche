@@ -333,9 +333,13 @@ def test_program_leadership_line_degrades_program_and_institution_only():
         'Scholars Program, Test University'
 
 
-def test_program_leadership_line_degrades_dates_only():
+def test_program_leadership_line_dates_only_falls_back_to_text():
+    """None of role/program_name/institution present -> the entry's own
+    `text`, even with both dates present (#529 round 2, F6): a bare
+    "(2019-2022)" carries less than the Appendix line it replaces."""
     fields = {'start_date': '2019', 'end_date': '2022'}
-    assert _program_leadership_line(fields, 'raw text') == '(2019-2022)'
+    assert _program_leadership_line(fields, 'Directed a mentoring initiative.') == \
+        'Directed a mentoring initiative.'
 
 
 def test_program_leadership_line_all_five_keys_empty_falls_back_to_text():
@@ -457,16 +461,18 @@ def test_n1_real_template_three_lines_in_order_with_partial_fields():
     assert _body_after(gen.doc, N1_HEADING, 3) == [
         ('p', 'Director'),
         ('p', 'Scholars Program, Test University'),
-        ('p', '(2019-2022)'),
+        ('p', 'Directed a mentoring program before 2019 records began.'),
     ]
     assert gen.stats['entries_inserted'] == 3
 
 
 def test_n2_real_template_tables_in_order_placeholder_removed_sparse_as_line():
     """Real template: two N2 entries -> placeholder table gone, two 3-row
-    tables after "Institutional Training Grants..." in input order with a
-    spacer between; a third, sparse entry renders as one plain line and
-    adds no table (#529)."""
+    tables land AFTER the instruction paragraph ("Duplicate table below
+    as needed...") in input order with a spacer between -- heading ->
+    instruction -> tables, the template's own order (#529 round 2, F1;
+    was between the heading and the instruction before this fix). A
+    third, sparse entry renders as one plain line and adds no table."""
     gen = _template_generator()
     template_tables = len(gen.doc.tables)
     entries_by_code = {

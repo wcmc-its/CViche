@@ -229,21 +229,28 @@ def _training_grant_is_sparse(fields: Mapping[str, Any]) -> bool:
 def _program_leadership_line(fields: Mapping[str, Any], text: str) -> str:
     """One N1 line: the non-empty parts of role/program_name/institution,
     joined with ', ', then the date range in parentheses when either date is
-    present. All five keys empty -> the entry's own `text` (#529)."""
+    present alongside at least one of the three.
+
+    None of role/program_name/institution present -> the entry's own `text`,
+    even when a date is present on its own (#529 round 2, F6): a bare date
+    range (e.g. "(2019-2022)") carries less than the Appendix line it
+    replaces, so a date-only entry falls back to its full text instead of
+    shrinking to just the dates.
+    """
     role = str(fields.get('role') or '').strip()
     program_name = str(fields.get('program_name') or '').strip()
     institution = str(fields.get('institution') or '').strip()
-    start = str(fields.get('start_date') or '').strip()
-    end = str(fields.get('end_date') or '').strip()
 
-    if not (role or program_name or institution or start or end):
+    if not (role or program_name or institution):
         return (text or '').strip()
 
     line = ', '.join(part for part in (role, program_name, institution) if part)
+    start = str(fields.get('start_date') or '').strip()
+    end = str(fields.get('end_date') or '').strip()
     if start or end:
         date_range = format_date_range(start, end, 'N1')
         if date_range:
-            line = f"{line} ({date_range})" if line else f"({date_range})"
+            line = f"{line} ({date_range})"
     return line
 
 
