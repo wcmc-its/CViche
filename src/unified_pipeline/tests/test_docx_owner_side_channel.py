@@ -24,7 +24,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
-from docx.enum.section import WD_SECTION  # noqa: E402
+from docx.enum.section import WD_HEADER_FOOTER, WD_SECTION  # noqa: E402
 from docx.oxml import parse_xml  # noqa: E402
 from docx.oxml.ns import nsdecls, qn  # noqa: E402
 
@@ -220,6 +220,40 @@ def test_second_section_header_linked_to_previous_is_not_duplicated(tmp_path):
     channel = extract_owner_side_channel(_save(doc, tmp_path))
 
     assert channel["header_lines"] == ["Shared Header Owner"]
+
+
+def test_two_non_linked_sections_sharing_the_same_header_part_are_deduped_by_partname(tmp_path):
+    """#456-R2 verifier Finding 1: two sections that are each explicitly
+    NOT linked to the previous section (`is_linked_to_previous` False on
+    both -- each has its own `w:headerReference`) can still have their
+    `w:headerReference` r:ids resolve to the SAME header part, e.g. when a
+    document is hand-assembled or re-saved by a tool that reuses a
+    relationship id across sections rather than cloning the part. The
+    dedup in `_header_footer_paragraph_lines` keys on the OPC part name
+    (`str(container.part.partname)`), not on `is_linked_to_previous`, so
+    this case -- distinct from the "linked" test above -- must also
+    collapse to one copy of the header's lines."""
+    doc = Document()
+    doc.add_paragraph("s0 body")
+    doc.sections[0].header.is_linked_to_previous = False
+    doc.sections[0].header.add_paragraph("Shared Part Owner")
+    shared_rId = doc.sections[0]._sectPr.get_headerReference(WD_HEADER_FOOTER.PRIMARY).rId
+
+    doc.add_section(WD_SECTION.NEW_PAGE)
+    doc.add_paragraph("s1 body")
+    # Section 1 gets its OWN headerReference element (so is_linked_to_previous
+    # is False, unlike the "linked" test above) but it is pointed at section
+    # 0's r:id rather than a freshly-added part -- the same-partname,
+    # not-linked shape the ticket's Finding 1 asks for.
+    doc.sections[1]._sectPr.add_headerReference(WD_HEADER_FOOTER.PRIMARY, shared_rId)
+
+    assert doc.sections[0].header.is_linked_to_previous is False
+    assert doc.sections[1].header.is_linked_to_previous is False
+    assert str(doc.sections[0].header.part.partname) == str(doc.sections[1].header.part.partname)
+
+    channel = extract_owner_side_channel(_save(doc, tmp_path))
+
+    assert channel["header_lines"] == ["Shared Part Owner"]
 
 
 def test_header_with_only_a_page_field_is_skipped(tmp_path):
