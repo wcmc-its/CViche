@@ -10,8 +10,10 @@ over-fired on three shapes round 1's own test suite never exercised:
    `row.cells` returns the SAME cell 2-3x -- round 1's predicate read that
    as "a label with a non-blank value cell" and demoted a real section
    header (e.g. "GRANTS" spanning 3 columns) to content ("GRANTS | GRANTS |
-   GRANTS"). Fixed by deduping `row.cells` by `_tc` identity inside
-   `extract_table_metadata`.
+   GRANTS"). Fixed with a predicate-only check in
+   `row_has_nonblank_value_cells`: a trailing cell that repeats cell 0's own
+   text does not count as a value (#811 round 3, finding 1) -- `data`'s row
+   shape from `extract_table_metadata` is left untouched.
 2. A "header-left / content-right" row: a REAL section header (all-caps,
    no colon, e.g. "MAILING ADDRESS") with distinct content in a trailing
    cell. Round 1 demoted it to content-only, losing the header signal
@@ -76,7 +78,8 @@ def test_merged_gridspan_subheader_row_stays_table_header(tmp_path):
     content_text = "\n".join(e["text"] for e in table_contents)
 
     assert any(e["text"] == "GRANTS" for e in table_headers)
-    # The dedup must not turn "GRANTS" into a duplicated-value content row.
+    # The label-text exclusion in row_has_nonblank_value_cells must not turn
+    # "GRANTS" into a duplicated-value content row.
     assert "GRANTS | GRANTS" not in content_text
 
 
@@ -301,9 +304,9 @@ def _build_row0_multiline_embedded_header_docx(path: str) -> None:
     """Regression shape found by the corpus scan (web206): row 0's cell 0 is
     a real, non-colon header whose looks_like_section_header confidence is
     BELOW the header-left/content-right floor (0.4 <= conf < 0.6) -- "Senior
-    research fellow" (verified directly against the function: 0.5, same
-    band as web206's actual "Assistant Professor of Instruction"). Its cell
-    also contains an embedded "\\n\\n" second job title further down, and
+    research fellow" (verified directly against the function: 0.5, the same
+    band as web206's actual header text, which is not reproduced here).
+    Its cell also contains an embedded "\\n\\n" second job title further down, and
     row 0's OTHER cell carries a non-blank date range. `row0_is_form_label`
     must stay False here (no colon) so row 0 is NOT rerouted into the
     per-row walk's separate `\\n\\n`-embedded-header splitter, which builds
@@ -414,3 +417,44 @@ def test_row_zero_multiline_form_label_content_not_duplicated(tmp_path):
 
     assert content_text.count("Board certified in Synthetic Medicine") == 1
     assert content_text.count("Synthetic Value") == 1
+
+
+def _build_row0_colon_label_blank_value_docx(path: str) -> None:
+    """Row 0's cell 0 is a colon-terminated, multi-line label whose first
+    line alone ends in a colon ("Certification:") followed by a 66-char
+    continuation line that ALSO ends in a colon -- but cell 1 (the only
+    trailing cell) is BLANK. `row0_is_form_label` requires BOTH the
+    trailing-colon check on `first_cell_text` AND
+    `row_has_nonblank_value_cells(row_0)`; a blank cell 1 fails the second
+    conjunct, so this is NOT a form-label row -- row 0 must still be emitted
+    as a table_header, with its long continuation line recovered as
+    content (#811 round 3, finding 1 / round 4 regression test)."""
+    doc = Document()
+    table = doc.add_table(rows=1, cols=2)
+
+    table.cell(0, 0).text = (
+        "Certification:\n"
+        "Board certified in Synthetic Medicine with additional detail here:"
+    )
+    table.cell(0, 1).text = ""
+
+    doc.save(path)
+
+
+def test_row_zero_colon_label_blank_value_keeps_table_header(tmp_path):
+    """Positive case (#811 round 3 finding 1 / round 4): a row-0 label ending
+    in a colon, whose ONLY trailing cell is blank, must keep its
+    table_header ("Certification:") -- `row_has_nonblank_value_cells(row_0)`
+    being False means `row0_is_form_label` is False even though the label
+    text itself ends in a colon. The long continuation line in the same
+    cell is recovered as table_content."""
+    docx_path = str(tmp_path / "row0_colon_label_blank_value.docx")
+    _build_row0_colon_label_blank_value_docx(docx_path)
+
+    elements = extract_unified_elements(docx_path)["elements"]
+    table_headers = [e for e in elements if e.get("type") == "table_header"]
+    table_contents = [e for e in elements if e.get("type") == "table_content"]
+    content_text = "\n".join(e["text"] for e in table_contents)
+
+    assert any(e["text"] == "Certification:" for e in table_headers)
+    assert "Board certified in Synthetic Medicine with additional detail here:" in content_text
