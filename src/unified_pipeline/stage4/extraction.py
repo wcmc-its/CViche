@@ -840,7 +840,7 @@ def extract_fields_from_mapped_entries(
     batch_size: int = 10,
     document_uid: str = "",
     cancel_check: Callable[[], None] | None = None,
-    docx_path: str | None = None,
+    docx_path: str | None = None,  # #456 owner-name side channel; None = pre-#456 behavior
 ) -> ExtractionResult:
     """
     Extract structured fields from all mapped entries.
@@ -853,10 +853,6 @@ def extract_fields_from_mapped_entries(
             batch iteration. It should raise to abort the run (the web
             orchestrator passes its check_cancelled). None (the standalone CLI
             default) is a no-op.
-        docx_path: Optional path to the source .docx, threaded straight
-            through to `extract_cv_owner_name`'s #456 side-channel tier. None
-            (the default) keeps owner-name extraction identical to before
-            #456.
     """
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
