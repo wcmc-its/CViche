@@ -555,35 +555,23 @@ HEADER_LEFT_CONTENT_RIGHT_MIN_CONFIDENCE = 0.6
 
 def row_has_distinct_nonblank_value_cells(row: list[dict[str, Any]], label_text: str) -> bool:
     """Return True if any cell after row[0] has non-blank text that DIFFERS
-    (case-insensitively) both from the row's own label text AND from every
-    other trailing cell already counted.
+    (case-insensitively) from the row's own label text.
 
     Defense in depth for the header-left/content-right path (#811 round 2):
     guards against a horizontally merged (gridSpan) cell whose duplicate
     copies repeat the label text itself rather than carrying real content.
-    The "from each other" dedup (#811 round 3, finding 1) replaces the
-    `_tc`-identity dedup that used to run in `extract_table_metadata` --
-    reverted because it drifted the `data` row shape stage 2 reads -- with a
-    text-identity dedup scoped to this boolean check only, so a gridSpan
-    VALUE cell repeating itself across spanned columns still counts as ONE
-    distinct value, not several. (For an `any()`-style boolean this is
-    behaviourally equivalent to the from-cell-0-only check on every case the
-    corpus and test suite exercise: the first qualifying trailing cell
-    always short-circuits the loop before a later duplicate is ever
-    inspected.)
+    The from-cell-0 check is the WHOLE predicate (#811 round 4, finding 2):
+    for an `any()`-style boolean, a dedup of trailing cells "from each
+    other" can never change the result -- the first qualifying trailing
+    cell always short-circuits the loop before a later duplicate is ever
+    inspected, so tracking previously-seen trailing values is dead code.
     """
     label_norm = label_text.strip().casefold()
-    seen = {label_norm}
     for cell in row[1:]:
         cell_value = cell.get("text", "") if isinstance(cell, dict) else str(cell)
         cell_value = cell_value.strip()
-        if not cell_value:
-            continue
-        cell_norm = cell_value.casefold()
-        if cell_norm in seen:
-            continue
-        seen.add(cell_norm)
-        return True
+        if cell_value and cell_value.casefold() != label_norm:
+            return True
     return False
 
 
@@ -694,12 +682,12 @@ def _handle_table_row_zero(
     (`is_header_left_content_right_row`) here: routing a non-colon row 0
     into the per-row walk below also exposes it to that walk's separate
     `\\n\\n`-embedded-header splitter, which builds single-cell synthetic
-    rows and silently drops row 0's OTHER cells (found on web206's
-    "Assistant Professor of Instruction" -- a real, non-colon,
-    confidence-0.5 header whose row 1 date range vanished when misrouted
-    this way). A row 0 header-left/content-right layout (e.g. "CURRENT
-    POSITION" | <address>) is out of this ticket's scope and keeps today's
-    existing table-level header behavior.
+    rows and silently drops row 0's OTHER cells (found on a web206-shaped
+    row: a non-colon, confidence-0.5 header like "Senior research fellow"
+    whose row 1 date range vanished when misrouted this way). A row 0
+    header-left/content-right layout (e.g. "CURRENT POSITION" | <address>)
+    is out of this ticket's scope and keeps today's existing table-level
+    header behavior.
 
     Returns:
         (new_elements, unified_idx, num_table_headers_emitted, table_rows,
