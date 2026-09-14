@@ -62,7 +62,10 @@ def _appendix_text(doc) -> str:
     return ""
 
 
-def _render(tmp_path, entries) -> Document:
+def _render(tmp_path, entries) -> tuple[Document, dict]:
+    """Returns the rendered Document and the `<uid>_render_warnings.json`
+    sidecar actually written to disk, so a test can check both what the
+    document shows and what generate() reported about it (#531)."""
     gen = WCMTemplateGenerator(verbose=False)
     # Neutralize the LLM-driven appendix-reconsider pass: isolates the
     # consumed-entry exclusion under test and keeps the render deterministic
@@ -73,7 +76,15 @@ def _render(tmp_path, entries) -> Document:
     output_path = tmp_path / "out.docx"
     input_path.write_text(json.dumps(data))
     gen.generate(str(input_path), str(output_path), research_summary_path=None)
-    return Document(str(output_path))
+    sidecar = json.loads((tmp_path / "TESTEG_render_warnings.json").read_text())
+    return Document(str(output_path)), sidecar
+
+
+def _appendix_diversion_count(sidecar: dict, code: str) -> int:
+    """Sum of `count` over this sidecar's `appendix_diversion` warnings for
+    *code* -- 0 when the code produced none."""
+    return sum(w["count"] for w in sidecar["warnings"]
+               if w.get("check") == "appendix_diversion" and w["code"] == code)
 
 
 _OWNER_ENTRY = {
@@ -96,7 +107,7 @@ def test_accepted_employment_entry_not_duplicated_refused_entry_stays_in_appendi
             "extracted_fields": {}, "element_idx_start": 2,
         },
     ]
-    doc = _render(tmp_path, entries)
+    doc, sidecar = _render(tmp_path, entries)
     full, appendix = _full_text(doc), _appendix_text(doc)
 
     assert "DISTINCTIVE_E_ACCEPTED_EMPLOYER" in full, "accepted entry did not render at all"
@@ -104,6 +115,9 @@ def test_accepted_employment_entry_not_duplicated_refused_entry_stays_in_appendi
         "accepted E entry duplicated into the Appendix -- #294 regression")
     assert "DISTINCTIVE_E_REFUSED_LABEL" in appendix, (
         "refused E entry (label matches no template row) must still reach the Appendix")
+    # #531: the appendix_diversion count for T must reflect only the refused
+    # entry -- the accepted (passthrough-consumed) one must not inflate it.
+    assert _appendix_diversion_count(sidecar, "T") == 1
 
 
 def test_accepted_affiliation_entry_not_duplicated_refused_entry_stays_in_appendix(tmp_path):
@@ -121,7 +135,7 @@ def test_accepted_affiliation_entry_not_duplicated_refused_entry_stays_in_append
             "extracted_fields": {}, "element_idx_start": 4,
         },
     ]
-    doc = _render(tmp_path, entries)
+    doc, sidecar = _render(tmp_path, entries)
     full, appendix = _full_text(doc), _appendix_text(doc)
 
     assert "DISTINCTIVE_G_ACCEPTED_AFFIL" in full, "accepted entry did not render at all"
@@ -129,3 +143,5 @@ def test_accepted_affiliation_entry_not_duplicated_refused_entry_stays_in_append
         "accepted G entry duplicated into the Appendix -- #294 regression")
     assert "QQ1" in appendix, (
         "refused G entry (too short to be routed) must still reach the Appendix")
+    # #531: same exclusion, checked through the new per-code count.
+    assert _appendix_diversion_count(sidecar, "T") == 1

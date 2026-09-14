@@ -782,6 +782,26 @@ def test_stage6_warnings_quiet_on_clean_sidecar():
     assert lint_stage6_warnings({"warnings": [], "dedup_decisions": []}) == []
 
 
+def test_stage6_warnings_reemits_appendix_diversion_with_code_and_count():
+    """#531: an appendix_diversion sidecar entry re-emits as a WARN whose
+    message names the code and the count -- lint_stage6_warnings reads only
+    `message`/`evidence` (KNOWN_LINTS/LintSpec untouched, per the ticket),
+    so this is a re-emission proof, not a lint-registry change."""
+    report = {"document_uid": "X", "warnings": [
+        {"check": "appendix_diversion", "code": "N2", "section": "T. APPENDIX",
+         "count": 3, "reason": "no_render_route",
+         "message": "N2: 3 entries diverted to the Appendix — no stage "
+                    "6 section is routed to render this taxonomy code",
+         "evidence": []},
+    ]}
+    findings = lint_stage6_warnings(report)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["lint"] == "stage6_render_warnings" and f["severity"] == "WARN"
+    assert "N2" in f["message"] and "3" in f["message"]
+    assert f["evidence"] == []
+
+
 # ----------------------------------------------------- lint 11: dedup drops
 
 def test_dedup_drops_flags_distinct_record_quiet_on_true_dup():
