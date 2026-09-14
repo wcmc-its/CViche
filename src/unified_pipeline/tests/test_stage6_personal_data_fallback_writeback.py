@@ -777,6 +777,32 @@ def test_recovered_address_value_that_is_a_birth_place_line_is_withheld(tmp_path
     assert gen._pii_result.withheld[0].entry_index is None
 
 
+def test_recovery_stops_at_a_withheld_office_address_row_instead_of_taking_the_next_one(tmp_path):
+    """#820 R3 finding 1: web198's source table has a withheld office_address
+    row followed by a second, unrelated office_address-classified row.
+    Before this fix, the first row's content was withheld in full (leaving
+    `office_address` empty) and the `not office_address` guard let the
+    SECOND row fill the slot instead -- rendering an unrelated line
+    (web198: the next address-classified row's value) as the office
+    address. Once a slot's row content has been policy-denied, the slot
+    must render EMPTY for the rest of the document, not take whatever
+    office_address row comes next."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Office Address:", "Place of Birth: Example City, EX"),
+        ("Office Address:", "42 Example Ave, Example City, EX 00000"),
+    ])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    rendered = _docx_texts(tmp_path / "out.docx")
+    assert rows.get("office address:", "") == "", (
+        "the office address slot took the SECOND row's value after the "
+        "first row's content was withheld"
+    )
+    assert "42 Example Ave" not in rendered
+    assert "Example City" not in rendered
+    assert [i.category for i in gen._pii_result.withheld] == ["place of birth"]
+
+
 def test_recovered_address_keeps_its_clean_lines_and_drops_the_protected_one(tmp_path):
     """Line-level, like the entry path's value-level gate: the street lines
     render, the one protected line inside the same cell does not."""
