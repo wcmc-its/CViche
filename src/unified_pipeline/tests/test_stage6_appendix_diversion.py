@@ -48,6 +48,7 @@ Run with:
 """
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -64,6 +65,10 @@ from unified_pipeline.stage6.sections.appendix import (  # noqa: E402
     _appendix_diversion_reason,
     build_appendix_diversion_warnings,
 )
+from unified_pipeline.stage6.sections.passthrough import (  # noqa: E402
+    PASSTHROUGH_CODES,
+    PassthroughSection,
+)
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     RENDER_ROUTED_CODES,
     WCMTemplateGenerator,
@@ -75,7 +80,7 @@ _APPENDIX_HEADER = "T. APPENDIX"
 # ------------------------------------------------------------- pure-function
 
 def test_reason_no_render_route_for_a_code_never_in_render_routed_codes():
-    assert _appendix_diversion_reason("N2", RENDER_ROUTED_CODES) == REASON_NO_RENDER_ROUTE
+    assert _appendix_diversion_reason("N2", RENDER_ROUTED_CODES, PASSTHROUGH_CODES) == REASON_NO_RENDER_ROUTE
 
 
 def test_reason_renderer_declined_for_a_code_in_render_routed_codes():
@@ -83,7 +88,7 @@ def test_reason_renderer_declined_for_a_code_in_render_routed_codes():
     # when generate()'s per-call mapped_codes copy discarded it (the M1
     # no-research-summary case) -- so any entry `build_appendix_diversion_
     # warnings` sees under a RENDER_ROUTED_CODES member is exactly that case.
-    assert _appendix_diversion_reason("M1", RENDER_ROUTED_CODES) == REASON_RENDERER_DECLINED
+    assert _appendix_diversion_reason("M1", RENDER_ROUTED_CODES, PASSTHROUGH_CODES) == REASON_RENDERER_DECLINED
 
 
 def test_reason_renderer_declined_for_a_passthrough_code_not_in_render_routed_codes():
@@ -91,7 +96,7 @@ def test_reason_renderer_declined_for_a_passthrough_code_not_in_render_routed_co
     # their own) but must still classify as renderer_declined, not
     # no_render_route -- _fill_passthrough_sections IS their renderer.
     for code in ("E", "G", "J"):
-        assert _appendix_diversion_reason(code, RENDER_ROUTED_CODES) == REASON_RENDERER_DECLINED
+        assert _appendix_diversion_reason(code, RENDER_ROUTED_CODES, PASSTHROUGH_CODES) == REASON_RENDERER_DECLINED
         assert code not in RENDER_ROUTED_CODES  # the premise F2 fixes
 
 
@@ -101,7 +106,7 @@ def _entry(code: str) -> dict:
 
 def test_build_warnings_one_unrouted_code_three_entries():
     written = [_entry("N2"), _entry("N2"), _entry("N2")]
-    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES)
+    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
     assert len(warnings) == 1
     w = warnings[0]
     assert w["check"] == "appendix_diversion"
@@ -117,35 +122,35 @@ def test_build_warnings_one_unrouted_code_three_entries():
 
 def test_build_warnings_two_unrouted_codes_sorted_by_code():
     written = [_entry("N2"), _entry("M4A"), _entry("M4A")]
-    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES)
+    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
     assert [w["code"] for w in warnings] == ["M4A", "N2"]
     assert [w["count"] for w in warnings] == [2, 1]
     assert all(w["reason"] == REASON_NO_RENDER_ROUTE for w in warnings)
 
 
 def test_build_warnings_empty_written_list_returns_no_warnings():
-    assert build_appendix_diversion_warnings([], [], RENDER_ROUTED_CODES) == []
+    assert build_appendix_diversion_warnings([], [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES) == []
 
 
 def test_build_warnings_evidence_always_empty_never_entry_text():
     written = [{"taxonomy_code": "N2", "text": "some real CV sentence"}]
-    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES)
+    warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
     assert warnings[0]["evidence"] == []
     assert "some real CV sentence" not in json.dumps(warnings)
 
 
 def test_build_warnings_entry_with_no_taxonomy_code_groups_under_question_mark():
     # F5: the "?" bucket -- entry.get("taxonomy_code") is falsy, not KeyError.
-    # "?" is in neither _PASSTHROUGH_CODES nor RENDER_ROUTED_CODES, so it
+    # "?" is in neither PASSTHROUGH_CODES nor RENDER_ROUTED_CODES, so it
     # reads as no_render_route, same as any other never-routed code.
-    warnings = build_appendix_diversion_warnings([{"text": "no code here"}], [], RENDER_ROUTED_CODES)
+    warnings = build_appendix_diversion_warnings([{"text": "no code here"}], [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
     assert len(warnings) == 1
     assert warnings[0]["code"] == "?"
     assert warnings[0]["reason"] == REASON_NO_RENDER_ROUTE
 
 
 def test_build_warnings_recovered_codes_produce_recovered_unrendered_reason():
-    warnings = build_appendix_diversion_warnings([], ["D1", "D1"], RENDER_ROUTED_CODES)
+    warnings = build_appendix_diversion_warnings([], ["D1", "D1"], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
     assert len(warnings) == 1
     w = warnings[0]
     assert w["code"] == "D1"
@@ -158,7 +163,7 @@ def test_build_warnings_recovered_codes_produce_recovered_unrendered_reason():
 
 def test_build_warnings_recovered_singular_count_is_grammatical():
     # F5 singular case, for the recovered_unrendered message's verb agreement.
-    w = build_appendix_diversion_warnings([], ["D1"], RENDER_ROUTED_CODES)[0]
+    w = build_appendix_diversion_warnings([], ["D1"], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)[0]
     assert w["message"] == (
         "D1: 1 entry classified D1 was not found in the rendered document "
         "and was recovered into the Appendix")
@@ -169,7 +174,7 @@ def test_build_warnings_same_code_both_streams_two_warnings_sorted():
     # one (recovered_unrendered) yields two distinct (code, reason) rows,
     # sorted with reason as the tiebreak -- "no_render_route" < "recovered_
     # unrendered" alphabetically.
-    warnings = build_appendix_diversion_warnings([_entry("T"), _entry("T")], ["T"], RENDER_ROUTED_CODES)
+    warnings = build_appendix_diversion_warnings([_entry("T"), _entry("T")], ["T"], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
     assert [(w["code"], w["reason"], w["count"]) for w in warnings] == [
         ("T", REASON_NO_RENDER_ROUTE, 2),
         ("T", REASON_RECOVERED_UNRENDERED, 1),
@@ -469,3 +474,110 @@ def test_negative_existing_checks_output_unchanged_when_diversion_also_fires(tmp
                      "6 section is routed to render this taxonomy code"),
          "evidence": []},
     ]
+
+
+# ---------------------------------------------------- R2 verifier r7 / r10
+
+def test_recover_unrendered_records_wire_a_coded_orphan_becomes_bullet(tmp_path):
+    """r7 (#531-R3, verifier finding F-R2-1): `generate()`'s
+    `recovered_appendix_codes += self._recover_unrendered_records(...)` wire
+    (`stage_6_word_template.py:895`) carries 204 of the corpus's 210
+    `recovered_unrendered` bullets, all A-coded, via
+    `_unconsumed_personal_data_batch` (personal_data.py:402's `unconsumed`
+    list). Every other test in this file drives the F1 recovery path through
+    `_reconsider_appendix_entries` with `recover_unrendered_records=False`;
+    this one turns the REAL post-render pass on instead, with a synthetic
+    A-coded entry that fills none of `_fill_personal_data`'s six contact
+    slots (`work_email`/`personal_email`/`office_phone`/`cell_phone`/
+    `office_address`/`home_address`) so it lands in `unconsumed` and is
+    recovered with no LLM involved. `_reconsider_appendix_entries` (the
+    OTHER writer into the same wire, r10's target below) is neutralized so
+    this test isolates the `_recover_unrendered_records` half exactly.
+
+    Mutant r7 (`self._recover_unrendered_records(...)` called bare, its
+    return dropped) makes `recovered_appendix_codes` empty -- `diversions`
+    below would be `[]` -- FAILING this test's `assert diversions == [...]`.
+    """
+    entries = [_t_entry("Foreign Languages: Spanish, French", "A",
+                         ["Personal Data"], 0)]
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=True)
+    gen._reconsider_appendix_entries = lambda: None
+    data = {"document_uid": "T531N", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+    sidecar = json.loads((tmp_path / "T531N_render_warnings.json").read_text())
+    diversions = _diversion_warnings(sidecar)
+    assert diversions == [{
+        "check": "appendix_diversion", "code": "A", "section": "T. APPENDIX",
+        "count": 1, "reason": REASON_RECOVERED_UNRENDERED,
+        "message": ("A: 1 entry classified A was not found in the rendered "
+                    "document and was recovered into the Appendix"),
+        "evidence": [],
+    }]
+
+
+def test_reconsider_appendix_entries_real_tail_wires_recovered_codes(tmp_path):
+    """r10 (#531-R3, verifier finding F-R2-2): the REAL
+    `_reconsider_appendix_entries` tail (`stage_6_word_template.py:1968-1976`
+    -- `remaining_for_appendix` -> `_add_remaining_to_appendix` -> `return
+    recovered_codes`) is exercised, not replaced by a lambda as every other
+    test in this file does. Only `_reclassify_entry_segments` (the LLM step)
+    is stubbed, to return falsy so the deterministic post-LLM tail runs for
+    real: `self._appendix_pending` is seeded directly (bypassing
+    `_route_overflow_entries`, whose own low-coverage/long-text gate is a
+    separate concern from this wire), so `generate()`'s real call to
+    `_reconsider_appendix_entries()` drives the whole tail.
+
+    Mutant r10 (`self._add_remaining_to_appendix(remaining_for_appendix)`
+    called bare, `_reconsider_appendix_entries` returning `[]`) drops the D2
+    warning below entirely -- FAILING this test.
+    """
+    entries = [_OWNER_ENTRY,
+               _t_entry("N2_ONE reviewed grant applications for the Foundation "
+                        "for Anesthesia Education and Research", "N2", ["Peer Review"], 1)]
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    pending_entry = {"text": "SYNTHETIC_PENDING_D2 record awaiting reconsideration",
+                      "taxonomy_code": "D2", "extracted_fields": {}}
+    gen._appendix_pending = [(pending_entry, 40.0)]
+    gen._reclassify_entry_segments = lambda text, code: []
+    data = {"document_uid": "T531O", "entries": entries}
+    input_path = tmp_path / "in.json"
+    output_path = tmp_path / "out.docx"
+    input_path.write_text(json.dumps(data))
+    gen.generate(str(input_path), str(output_path), research_summary_path=None)
+    sidecar = json.loads((tmp_path / "T531O_render_warnings.json").read_text())
+    diversions = _diversion_warnings(sidecar)
+    assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
+        ("D2", REASON_RECOVERED_UNRENDERED, 1),
+        ("N2", REASON_NO_RENDER_ROUTE, 1),
+    ]
+
+
+# ------------------------------------------------------------------ task 4
+
+def test_passthrough_codes_matches_pinned_value_and_its_own_docstring_source():
+    """Task 4 (#531-R3): `PASSTHROUGH_CODES` lives in `passthrough.py`,
+    derived from `_fill_passthrough_sections`'s own "Sections handled:"
+    docstring bullets (passthrough.py:339-341 -- "- E. EMPLOYMENT STATUS",
+    "- G. ...", "- J. ..."), never hand-typed as a set literal a second time
+    (appendix.py's prior-round `_PASSTHROUGH_CODES` was exactly that first
+    hand-typed literal; it is now deleted). `appendix.py` does NOT import
+    this constant -- both modules are `stage6/sections/*` peers and
+    CODING_STANDARDS.md 1.3 forbids that edge -- it is threaded in as a
+    parameter by `generate()` (`stage_6_word_template.py`, not a `sections/*`
+    peer) instead, the same way `RENDER_ROUTED_CODES` already is; see
+    `appendix.py`'s module-level comment above `_REASON_TEXT`.
+
+    Pinned to the known triple AND re-derived here independently (the same
+    regex shape passthrough.py's own derivation uses, applied by this test
+    to the docstring text itself) so the production derivation and the
+    docstring it reads from cannot silently drift apart -- a bullet added,
+    removed or reworded there without a matching `PASSTHROUGH_CODES` change
+    fails this test, not just the pinned-value half.
+    """
+    assert PASSTHROUGH_CODES == frozenset({'E', 'G', 'J'})
+    doc = PassthroughSection._fill_passthrough_sections.__doc__ or ""
+    bullet_codes = frozenset(re.findall(r'^\s*-\s+([A-Z])\.\s', doc, re.MULTILINE))
+    assert PASSTHROUGH_CODES == bullet_codes

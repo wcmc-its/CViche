@@ -153,7 +153,16 @@ def test_refused_g_entry_reason_is_renderer_declined_accepted_produces_no_warnin
     the two tests above use) reads as `renderer_declined`, never
     `no_render_route` -- `_fill_passthrough_sections` IS G's renderer and
     declined this entry (too short), it is not that no section routes G at
-    all. The accepted G entry produces no appendix_diversion warning."""
+    all. The accepted G entry produces no appendix_diversion warning.
+
+    Also pins r11 (#531-R2 finding F-R2-3 / #531-R3 task 3): the exact
+    passthrough-refusal message text, singular case ("1 entry ... refused
+    by..."). `test_refused_g_entries_plural_message` below is the plural
+    companion. Mutant r11 (`if False:` disabling the E/G/J-specific message
+    branch in `_diversion_message`) falls through to the generic
+    `_REASON_TEXT[REASON_RENDERER_DECLINED]` string ("no research summary
+    rendered") instead -- FAILING the message assertion here.
+    """
     entries = [
         _OWNER_ENTRY,
         {  # Accepted, G-coded this time.
@@ -172,3 +181,33 @@ def test_refused_g_entry_reason_is_renderer_declined_accepted_produces_no_warnin
                   if w.get("check") == "appendix_diversion" and w["code"] == "G"]
     assert [(w["reason"], w["count"]) for w in diversions] == [
         (REASON_RENDERER_DECLINED, 1)]
+    assert diversions[0]["message"] == (
+        "G: 1 entry diverted to the Appendix — refused by the passthrough "
+        "writer for G (source section label did not match)")
+
+
+def test_refused_g_entries_plural_message(tmp_path):
+    """r11 (#531-R3 task 3) plural companion to the singular pin above: two
+    refused G entries read as one warning, count 2, "entries"/no verb-
+    agreement pronoun issue."""
+    entries = [
+        _OWNER_ENTRY,
+        {  # Refused #1: <= 5 chars, below the writer's own admission threshold.
+            "text": "Q2",
+            "taxonomy_code": "G", "hierarchy": ["G. INSTITUTIONAL/HOSPITAL AFFILIATION"],
+            "extracted_fields": {}, "element_idx_start": 5,
+        },
+        {  # Refused #2: same reason, a distinct entry.
+            "text": "Q3",
+            "taxonomy_code": "G", "hierarchy": ["G. INSTITUTIONAL/HOSPITAL AFFILIATION"],
+            "extracted_fields": {}, "element_idx_start": 6,
+        },
+    ]
+    _doc, sidecar = _render(tmp_path, entries)
+    diversions = [w for w in sidecar["warnings"]
+                  if w.get("check") == "appendix_diversion" and w["code"] == "G"]
+    assert [(w["reason"], w["count"]) for w in diversions] == [
+        (REASON_RENDERER_DECLINED, 2)]
+    assert diversions[0]["message"] == (
+        "G: 2 entries diverted to the Appendix — refused by the passthrough "
+        "writer for G (source section label did not match)")
