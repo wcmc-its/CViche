@@ -28,6 +28,7 @@ from unified_pipeline.stage6.normalization.pii import CAT_DEA  # noqa: E402
 from unified_pipeline.stage6.sections.licensure import (  # noqa: E402
     _LICENSURE_SECTION_LABEL,
     _resolve_licensure,
+    _strip_dea_lines,
 )
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -186,3 +187,82 @@ def test_221_recovery_does_not_reinsert_a_record_shaped_dea_line():
         "the record-shaped DEA line leaked into the document"
     assert "335577" in joined, "the Connecticut licence line was not recovered"
     assert "446688" in joined, "the Massachusetts licence line was not recovered"
+
+
+# ---------------------------------------------------------------------------
+# 4. `_strip_dea_lines` removes DEA lines and NOTHING that merely shares
+#    their length (#821 R3 F-A).
+#
+#    The round-2 predicate tested every alphanumeric token against the
+#    classifier's deliberately loose shape (two letters + seven
+#    ALPHANUMERICS), which is also the shape of every nine-letter English
+#    word -- so a fused entry lost every licence line that happened to name
+#    a nine-letter state or carry a nine-letter word, silently.
+# ---------------------------------------------------------------------------
+
+#: Nine letters each: the length the loose shape confused with a DEA number.
+_NINE_LETTER_WORDS = ("Wisconsin", "Certified", "Emergency", "Physician")
+
+
+def test_strip_dea_lines_keeps_a_line_whose_only_nine_char_token_is_a_word():
+    """The negative case, one line per nine-letter word. None of these is a
+    DEA registration (which is two letters then seven DIGITS), so none of
+    these lines may be removed."""
+    for word in _NINE_LETTER_WORDS:
+        line = f"State of Example | {word} licence 123456 | Issued 01/2015"
+        assert _strip_dea_lines(line) == line, f"{word!r} was read as a DEA number"
+
+
+def test_strip_dea_lines_removes_a_real_dea_number_token():
+    """The positive case: two letters then seven digits, with no "DEA"
+    label anywhere on the line to fall back on."""
+    assert _strip_dea_lines("Registration AB1234567 | Issued 01/2015") == ""
+
+
+def test_strip_dea_lines_removes_a_labelled_line_and_keeps_its_siblings():
+    text = "\n".join([
+        "State of Example | Licence 123456 | Issued 01/2015",
+        "DEA registration AB1234567",
+        "Commonwealth of Example | Certificate 654321 | Issued 02/2016",
+    ])
+    kept = _strip_dea_lines(text)
+    assert "AB1234567" not in kept
+    assert kept.split("\n") == [
+        "State of Example | Licence 123456 | Issued 01/2015",
+        "Commonwealth of Example | Certificate 654321 | Issued 02/2016",
+    ]
+
+
+def test_221_recovery_keeps_fused_licence_lines_with_nine_letter_words():
+    """#821 R3 F-A, through the real render + #221 recovery path: a fused
+    F1 entry whose DEA line sits alongside two record-shaped state-licence
+    lines, one of them naming a nine-letter jurisdiction and one carrying a
+    nine-letter word in its own text. Both licences must come back out of
+    `_recover_unrendered_records`, and no DEA-shaped token may reach the
+    document. Under the round-2 predicate the nine-letter line was stripped
+    with the DEA line, which also dropped the entry below
+    `UNRENDERED_MIN_RECORD_LINES` and cost the OTHER licence too -- two
+    licences recovered before this branch, zero after it."""
+    gen = _generator()
+    entry = {
+        "taxonomy_code": "F1",
+        "text": "\n".join([
+            "DEA registration AB1234567",
+            "State of Wisconsin | License 887744 | Issued 05/2016 | Expires 05/2026",
+            "State of New Jersey | Certified License 665533 | Issued 09/2017 "
+            "| Renewal due 09/2027",
+        ]),
+        "extracted_fields": {"license_number": "AB1234567"},
+    }
+
+    gen._fill_licensure([entry])
+    gen._recover_unrendered_records({"F1": [entry]})
+
+    texts = [p.text for p in gen.doc.paragraphs]
+    joined = "\n".join(texts)
+    # Neither number is a substring of the DEA token, so a leak cannot
+    # satisfy these two assertions.
+    assert "887744" in joined, "the nine-letter-jurisdiction licence line was lost"
+    assert "665533" in joined, "the sibling licence line was lost with it"
+    assert not any("AB1234567" in t for t in texts), \
+        "the DEA number leaked into the document"

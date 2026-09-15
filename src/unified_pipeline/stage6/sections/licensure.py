@@ -36,7 +36,10 @@ shape alone cannot do it (#573):
   not running on into letters (a fused "NPI15180546000" still counts) -- the
   old substring test fired on any entry mentioning "Dean";
 - else, and only when the entry names no state, the number's shape: an NPI
-  is 10 or 11 digits, a DEA number two letters plus seven alphanumerics. An
+  is 10 or 11 digits, a DEA-LIKE number two letters plus seven alphanumerics
+  (wider than the real two-letters-plus-seven-DIGITS format on purpose --
+  this tiebreak withholds, so it fails safe by over-matching; the tight
+  `_DEA_NUMBER_RE` is what may DELETE a line. See both regexes' comment). An
   all-numeric 10-11 digit state licence number is indistinguishable from an
   NPI by shape, which is why a stated jurisdiction disables the tiebreak.
 
@@ -83,7 +86,33 @@ logger = logging.getLogger(__name__)
 _NPI_LABEL_RE = re.compile(r'\bNPI(?![A-Za-z])', re.IGNORECASE)
 _DEA_LABEL_RE = re.compile(r'\bDEA(?![A-Za-z])', re.IGNORECASE)
 _NPI_SHAPE_RE = re.compile(r'^\d{10,11}$')
-_DEA_SHAPE_RE = re.compile(r'^[A-Za-z]{2}[A-Za-z0-9]{7}$')
+
+# Two DEA shapes, deliberately different widths, because the two callers
+# fail in OPPOSITE directions (#821 R3 F-A).
+#
+# `_DEA_NUMBER_RE` is the real format -- two letters then SEVEN DIGITS (the
+# first letter is the registrant type, the second the registrant's surname
+# initial, the last digit a checksum). It is the only one of the two that
+# may drive a DELETION: `_strip_dea_lines` removes a whole line of an
+# entry's raw text on it, so a predicate wider than the thing it is named
+# for silently destroys content -- the loose shape below matches every
+# nine-letter English word ("Wisconsin", "Certified", "Emergency"), which
+# took a fused entry's real state-licence lines out of the #221 recovery
+# pass (#821 R3 F-A, found by the round-2 verifier).
+#
+# `_DEA_LIKE_SHAPE_RE` is that same shape widened to any alphanumeric tail,
+# and it stays wide on purpose: its ONLY use is the classifier's tiebreak
+# (`_classify_licensure_entry`, reached only for an entry that carries no
+# NPI/DEA label at all, names no state, and DOES carry a `license_number`),
+# where a match WITHHOLDS the entry instead of rendering it. Failing safe
+# there means over-matching -- a DEA number mis-transcribed with a letter
+# for a digit ("AB123456O") must still be withheld, and the cost of a false
+# positive is one licence row withheld with a notice, not a leak. Corpus
+# check before splitting the two (both farms, 196 F1 entries): zero
+# `license_number` values match the loose shape but not the tight one, so
+# the split changes no rendered output today.
+_DEA_NUMBER_RE = re.compile(r'^[A-Za-z]{2}\d{7}$')
+_DEA_LIKE_SHAPE_RE = re.compile(r'^[A-Za-z]{2}[A-Za-z0-9]{7}$')
 
 # Classification results for one F1 entry.
 KIND_LICENSE = 'license'
@@ -191,7 +220,7 @@ def _classify_licensure_entry(state: str, license_number: str,
     if not state:
         if _NPI_SHAPE_RE.match(license_number):
             return KIND_NPI
-        if _DEA_SHAPE_RE.match(license_number):
+        if _DEA_LIKE_SHAPE_RE.match(license_number):
             return KIND_DEA
     return KIND_LICENSE
 
@@ -273,15 +302,24 @@ def _strip_dea_lines(text: str) -> str:
     anywhere in its text -- see `_classify_licensure_entry`), which took
     them out of reach of `generate()`'s #221 post-render recovery pass too,
     since that pass reads `entry['text']` directly. A line is stripped when
-    it names DEA (`_DEA_LABEL_RE`) or carries a DEA-shaped token
-    (`_DEA_SHAPE_RE`, matched per alphanumeric token so it cannot also
-    consume a same-length state licence number sitting on the SAME line as
-    unrelated content)."""
+    it names DEA (`_DEA_LABEL_RE`) or carries a token that is a DEA NUMBER
+    (`_DEA_NUMBER_RE`: two letters then seven digits, matched per
+    alphanumeric token so it cannot also consume a same-length state
+    licence number sitting on the SAME line as unrelated content).
+
+    The token test is the tight shape, never the classifier's deliberately
+    loose `_DEA_LIKE_SHAPE_RE` (#821 R3 F-A): that one matches any nine
+    alphanumerics opening with two letters, i.e. every nine-letter English
+    word, so a fused entry's "Wisconsin ... licence" or "Certified ..."
+    line was dropped here as if it were a DEA registration -- and with it
+    every licence number on that line, silently, exactly the content loss
+    this function was written to stop. See the two regexes' own comment for
+    why the classifier keeps the wide one."""
     kept = []
     for line in str(text or '').split('\n'):
         if _DEA_LABEL_RE.search(line):
             continue
-        if any(_DEA_SHAPE_RE.match(tok)
+        if any(_DEA_NUMBER_RE.match(tok)
                for tok in re.findall(r'[A-Za-z0-9]+', line)):
             continue
         kept.append(line)
