@@ -306,6 +306,29 @@ def test_appendix_residual_survives_a_fused_withheld_and_kept_fragment(tmp_path:
     )
 
 
+def test_appendix_residual_is_refused_when_the_value_sits_past_a_hard_delimiter(
+        tmp_path: Path) -> None:
+    """Negative case `_pii_cut_left_a_bare_label` exists for (#821 R2 F3
+    safety check, corpus-observed on 1FRABQ): a "Label: | value" shape --
+    a pipe, the pipeline's own inline-cell separator, sitting directly
+    after the label's colon. `pii.py`'s label span runs "to the next hard
+    delimiter", and `|` IS one, so the cut removes ONLY "Home telephone:"
+    and leaves the phone number completely uncut in `entry['text']` --
+    which would otherwise look exactly like a safe residual (`_clean_
+    inline_tabs` then drops the now-empty label cell entirely, leaving a
+    bare, unlabelled phone number). The whole entry must stay denied, the
+    same as a real fused entry with no safely-separable residual at all."""
+    text = _render(tmp_path, [
+        _a("Home telephone: | 212 555 1234"),
+    ])
+    assert "212 555 1234" not in text, (
+        "a home phone number separated from its label by a hard delimiter "
+        "reached the document unlabelled"
+    )
+    assert "Home telephone" not in text
+    assert PII_REDACTED_NOTICE in text
+
+
 def test_pii_in_a_tab_separated_cell_is_still_caught(tmp_path):
     """The scan must read the RAW entry text. _clean_inline_tabs rewrites the
     first '\\t' to ': ' and ' | ' to ' — ', destroying the fragment boundaries

@@ -280,6 +280,27 @@ def _strip_dangling_separators(text: str) -> str:
     return _DANGLING_SEPARATOR_RE.sub('', text)
 
 
+def _pii_cut_left_a_bare_label(fragments: list[str]) -> bool:
+    """True when any fragment `run_pii_pass` cut off an entry is a BARE
+    LABEL -- ends at its own colon with no value captured at all (#821 R2
+    F3 safety check, corpus-observed on 1FRABQ).
+
+    Every `WITHHOLD_POLICY` label row's span runs "from the opener's own
+    start to the next hard delimiter" (`normalization/pii.py`'s
+    `_label_spans`): a hard delimiter (`|`, a tab, 3+ spaces --
+    `_PII_FRAGMENT_SPLIT_RE`) sitting directly after the label's colon --
+    a "Home telephone: | <phone>" shape several A-coded orphan entries in
+    this corpus use, one field per entry, label and value joined by " | "
+    the way a two-cell table row is elsewhere in this pipeline -- stops the
+    span AT the colon, so the phone number itself is never cut and survives
+    as what looks like a safe residual; `_clean_inline_tabs` then drops the
+    now-empty label cell entirely, leaving a bare, unlabelled protected
+    value. Rendering the residual is refused whenever this happened -- the
+    whole entry stays denied instead, the pre-#821-R2-F3 behavior for every
+    entry, not just this shape."""
+    return any(frag.rstrip().endswith(':') for frag in fragments)
+
+
 
 
 
@@ -2515,8 +2536,13 @@ Now analyze the text above:"""
             if entry.get('_pii_withheld'):
                 # A raw-text cut (`_pii_fragments` non-empty) can leave a
                 # real residual; a field-key-only withhold cannot (the raw
-                # text was never touched) -- see the method docstring.
-                if entry.get('_pii_fragments'):
+                # text was never touched) -- see the method docstring. A
+                # bare-label cut (`_pii_cut_left_a_bare_label`) means the
+                # VALUE never got cut at all and is hiding in what looks
+                # like a safe residual -- refuse it too (#821 R2 F3 safety
+                # check).
+                fragments = entry.get('_pii_fragments') or []
+                if fragments and not _pii_cut_left_a_bare_label(fragments):
                     text = _strip_dangling_separators(text).strip()
                     if text and _squash(text) not in haystack:
                         batch.append((text, 'A', 0))
