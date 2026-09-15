@@ -34,6 +34,7 @@ import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
 
+import pytest
 from docx import Document
 
 _SRC = Path(__file__).resolve().parents[2]
@@ -47,9 +48,12 @@ from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
 from unified_pipeline.stage6.pii_pass import (  # noqa: E402
     WITHHELD_COMMENT_AUTHOR,
     WITHHELD_COMMENT_HEADER,
+    run_pii_pass,
 )
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     PII_REDACTED_NOTICE,
+    RENDER_ROUTED_CODES,
+    TAXONOMY_TO_SECTION,
     WCMTemplateGenerator,
     _pii_fragments,
 )
@@ -780,3 +784,120 @@ def test_protected_class_labels_deny_only_the_colon_form():
         "Age-related macular degeneration",
     ]:
         assert not _pii_fragments(keeper), f"false positive on {keeper!r}"
+
+
+# --------------------------------------------------------------------------
+# #821 R4 F-1: a bare-label cut may stop only at a KNOWN field label
+#
+# The round-3 stop searched the run for "1-4 word tokens then a colon", a
+# WORD SHAPE, and the protected value's own trailing words satisfy it: a
+# home address followed on the same run by a sibling field had its
+# city/state -- or, for an address with no digits, nearly all of it --
+# left in the residual and rendered into the Appendix. The stop is now a
+# VOCABULARY (`pii_pass.py::_KNOWN_FIELD_LABEL_RE`, built from
+# `WITHHOLD_POLICY`'s label rows plus `_RENDER_SET_FIELD_LABELS`), so it
+# can only stop where a field is actually NAMED, and a run with no known
+# label in it is cut whole.
+#
+# Every case is asserted twice: on the pass's own residual by EQUALITY
+# (`run_pii_pass` -- the leak-proof statement: the residual contains no
+# token of the value), and on the rendered document (`_render` -- the
+# wire: the survivor reached it, every forbidden token did not). All
+# values synthetic.
+# --------------------------------------------------------------------------
+
+_KNOWN_LABEL_CASES = [
+    # (id, text, residual, survives_in_document, forbidden_in_document)
+    ("value_tail_is_words_then_a_known_label",
+     "Home Address:        12 Elm St New York NY Citizenship: US",
+     "Citizenship: US", "• Citizenship: US", ["Elm", "New York"]),
+    ("value_is_all_words_then_a_known_label",
+     "Home Address:        Elm House Oak Lane Citizenship: US",
+     "Citizenship: US", "• Citizenship: US", ["Elm", "Oak Lane", "House"]),
+    ("pipe_value_tail_is_words_then_a_known_label",
+     "Home Address: | 12 Elm St Apt 4 Anytown Citizenship: US",
+     "Citizenship: US", "• Citizenship: US", ["Elm", "Anytown", "Apt"]),
+    ("value_carries_its_own_colon",
+     # "Apt:" is colon-terminated and would stop a shape-based search
+     # dead, leaving "4 Anytown" in the residual. It is not a field this
+     # codebase renders, so it is not in the vocabulary and is cut with
+     # the rest of the value.
+     "Home Address: | 12 Elm St Apt: 4 Anytown Citizenship: US",
+     "Citizenship: US", "• Citizenship: US", ["Elm", "Anytown", "Apt"]),
+    ("gapped_phone_then_a_known_label",
+     # web32's shape, the one the extension was built for.
+     "Home Phone:        555-0100 Citizenship: US",
+     "Citizenship: US", "• Citizenship: US", ["555-0100"]),
+    ("gapped_phone_then_a_known_render_set_label",
+     # The survivor here is a render-set field rather than a policy
+     # "render" default, and it reaches the PERSONAL DATA table's Work
+     # email cell rather than the Appendix -- which is why the document
+     # assertion is a substring and the residual assertion is equality.
+     "Home Phone:        555-0100 Work Email: someone@example.org",
+     "Work Email: someone@example.org", "someone@example.org", ["555-0100"]),
+    ("no_known_label_in_the_run_cuts_the_whole_run",
+     # The stated cost of a vocabulary: "Foo:" names no field this
+     # pipeline renders, so the run is cut whole. The sibling is lost;
+     # nothing of the address is leaked.
+     "Home Address:        12 Elm St Anytown Foo: bar",
+     "", None, ["Elm", "Anytown", "Foo", "bar"]),
+    ("a_known_label_glued_into_a_word_is_not_a_label",
+     # The word-start anchor. Without it the search stops on the
+     # "citizenship" INSIDE "Noncitizenship" and everything before it --
+     # the whole address -- renders.
+     "Home Address: | 12 Elm St Noncitizenship: none",
+     "", None, ["Elm", "Noncitizenship", "citizenship"]),
+    ("newline_before_a_known_label_is_untouched",
+     "Home Address:\nCitizenship: US",
+     "Citizenship: US", "• Citizenship: US", ["Home Address"]),
+    ("newline_before_a_numbered_known_label_is_untouched",
+     "2. Home Address:\n3. Work Email: someone@example.org",
+     "2. \n3. Work Email: someone@example.org", "someone@example.org",
+     ["Home Address"]),
+    ("delimiter_then_newline_refuses_the_residual",
+     # #821 R3 F-2 / the verifier's g13b mutant: the `text[value_start]
+     # == "\n"` guard in `_extend_bare_label_span`. The delimiter is a
+     # pipe, so the extension starts, but the value is on the NEXT line --
+     # the one place a cut may not reach. The value stays in the residual
+     # uncut, the pass flags the entry (`_pii_orphaned_value`), and the
+     # Appendix refuses it whole. Without the guard the address renders.
+     "Home Address: | \n12 Elm St",
+     "| \n12 Elm St", None, ["Elm"]),
+]
+
+
+@pytest.mark.parametrize(
+    "text,residual,survives,forbidden",
+    [(text, residual, survives, forbidden)
+     for _, text, residual, survives, forbidden in _KNOWN_LABEL_CASES],
+    ids=[case_id for case_id, *_ in _KNOWN_LABEL_CASES],
+)
+def test_a_bare_label_cut_stops_only_at_a_known_field_label(
+        tmp_path: Path, text: str, residual: str, survives: str | None,
+        forbidden: list[str]) -> None:
+    """#821 R4 F-1, both halves in one case list.
+
+    `residual` is `entry['text']` after the real `run_pii_pass`, asserted
+    by equality: that is the statement "no token of the protected value is
+    left behind", which a substring assertion cannot make. `survives` is
+    what must reach the rendered document (None: nothing from this entry
+    may), and `forbidden` is every value token that must not, read from
+    the whole document rather than from one paragraph."""
+    entry = {"text": text, "taxonomy_code": "A", "extracted_fields": {}}
+    run_pii_pass({"A": [entry]}, routed_codes=RENDER_ROUTED_CODES,
+                 section_names=TAXONOMY_TO_SECTION)
+    assert entry["text"] == residual, (
+        "the pass's residual is not exactly the sibling field")
+
+    rendered = _render(tmp_path, [_a(text)])
+    for token in forbidden:
+        assert token not in rendered, f"{token!r} reached the document"
+    if survives is None:
+        assert "Citizenship: US" not in rendered
+    elif survives.startswith("•"):
+        assert survives in _paragraph_texts(tmp_path / "out.docx"), (
+            "the residual did not render as exactly that appendix bullet: "
+            f"{[p for p in _paragraph_texts(tmp_path / 'out.docx') if p.strip()][-6:]}")
+    else:
+        assert survives in rendered, "the sibling field did not reach the document"
+    assert PII_REDACTED_NOTICE in rendered

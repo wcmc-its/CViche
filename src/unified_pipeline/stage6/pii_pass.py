@@ -50,6 +50,7 @@ from typing import NamedTuple
 from .normalization.pii import (  # noqa: F401
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
+    WITHHOLD_POLICY,
     WithheldItem,
     _PII_FRAGMENT_SPLIT_RE,
     _pii_field_key_category,
@@ -90,14 +91,24 @@ WITHHELD_COMMENT_AUTHOR = "CViche"
 _MULTI_SPACE_RE = re.compile(r"[ \t]{2,}")
 _BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
 
-#: The opener of the NEXT labelled field, where a bare label's own value
-#: would otherwise be looked for (#821 R3 F-B). A label is a short run of
-#: word-like tokens ending in a colon, optionally behind a list marker
-#: ("3. Work Email:", "• Citizenship:"), which is how every fielded corpus
-#: CV separates one field from the next inside a single extracted entry.
-#: Matched with `.match` at a candidate value position and with `.search`
-#: inside the span the extension would otherwise swallow; either way it is
-#: a STOP, never a start -- nothing it matches is ever cut.
+#: The opener of the NEXT labelled field AT a candidate value position
+#: (#821 R3 F-B). A label is a short run of word-like tokens ending in a
+#: colon, optionally behind a list marker ("3. Work Email:",
+#: "• Citizenship:"), which is how every fielded corpus CV separates one
+#: field from the next inside a single extracted entry.
+#: Used with `.match` ONLY -- at the position a bare label's value would
+#: start, and at the position after a refused extension. There it is a
+#: statement about POSITION, not about vocabulary: a run that BEGINS with
+#: a colon-terminated word run, right where this label's value was
+#: expected, is the next field rather than this label's value, whatever it
+#: is called.
+#: It is deliberately NOT used to search INSIDE a run (#821 R4 F-1): the
+#: leftmost "1-4 words then a colon" inside
+#: "Home Address:<gap>12 Elm St New York NY Citizenship: US" starts on the
+#: VALUE's own trailing words, so cutting up to it left part of a
+#: withheld address in the document. Searching inside a run is
+#: `_KNOWN_FIELD_LABEL_RE` below, which can only stop somewhere a field is
+#: actually NAMED.
 #: Four words is the cap because the policy's own longest label
 #: ("Social Security Number", "Date of Birth") is four; a longer colon-
 #: terminated run is prose, not a field name.
@@ -107,6 +118,96 @@ _SIBLING_LABEL_RE = re.compile(
     r"[A-Za-z][\w.'’&/-]*"
     r"(?:[ \t][A-Za-z][\w.'’&/-]*){0," + str(_SIBLING_LABEL_MAX_WORDS - 1) + r"}"
     r"[ \t]*:"
+)
+
+#: Field labels this pipeline RENDERS, curated from the code that already
+#: recognises each one -- the second half of `_KNOWN_FIELD_LABEL_RE`'s
+#: vocabulary (the first half is `WITHHOLD_POLICY`'s own label rows).
+#: Verbose-mode alternatives, case-insensitive, no colon (the shared
+#: `\s*:` terminator is appended once, the way `pii.py::_label_pattern`
+#: appends it for a policy row).
+#:
+#: Every entry names a field some renderer or classifier looks for by
+#: name; nothing here is a guess about English word shape. Source per
+#: entry (all on this branch):
+#:
+#: - the six PERSONAL DATA table rows `_write_personal_data_table_cells`
+#:   matches by their own cell text -- 'office address'
+#:   (`sections/personal_data.py:631`), 'office telephone' (`:637`),
+#:   'work email' (`:642`), 'home address' (`:647`), 'cell phone'
+#:   (`:653`), 'personal email' (`:658`). 'home address' also arrives via
+#:   `WITHHOLD_POLICY`'s own home-contact row, which is fine: the
+#:   vocabulary is a union.
+#: - `_classify_contact_label`'s label words -- `_EMAIL_LABEL_WORDS`
+#:   ('e-mail', 'email') `:158`, `_PHONE_LABEL_WORDS` ('phone',
+#:   'telephone') `:159`, `_ADDRESS_LABEL_WORDS` ('address', 'business')
+#:   `:163`, `_PERSON_NAME_LABELS` ('name', 'full name', 'legal name',
+#:   'candidate name', 'applicant name') `:169-172`.
+#: - the phone-type words the entry classifier reads out of the raw text:
+#:   'cell', 'mobile' (`personal_data.py:423`).
+#: - 'fax' -- consumed and deliberately dropped by
+#:   `_parse_address_block` (`personal_data.py:892`) and by
+#:   `normalization/fields.py:174-177`.
+#: - 'citizenship', 'nationality' and 'personal email' -- the #821
+#:   "render" defaults, listed as NOT in the table at
+#:   `normalization/pii.py:304-305`.
+#: - 'npi' -- the same list's public identifier (`pii.py:306`), detected
+#:   by `sections/licensure.py:86` `_NPI_LABEL_RE`.
+#: - 'orcid' -- section S0's own identifier
+#:   (`sections/researcher_profiles.py:1-3`, `sections/__init__.py:29`).
+#: - 'website', 'home page', 'homepage', 'contact' -- the contact nouns
+#:   `core/validators/contact_section.py:90-92` `CONTACT_NOUNS` lists.
+#:
+#: Adding a field is one row. A label NOT here is not leaked: the run is
+#: cut whole (see `_extend_bare_label_span`), so the cost of a gap is a
+#: lost sibling field, never a rendered protected value.
+_RENDER_SET_FIELD_LABELS: tuple[str, ...] = (
+    r"office \s* address",
+    r"office \s* (?: telephone | phone )",
+    r"work \s* e-? \s* mail",
+    r"personal \s* e-? \s* mail",
+    r"cell (?: \s* phone )?",
+    r"mobile (?: \s* phone )?",
+    r"e-? \s* mail (?: \s* address )?",
+    r"telephone",
+    r"phone",
+    r"address",
+    r"business",
+    r"name",
+    r"(?: full | legal | candidate | applicant ) \s* name",
+    r"fax",
+    r"citizenship",
+    r"nationality",
+    r"npi",
+    r"orcid",
+    r"website",
+    r"home \s* page | homepage",
+    r"contact",
+)
+
+#: The ONLY thing a bare-label extension may stop at part-way through a
+#: whitespace run (#821 R4 F-1): a label this codebase actually knows, at
+#: a word start, optionally behind a list marker.
+#:
+#: Built from `WITHHOLD_POLICY`'s label rows PLUS
+#: `_RENDER_SET_FIELD_LABELS`, the same way `pii.py::_PII_LABEL_RE` is
+#: built from those rows -- one source, so the vocabulary cannot drift
+#: from the policy when a row is added.
+#:
+#: The leading `(?<![\w'’-])` is what makes it a FIELD NAME rather than a
+#: substring: without it "MyCitizenship:" inside a value stops the cut and
+#: everything before it renders.
+_KNOWN_FIELD_LABEL_RE = re.compile(
+    r"(?<![\w'’-])"
+    r"(?:(?:[•·*–—-]|\d{1,3}[.)])[ \t]*)?"
+    r"(?:"
+    + "|".join(
+        [r"(?:" + str(rule.label) + r")"
+         for rule in WITHHOLD_POLICY if rule.label is not None]
+        + [r"(?:" + label + r")" for label in _RENDER_SET_FIELD_LABELS]
+    )
+    + r")\s*:",
+    re.X | re.I,
 )
 
 
@@ -203,11 +304,26 @@ def _extend_bare_label_span(text: str, start: int, end: int) -> _BareLabelSpan:
     - it never crosses a newline. A line break is the one delimiter the
       source document itself drew; whatever is on the next line is a new
       field, not this label's orphaned value.
-    - it stops at the next labelled field (`_SIBLING_LABEL_RE`), whether
-      that field starts immediately after the delimiter or further along
-      the same run. "Home Phone:<gap>555-0100 Citizenship: US" separates
-      the sibling by a SINGLE space, which is not a hard delimiter at all,
-      so without this stop the extension ran to the end of the entry.
+    - it stops where the value would start if what is there is the next
+      labelled field by POSITION (`_SIBLING_LABEL_RE.match`), and PART-WAY
+      through the run only at a label this codebase actually knows
+      (`_KNOWN_FIELD_LABEL_RE`). "Home Phone:<gap>555-0100 Citizenship: US"
+      separates the sibling by a SINGLE space, which is not a hard
+      delimiter at all, so without a stop inside the run the extension ran
+      to the end of the entry.
+
+    The in-run stop is a VOCABULARY, not a word shape, and that is the
+    whole of #821 R4 F-1. The previous version took the leftmost run of
+    1-4 word tokens ending in a colon, which the protected value's own
+    trailing words satisfy: "Home Address:<gap>12 Elm St New York NY
+    Citizenship: US" stopped on the value's city/state and rendered them.
+    Any rule that guesses where a value ENDS from word shape leaks some
+    value; only a rule that recognises where the NEXT FIELD BEGINS is
+    leak-proof by construction. The price is stated and accepted: a
+    sibling field whose label is not in the vocabulary, inside the same
+    whitespace run, is cut together with the value -- never leaked,
+    possibly lost. Extending the vocabulary is one row in
+    `_RENDER_SET_FIELD_LABELS`.
 
     When a stop refuses the extension, `orphaned_value` says whether the
     value is still sitting there uncut (see `_BareLabelSpan`): a label with
@@ -231,8 +347,8 @@ def _extend_bare_label_span(text: str, start: int, end: int) -> _BareLabelSpan:
         return _BareLabelSpan(end, False)  # the next field, not our value
     nxt = _PII_FRAGMENT_SPLIT_RE.search(text, value_start)
     limit = nxt.start() if nxt else len(text)
-    sibling = _SIBLING_LABEL_RE.search(text, value_start, limit)
-    return _BareLabelSpan(sibling.start() if sibling else limit, False)
+    known = _KNOWN_FIELD_LABEL_RE.search(text, value_start, limit)
+    return _BareLabelSpan(known.start() if known else limit, False)
 
 
 def _cut_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
