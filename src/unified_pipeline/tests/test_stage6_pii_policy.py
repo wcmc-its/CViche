@@ -447,6 +447,13 @@ _BARE_LABEL_CASES = [
     ("single_space_sibling_label",
      "Home Phone:        555-0100 Citizenship: US",
      ["555-0100"], ["Citizenship: US"]),
+    ("pipe_then_gapped_sibling_label",
+     # The sibling's own colon sits PAST a hard delimiter (a column-aligned
+     # "Citizenship   : US"), so a stop that only looked inside the span up
+     # to the next delimiter could not see the label at all and would cut
+     # the sibling's name off its value.
+     "Home telephone: | Citizenship   : US",
+     [], ["Citizenship"]),
     ("pipe_orphaned_value",
      "Home telephone: | 555-0100",
      ["555-0100"], []),
