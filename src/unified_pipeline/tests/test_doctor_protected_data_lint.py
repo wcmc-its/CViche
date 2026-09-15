@@ -124,7 +124,7 @@ def test_a_home_address_value_on_the_table_rows_own_next_line_is_flagged():
     `\\n`-joined), and `\\n` is one of `_pii_matches`' own hard fragment
     boundaries -- the generic scan's label span stops right at the label,
     never reaching a value on the very next line, so it alone reported
-    zero findings for this shape (farm uid 0WT89A, a real leak, matched
+    zero findings for this shape (a real leak on one farm CV, matched
     nothing under the generic scan by itself). `_home_contact_value_leaked`
     is the dedicated probe that closes it."""
     blocks = [_p("PERSONAL DATA"),

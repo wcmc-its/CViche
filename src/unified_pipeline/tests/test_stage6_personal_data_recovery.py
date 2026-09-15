@@ -94,6 +94,16 @@ def _comments(docx_path) -> list[tuple[str, str]]:
     return out
 
 
+def _paragraph_texts(docx_path) -> list[str]:
+    """Every paragraph's text, read from raw w:t nodes like `_all_text` --
+    one string per PARAGRAPH, which `_all_text` cannot give (it joins node
+    by node), and which an assertion about what a line renders AS rather
+    than what it CONTAINS needs."""
+    doc = Document(str(docx_path))
+    return ["".join(n.text or "" for n in para._p.iter(W_T))
+            for para in doc.paragraphs]
+
+
 def _a(text, fields=None, idx=0):
     return {"text": text, "taxonomy_code": "A",
             "extracted_fields": fields or {}, "element_idx_start": idx}
@@ -287,8 +297,8 @@ def test_appendix_residual_survives_a_fused_withheld_and_kept_fragment(tmp_path:
     this entry is not "nothing": `run_pii_pass` (`pii_pass.py`'s
     `_cut_spans`) already cut only the withheld SPAN out of `entry['text']`,
     so the kept fragment survives in the entry's own residual text and
-    should have reached the Appendix all along (the corpus shape: web32's
-    fused "Home Phone" + "Citizenship" orphan). The residual renders as an
+    should have reached the Appendix all along (the corpus shape: a fused
+    "Home Phone" + "Citizenship" orphan). The residual renders as an
     ordinary Appendix bullet with its dangling separator punctuation
     trimmed (`_strip_dangling_separators`) and its normal classification
     comment attached, same as any other appendix line."""
@@ -308,7 +318,7 @@ def test_appendix_residual_survives_a_fused_withheld_and_kept_fragment(tmp_path:
 
 def test_appendix_residual_is_refused_when_the_value_sits_past_a_hard_delimiter(
         tmp_path: Path) -> None:
-    """#821 R2 F3 safety check, corpus-observed on 1FRABQ: a "Label: |
+    """#821 R2 F3 safety check, corpus-observed: a "Label: |
     value" shape -- a pipe, the pipeline's own inline-cell separator,
     sitting directly after the label's colon. `pii.py`'s label span runs
     "to the next hard delimiter", and `|` IS one, so an UNEXTENDED cut
@@ -336,7 +346,7 @@ def test_appendix_residual_is_refused_when_the_value_sits_past_a_hard_delimiter(
 def test_appendix_residual_recovers_a_sibling_field_past_a_wide_gap(
         tmp_path: Path) -> None:
     """#821 R2 F3 (issue #834), the corpus shape that needed
-    `_extend_bare_label_span`: web32's fused "Home Phone" + "Citizenship"
+    `_extend_bare_label_span`: a fused "Home Phone" + "Citizenship"
     A-coded orphan column-aligns its fields with a wide run of spaces
     instead of a colon-adjacent value ("Home Phone:        <phone>
     Citizenship: ..."). 3+ spaces is ALSO one of `pii.py`'s hard
@@ -357,6 +367,89 @@ def test_appendix_residual_recovers_a_sibling_field_past_a_wide_gap(
     assert "212 555 1234" not in text, "the withheld home phone reached the document"
     assert "Home Phone" not in text
     assert PII_REDACTED_NOTICE in text
+
+
+def test_appendix_residual_renders_exactly_the_kept_fragment(tmp_path: Path) -> None:
+    """#821 R3 F-E: the residual is asserted by EQUALITY on the rendered
+    paragraph, not by substring. The cut stops at the hard delimiter that
+    separated the withheld fragment from its neighbour, so the delimiter
+    itself is left dangling on the front of the residual (`"; Citizenship:
+    US"`); `_strip_dangling_separators` trims it. A substring assertion
+    ("Citizenship: US" in text) passes either way and left that trim
+    untested on the wire -- this one fails the moment the residual renders
+    with its leading separator."""
+    _render(tmp_path, [
+        _a("Home Phone: 555-123-4567; Citizenship: US"),
+    ])
+    paragraphs = _paragraph_texts(tmp_path / "out.docx")
+    assert "\u2022 Citizenship: US" in paragraphs, (
+        "the residual did not render as a clean appendix bullet: "
+        f"{[x for x in paragraphs if 'Citizenship' in x]}"
+    )
+
+
+def test_appendix_residual_renders_when_a_bare_label_had_no_value_after_it(
+        tmp_path: Path) -> None:
+    """#821 R3 F-D: a protected label with NOTHING after it -- a fielded
+    template's leftover empty row -- is not a leak. The R2 refusal keyed on
+    "the cut fragment ends in a colon", which is equally true of a label
+    whose value survived the cut and of one that never had a value at all,
+    so this entry lost its citizenship line (a #821 "render" item) to
+    protect nothing. `run_pii_pass` now records which of the two happened
+    (`_pii_orphaned_value`) and only the first refuses the residual."""
+    text = _render(tmp_path, [
+        _a("Citizenship: US\nHome Address:"),
+    ])
+    assert "Citizenship: US" in text, (
+        "a bare protected label with no value after it withheld its sibling field"
+    )
+    assert "Home Address" not in text, "the protected label itself rendered"
+    assert PII_REDACTED_NOTICE in text
+
+
+def test_appendix_residual_is_refused_when_the_value_sits_on_the_next_line(
+        tmp_path: Path) -> None:
+    """The negative half of the case above, and the reason the refusal
+    still exists: the same bare label, but with an unlabelled value on the
+    line below it. The pass will not extend a cut across a newline (a
+    newline is the source document's own field separator -- extending
+    across one swallowed the NEXT field, #821 R3 F-B), so the address is
+    still in the residual, unlabelled, indistinguishable from safe content.
+    The whole entry is denied instead -- including its other, harmless
+    field, which is the price of not leaking the address."""
+    text = _render(tmp_path, [
+        _a("Citizenship: US\nHome Address:\n12 Example Street"),
+    ])
+    assert "12 Example Street" not in text, (
+        "an unlabelled home address reached the Appendix as a safe residual"
+    )
+    assert "Citizenship" not in text, (
+        "the residual rendered even though the protected value was still in it"
+    )
+    assert PII_REDACTED_NOTICE in text
+
+
+def test_personal_data_redacted_counts_every_entry_the_policy_cut(
+        tmp_path: Path) -> None:
+    """#821 R3 F-H: `stats['personal_data_redacted']` means "A-coded
+    orphans the policy removed something from", so it counts the entry
+    whose residual rendered as well as the one denied whole -- before the
+    #834 residual fix those were the same population and the counter sat on
+    the deny branch alone, which silently turned it into "entries dropped".
+    `personal_data_recovered` is the count of what actually reached the
+    Appendix, so the two still separate the cases: 2 cut, 2 rendered (the
+    residual and the clean sibling)."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None
+    ip, op = tmp_path / "in.json", tmp_path / "out.docx"
+    ip.write_text(json.dumps({"document_uid": "TESTPD", "entries": [
+        _a("Home Phone: 555-123-4567; Citizenship: US"),
+        _a("Date of Birth: 04/01/1958", idx=1),
+        _a("Foreign Languages: French", idx=2),
+    ]}))
+    gen.generate(str(ip), str(op), research_summary_path=None)
+    assert gen.stats["personal_data_redacted"] == 2
+    assert gen.stats["personal_data_recovered"] == 2
 
 
 def test_pii_in_a_tab_separated_cell_is_still_caught(tmp_path):

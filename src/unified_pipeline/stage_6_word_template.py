@@ -23,6 +23,7 @@ import sys
 import json
 from types import MappingProxyType
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Dict, List, Any, Literal, Optional, Tuple
 from datetime import datetime
@@ -280,10 +281,11 @@ def _strip_dangling_separators(text: str) -> str:
     return _DANGLING_SEPARATOR_RE.sub('', text)
 
 
-def _pii_cut_left_a_bare_label(fragments: list[str]) -> bool:
-    """True when any fragment `run_pii_pass` cut off an entry is a BARE
-    LABEL -- ends at its own colon with no value captured at all (#821 R2
-    F3 safety check, corpus-observed on 1FRABQ).
+def _pii_cut_left_a_bare_label(entry: Mapping[str, Any]) -> bool:
+    """True when `run_pii_pass` cut a BARE LABEL off this entry and the
+    label's own value is still sitting in the residual text, uncut and now
+    unlabelled (#821 R2 F3 safety check; the corpus shape is a label and
+    its value joined by a literal pipe).
 
     Every `WITHHOLD_POLICY` label row's span runs "from the opener's own
     start to the next hard delimiter" (`normalization/pii.py`'s
@@ -295,10 +297,18 @@ def _pii_cut_left_a_bare_label(fragments: list[str]) -> bool:
     span AT the colon, so the phone number itself is never cut and survives
     as what looks like a safe residual; `_clean_inline_tabs` then drops the
     now-empty label cell entirely, leaving a bare, unlabelled protected
-    value. Rendering the residual is refused whenever this happened -- the
-    whole entry stays denied instead, the pre-#821-R2-F3 behavior for every
-    entry, not just this shape."""
-    return any(frag.rstrip().endswith(':') for frag in fragments)
+    value. Rendering the residual is refused whenever that happened -- the
+    whole entry stays denied instead, the pre-#821-R2-F3 behavior.
+
+    The verdict is the pass's own (`_pii_orphaned_value`, written by
+    `_extend_bare_label_span`) rather than a re-read of the fragment
+    strings, because by this point the strings cannot answer the question:
+    "the cut fragment ends in a colon" is equally true of a label whose
+    value was left behind and of a label that had NOTHING after it at all
+    ("Citizenship: US\\nHome Address:" -- a template leftover, nothing
+    protected, and refusing it cost the citizenship line, #821 R3 F-D).
+    Only the pass still holds the text on both sides of the cut."""
+    return bool(entry.get('_pii_orphaned_value'))
 
 
 
@@ -2537,17 +2547,26 @@ Now analyze the text above:"""
                 # A raw-text cut (`_pii_fragments` non-empty) can leave a
                 # real residual; a field-key-only withhold cannot (the raw
                 # text was never touched) -- see the method docstring. A
-                # bare-label cut (`_pii_cut_left_a_bare_label`) means the
-                # VALUE never got cut at all and is hiding in what looks
-                # like a safe residual -- refuse it too (#821 R2 F3 safety
-                # check).
+                # bare-label cut whose value the pass could not reach
+                # (`_pii_cut_left_a_bare_label`) means the VALUE never got
+                # cut at all and is hiding in what looks like a safe
+                # residual -- refuse it too (#821 R2 F3 safety check).
+                # Either way this entry had protected data removed from it,
+                # so it counts as redacted (#821 R3 F-H). Before the #834
+                # residual fix every withheld entry was dropped whole, so
+                # "redacted" and "dropped" were one population; leaving the
+                # counter on the drop-only branch silently redefined it as
+                # "entries dropped" and under-reported the redaction on
+                # exactly the entries the residual fix changed.
+                # `personal_data_recovered` right below is the count of what
+                # RENDERED, so the two together still separate the cases.
+                redacted += 1
                 fragments = entry.get('_pii_fragments') or []
-                if fragments and not _pii_cut_left_a_bare_label(fragments):
+                if fragments and not _pii_cut_left_a_bare_label(entry):
                     text = _strip_dangling_separators(text).strip()
                     if text and _squash(text) not in haystack:
                         batch.append((text, 'A', 0))
                         continue
-                redacted += 1
                 continue
             if not text:
                 continue
