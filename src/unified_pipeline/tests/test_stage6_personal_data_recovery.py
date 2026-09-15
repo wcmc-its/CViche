@@ -308,16 +308,20 @@ def test_appendix_residual_survives_a_fused_withheld_and_kept_fragment(tmp_path:
 
 def test_appendix_residual_is_refused_when_the_value_sits_past_a_hard_delimiter(
         tmp_path: Path) -> None:
-    """Negative case `_pii_cut_left_a_bare_label` exists for (#821 R2 F3
-    safety check, corpus-observed on 1FRABQ): a "Label: | value" shape --
-    a pipe, the pipeline's own inline-cell separator, sitting directly
-    after the label's colon. `pii.py`'s label span runs "to the next hard
-    delimiter", and `|` IS one, so the cut removes ONLY "Home telephone:"
-    and leaves the phone number completely uncut in `entry['text']` --
-    which would otherwise look exactly like a safe residual (`_clean_
-    inline_tabs` then drops the now-empty label cell entirely, leaving a
-    bare, unlabelled phone number). The whole entry must stay denied, the
-    same as a real fused entry with no safely-separable residual at all."""
+    """#821 R2 F3 safety check, corpus-observed on 1FRABQ: a "Label: |
+    value" shape -- a pipe, the pipeline's own inline-cell separator,
+    sitting directly after the label's colon. `pii.py`'s label span runs
+    "to the next hard delimiter", and `|` IS one, so an UNEXTENDED cut
+    would remove only "Home telephone:" and leave the phone number
+    completely uncut in `entry['text']` -- indistinguishable, at that
+    point, from a safe residual (`_clean_inline_tabs` then drops the
+    now-empty label cell entirely, leaving a bare, unlabelled phone
+    number). `pii_pass.py`'s `_extend_bare_label_span` closes this at the
+    pass itself (the phone number is now PART of the cut fragment, so this
+    entry has nothing left at all -- see the sibling test right below for
+    the case where a value trails the same shape); `_unconsumed_personal_
+    data_batch`'s own `_pii_cut_left_a_bare_label` is the second layer,
+    for any shape that extension does not catch."""
     text = _render(tmp_path, [
         _a("Home telephone: | 212 555 1234"),
     ])
@@ -326,6 +330,32 @@ def test_appendix_residual_is_refused_when_the_value_sits_past_a_hard_delimiter(
         "reached the document unlabelled"
     )
     assert "Home telephone" not in text
+    assert PII_REDACTED_NOTICE in text
+
+
+def test_appendix_residual_recovers_a_sibling_field_past_a_wide_gap(
+        tmp_path: Path) -> None:
+    """#821 R2 F3 (issue #834), the corpus shape that needed
+    `_extend_bare_label_span`: web32's fused "Home Phone" + "Citizenship"
+    A-coded orphan column-aligns its fields with a wide run of spaces
+    instead of a colon-adjacent value ("Home Phone:        <phone>
+    Citizenship: ..."). 3+ spaces is ALSO one of `pii.py`'s hard
+    delimiters, so the UNEXTENDED label match stops at the colon, same as
+    the pipe shape above -- but here a sibling field follows, not the end
+    of the entry, so simply discarding the whole entry (as F3's original,
+    unextended fix did) cost the citizenship line. The extension pulls the
+    orphaned phone value into the SAME cut, stopping before the next hard
+    delimiter, so the residual is exactly the sibling field with nothing
+    of the phone left in it."""
+    text = _render(tmp_path, [
+        _a("Home Phone:        212 555 1234"
+           "                                               Citizenship:  US"),
+    ], emit_comments=True)
+    assert "Citizenship" in text and "US" in text, (
+        "the sibling field past the wide gap was dropped along with the phone"
+    )
+    assert "212 555 1234" not in text, "the withheld home phone reached the document"
+    assert "Home Phone" not in text
     assert PII_REDACTED_NOTICE in text
 
 

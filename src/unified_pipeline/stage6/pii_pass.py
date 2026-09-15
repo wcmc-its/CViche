@@ -50,6 +50,7 @@ from .normalization.pii import (  # noqa: F401
     SCOPE_ALL_CODES,
     SCOPE_PERSONAL_AND_APPENDIX,
     WithheldItem,
+    _PII_FRAGMENT_SPLIT_RE,
     _pii_field_key_category,
     _pii_matches,
 )
@@ -121,6 +122,42 @@ def _section_label(code: str, routed_codes: frozenset[str] | set[str],
     return name.replace("_", " ").title()
 
 
+def _extend_bare_label_span(text: str, start: int, end: int) -> int:
+    """Extend a label match's span past its own colon when nothing else
+    was captured (#821 R2 F3 / #834 follow-up).
+
+    `pii.py`'s `_label_spans` runs a match "from the opener's own start to
+    the next hard delimiter" (`_PII_FRAGMENT_SPLIT_RE`: `\\n`, a tab, `|`,
+    `;`, or 3+ spaces). Two corpus shapes put that delimiter directly after
+    the label's own colon, before its value ever starts: "Home telephone:
+    | <phone>" (1FRABQ, a literal pipe) and "Home Phone:        <phone>
+    Citizenship: ..." (web32, column-aligned with a wide gap). Either way
+    the match this function is handed already stops AT the colon -- the
+    value is left completely uncut, indistinguishable, once
+    `stage_6_word_template.py::_unconsumed_personal_data_batch` sees it,
+    from safe kept content (1FRABQ's phone leaked into the Appendix
+    exactly this way before this fix).
+
+    Only fires when the match text, right-stripped, ends in `:` -- a
+    normal label+value match (the far more common shape, e.g. "Home
+    Phone: 555-1234") already captured its value and is returned
+    unchanged. Computed against the ORIGINAL `text` and its real offsets,
+    before `_cut_spans` collapses the very whitespace run that marks this
+    boundary -- the one place in the pass where that information still
+    exists at all."""
+    if not text[start:end].rstrip().endswith(':'):
+        return end
+    delim = _PII_FRAGMENT_SPLIT_RE.match(text, end)
+    if delim is None:
+        return end
+    after = text[delim.end():]
+    value_start = delim.end() + (len(after) - len(after.lstrip()))
+    if value_start >= len(text):
+        return end  # the delimiter was trailing whitespace; no value follows
+    nxt = _PII_FRAGMENT_SPLIT_RE.search(text, value_start)
+    return nxt.start() if nxt else len(text)
+
+
 def _cut_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
     """`text` with each (start, end) span removed, by OFFSET -- the spans
     are `pii.py`'s own, so the right occurrence is always the one cut even
@@ -157,9 +194,13 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
     now run against the ALREADY-STRIPPED text and find nothing):
 
     - ``_pii_fragments``: the fragment strings this pass found, computed
-      against the entry's ORIGINAL text. `personal_data.py`'s value-
-      provenance check asks whether an `extracted_fields` value came from
-      inside one of them, answerable only against the pre-strip fragments.
+      against the entry's ORIGINAL text -- extended past a bare label's own
+      colon when nothing else was captured there (`_extend_bare_label_span`,
+      #821 R2 F3 follow-up), so a value a hard delimiter separated from its
+      label is still part of what these fragments say was removed.
+      `personal_data.py`'s value-provenance check asks whether an
+      `extracted_fields` value came from inside one of them, answerable
+      only against the pre-strip fragments.
     - ``_pii_withheld``: True whenever this pass touched the entry at all --
       the Appendix path's ENTRY-level deny (#473's granularity: an orphan
       renders nothing, so discarding it whole is free) reads this flag.
@@ -181,10 +222,18 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             if not matches and not pii_keys:
                 continue
 
-            entry["_pii_fragments"] = [raw_text[m.start:m.end] for m in matches]
+            # Extend a bare-label match (`_extend_bare_label_span`) to pull
+            # in its orphaned value BEFORE any offset is used for anything
+            # -- both the cut and the recorded fragment read the extended
+            # span, so `_pii_fragments` reflects what was actually removed.
+            extended_ends = [_extend_bare_label_span(raw_text, m.start, m.end)
+                             for m in matches]
+            entry["_pii_fragments"] = [raw_text[m.start:e]
+                                       for m, e in zip(matches, extended_ends)]
             entry["_pii_withheld"] = True
             if matches:
-                entry["text"] = _cut_spans(raw_text, [(m.start, m.end) for m in matches])
+                entry["text"] = _cut_spans(
+                    raw_text, [(m.start, e) for m, e in zip(matches, extended_ends)])
                 result.withheld.extend(
                     WithheldItem(m.category, section, index) for m in matches)
             for key, category in pii_keys:
