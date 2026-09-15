@@ -825,7 +825,9 @@ _KNOWN_LABEL_CASES = [
      "Home Address: | 12 Elm St Apt: 4 Anytown Citizenship: US",
      "Citizenship: US", "• Citizenship: US", ["Elm", "Anytown", "Apt"]),
     ("gapped_phone_then_a_known_label",
-     # web32's shape, the one the extension was built for.
+     # The corpus shape the extension was built for: a column-aligned
+     # field pair whose label is padded to a fixed width with spaces, a
+     # phone value, then a sibling field one plain space later.
      "Home Phone:        555-0100 Citizenship: US",
      "Citizenship: US", "• Citizenship: US", ["555-0100"]),
     ("gapped_phone_then_a_known_render_set_label",
