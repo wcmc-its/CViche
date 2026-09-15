@@ -421,3 +421,94 @@ def test_comment_text_carries_no_value():
     text = withheld_comment_text([WithheldItem(CAT_SSN, "Appendix", 0)])
     assert "123-45-6789" not in text
     assert set(WithheldItem._fields) == {"category", "section_label", "entry_index"}
+
+
+# --------------------------------------------------------------------------
+# 4. Bare-label span extension (#821 R3 F-B)
+#
+# The extension exists because a hard delimiter can sit between a label and
+# its own value, leaving the value uncut. It must reach exactly that value
+# and nothing else: the round-2 version ran to the next hard delimiter with
+# no test for what it was swallowing, and swallowed the NEXT labelled field
+# -- citizenship and a work email, both #821 "render" items.
+#
+# Each case is the whole entry text, what must be GONE from the residual,
+# and what must SURVIVE in it. All values synthetic.
+# --------------------------------------------------------------------------
+
+_BARE_LABEL_CASES = [
+    # (id, text, gone, survives)
+    ("newline_sibling_label",
+     "Home Address:\nCitizenship: US",
+     [], ["Citizenship: US"]),
+    ("newline_numbered_sibling_label",
+     "2. Home Address:\n3. Work Email: someone@example.org",
+     [], ["3. Work Email: someone@example.org"]),
+    ("single_space_sibling_label",
+     "Home Phone:        555-0100 Citizenship: US",
+     ["555-0100"], ["Citizenship: US"]),
+    ("pipe_orphaned_value",
+     "Home telephone: | 555-0100",
+     ["555-0100"], []),
+    ("wide_gap_orphaned_value",
+     "Home Phone:        555-0100",
+     ["555-0100"], []),
+]
+
+
+@pytest.mark.parametrize(
+    "text,gone,survives",
+    [(text, gone, survives) for _, text, gone, survives in _BARE_LABEL_CASES],
+    ids=[case_id for case_id, *_ in _BARE_LABEL_CASES],
+)
+def test_bare_label_extension_cuts_the_value_and_only_the_value(text, gone, survives):
+    """The five shapes, through the real `run_pii_pass`. The first three are
+    the negative cases the extension must NOT reach past (a sibling field on
+    the next line, the same with list markers, a sibling field one plain
+    space after the value); the last two are the corpus shapes it exists
+    for (a pipe, and a column-aligned wide gap with nothing after the
+    value)."""
+    entry = {"text": text, "taxonomy_code": "A", "extracted_fields": {}}
+    _run({"A": [entry]})
+    residual = entry["text"]
+    for fragment in gone:
+        assert fragment not in residual, f"{fragment!r} survived the cut"
+        assert any(fragment in f for f in entry["_pii_fragments"]), (
+            f"{fragment!r} was not part of what the pass says it removed")
+    for fragment in survives:
+        assert fragment in residual, f"{fragment!r} was cut with its neighbour"
+        assert not any(fragment in f for f in entry["_pii_fragments"]), (
+            f"{fragment!r} was recorded as withheld")
+
+
+def test_bare_label_extension_never_crosses_a_newline_into_a_value():
+    """The one shape the extension deliberately does NOT rescue: the value
+    on the line below its label. A newline is the source document's own
+    field separator, so what follows it cannot be assumed to be this
+    label's value -- the pass leaves the line alone and flags the entry
+    instead (`_pii_orphaned_value`), which is what makes
+    `stage_6_word_template.py::_pii_cut_left_a_bare_label` refuse the
+    whole entry rather than render an unlabelled address."""
+    entry = {"text": "Home Address:\n12 Example Street", "taxonomy_code": "A",
+             "extracted_fields": {}}
+    _run({"A": [entry]})
+    assert entry["text"] == "12 Example Street"
+    assert entry["_pii_orphaned_value"] is True
+
+
+def test_bare_label_with_nothing_after_it_orphans_nothing():
+    """The negative of the flag above, and the whole of #821 R3 F-D: a
+    protected label with no value anywhere after it (a template leftover)
+    is not a leak, so the entry's other fields must still render."""
+    entry = {"text": "Citizenship: US\nHome Address:", "taxonomy_code": "A",
+             "extracted_fields": {}}
+    _run({"A": [entry]})
+    assert entry["text"] == "Citizenship: US"
+    assert entry["_pii_orphaned_value"] is False
+
+
+def test_bare_label_followed_by_a_sibling_label_orphans_nothing():
+    entry = {"text": "Home Address:\nCitizenship: US", "taxonomy_code": "A",
+             "extracted_fields": {}}
+    _run({"A": [entry]})
+    assert entry["_pii_orphaned_value"] is False

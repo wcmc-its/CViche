@@ -45,6 +45,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 from .normalization.pii import (  # noqa: F401
     SCOPE_ALL_CODES,
@@ -89,6 +90,52 @@ WITHHELD_COMMENT_AUTHOR = "CViche"
 _MULTI_SPACE_RE = re.compile(r"[ \t]{2,}")
 _BLANK_LINE_RE = re.compile(r"\n[ \t]*\n")
 
+#: The opener of the NEXT labelled field, where a bare label's own value
+#: would otherwise be looked for (#821 R3 F-B). A label is a short run of
+#: word-like tokens ending in a colon, optionally behind a list marker
+#: ("3. Work Email:", "• Citizenship:"), which is how every fielded corpus
+#: CV separates one field from the next inside a single extracted entry.
+#: Matched with `.match` at a candidate value position and with `.search`
+#: inside the span the extension would otherwise swallow; either way it is
+#: a STOP, never a start -- nothing it matches is ever cut.
+#: Four words is the cap because the policy's own longest label
+#: ("Social Security Number", "Date of Birth") is four; a longer colon-
+#: terminated run is prose, not a field name.
+_SIBLING_LABEL_MAX_WORDS = 4
+_SIBLING_LABEL_RE = re.compile(
+    r"(?:[•·*–—-]|\d{1,3}[.)])?[ \t]*"
+    r"[A-Za-z][\w.'’&/-]*"
+    r"(?:[ \t][A-Za-z][\w.'’&/-]*){0," + str(_SIBLING_LABEL_MAX_WORDS - 1) + r"}"
+    r"[ \t]*:"
+)
+
+
+class _BareLabelSpan(NamedTuple):
+    """What `_extend_bare_label_span` decided about one bare-label match.
+
+    `end` is the offset the cut should run to. `orphaned_value` is True when
+    the extension was REFUSED and what follows the label is an unlabelled
+    value rather than the next labelled field -- i.e. the protected value is
+    still sitting in the entry's residual text, unlabelled and
+    indistinguishable from safe content. Only the pass can tell: by the time
+    `stage_6_word_template.py` sees the entry, the cut has already happened
+    and the fragment strings alone cannot say whether anything was left
+    behind (#821 R3 F-D)."""
+
+    end: int
+    orphaned_value: bool
+
+
+def _value_is_orphaned_after(text: str, pos: int) -> bool:
+    """True when the content of `text` from `pos` on opens with something
+    that is NOT another labelled field -- the shape that means a bare
+    label's own value survived the cut uncut."""
+    rest = text[pos:]
+    lead = len(rest) - len(rest.lstrip())
+    if lead == len(rest):
+        return False  # nothing but whitespace follows; nothing was orphaned
+    return not _SIBLING_LABEL_RE.match(text, pos + lead)
+
 
 @dataclass
 class PiiPassResult:
@@ -122,21 +169,23 @@ def _section_label(code: str, routed_codes: frozenset[str] | set[str],
     return name.replace("_", " ").title()
 
 
-def _extend_bare_label_span(text: str, start: int, end: int) -> int:
+def _extend_bare_label_span(text: str, start: int, end: int) -> _BareLabelSpan:
     """Extend a label match's span past its own colon when nothing else
     was captured (#821 R2 F3 / #834 follow-up).
 
     `pii.py`'s `_label_spans` runs a match "from the opener's own start to
     the next hard delimiter" (`_PII_FRAGMENT_SPLIT_RE`: `\\n`, a tab, `|`,
     `;`, or 3+ spaces). Two corpus shapes put that delimiter directly after
-    the label's own colon, before its value ever starts: "Home telephone:
-    | <phone>" (1FRABQ, a literal pipe) and "Home Phone:        <phone>
-    Citizenship: ..." (web32, column-aligned with a wide gap). Either way
-    the match this function is handed already stops AT the colon -- the
+    the label's own colon, before its value ever starts: a label and its
+    value joined by a literal pipe, the way a two-cell table row is
+    rendered elsewhere in this pipeline ("Home telephone: | <phone>"), and
+    a column-aligned field pair whose label is padded out to a fixed width
+    with spaces ("Home Phone:<wide gap><phone> Citizenship: ..."). Either
+    way the match this function is handed already stops AT the colon -- the
     value is left completely uncut, indistinguishable, once
     `stage_6_word_template.py::_unconsumed_personal_data_batch` sees it,
-    from safe kept content (1FRABQ's phone leaked into the Appendix
-    exactly this way before this fix).
+    from safe kept content (the pipe shape leaked a home phone into the
+    Appendix exactly this way before this fix).
 
     Only fires when the match text, right-stripped, ends in `:` -- a
     normal label+value match (the far more common shape, e.g. "Home
@@ -144,18 +193,46 @@ def _extend_bare_label_span(text: str, start: int, end: int) -> int:
     unchanged. Computed against the ORIGINAL `text` and its real offsets,
     before `_cut_spans` collapses the very whitespace run that marks this
     boundary -- the one place in the pass where that information still
-    exists at all."""
+    exists at all.
+
+    Two hard stops, because an extension is a CUT and a predicate that
+    reaches past the value it is named for deletes someone else's content
+    (#821 R3 F-B, found by the round-2 verifier -- both shapes below lost a
+    #821 "render" item: citizenship, a work email):
+
+    - it never crosses a newline. A line break is the one delimiter the
+      source document itself drew; whatever is on the next line is a new
+      field, not this label's orphaned value.
+    - it stops at the next labelled field (`_SIBLING_LABEL_RE`), whether
+      that field starts immediately after the delimiter or further along
+      the same run. "Home Phone:<gap>555-0100 Citizenship: US" separates
+      the sibling by a SINGLE space, which is not a hard delimiter at all,
+      so without this stop the extension ran to the end of the entry.
+
+    When a stop refuses the extension, `orphaned_value` says whether the
+    value is still sitting there uncut (see `_BareLabelSpan`): a label with
+    nothing after it, or with another labelled field after it, orphans
+    nothing and its residual is safe to render (#821 R3 F-D)."""
     if not text[start:end].rstrip().endswith(':'):
-        return end
+        return _BareLabelSpan(end, False)
     delim = _PII_FRAGMENT_SPLIT_RE.match(text, end)
     if delim is None:
-        return end
+        # A bare label at the very end of the entry: nothing follows it to
+        # cut, and nothing follows it to leak either.
+        return _BareLabelSpan(end, False)
+    if "\n" in delim.group():
+        return _BareLabelSpan(end, _value_is_orphaned_after(text, delim.end()))
     after = text[delim.end():]
-    value_start = delim.end() + (len(after) - len(after.lstrip()))
-    if value_start >= len(text):
-        return end  # the delimiter was trailing whitespace; no value follows
+    value_start = delim.end() + (len(after) - len(after.lstrip(" \t")))
+    if value_start >= len(text) or text[value_start] == "\n":
+        # the delimiter was trailing whitespace, or the line ends here
+        return _BareLabelSpan(end, _value_is_orphaned_after(text, value_start))
+    if _SIBLING_LABEL_RE.match(text, value_start):
+        return _BareLabelSpan(end, False)  # the next field, not our value
     nxt = _PII_FRAGMENT_SPLIT_RE.search(text, value_start)
-    return nxt.start() if nxt else len(text)
+    limit = nxt.start() if nxt else len(text)
+    sibling = _SIBLING_LABEL_RE.search(text, value_start, limit)
+    return _BareLabelSpan(sibling.start() if sibling else limit, False)
 
 
 def _cut_spans(text: str, spans: Sequence[tuple[int, int]]) -> str:
@@ -204,6 +281,12 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
     - ``_pii_withheld``: True whenever this pass touched the entry at all --
       the Appendix path's ENTRY-level deny (#473's granularity: an orphan
       renders nothing, so discarding it whole is free) reads this flag.
+    - ``_pii_orphaned_value``: True when a bare label's own value could not
+      be pulled into the cut and is still in the residual text, unlabelled
+      (`_BareLabelSpan.orphaned_value`). The Appendix path refuses that
+      entry's residual outright; a bare label with nothing after it, or
+      with the next labelled field after it, sets this False and its
+      residual renders (#821 R3 F-D).
     """
     result = PiiPassResult()
     index = -1
@@ -226,14 +309,18 @@ def run_pii_pass(entries_by_code: Mapping[str, Sequence[dict]], *,
             # in its orphaned value BEFORE any offset is used for anything
             # -- both the cut and the recorded fragment read the extended
             # span, so `_pii_fragments` reflects what was actually removed.
-            extended_ends = [_extend_bare_label_span(raw_text, m.start, m.end)
-                             for m in matches]
-            entry["_pii_fragments"] = [raw_text[m.start:e]
-                                       for m, e in zip(matches, extended_ends)]
+            spans = [_extend_bare_label_span(raw_text, m.start, m.end)
+                     for m in matches]
+            entry["_pii_fragments"] = [raw_text[m.start:s.end]
+                                       for m, s in zip(matches, spans)]
             entry["_pii_withheld"] = True
+            # Whether any of those extensions was refused with the label's
+            # own value left uncut in the residual (#821 R3 F-D): the one
+            # verdict the Appendix path cannot recompute for itself.
+            entry["_pii_orphaned_value"] = any(s.orphaned_value for s in spans)
             if matches:
                 entry["text"] = _cut_spans(
-                    raw_text, [(m.start, e) for m, e in zip(matches, extended_ends)])
+                    raw_text, [(m.start, s.end) for m, s in zip(matches, spans)])
                 result.withheld.extend(
                     WithheldItem(m.category, section, index) for m in matches)
             for key, category in pii_keys:
