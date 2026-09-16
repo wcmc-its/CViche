@@ -531,8 +531,10 @@ def row_has_nonblank_value_cells(row: list[dict[str, Any]]) -> bool:
     duplicate) is now indistinguishable from a genuine merge and is treated
     the same way -- not observed in the corpus.
     """
-    label_norm = row[0].get("text", "") if row and isinstance(row[0], dict) else (str(row[0]) if row else "")
-    label_norm = label_norm.strip().casefold()
+    if not row:
+        return False
+    first = row[0]
+    label_norm = (first.get("text", "") if isinstance(first, dict) else str(first)).strip().casefold()
     for cell in row[1:]:
         cell_value = cell.get("text", "") if isinstance(cell, dict) else str(cell)
         cell_value = cell_value.strip()
@@ -553,45 +555,26 @@ def row_has_nonblank_value_cells(row: list[dict[str, Any]]) -> bool:
 HEADER_LEFT_CONTENT_RIGHT_MIN_CONFIDENCE = 0.6
 
 
-def row_has_distinct_nonblank_value_cells(row: list[dict[str, Any]], label_text: str) -> bool:
-    """Return True if any cell after row[0] has non-blank text that DIFFERS
-    (case-insensitively) from the row's own label text.
-
-    Defense in depth for the header-left/content-right path (#811 round 2):
-    guards against a horizontally merged (gridSpan) cell whose duplicate
-    copies repeat the label text itself rather than carrying real content.
-    The from-cell-0 check is the WHOLE predicate (#811 round 4, finding 2):
-    for an `any()`-style boolean, a dedup of trailing cells "from each
-    other" can never change the result -- the first qualifying trailing
-    cell always short-circuits the loop before a later duplicate is ever
-    inspected, so tracking previously-seen trailing values is dead code.
-    """
-    label_norm = label_text.strip().casefold()
-    for cell in row[1:]:
-        cell_value = cell.get("text", "") if isinstance(cell, dict) else str(cell)
-        cell_value = cell_value.strip()
-        if cell_value and cell_value.casefold() != label_norm:
-            return True
-    return False
-
-
-def is_header_left_content_right_row(
-    cell_text: str, header_confidence: float, row: list[dict[str, Any]]
-) -> bool:
+def is_header_left_content_right_row(cell_text: str, header_confidence: float) -> bool:
     """Return True when a row's first cell is a real section header (not a
-    colon-terminated form label) that also carries distinct non-blank content
-    in a trailing cell -- the "header-left / content-right" table layout
-    (#811 round 2, web064: `WORK ADDRESS | <address>`).
+    colon-terminated form label) with high enough confidence for the
+    "header-left / content-right" table layout (#811 round 2, web064:
+    `WORK ADDRESS | <address>`).
 
     Such a row keeps its `table_header` AND has its content recovered into
     `current_content_rows`, unlike a form-style label|value row (#811 round 1,
     e.g. `Name: | <value>`), which is content-only.
+
+    The only caller (`_classify_subheader_row_content`) gates on
+    `row_has_nonblank_value_cells(row)` first -- the same distinct-non-blank-
+    trailing-cell predicate keyed on row[0]'s text -- so the per-row check that
+    used to live here (`row_has_distinct_nonblank_value_cells`) was a duplicate
+    and was removed (#811 review r4025634341).
     """
-    if cell_text.rstrip().endswith(":"):
-        return False
-    if header_confidence < HEADER_LEFT_CONTENT_RIGHT_MIN_CONFIDENCE:
-        return False
-    return row_has_distinct_nonblank_value_cells(row, cell_text)
+    return (
+        not cell_text.rstrip().endswith(":")
+        and header_confidence >= HEADER_LEFT_CONTENT_RIGHT_MIN_CONFIDENCE
+    )
 
 
 def get_table_first_cell_text(table: Table) -> str:
@@ -653,7 +636,7 @@ def _classify_subheader_row_content(
     """
     has_value_cells = row_has_nonblank_value_cells(row)
     header_left_content_right = has_value_cells and is_header_left_content_right_row(
-        cell_text, row_header_conf, row
+        cell_text, row_header_conf
     )
     return has_value_cells, header_left_content_right
 
@@ -693,7 +676,8 @@ def _handle_table_row_zero(
         (new_elements, unified_idx, num_table_headers_emitted, table_rows,
          current_content_rows)
     """
-    row_0 = table_data["data"][0] if table_data["data"] else []
+    data = table_data.get("data", [])
+    row_0 = data[0] if data else []
     row0_is_form_label = (
         first_cell_text.rstrip().endswith(":")
         and row_has_nonblank_value_cells(row_0)
@@ -726,12 +710,12 @@ def _handle_table_row_zero(
 
         # Scan remaining rows for sub-headers
         # Some tables have multiple sections with headers in first cell of rows
-        table_rows = table_data["data"][1:] if table_data["data"] else []
+        table_rows = data[1:]
     else:
         # Row 0 is a form label, not a table header -- let it flow
         # through the per-row walk below like any other row, so it
         # is recovered as content (#811 round 2).
-        table_rows = table_data["data"] if table_data["data"] else []
+        table_rows = data
 
     current_content_rows: list[list[dict[str, Any]]] = []
 
