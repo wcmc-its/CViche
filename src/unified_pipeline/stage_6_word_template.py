@@ -244,8 +244,9 @@ def _is_bullet_paragraph(para: Paragraph) -> bool:
 
     Section K moved to real Word list paragraphs in #474, so a validator that
     tests for a literal "•" prefix stops seeing K at all -- and check 3
-    below then reports no_visible_teaching_content on every CV. The non-K
-    emitters still prefix the glyph (#483), so both forms have to count.
+    below then reports no_visible_teaching_content on every CV. #483 moved
+    all but one non-K emitter (`_insert_reconsidered_segment`) to the same
+    real-list form, so both forms still have to count.
     """
     if para.text.strip().startswith('•'):
         return True
@@ -1113,7 +1114,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                                 add_blank_before: bool = False,
                                 list_level: int | None = None,
                                 entry_sibling_paras: list[Paragraph] | None = None) -> Paragraph | None:
-        """Insert a SINGLE bulleted entry paragraph with a bullet character prefix.
+        """Insert a SINGLE bulleted entry paragraph as a real Word list item.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
 
@@ -1122,10 +1123,11 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             text: The text content for the entry (should be single line)
             entry: Optional entry dict for adding comments
             add_blank_before: If True, add a blank line before this entry
-            list_level: When given, emit a real Word list paragraph at this
-                ilvl via _apply_list_bullet instead of prefixing a literal "• "
-                glyph (#474). Left at None by the three non-K call sites, whose
-                1,765 corpus-wide glyphs are #483.
+            list_level: The ilvl passed to _apply_list_bullet (#474). Every
+                call site is expected to pass this explicitly; omitting it
+                defaults to level 0 rather than falling back to a literal
+                "• " glyph prefix (#483 -- the last caller-omittable glyph
+                path, closed alongside _add_remaining_to_appendix).
             entry_sibling_paras: The OTHER paragraphs this same entry already
                 rendered into, when a caller is splitting one entry across
                 several bullets and attaching the entry to this one. Passed on
@@ -1149,14 +1151,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             entry_para.insert_paragraph_before("")
 
         body = _clean_inline_tabs(_strip_taxonomy_code(text))
-        # Without list_level, a simple bullet character prefix: it avoids Word
-        # numbering system issues across different templates, at the cost of not
-        # being a list item to Word's outline, to accessibility tooling, or to
-        # anything re-parsing the output.
-        run = entry_para.add_run(body if list_level is not None else f"• {body}")
+        run = entry_para.add_run(body)
         _set_font(run)
-        if list_level is not None:
-            self._apply_list_bullet(entry_para, level=list_level)
+        self._apply_list_bullet(entry_para, level=list_level if list_level is not None else 0)
 
         if entry:
             self._add_entry_comments(entry_para, entry,
@@ -2091,7 +2088,11 @@ Now analyze the text above:"""
         if insert_idx is None:
             return False
 
-        # Insert as a bullet
+        # Insert as a bullet. Still a literal "• " prefix, not a real Word
+        # list paragraph (#474/#483's last deferred emitter): its own tests
+        # in test_stage6_unrendered_recovery.py assert the glyph across ~18
+        # cases, so converting it is a separate follow-up, not folded into
+        # #483's `_add_remaining_to_appendix` conversion.
         try:
             insert_para = self.doc.paragraphs[insert_idx]
             new_para = insert_para.insert_paragraph_before()
@@ -2225,8 +2226,9 @@ Now analyze the text above:"""
         # faculty-facing text (#213).
         for segment_text, original_code, coverage_pct in remaining:
             entry_para = self.doc.add_paragraph()
-            run = entry_para.add_run(f"• {segment_text}")
+            run = entry_para.add_run(segment_text)
             _set_font(run)
+            self._apply_list_bullet(entry_para, level=0)
             self._add_word_comment(
                 entry_para,
                 f"Originally classified {original_code}; could not be mapped "

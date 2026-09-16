@@ -26,6 +26,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
+from docx.oxml.ns import qn  # noqa: E402
 
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     WCMTemplateGenerator,
@@ -39,6 +40,21 @@ def _generator(**kwargs):
     gen = WCMTemplateGenerator(verbose=False, **kwargs)
     gen.doc = Document(gen.template_path)
     return gen
+
+
+def _num_level(para):
+    """The paragraph's w:ilvl, or None when it carries no list markup.
+
+    Mirrors test_stage6_k_list_bullets.py's helper of the same name. Only
+    `_add_remaining_to_appendix`'s output needs this here -- every other
+    bullet in this file still comes from `_insert_reconsidered_segment`,
+    which #483 left on the literal-glyph path (see that ticket's report).
+    """
+    pPr = para._p.pPr
+    numPr = pPr.find(qn("w:numPr")) if pPr is not None else None
+    if numPr is None:
+        return None
+    return numPr.find(qn("w:ilvl")).get(qn("w:val"))
 
 
 # Mirrors the KFGXBW entry-21 shape: date-range comma lines, flat singular
@@ -560,11 +576,17 @@ def test_unmapped_code_falls_back_to_appendix_untruncated():
 
     texts = [p.text for p in gen.doc.paragraphs]
     assert any("T. APPENDIX" in t for t in texts)
-    # Untruncated verbatim bullets (the 200-char _fill_appendix truncation is
-    # part of what masked the KFGXBW loss).
-    assert any(t == "• Jan 2012-Dec 2016, Fellowship of Ornithological "
-                    "Cryptography, Guild of Meandering Auditors, Crab Hollow, "
-                    "ZQ" for t in texts)
+    # Untruncated verbatim, as a real Word list paragraph (#483) -- the
+    # 200-char _fill_appendix truncation is part of what masked the KFGXBW
+    # loss.
+    matches = [p for p in gen.doc.paragraphs
+               if p.text == "Jan 2012-Dec 2016, Fellowship of Ornithological "
+                             "Cryptography, Guild of Meandering Auditors, "
+                             "Crab Hollow, ZQ"]
+    assert len(matches) == 1
+    assert _num_level(matches[0]) == "0"
+    assert not any(t.startswith("•") and "Ornithological Cryptography" in t
+                   for t in texts)
 
 
 def test_reconsider_insert_failure_falls_back_to_appendix(monkeypatch):

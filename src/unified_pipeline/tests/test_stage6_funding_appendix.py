@@ -23,12 +23,27 @@ if str(_SRC) not in sys.path:
 
 from docx import Document  # noqa: E402
 
+from docx.oxml.ns import qn  # noqa: E402
+
 from unified_pipeline.core.template_boilerplate import is_source_boilerplate  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     WCMTemplateGenerator,
     grant_status_rebucket_target,
     segment_already_rendered,
 )
+
+
+def _num_level(para):
+    """The paragraph's w:ilvl, or None when it carries no list markup.
+
+    Mirrors test_stage6_k_list_bullets.py's helper of the same name -- the
+    appendix segments converted to real Word list paragraphs by #483.
+    """
+    pPr = para._p.pPr
+    numPr = pPr.find(qn("w:numPr")) if pPr is not None else None
+    if numPr is None:
+        return None
+    return numPr.find(qn("w:ilvl")).get(qn("w:val"))
 
 
 # ---------------------------------------------------------------- #210
@@ -172,6 +187,7 @@ def test_source_boilerplate_negatives():
 def test_appendix_renders_without_codes_and_drops_noise():
     gen = WCMTemplateGenerator(verbose=False)
     gen.doc = Document(gen.template_path)
+    before = len(gen.doc.paragraphs)
 
     gen._add_remaining_to_appendix([
         ("Some grant text | Role: PI | Status: Under review", "M2A", 10.0),
@@ -179,10 +195,17 @@ def test_appendix_renders_without_codes_and_drops_noise():
         ("CURRICULUM VITAE", "T", 0.0),  # source furniture — must be skipped
     ])
 
-    texts = [p.text for p in gen.doc.paragraphs]
-    bullets = [t for t in texts if t.strip().startswith("•")]
-    assert bullets == ["• Some grant text | Role: PI | Status: Under review"]
-    assert not any("[M2A]" in t for t in texts)
+    # Only the paragraphs this call added -- the blank template already
+    # carries 32 pre-existing ilvl=0 list paragraphs (its own section
+    # headings), so filtering the whole document by numPr level would also
+    # match those.
+    added = gen.doc.paragraphs[before:]
+    bullets = [p for p in added if _num_level(p) == "0"]
+    assert [p.text for p in bullets] == [
+        "Some grant text | Role: PI | Status: Under review"
+    ]
+    assert not any(p.text.startswith("•") for p in added)
+    assert not any("[M2A]" in p.text for p in added)
 
 
 def test_reconsider_routes_unrendered_siblings_home(monkeypatch):
