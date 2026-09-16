@@ -48,9 +48,9 @@ A multi-stage LLM pipeline for extracting structured data from faculty CVs and r
 │  ├── Features: ID conversion, batch fetching, authoritative metadata        │
 │  └── Output: *_enriched.json                                                │
 │                                                                             │
-│  STAGE 5b: Institution Enrichment (ROR API)                                 │
+│  STAGE 5b: Institution Enrichment (LLM)                                     │
 │  ├── Input: Stage 5 enriched output                                         │
-│  ├── Process: Look up institutions in ROR (Research Organization Registry)  │
+│  ├── Process: Look up institutions via LLM                                  │
 │  ├── Features: City, state, country lookup for B, C, D entries              │
 │  └── Output: *_institution_enriched.json                                    │
 │                                                                             │
@@ -90,7 +90,7 @@ python3 run_full_pipeline.py 2015_Wende --model gpt-4o-mini
 # Run Stage 5: PubMed Enrichment
 python3 stage_5_pubmed_enrichment.py 2015_Wende
 
-# Run Stage 5b: Institution Enrichment (ROR lookup for locations)
+# Run Stage 5b: Institution Enrichment (LLM lookup for locations)
 python3 stage_5b_institution_enrichment.py 2015_Wende
 
 # Run Stage 5c: Teaching Formatter (LLM-polish K-code entries)
@@ -121,7 +121,7 @@ unified_pipeline/
 ├── stage_3b_entry_classifier.py      # Entry classification
 ├── stage_4_field_extractor.py        # Field extraction
 ├── stage_5_pubmed_enrichment.py      # PubMed enrichment
-├── stage_5b_institution_enrichment.py # Institution location enrichment (ROR)
+├── stage_5b_institution_enrichment.py # Institution location enrichment (LLM)
 ├── stage_5c_teaching_formatter.py    # Teaching/K-code formatting (LLM)
 ├── stage_5d_citation_formatter.py    # Non-enriched citation formatting (LLM)
 ├── stage_6_word_template.py          # WCM document generation
@@ -347,9 +347,9 @@ python3 stage_5_pubmed_enrichment.py 2015_Wende -o custom_output.json
 
 ---
 
-## Stage 5b: Institution Enrichment (ROR API)
+## Stage 5b: Institution Enrichment
 
-Stage 5b enriches education and position entries with institution location data using the ROR (Research Organization Registry) API, which is the successor to GRID.
+Stage 5b enriches entries with institution location data (city, state, country) by sending institution names to an LLM in batches of up to 10.
 
 ### What Gets Enriched
 
@@ -360,24 +360,22 @@ Entries with these taxonomy codes are eligible for institution enrichment:
 
 ### Enrichment Data
 
-For each institution, ROR provides:
+For each institution, the LLM lookup provides:
 - **City**: e.g., "Columbus"
 - **State**: e.g., "Ohio" (converted to "OH" for US)
 - **Country**: e.g., "United States"
-- **ROR ID**: Unique identifier for the institution
 
 ### Output Structure
 
 ```json
 {
   "institution_enrichment": {
-    "ror_id": "https://ror.org/00rs6vg23",
     "official_name": "Ohio State University",
     "city": "Columbus",
     "state": "Ohio",
     "country": "United States",
     "country_code": "US",
-    "source": "ror_api"
+    "source": "llm"
   }
 }
 ```
@@ -394,7 +392,7 @@ python3 stage_5b_institution_enrichment.py outputs/stage_5_enrichment/2015_Wende
 
 ### Caching
 
-ROR lookups are cached to `config/ror_cache.json` to avoid redundant API calls and improve performance on subsequent runs.
+Institution lookups are cached to `config/institution_cache.json` to avoid redundant API calls and improve performance on subsequent runs.
 
 ---
 
