@@ -716,7 +716,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 tbl._element.getparent().remove(tbl._element)
                 removed += 1
         if removed and self.verbose:
-            print(f"Removed {removed} WCM-template instruction box(es)")
+            logger.info(f"Removed {removed} WCM-template instruction box(es)")
 
     def _resolve_original_doc_path(
             self, document_uid: str, original_doc_path: str | None
@@ -743,12 +743,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if path.exists():
                 original_doc_path = str(path.resolve())
                 if self.verbose:
-                    print(f"Found original document: {original_doc_path}")
+                    logger.info(f"Found original document: {original_doc_path}")
                 break
         else:
             if self.verbose:
-                print(f"No original document found for {document_uid} in "
-                      f"{SAMPLE_CV_DIR} or ./data/sample_cvs/word")
+                logger.info(f"No original document found for {document_uid} in "
+                            f"{SAMPLE_CV_DIR} or ./data/sample_cvs/word")
         return original_doc_path
 
     def _load_research_summary_data(
@@ -764,7 +764,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             with open(research_summary_path, 'r') as f:
                 research_summary_data = json.load(f)
             if self.verbose:
-                print(f"Loaded research summary from Stage 4.5: {research_summary_path}")
+                logger.info(f"Loaded research summary from Stage 4.5: {research_summary_path}")
             return research_summary_data
 
         # Try to find it automatically
@@ -774,7 +774,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             with open(auto_summary_path, 'r') as f:
                 research_summary_data = json.load(f)
             if self.verbose:
-                print(f"Auto-loaded research summary from: {auto_summary_path}")
+                logger.info(f"Auto-loaded research summary from: {auto_summary_path}")
             return research_summary_data
         return None
 
@@ -814,13 +814,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                         stage4_data = json.load(f)
                     cv_owner_location = stage4_data.get('cv_owner_location', {})
                     if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
-                        print(f"Loaded cv_owner_location from Stage 4 output")
+                        logger.info(f"Loaded cv_owner_location from Stage 4 output")
                 except Exception as e:
                     # Non-fatal: geographic-scope classification just falls back
                     # to its default. Still say so -- a permission error or a
                     # truncated stage-4 JSON should not vanish without a trace.
                     if self.verbose:
-                        print(f"  Warning: Could not load cv_owner_location from Stage 4: {e}")
+                        logger.warning(f"Could not load cv_owner_location from Stage 4: {e}")
 
         # Store location context for geographic scope classification
         self.cv_owner_location = cv_owner_location if cv_owner_location and cv_owner_location.get('inference_success') else None
@@ -828,7 +828,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             metro = self.cv_owner_location.get('metro_area', '')
             primary = self.cv_owner_location.get('primary_location', {})
             if primary:
-                print(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
+                logger.info(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
         # Original-document discovery and the Stage 4.5 research-summary load
         # are lifted out to their own helpers (#820 R3, pure moves -- §3.2):
@@ -839,10 +839,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             research_summary_path, input_path, document_uid)
 
         if self.verbose:
-            print(f"\n{'='*60}")
-            print(f"Stage 6: WCM Template Generation - {document_uid}")
-            print(f"{'='*60}")
-            print(f"Total entries: {len(entries)}")
+            logger.info("=" * 60)
+            logger.info(f"Stage 6: WCM Template Generation - {document_uid}")
+            logger.info("=" * 60)
+            logger.info(f"Total entries: {len(entries)}")
 
         # Group entries by taxonomy code, applying mismatch corrections
         entries_by_code = defaultdict(list)
@@ -855,9 +855,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             entries_by_code[code].append(entry)
 
         if self.verbose:
-            print(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
+            logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
             if mismatch_corrections > 0:
-                print(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
+                logger.info(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
 
         # #820 piece 2: one pre-render deny pass over every entry, every
         # code, BEFORE the pre-dedup snapshot below -- a near-duplicate
