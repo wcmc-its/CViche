@@ -1036,7 +1036,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 "warnings": warnings,
                 "dedup_decisions": dedup_decisions,
             }, indent=2))
-        except Exception as exc:
+        except Exception:
             logger.exception("could not write render-warnings sidecar")
 
 
