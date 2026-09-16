@@ -295,19 +295,47 @@ def remove_subset_delimiters(delimiters: list) -> list:
                 return (float(idx), 0)
         return (float(idx), 0)
 
-    def span_size(d):
-        """Calculate span size, handling string indices."""
+    def is_bare(idx):
+        """True when idx carries no ".row" sub-index (i.e. a whole element)."""
+        return not (isinstance(idx, str) and "." in idx)
+
+    def normalize_span(d: dict) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Return (start, end) sort keys for a delimiter.
+
+        A mixed delimiter -- a sub-indexed start ("9.1") paired with a bare
+        int end (9) -- normalizes its end to (9, 0), which sorts BELOW the
+        start's own (9, 1). The delimiter's own "end" then reads as earlier
+        than its "start", so it tests as fully contained inside an unrelated
+        sibling row and is silently dropped (#854). The LLM does return this
+        shape (start carries the row sub-index the model resolved, end does
+        not), so this is not a defensive case -- it is an observed one.
+
+        When the end is bare but the start is sub-indexed and the raw
+        (uncorrected) end would sort below the start, treat the end as equal
+        to the start's own key instead. This never touches a delimiter whose
+        end is itself sub-indexed (the true-subset case is unaffected), and
+        never touches a delimiter that is bare on both ends (ordinary int
+        spans are unaffected). The delimiter's own element_idx_end field is
+        left untouched -- only the sort/containment key changes.
+        """
         start = normalize_idx(d["element_idx_start"])
         end = normalize_idx(d["element_idx_end"])
+        if (
+            is_bare(d["element_idx_end"])
+            and not is_bare(d["element_idx_start"])
+            and end < start
+        ):
+            end = start
+        return start, end
+
+    def span_size(d):
+        """Calculate span size, handling string indices."""
+        start, end = normalize_span(d)
         # For row entries (same parent), span is end[1] - start[1]
         # For regular entries, span is end[0] - start[0]
         if start[0] == end[0]:
             return end[1] - start[1]
         return end[0] - start[0]
-
-    def is_bare(idx):
-        """True when idx carries no ".row" sub-index (i.e. a whole element)."""
-        return not (isinstance(idx, str) and "." in idx)
 
     def content_lines(text):
         """Non-trivial content lines of an entry.
@@ -374,19 +402,17 @@ def remove_subset_delimiters(delimiters: list) -> list:
     # Sort by start index, then by span size (largest first)
     sorted_delims = sorted(
         delimiters,
-        key=lambda d: (normalize_idx(d["element_idx_start"]), -span_size(d))
+        key=lambda d: (normalize_span(d)[0], -span_size(d))
     )
 
     kept = []
     for delim in sorted_delims:
-        start = normalize_idx(delim["element_idx_start"])
-        end = normalize_idx(delim["element_idx_end"])
+        start, end = normalize_span(delim)
 
         # Check if this delimiter is a subset of any already-kept delimiter
         is_subset = False
         for kept_delim in kept:
-            kept_start = normalize_idx(kept_delim["element_idx_start"])
-            kept_end = normalize_idx(kept_delim["element_idx_end"])
+            kept_start, kept_end = normalize_span(kept_delim)
 
             # Check if current is fully contained within kept
             if start >= kept_start and end <= kept_end:

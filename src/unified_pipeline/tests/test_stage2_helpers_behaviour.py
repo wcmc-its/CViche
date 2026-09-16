@@ -454,6 +454,62 @@ def test_remove_subset_delimiters_short_only_parent_is_not_vacuously_dropped():
     assert 50 in [d["element_idx_start"] for d in kept]
 
 
+def test_remove_subset_delimiters_mixed_subindexed_start_bare_end_both_rows_survive():
+    """#854: the LLM returns a sub-indexed start ("9.1") paired with a bare
+    int end (9). normalize_idx maps that bare end to (9, 0), which sorts
+    BELOW the start's own (9, 1) -- the delimiter's "end" then reads as
+    earlier than its "start", so it tested as fully contained inside the
+    sibling row "9.0"/"9.0" and was silently dropped. Both rows must
+    survive, and the raw element_idx_end value (9) must be left unchanged
+    -- normalization corrects only the sort/containment key, not the
+    delimiter's own data."""
+    delimiters = [
+        _d("9.1", 9, "2021 | Second row"),
+        _d("9.0", "9.0", "2020 | First row"),
+    ]
+    kept = remove_subset_delimiters(delimiters)
+    assert [(d["element_idx_start"], d["element_idx_end"]) for d in kept] == [
+        ("9.0", "9.0"),
+        ("9.1", 9),
+    ]
+
+
+def test_remove_subset_delimiters_plain_int_start_and_end_unchanged():
+    """Negative case for #854's fix: a delimiter that is bare on BOTH ends
+    must not be touched by the mixed-shape normalization -- ordinary int
+    spans behave exactly as before."""
+    kept = remove_subset_delimiters([_d(9, 9, "solo"), _d(20, 25, "other")])
+    assert [(d["element_idx_start"], d["element_idx_end"]) for d in kept] == [
+        (9, 9),
+        (20, 25),
+    ]
+
+
+def test_remove_subset_delimiters_dotted_start_and_end_unchanged():
+    """Negative case for #854's fix: a delimiter whose end is ITSELF
+    sub-indexed ("9.0") must not be touched -- the fix only fires when the
+    end is bare."""
+    kept = remove_subset_delimiters(
+        [_d("9.0", "9.0", "row"), _d("9.1", "9.1", "other row")]
+    )
+    assert [(d["element_idx_start"], d["element_idx_end"]) for d in kept] == [
+        ("9.0", "9.0"),
+        ("9.1", "9.1"),
+    ]
+
+
+def test_remove_subset_delimiters_true_subset_of_dotted_range_still_removed():
+    """Negative case for #854's fix: a genuine subset ("9.1".."9.1" fully
+    inside "9.0".."9.3") must still be dropped -- the fix does not weaken
+    ordinary dotted-range containment."""
+    parent = _d("9.0", "9.3", "whole range")
+    child = _d("9.1", "9.1", "contained point")
+    kept = remove_subset_delimiters([child, parent])
+    assert [(d["element_idx_start"], d["element_idx_end"]) for d in kept] == [
+        ("9.0", "9.3"),
+    ]
+
+
 # ------------------------------------------------ recover_unclaimed_table_rows
 
 def _row(idx, text, table_index=2, parent_idx=9):
