@@ -37,6 +37,17 @@ Fails closed (CODING_STANDARDS Section 5.5) if either arm recorded any
 doctor_gate.py failures (the "_failed" key doctor_gate.py writes alongside
 its per-uid reports) -- a uid run_doctor() itself crashed on must never be
 silently excluded from the comparison as if it had no findings to compare.
+
+`metrics` (#816) is a trend block, not a per-run verdict -- it carries no
+severity and #816's own module docstring says so. `norm()` therefore drops
+`metrics` before comparing, so CHANGED/PASS/FAIL below is driven by
+`findings` (plus `document_uid`, `root`, `artifacts`, `counts`,
+`worst_severity`) exactly as it was before #816 introduced `metrics` --
+otherwise every uid whose `metrics` block picked up a routine denominator
+shift would read as CHANGED, indistinguishable from a real finding
+regression (round-2 review F1). `metrics` differences are still surfaced --
+`_metrics_diff` reports them per uid, per key, old -> new -- but only ever
+as information; they never move `diff`, `ok`, or the exit code.
 """
 import argparse
 import json
@@ -60,16 +71,38 @@ def _scrub_work_dir(value):
 
 
 def norm(rep):
-    """Canonical JSON for rep with the harness's own work-dir path scrubbed
-    out of `root` and `artifacts` -- the only two fields run_doctor's report
-    uses for filesystem paths. See module docstring."""
+    """Canonical JSON for rep's findings-driving fields, with the harness's
+    own work-dir path scrubbed out of `root` and `artifacts` -- the only two
+    fields run_doctor's report uses for filesystem paths. `metrics` (#816) is
+    excluded: it never drives PASS/FAIL, see module docstring and
+    `_metrics_diff`. See module docstring for the path scrub."""
     scrubbed = dict(rep) if isinstance(rep, dict) else rep
     if isinstance(scrubbed, dict):
+        scrubbed.pop("metrics", None)
         if "root" in scrubbed:
             scrubbed["root"] = _scrub_work_dir(scrubbed["root"])
         if isinstance(scrubbed.get("artifacts"), dict):
             scrubbed["artifacts"] = {k: _scrub_work_dir(v) for k, v in scrubbed["artifacts"].items()}
     return json.dumps(scrubbed, sort_keys=True)
+
+
+def _metrics_diff(rep_a, rep_b) -> list:
+    """Per-key `metrics` (#816) differences between two reports for the same
+    uid, as `(key, old, new)` triples sorted by key. Reported only -- see
+    module docstring for why this never feeds `norm()` or the gate's
+    PASS/FAIL. A key present on only one side reports the other side as
+    `None`, distinguishable from an actual `None` metric value only by
+    checking the other report -- no metric in `_build_metrics` is ever
+    `None` today, so this is not ambiguous in practice."""
+    a_metrics = rep_a.get("metrics") if isinstance(rep_a, dict) else None
+    b_metrics = rep_b.get("metrics") if isinstance(rep_b, dict) else None
+    a_metrics = a_metrics if isinstance(a_metrics, dict) else {}
+    b_metrics = b_metrics if isinstance(b_metrics, dict) else {}
+    return [
+        (key, a_metrics.get(key), b_metrics.get(key))
+        for key in sorted(set(a_metrics) | set(b_metrics))
+        if a_metrics.get(key) != b_metrics.get(key)
+    ]
 
 
 def _failure_guard_problems(failed_a, failed_b) -> list:
@@ -119,6 +152,20 @@ def main(argv=None):
     print(f"compared {len(common)} CVs; identical {len(common) - len(diff)}; CHANGED {len(diff)}")
     if missing:
         print(f"UID SET DIFFERS: {sorted(missing)[:10]}")
+
+    # metrics (#816) is reported, never gated -- see module docstring and
+    # _metrics_diff. Silent when nothing differs, so a farm with no metrics
+    # block on either side (pre-#816 reports) or with identical metrics
+    # prints exactly what it did before metrics existed.
+    metrics_by_uid = {u: c for u in sorted(common) if (c := _metrics_diff(a[u], b[u]))}
+    if metrics_by_uid:
+        total = sum(len(c) for c in metrics_by_uid.values())
+        print(f"metrics CHANGED (reported only, never fails the gate): "
+              f"{len(metrics_by_uid)} uid(s), {total} key(s)")
+        for u, changed in metrics_by_uid.items():
+            for key, old, new in changed:
+                print(f"  {u} {key}: {old!r} -> {new!r}")
+
     ok = not diff and not missing and bool(common)
     if not common:
         print("FAIL - no comparable CVs (empty UID intersection)")
