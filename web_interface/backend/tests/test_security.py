@@ -654,7 +654,10 @@ class TestUploadValidation:
         assert "does not match .docx format" in response.json()["detail"]["message"]
 
     def test_spoofed_pdf_with_zip_content_rejected(self, client, db, seed_simple_mode):
-        """A file with .pdf extension but ZIP magic bytes is rejected."""
+        """#524: .pdf is rejected outright now, at the extension check --
+        before the magic-byte check would even run. So a .pdf extension is
+        refused the same way regardless of its actual content (real PDF
+        bytes, ZIP bytes disguised as a .pdf, or garbage)."""
         self._create_auth_user(client, db)
         zip_content = b"PK\x03\x04" + b"\x00" * 100
         response = client.post(
@@ -662,57 +665,69 @@ class TestUploadValidation:
             files={"file": ("resume.pdf", zip_content, "application/octet-stream")}, data={"submission_type": "own_cv"},
         )
         assert response.status_code == 400
-        assert "does not match .pdf format" in response.json()["detail"]["message"]
+        assert response.json()["detail"]["message"] == (
+            "Unsupported file type: .pdf. Only .docx files are supported. "
+            "Please convert your file to .docx before uploading."
+        )
 
-    def test_valid_pdf_accepted(self, client, db, seed_simple_mode, tmp_path):
-        """A legitimate PDF file is accepted."""
+    def test_pdf_rejected_at_upload(self, client, db, seed_simple_mode, tmp_path):
+        """#524: PDF is no longer accepted -- the API now matches the
+        frontend's .docx-only guard. Formerly test_valid_pdf_accepted
+        (asserted 200 + file_type "pdf"); every downstream reader
+        (docx_structure_extractor, stage 2, stage 6) is python-docx only, so
+        accepting PDF here always died at stage 1a. No Run row is created."""
+        from app.models import Run
         self._create_auth_user(client, db)
-        # Minimal valid PDF
+        # Minimal valid PDF -- rejected on extension alone, before this
+        # content is ever inspected.
         pdf_content = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF"
-        # Patch UPLOAD_DIR to tmp_path so we don't pollute real uploads. Mock the
-        # empty-document text extraction (covered separately in test_release_guards)
-        # so this magic-byte-acceptance test isn't tripped by the text-bearing guard.
-        with patch("app.api.upload.UPLOAD_DIR", tmp_path), \
-             patch("app.api.upload._extract_text", return_value="x" * 600):
+        with patch("app.api.upload.UPLOAD_DIR", tmp_path):
             response = client.post(
                 "/api/upload",
                 files={"file": ("my_cv.pdf", pdf_content, "application/pdf")}, data={"submission_type": "own_cv"},
             )
-        assert response.status_code == 200
-        data = response.json()
-        assert data["filename"] == "my_cv.pdf"
-        assert data["file_type"] == "pdf"
+        assert response.status_code == 400
+        assert response.json()["detail"]["message"].startswith("Unsupported file type: .pdf.")
+        assert db.query(Run).count() == 0
 
     def test_oversized_file_rejected(self, client, db, seed_simple_mode):
-        """Files exceeding the size limit are rejected."""
+        """Files exceeding the size limit are rejected. Uses .docx (not the
+        formerly-accepted .pdf, #524) so this still reaches the size check
+        (upload.py's size check runs before the magic-byte check, so the
+        content need not be a structurally valid .docx)."""
         self._create_auth_user(client, db)
-        pdf_header = b"%PDF-1.4"
+        docx_header = b"PK\x03\x04"
         with patch("app.api.upload.MAX_UPLOAD_SIZE", 100):  # Set limit to 100 bytes for test
-            big_content = pdf_header + b"\x00" * 200  # 208 bytes > 100 byte limit
+            big_content = docx_header + b"\x00" * 200  # 204 bytes > 100 byte limit
             response = client.post(
                 "/api/upload",
-                files={"file": ("big.pdf", big_content, "application/pdf")}, data={"submission_type": "own_cv"},
+                files={"file": ("big.docx", big_content, "application/octet-stream")}, data={"submission_type": "own_cv"},
             )
         assert response.status_code == 400
         assert "too large" in response.json()["detail"]["message"].lower()
 
     def test_randomized_filename_on_disk(self, client, db, seed_simple_mode, tmp_path):
-        """Uploaded files are stored with randomized names, not the user-provided filename."""
+        """Uploaded files are stored with randomized names, not the
+        user-provided filename. Uses .docx (not the formerly-accepted .pdf,
+        #524); the magic-byte check is bypassed (covered separately by
+        test_upload_atomicity.py's zip-structure tests) so this test stays
+        focused on the naming behavior."""
         self._create_auth_user(client, db)
-        pdf_content = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF"
+        docx_content = b"PK\x03\x04dummy-docx-bytes"
         with patch("app.api.upload.UPLOAD_DIR", tmp_path), \
+             patch("app.api.upload._validate_docx_magic", return_value=True), \
              patch("app.api.upload._extract_text", return_value="x" * 600):
             response = client.post(
                 "/api/upload",
-                files={"file": ("John_Doe_CV_2024.pdf", pdf_content, "application/pdf")}, data={"submission_type": "own_cv"},
+                files={"file": ("John_Doe_CV_2024.docx", docx_content, "application/octet-stream")}, data={"submission_type": "own_cv"},
             )
         assert response.status_code == 200
         run_id = response.json()["run_id"]
-        # File on disk should be {run_id}.pdf, NOT contain "John_Doe"
+        # File on disk should be {run_id}.docx, NOT contain "John_Doe"
         saved_files = list(tmp_path.iterdir())
         assert len(saved_files) == 1
         saved_name = saved_files[0].name
-        assert saved_name == f"{run_id}.pdf"
+        assert saved_name == f"{run_id}.docx"
         assert "John_Doe" not in saved_name
 
     def test_security_log_on_spoofed_upload(self, client, db, seed_simple_mode, caplog):
