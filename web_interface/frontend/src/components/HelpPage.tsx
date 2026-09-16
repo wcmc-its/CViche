@@ -1,10 +1,12 @@
-import { Link } from 'react-router-dom'
+import { useEffect } from 'react'
+import { Link, useLocation } from 'react-router-dom'
 import { HelpCircle, ArrowLeft } from 'lucide-react'
 
 const sections = [
   { id: 'what-is-cviche', label: 'What is CViche?' },
   { id: 'getting-started', label: 'Getting Started' },
   { id: 'understanding-results', label: 'Understanding Your Results' },
+  { id: 'data-retention', label: 'Data Retention Policy' },
   { id: 'faq', label: 'Frequently Asked Questions' },
   { id: 'contact', label: 'Contact & Support' },
 ]
@@ -19,6 +21,10 @@ const handleScrollTo = (e: React.MouseEvent, id: string) => {
 }
 
 export default function HelpPage() {
+  const { hash } = useLocation()
+  useEffect(() => {
+    if (hash) document.getElementById(hash.slice(1))?.scrollIntoView()
+  }, [hash])
   return (
     <main
       className="flex items-start justify-center min-h-screen p-4 pt-12"
@@ -147,6 +153,49 @@ export default function HelpPage() {
 
           <hr className="border-t border-gray-200 my-6" />
 
+          {/* Data retention policy (Faculty Affairs, 2026-09). Linked from the upload attestation. */}
+          <section id="data-retention">
+            <h2 className="text-lg font-semibold text-gray-900 mb-4">Data Retention Policy</h2>
+            <div className="space-y-3 text-sm text-gray-700 leading-relaxed">
+              <p>
+                <strong>What is retained.</strong> For every run, CViche keeps the original CV as uploaded, the
+                intermediate outputs produced at each stage of processing (including the text exchanged with the AI
+                service), the final WCM-formatted document, the run record (who submitted it, when, and processing
+                cost), and any feedback submitted about the run.
+              </p>
+              <p>
+                <strong>How long.</strong> Runs are retained indefinitely during the pilot. There is no automatic
+                expiry; removal is by request (see below).
+              </p>
+              <p>
+                <strong>Where.</strong> All of this is stored on WCM-managed cloud infrastructure. The only material
+                that leaves WCM systems is the CV text sent to the AI service during processing, as described under
+                &ldquo;Is my data secure?&rdquo; below.
+              </p>
+              <p>
+                <strong>Who can access it.</strong> You can see your own runs. CViche administrators (the Library
+                development team) can see all runs. Access requires WCM single sign-on; there is no public or
+                anonymous access.
+              </p>
+              <p>
+                <strong>How it is used.</strong> Retained runs are used to measure and improve CViche&apos;s accuracy
+                and to test proposed changes before they are released. CViche does not send your CV or its output to
+                any office or use it in any appointment, promotion, or review process; the output is a draft returned
+                to the person who uploaded it.
+              </p>
+              <p>
+                <strong>Removal.</strong> To have a run removed, contact Paul Albert at{' '}
+                <a href="mailto:paa2013@med.cornell.edu" className="text-primary-600 hover:underline">
+                  paa2013@med.cornell.edu
+                </a>
+                . The original CV, intermediate outputs, and final document are deleted from storage and the run record
+                from the database. Deleted runs may remain in routine system backups for a limited period.
+              </p>
+            </div>
+          </section>
+
+          <hr className="border-t border-gray-200 my-6" />
+
           {/* Section 4: FAQ */}
           <section id="faq">
             <h2 className="text-lg font-semibold text-gray-900 mb-4">Frequently Asked Questions</h2>
@@ -183,10 +232,12 @@ export default function HelpPage() {
                 <p className="text-sm font-semibold text-gray-900 mb-1">Is my data secure?</p>
                 <p>
                   Your uploaded CV is stored on a secure WCM server and is only accessible to you and CViche
-                  administrators. However, CV content is sent to OpenAI for AI processing. Do not include sensitive
-                  personal information such as Social Security numbers or dates of birth in your CV. By using CViche,
-                  you acknowledge that your CV content will be processed by OpenAI. If this is not acceptable, please
-                  do not use the service.
+                  administrators. However, the text of the CV is sent to a third-party AI service for processing
+                  (currently Anthropic&apos;s Claude on Amazon Bedrock; the provider may change, for example to OpenAI).
+                  CViche attempts to withhold highly sensitive personal details such as date of birth or Social
+                  Security number, but you should not include anything you would not want these systems to see. By
+                  using CViche, you acknowledge that your CV content will be processed by a third-party AI service. If
+                  this is not acceptable, please do not use the service.
                 </p>
               </div>
               <div>

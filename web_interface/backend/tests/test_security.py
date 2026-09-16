@@ -648,7 +648,7 @@ class TestUploadValidation:
         pdf_content = b"%PDF-1.4 fake pdf content that is definitely not a docx"
         response = client.post(
             "/api/upload",
-            files={"file": ("resume.docx", pdf_content, "application/octet-stream")},
+            files={"file": ("resume.docx", pdf_content, "application/octet-stream")}, data={"submission_type": "own_cv"},
         )
         assert response.status_code == 400
         assert "does not match .docx format" in response.json()["detail"]["message"]
@@ -659,7 +659,7 @@ class TestUploadValidation:
         zip_content = b"PK\x03\x04" + b"\x00" * 100
         response = client.post(
             "/api/upload",
-            files={"file": ("resume.pdf", zip_content, "application/octet-stream")},
+            files={"file": ("resume.pdf", zip_content, "application/octet-stream")}, data={"submission_type": "own_cv"},
         )
         assert response.status_code == 400
         assert "does not match .pdf format" in response.json()["detail"]["message"]
@@ -676,7 +676,7 @@ class TestUploadValidation:
              patch("app.api.upload._extract_text", return_value="x" * 600):
             response = client.post(
                 "/api/upload",
-                files={"file": ("my_cv.pdf", pdf_content, "application/pdf")},
+                files={"file": ("my_cv.pdf", pdf_content, "application/pdf")}, data={"submission_type": "own_cv"},
             )
         assert response.status_code == 200
         data = response.json()
@@ -691,7 +691,7 @@ class TestUploadValidation:
             big_content = pdf_header + b"\x00" * 200  # 208 bytes > 100 byte limit
             response = client.post(
                 "/api/upload",
-                files={"file": ("big.pdf", big_content, "application/pdf")},
+                files={"file": ("big.pdf", big_content, "application/pdf")}, data={"submission_type": "own_cv"},
             )
         assert response.status_code == 400
         assert "too large" in response.json()["detail"]["message"].lower()
@@ -704,7 +704,7 @@ class TestUploadValidation:
              patch("app.api.upload._extract_text", return_value="x" * 600):
             response = client.post(
                 "/api/upload",
-                files={"file": ("John_Doe_CV_2024.pdf", pdf_content, "application/pdf")},
+                files={"file": ("John_Doe_CV_2024.pdf", pdf_content, "application/pdf")}, data={"submission_type": "own_cv"},
             )
         assert response.status_code == 200
         run_id = response.json()["run_id"]
@@ -722,7 +722,7 @@ class TestUploadValidation:
         with caplog.at_level(logging.WARNING):
             client.post(
                 "/api/upload",
-                files={"file": ("resume.docx", pdf_content, "application/octet-stream")},
+                files={"file": ("resume.docx", pdf_content, "application/octet-stream")}, data={"submission_type": "own_cv"},
             )
         security_logs = [r for r in caplog.records if "[SECURITY]" in r.getMessage()]
         assert len(security_logs) >= 1, "Expected [SECURITY] log for spoofed upload"
@@ -744,6 +744,6 @@ class TestUploadValidation:
         random_content = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09" * 100
         response = client.post(
             "/api/upload",
-            files={"file": ("resume.pdf", random_content, "application/pdf")},
+            files={"file": ("resume.pdf", random_content, "application/pdf")}, data={"submission_type": "own_cv"},
         )
         assert response.status_code == 400

@@ -14,7 +14,7 @@ from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException
 from sqlalchemy.orm import Session
 from datetime import datetime
 from pydantic import BaseModel
-from typing import Optional
+from typing import Literal, Optional
 
 from app.database import get_db
 from app.models import Run, Step, User
@@ -301,6 +301,10 @@ async def upload_cv(
     include_track_changes: bool = Form(True),
     include_classification_comments: bool = Form(False),
     strip_wcm_instructions: bool = Form(True),
+    # Per-upload role attestation (Faculty Affairs). Required: every run must
+    # record whether the submitter was the faculty member or an administrator
+    # who attested to having the faculty member's permission.
+    submission_type: Literal["own_cv", "authorized_admin"] = Form(...),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -449,6 +453,7 @@ async def upload_cv(
         status="created",
         started_at=datetime.now(),
         user_id=current_user.id,
+        submission_type=submission_type,
         estimated_duration_seconds=estimated_duration_seconds,
         show_track_changes=1 if include_track_changes else 0,
         show_pipeline_comments=1 if include_classification_comments else 0,
