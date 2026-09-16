@@ -234,16 +234,18 @@ def test_upload_rejects_unsupported_extension(client, db, seed_simple_mode, tmp_
 
 # --- G-524: PDF rejected at both API validators (#524, #525) ----------------
 
-def test_estimate_rejects_pdf(client, db, seed_simple_mode):
+@pytest.mark.parametrize("filename", ["cv.pdf", "cv.PDF"])
+def test_estimate_rejects_pdf(client, db, seed_simple_mode, filename):
     """#524/#525: /estimate (upload.py:~511) applies the same
     ALLOWED_UPLOAD_EXTENSIONS gate as /upload, so a PDF can no longer reach
-    the (now-deleted) pypdf-import branch."""
+    the (now-deleted) pypdf-import branch. Uppercase suffix (cv.PDF) covers
+    the same lower-casing the extension check applies before the gate."""
     user = _make_user(db)
     _auth(client, user)
 
     resp = client.post(
         "/api/estimate",
-        files={"file": ("cv.pdf", b"%PDF-1.4 dummy pdf content", "application/pdf")},
+        files={"file": (filename, b"%PDF-1.4 dummy pdf content", "application/pdf")},
     )
 
     assert resp.status_code == 400, resp.text
