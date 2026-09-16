@@ -346,7 +346,7 @@ async def upload_cv(
         logger.info("Rejected upload with no readable text (user=%s, chars=%d)", current_user.email, len(extracted.strip()))
         raise bad_request(
             "We couldn't read any text from this file. It may be a scanned image, "
-            "password-protected, or empty. Please upload a text-based PDF or Word document."
+            "password-protected, or empty. Please upload a text-based Word document."
         )
 
     # Cheap, no-LLM check: does this look like the *blank* WCM CV template?
