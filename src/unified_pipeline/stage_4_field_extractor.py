@@ -105,28 +105,24 @@ def process_cv(
     filename = Path(docx_path).stem
     document_uid = filename
 
-    # Try Stage 3b output first (new format), fall back to Stage 3 (legacy)
+    # Stage 3b is the only live producer of classified entries -- the legacy
+    # stage_3_taxonomy_mapping/ fallback this used to check for is dead: no
+    # live driver (run_full_pipeline.py, orchestrator.py, scripts/) writes
+    # that directory any more (#852), so treating its presence as a second
+    # source of provenance was never reachable outside a hand-crafted fixture.
     stage3b_path = Path(__file__).parent / "outputs" / "stage_3b_classified_entries" / f"{document_uid}_classified.json"
-    stage3_path = Path(__file__).parent / "outputs" / "stage_3_taxonomy_mapping" / f"{document_uid}_mapped.json"
 
-    if stage3b_path.exists():
-        print(f"\n Loading Stage 3b output: {stage3b_path.name}")
-        with open(stage3b_path, "r") as f:
-            stage_data = json.load(f)
-        # Stage 3b uses "entries" key
-        mapped_entries = stage_data.get("entries", [])
-    elif stage3_path.exists():
-        print(f"\n Loading Stage 3 output (legacy): {stage3_path.name}")
-        with open(stage3_path, "r") as f:
-            stage_data = json.load(f)
-        # Legacy Stage 3 uses "mapped_entries" key
-        mapped_entries = stage_data.get("mapped_entries", [])
-    else:
+    if not stage3b_path.exists():
         raise FileNotFoundError(
-            f"No Stage 3b or Stage 3 output found for {document_uid}.\n"
-            f"  Tried: {stage3b_path}\n"
-            f"  Tried: {stage3_path}"
+            f"No Stage 3b output found for {document_uid}.\n"
+            f"  Tried: {stage3b_path}"
         )
+
+    print(f"\n Loading Stage 3b output: {stage3b_path.name}")
+    with open(stage3b_path, "r") as f:
+        stage_data = json.load(f)
+    # Stage 3b uses "entries" key
+    mapped_entries = stage_data.get("entries", [])
 
     # Filter out fragments and duplicates (they don't need field extraction)
     valid_entries = [
