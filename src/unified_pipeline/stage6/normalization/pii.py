@@ -301,11 +301,13 @@ WITHHOLD_POLICY: tuple[WithholdRule, ...] = (
                  label=r"home \s* (?: address | phone | telephone | tel\.? )"),
 )
 
-# --- what is NOT in the table, and why (#821 defaults / public) -------------
-# citizenship / nationality -- render;  personal email -- render;
-# NPI -- a public identifier, render.  Third-party contacts in an
-# unlabelled References
-# section -- a separate follow-up issue, not this table.
+# --- what is NOT in the table, and why (decided in DECIDED_821) -------------
+# citizenship / nationality -- render;  personal email -- render (both the
+# owner's #821 decision, so no CAT_* constant: a category constant exists
+# to be shared by a policy row, a field-key rule and a comment line, and
+# neither has one); NPI -- a public identifier, render.  Third-party
+# contacts in an unlabelled References section -- a separate follow-up
+# issue, not this table.
 
 
 # Stage-4 field KEYS that name protected data outright (the label pattern
