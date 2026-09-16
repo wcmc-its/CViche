@@ -17,8 +17,6 @@ is testable on strings alone.
     _merge_first_cell_continuation  folds a 3-column row's second-paragraph
                                     award cell back into one line before
                                     _entry_parts sees it (#828)
-    _same_calendar_date             claims a full-date cell for _entry_parts
-                                    by parsed value, not string equality
     _is_honors_header_entry         whether the whole entry is the source
                                     CV's own column-header row
     _parse_honor_lines              one pass over those parts, sorting them
@@ -87,7 +85,6 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
 
 try:
     from docx.table import Table
@@ -254,43 +251,6 @@ def _is_date_column(part: str) -> bool:
     return bool(_YEAR_ONLY_RE.match(part) or _DATE_COLUMN_RE.match(part))
 
 
-# Formats `_same_calendar_date` tries, in this order: stage 4's own ISO
-# `date` field, then the three full-date cell shapes `_DATE_COLUMN_RE` was
-# widened to accept (#828). Every format here names a full calendar date --
-# year, month AND day -- deliberately: a bare year or a month-and-year cell
-# has no day to compare, so it is claimed by `_is_date_column`'s shape check
-# alone, never by this one.
-_DATE_PARSE_FORMATS = ('%Y-%m-%d', '%m/%d/%Y', '%d %B %Y', '%B %d, %Y',
-                       '%B %d %Y')
-
-
-def _parse_full_date(text: str) -> date | None:
-    """`text` as a calendar date, trying each of `_DATE_PARSE_FORMATS` in
-    turn, or None if it matches none of them."""
-    for fmt in _DATE_PARSE_FORMATS:
-        try:
-            return datetime.strptime(text, fmt).date()
-        except ValueError:
-            continue
-    return None
-
-
-def _same_calendar_date(a: str, b: str) -> bool:
-    """Do `a` and `b` name the same calendar date, however each is written?
-
-    Stage 4's `date` field is always ISO ("2017-10-30"); the source cell it
-    came from can be "10/30/2017", "30 October 2017" or "October 30, 2017"
-    (#828) -- string equality never sees those as the same date, which is
-    why `_entry_parts`'s claimed-cell check used to miss a full-date column
-    entirely. Unparsable on either side (a bare year, an empty string,
-    `None`) is False, never raises.
-    """
-    if not a or not b:
-        return False
-    parsed_a = _parse_full_date(a.strip())
-    return parsed_a is not None and parsed_a == _parse_full_date(b.strip())
-
-
 def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     """Non-empty parts of an honors entry (#476), scoped to exactly the
     newline-blind case entry_lines already names as its own blind spot: a
@@ -366,12 +326,21 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     origin/dev alike. Nothing in the farm has that shape and inventing a third
     rule for it would be untested.
 
-    A part is also claimed -- filtered out of `awards` below -- when it names
-    the same calendar date as the extracted `date` even though the strings
-    differ (`2017-10-30` claims `10/30/2017`), not only when it string-equals
-    a claimed value (#828): `_is_date_column`'s widened shapes already catch
-    most of these, but a full-date cell in a format that regex does not name
-    is still recognised here via `_same_calendar_date`.
+    A part is claimed -- filtered out of `awards` below -- only by string
+    equality with an extracted column value (#828 review round 2): an
+    earlier revision additionally claimed a part when it named the same
+    calendar date as stage 4's ISO `date` by PARSED value, so "10/30/2017"
+    in the text would claim "2017-10-30" from stage 4 even though the
+    strings differ. That comparison turned out to be dead: every full-date
+    cell shape the parsed comparison could recognise ("10/30/2017", "30
+    October 2017", "October 30, 2017", "October 30 2017") is *already*
+    matched by `_is_date_column`'s widened regex (#828) before this filter
+    ever runs, and the one shape the regex does not name -- the cell written
+    in stage 4's own ISO form -- never occurs in a source CV's own text (a
+    human writes a date one of the four ways above, never "2017-10-30").
+    Deleting the comparison left all 80 honors tests green (verified before
+    removal, not merely asserted); reintroduce it only against a wire test
+    proving a reachable input it alone catches.
     """
     lines = _merge_first_cell_continuation(entry_lines(text))
     if len(lines) != 1 or '\t' in lines[0]:
@@ -380,8 +349,7 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     claimed = {v.strip().lower() for v in column_values if v and v.strip()}
     dates = [p for p in parts if _is_date_column(p)]
     awards = [p for p in parts
-              if not _is_date_column(p) and p.lower() not in claimed
-              and not any(_same_calendar_date(p, v) for v in column_values)]
+              if not _is_date_column(p) and p.lower() not in claimed]
     if len(awards) < _MIN_AWARDS_FOR_SPLIT:
         return lines
     if dates and len(dates) != len(awards):

@@ -90,7 +90,7 @@ from unified_pipeline.stage6.sections.honors import (  # noqa: E402
     _honor_columns,
     _is_date_column,
     _is_honors_header_entry,
-    _same_calendar_date,
+    _merge_first_cell_continuation,
     _split_award_year,
     parse_honor_entry,
 )
@@ -1126,29 +1126,6 @@ def test_claimed_date_that_differs_from_the_cell_is_still_a_date_column():
                      "2016"]]
 
 
-# --- _same_calendar_date -----------------------------------------------------
-
-def test_same_calendar_date_matches_iso_against_us_and_written_forms():
-    assert _same_calendar_date("2017-10-30", "10/30/2017")
-    assert _same_calendar_date("2017-10-30", "30 October 2017")
-    assert _same_calendar_date("2017-10-30", "October 30, 2017")
-
-
-def test_same_calendar_date_rejects_a_genuinely_different_date():
-    assert not _same_calendar_date("2016-01-01", "10/30/2017")
-
-
-def test_same_calendar_date_is_false_on_unparsable_or_missing_input():
-    """None-safe, and a day-less cell (a bare year) never claims a full
-    date -- that shape is left to `_is_date_column` alone."""
-    assert not _same_calendar_date("2017", "2017")
-    assert not _same_calendar_date("not a date", "10/30/2017")
-    assert not _same_calendar_date("", "10/30/2017")
-    assert not _same_calendar_date("2017-10-30", "")
-    assert not _same_calendar_date(None, "10/30/2017")
-    assert not _same_calendar_date("2017-10-30", None)
-
-
 # --- item 3: the first cell's second paragraph is a continuation ------------
 
 def test_second_paragraph_in_the_award_cell_joins_the_award_name():
@@ -1178,6 +1155,62 @@ def test_continuation_merge_requires_both_organization_and_date():
     text = "Fictional Award | Imaginary Testing Society\nFictional Award Two"
     assert _entry_parts(text) == [
         "Fictional Award | Imaginary Testing Society", "Fictional Award Two"]
+
+
+# --- one negative test per `_merge_first_cell_continuation` guard (R2/F2) ---
+# Each names the guard it kills: deleting that one `if` from the function
+# leaves the suite green without it (verified per-guard below and pasted in
+# the report), which is why each gets its own assertion rather than sharing
+# one with a guard already covered above (`not columns.date` is
+# `test_continuation_merge_requires_both_organization_and_date`, above).
+
+def test_continuation_merge_requires_an_organization():
+    """A first line with only a date (no organization) is not the 3-column
+    shape the merge is scoped to -- mirrors the date-only guard above but
+    for the organization half of `_honor_columns`."""
+    lines = ["Fictional Award | 10/30/2017", "Fictional Award Two"]
+    assert _merge_first_cell_continuation(lines) == lines
+
+
+def test_continuation_merge_rejects_a_bare_year_second_line():
+    """A second line that is nothing but a year is a loose year cell for a
+    genuinely separate award, not a continuation paragraph."""
+    lines = ["Fictional Excellence Award | Imaginary Testing Society | "
+             "10/30/2017", "2018"]
+    assert _merge_first_cell_continuation(lines) == lines
+
+
+def test_continuation_merge_rejects_a_header_row_second_line():
+    """A second line that is itself the source table's fused header row
+    (no pipe of its own, but two header keywords) is not a continuation."""
+    lines = ["Fictional Excellence Award | Imaginary Testing Society | "
+             "10/30/2017", "Organization Year"]
+    assert _merge_first_cell_continuation(lines) == lines
+
+
+def test_continuation_merge_rejects_a_second_line_with_its_own_pipe():
+    """A second line carrying its own '|' is a genuinely separate 3-column
+    award row, not a parenthetical -- folding it in would swallow a whole
+    second award (verifier finding F2)."""
+    lines = ["Fictional Award One | Imaginary Testing Society | 10/30/2017",
+             "Fictional Award Two | Imaginary Testing Society Two | 5/1/2018"]
+    assert _merge_first_cell_continuation(lines) == lines
+
+
+def test_continuation_merge_rejects_a_second_line_with_a_tab():
+    """A second line carrying a tab is column-structured on its own, not a
+    free-text continuation paragraph."""
+    lines = ["Fictional Excellence Award | Imaginary Testing Society | "
+             "10/30/2017", "Fictional Award Two\tSome Note"]
+    assert _merge_first_cell_continuation(lines) == lines
+
+
+def test_continuation_merge_does_not_apply_past_exactly_two_lines():
+    """Three or more lines is not the narrow two-line shape the merge is
+    scoped to, whatever the first two look like -- returned unchanged."""
+    lines = ["Fictional Excellence Award | Imaginary Testing Society | "
+             "10/30/2017", "(A continuation paragraph)", "A third line"]
+    assert _merge_first_cell_continuation(lines) == lines
 
 
 if __name__ == "__main__":
