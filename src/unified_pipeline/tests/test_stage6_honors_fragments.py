@@ -88,7 +88,9 @@ from unified_pipeline.stage6.sections.honors import (  # noqa: E402
     _entry_parts,
     _extract_organization_from_award,
     _honor_columns,
+    _is_date_column,
     _is_honors_header_entry,
+    _same_calendar_date,
     _split_award_year,
     parse_honor_entry,
 )
@@ -1035,6 +1037,147 @@ def test_production_template_fills_its_own_honors_table():
     assert gen.stats.get(_FALLBACK_SCHEMA_STAT, 0) == 0
     assert gen.stats['tables_populated'] == 1
     assert gen.stats['entries_inserted'] == 4
+
+
+# =========================================================================
+# #828: a full mm/dd/yyyy (or "30 October 2017" / "October 30, 2017") date
+# cell in a 3-column award row is a date, not a second award. Synthetic
+# names throughout -- none of these strings are corpus content.
+# =========================================================================
+
+_FULL_DATE_ENTRY = {
+    "text": "Fictional Excellence Award | Imaginary Testing Society | 10/30/2017",
+    "extracted_fields": {
+        "award_name": "Fictional Excellence Award",
+        "granting_body": "Imaginary Testing Society",
+        "date": "2017-10-30",
+    },
+}
+
+
+def test_full_date_cell_is_not_read_as_a_second_award():
+    """The issue's own shape: a 3-column row whose date cell is a full
+    mm/dd/yyyy date, not the bare year the template's column header asks
+    for. Before the fix neither `_is_date_column` nor the claimed-value
+    filter recognised '10/30/2017' as the date column, so two award-looking
+    parts (the award and the date) survived and the row split into three."""
+    rows = _render_honors([_FULL_DATE_ENTRY])
+    assert rows == [["Fictional Excellence Award", "Imaginary Testing Society",
+                     "2017"]]
+
+
+def test_alternate_full_date_cell_shapes_each_yield_one_record():
+    """`_DATE_COLUMN_RE` was widened to accept two more full-date shapes
+    (#828); each renders the same single row as the mm/dd/yyyy form above."""
+    for cell in ("30 October 2017", "October 30, 2017"):
+        assert _is_date_column(cell), cell
+        entry = {
+            "text": f"Fictional Excellence Award | Imaginary Testing Society | {cell}",
+            "extracted_fields": {
+                "award_name": "Fictional Excellence Award",
+                "granting_body": "Imaginary Testing Society",
+                "date": "2017-10-30",
+            },
+        }
+        rows = _render_honors([entry])
+        assert rows == [["Fictional Excellence Award",
+                         "Imaginary Testing Society", "2017"]], cell
+
+
+def test_month_year_and_bare_year_date_cells_remain_one_record():
+    """The two shapes `_DATE_COLUMN_RE` already accepted on dev still
+    collapse a 3-column row to one part after the widening -- the fix adds
+    shapes, it does not narrow the existing ones."""
+    for cell in ("10/2017", "2017"):
+        text = ("Fictional Excellence Award | Imaginary Testing Society | "
+                f"{cell}")
+        assert _entry_parts(
+            text, ("Imaginary Testing Society", "2017")) == [text], cell
+
+
+def test_two_genuinely_separate_full_date_awards_still_split():
+    """Negative control (MUST NOT in the ticket): the widened date-column
+    check must not swallow a real two-award list -- each award still carries
+    its own full-date cell and `_MIN_AWARDS_FOR_SPLIT` is untouched."""
+    text = ("Fictional Award One | 10/30/2017 | "
+            "Fictional Award Two | 5/1/2018")
+    assert _entry_parts(text, ("", "")) == [
+        "Fictional Award One", "10/30/2017",
+        "Fictional Award Two", "5/1/2018"]
+
+
+def test_claimed_date_that_differs_from_the_cell_is_still_a_date_column():
+    """Choice stated for the report: whether a cell counts as the date
+    column is decided by its SHAPE (`_is_date_column`), not by whether it
+    matches the extracted `date` -- '10/30/2017' is a date column even when
+    stage 4 extracted a different date (2016-01-01) for this entry, so the
+    row still renders as one record rather than being second-guessed against
+    a mismatched extracted value."""
+    entry = {
+        "text": "Fictional Excellence Award | Imaginary Testing Society | 10/30/2017",
+        "extracted_fields": {
+            "award_name": "Fictional Excellence Award",
+            "granting_body": "Imaginary Testing Society",
+            "date": "2016-01-01",
+        },
+    }
+    rows = _render_honors([entry])
+    assert rows == [["Fictional Excellence Award", "Imaginary Testing Society",
+                     "2016"]]
+
+
+# --- _same_calendar_date -----------------------------------------------------
+
+def test_same_calendar_date_matches_iso_against_us_and_written_forms():
+    assert _same_calendar_date("2017-10-30", "10/30/2017")
+    assert _same_calendar_date("2017-10-30", "30 October 2017")
+    assert _same_calendar_date("2017-10-30", "October 30, 2017")
+
+
+def test_same_calendar_date_rejects_a_genuinely_different_date():
+    assert not _same_calendar_date("2016-01-01", "10/30/2017")
+
+
+def test_same_calendar_date_is_false_on_unparsable_or_missing_input():
+    """None-safe, and a day-less cell (a bare year) never claims a full
+    date -- that shape is left to `_is_date_column` alone."""
+    assert not _same_calendar_date("2017", "2017")
+    assert not _same_calendar_date("not a date", "10/30/2017")
+    assert not _same_calendar_date("", "10/30/2017")
+    assert not _same_calendar_date("2017-10-30", "")
+    assert not _same_calendar_date(None, "10/30/2017")
+    assert not _same_calendar_date("2017-10-30", None)
+
+
+# --- item 3: the first cell's second paragraph is a continuation ------------
+
+def test_second_paragraph_in_the_award_cell_joins_the_award_name():
+    """A source table cell's second paragraph -- the parenthetical under the
+    award name -- arrives as its own newline-separated line and reads like a
+    second award. When the row already has an organization and a date cell,
+    it is joined into the award name instead of splitting (#828)."""
+    text = ("Fictional Team Award | Imaginary Testing Society | 10/30/2017\n"
+            "(Co-recipient team award)")
+    rows = _render_honors([_raw(text)])
+    assert rows == [["Fictional Team Award (Co-recipient team award)",
+                     "Imaginary Testing Society", "2017"]]
+
+
+def test_continuation_merge_does_not_apply_to_two_real_awards():
+    """The guard's negative path: two genuinely separate multi-line awards,
+    neither naming its own organization and date on the first line, must
+    still split -- unaffected by the merge added for #828."""
+    text = "Fictional Award One\nFictional Award Two"
+    assert _entry_parts(text) == ["Fictional Award One", "Fictional Award Two"]
+
+
+def test_continuation_merge_requires_both_organization_and_date():
+    """A first line with only an organization (no date) is not the
+    3-column shape the merge is scoped to, so the second line is still read
+    as its own (fused-list) award."""
+    text = "Fictional Award | Imaginary Testing Society\nFictional Award Two"
+    assert _entry_parts(text) == [
+        "Fictional Award | Imaginary Testing Society", "Fictional Award Two"]
 
 
 if __name__ == "__main__":

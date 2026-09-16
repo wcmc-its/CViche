@@ -14,6 +14,11 @@ is testable on strings alone.
 
     _entry_parts                    the entry's parts: newlines always, '|'
                                     for the newline-blind single-line case
+    _merge_first_cell_continuation  folds a 3-column row's second-paragraph
+                                    award cell back into one line before
+                                    _entry_parts sees it (#828)
+    _same_calendar_date             claims a full-date cell for _entry_parts
+                                    by parsed value, not string equality
     _is_honors_header_entry         whether the whole entry is the source
                                     CV's own column-header row
     _parse_honor_lines              one pass over those parts, sorting them
@@ -82,6 +87,7 @@ import logging
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import date, datetime
 
 try:
     from docx.table import Table
@@ -157,10 +163,20 @@ _MONTH_TAIL_RE = re.compile(r'[\s,]*' + _MONTH_NAME + r'$', re.IGNORECASE)
 # this whole PART a bare year, i.e. its own record separator?): a date cell
 # that stage 2 lifted out of a source table can carry the month or a slash
 # form the source wrote, and "Award | Organization | August 2025" is the same
-# three-column line as "Award | Organization | 2025".
+# three-column line as "Award | Organization | 2025". The template column
+# says "Date awarded (yyyy)" but a WCM-template CV writes the full date it
+# actually has -- "10/30/2017", "30 October 2017", "October 30, 2017" -- so
+# those three shapes are accepted alongside the bare-year and month-year ones
+# above (#828); a 3-column award row with a full-date cell used to have no
+# recognised date column at all and split into three rows.
 _DATE_COLUMN_RE = re.compile(
-    r'^(?:' + _MONTH_NAME + r'\s+)?(?:\d{1,2}/)?(?:19|20)\d{2}'
-    r'(?:\s*[-–]\s*(?:(?:19|20)\d{2}|present))?$', re.IGNORECASE)
+    r'^(?:'
+    r'(?:' + _MONTH_NAME + r'\s+)?(?:\d{1,2}/)?(?:19|20)\d{2}'
+    r'(?:\s*[-–]\s*(?:(?:19|20)\d{2}|present))?'
+    r'|\d{1,2}/\d{1,2}/(?:19|20)\d{2}'                     # mm/dd/yyyy
+    r'|\d{1,2}\s+' + _MONTH_NAME + r'\s+(?:19|20)\d{2}'    # d Month yyyy
+    r'|' + _MONTH_NAME + r'\s+\d{1,2},?\s+(?:19|20)\d{2}'  # Month d, yyyy
+    r')$', re.IGNORECASE)
 
 # Words that are part of award descriptions, not organization names.
 _ORG_STOP_WORDS = frozenset([
@@ -238,6 +254,43 @@ def _is_date_column(part: str) -> bool:
     return bool(_YEAR_ONLY_RE.match(part) or _DATE_COLUMN_RE.match(part))
 
 
+# Formats `_same_calendar_date` tries, in this order: stage 4's own ISO
+# `date` field, then the three full-date cell shapes `_DATE_COLUMN_RE` was
+# widened to accept (#828). Every format here names a full calendar date --
+# year, month AND day -- deliberately: a bare year or a month-and-year cell
+# has no day to compare, so it is claimed by `_is_date_column`'s shape check
+# alone, never by this one.
+_DATE_PARSE_FORMATS = ('%Y-%m-%d', '%m/%d/%Y', '%d %B %Y', '%B %d, %Y',
+                       '%B %d %Y')
+
+
+def _parse_full_date(text: str) -> date | None:
+    """`text` as a calendar date, trying each of `_DATE_PARSE_FORMATS` in
+    turn, or None if it matches none of them."""
+    for fmt in _DATE_PARSE_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _same_calendar_date(a: str, b: str) -> bool:
+    """Do `a` and `b` name the same calendar date, however each is written?
+
+    Stage 4's `date` field is always ISO ("2017-10-30"); the source cell it
+    came from can be "10/30/2017", "30 October 2017" or "October 30, 2017"
+    (#828) -- string equality never sees those as the same date, which is
+    why `_entry_parts`'s claimed-cell check used to miss a full-date column
+    entirely. Unparsable on either side (a bare year, an empty string,
+    `None`) is False, never raises.
+    """
+    if not a or not b:
+        return False
+    parsed_a = _parse_full_date(a.strip())
+    return parsed_a is not None and parsed_a == _parse_full_date(b.strip())
+
+
 def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     """Non-empty parts of an honors entry (#476), scoped to exactly the
     newline-blind case entry_lines already names as its own blind spot: a
@@ -246,7 +299,14 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
 
     A genuinely multi-line entry (entry_lines already returns >1 part) is
     returned UNCHANGED -- its existing per-part tab/pipe handling below stays
-    exactly as today. Reading the farm's changed uids proved this matters:
+    exactly as today, with ONE narrow exception routed through
+    `_merge_first_cell_continuation` first (#828): a source table's cell can
+    carry a second paragraph under the award name (a parenthetical), which
+    arrives as its own line and reads exactly like a second, genuinely
+    separate award. That is only merged back into the first line's award cell
+    when the first line is already a recognised 3-column row with its own
+    organization AND date -- see that function for the full guard. Reading
+    the farm's changed uids proved the general UNCHANGED rule matters:
     2054_Opresko_Cv's "1994 | American Chemical Society Award,\\nLehigh Valley
     Chapter of ACS" already has 2 lines by newline alone, and additionally
     splitting line 0's '|' collides with the existing (separate, pre-existing)
@@ -305,20 +365,57 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     effect: `_fill_honors` emits zero rows for that text on this branch and on
     origin/dev alike. Nothing in the farm has that shape and inventing a third
     rule for it would be untested.
+
+    A part is also claimed -- filtered out of `awards` below -- when it names
+    the same calendar date as the extracted `date` even though the strings
+    differ (`2017-10-30` claims `10/30/2017`), not only when it string-equals
+    a claimed value (#828): `_is_date_column`'s widened shapes already catch
+    most of these, but a full-date cell in a format that regex does not name
+    is still recognised here via `_same_calendar_date`.
     """
-    lines = entry_lines(text)
+    lines = _merge_first_cell_continuation(entry_lines(text))
     if len(lines) != 1 or '\t' in lines[0]:
         return lines
     parts = [p.strip() for p in lines[0].split('|') if p.strip()]
     claimed = {v.strip().lower() for v in column_values if v and v.strip()}
     dates = [p for p in parts if _is_date_column(p)]
     awards = [p for p in parts
-              if not _is_date_column(p) and p.lower() not in claimed]
+              if not _is_date_column(p) and p.lower() not in claimed
+              and not any(_same_calendar_date(p, v) for v in column_values)]
     if len(awards) < _MIN_AWARDS_FOR_SPLIT:
         return lines
     if dates and len(dates) != len(awards):
         return lines
     return parts
+
+
+def _merge_first_cell_continuation(lines: Sequence[str]) -> list[str]:
+    """A second paragraph in a 3-column row's first cell, read back as a
+    continuation of the award name rather than a second award (#828).
+
+    `entry_lines` splits on every '\\n', so "Award Name\\n(description)" from
+    one cell reads exactly like "Award Name" followed by a genuinely separate
+    award line. Only the narrow shape that says otherwise qualifies: exactly
+    two lines, neither carrying a tab or (on the second) a pipe of its own,
+    the first already a recognised 3-column row with its own organization
+    AND date (`_honor_columns`), the second not itself a year and not a
+    header row. Two real award lines, a first line with no columns of its
+    own, or a second line that is itself structured, are returned unchanged
+    and fall through to `_parse_honor_lines` exactly as before.
+    """
+    if len(lines) != 2 or '\t' in lines[0] or '|' not in lines[0]:
+        return list(lines)
+    first, second = lines
+    if '\t' in second or '|' in second:
+        return list(lines)
+    if _YEAR_ONLY_RE.match(second) or _looks_like_column_header(second):
+        return list(lines)
+    columns = _honor_columns(first)
+    if columns is None or not columns.organization or not columns.date:
+        return list(lines)
+    parts = [p.strip() for p in first.split('|') if p.strip()]
+    parts[0] = f"{parts[0]} {second}".strip()
+    return [' | '.join(parts)]
 
 
 def _field_text(fields: Mapping, *names: str) -> str:
