@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from docx import Document
+from docx.oxml.ns import qn
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -51,6 +52,34 @@ def _rows_after_board(gen):
     table = gen._find_table_after_paragraph(section_idx)
     assert table is not None
     return [tuple(cell.text for cell in row.cells) for row in table.rows[1:]]
+
+
+def _board_table(gen):
+    """The table under the Board Certification header, or None."""
+    section_idx = None
+    for i, para in enumerate(gen.doc.paragraphs):
+        text = para.text.strip()
+        if text == "Board Certification" or text.startswith("Board Certification:"):
+            section_idx = i
+            break
+    assert section_idx is not None, "template lost its Board Certification header"
+    return gen._find_table_after_paragraph(section_idx)
+
+
+def _cell_wt_texts(row):
+    """Each cell's text in `row`, read from the raw `w:t` runs directly
+    rather than python-docx's computed `cell.text` (#708: the assertion this
+    feeds must hold on the actual XML, not on whatever python-docx happens
+    to reconstruct). Paragraphs within a cell are joined with '\\n', same as
+    `cell.text` does, since the real template's own header cells carry more
+    than one `w:p` (e.g. "Certificate # " / "(indicate if board eligible)")."""
+    return [
+        '\n'.join(
+            ''.join(t.text or '' for t in p.iter(qn('w:t')))
+            for p in tc.findall(qn('w:p'))
+        )
+        for tc in row._tr.findall(qn('w:tc'))
+    ]
 
 
 class TestCertificateNumberPatternRejectsMalformed:
@@ -809,3 +838,63 @@ class TestBlankRowGuardIsUniformAcrossColumnBranches:
 
         assert len(table.rows) == rows_before, "a whitespace-only row must be removed, not left behind"
         assert gen.stats['entries_inserted'] == entries_before
+
+
+class TestEmptyEntriesClearsTemplatePlaceholderRow:
+    """#708: `_fill_board_certification([])` used to return before
+    `_clear_table_data` ever ran, so the WCM template's own shipped blank
+    placeholder data row (real template table 10, row 1) survived into the
+    delivered document on every CV with zero F2 entries -- 23 of 66 corpus
+    CVs. The clear now always runs once the section header and table are
+    located; only the row-writing loop is skipped when there is nothing to
+    write.
+    """
+
+    def test_real_template_no_entries_leaves_no_blank_data_row(self):
+        gen = _generator()
+        table = _board_table(gen)
+        assert table is not None
+        # Fixture guard: fail loudly, not silently-vacuous, if the shipped
+        # template ever stops carrying the placeholder row this test targets.
+        assert len(table.rows) == 2, (
+            "template fixture drifted: expected header + one placeholder "
+            "data row before the fill call"
+        )
+
+        gen._fill_board_certification([])
+
+        assert table.rows[1:] == [], (
+            "no data row of any kind -- blank or otherwise -- should remain "
+            "with zero F2 entries"
+        )
+        # Header row is untouched -- read via raw w:t so this cannot be
+        # satisfied by a header cell python-docx merely reports as non-empty.
+        assert _cell_wt_texts(table.rows[0]) == [
+            "Full Name of Board",
+            "Certificate # \n(indicate if board eligible)",
+            "Dates of Certification \n(yyyy–yyyy)",
+        ]
+        assert gen.stats['tables_populated'] == 1
+
+    def test_one_synthetic_f2_entry_renders_exactly_one_row_no_blank_row(self):
+        # Regression guard for the non-empty path: the clear now always
+        # runs, so this also proves it doesn't leave a SECOND (blank) row
+        # behind alongside the real one.
+        gen = _generator()
+        entry = {
+            "text": "",
+            "extracted_fields": {
+                "certifying_board": "American Board of Synthetic Medicine",
+                "certificate_number": "999999",
+                "year_certified": "2019",
+            },
+        }
+
+        gen._fill_board_certification([entry])
+
+        table = _board_table(gen)
+        assert len(table.rows) == 2, "exactly one data row, no blank row alongside it"
+        assert _cell_wt_texts(table.rows[1]) == [
+            "American Board of Synthetic Medicine", "999999", "2019",
+        ]
+        assert gen.stats['tables_populated'] == 1
