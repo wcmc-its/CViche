@@ -1146,14 +1146,7 @@ def extract_owner_side_channel(docx_path: str) -> OwnerSideChannel:
 
     sdt_lines: list[str] = []
     for p_elem in doc.element.body.iter(w_p):
-        ancestor = p_elem.getparent()
-        in_sdt = False
-        while ancestor is not None:
-            if ancestor.tag == w_sdt_content:
-                in_sdt = True
-                break
-            ancestor = ancestor.getparent()
-        if not in_sdt:
+        if next(p_elem.iterancestors(w_sdt_content), None) is None:
             continue
         text = _side_channel_paragraph_text(p_elem).strip()
         if text:
