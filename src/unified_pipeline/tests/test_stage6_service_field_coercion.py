@@ -81,6 +81,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.normalization.fields import _cell_text, _committee_cell_text  # noqa: E402
 from unified_pipeline.stage6.sections.service import _journal_name_cell_text  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
@@ -209,6 +210,15 @@ def test_new_helper_names_are_not_defined_by_any_mixin():
             f"{base.__name__} defines _cell_text -- it must stay the "
             f"module-level re-export in normalization/fields.py"
         )
+
+
+def test_cell_text_is_the_committee_coercer_alias() -> None:
+    """`_cell_text` is `_committee_cell_text` itself, not a second implementation
+    (#812 review, r4025163438): the str-on-every-branch guarantee that lets
+    `_route_q2_entries` call `.lower()` on it is proven by
+    test_stage6_committee_structured_fields.py::test_always_returns_str, and
+    this identity is what makes that proof apply here."""
+    assert _cell_text is _committee_cell_text
 
 
 # ---------------------------------------------------------------------------
