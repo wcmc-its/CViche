@@ -23,13 +23,13 @@ from docx import Document  # noqa: E402
 
 from unified_pipeline.quality_score import score_cv_owner  # noqa: E402
 from unified_pipeline.run_doctor import (  # noqa: E402
-    APPENDIX_WARN_ENTRIES,
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
     MISSED_HEADERS_WARN_COUNT,
-    TABLE_SHAPE_WARN_DEFECTS,
-    TABLE_SHAPE_WARN_ROW_RATIO,
     lint_surprise,
     rank_lints,
+    appendix_entry_count,
+    honors_table_totals,
+    unrouted_code_counts,
     iter_header_candidates,
     lint_bucket_status,
     lint_classified_unrendered,
@@ -39,10 +39,12 @@ from unified_pipeline.run_doctor import (  # noqa: E402
     lint_duplicate_passages,
     lint_enrichment_failures,
     lint_missed_headers,
+    lint_no_output,
     lint_output_hygiene,
     lint_owner_contact_missing,
     lint_pipe_leaks,
     lint_pipeline_errors,
+    lint_stage3b_fallback_ratio,
     lint_taxonomy_code_coverage,
     lint_segmentation,
     lint_stage6_warnings,
@@ -432,9 +434,24 @@ def test_taxonomy_code_coverage_fires_for_a_code_with_no_render_route():
     ]}
     findings = lint_taxonomy_code_coverage(stage3b)
     assert len(findings) == 1
-    assert findings[0]["severity"] == "WARN"
+    # #816: always INFO now -- the unrouted-code counts moved to the
+    # doctor's `metrics` block (unrouted_code_entries).
+    assert findings[0]["severity"] == "INFO"
     assert "N2" in findings[0]["message"]
     assert "2 entries" in findings[0]["message"]
+
+
+def test_unrouted_code_counts_matches_the_lints_own_by_code_dict():
+    """#816: the doctor's `metrics` block reads this SAME dict the lint
+    above builds its findings from."""
+    stage3b = {"entries": [
+        _entry("Postdoctoral Fellowship", taxonomy_code="N2", start=1),
+        _entry("Mentored Research Scholar Grant", taxonomy_code="N2", start=2),
+        _entry("Another orphan code", taxonomy_code="N1", start=3),
+        _entry("A grant", taxonomy_code="M2A", start=4),
+    ]}
+    assert unrouted_code_counts(stage3b) == {"N2": 2, "N1": 1}
+    assert unrouted_code_counts({"entries": []}) == {}
 
 
 def test_taxonomy_code_coverage_quiet_for_a_routed_code():
@@ -504,13 +521,17 @@ def test_output_hygiene_flags_boilerplate_in_appendix():
     assert "3" in count["message"]
 
 
-def test_output_hygiene_warns_on_oversized_appendix():
+def test_output_hygiene_appendix_count_stays_info_regardless_of_size():
+    """#816: the appendix-size threshold was retired -- this finding is
+    always INFO now, and the count moves to the doctor's `metrics` block
+    (appendix_entries/appendix_share) instead of a per-run WARN."""
     bullets = [("p", f"• Unmapped leftover entry with descriptive text number {i}")
-               for i in range(APPENDIX_WARN_ENTRIES + 1)]
+               for i in range(20)]
     blocks = [("p", "T. APPENDIX"), ("p", "The following content:")] + bullets
     count = next(f for f in lint_output_hygiene(blocks)
                  if "appendix holds" in f["message"])
-    assert count["severity"] == "WARN"
+    assert count["severity"] == "INFO"
+    assert "20" in count["message"]
 
 
 def test_output_hygiene_flags_a_non_paragraph_block_inside_the_appendix():
@@ -546,6 +567,21 @@ def test_output_hygiene_quiet_on_clean_output():
     ]
     findings = lint_output_hygiene(blocks)
     assert all(f["severity"] == "INFO" for f in findings)
+
+
+def test_appendix_entry_count_matches_the_lints_own_count():
+    blocks = [
+        ("p", "T. APPENDIX"),
+        ("p", "The following content:"),
+        ("p", "• one"), ("p", "• two"), ("p", "• three"),
+    ]
+    assert appendix_entry_count(blocks) == 3
+
+
+def test_appendix_entry_count_is_none_with_no_appendix_section():
+    """None (not 0) when the document has no appendix at all -- distinct
+    from an appendix that exists and is empty (#816)."""
+    assert appendix_entry_count([("p", "D. GRANTS")]) is None
 
 
 # ---------------------------------------------------------- lint 7: dead sections
@@ -897,7 +933,9 @@ def test_table_shape_flags_malformed_honors_rows():
     findings = lint_table_shape(tables)
     assert len(findings) == 1
     f = findings[0]
-    assert f["lint"] == "table_shape" and f["severity"] == "WARN"
+    # #816: always INFO now -- the malformed-row count moved to the doctor's
+    # `metrics` block (honors_malformed_rows/honors_rows).
+    assert f["lint"] == "table_shape" and f["severity"] == "INFO"
     assert "2/3 row(s) malformed" in f["message"]
     assert any("state abbrev" in e for e in f["evidence"])
     assert any("blob" in e for e in f["evidence"])
@@ -914,6 +952,25 @@ def test_table_shape_ignores_non_honors_tables_and_clean_rows():
                           "Indiana University", "2013"]],
     ]
     assert lint_table_shape(tables) == []
+
+
+def test_honors_table_totals_sums_across_multiple_tables():
+    """#816: the doctor's `metrics` block sums the SAME per-row predicate
+    the finding is built from, over every honors-shaped table, ignoring
+    non-honors ones entirely."""
+    tables = [
+        [["Committee", "Role"], [_BLOB, "Chair"]],  # not honors-shaped
+        [_HONORS_HEADER,
+         [_BLOB, "MD", ""],  # malformed
+         ["Distinguished Teaching Award", "Indiana University", "2013"]],
+        [_HONORS_HEADER,
+         ["Another Award", "Cornell University", "2015"]],  # clean
+    ]
+    assert honors_table_totals(tables) == (1, 3)
+
+
+def test_honors_table_totals_zero_with_no_honors_tables():
+    assert honors_table_totals([[["Committee", "Role"], [_BLOB, "Chair"]]]) == (0, 0)
 
 
 # ----------------------------------------------- lint 14: duplicate passages
@@ -1178,6 +1235,87 @@ def test_pipeline_errors_quiet_on_benign_and_absent_error_fields():
     assert lint_pipeline_errors({}) == []
 
 
+# ------------------------------ #810: stage3b_fallback_ratio (hard fail) ----
+#
+# Synthesized from the outage's own log line (~/worktrees/batch-slices/s4/
+# _batch_runs/logs/web30.log): "Stage 3b (web30): 41 of 83 classification
+# batches failed; 510 entries fell back to default codes" against a total of
+# 1019 entries_classified (batch-3 artifact). The clean re-run's own values
+# (0 failed of 80 batches, 0 fallback of 1037 entries) are the negative case.
+
+def _stage3b_stats(**stats):
+    return {"meta": {"stats": stats}}
+
+
+def test_stage3b_fallback_ratio_errors_on_the_web30_outage_numbers():
+    stage3b = _stage3b_stats(failed_batches=41, llm_batches=83,
+                             fallback_entries=510, entries_classified=1019)
+    findings = lint_stage3b_fallback_ratio(stage3b)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["lint"] == "stage3b_fallback_ratio"
+    assert finding["severity"] == "ERROR"
+    assert "stage-3b fallback ratio" in finding["message"]
+    assert "40" in finding["message"]  # same cap as pipeline_errors_present
+
+
+def test_stage3b_fallback_ratio_quiet_on_the_clean_rerun_numbers():
+    stage3b = _stage3b_stats(failed_batches=0, llm_batches=80,
+                             fallback_entries=0, entries_classified=1037)
+    assert lint_stage3b_fallback_ratio(stage3b) == []
+
+
+def test_stage3b_fallback_ratio_quiet_on_missing_keys_not_a_crash():
+    """An artifact from before c6402bf added these counters must not crash
+    or false-positive -- (False, None), same convention as every other
+    missing-evidence case in this module."""
+    assert lint_stage3b_fallback_ratio({}) == []
+    assert lint_stage3b_fallback_ratio({"meta": {}}) == []
+    assert lint_stage3b_fallback_ratio(
+        _stage3b_stats(failed_batches=5)) == []  # llm_batches absent
+
+
+def test_stage3b_fallback_ratio_boundary_at_the_threshold():
+    from unified_pipeline.quality_score import STAGE3B_FALLBACK_RATIO_THRESHOLD
+
+    at_threshold = _stage3b_stats(
+        failed_batches=int(STAGE3B_FALLBACK_RATIO_THRESHOLD * 100),
+        llm_batches=100, fallback_entries=0, entries_classified=1)
+    assert lint_stage3b_fallback_ratio(at_threshold) == [], \
+        "exactly at the threshold must not exceed it"
+
+    just_over = _stage3b_stats(
+        failed_batches=int(STAGE3B_FALLBACK_RATIO_THRESHOLD * 100) + 1,
+        llm_batches=100, fallback_entries=0, entries_classified=1)
+    assert len(lint_stage3b_fallback_ratio(just_over)) == 1
+
+
+# ------------------------------------------------ #745: no_output (hard fail) -----
+
+def test_no_output_errors_when_stage4_reached_but_nothing_rendered():
+    findings = lint_no_output(True, False, False)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["lint"] == "no_output"
+    assert finding["severity"] == "ERROR"
+    assert "No output produced" in finding["message"]
+    assert "20" in finding["message"]
+
+
+def test_no_output_quiet_when_either_artifact_exists():
+    assert lint_no_output(True, True, False) == []
+    assert lint_no_output(True, False, True) == []
+    assert lint_no_output(True, True, True) == []
+
+
+def test_no_output_quiet_when_stage4_never_ran():
+    """An incomplete run that never reached stage 4 has no output YET -- not
+    the same failure as one that ran the whole pipeline and produced
+    nothing, the same distinction owner_contact_missing already draws via
+    _DELIVERABLE."""
+    assert lint_no_output(False, False, False) == []
+
+
 # ------------------------------------------------------------ full doctor runs
 
 _UID = "89TEST"
@@ -1253,24 +1391,124 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    assert len(payload["findings"]) == 18  # one skip per lint in KNOWN_LINTS
+    # One skip per lint in KNOWN_LINTS (19), except no_output: it never even
+    # reached stage 4, so its "has_stage4 and not has_docx..." condition is
+    # False and it emits NOTHING, not a skip -- it is dispatched by hand
+    # (booleans, not `_ready()`-checked content) precisely so an incomplete
+    # run like this one is silent rather than reported as "no output" (#745).
+    assert len(payload["findings"]) == 19
+    assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])
     assert payload["counts"]["ERROR"] == 0
     assert payload["counts"]["WARN"] == 0
     assert all(v is None for v in payload["artifacts"].values())
+    assert payload["metrics"] == {}
 
 
 def test_run_doctor_clean_run_end_to_end(tmp_path):
     root = _build_clean_run(tmp_path)
     payload = run_doctor(root, _UID)
     assert set(payload) == {"document_uid", "root", "artifacts", "findings",
-                            "counts", "worst_severity"}
+                            "counts", "worst_severity", "metrics"}
     assert all(v is not None for v in payload["artifacts"].values())
     assert not any("skipped" in f["message"] for f in payload["findings"])
     assert payload["counts"]["ERROR"] == 0
     assert payload["counts"]["WARN"] == 0
     assert payload["worst_severity"] == "INFO"
+    # #816: appendix_entries/appendix_share are present even at 0/0.0 -- an
+    # EMPTY appendix is still a measured appendix, distinct from the "no
+    # appendix at all" None that omits the key entirely (see the dedicated
+    # metrics tests below). source_coverage_pct is populated because
+    # source/stage_1a/stage_2 are all present; no honors table, no unrouted
+    # code and no meta.stats in this fixture, so those four keys are absent.
+    assert payload["metrics"] == {
+        "appendix_entries": 0, "appendix_share": 0.0, "source_coverage_pct": 100.0}
+
+
+# ------------------------------------------------------------- #816: metrics
+
+def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
+    """One `_build_metrics` call over a run carrying all seven inputs at
+    once: an appendix with real entries, an honors table with a malformed
+    row, an unrouted code, a stage-3b fallback ratio, and both yield stats."""
+    from unified_pipeline.run_doctor import _build_metrics
+
+    stage3b = {
+        "entries": [
+            _entry("Postdoctoral Fellowship", taxonomy_code="N2", start=1),
+            _entry("A grant", taxonomy_code="M2A", start=2),
+        ],
+        "meta": {"stats": {
+            "failed_batches": 41, "llm_batches": 83,
+            "fallback_entries": 510, "entries_classified": 1019,
+            "t_validation": {"t_entries_reviewed": 93, "t_entries_reclassified": 28},
+            "fragment_reconnection": {"fragments_reviewed": 7, "fragments_reconnected": 3},
+        }},
+    }
+    blocks = [
+        ("p", "T. APPENDIX"),
+        ("p", "The following content from the original CV was not "
+              "successfully mapped to this CV format:"),
+        ("p", "• Unmapped leftover entry one"),
+        ("p", "• Unmapped leftover entry two"),
+    ]
+    table_rows = [
+        [_HONORS_HEADER,
+         [_BLOB, "MD", ""],
+         ["Distinguished Teaching Award", "Indiana University", "2013"]],
+    ]
+    views = {
+        "blocks": blocks, "stage_3b": stage3b, "table_rows": table_rows,
+        "source_lines": ["GRANTS", "A grant text line here for coverage"],
+        "stage_1a": _STAGE1A,
+        "stage_2": {"entries": [_entry("A grant text line here for coverage",
+                                       start=1)]},
+    }
+
+    metrics = _build_metrics(views)
+
+    assert metrics["appendix_entries"] == 2
+    assert metrics["appendix_share"] == round(2 / 2, 4)
+    assert metrics["honors_malformed_rows"] == 1
+    assert metrics["honors_rows"] == 2
+    assert metrics["unrouted_code_entries"] == {"N2": 1}
+    assert metrics["stage3b_fallback_ratio"] == round(510 / 1019, 4)
+    assert metrics["t_validation_yield"] == round(28 / 93, 4)
+    assert metrics["fragment_reconnection_yield"] == round(3 / 7, 4)
+    assert "source_coverage_pct" in metrics
+
+
+def test_build_metrics_omits_rather_than_reports_a_misleading_zero(tmp_path):
+    """A metric whose denominator is 0, or whose input is entirely absent,
+    must be OMITTED, not reported as a 0 that reads as measured-and-clean."""
+    from unified_pipeline.run_doctor import _build_metrics
+
+    assert _build_metrics({}) == {}
+    assert _build_metrics({"blocks": None, "stage_3b": None,
+                           "table_rows": None}) == {}
+    # blocks present with NO appendix section at all -> appendix_entries is
+    # None (not 0), so nothing is reported for it.
+    assert _build_metrics({"blocks": [("p", "D. GRANTS")]}) == {}
+    # stage_3b present but with an empty entries list: appendix_share's
+    # denominator is 0, so the ratio is omitted even though appendix_entries
+    # (computed from blocks alone) is not.
+    metrics = _build_metrics({
+        "blocks": [("p", "T. APPENDIX"), ("p", "boilerplate:"),
+                   ("p", "• one leftover entry")],
+        "stage_3b": {"entries": []},
+    })
+    assert metrics == {"appendix_entries": 1}
+
+
+def test_build_metrics_never_raises_on_a_malformed_stage3b(tmp_path):
+    """run_doctor() wraps _build_metrics in its own try/except (belt and
+    braces), but the function itself should already degrade gracefully on
+    a stage_3b shaped nothing like the real artifact."""
+    from unified_pipeline.run_doctor import _build_metrics
+
+    assert _build_metrics({"stage_3b": {"entries": "not a list"}}) == {}
+    assert _build_metrics({"stage_3b": {"meta": "not a dict"}}) == {}
 
 
 def test_run_doctor_reports_corrupt_artifact_as_error_not_missing(tmp_path):
@@ -1401,6 +1639,51 @@ def test_run_doctor_owner_gate_skips_when_the_run_produced_nothing(tmp_path):
     assert gates["pipeline_errors_present"]["severity"] == "INFO"
     assert gates["pipeline_errors_present"]["message"] == \
         "skipped: missing stage_2, stage_3b, stage_4"
+
+
+# --------------------------------- round-2 F3: test the WIRE, not just the
+# rule -- both hard-fail gates above are dispatched from run_doctor() by a
+# `_run_lint(...)` call the rule-level tests never exercise; deleting either
+# call (verifier mutant m20 and its stage3b_fallback_ratio counterpart) left
+# the full `test_run_doctor.py` green because nothing drove the gate through
+# run_doctor() itself, only through the bare lint function.
+
+def test_run_doctor_wires_no_output_through_to_the_verdict(tmp_path):
+    """web204: stage 4 ran, stage 6 never did (#812) -- run_doctor() itself,
+    not just lint_no_output(), must surface the ERROR. Deleting the
+    `_run_lint("no_output", ...)` call in run_doctor() (m20) leaves this red
+    while every rule-level no_output test stays green."""
+    root = _build_clean_run(tmp_path)
+    for leftover in (root / "stage_6_wcm_documents").glob(f"{_UID}*"):
+        leftover.unlink()
+
+    payload = run_doctor(root, _UID)
+
+    assert payload["worst_severity"] == "ERROR"
+    no_output = [f for f in payload["findings"] if f["lint"] == "no_output"]
+    assert len(no_output) == 1
+    assert no_output[0]["severity"] == "ERROR"
+
+
+def test_run_doctor_wires_stage3b_fallback_ratio_through_to_the_verdict(tmp_path):
+    """web30's own outage numbers, driven through run_doctor() end to end --
+    not just lint_stage3b_fallback_ratio() in isolation. Deleting run_doctor's
+    dispatch of this lint (the LINT_REGISTRY row / its `_run_lint` call) must
+    fail this while the rule-level tests above stay green."""
+    root = _build_clean_run(tmp_path)
+    classified = root / "stage_3b_classified_entries" / f"{_UID}_cv_classified.json"
+    data = json.loads(classified.read_text())
+    data["meta"] = {"stats": {"failed_batches": 41, "llm_batches": 83,
+                              "fallback_entries": 510, "entries_classified": 1019}}
+    classified.write_text(json.dumps(data))
+
+    payload = run_doctor(root, _UID)
+
+    assert payload["worst_severity"] == "ERROR"
+    fallback = [f for f in payload["findings"]
+               if f["lint"] == "stage3b_fallback_ratio"]
+    assert len(fallback) == 1
+    assert fallback[0]["severity"] == "ERROR"
 
 
 def test_run_doctor_hard_fail_gates_label_corrupt_artifacts_as_unreadable(tmp_path):
@@ -1539,6 +1822,129 @@ def test_missed_headers_ignores_trailing_colon():
     assert found[0]["lint"] == "missed_headers"
 
 
+# ------------------------------------------------ #814: enumeration prefixes
+# and wrapped headers in missed_headers
+
+def test_missed_headers_ignores_a_roman_numeral_enumeration_prefix():
+    """web199: stage 1a promotes 'I.  CURRENT POSITION' to the hierarchy node
+    'CURRENT POSITION', without the numeral -- comparing the raw forms
+    reported all 11 of web199's sections as missing."""
+    stage1a = {"hierarchy": [{"text": "CURRENT POSITION", "children": []}]}
+    assert lint_missed_headers(["I.  CURRENT POSITION"], stage1a, {"entries": []}) == []
+    # a different roman numeral, multi-letter
+    stage1a_xi = {"hierarchy": [{"text": "BIBLIOGRAPHY", "children": []}]}
+    assert lint_missed_headers(["XI.  BIBLIOGRAPHY"], stage1a_xi, {"entries": []}) == []
+
+
+def test_missed_headers_joins_a_header_wrapped_over_two_source_lines():
+    """web228: the source wraps one long header over two physical lines,
+    which stage 1a correctly joins into a single hierarchy node -- neither
+    physical line matches the joined title alone (5 of 7 findings on that
+    CV were this)."""
+    stage1a = {"hierarchy": [{
+        "text": "SERVICE ON NATIONAL GRANT REVIEW PANELS, STUDY SECTIONS, COMMITTEES",
+        "children": []}]}
+    candidates = ["SERVICE ON NATIONAL GRANT REVIEW PANELS, STUDY SECTIONS,",
+                 "COMMITTEES:"]
+    assert lint_missed_headers(candidates, stage1a, {"entries": []}) == []
+
+
+def test_missed_headers_short_candidate_does_not_match_by_prefix():
+    """A short candidate ('AND') must not silently match a longer, unrelated
+    title just because it happens to be a prefix or suffix of it -- the
+    over-normalisation guard #814 added."""
+    stage1a = {"hierarchy": [{
+        "text": "AND SOME COMPLETELY UNRELATED LONG TITLE", "children": []}]}
+    found = lint_missed_headers(["AND"], stage1a, {"entries": []})
+    assert len(found) == 1
+    assert "AND" in found[0]["message"]
+
+
+def test_missed_headers_true_positive_still_fires_after_814():
+    """A header genuinely absent from segmentation must still be reported --
+    #814's normalisation additions (enumeration stripping, prefix/suffix
+    matching) must not silence a real miss."""
+    stage1a = {"hierarchy": [{"text": "EDUCATION", "children": []}]}
+    found = lint_missed_headers(["PROFESSIONAL SOCIETIES"], stage1a, {"entries": []})
+    assert len(found) == 1
+    assert "PROFESSIONAL SOCIETIES" in found[0]["message"]
+
+
+# ---------------------------------------------------- round-2 F1: a standalone
+# candidate matching a known title by PREFIX or SUFFIX alone, with no next
+# candidate to join against -- the verifier's mutant m11 (`_key_matches_title`
+# -> `return False`, deleting the whole prefix/suffix branch) survived every
+# existing test because none of them requires that branch to ever return True;
+# the "wrapped header" test above is satisfied by the JOIN's exact match
+# instead. These two are the missing positive coverage.
+
+def test_missed_headers_standalone_prefix_of_a_known_title():
+    """A candidate that is a genuine, substantial PREFIX of a known title,
+    with no following candidate to join against, must be recognised -- not
+    just the two-line-join case above. Ratio 44/53 = 0.83, well past the
+    round-2 F2 length-ratio guard."""
+    stage1a = {"hierarchy": [{
+        "text": "COMMITTEE ON RESEARCH INTEGRITY AND ETHICS OVERSIGHT",
+        "children": []}]}
+    assert lint_missed_headers(
+        ["COMMITTEE ON RESEARCH INTEGRITY AND ETHICS"], stage1a,
+        {"entries": []}) == []
+
+
+def test_missed_headers_standalone_suffix_of_a_known_title():
+    """The SUFFIX mirror of the prefix case above: a candidate that is the
+    tail of a known title on its own, with no preceding candidate. Ratio
+    34/47 = 0.72."""
+    stage1a = {"hierarchy": [{
+        "text": "SOCIETY FOR EXPERIMENTAL BIOLOGY AND MEDICINE",
+        "children": []}]}
+    assert lint_missed_headers(
+        ["EXPERIMENTAL BIOLOGY AND MEDICINE"], stage1a,
+        {"entries": []}) == []
+
+
+# ------------------------------------------------------- round-2 F2: prefix/
+# suffix matching must run against stage-1a titles (`known`) only, never
+# against stage-2 entry hierarchy paths (`paths`) -- exact matching may still
+# use `paths` (an entry filed under a header IS that header, verbatim).
+# web200 (batch-3): the standalone bold label 'UK GOVERNMENT' was silenced as
+# a suffix of an unrelated section; see MIN_KEY_TO_TITLE_RATIO's docstring.
+
+def test_missed_headers_exact_match_still_allowed_via_stage2_paths():
+    """Exact matching against a stage-2 entry hierarchy path is unaffected by
+    the round-2 F2 restriction -- only prefix/suffix narrowed to `known`."""
+    stage2 = {"entries": [{"hierarchy": ["GRANTS ADMINISTRATION COMMITTEE"]}]}
+    assert lint_missed_headers(
+        ["GRANTS ADMINISTRATION COMMITTEE"], {"hierarchy": []}, stage2) == []
+
+
+def test_missed_headers_prefix_suffix_never_matches_via_stage2_paths_only():
+    """A candidate that is a substantial, high-ratio suffix of a stage-2
+    entry hierarchy path -- but of NO stage-1a title -- must still be
+    reported: prefix/suffix matching only ever looks at `known` (round-2
+    F2). Ratio 30/59 = 0.51, comfortably past the length-ratio guard, so a
+    silent match here can only be explained by matching against `paths`."""
+    stage2 = {"entries": [{
+        "hierarchy": ["COMMITTEE MEMBERSHIP FOR THE REGIONAL EXAMPLE AGENCY BOARD"]}]}
+    found = lint_missed_headers(
+        ["REGIONAL EXAMPLE AGENCY BOARD"], {"hierarchy": []}, stage2)
+    assert len(found) == 1
+    assert "REGIONAL EXAMPLE AGENCY BOARD" in found[0]["message"]
+
+
+def test_missed_headers_low_ratio_suffix_of_a_known_title_still_fires():
+    """web200 (batch-3): a standalone bold label short enough to clear the
+    absolute-length guard, but far shorter than the unrelated known title it
+    happens to trail, must still be reported -- the F2 length-ratio guard
+    (MIN_KEY_TO_TITLE_RATIO), not just the known/paths restriction, is what
+    keeps this a real finding (synthetic values; ratio 16/44 = 0.36)."""
+    stage1a = {"hierarchy": [{
+        "text": "EXPERIENCE IN WORKING WITH REGIONAL COUNCIL", "children": []}]}
+    found = lint_missed_headers(["REGIONAL COUNCIL"], stage1a, {"entries": []})
+    assert len(found) == 1
+    assert "REGIONAL COUNCIL" in found[0]["message"]
+
+
 def test_artifact_resolution_does_not_steal_a_longer_uids_files(tmp_path):
     """uid 'web05' must not resolve to 'web050_entries.json'.
 
@@ -1656,8 +2062,11 @@ def test_classified_unrendered_severity_tracks_total_entries_lost():
     assert many[0]["severity"] == "WARN"
 
 
-def test_table_shape_severity_tracks_how_malformed_the_table_is():
-    """A couple of bad rows in a long table is normal; a bad short table is not."""
+def test_table_shape_stays_info_regardless_of_how_malformed_the_table_is():
+    """#816 retired table_shape's own magnitude threshold: a couple of bad
+    rows in a long table and half a short table both stay INFO now -- the
+    malformed-row count is a `metrics` value (honors_malformed_rows/
+    honors_rows), not a per-run severity signal."""
     header = ["Name of Award", "Granting Organization", "Date Awarded"]
 
     def tbl(bad, total):
@@ -1673,7 +2082,7 @@ def test_table_shape_severity_tracks_how_malformed_the_table_is():
     short_bad = lint_table_shape(tbl(3, 4))
     assert long_mild and short_bad, "the lint must still fire in both cases"
     assert long_mild[0]["severity"] == "INFO", "1/40 malformed rows is not a WARN"
-    assert short_bad[0]["severity"] == "WARN", "3/4 malformed rows is"
+    assert short_bad[0]["severity"] == "INFO", "3/4 malformed rows is INFO too now"
 
 
 def test_rare_lints_outrank_ubiquitous_ones_however_often_they_fire():

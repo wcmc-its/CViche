@@ -62,12 +62,19 @@ OUTDIR="$RESULTS/outputs"; LOGDIR="$RESULTS/logs"; SUMMARY="$RESULTS/summary.tsv
 WCM_SRC="src/unified_pipeline/outputs/stage_6_wcm_documents"
 OUTPUTS_ROOT="src/unified_pipeline/outputs"
 DOCTOR_TSV="$RESULTS/doctor.tsv"; DOCTOR_DIR="$RESULTS/doctor"
+METRICS_TSV="$RESULTS/metrics.tsv"
 SCORES_TSV="$RESULTS/scores.tsv"
 mkdir -p "$OUTDIR" "$LOGDIR"
 [ -f "$SCORES_TSV" ] || printf 'date\tsha\tcv\tscore\tband\traw_before_caps\ttop_penalties\n' > "$SCORES_TSV"
 if [ "$DOCTOR" = "1" ]; then
   mkdir -p "$DOCTOR_DIR"
   [ -f "$DOCTOR_TSV" ] || printf 'date\tsha\tcv\tworst\tERROR\tWARN\tINFO\ttop_lints\n' > "$DOCTOR_TSV"
+  # #816: batch-trend numbers (appendix share, honors malformed-row rate,
+  # unrouted taxonomy codes, stage-3b fallback ratio, source coverage %,
+  # T-validation/fragment-reconnection yields), one row per CV, distinct
+  # from doctor.tsv's per-run findings. Header created here, same as the
+  # two TSVs above; doctor_one.py --metrics-tsv only ever appends.
+  [ -f "$METRICS_TSV" ] || printf 'uid\tappendix_entries\tappendix_share\thonors_malformed_rows\thonors_rows\tunrouted_code_entries\tsource_coverage_pct\tstage3b_fallback_ratio\tt_validation_yield\tfragment_reconnection_yield\n' > "$METRICS_TSV"
 fi
 
 # provenance for this invocation
@@ -76,8 +83,24 @@ BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 MODEL_LABEL="${MODEL:-default}"
 
-HEADER=$'date\tsha\tmodel\tcv\texit\twcm_output\tkb\tsections\theaders\tentries\tclassified'
-[ -f "$SUMMARY" ] || printf '%s\n' "$HEADER" > "$SUMMARY"
+# 'defaulted' is APPENDED at the end (#810), never inserted -- existing
+# columns keep their positions, since the merge scripts and scores.tsv joins
+# read summary.tsv by index.
+HEADER=$'date\tsha\tmodel\tcv\texit\twcm_output\tkb\tsections\theaders\tentries\tclassified\tdefaulted'
+if [ -f "$SUMMARY" ]; then
+  # round-2 N6: a summary.tsv from before #810 has the old 11-column header
+  # (no 'defaulted') -- appending this run's 12-cell rows under it silently
+  # would leave every reader that keys columns off the header line
+  # misaligned. Cheapest honest fix: widen the header in place, once. The
+  # OLD rows are never rewritten, so under the new header they simply read
+  # as an empty 'defaulted' cell by position -- the same as any short
+  # trailing TSV row already reads, never a fabricated 0.
+  if ! head -1 "$SUMMARY" | grep -q $'\tdefaulted$'; then
+    sed -i.bak '1s/$/\tdefaulted/' "$SUMMARY" && rm -f "$SUMMARY.bak"
+  fi
+else
+  printf '%s\n' "$HEADER" > "$SUMMARY"
+fi
 
 # The loop below only ever sees *.docx -- the pipeline's readers don't handle
 # other formats yet (#524 is the separate initiative for that). A directory
@@ -142,16 +165,21 @@ for f in "$INPUT_DIR"/*.docx; do
   sec=$(grep -oE 'Top-level sections: [0-9]+' "$log" | grep -oE '[0-9]+' | tail -1)
   hdr=$(grep -oE 'Total headers: [0-9]+'      "$log" | grep -oE '[0-9]+' | tail -1)
   ent=$(grep -oE 'Entries extracted: [0-9]+'  "$log" | grep -oE '[0-9]+' | tail -1)
+  # #810: 'classified' is now entries that received a REAL taxonomy code
+  # (run_full_pipeline.py logs llm_classified under this same literal, so the
+  # column header is unchanged); 'defaulted' is the new, appended column for
+  # entries that fell back to a default code on an LLM failure.
   cls=$(grep -oE 'Entries classified: [0-9]+' "$log" | grep -oE '[0-9]+' | tail -1)
+  dft=$(grep -oE 'Entries defaulted: [0-9]+'  "$log" | grep -oE '[0-9]+' | tail -1)
   # Scraped, not echoed: the old column repeated whatever was passed in, so it
   # could not tell two model configurations apart and said 'default' either way.
   mdl=$(grep -oE '^Models: .*' "$log" | tail -1 | sed 's/^Models: //' | tr '\t' ' ')
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$ts" "$SHA" "${mdl:-$MODEL_LABEL}" "$stem" "$rc" "$out" "${kb:-}" "${sec:-}" "${hdr:-}" "${ent:-}" "${cls:-}" >> "$SUMMARY"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$ts" "$SHA" "${mdl:-$MODEL_LABEL}" "$stem" "$rc" "$out" "${kb:-}" "${sec:-}" "${hdr:-}" "${ent:-}" "${cls:-}" "${dft:-}" >> "$SUMMARY"
 
   # optional: run the deterministic doctor over this run's stage artifacts and record findings
   if [ "$DOCTOR" = "1" ]; then
-    dline=$(PYTHONPATH=src python3 scripts/doctor_one.py "$OUTPUTS_ROOT" "$stem" "$f" "$DOCTOR_DIR/${stem}.json" 2>>"$log") || dline=$'error\t\t\t\t'
+    dline=$(PYTHONPATH=src python3 scripts/doctor_one.py "$OUTPUTS_ROOT" "$stem" "$f" "$DOCTOR_DIR/${stem}.json" --metrics-tsv "$METRICS_TSV" 2>>"$log") || dline=$'error\t\t\t\t'
     printf '%s\t%s\t%s\t%s\n' "$ts" "$SHA" "$stem" "$dline" >> "$DOCTOR_TSV"
     echo "   doctor: $(printf '%s' "$dline" | cut -f1) (E/W/I $(printf '%s' "$dline" | cut -f2-4 | tr '\t' '/'))"
   fi

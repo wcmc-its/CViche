@@ -1,13 +1,14 @@
 """CODING_STANDARDS.md 6.4 contract test: run_full_pipeline.py's stdout is read
 by another process, so its shape is pinned here.
 
-The consumer is ``scripts/run_corpus_batch.sh``. Lines 142-147 of that script
+The consumer is ``scripts/run_corpus_batch.sh``. Lines 152-163 of that script
 build every metric column of ``summary.tsv`` by grepping this CLI's log::
 
     sec=$(grep -oE 'Top-level sections: [0-9]+' "$log" | grep -oE '[0-9]+' | tail -1)
     hdr=$(grep -oE 'Total headers: [0-9]+'      "$log" | grep -oE '[0-9]+' | tail -1)
     ent=$(grep -oE 'Entries extracted: [0-9]+'  "$log" | grep -oE '[0-9]+' | tail -1)
     cls=$(grep -oE 'Entries classified: [0-9]+' "$log" | grep -oE '[0-9]+' | tail -1)
+    dft=$(grep -oE 'Entries defaulted: [0-9]+'  "$log" | grep -oE '[0-9]+' | tail -1)
     mdl=$(grep -oE '^Models: .*' "$log" | tail -1 | sed 's/^Models: //' | tr '\\t' ' ')
 
 Three properties are load-bearing and none of them were guarded before #780:
@@ -63,12 +64,14 @@ _EXPECTED_BATCH_PATTERNS = {
     'Total headers: [0-9]+',
     'Entries extracted: [0-9]+',
     'Entries classified: [0-9]+',
+    'Entries defaulted: [0-9]+',
     '^Models: .*',
 }
 _VALUE_EXTRACTOR = '[0-9]+'
 _SUMMARY_BANNER = "PIPELINE COMPLETE"
 _METRIC_LITERALS = ('Top-level sections:', 'Total headers:',
-                    'Entries extracted:', 'Entries classified:')
+                    'Entries extracted:', 'Entries classified:',
+                    'Entries defaulted:')
 
 
 def _batch_patterns():
@@ -118,7 +121,7 @@ def test_the_values_the_batch_script_would_record(tmp_path, monkeypatch, capsys)
     checks the number it lands on, not merely that a line exists.
 
     The stub hierarchy is one top-level node with no children, stage 2 reports
-    400 entries and stage 3b classifies 400.
+    400 entries and stage 3b classifies 400 with 0 fallbacks (#810).
     """
     _, out = _run_main(tmp_path, monkeypatch, capsys)
 
@@ -131,6 +134,67 @@ def test_the_values_the_batch_script_would_record(tmp_path, monkeypatch, capsys)
     assert column('Total headers: [0-9]+') == '1'
     assert column('Entries extracted: [0-9]+') == '400'
     assert column('Entries classified: [0-9]+') == '400'
+    assert column('Entries defaulted: [0-9]+') == '0'
+
+
+def test_stage_3b_narration_reports_llm_classified_not_total_when_some_default(
+        tmp_path, monkeypatch, caplog):
+    """#810: a run where some entries fell back to a default code must log
+    'Entries classified:' as the LLM-classified count, not `total_entries`
+    (which includes the fallbacks) -- and the new 'Entries defaulted:' line
+    must carry the fallback count. Unit-level, not the full harness: this
+    drives `_stage_3b` directly so the case doesn't need wiring a fallback
+    count through every other stage's stub.
+
+    Mutant that kills this: revert to logging `result['total_entries']`, or
+    drop the new 'Entries defaulted:' line.
+    """
+    import logging
+
+    import run_full_pipeline as r
+
+    monkeypatch.setattr(r, "run_stage_3b", lambda *, document_uid, stage_3a_path: {
+        "output_path": "c.json",
+        "stats": {"cost": 0.01, "llm_classified": 490, "fallback_entries": 10},
+        "total_entries": 500, "code_distribution": {"A": 3},
+    })
+    ctx = r.PipelineContext(cv_path=tmp_path / "sentinel_uid.docx", document_uid="sentinel_uid",
+                            outputs={"2": "b.json", "3a": "a.json"})
+
+    with caplog.at_level(logging.INFO, logger="run_full_pipeline"):
+        result = r._stage_3b(ctx)
+
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert "  Entries classified: 490" in messages
+    assert "  Entries defaulted: 10" in messages
+    assert result.stats["entries_classified"] == 490
+    assert result.stats["fallback_entries"] == 10
+
+
+def test_stage_3b_narration_reports_zero_defaulted_on_the_clean_case(
+        tmp_path, monkeypatch, caplog):
+    """The negative case for the test above: no fallbacks still prints the
+    line (as '0'), rather than omitting it -- the batch script's grep and
+    the contract tests above both require the line to always be present."""
+    import logging
+
+    import run_full_pipeline as r
+
+    monkeypatch.setattr(r, "run_stage_3b", lambda *, document_uid, stage_3a_path: {
+        "output_path": "c.json",
+        "stats": {"cost": 0.01, "llm_classified": 400, "fallback_entries": 0},
+        "total_entries": 400, "code_distribution": {},
+    })
+    ctx = r.PipelineContext(cv_path=tmp_path / "sentinel_uid.docx", document_uid="sentinel_uid",
+                            outputs={"2": "b.json", "3a": "a.json"})
+
+    with caplog.at_level(logging.INFO, logger="run_full_pipeline"):
+        result = r._stage_3b(ctx)
+
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert "  Entries classified: 400" in messages
+    assert "  Entries defaulted: 0" in messages
+    assert result.stats["fallback_entries"] == 0
 
 
 def test_the_models_line_starts_the_line_it_is_on(tmp_path, monkeypatch, capsys):

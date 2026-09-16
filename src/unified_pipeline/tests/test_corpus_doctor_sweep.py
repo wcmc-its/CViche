@@ -371,22 +371,57 @@ def test_skip_detection_matches_what_run_doctor_actually_emits(tmp_path):
     This runs the REAL run_doctor on an empty root -- every registered lint
     skips -- through aggregate(), so a rewording on either side fails here
     instead of silently counting every skipped lint as 'ran clean'.
+
+    no_output (#745) is the one exception, not a rewording drift: it is
+    dispatched by hand on artifact PATHS rather than `_ready()`-checked
+    content, and its condition ('reached stage 4 but produced no output')
+    is simply False on a root with no stage 4 either -- so it emits NOTHING
+    at all here, neither a skip note nor a real finding. aggregate() (round-2
+    N5) special-cases it: 'ran' for no_output reads `artifacts.stage_4`
+    directly rather than the generic 'not explicitly skipped' rule, so an
+    incomplete run that never reached stage 4 is not counted as having run
+    this lint either.
     """
     from unified_pipeline.run_doctor import run_doctor
 
     cli = _load_cli()
     rep = run_doctor(tmp_path, "aaa111")
 
-    assert {f["lint"] for f in rep["findings"]} == set(cli.ALL_LINTS), (
-        "every registered lint must skip on an empty root")
+    real_lints = set(cli.ALL_LINTS) - {"no_output"}
+    assert {f["lint"] for f in rep["findings"]} == real_lints, (
+        "every registered lint but no_output must skip on an empty root")
     assert {f["severity"] for f in rep["findings"]} == {"INFO"}
     assert all(f["message"].startswith(cli.SKIPPED_MISSING_PREFIX)
                for f in rep["findings"]), "the sweep's prefix must be what _ready() emits"
+    assert rep["artifacts"]["stage_4"] is None, "an empty root never reached stage 4"
 
     rows = cli.aggregate({"r1": rep})
-    assert {r["lint"]: r["cvs_ran"] for r in rows} == {lint: 0 for lint in cli.ALL_LINTS}, (
-        "a skipped lint must not count as having run")
+    expected_ran = {lint: 0 for lint in cli.ALL_LINTS}
+    assert {r["lint"]: r["cvs_ran"] for r in rows} == expected_ran, (
+        "a skipped lint -- and no_output on a run that never reached stage 4 "
+        "-- must not count as having run")
     assert {r["cvs_affected"] for r in rows} == {0}
+
+
+def test_no_output_counts_as_ran_once_stage_4_actually_happened(tmp_path):
+    """The mirror of the test above: a rep whose stage 4 DID produce output
+    (so no_output's own precondition held, even though this synthetic rep
+    reports no finding for it) must count as 'ran' for aggregate()'s
+    no_output row -- the round-2 N5 fix reads `artifacts.stage_4`, not the
+    generic 'not explicitly skipped' rule, so this must not regress to
+    always-0 either."""
+    cli = _load_cli()
+    rep = {
+        "artifacts": {"stage_4": str(tmp_path / "X_fields.json"), "stage_2": None},
+        "findings": [],
+    }
+    rows = cli.aggregate({"r1": rep})
+    ran = {r["lint"]: r["cvs_ran"] for r in rows}
+    assert ran["no_output"] == 1
+    # unaffected lints keep the generic "not explicitly skipped -> ran" rule,
+    # unchanged by the no_output special case -- an empty findings list means
+    # nothing was marked skipped, so every other lint still counts as ran.
+    assert ran["segmentation"] == 1
 
 
 def test_skip_detection_requires_prefix_not_mere_substring():
