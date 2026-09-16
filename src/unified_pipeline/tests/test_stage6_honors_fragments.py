@@ -1258,6 +1258,15 @@ def test_continuation_merge_rejects_a_first_line_with_its_own_pipe():
     assert _merge_first_cell_continuation(lines) == lines
 
 
+def test_continuation_merge_rejects_a_first_line_with_a_tab():
+    """A first line carrying a tab is column-structured on its own (a
+    tab-joined award/date/note triple), not the plain continuation-target
+    title the merge is scoped to."""
+    lines = ["Fictional Award\tSome Note",
+             "(continuation) | Imaginary Testing Society | 10/30/2017"]
+    assert _merge_first_cell_continuation(lines) == lines
+
+
 def test_continuation_merge_rejects_a_remainder_line_with_a_tab():
     """A remainder line carrying a tab is column-structured on its own, not
     a clean '|'-joined row the continuation merge is scoped to."""
