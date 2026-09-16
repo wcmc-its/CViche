@@ -395,6 +395,12 @@ RENDER_ROUTED_CODES = frozenset({
     # NOTE: T is intentionally NOT here - T entries go to Appendix
 })
 
+# Position/training codes represent career-progression stages that share most
+# words but differ in rank -- `_group_and_dedup_entries` uses date-aware dedup
+# for them, merging only entries whose date ranges overlap or match. A
+# taxonomy fact, not a setting (§7.2: no new configuration mechanism).
+_DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1'})
+
 
 
 
@@ -667,8 +673,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             print(f"Removed {removed} WCM-template instruction box(es)")
 
     def _group_and_dedup_entries(
-        self, entries: list[dict]
-    ) -> tuple[dict[str, list[dict]], dict[str, list[dict]], list[dict]]:
+        self, entries: list[dict[str, Any]]
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
         """Group entries by taxonomy code (applying mismatch corrections),
         then deduplicate within each group. Pure move out of generate() --
         carved out to offset the #565 section-dispatch table's line cost
@@ -690,22 +696,18 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             entries_by_code[code].append(entry)
 
         if self.verbose:
-            print(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
+            logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
             if mismatch_corrections > 0:
-                print(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
+                logger.info(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
 
-        # Position/training codes (D1, D2, D3, C, B1) represent career progression
-        # stages that share most words but differ in rank — use date-aware dedup
-        # that only merges entries whose date ranges overlap or match.
-        DATE_AWARE_DEDUP_CODES = {'D1', 'D2', 'D3', 'C', 'B1'}
         pre_dedup_entries_by_code = {code: list(group)
                                      for code, group in entries_by_code.items()}
         total_deduped = 0
-        dedup_decisions: List[Dict] = []
+        dedup_decisions: list[dict[str, Any]] = []
         for code in list(entries_by_code.keys()):
             before = len(entries_by_code[code])
-            date_aware = code in DATE_AWARE_DEDUP_CODES
-            group_decisions: List[Dict] = []
+            date_aware = code in _DATE_AWARE_DEDUP_CODES
+            group_decisions: list[dict[str, Any]] = []
             entries_by_code[code] = deduplicate_entries(
                 entries_by_code[code], verbose=self.verbose,
                 require_date_overlap=date_aware,
@@ -717,7 +719,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if removed > 0:
                 total_deduped += removed
         if self.verbose and total_deduped > 0:
-            print(f"  Deduplicated: {total_deduped} near-duplicate entries removed")
+            logger.info(f"  Deduplicated: {total_deduped} near-duplicate entries removed")
 
         return entries_by_code, pre_dedup_entries_by_code, dedup_decisions
 
@@ -961,12 +963,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         validation_issues = self._validate_output()
         all_warnings = self._section_failures + validation_issues
         if all_warnings:
-            print(f"\n{'!'*60}")
-            print("VALIDATION WARNINGS")
-            print(f"{'!'*60}")
+            logger.warning("!" * 60)
+            logger.warning("VALIDATION WARNINGS")
+            logger.warning("!" * 60)
             for issue in all_warnings:
-                print(f"  ⚠ {issue['message']}")
-            print(f"{'!'*60}")
+                logger.warning(f"  ⚠ {issue['message']}")
+            logger.warning("!" * 60)
 
         self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
 
@@ -1018,7 +1020,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             return None
 
     def _write_render_warnings_sidecar(self, output_path: str, document_uid: str,
-                                        warnings: list[dict], dedup_decisions: list[dict]) -> None:
+                                        warnings: list[dict[str, Any]], dedup_decisions: list[dict[str, Any]]) -> None:
         """Persist the self-check + section-failure warnings and dedup
         decision trail next to the docx so the run doctor can re-emit them
         (#227/#228) — until now they only ever reached the pod log. Written
@@ -1035,7 +1037,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 "dedup_decisions": dedup_decisions,
             }, indent=2))
         except Exception as exc:
-            print(f"  ⚠ could not write render-warnings sidecar: {exc}")
+            logger.exception("could not write render-warnings sidecar")
 
 
 

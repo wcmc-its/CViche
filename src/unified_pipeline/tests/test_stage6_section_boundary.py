@@ -303,15 +303,21 @@ def test_write_render_warnings_sidecar_writes_expected_json(tmp_path):
     }
 
 
-def test_write_render_warnings_sidecar_is_fail_soft(tmp_path, capsys):
+def test_write_render_warnings_sidecar_is_fail_soft(tmp_path, caplog):
     """Negative path: a sidecar write failure (here, a nonexistent parent
     directory) must never raise -- the render already succeeded and must
-    not be failed by a sidecar problem."""
+    not be failed by a sidecar problem. It is logged at ERROR with the
+    traceback attached (§5.4): a missing sidecar leaves the doctor unable
+    to tell a clean run from a pre-sidecar build, so it must be loud."""
     gen = _new_generator()
     bad_output_path = str(tmp_path / "missing_dir" / "out.docx")
-    gen._write_render_warnings_sidecar(bad_output_path, "TESTAA", [], [])
-    captured = capsys.readouterr()
-    assert "could not write render-warnings sidecar" in captured.out
+    with caplog.at_level(logging.ERROR):
+        gen._write_render_warnings_sidecar(bad_output_path, "TESTAA", [], [])
+    error_records = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert any("could not write render-warnings sidecar" in r.getMessage()
+               for r in error_records)
+    assert any(r.exc_info is not None for r in error_records), \
+        "the sidecar failure must be logged with logger.exception (traceback attached)"
 
 
 # --------------------------------------------------------------- lint severity path
