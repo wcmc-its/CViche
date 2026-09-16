@@ -244,9 +244,11 @@ def _is_bullet_paragraph(para: Paragraph) -> bool:
 
     Section K moved to real Word list paragraphs in #474, so a validator that
     tests for a literal "•" prefix stops seeing K at all -- and check 3
-    below then reports no_visible_teaching_content on every CV. #483 moved
-    all but one non-K emitter (`_insert_reconsidered_segment`) to the same
-    real-list form, so both forms still have to count.
+    below then reports no_visible_teaching_content on every CV. #483 (both
+    passes) moved every emitter this module writes to the same real-list
+    form, but a literal glyph can still arrive verbatim from the SOURCE docx
+    (e.g. a table cell copied through unchanged -- see web240 in #483 R1's
+    render-gate residue attribution), so both forms still have to count.
     """
     if para.text.strip().startswith('•'):
         return True
@@ -2088,17 +2090,16 @@ Now analyze the text above:"""
         if insert_idx is None:
             return False
 
-        # Insert as a bullet. Still a literal "• " prefix, not a real Word
-        # list paragraph (#474/#483's last deferred emitter): its own tests
-        # in test_stage6_unrendered_recovery.py assert the glyph across ~18
-        # cases, so converting it is a separate follow-up, not folded into
-        # #483's `_add_remaining_to_appendix` conversion.
+        # Insert as a real Word list paragraph (#483 R2 -- the last of the
+        # four glyph emitters #474/#483 tracked; its own tests in
+        # test_stage6_unrendered_recovery.py were rewritten alongside this).
         try:
             insert_para = self.doc.paragraphs[insert_idx]
             new_para = insert_para.insert_paragraph_before()
 
-            run = new_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
+            run = new_para.add_run(_clean_inline_tabs(_strip_taxonomy_code(text)))
             _set_font(run)
+            self._apply_list_bullet(new_para, level=0)
 
             # Add explanatory comment
             self._add_word_comment(
