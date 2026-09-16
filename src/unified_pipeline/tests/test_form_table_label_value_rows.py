@@ -26,7 +26,10 @@ if str(_SRC) not in sys.path:
 
 from docx import Document  # noqa: E402
 
-from core.docx_structure_extractor import extract_unified_elements  # noqa: E402
+from core.docx_structure_extractor import (  # noqa: E402
+    extract_unified_elements,
+    row_has_nonblank_value_cells,
+)
 
 
 def _build_form_table_docx(path: str) -> None:
@@ -94,3 +97,14 @@ def test_row_header_with_blank_value_cell_stays_table_header(tmp_path):
 
     assert any(e["text"] == "Certification:" for e in table_headers)
     assert "Certification:" not in content_text
+
+
+def test_row_predicate_is_false_for_an_empty_or_single_cell_row() -> None:
+    """#811 review r4025625445 / r4025600542: the predicate must answer False,
+    not raise, for None, [], and a lone label cell; True needs a distinct
+    non-blank trailing cell."""
+    assert row_has_nonblank_value_cells(None) is False
+    assert row_has_nonblank_value_cells([]) is False
+    assert row_has_nonblank_value_cells([{"text": "Name:"}]) is False
+    assert row_has_nonblank_value_cells([{"text": "Name:"}, {"text": "Name:"}]) is False
+    assert row_has_nonblank_value_cells([{"text": "Name:"}, {"text": "J. Doe"}]) is True

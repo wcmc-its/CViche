@@ -144,8 +144,9 @@ def test_duplicate_text_in_a_distinct_cell_is_not_recovered_content(tmp_path):
     """A trailing cell that is a genuinely separate cell (not a gridSpan
     duplicate) but repeats the label's own text must NOT satisfy the
     header-left/content-right "distinct content" requirement -- no content
-    is recovered for it (`row_has_distinct_nonblank_value_cells` excludes a
-    trailing cell that matches the label).
+    is recovered for it (`row_has_nonblank_value_cells` excludes a trailing
+    cell that matches cell 0's own text, and is the ONLY gate for that
+    requirement since the #811 review collapsed its duplicate).
 
     #811 round 3, finding 1: `row_has_nonblank_value_cells` now applies the
     SAME label-text exclusion as its own gate (a trailing cell equal to
