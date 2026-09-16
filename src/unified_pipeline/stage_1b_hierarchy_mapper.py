@@ -51,6 +51,13 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
     """
     import re
 
+    # An empty paragraph is a substring of every string, so the "contained"
+    # branch below would otherwise match it against ANY header (#851). Every
+    # caller already skips empty text before calling this function, but the
+    # function itself must not silently say yes.
+    if not para_text:
+        return False
+
     # Exact match - always accept
     if para_text == expected_header:
         return True
@@ -316,6 +323,59 @@ def has_mapped_children(node: dict) -> bool:
     return False
 
 
+def _repair_out_of_order_section_bounds(sections: list[dict], doc_length: int) -> None:
+    """
+    Fix invalid boundaries caused by out-of-order hierarchies.
+
+    A section's naive end (computed in `compute_bounds`) can inherit a
+    `default_end` from before a later sibling actually appears, leaving
+    `element_idx_end < element_idx_start`. For each such section, find the
+    next section in document order (by start index) and end just before it,
+    or run to the document end if none follows.
+
+    Mutates `sections` in place.
+    """
+    for section in sections:
+        if section["element_idx_end"] < section["element_idx_start"]:
+            current_start = section["element_idx_start"]
+            next_starts = [
+                s["element_idx_start"]
+                for s in sections
+                if s["element_idx_start"] > current_start
+            ]
+            if next_starts:
+                section["element_idx_end"] = min(next_starts) - 1
+            else:
+                section["element_idx_end"] = doc_length - 1
+
+
+def _extend_ancestors_to_cover_repaired_children(sections: list[dict]) -> None:
+    """
+    Re-extend every ancestor's end to cover its full descendant subtree.
+
+    `compute_bounds` extends a parent's end to its children's max end BEFORE
+    `_repair_out_of_order_section_bounds` runs, so a child repaired above can
+    grow past the bound its parent already settled on, violating this
+    function's docstring invariant #3 ("parent end >= last child end"). This
+    re-extends every section that has mapped children to at least the max end
+    of every section under it (matched by hierarchy-path prefix, not just
+    direct children, so a multi-level nesting cascades in one pass).
+
+    Mutates `sections` in place.
+    """
+    for section in sections:
+        if not section["has_children"]:
+            continue
+        depth = len(section["hierarchy"])
+        descendant_ends = [
+            other["element_idx_end"]
+            for other in sections
+            if len(other["hierarchy"]) > depth and other["hierarchy"][:depth] == section["hierarchy"]
+        ]
+        if descendant_ends:
+            section["element_idx_end"] = max(section["element_idx_end"], max(descendant_ends))
+
+
 def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) -> list[dict]:
     """
     Compute start/end element indices for each section.
@@ -439,34 +499,12 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
 
     compute_bounds(mapped_hierarchy)
 
-    # POST-PROCESS: Fix invalid boundaries caused by out-of-order hierarchies
-    # For each section, if end < start, find the actual next section in document order
-    # and set end to just before it
+    # POST-PROCESS: fix invalid boundaries caused by out-of-order hierarchies,
+    # then re-extend every ancestor to cover any child the repair just grew
+    # (docstring invariant #3: parent end >= last child end -- #851).
     if sections:
-        # Sort sections by start index to find actual document order
-        sections_by_start = sorted(
-            [(i, s["element_idx_start"]) for i, s in enumerate(sections)],
-            key=lambda x: x[1]
-        )
-
-        for i, section in enumerate(sections):
-            if section["element_idx_end"] < section["element_idx_start"]:
-                # Find the next section in document order (by start index)
-                current_start = section["element_idx_start"]
-
-                # Find all sections that start after this one
-                next_starts = [
-                    s["element_idx_start"]
-                    for s in sections
-                    if s["element_idx_start"] > current_start
-                ]
-
-                if next_starts:
-                    # End just before the next section starts
-                    section["element_idx_end"] = min(next_starts) - 1
-                else:
-                    # No next section - extend to document end
-                    section["element_idx_end"] = doc_length - 1
+        _repair_out_of_order_section_bounds(sections, doc_length)
+        _extend_ancestors_to_cover_repaired_children(sections)
 
     # PREAMBLE HANDLING: Check for unmapped content at the beginning of the document
     if sections:

@@ -124,7 +124,6 @@ def test_is_header_match_non_strict_mode_rejects_paragraph_at_150_chars_or_more(
     assert is_header_match("education", long_text, strict=False) is False
 
 
-@pytest.mark.xfail(strict=True, reason="suspected bug: '' is a substring of every header, so an empty paragraph matches ANY header (#851)")
 def test_is_header_match_empty_paragraph_does_not_match():
     # Every caller skips empty text before calling is_header_match, which is
     # why this has never bitten a run -- but the function itself should say no.
@@ -409,9 +408,9 @@ def test_compute_section_boundaries_nested_bounds_extend_parent_to_cover_child()
 
 def test_compute_section_boundaries_parent_end_extends_past_next_sibling_to_cover_a_late_child():
     # A's next sibling B sits at 3, so A's naive end is 2 -- but A's second
-    # child A2 lives at 9, past B. The parent is extended to the children's
-    # max end as computed inside compute_bounds (A1 runs 1..8, up to A2), not
-    # stopped at 2. (A2's own 9..11 is still not covered -- see #851.)
+    # child A2 lives at 9, past B. The parent is extended to cover its full
+    # descendant subtree (A2's repaired 9..11), not stopped at 2 or at A1's
+    # own 1..8 (docstring invariant #3, fixed by #851).
     mapped = [
         {
             "text": "A",
@@ -428,11 +427,10 @@ def test_compute_section_boundaries_parent_end_extends_past_next_sibling_to_cove
     by_path = {tuple(s["hierarchy"]): s for s in sections}
     assert by_path[("A", "A1")]["element_idx_end"] == 8
     assert by_path[("A", "A2")]["element_idx_end"] == 11
-    assert by_path[("A",)]["element_idx_end"] == 8
+    assert by_path[("A",)]["element_idx_end"] == 11
     assert by_path[("A",)]["element_idx_end"] > by_path[("B",)]["element_idx_start"]
 
 
-@pytest.mark.xfail(strict=True, reason="suspected bug: parent end is fixed before the post-process step repairs an out-of-order child, so invariant #3 (parent end >= last child end) is violated (#851)")
 def test_compute_section_boundaries_parent_covers_a_child_repaired_by_the_post_process_step():
     # A's child A1 sits at 8, but A's next sibling B is at 3, so A1's naive
     # end (2) is before its own start. The post-process step repairs A1 to
@@ -479,7 +477,10 @@ def test_compute_section_boundaries_unmapped_sibling_bounds_by_its_first_child()
 def test_compute_section_boundaries_out_of_order_last_section_extends_to_doc_end():
     # Same out-of-order pathology as above, but this time the buggy child is
     # the LAST section in document order (nothing starts after it) -- the
-    # POST-PROCESS repair has no next_starts, so it falls back to doc_length - 1.
+    # POST-PROCESS repair has no next_starts, so it falls back to
+    # doc_length - 1. Second #851 reproducer shape: the parent ("A") must
+    # still be extended to cover the repaired child via this fallback path,
+    # not just the next_starts path the other repair test covers.
     mapped = [
         {
             "text": "A",
@@ -491,8 +492,10 @@ def test_compute_section_boundaries_out_of_order_last_section_extends_to_doc_end
     ]
     sections = compute_section_boundaries(mapped, doc_length=20)
     a1 = next(s for s in sections if s["hierarchy"] == ["A", "A1"])
+    a = next(s for s in sections if s["hierarchy"] == ["A"])
     assert a1["element_idx_start"] == 8
     assert a1["element_idx_end"] == 19
+    assert a["element_idx_end"] >= a1["element_idx_end"]
 
 
 def test_compute_section_boundaries_preamble_extends_personal_data_parent_with_children():
