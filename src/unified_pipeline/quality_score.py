@@ -320,6 +320,115 @@ def cv_owner_name_missing(fields_data) -> bool:
     return (not full_name) and (not first_name or not last_name)
 
 
+#: The hard-fail cap for a run that produced no rendered docx at all (#745
+#: comment, 2026-09-12: web204 lost stage 6 to #812 and scored 88 GREEN
+#: because score_sparse_tables/score_broken_format's neutral 0.5-with-no-docx
+#: fraction is exactly as good as a mediocre-but-real docx). Set BELOW
+#: score_cv_owner's 25 and score_pipeline_errors' 40: "nothing to deliver" is
+#: more severe than either -- both of those caps still describe a run that
+#: produced *something* a human could look at.
+NO_OUTPUT_CAP = 20
+
+
+def no_docx_produced(outputs_dir: Path) -> bool:
+    """True only when the run's output directory has NO docx at all -- the
+    absent case _load_docx reports as ``"no docx found"``. Deliberately
+    narrower than "doc is None": an ambiguous match (more than one *.docx) or
+    a present-but-corrupt file is a different failure, already scored by
+    score_sparse_tables/score_broken_format's own 0.5 neutral fraction, and
+    is not "nothing was produced" the way a genuinely missing file is."""
+    _, reason = _load_docx(outputs_dir)
+    return reason == "no docx found"
+
+
+def no_output_produced(has_docx: bool, has_report: bool = False) -> bool:
+    """The single hard-fail predicate for 'nothing to deliver' (round-2 N4):
+    no docx AND no render-warnings report either -- ``doctor.lints.runtime
+    .lint_no_output`` and ``score_no_output`` below both call this instead of
+    each inlining their own version of the condition, so they cannot drift
+    apart the way #825 flagged for the other two hard-fail gates.
+
+    The score's ``outputs_dir`` is a flat directory `scripts/score_one.py`
+    collects (mirroring `quality_score_service.py`'s production copy) that
+    never receives the render-warnings JSON at all (its NEEDED_SUFFIXES list
+    has no `_render_warnings.json`) -- `score_no_output` therefore has no
+    report visibility and MUST pass ``has_report=False`` explicitly rather
+    than guessing, which degenerates this predicate to docx-absence alone for
+    that caller. That is not a second definition: stage 6 always saves the
+    docx before the report (`stage_6_word_template.py`), so 'report without
+    docx' cannot happen on a real run and both callers agree in practice; if
+    the score ever gains report visibility, passing the real value here is
+    the only change needed to make it agree by construction too."""
+    return (not has_docx) and (not has_report)
+
+
+#: #810 decision 4: stage 3b's own batch-fallback ratio. `lint_pipeline_errors`
+#: / `score_pipeline_errors` above can only see a failure recorded as an
+#: `error` STRING; the batch-fallback path (`stage3b/classify.py:258-271`)
+#: records it as NUMBERS instead (`meta.stats.failed_batches`,
+#: `fallback_entries`) and is invisible to that scan -- web30 lost 41 of 83
+#: classification batches (510 of 1019 entries defaulted) and scored 91
+#: GREEN, doctor WARN only. #61's own rule (fail only when EVERY batch
+#: failed) didn't fire either: a handful of batches classified late in the
+#: outage window was enough to clear it.
+#:
+#: 5% is a starting calibration, not a measured p75/p90 -- no such baseline
+#: exists yet for this metric (unlike MISSED_HEADERS_WARN_COUNT and its
+#: siblings, which were fit to a scored corpus). It is chosen only to sit an
+#: order of magnitude under the outage's own ratios (41/83=49%, 510/1019=50%)
+#: and the clean re-run's (0/80, 0/1037), so a PARTIAL outage like this one
+#: trips it well before #61's all-or-nothing bar. Revisit once more
+#: outage/clean run pairs exist to fit against.
+STAGE3B_FALLBACK_RATIO_THRESHOLD = 0.05
+
+#: Hard-fail like score_pipeline_errors: a batch-fallback run and a run with
+#: a fatal `error` string are the same failure class (a stage produced
+#: meaningless output that looks real), so they share a cap.
+STAGE3B_FALLBACK_HARD_FAIL_CAP = 40
+
+
+def stage3b_fallback_ratios(stage_3b_data: dict | None) -> dict[str, float]:
+    """The two ratios STAGE3B_FALLBACK_RATIO_THRESHOLD is compared against,
+    by name -- ``{}`` when the artifact is absent or lacks the counters
+    (an artifact from before c6402bf added them, or a denominator of 0).
+    The single source both `stage3b_fallback_ratio_exceeded` (the gate) and
+    the doctor's `metrics` block (#816, reporting the number even when it
+    does not trip the gate) read, so the two cannot compute it two different
+    ways (§1.5)."""
+    stats = ((stage_3b_data or {}).get("meta") or {}).get("stats") or {}
+    ratios: dict[str, float] = {}
+    failed_batches, llm_batches = stats.get("failed_batches"), stats.get("llm_batches")
+    if (isinstance(failed_batches, (int, float)) and isinstance(llm_batches, (int, float))
+            and llm_batches):
+        ratios["failed_batches/llm_batches"] = failed_batches / llm_batches
+    fallback_entries, entries_classified = (stats.get("fallback_entries"),
+                                            stats.get("entries_classified"))
+    if (isinstance(fallback_entries, (int, float))
+            and isinstance(entries_classified, (int, float)) and entries_classified):
+        ratios["fallback_entries/entries_classified"] = fallback_entries / entries_classified
+    return ratios
+
+
+def stage3b_fallback_ratio_exceeded(stage_3b_data: dict | None) -> tuple[bool, str | None]:
+    """True + a detail string when either ratio from `stage3b_fallback_ratios`
+    exceeds STAGE3B_FALLBACK_RATIO_THRESHOLD -- (False, None) when neither
+    ratio is computable (missing keys, an old-shaped artifact) or both are
+    within threshold. Never raises on a malformed/absent artifact."""
+    ratios = stage3b_fallback_ratios(stage_3b_data)
+    if not ratios:
+        return False, None
+    name, ratio = max(ratios.items(), key=lambda kv: kv[1])
+    if ratio <= STAGE3B_FALLBACK_RATIO_THRESHOLD:
+        return False, None
+    stats = ((stage_3b_data or {}).get("meta") or {}).get("stats") or {}
+    return True, (
+        f"{name}={ratio:.1%} exceeds {STAGE3B_FALLBACK_RATIO_THRESHOLD:.0%} "
+        f"(failed_batches={stats.get('failed_batches')}, "
+        f"llm_batches={stats.get('llm_batches')}, "
+        f"fallback_entries={stats.get('fallback_entries')}, "
+        f"entries_classified={stats.get('entries_classified')})")
+
+
 # ---------------------------------------------------------------------------
 # Dimension scorers  -- each returns (penalty_fraction, detail, hard_fail_cap)
 # ---------------------------------------------------------------------------
@@ -740,6 +849,37 @@ def score_duplicate_ratio(outputs_dir: Path) -> tuple[float, str, None]:
     return fraction, detail, None
 
 
+def score_no_output(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Whether the run produced a rendered docx AT ALL -- 'nothing to
+    deliver', the single most severe outcome a run can have (#745). Weight 0:
+    this is a pure gate, not a scored dimension -- score_sparse_tables and
+    score_broken_format already assign their own (unchanged) 0.5 neutral
+    fraction when there is no docx to inspect, so giving this a nonzero
+    weight would raise the score of every OTHER run in the corpus (a bigger
+    TOTAL_WEIGHT denominator with no matching penalty) purely because this
+    dimension was added, not because anything about those runs changed.
+    """
+    has_docx = not no_docx_produced(outputs_dir)
+    if no_output_produced(has_docx=has_docx):
+        return 1.0, f"no docx produced; hard-fail cap={NO_OUTPUT_CAP}", NO_OUTPUT_CAP
+    return 0.0, "docx present (or absence is ambiguous/unreadable, scored elsewhere)", None
+
+
+def score_stage3b_fallback_ratio(outputs_dir: Path) -> tuple[float, str, int | None]:
+    """Stage 3b's batch-fallback ratio (#810): hard-fail like
+    score_pipeline_errors, same reasoning as score_no_output for weight 0 --
+    this does not re-score classification quality (score_t_bucket already
+    does), it only gates the case where a large share of it never happened.
+    """
+    data, reason = _load_first(outputs_dir, "*_classified.json")
+    exceeded, detail = stage3b_fallback_ratio_exceeded(data)
+    if exceeded:
+        return 1.0, f"hard-fail cap={STAGE3B_FALLBACK_HARD_FAIL_CAP}: {detail}", \
+            STAGE3B_FALLBACK_HARD_FAIL_CAP
+    return 0.0, _missing_or_unreadable_detail("classified.json", reason) if data is None \
+        else "within threshold", None
+
+
 # ---------------------------------------------------------------------------
 # Dimension registry  -- single source of truth (name, weight, scorer fn)
 # ---------------------------------------------------------------------------
@@ -752,6 +892,8 @@ DIMENSIONS = [
     ("Broken table / raw formatting artifacts in docx", 10, score_broken_format),
     ("Field-extraction sparseness (entry-level)", 8, score_field_sparseness),
     ("Duplicate-entry ratio (de-dup / fragmentation health)", 10, score_duplicate_ratio),
+    ("No rendered output produced at all (HARD-FAIL gate)", 0, score_no_output),
+    ("Stage-3b batch-fallback ratio (HARD-FAIL gate)", 0, score_stage3b_fallback_ratio),
 ]
 TOTAL_WEIGHT = sum(w for _, w, _ in DIMENSIONS)
 
