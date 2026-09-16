@@ -846,8 +846,10 @@ class TestEmptyEntriesClearsTemplatePlaceholderRow:
     placeholder data row (real template table 10, row 1) survived into the
     delivered document on every CV with zero F2 entries -- 23 of 66 corpus
     CVs. The clear now always runs once the section header and table are
-    located; only the row-writing loop is skipped when there is nothing to
-    write.
+    located; the row-writing loop is simply a no-op on an empty `entries`
+    (round 2: the separate early return after the clear was dead code and
+    has been removed). `tables_populated` is gated on `entries` -- a
+    cleared placeholder is not a populated table.
     """
 
     def test_real_template_no_entries_leaves_no_blank_data_row(self):
@@ -874,7 +876,8 @@ class TestEmptyEntriesClearsTemplatePlaceholderRow:
             "Certificate # \n(indicate if board eligible)",
             "Dates of Certification \n(yyyy–yyyy)",
         ]
-        assert gen.stats['tables_populated'] == 1
+        # round 2: a cleared placeholder is not a "populated" table.
+        assert gen.stats['tables_populated'] == 0
 
     def test_one_synthetic_f2_entry_renders_exactly_one_row_no_blank_row(self):
         # Regression guard for the non-empty path: the clear now always

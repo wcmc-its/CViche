@@ -412,8 +412,10 @@ class BoardCertificationSection:
         template ships a blank placeholder data row in this table, and this
         used to return before `_clear_table_data` ever ran, so that row
         survived into the delivered document on every CV with zero F2
-        entries. The clear now always runs once the table is found; only the
-        row-writing loop below is skipped when there is nothing to write.
+        entries. The clear now always runs once the table is found; the
+        row-writing loop below is simply a no-op on an empty `entries`, so
+        no separate early return is needed. `tables_populated` only counts
+        an actual write -- a cleared placeholder is not a populated table.
         """
         if self.verbose and entries:
             print(f"Filling Board Certification ({len(entries)} entries)...")
@@ -435,10 +437,8 @@ class BoardCertificationSection:
             return
 
         _clear_table_data(table, keep_header=True)
-        self.stats['tables_populated'] += 1
-
-        if not entries:
-            return
+        if entries:
+            self.stats['tables_populated'] += 1
 
         # #625 thread 3850478580: the 15 sibling section writers under this
         # same header (e.g. licensure.py) sort reverse-chronologically before
