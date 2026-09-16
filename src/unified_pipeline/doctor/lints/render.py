@@ -37,10 +37,6 @@ from ..shared import (
 )
 
 
-# Lint 6: an appendix bigger than this means mapping failed at scale.
-APPENDIX_WARN_ENTRIES = 15
-
-
 # Lint 7: a source section with at least this many substantive lines whose
 # output section is empty did not just "have nothing to say".
 DEAD_SECTION_MIN_LINES = 3
@@ -146,8 +142,8 @@ def _is_bare_date_line(line: str) -> bool:
 # 77% to 58%:
 #
 #   magnitude                                   n    p50   p75   p90   max
-#   table_shape malformed-row ratio            41   0.18  0.27  0.40  0.60
-#   table_shape defects per table              41      2     4     7     10
+#   table_shape malformed-row ratio            41   0.18  0.27  0.40  0.60  (retired, see below)
+#   table_shape defects per table              41      2     4     7     10  (retired, see below)
 #   missed_headers per run                     21      2     6     9     13
 #   classified_unrendered entries lost/run     21      1     2     3      4
 #
@@ -158,10 +154,14 @@ def _is_bare_date_line(line: str) -> bool:
 # improves -- #440 replaces them with a live corpus baseline. Until then, a
 # threshold that drifts is still strictly better than no threshold: today every
 # one of these fires WARN at magnitude 1.
-TABLE_SHAPE_WARN_ROW_RATIO = 0.27
-
-
-TABLE_SHAPE_WARN_DEFECTS = 4
+#
+# table_shape's own two thresholds (TABLE_SHAPE_WARN_ROW_RATIO,
+# TABLE_SHAPE_WARN_DEFECTS) were retired by #816: it fired on 24 of 40 runs in
+# the 2026-09-11 batch, the same "constant condition carries no information"
+# shape #438 named -- the malformed-row count is now the doctor's `metrics`
+# block (honors_malformed_rows/honors_rows) and the finding stays INFO always.
+# missed_headers and classified_unrendered are unaffected; they still WARN on
+# the corpus's worst quartile.
 
 
 # '• [M2A] ...' style taxonomy-code leak (the pre-#214 appendix format).
@@ -184,6 +184,64 @@ def _is_appendix_noise(text: str) -> bool:
     return is_source_boilerplate(normed)
 
 
+def _appendix_contents(blocks: list[tuple[str, str]]
+                       ) -> tuple[list[str], int] | None:
+    """The appendix's entry lines and its non-paragraph block count, or None
+    when the document has no appendix section at all. Factored out of
+    `lint_output_hygiene` so the doctor's `metrics` block (#816's
+    `appendix_entries`/`appendix_share`) reads the SAME count the finding
+    below is built from, rather than a second derivation of "appendix
+    entry" that could disagree with it.
+
+    Paragraph-only invariant (#446 review T1.9 / #725 review r3923589271
+    pt 9), enforced, not just documented: stage 6 renders the appendix --
+    the catch-all for content that did not map to a template section --
+    as numbered/bulleted PARAGRAPHS only, never as a table or list block.
+    Measured directly against the 65 real *_wcm.docx stage_6_wcm_documents
+    farm outputs: 33 of them carry a "T. APPENDIX" section, and 0 of those
+    33 contain a table block anywhere inside it -- but scanning only
+    `kind == "p"` blocks to find entries would silently miss one on a
+    future document that DOES break the invariant, so the non-paragraph
+    count is returned alongside the entries rather than folded into them.
+    """
+    paras = [text for kind, text in blocks if kind == "p"]
+    appendix_at = next((i for i, t in enumerate(paras)
+                        if t.strip() == _APPENDIX_HEADER), None)
+    if appendix_at is None:
+        return None
+
+    non_paragraph_count = 0
+    in_appendix = False
+    for kind, text in blocks:
+        stripped = str(text).strip()
+        if kind == "p":
+            if stripped == _APPENDIX_HEADER:
+                in_appendix = True
+                continue
+            if in_appendix and _output_section_header(stripped):
+                in_appendix = False
+        elif in_appendix:
+            non_paragraph_count += 1
+
+    entries = []
+    for text in paras[appendix_at + 1:]:
+        stripped = text.strip()
+        if _output_section_header(stripped):
+            break
+        if _APPENDIX_ENTRY_RE.match(stripped):
+            entries.append(_APPENDIX_ENTRY_RE.sub("", stripped).strip())
+    return entries, non_paragraph_count
+
+
+def appendix_entry_count(blocks: list[tuple[str, str]]) -> int | None:
+    """`appendix_entries` for the doctor's `metrics` block (#816) -- None
+    when the document has no appendix section at all, distinguishing "no
+    appendix" from "appendix, but empty" the same way a missing artifact is
+    kept distinct from an empty one elsewhere in the doctor."""
+    found = _appendix_contents(blocks)
+    return len(found[0]) if found is not None else None
+
+
 def lint_output_hygiene(blocks: list[tuple[str, str]]) -> list[dict]:
     """Bracketed taxonomy-code leaks anywhere in the output, plus appendix
     size and boilerplate lines rendered as appendix entries."""
@@ -199,47 +257,16 @@ def lint_output_hygiene(blocks: list[tuple[str, str]]) -> list[dict]:
             f"{len(leaks)} bracketed taxonomy-code leak(s) in output text",
             [leak[:100] for leak in leaks[:5]]))
 
-    # Paragraph-only invariant (#446 review T1.9 / #725 review r3923589271
-    # pt 9), enforced, not just documented: stage 6 renders the appendix --
-    # the catch-all for content that did not map to a template section --
-    # as numbered/bulleted PARAGRAPHS only, never as a table or list block.
-    # Measured directly against the 65 real *_wcm.docx stage_6_wcm_documents
-    # farm outputs: 33 of them carry a "T. APPENDIX" section, and 0 of those
-    # 33 contain a table block anywhere inside it -- but scanning only
-    # `kind == "p"` blocks to find entries would silently miss one on a
-    # future document that DOES break the invariant, so a non-paragraph
-    # block inside the appendix range is its own finding.
-    paras = [text for kind, text in blocks if kind == "p"]
-    appendix_at = next((i for i, t in enumerate(paras)
-                        if t.strip() == _APPENDIX_HEADER), None)
-    if appendix_at is None:
+    found = _appendix_contents(blocks)
+    if found is None:
         return findings
+    entries, non_paragraph_count = found
 
-    non_paragraph_count = 0
-    in_appendix = False
-    for kind, text in blocks:
-        stripped = str(text).strip()
-        if kind == "p":
-            if stripped == _APPENDIX_HEADER:
-                in_appendix = True
-                continue
-            if in_appendix and _output_section_header(stripped):
-                in_appendix = False
-        elif in_appendix:
-            non_paragraph_count += 1
     if non_paragraph_count:
         findings.append(_finding(
             "output_hygiene", "WARN",
             f"{non_paragraph_count} non-paragraph block(s) inside the "
             "appendix -- entries there are only scanned as paragraphs"))
-
-    entries = []
-    for text in paras[appendix_at + 1:]:
-        stripped = text.strip()
-        if _output_section_header(stripped):
-            break
-        if _APPENDIX_ENTRY_RE.match(stripped):
-            entries.append(_APPENDIX_ENTRY_RE.sub("", stripped).strip())
 
     boiler = [e for e in entries if _is_appendix_noise(e)]
     if boiler:
@@ -247,9 +274,13 @@ def lint_output_hygiene(blocks: list[tuple[str, str]]) -> list[dict]:
             "output_hygiene", "WARN",
             f"{len(boiler)} boilerplate line(s) rendered in the appendix",
             [b[:100] for b in boiler[:5]]))
+    # #816: this finding is now always INFO. It fired on 37 of 40 runs in
+    # the 2026-09-11 batch -- an appendix count is a corpus-level metric
+    # (moved to the doctor's `metrics` block as appendix_entries/
+    # appendix_share), not a per-run WARN; a threshold on it carried no
+    # per-run information (#438's class, generalized by #816).
     findings.append(_finding(
-        "output_hygiene",
-        "WARN" if len(entries) > APPENDIX_WARN_ENTRIES else "INFO",
+        "output_hygiene", "INFO",
         f"appendix holds {len(entries)} unmapped entr"
         + ("y" if len(entries) == 1 else "ies")))
     return findings
@@ -656,6 +687,77 @@ def _alias_col(header: list[str], aliases: tuple[str, ...]) -> int | None:
     return None
 
 
+class _HonorsTableShape(NamedTuple):
+    defects: list[str]
+    defective_rows: set
+    non_blank_rows: int
+
+
+def _honors_table_shape(tbl: list[list[str]]) -> "_HonorsTableShape | None":
+    """One table's honors-shape defects (#229), or None when it is not an
+    honors/awards table at all (no 'name of award'/'date awarded' header).
+    Factored out of `lint_table_shape` so the doctor's `metrics` block
+    (#816's `honors_malformed_rows`/`honors_rows`) sums the SAME per-row
+    predicate the finding below is built from, not a second definition of
+    'malformed'."""
+    if len(tbl) < 2 or not tbl[0]:
+        return None
+    header = [_norm(cell) for cell in tbl[0]]
+    header_all = " ".join(header)
+    if "name of award" not in header_all and "date awarded" not in header_all:
+        return None
+
+    name_i = _alias_col(header, _AWARD_NAME_ALIASES)
+    org_i = _alias_col(header, _AWARD_ORG_ALIASES)
+    date_i = _alias_col(header, _AWARD_DATE_ALIASES)
+    if name_i is None:
+        return None
+    defective_rows: set = set()
+    defects: List[str] = []
+    non_blank_rows = 0
+
+    def flag(rn, msg):
+        defective_rows.add(rn)
+        defects.append(f"row {rn}: {msg}")
+
+    # Enumerate the ORIGINAL rows -- not a pre-filtered blanks-removed
+    # list -- so a defect's reported row number is the actual source
+    # table row, not its position after blank rows above it were
+    # dropped (#446 review T1.8).
+    for rn, row in enumerate(tbl[1:], start=1):
+        if not any(row):
+            continue
+        non_blank_rows += 1
+        name = row[name_i] if name_i < len(row) else ""
+        org = row[org_i] if org_i is not None and org_i < len(row) else ""
+        date = row[date_i] if date_i is not None and date_i < len(row) else ""
+        if (len(name) > HONORS_NAME_BLOB_CHARS
+                or len(_SENTENCE_BOUNDARY_RE.findall(name)) >= 2):
+            flag(rn, f"name-cell blob ({len(name)} chars): {name[:80]}")
+        if date_i is not None and not date and _YEAR_RE.search(name):
+            flag(rn, f"empty date but year in name: {name[:80]}")
+        if org in _US_STATE_ABBREVS:
+            flag(rn, f"organization is a bare state abbrev: '{org}'")
+        elif org and len(org) > 8 and _norm(org) in _norm(name):
+            flag(rn, f"organization duplicated in name: {org[:60]}")
+    return _HonorsTableShape(defects, defective_rows, non_blank_rows)
+
+
+def honors_table_totals(tables: list[list[list[str]]]) -> tuple[int, int]:
+    """(malformed_rows, total_rows) summed over every honors-shaped table in
+    the document, for the doctor's `metrics` block (#816: `honors_malformed_
+    rows`/`honors_rows`). Non-honors tables contribute nothing to either
+    total, same as `lint_table_shape` skipping them entirely."""
+    malformed = total = 0
+    for tbl in tables:
+        shape = _honors_table_shape(tbl)
+        if shape is None:
+            continue
+        malformed += len(shape.defective_rows)
+        total += shape.non_blank_rows
+    return malformed, total
+
+
 def lint_table_shape(tables: list[list[list[str]]]) -> list[dict]:
     """Honors-like tables whose rows are mis-shaped (#229): the stage-6
     multi-award fallback puts citation blobs in the name cell, leaks state
@@ -664,60 +766,19 @@ def lint_table_shape(tables: list[list[list[str]]]) -> list[dict]:
     the name."""
     findings = []
     for tbl in tables:
-        if len(tbl) < 2 or not tbl[0]:
+        shape = _honors_table_shape(tbl)
+        if shape is None or not shape.defects:
             continue
-        header = [_norm(cell) for cell in tbl[0]]
-        header_all = " ".join(header)
-        if "name of award" not in header_all and "date awarded" not in header_all:
-            continue
-
-        name_i = _alias_col(header, _AWARD_NAME_ALIASES)
-        org_i = _alias_col(header, _AWARD_ORG_ALIASES)
-        date_i = _alias_col(header, _AWARD_DATE_ALIASES)
-        if name_i is None:
-            continue
-        defective_rows = set()
-        defects: List[str] = []
-        non_blank_rows = 0
-
-        def flag(rn, msg):
-            defective_rows.add(rn)
-            defects.append(f"row {rn}: {msg}")
-
-        # Enumerate the ORIGINAL rows -- not a pre-filtered blanks-removed
-        # list -- so a defect's reported row number is the actual source
-        # table row, not its position after blank rows above it were
-        # dropped (#446 review T1.8).
-        for rn, row in enumerate(tbl[1:], start=1):
-            if not any(row):
-                continue
-            non_blank_rows += 1
-            name = row[name_i] if name_i < len(row) else ""
-            org = row[org_i] if org_i is not None and org_i < len(row) else ""
-            date = row[date_i] if date_i is not None and date_i < len(row) else ""
-            if (len(name) > HONORS_NAME_BLOB_CHARS
-                    or len(_SENTENCE_BOUNDARY_RE.findall(name)) >= 2):
-                flag(rn, f"name-cell blob ({len(name)} chars): {name[:80]}")
-            if date_i is not None and not date and _YEAR_RE.search(name):
-                flag(rn, f"empty date but year in name: {name[:80]}")
-            if org in _US_STATE_ABBREVS:
-                flag(rn, f"organization is a bare state abbrev: '{org}'")
-            elif org and len(org) > 8 and _norm(org) in _norm(name):
-                flag(rn, f"organization duplicated in name: {org[:60]}")
-        if defects:
-            # A couple of mis-shaped rows in a long honors table is the corpus
-            # norm; half the table is not. Threshold on either the share of
-            # rows or the absolute defect count, so a short table with two bad
-            # rows out of three still warns (#438).
-            ratio = (len(defective_rows) / non_blank_rows
-                     if non_blank_rows else 0.0)
-            findings.append(_finding(
-                "table_shape",
-                "WARN" if (ratio >= TABLE_SHAPE_WARN_ROW_RATIO
-                           or len(defects) >= TABLE_SHAPE_WARN_DEFECTS) else "INFO",
-                f"honors table: {len(defective_rows)}/{non_blank_rows} row(s) "
-                f"malformed ({len(defects)} defect(s)) — #229",
-                defects[:6]))
+        # #816: always INFO now, for the same reason as output_hygiene's
+        # appendix finding above -- this fired on 24 of 40 runs in the
+        # 2026-09-11 batch, so a magnitude-based WARN on it carried no
+        # per-run information. The malformed-row count moves to the doctor's
+        # `metrics` block (honors_malformed_rows/honors_rows) instead.
+        findings.append(_finding(
+            "table_shape", "INFO",
+            f"honors table: {len(shape.defective_rows)}/{shape.non_blank_rows} "
+            f"row(s) malformed ({len(shape.defects)} defect(s)) — #229",
+            shape.defects[:6]))
     return findings
 
 

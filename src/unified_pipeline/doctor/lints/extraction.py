@@ -287,20 +287,13 @@ def lint_classified_unrendered(stage3b: Dict,
 _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES = frozenset({'E', 'G', 'J', 'N4'})
 
 
-def lint_taxonomy_code_coverage(stage3b: Dict) -> List[Dict]:
-    """Entries classified into a taxonomy code stage 6 has no render route
-    for at all -- they land in the Appendix by construction, regardless of
-    confidence or content (#529, e.g. N2 "Institutional Training Grants and
-    Mentored Trainee Grants").
-
-    Distinct from lint_classified_unrendered just above: that lint asks
-    whether an entry's text appears ANYWHERE in the rendered output, and
-    appendix content passes that check (the text is there, just in the
-    Appendix), so it cannot see this class -- #529's own investigation hit
-    exactly that blind spot. This lint instead asks a structural question
-    that needs no rendered document at all: does this code have a dispatch
-    path in generate()."""
-    by_code: Dict[str, int] = {}
+def unrouted_code_counts(stage3b: dict) -> dict[str, int]:
+    """{taxonomy code: entry count} for every code classified at 3b that
+    stage 6 has no render route for -- the doctor's `metrics` block (#816's
+    `unrouted_code_entries`) reads this SAME dict rather than re-deriving
+    which codes are unrouted a second way. Factored out of
+    `lint_taxonomy_code_coverage`, which builds its findings from it."""
+    by_code: dict[str, int] = {}
     for e in stage3b.get("entries", []):
         if e.get("element_type") in ("header", "break"):
             continue
@@ -314,10 +307,31 @@ def lint_taxonomy_code_coverage(stage3b: Dict) -> List[Dict]:
         if code in RENDER_ROUTED_CODES or code in _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES:
             continue
         by_code[code] = by_code.get(code, 0) + 1
+    return by_code
 
+
+def lint_taxonomy_code_coverage(stage3b: Dict) -> List[Dict]:
+    """Entries classified into a taxonomy code stage 6 has no render route
+    for at all -- they land in the Appendix by construction, regardless of
+    confidence or content (#529, e.g. N2 "Institutional Training Grants and
+    Mentored Trainee Grants").
+
+    Distinct from lint_classified_unrendered just above: that lint asks
+    whether an entry's text appears ANYWHERE in the rendered output, and
+    appendix content passes that check (the text is there, just in the
+    Appendix), so it cannot see this class -- #529's own investigation hit
+    exactly that blind spot. This lint instead asks a structural question
+    that needs no rendered document at all: does this code have a dispatch
+    path in generate().
+
+    #816: always INFO now -- it fired on 10 of 40 runs in the 2026-09-11
+    batch reporting the same handful of known orphan codes (N1/N2/N3/M4A)
+    every time, which is a routing-coverage METRIC (moved to the doctor's
+    `metrics` block as `unrouted_code_entries`), not a per-run WARN."""
+    by_code = unrouted_code_counts(stage3b)
     return [
         _finding(
-            "taxonomy_code_coverage", "WARN",
+            "taxonomy_code_coverage", "INFO",
             f"taxonomy code {code}: {count} entries classified but stage 6 "
             f"has no render route for this code -- routed to the Appendix "
             f"by construction, not by content or confidence",
