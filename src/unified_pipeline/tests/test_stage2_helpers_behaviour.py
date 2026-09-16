@@ -32,8 +32,6 @@ Run with:
 import sys
 from pathlib import Path
 
-import pytest
-
 # Ensure the repo's ``src`` directory is importable regardless of cwd/rootdir.
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -444,20 +442,12 @@ def test_remove_subset_delimiters_bare_span_unrelated_to_any_split_table_kept():
     assert 114 in [d["element_idx_start"] for d in kept]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "suspected bug (#855): content_lines() drops every line under 12 chars, so "
-        "a table-parent whose full text is entirely short cells (e.g. 'PI', "
-        "'2020') yields an empty set; all(x for x in <empty>) is vacuously "
-        "True, so is_redundant_table_parent treats it as a PROVEN duplicate "
-        "and drops it even though nothing was actually checked against the "
-        "sibling rows -- contradicts the function's own stated invariant "
-        "that a parent is dropped only when 'every content line is already "
-        "present in its own surviving rows'."
-    ),
-)
 def test_remove_subset_delimiters_short_only_parent_is_not_vacuously_dropped():
+    """#855: content_lines() drops every line under 12 chars, so a
+    table-parent whose full text is entirely short cells (e.g. 'PI',
+    '2020') yields an empty set; all(x for x in <empty>) is vacuously True,
+    so is_redundant_table_parent must not treat that as a PROVEN duplicate
+    -- nothing was actually checked against the sibling rows."""
     blob = _d(50, text="PI\n2020\nWCM")
     row = _d("50.1", text="totally unrelated row content that is unverified")
     kept = remove_subset_delimiters([blob, row])

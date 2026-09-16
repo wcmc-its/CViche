@@ -358,7 +358,16 @@ def remove_subset_delimiters(delimiters: list) -> list:
             rows = sub_row_parents[main]
             haystack = " \n ".join(str(r.get("text", "")) for r in rows)
             haystack = " ".join(haystack.replace("\t", " ").split()).lower()
-            return all(line in haystack for line in content_lines(d.get("text", "")))
+            lines = content_lines(d.get("text", ""))
+            if not lines:
+                # Every line of the parent's own text was under the 12-char
+                # noise floor (e.g. "PI\n2020\nWCM"): all(... for x in <empty
+                # set>) is vacuously True, which would read as "every content
+                # line already proven present in the sibling rows" when in
+                # fact nothing was checked at all. Not proven -> not
+                # redundant; leave the parent in place (#855).
+                return False
+            return all(line in haystack for line in lines)
 
         delimiters = [d for d in delimiters if not is_redundant_table_parent(d)]
 
