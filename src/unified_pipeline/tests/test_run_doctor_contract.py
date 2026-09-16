@@ -153,10 +153,11 @@ def test_known_lints_has_no_duplicates_and_is_not_empty():
     """Guard the guard: an empty or duplicated tuple would pass the checks above."""
     known = _module().KNOWN_LINTS
     assert len(known) == len(set(known)), f"duplicate entries in KNOWN_LINTS: {known}"
-    assert len(known) == 19, (
-        f"KNOWN_LINTS changed size ({len(known)}, was 18). That is fine if a "
-        f"lint was genuinely added or removed -- update this count and say so "
-        f"in the commit message."
+    assert len(known) == 21, (
+        f"KNOWN_LINTS changed size ({len(known)}, was 20 -- #820 added "
+        f"protected_data_in_output). That is fine if a lint was genuinely "
+        f"added or removed -- update this count and say so in the commit "
+        f"message."
     )
 
 
@@ -191,12 +192,9 @@ def test_the_lint_prefix_is_not_a_reliable_rule_marker():
 #: Adding to this list is fine. REMOVING from it is a breaking change, and it is
 #: the one the split is most likely to make by accident.
 RUN_DOCTOR_IMPORT_SURFACE = (
-    "APPENDIX_WARN_ENTRIES",
     "CLASSIFIED_UNRENDERED_WARN_ENTRIES",
     "DUPLICATE_PASSAGE_MIN_BLOCKS",
     "MISSED_HEADERS_WARN_COUNT",
-    "TABLE_SHAPE_WARN_DEFECTS",
-    "TABLE_SHAPE_WARN_ROW_RATIO",
     "_docx_text",
     "_find_artifact",
     "_find_source",
@@ -209,11 +207,13 @@ RUN_DOCTOR_IMPORT_SURFACE = (
     "lint_duplicate_passages",
     "lint_enrichment_failures",
     "lint_missed_headers",
+    "lint_no_output",
     "lint_output_hygiene",
     "lint_owner_contact_missing",
     "lint_pipe_leaks",
     "lint_pipeline_errors",
     "lint_segmentation",
+    "lint_stage3b_fallback_ratio",
     "lint_stage6_warnings",
     "lint_surprise",
     "lint_table_shape",
@@ -243,9 +243,13 @@ def test_run_doctor_symbol_is_still_importable(name):
 
 def test_the_surface_list_is_not_silently_empty():
     """A refactor that emptied the tuple would make the test above vacuous."""
-    assert len(RUN_DOCTOR_IMPORT_SURFACE) == 33, (
+    assert len(RUN_DOCTOR_IMPORT_SURFACE) == 32, (
         "the pinned run_doctor import surface changed size -- if that is "
-        "intentional, update the count and say why in the commit message"
+        "intentional, update the count and say why in the commit message "
+        "(#816 removed APPENDIX_WARN_ENTRIES/TABLE_SHAPE_WARN_DEFECTS/"
+        "TABLE_SHAPE_WARN_ROW_RATIO, now dead once their severity thresholds "
+        "were retired; #810/#745 added lint_stage3b_fallback_ratio/"
+        "lint_no_output: 33 - 3 + 2 = 32)"
     )
 
 
@@ -260,11 +264,12 @@ def test_known_lints_literal_expected_order():
     fails even when the AST-derived side was reordered to match."""
     assert tuple(_module().KNOWN_LINTS) == (
         "segmentation", "missed_headers", "bucket_status", "under_extraction",
-        "classified_unrendered", "taxonomy_code_coverage", "output_hygiene",
+        "classified_unrendered", "taxonomy_code_coverage",
+        "stage3b_fallback_ratio", "output_hygiene",
         "dead_sections", "unrendered_records", "enrichment_failures",
         "stage6_render_warnings", "dedup_drops", "pipe_leaks", "table_shape",
         "duplicate_passages", "duplicate_records", "protected_data_in_output",
-        "owner_contact_missing", "pipeline_errors_present",
+        "owner_contact_missing", "pipeline_errors_present", "no_output",
     )
 
 
@@ -376,15 +381,16 @@ def test_run_doctor_report_shape_and_values(tmp_path):
 
 # --- contract 4: review round 2 on #725 (run_doctor.py thread) ---------------
 
-def test_known_lints_is_the_registry_order_plus_the_two_gates():
+def test_known_lints_is_the_registry_order_plus_the_three_gates():
     """Item 5: the dispatch order is now an OBJECT (`LINT_REGISTRY`) rather
     than a block of if-statements. KNOWN_LINTS must be that order followed
-    by the two hard-fail gates, which keep their hand-written dispatch; this
-    is the one place the two are pinned against each other at runtime, not
-    through the AST."""
+    by the three hard-fail gates, which keep their hand-written dispatch
+    (owner_contact_missing/pipeline_errors_present, joined by no_output in
+    #745); this is the one place the two are pinned against each other at
+    runtime, not through the AST."""
     mod = _module()
     assert tuple(spec.lint_id for spec in mod.LINT_REGISTRY) + (
-        "owner_contact_missing", "pipeline_errors_present",
+        "owner_contact_missing", "pipeline_errors_present", "no_output",
     ) == tuple(mod.KNOWN_LINTS)
 
 

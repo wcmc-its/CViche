@@ -130,10 +130,11 @@ def configure_cli_logging() -> None:
 
     stdout: this module's INFO records, formatted as the message and nothing
     else. That is the narration AND a cross-process contract --
-    scripts/run_corpus_batch.sh:142-147 greps `Top-level sections:`,
-    `Total headers:`, `Entries extracted:`, `Entries classified:` and an
-    ANCHORED `^Models: ` out of this stdout, so a timestamp or level in front
-    of a line blanks a column of summary.tsv. CODING_STANDARDS.md 7.1 names it;
+    scripts/run_corpus_batch.sh:152-163 greps `Top-level sections:`,
+    `Total headers:`, `Entries extracted:`, `Entries classified:`,
+    `Entries defaulted:` (#810) and an ANCHORED `^Models: ` out of this
+    stdout, so a timestamp or level in front of a line blanks a column of
+    summary.tsv. CODING_STANDARDS.md 7.1 names it;
     src/unified_pipeline/tests/test_run_full_pipeline_stdout_contract.py pins it.
 
     stderr: everything else, timestamped -- WARNING and above from here
@@ -709,13 +710,26 @@ def _stage_3b(ctx: PipelineContext) -> StageResult:
     result = run_stage_3b(document_uid=ctx.document_uid,
                           stage_3a_path=ctx.best_input('3a'))
     cost = result['stats']['cost']
+    # #810 decision 4: `total_entries` counts every classified entry
+    # REGARDLESS of whether it got a real code or fell back to a default one
+    # on an LLM failure -- summary.tsv's `classified` column was silently
+    # counting fallbacks as classifications (web30: 510 of 1019 entries
+    # defaulted, still read `cls=1019`). `llm_classified` is entries that
+    # actually received a real code; `fallback_entries` is the rest. The
+    # 'Entries classified:' literal is unchanged -- it is a parsed contract
+    # (run_corpus_batch.sh, test_run_full_pipeline_stdout_contract.py) -- only
+    # the VALUE logged changes, and a new 'Entries defaulted:' line is added.
+    llm_classified = result['stats']['llm_classified']
+    fallback_entries = result['stats']['fallback_entries']
     logger.info("")
     logger.info("Stage 3b Complete")
     logger.info("  Output: %s", result['output_path'])
-    logger.info("  Entries classified: %s", result['total_entries'])
+    logger.info("  Entries classified: %s", llm_classified)
+    logger.info("  Entries defaulted: %s", fallback_entries)
     logger.info("  Cost: $%.4f", cost)
     return StageResult(stage='3b', output_file=str(result['output_path']), cost=cost,
-                       stats={'entries_classified': result['total_entries'],
+                       stats={'entries_classified': llm_classified,
+                              'fallback_entries': fallback_entries,
                               'code_distribution': result.get('code_distribution', {})})
 
 
@@ -991,7 +1005,13 @@ def _print_processing_stats(result: PipelineResult) -> None:
         logger.info("  Header nodes mapped: %s", stage_3a.stats['node_count'])
     stage_3b = result.results.get('stage_3b')
     if stage_3b is not None and 'entries_classified' in stage_3b.stats:
+        # This is the occurrence `run_corpus_batch.sh`'s `tail -1` actually
+        # reads (see the module docstring on print_summary below) -- the
+        # per-stage narration in _stage_3b() logs the same two literals
+        # first, but this later copy is the one summary.tsv's `classified`/
+        # `defaulted` columns come from.
         logger.info("  Entries classified: %s", stage_3b.stats['entries_classified'])
+        logger.info("  Entries defaulted: %s", stage_3b.stats.get('fallback_entries', 0))
     stage_4 = result.results.get('stage_4')
     if stage_4 is not None and 'entries_extracted' in stage_4.stats:
         logger.info("  Fields extracted: %s", stage_4.stats['entries_extracted'])
@@ -1015,10 +1035,11 @@ def _print_code_distribution(stage_3b: StageResult | None) -> None:
 def print_summary(result: PipelineResult, ctx: PipelineContext) -> None:
     """The run's operator-facing report.
 
-    Four of its lines are a cross-process contract, not decoration:
-    ``scripts/run_corpus_batch.sh:142-147`` greps ``Top-level sections:``,
-    ``Total headers:``, ``Entries extracted:``, ``Entries classified:`` and an
-    anchored ``^Models: `` out of this stdout into ``summary.tsv``. Pinned by
+    Five of its lines are a cross-process contract, not decoration:
+    ``scripts/run_corpus_batch.sh:152-163`` greps ``Top-level sections:``,
+    ``Total headers:``, ``Entries extracted:``, ``Entries classified:``,
+    ``Entries defaulted:`` (#810) and an anchored ``^Models: `` out of this
+    stdout into ``summary.tsv``. Pinned by
     ``src/unified_pipeline/tests/test_run_full_pipeline_stdout_contract.py``.
     """
     logger.info("=" * _BANNER_WIDTH)
