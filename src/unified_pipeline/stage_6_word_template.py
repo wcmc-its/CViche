@@ -674,7 +674,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 tbl._element.getparent().remove(tbl._element)
                 removed += 1
         if removed and self.verbose:
-            print(f"Removed {removed} WCM-template instruction box(es)")
+            logger.info(f"Removed {removed} WCM-template instruction box(es)")
 
     def _load_cv_owner_location_from_stage4(self, document_uid: str, cv_owner_location: dict[str, Any]) -> dict[str, Any]:
         stage4_dir = Path(__file__).parent / "outputs" / "stage_4_field_extraction"
@@ -685,13 +685,15 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                     stage4_data = json.load(f)
                 cv_owner_location = stage4_data.get('cv_owner_location', {})
                 if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
-                    print(f"Loaded cv_owner_location from Stage 4 output")
-            except Exception as e:
+                    logger.info("Loaded cv_owner_location from Stage 4 output")
+            except (OSError, ValueError) as e:
                 # Non-fatal: geographic-scope classification just falls back to its
                 # default. Still say so -- a permission error or a truncated stage-4
-                # JSON should not vanish without a trace.
+                # JSON should not vanish without a trace. Only file and JSON errors
+                # are expected here; a code bug must surface, not read as a missing
+                # file (#531 review).
                 if self.verbose:
-                    print(f"  Warning: Could not load cv_owner_location from Stage 4: {e}")
+                    logger.warning(f"Could not load cv_owner_location from Stage 4: {e}")
         return cv_owner_location
 
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
@@ -936,12 +938,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             validation_issues, written_appendix_entries, recovered_appendix_codes)
 
         if validation_issues:
-            print(f"\n{'!'*60}")
-            print("VALIDATION WARNINGS")
-            print(f"{'!'*60}")
+            logger.warning("!" * 60)
+            logger.warning("VALIDATION WARNINGS")
+            logger.warning("!" * 60)
             for issue in validation_issues:
-                print(f"  ⚠ {issue['message']}")
-            print(f"{'!'*60}")
+                logger.warning(f"  ⚠ {issue['message']}")
+            logger.warning("!" * 60)
 
         # Persist the self-check warnings and dedup decision trail next to
         # the docx so the run doctor can re-emit them (#227/#228) — until now
@@ -1913,7 +1915,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         self.stats['overflow_to_appendix'] += 1
         if self.verbose:
             taxonomy_code = entry.get('taxonomy_code', '?')
-            print(f"  Queued for reconsideration: {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
+            logger.info(f"  Queued for reconsideration: {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
 
     def _reconsider_appendix_entries(self) -> list[str]:
         """Analyze appendix-pending entries and reclassify segments to appropriate sections.
@@ -1933,7 +1935,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return []
 
         if self.verbose:
-            print(f"\nReconsidering {len(self._appendix_pending)} appendix entries...")
+            logger.info(f"Reconsidering {len(self._appendix_pending)} appendix entries...")
 
         # Collect all segments that could be reclassified
         segments_to_route = []  # List of (segment_text, taxonomy_code, original_entry)
@@ -1980,7 +1982,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             recovered_codes = self._add_remaining_to_appendix(remaining_for_appendix)
 
         if self.verbose and segments_to_route:
-            print(f"  Reclassified {len(segments_to_route)} segments to other sections")
+            logger.info(f"  Reclassified {len(segments_to_route)} segments to other sections")
 
         return recovered_codes
 
@@ -2408,8 +2410,8 @@ Now analyze the text above:"""
             recovered_codes = self._add_remaining_to_appendix(appendix_batch)
 
         if self.verbose and n_recovered:
-            print(f"  Recovered {n_recovered} unrendered record line(s) "
-                  f"({len(appendix_batch)} routed to appendix)")
+            logger.info(f"  Recovered {n_recovered} unrendered record line(s) "
+                        f"({len(appendix_batch)} routed to appendix)")
 
         return recovered_codes
 
