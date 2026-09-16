@@ -33,18 +33,20 @@ from app.storage.base import StorageKeyExists
 from app.services.template_warning import detect_wcm_template
 
 logger = logging.getLogger(__name__)
-PDF_MAGIC = b"%PDF-"
 ZIP_MAGIC = b"PK\x03\x04"
+
+# Extensions the upload API accepts, matching the frontend's ".docx only" guard
+# (UploadPage.tsx's dropzone caption and error, HelpPage.tsx's "accepts .docx
+# ... files only"). PDF was accepted here until #524: every downstream reader
+# (stage 1a/1b/2's docx_structure_extractor, stage 2, stage 6) is python-docx
+# only, so a PDF upload always died at stage 1a. PDF ingest via a conversion
+# step is tracked separately as #806, not implemented here.
+ALLOWED_UPLOAD_EXTENSIONS = (".docx",)
 
 # Minimum extracted text (characters) for a document to be considered readable.
 # A real CV runs into the thousands of characters; anything below this is almost
 # certainly a scanned image, a password-protected file, or effectively blank.
 MIN_EXTRACTED_CHARS = 500
-
-
-def _validate_pdf_magic(content: bytes) -> bool:
-    """Check if content starts with PDF magic bytes."""
-    return content[:5] == PDF_MAGIC
 
 
 def _validate_docx_magic(content: bytes) -> bool:
@@ -81,20 +83,6 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
                         for cell in row.cells:
                             if cell.text.strip():
                                 parts.append(cell.text)
-                return "\n".join(parts)
-            finally:
-                os.unlink(tmp_path)
-
-        elif file_ext == ".pdf":
-            import pdfplumber
-            with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-            try:
-                parts = []
-                with pdfplumber.open(tmp_path) as pdf:
-                    for page in pdf.pages:
-                        parts.append(page.extract_text() or "")
                 return "\n".join(parts)
             finally:
                 os.unlink(tmp_path)
@@ -326,8 +314,11 @@ async def upload_cv(
         raise bad_request("No filename provided")
 
     file_ext = Path(file.filename).suffix.lower()
-    if file_ext not in [".docx", ".pdf"]:
-        raise bad_request(f"Unsupported file type: {file_ext}. Only .docx and .pdf are supported.")
+    if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise bad_request(
+            f"Unsupported file type: {file_ext}. Only .docx files are supported. "
+            "Please convert your file to .docx before uploading."
+        )
 
     # Check rate limit (after file validation so bad uploads don't count)
     rate_limit_error = check_rate_limit(current_user, db)
@@ -342,10 +333,7 @@ async def upload_cv(
         raise bad_request(f"File too large ({len(content) // (1024*1024)} MB). Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.")
 
     # Validate magic bytes match claimed extension
-    if file_ext == ".pdf" and not _validate_pdf_magic(content):
-        logger.warning("[SECURITY] Rejected upload: file claims .pdf but magic bytes do not match (user=%s)", current_user.email)
-        raise bad_request("File content does not match .pdf format. The file may be corrupted or mislabeled.")
-    elif file_ext == ".docx" and not _validate_docx_magic(content):
+    if file_ext == ".docx" and not _validate_docx_magic(content):
         logger.warning("[SECURITY] Rejected upload: file claims .docx but magic bytes do not match (user=%s)", current_user.email)
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
 
@@ -508,8 +496,11 @@ async def estimate_processing(
         raise bad_request("No filename provided")
 
     file_ext = Path(file.filename).suffix.lower()
-    if file_ext not in [".docx", ".pdf"]:
-        raise bad_request(f"Unsupported file type: {file_ext}. Only .docx and .pdf are supported.")
+    if file_ext not in ALLOWED_UPLOAD_EXTENSIONS:
+        raise bad_request(
+            f"Unsupported file type: {file_ext}. Only .docx files are supported. "
+            "Please convert your file to .docx before uploading."
+        )
 
     # Read file content
     content = await file.read()
@@ -519,10 +510,7 @@ async def estimate_processing(
         raise bad_request(f"File too large ({len(content) // (1024*1024)} MB). Maximum size is {MAX_UPLOAD_SIZE // (1024*1024)} MB.")
 
     # Validate magic bytes
-    if file_ext == ".pdf" and not _validate_pdf_magic(content):
-        logger.warning("[SECURITY] Rejected estimate: file claims .pdf but magic bytes do not match")
-        raise bad_request("File content does not match .pdf format. The file may be corrupted or mislabeled.")
-    elif file_ext == ".docx" and not _validate_docx_magic(content):
+    if file_ext == ".docx" and not _validate_docx_magic(content):
         logger.warning("[SECURITY] Rejected estimate: file claims .docx but magic bytes do not match")
         raise bad_request("File content does not match .docx format. The file may be corrupted or mislabeled.")
 
@@ -555,25 +543,6 @@ async def estimate_processing(
                 text_char_count = len(document_text)
             finally:
                 os.unlink(tmp_path)
-
-        elif file_ext == ".pdf":
-            # For PDFs, try to extract text using pypdf if available
-            try:
-                import pypdf
-                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-                    tmp.write(content)
-                    tmp_path = tmp.name
-                try:
-                    reader = pypdf.PdfReader(tmp_path)
-                    for page in reader.pages:
-                        document_text += page.extract_text() or ""
-                    text_char_count = len(document_text)
-                finally:
-                    os.unlink(tmp_path)
-            except ImportError:
-                # Fallback: rough estimate for PDFs (typically ~500-1000 chars per page, ~1 page per 30KB)
-                estimated_pages = max(1, len(content) // 30000)
-                text_char_count = estimated_pages * 2000  # ~2000 chars per page average
     except Exception as e:
         # Fallback: very rough estimate
         text_char_count = 5000  # Assume a typical CV has ~5000 characters
