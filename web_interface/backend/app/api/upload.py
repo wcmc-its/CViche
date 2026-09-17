@@ -92,7 +92,7 @@ def _extract_text(content: bytes, file_ext: str) -> str | None:
         # unreadable -> trip the guard (empty string) rather than fail open.
         if "password" in msg or "encrypt" in msg or "decrypt" in msg:
             return ""
-        logger.warning("Text extraction for empty-doc guard failed (%s): %s", file_ext, e)
+        logger.warning("Text extraction for empty-doc guard failed (%s): %s", file_ext, e, exc_info=True)
         return None
     return None
 
