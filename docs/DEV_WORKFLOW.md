@@ -72,7 +72,7 @@ The standing verdict on most reviews is:
 > suggestions, not bugs. If any of them cannot be addressed now, please leave a
 > comment explaining why. I will merge the PR as is."
 
-So a review is not a gate. The friction is in how we answer it. Five rules, all
+So a review is not a gate. The friction is in how we answer it. Six rules, all
 written from complaints we actually caused:
 
 1. **A reviewer ask on a file the PR already touches is fixed in the PR,
@@ -112,6 +112,14 @@ written from complaints we actually caused:
    written down anywhere, which is the actual cost of not having this rule.
    When the test does say yes, open a **PR**, not an issue: a filed issue with
    no PR attached is where findings go to be forgotten (see rule 3 below).
+   `CODING_STANDARDS.md` §8.1 ("type a record only in code the PR already
+   changes") is not an exemption from this rule either — it is the same test.
+   On #874 (2026-09-17) a file-level ask to type the stage-1b section dicts
+   was declined under §8.1 and #879 filed, on a PR whose diff already covered
+   254 lines of that module; the reviewer: *"I'm not sure why Claude keeps
+   deferring these tasks. Please address them in this PR instead."* It was
+   typed in the PR the same day (`TypedDict`, mypy-gated) and #879 closes
+   with it. If the file is in the diff, the ask is in the PR.
 2. **Never decline without a reason.** "Declined" with no explanation drew the
    same objection seven times across #514 and #517 — *"Declined without any
    explanation."* Say what you considered and why it does not apply here.
@@ -155,6 +163,21 @@ written from complaints we actually caused:
    that is the half we actually missed on #625, and it is the half that makes a
    round look finished when it is not. Leave every thread open for the reviewer
    to close.
+6. **Check the state of every issue or PR you reference, and say it.** A bare
+   `#N` is a claim about the world at the moment you write it, and the reader
+   follows every pointer. On #875 (2026-09-17) a reply said the rest of a
+   module's `print()` migration "is its own PR in the #859 shape" — #859 was
+   the already-merged stage-6 migration, so the sentence read as handing work
+   to a PR that no longer existed. The reviewer, relayed by Paul: *"it doesn't
+   check whether an existing issue or PR is open or closed before referencing
+   it... we should instruct it to verify the status of any referenced items
+   first."* So, before posting: look each number up (`gh pr view N --json
+   state,mergedAt`, `gh issue view N --json state`) and write the state next to
+   it the first time it appears — `#859 (merged)`, `#879 (open)`, `#806
+   (closed)`. A merged PR is cited as *where something landed* (with the `dev`
+   SHA), never as *where something will happen*; a closed issue is not a
+   tracking target. This is the same failure as rule 3's unfindable pointer,
+   one step earlier: the pointer resolves, but to the wrong tense.
 
 ### What reviews here consistently ask for
 
