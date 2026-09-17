@@ -186,6 +186,11 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     ServiceSection,
     TeachingSection,
 )
+from unified_pipeline.stage6.sections.appendix import (
+    UnmappedEntry,
+    build_appendix_diversion_warnings,
+)
+from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
@@ -411,8 +416,21 @@ RENDER_ROUTED_CODES = frozenset({
 _DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1'})
 
 
-
-
+def _merge_appendix_diversion_warnings(
+    issues: list[dict], written: list[UnmappedEntry], recovered: list[str],
+) -> list[dict]:
+    """Append #531/#531-R2 per-(code, reason) Appendix-diversion warnings
+    (from what `_fill_appendix`/`_add_remaining_to_appendix` report they
+    wrote, never re-derived from the document) to *issues*; unchanged when
+    there is nothing to add. Passes `PASSTHROUGH_CODES` down rather than
+    letting `appendix.py` import it from `passthrough.py` directly -- both
+    are `stage6/sections/*` peers (CODING_STANDARDS.md 1.3, `[gate]`); this
+    module is not a peer of either and is free to import both (#531-R3
+    task 4)."""
+    if not written and not recovered:
+        return issues
+    return issues + build_appendix_diversion_warnings(
+        written, recovered, RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
 
 
 # Personal data that must not be carried onto a WCM CV. Source CVs routinely
@@ -681,6 +699,26 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         if removed and self.verbose:
             logger.info(f"Removed {removed} WCM-template instruction box(es)")
 
+    def _load_cv_owner_location_from_stage4(self, document_uid: str, cv_owner_location: dict[str, Any]) -> dict[str, Any]:
+        stage4_dir = Path(__file__).parent / "outputs" / "stage_4_field_extraction"
+        stage4_candidates = list(stage4_dir.glob(f"*{document_uid}*_fields.json"))
+        if stage4_candidates:
+            try:
+                with open(stage4_candidates[0], 'r') as f:
+                    stage4_data = json.load(f)
+                cv_owner_location = stage4_data.get('cv_owner_location', {})
+                if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
+                    logger.info("Loaded cv_owner_location from Stage 4 output")
+            except (OSError, ValueError) as e:
+                # Non-fatal: geographic-scope classification just falls back to its
+                # default. Still say so -- a permission error or a truncated stage-4
+                # JSON should not vanish without a trace. Only file and JSON errors
+                # are expected here; a code bug must surface, not read as a missing
+                # file (#531 review).
+                if self.verbose:
+                    logger.warning(f"Could not load cv_owner_location from Stage 4: {e}")
+        return cv_owner_location
+
     def _group_and_dedup_entries(
         self, entries: list[dict[str, Any]]
     ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
@@ -765,21 +803,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         # If cv_owner_location not in input file, try to load from Stage 4 output
         if not cv_owner_location or not cv_owner_location.get('inference_success'):
-            stage4_dir = Path(__file__).parent / "outputs" / "stage_4_field_extraction"
-            stage4_candidates = list(stage4_dir.glob(f"*{document_uid}*_fields.json"))
-            if stage4_candidates:
-                try:
-                    with open(stage4_candidates[0], 'r') as f:
-                        stage4_data = json.load(f)
-                    cv_owner_location = stage4_data.get('cv_owner_location', {})
-                    if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
-                        logger.info("Loaded cv_owner_location from Stage 4 output")
-                except Exception as e:
-                    # Non-fatal: geographic-scope classification just falls back
-                    # to its default. Still say so -- a permission error or a
-                    # truncated stage-4 JSON should not vanish without a trace.
-                    if self.verbose:
-                        logger.warning(f"  Warning: Could not load cv_owner_location from Stage 4: {e}")
+            cv_owner_location = self._load_cv_owner_location_from_stage4(document_uid, cv_owner_location)
 
         # Store location context for geographic scope classification
         self.cv_owner_location = cv_owner_location if cv_owner_location and cv_owner_location.get('inference_success') else None
@@ -924,22 +948,20 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # second time. They are recovered after every section has rendered, by
         # _unconsumed_personal_data_batch.
 
+        written_appendix_entries: list[UnmappedEntry] = []
         if unmapped_entries:
-            self._render_section('appendix', lambda: self._fill_appendix(unmapped_entries))
+            written_appendix_entries = self._render_section(
+                'appendix', lambda: self._fill_appendix(unmapped_entries)) or []
 
         # Route content-overflow entries as tracked-change bullets
         self._route_overflow_entries()
 
-        # Reconsider appendix entries - reclassify segments to appropriate sections
-        self._reconsider_appendix_entries()
-
-        # Post-render safety net: re-emit record lines the structured render
-        # dropped (#221). Runs after the overflow/reconsider passes so their
-        # inserts count as rendered, and before comment finalization and
-        # instruction-box removal (anchor lookups are text-based). Scans the
-        # PRE-dedup entries so records fused into a deduped-away entry are
-        # still checked.
-        self._recover_unrendered_records(pre_dedup_entries_by_code)
+        # Reconsider appendix entries (reclassify segments to other sections)
+        # then recover unrendered records (#221, after reconsider so its
+        # inserts count as rendered) -- both bullet leftover content into the
+        # Appendix and report back each bullet's code (#531-R2 finding F1).
+        recovered_appendix_codes = list(self._reconsider_appendix_entries() or [])
+        recovered_appendix_codes += self._recover_unrendered_records(pre_dedup_entries_by_code) or []
 
         # Finalize comments (add to comments.xml)
         self._finalize_comments()
@@ -970,6 +992,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # and the sidecar, so a missing section is never quieter than a
         # cosmetic self-check finding.
         validation_issues = self._validate_output()
+
+        # Appendix-diversion warnings (#531, #531-R2) -- see the helper's
+        # own docstring for what it merges and why.
+        validation_issues = _merge_appendix_diversion_warnings(
+            validation_issues, written_appendix_entries, recovered_appendix_codes)
+
         all_warnings = self._section_failures + validation_issues
         if all_warnings:
             logger.warning("!" * 60)
@@ -1983,7 +2011,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             taxonomy_code = entry.get('taxonomy_code', '?')
             logger.info(f"  Queued for reconsideration: {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
 
-    def _reconsider_appendix_entries(self):
+    def _reconsider_appendix_entries(self) -> list[str]:
         """Analyze appendix-pending entries and reclassify segments to appropriate sections.
 
         For each entry queued for appendix, this method:
@@ -1991,9 +2019,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         2. Uses LLM to classify each segment to a taxonomy code
         3. Routes segments to appropriate WCM sections as bullets
         4. Only truly unmappable content remains for the appendix
+
+        Returns the taxonomy code of each bullet `_add_remaining_to_appendix`
+        actually wrote for the entries that stayed unmappable (#531-R2
+        finding F1) -- `[]` when nothing was pending or everything was
+        reclassified elsewhere.
         """
         if not self._appendix_pending:
-            return
+            return []
 
         if self.verbose:
             logger.info(f"\nReconsidering {len(self._appendix_pending)} appendix entries...")
@@ -2038,11 +2071,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 remaining_for_appendix.append((segment_text, new_code, 0.0))
 
         # Add remaining unmappable content to appendix
+        recovered_codes: list[str] = []
         if remaining_for_appendix:
-            self._add_remaining_to_appendix(remaining_for_appendix)
+            recovered_codes = self._add_remaining_to_appendix(remaining_for_appendix)
 
         if self.verbose and segments_to_route:
             logger.info(f"  Reclassified {len(segments_to_route)} segments to other sections")
+
+        return recovered_codes
 
     def _reclassify_entry_segments(self, text: str, original_code: str) -> List[Tuple[str, str]]:
         """Use LLM to segment and reclassify content from an appendix entry.
@@ -2285,8 +2321,16 @@ Now analyze the text above:"""
         # Fallback to end of section
         return self._find_section_end_paragraph_idx(header_idx)
 
-    def _add_remaining_to_appendix(self, remaining: List[Tuple[str, str, float]]):
-        """Add remaining unmappable segments to the appendix."""
+    def _add_remaining_to_appendix(self, remaining: List[Tuple[str, str, float]]) -> list[str]:
+        """Add remaining unmappable segments to the appendix as bullet lines.
+
+        Returns the taxonomy code of each segment actually written -- one
+        entry per "• text" bullet, in write order -- the same "report back
+        what was actually consumed" contract `_fill_appendix` and the
+        passthrough writers use (#531-R2 finding F1). A segment this method
+        drops (blank, template-instruction, source-boilerplate) is NOT in
+        the returned list.
+        """
         # Filter BEFORE creating the section header so an all-noise batch
         # doesn't leave an empty T. APPENDIX behind (#213).
         remaining = [
@@ -2296,7 +2340,7 @@ Now analyze the text above:"""
             and not is_source_boilerplate(text)
         ]
         if not remaining:
-            return
+            return []
 
         # Find or create the T. APPENDIX section
         appendix_idx = self._find_paragraph_with_text("T. APPENDIX")
@@ -2330,6 +2374,8 @@ Now analyze the text above:"""
                 f"to a template section.",
                 author="Classification",
             )
+
+        return [code for _, code, _ in remaining]
 
     def _rendered_output_lines(self) -> List[str]:
         """Every rendered text line of the in-memory document: body paragraphs
@@ -2367,7 +2413,7 @@ Now analyze the text above:"""
             walk_table(tbl)
         return lines
 
-    def _recover_unrendered_records(self, entries_by_code: Dict[str, List[Dict]]):
+    def _recover_unrendered_records(self, entries_by_code: Dict[str, List[Dict]]) -> list[str]:
         """Post-render safety net (#221): re-emit record lines the structured
         render dropped.
 
@@ -2383,9 +2429,14 @@ Now analyze the text above:"""
         fallback. Lines that cannot be VERIFIED absent are never re-inserted:
         duplicating faculty-facing content is worse than leaving a loss for the
         offline doctor to flag.
+
+        Returns the taxonomy code of each bullet `_add_remaining_to_appendix`
+        actually wrote for the lines that landed in the appendix fallback
+        (#531-R2 finding F1) -- `[]` when the pass is disabled or nothing
+        fell through to the appendix.
         """
         if not self.recover_unrendered_records:
-            return
+            return []
 
         out_lines = self._rendered_output_lines()
         haystack = "\x00".join(_squash(line) for line in out_lines)
@@ -2452,12 +2503,15 @@ Now analyze the text above:"""
 
         appendix_batch.extend(self._unconsumed_personal_data_batch(haystack))
 
+        recovered_codes: list[str] = []
         if appendix_batch:
-            self._add_remaining_to_appendix(appendix_batch)
+            recovered_codes = self._add_remaining_to_appendix(appendix_batch)
 
         if self.verbose and n_recovered:
             logger.info(f"  Recovered {n_recovered} unrendered record line(s) "
-                  f"({len(appendix_batch)} routed to appendix)")
+                        f"({len(appendix_batch)} routed to appendix)")
+
+        return recovered_codes
 
     def _unconsumed_personal_data_batch(self, haystack: str
                                         ) -> List[Tuple[str, str, float]]:
