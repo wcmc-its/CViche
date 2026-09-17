@@ -54,7 +54,7 @@ This pipeline parses academic/faculty CVs (Word documents) and produces structur
 │  │  │  Stage 4  │──▶│ Stage 4.5 │──▶│  Stage 5  │──▶│ Stage 5b  │        │   │
 │  │  │  Field    │   │  Research │   │  PubMed   │   │Institution│        │   │
 │  │  │ Extract   │   │  Summary  │   │  Enrich   │   │  Enrich   │        │   │
-│  │  │  (LLM)    │   │  (LLM)    │   │ (API)     │   │ (ROR API) │        │   │
+│  │  │  (LLM)    │   │  (LLM)    │   │ (API)     │   │   (LLM)   │        │   │
 │  │  └───────────┘   └───────────┘   └───────────┘   └─────┬─────┘        │   │
 │  └────────────────────────────────────────────────────────│──────────────┘   │
 │                                                           │                  │
@@ -101,9 +101,9 @@ This pipeline parses academic/faculty CVs (Word documents) and produces structur
 ```
 Stage order: 1a → 1b → 2 → 3a → 3b → 4 → 4.5 → 5 → 5b → 6
 
-LLM stages:         1a, 3a, 3b, 4, 4.5  (require OpenAI API)
+LLM stages:         1a, 3a, 3b, 4, 4.5, 5b  (require OpenAI API)
 Deterministic:      1b, 2               (no API calls)
-External API:       5, 5b               (PubMed/NCBI, ROR)
+External API:       5                   (PubMed/NCBI)
 Document Gen:       6                   (python-docx)
 
 Inputs/Outputs:
@@ -188,9 +188,9 @@ Word Document (.docx)
     │
     ▼
 ┌─────────────────────────────────────┐
-│  Stage 5b: Institution Enrichment   │  External API (ROR)
+│  Stage 5b: Institution Enrichment   │  LLM
 │  Add institution location data      │
-│  (city, state, country) via ROR     │
+│  (city, state, country) via LLM     │
 └─────────────────────────────────────┘
     │
     ▼
@@ -214,7 +214,7 @@ WCM Word Document (.docx)
 | **4** | Extract structured fields | LLM | Stage 3b JSON | `_fields.json` |
 | **4.5** | Generate research summary (M1) | LLM | Stage 4 JSON | `_research_summary.json` |
 | **5** | Enrich publications with PubMed | NCBI API | Stage 4 JSON | `_enriched.json` |
-| **5b** | Enrich institutions with ROR | ROR API | Stage 5 JSON | `_institution_enriched.json` |
+| **5b** | Enrich institutions with LLM | LLM | Stage 5 JSON | `_institution_enriched.json` |
 | **6** | Generate WCM Word template | None | Best available JSON | `_wcm.docx` |
 
 ---
@@ -243,7 +243,7 @@ CV parsing - AI project/
 │   ├── stage_4_smart_extractor.py                # Stage 4 (two-tier: cheap model + retry)
 │   ├── stage_4_5_research_summary.py             # Stage 4.5 (LLM - M1 biosketch summary)
 │   ├── stage_5_pubmed_enrichment.py              # Stage 5 (NCBI API - PubMed metadata)
-│   ├── stage_5b_institution_enrichment.py        # Stage 5b (ROR API - institution location)
+│   ├── stage_5b_institution_enrichment.py        # Stage 5b (LLM - institution location)
 │   ├── stage_6_word_template.py                  # Stage 6 (Word doc generation)
 │   ├── core/
 │   │   ├── taxonomy_v7.json                      # Definitive taxonomy (59 codes)
@@ -261,8 +261,7 @@ CV parsing - AI project/
 │   │       ├── s7_unpublished.py                 # Unpublished work detection
 │   │       └── ...                               # Other validators
 │   ├── config/
-│   │   ├── field_schemas_v1.json                 # Field extraction schemas by taxonomy code
-│   │   └── ror_cache.json                        # Cached ROR lookups (auto-generated)
+│   │   └── field_schemas_v1.json                 # Field extraction schemas by taxonomy code
 │   └── outputs/                                  # All stage outputs (auto-created)
 │       ├── stage_1a_segmentation/
 │       ├── stage_1b_hierarchy_mapping/
@@ -364,7 +363,7 @@ python3 run_full_pipeline.py 2071_Zuschlag_Cv --stage 6
 | `4` | Stage 3b output (`_classified.json`) | LLM |
 | `4.5` | Stage 4 output (`_fields.json`) | LLM |
 | `5` | Stage 4 output (`_fields.json`) | NCBI API |
-| `5b` | Stage 5 output (`_enriched.json`) | ROR API |
+| `5b` | Stage 5 output (`_enriched.json`) | LLM |
 | `6` | Best available: 5b → 5 → 4 → 3b | No |
 
 **Behavior:**
@@ -730,7 +729,6 @@ See `config/field_schemas_v1.json` for complete field definitions.
         "year": "2005"
       },
       "institution_data": {
-        "ror_id": "https://ror.org/00za53h95",
         "official_name": "Johns Hopkins University",
         "city": "Baltimore",
         "state": "Maryland",
@@ -1112,7 +1110,6 @@ Typical CV (150 entries):
 - Stage 4: ~$0.02-0.08 (LLM, varies by two-tier strategy)
 - Stage 4.5: ~$0.01-0.02 (LLM)
 - Stage 5: $0 (PubMed API, free)
-- Stage 5b: $0 (ROR API, free)
 - Stage 6: $0 (local document generation)
 - **Total: ~$0.11-0.31 per CV (full pipeline)**
 
@@ -1477,7 +1474,6 @@ from unified_pipeline.stage_3_taxonomy_mapper import run_stage_3
 | **Extracted Fields** | Structured key-value pairs extracted from entry text (e.g., `{"authors": "...", "title": "..."}`) |
 | **Research Summary (M1)** | Biosketch-style narrative summarizing research activities and contributions |
 | **PubMed Enrichment** | Stage 5 process: add authoritative metadata from NCBI PubMed to publications |
-| **ROR** | Research Organization Registry - database for institution identification and location |
 | **Institution Enrichment** | Stage 5b process: add city/state/country data to education and position entries |
 | **WCM Template** | Weill Cornell Medicine standard CV format with predefined sections |
 | **CV Owner** | The person whose CV is being processed (used for name highlighting) |

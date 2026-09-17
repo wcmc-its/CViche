@@ -693,7 +693,7 @@ web_interface/
 - **Stages 3a/3b (Taxonomy Mapping):** LLM response parsing error. Check step logs for the raw LLM response.
 - **Stage 4 (Field Extraction):** Token limit exceeded for very large CVs. The step logs will show a `finish_reason: length` warning.
 - **Stage 5 (PubMed Enrichment):** Network connectivity to PubMed E-utilities API. Check firewall rules.
-- **Stage 5b (Institution Enrichment):** ROR API connectivity. Less common than PubMed failures.
+- **Stage 5b (Institution Enrichment):** LLM connectivity. Less common than PubMed failures.
 - **Stage 6 (WCM Word Template):** Template rendering error. Check the step logs for details.
 
 ### Rate limit message appears unexpectedly

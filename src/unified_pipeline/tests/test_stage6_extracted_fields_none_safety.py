@@ -129,6 +129,52 @@ def test_partition_tolerates_none_extracted_fields_in_ongoing_rule():
     assert partition.current == () and partition.past == ()
 
 
+# --- N1/N2: extracted_fields=None (#529) -----------------------------------------
+
+def _n1_n2_doc() -> WCMTemplateGenerator:
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+    gen.doc.add_paragraph(
+        "Leadership and mentoring in programs (Describe activity; include dates)")
+    gen.doc.add_paragraph(
+        "Institutional Training Grants and Mentored Trainee Grants")
+    return gen
+
+
+def test_n1_none_extracted_fields_renders_as_its_raw_text():
+    """`_fill_mentoring` reads `entry.get('extracted_fields') or {}`, the
+    #659-defended idiom, before handing fields to `_program_leadership_line`;
+    an explicit None degrades to the entry's text, same as an entry with no
+    fields at all -- never an AttributeError."""
+    gen = _n1_n2_doc()
+    entry = {'taxonomy_code': 'N1', 'text': 'Directed a mentoring initiative.',
+             'extracted_fields': None}
+
+    gen._fill_mentoring({'N1': [entry]})
+
+    assert _body_after(gen.doc, "Leadership and mentoring in programs "
+                       "(Describe activity; include dates)", 1) == [
+        ('p', 'Directed a mentoring initiative.')]
+    assert gen.stats['entries_inserted'] == 1
+
+
+def test_n2_none_extracted_fields_renders_as_its_raw_text():
+    """Same idiom for N2: a None `extracted_fields` reads as sparse (no
+    title/agency/grant_number), so it degrades to a plain line, not a
+    crash and not an empty table."""
+    gen = _n1_n2_doc()
+    entry = {'taxonomy_code': 'N2', 'text': 'A training grant with no fields.',
+             'extracted_fields': None}
+
+    gen._fill_mentoring({'N2': [entry]})
+
+    assert _body_after(gen.doc, "Institutional Training Grants and "
+                       "Mentored Trainee Grants", 1) == [
+        ('p', 'A training grant with no fields.')]
+    assert len(gen.doc.tables) == 0
+    assert gen.stats['entries_inserted'] == 1
+
+
 # --- mentoring: Past -> Current migration ---------------------------------------
 
 @pytest.mark.parametrize("fields", [

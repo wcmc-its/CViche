@@ -62,7 +62,7 @@ class PipelineConfig:
     # Run PubMed enrichment (critical for publication subsection accuracy)
     ENABLE_PUBMED_ENRICHMENT = True
 
-    # Run ROR enrichment (adds institution IDs)
+    # Legacy flag, unused: institution enrichment is LLM-based now, not ROR
     ENABLE_ROR_ENRICHMENT = True
 
     # Maximum number of sections to extract in parallel
