@@ -396,6 +396,37 @@ def _first_table_after(anchor: BaseOxmlElement) -> BaseOxmlElement | None:
     return None
 
 
+def _first_cell_text(table_element: BaseOxmlElement) -> str:
+    """The raw text of `table_element`'s first `w:tc`, or '' if it has none.
+
+    Reads the XML directly rather than wrapping in `docx.table.Table` --
+    `_first_table_after` hands us the bare element and this only needs one
+    cell's text, not the table object. Joins every `w:t` descendant's own
+    `.text` rather than using `itertext()`: python-docx's `CT_P`/`CT_R`
+    element classes override `.text` as a Python property that already
+    aggregates their own descendants' text, so `itertext()` walks those
+    overridden values too and repeats each run's text once per ancestor --
+    a lone "Name" run inside one paragraph inside one cell comes back
+    "NameNameName", not "Name".
+    """
+    first_tc = table_element.find(f'.//{qn("w:tc")}')
+    if first_tc is None:
+        return ''
+    return ''.join(t.text or '' for t in first_tc.findall(f'.//{qn("w:t")}'))
+
+
+def _looks_like_mentee_placeholder(table_element: BaseOxmlElement) -> bool:
+    """True when `table_element`'s first cell is exactly "Name" (#836, same
+    pattern as `leadership._looks_like_leadership_table`).
+
+    Exact match, not substring: other template tables' row-0 cell-0 CONTAINS
+    "name" without being a mentee placeholder -- "Name of Committee" (section
+    P) and "Name of award" (section elsewhere) -- so a substring test would
+    keep the very bug this guard exists to stop.
+    """
+    return _first_cell_text(table_element).strip().lower() == 'name'
+
+
 def _mentee_spacing_paragraph() -> BaseOxmlElement:
     """A blank paragraph with 6pt spacing before and after, for the gap
     between consecutive mentee tables."""
@@ -523,9 +554,16 @@ class MentoringSection:
 
     def _remove_template_table_after(self, anchor: BaseOxmlElement) -> None:
         """Drop the template's placeholder mentee table under a heading, if
-        one is there, before the real tables go in."""
+        one is there, before the real tables go in.
+
+        `_first_table_after` has no section boundary -- it returns the first
+        table anywhere below the anchor, which on a research-support cascade
+        upstream (#836) could be some other section's table entirely. The
+        shape guard keeps this removal to a table that is actually a mentee
+        placeholder.
+        """
         table_element = _first_table_after(anchor)
-        if table_element is not None:
+        if table_element is not None and _looks_like_mentee_placeholder(table_element):
             table_element.getparent().remove(table_element)
 
     def _fill_program_leadership(self, entries: Sequence[Mapping[str, Any]]) -> None:
