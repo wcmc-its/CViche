@@ -11,8 +11,10 @@ re-export is a second binding, and rebinding it there silently leaves the real
 function in play (the #496 split-state lesson).
 """
 
+import contextvars
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, NotRequired, TypedDict
 
 from openai import APITimeoutError
@@ -47,6 +49,13 @@ logger = logging.getLogger(__name__)
 LLM_RESPONSE_INVALID = "llm_response_invalid"
 LLM_TIMEOUT = "llm_timeout"
 LLM_PROVIDER_ERROR = "llm_provider_error"
+
+# Batches are independent of one another (cv_owner_name is fixed before the
+# loop; entries are re-sorted by element_idx after it), so they run on a small
+# thread pool. Stage 4 was ~35% of a run's wall time, all of it serial round
+# trips (#881). Kept under llm/retry.py's per-pod semaphore (8) so one run
+# cannot starve the others admitted alongside it.
+STAGE4_BATCH_WORKERS = 4
 
 
 class _ExtractedEntryFields(BaseModel):
@@ -854,12 +863,51 @@ def _extract_and_log_cv_owner_name(
     return cv_owner_name
 
 
+def _extract_batches(
+    valid_entries: list[dict[str, Any]],
+    batch_size: int,
+    cv_owner_name: dict[str, str],
+    cancel_check: Callable[[], None] | None,
+    workers: int,
+) -> list[dict[str, Any]]:
+    """Run extract_fields_batch over every batch; results come back in batch order.
+
+    Each task runs inside a copy of the caller's contextvars.Context so
+    prompt_logger's per-run log directory (#580) follows the call onto the pool
+    thread -- a bare pool thread starts with an empty context and would write
+    into the shared flat directory. A cancel or failure in any task drops the
+    queued ones; calls already in flight finish, since a thread cannot be
+    interrupted, so at most `workers` LLM calls complete after a cancel.
+    """
+    num_batches = (len(valid_entries) + batch_size - 1) // batch_size
+
+    def run_batch(batch_idx: int) -> dict[str, Any]:
+        # Check for cancellation before each batch's LLM calls so an aborted
+        # run terminates promptly rather than running every batch to completion.
+        if cancel_check is not None:
+            cancel_check()
+        batch = valid_entries[batch_idx * batch_size:(batch_idx + 1) * batch_size]
+        return extract_fields_batch(batch, batch_idx, num_batches, cv_owner_name=cv_owner_name)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(contextvars.copy_context().run, run_batch, batch_idx)
+            for batch_idx in range(num_batches)
+        ]
+        try:
+            return [future.result() for future in futures]
+        except BaseException:
+            pool.shutdown(wait=False, cancel_futures=True)
+            raise
+
+
 def extract_fields_from_mapped_entries(
     mapped_entries: list[dict[str, Any]],
     batch_size: int = 10,
     document_uid: str = "",
     cancel_check: Callable[[], None] | None = None,
     docx_path: str | None = None,  # #456 owner-name side channel; None = pre-#456 behavior
+    workers: int = STAGE4_BATCH_WORKERS,
 ) -> ExtractionResult:
     """
     Extract structured fields from all mapped entries.
@@ -872,6 +920,8 @@ def extract_fields_from_mapped_entries(
             batch iteration. It should raise to abort the run (the web
             orchestrator passes its check_cancelled). None (the standalone CLI
             default) is a no-op.
+        workers: Batches in flight at once (default STAGE4_BATCH_WORKERS).
+            1 reproduces the pre-#881 serial loop exactly.
     """
     if batch_size < 1:
         raise ValueError(f"batch_size must be >= 1, got {batch_size}")
@@ -933,18 +983,8 @@ def extract_fields_from_mapped_entries(
     # to a clean one.
     failed_batches = 0
 
-    for batch_idx in range(num_batches):
-        # Check for cancellation before each batch's LLM calls so an aborted
-        # run terminates promptly rather than running every batch to completion.
-        if cancel_check is not None:
-            cancel_check()
-
-        start_idx = batch_idx * batch_size
-        end_idx = min(start_idx + batch_size, len(valid_entries))
-        batch = valid_entries[start_idx:end_idx]
-
-        result = extract_fields_batch(batch, batch_idx, num_batches, cv_owner_name=cv_owner_name)
-
+    results = _extract_batches(valid_entries, batch_size, cv_owner_name, cancel_check, workers)
+    for batch_idx, result in enumerate(results):
         # Always keep whatever entries came back. A batch that had one failed
         # taxonomy group still successfully extracted every other group in it
         # (see extract_fields_batch's per-code error handling), so gating
