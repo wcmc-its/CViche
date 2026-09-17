@@ -28,6 +28,8 @@ from typing import Dict, List, Any, Literal, Optional, Tuple
 from datetime import datetime
 from collections import defaultdict
 
+logger = logging.getLogger(__name__)
+
 try:
     from docx import Document
     from docx.shared import Pt, RGBColor, Inches, Twips
@@ -40,7 +42,7 @@ try:
     from docx.parts.document import DocumentPart
     from lxml import etree
 except ImportError:
-    print("Error: python-docx not installed. Install with: pip install python-docx lxml")
+    logger.error("Error: python-docx not installed. Install with: pip install python-docx lxml")
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
@@ -188,7 +190,6 @@ from unified_pipeline.stage6.sections.appendix import (
 )
 from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 
-logger = logging.getLogger(__name__)
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
@@ -249,8 +250,11 @@ def _is_bullet_paragraph(para: Paragraph) -> bool:
 
     Section K moved to real Word list paragraphs in #474, so a validator that
     tests for a literal "•" prefix stops seeing K at all -- and check 3
-    below then reports no_visible_teaching_content on every CV. The non-K
-    emitters still prefix the glyph (#483), so both forms have to count.
+    below then reports no_visible_teaching_content on every CV. #483 (both
+    passes) moved every emitter this module writes to the same real-list
+    form, but a literal glyph can still arrive verbatim from the SOURCE docx
+    (e.g. a table cell copied through unchanged -- see web240 in #483 R1's
+    render-gate residue attribution), so both forms still have to count.
     """
     if para.text.strip().startswith('•'):
         return True
@@ -332,6 +336,8 @@ TAXONOMY_TO_SECTION = MappingProxyType({
     # NOTE: M4 clinical trial codes removed - clinical trials now use M2A/M2B/M2C based on status
 
     # Mentoring
+    'N1': 'mentoring_leadership',
+    'N2': 'training_grants',
     'N3A': 'current_mentees',
     'N3B': 'past_mentees',
 
@@ -389,6 +395,9 @@ RENDER_ROUTED_CODES = frozenset({
            # in generate(): only routed when the summary actually rendered.
     'M2A', 'M2B', 'M2C',  # Research Support (grants and clinical trials)
     'M2D',  # Patents & Innovations
+    'N1',  # Mentoring - Leadership and mentoring in programs (#529)
+    'N2',  # Mentoring - Institutional Training Grants and Mentored Trainee
+           # Grants (#529)
     'N3A', 'N3B',  # Mentoring (current/past mentees)
     'O',   # Institutional Leadership
     'P',   # Administrative Committees
@@ -592,7 +601,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         if assigned_family == expected_family:
             if self.verbose:
-                print(f"    Mismatch correction: {assigned_code}→{best_expected} "
+                logger.info(f"    Mismatch correction: {assigned_code}→{best_expected} "
                       f"(same family, hierarchy-guided) [{entry.get('text', '')[:60]}...]")
             entry['taxonomy_code_original'] = assigned_code
             entry['taxonomy_code'] = best_expected
@@ -601,7 +610,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Cross-family: only if LLM confidence was low
         if confidence < 0.7:
             if self.verbose:
-                print(f"    Mismatch correction: {assigned_code}→{best_expected} "
+                logger.info(f"    Mismatch correction: {assigned_code}→{best_expected} "
                       f"(cross-family, low confidence {confidence:.2f}) [{entry.get('text', '')[:60]}...]")
             entry['taxonomy_code_original'] = assigned_code
             entry['taxonomy_code'] = best_expected
@@ -646,7 +655,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 merged.append(entry)
 
         if self.verbose and replaced_count > 0:
-            print(f"  Replaced {replaced_count} K-code entries with Stage 5c formatted versions")
+            logger.info(f"  Replaced {replaced_count} K-code entries with Stage 5c formatted versions")
 
         return merged
 
@@ -732,7 +741,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             metro = self.cv_owner_location.get('metro_area', '')
             primary = self.cv_owner_location.get('primary_location', {})
             if primary:
-                print(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
+                logger.info(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
         # Try to find original document if not provided -- which every live run
         # is: only render_gate.py --source-dir and stage 6's tests pass one, and
@@ -750,11 +759,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 if path.exists():
                     original_doc_path = str(path.resolve())
                     if self.verbose:
-                        print(f"Found original document: {original_doc_path}")
+                        logger.info(f"Found original document: {original_doc_path}")
                     break
             else:
                 if self.verbose:
-                    print(f"No original document found for {document_uid} in "
+                    logger.info(f"No original document found for {document_uid} in "
                           f"{SAMPLE_CV_DIR} or ./data/sample_cvs/word")
 
         # Load Stage 4.5 research summary if available
@@ -763,7 +772,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             with open(research_summary_path, 'r') as f:
                 research_summary_data = json.load(f)
             if self.verbose:
-                print(f"Loaded research summary from Stage 4.5: {research_summary_path}")
+                logger.info(f"Loaded research summary from Stage 4.5: {research_summary_path}")
         else:
             # Try to find it automatically
             input_dir = Path(input_path).parent.parent
@@ -772,13 +781,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 with open(auto_summary_path, 'r') as f:
                     research_summary_data = json.load(f)
                 if self.verbose:
-                    print(f"Auto-loaded research summary from: {auto_summary_path}")
+                    logger.info(f"Auto-loaded research summary from: {auto_summary_path}")
 
         if self.verbose:
-            print(f"\n{'='*60}")
-            print(f"Stage 6: WCM Template Generation - {document_uid}")
-            print(f"{'='*60}")
-            print(f"Total entries: {len(entries)}")
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Stage 6: WCM Template Generation - {document_uid}")
+            logger.info(f"{'='*60}")
+            logger.info(f"Total entries: {len(entries)}")
 
         # Group entries by taxonomy code, applying mismatch corrections
         entries_by_code = defaultdict(list)
@@ -791,9 +800,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             entries_by_code[code].append(entry)
 
         if self.verbose:
-            print(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
+            logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
             if mismatch_corrections > 0:
-                print(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
+                logger.info(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
 
         # Deduplicate within each code group.
         # Position/training codes (D1, D2, D3, C, B1) represent career progression
@@ -824,7 +833,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if removed > 0:
                 total_deduped += removed
         if self.verbose and total_deduped > 0:
-            print(f"  Deduplicated: {total_deduped} near-duplicate entries removed")
+            logger.info(f"  Deduplicated: {total_deduped} near-duplicate entries removed")
 
         # Load template
         self.doc = Document(self.template_path)
@@ -938,12 +947,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             validation_issues, written_appendix_entries, recovered_appendix_codes)
 
         if validation_issues:
-            logger.warning("!" * 60)
-            logger.warning("VALIDATION WARNINGS")
-            logger.warning("!" * 60)
+            logger.info(f"\n{'!'*60}")
+            logger.info("VALIDATION WARNINGS")
+            logger.info(f"{'!'*60}")
             for issue in validation_issues:
                 logger.warning(f"  ⚠ {issue['message']}")
-            logger.warning("!" * 60)
+            logger.info(f"{'!'*60}")
 
         # Persist the self-check warnings and dedup decision trail next to
         # the docx so the run doctor can re-emit them (#227/#228) — until now
@@ -959,24 +968,24 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 "dedup_decisions": dedup_decisions,
             }, indent=2))
         except Exception as exc:
-            print(f"  ⚠ could not write render-warnings sidecar: {exc}")
+            logger.warning(f"  ⚠ could not write render-warnings sidecar: {exc}")
 
         if self.verbose:
-            print(f"\n{'='*60}")
-            print("Generation Summary")
-            print(f"{'='*60}")
-            print(f"  Entries inserted: {self.stats['entries_inserted']}")
-            print(f"  Tables populated: {self.stats['tables_populated']}")
-            print(f"  Target names bolded: {self.stats['target_names_bolded']}")
-            print(f"  Track changes added: {self.stats['track_changes_added']}")
-            print(f"  Comments added: {self.stats['comments_added']}")
+            logger.info(f"\n{'='*60}")
+            logger.info("Generation Summary")
+            logger.info(f"{'='*60}")
+            logger.info(f"  Entries inserted: {self.stats['entries_inserted']}")
+            logger.info(f"  Tables populated: {self.stats['tables_populated']}")
+            logger.info(f"  Target names bolded: {self.stats['target_names_bolded']}")
+            logger.info(f"  Track changes added: {self.stats['track_changes_added']}")
+            logger.info(f"  Comments added: {self.stats['comments_added']}")
             if self.stats.get('overflow_bullets_added', 0) > 0:
-                print(f"  Overflow bullets added: {self.stats['overflow_bullets_added']}")
+                logger.info(f"  Overflow bullets added: {self.stats['overflow_bullets_added']}")
             if self.stats.get('overflow_to_appendix', 0) > 0:
-                print(f"  Overflow to appendix: {self.stats['overflow_to_appendix']}")
+                logger.info(f"  Overflow to appendix: {self.stats['overflow_to_appendix']}")
             if self.stats.get('appendix_segments_reconsidered', 0) > 0:
-                print(f"  Appendix segments reconsidered: {self.stats['appendix_segments_reconsidered']}")
-            print(f"\nSaved to: {output_path}")
+                logger.info(f"  Appendix segments reconsidered: {self.stats['appendix_segments_reconsidered']}")
+            logger.info(f"\nSaved to: {output_path}")
 
         return output_path
 
@@ -1130,7 +1139,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         except Exception as e:
             if self.verbose:
-                print(f"    ⚠ Geographic classification error: {e}")
+                logger.warning(f"    ⚠ Geographic classification error: {e}")
             return 'National'  # Default on error
 
 
@@ -1140,7 +1149,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                                 add_blank_before: bool = False,
                                 list_level: int | None = None,
                                 entry_sibling_paras: list[Paragraph] | None = None) -> Paragraph | None:
-        """Insert a SINGLE bulleted entry paragraph with a bullet character prefix.
+        """Insert a SINGLE bulleted entry paragraph as a real Word list item.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
 
@@ -1149,10 +1158,11 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             text: The text content for the entry (should be single line)
             entry: Optional entry dict for adding comments
             add_blank_before: If True, add a blank line before this entry
-            list_level: When given, emit a real Word list paragraph at this
-                ilvl via _apply_list_bullet instead of prefixing a literal "• "
-                glyph (#474). Left at None by the three non-K call sites, whose
-                1,765 corpus-wide glyphs are #483.
+            list_level: The ilvl passed to _apply_list_bullet (#474). Every
+                call site is expected to pass this explicitly; omitting it
+                defaults to level 0 rather than falling back to a literal
+                "• " glyph prefix (#483 -- the last caller-omittable glyph
+                path, closed alongside _add_remaining_to_appendix).
             entry_sibling_paras: The OTHER paragraphs this same entry already
                 rendered into, when a caller is splitting one entry across
                 several bullets and attaching the entry to this one. Passed on
@@ -1176,14 +1186,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             entry_para.insert_paragraph_before("")
 
         body = _clean_inline_tabs(_strip_taxonomy_code(text))
-        # Without list_level, a simple bullet character prefix: it avoids Word
-        # numbering system issues across different templates, at the cost of not
-        # being a list item to Word's outline, to accessibility tooling, or to
-        # anything re-parsing the output.
-        run = entry_para.add_run(body if list_level is not None else f"• {body}")
+        run = entry_para.add_run(body)
         _set_font(run)
-        if list_level is not None:
-            self._apply_list_bullet(entry_para, level=list_level)
+        self._apply_list_bullet(entry_para, level=list_level if list_level is not None else 0)
 
         if entry:
             self._add_entry_comments(entry_para, entry,
@@ -1264,6 +1269,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             'M2C': 'Pending Funding',
             # Mentoring (N codes)
             'N': 'Mentees',
+            'N1': 'Leadership and mentoring in programs (Describe activity; include dates)',
+            'N2': 'Institutional Training Grants and Mentored Trainee Grants',
             'N3A': 'Current Mentees:',
             'N3B': 'Past Mentees:',
             # Leadership (O codes)
@@ -1468,7 +1475,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 if matched:
                     paragraphs_to_remove.append(para._element)
                     if self.verbose:
-                        print(f"    Removing template instruction: '{para_text[:60]}...'")
+                        logger.info(f"    Removing template instruction: '{para_text[:60]}...'")
 
         # Remove identified instruction paragraphs
         for para_elem in paragraphs_to_remove:
@@ -1715,7 +1722,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return
 
         if self.verbose:
-            print(f"\nRouting {len(self._overflow_entries)} content-overflow entries...")
+            logger.info(f"\nRouting {len(self._overflow_entries)} content-overflow entries...")
 
         for entry, para, taxonomy_code in self._overflow_entries:
             original_text = entry.get('text', '').strip()
@@ -1754,7 +1761,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                                 )
                                 self.stats['overflow_bullets_added'] += 1
                                 if self.verbose:
-                                    print(f"  Added overflow bullets in section {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
+                                    logger.info(f"  Added overflow bullets in section {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
                                 continue
                 # Fall back to appendix for non-K/L codes or if section insertion failed
                 self._route_overflow_to_appendix(entry, coverage_pct)
@@ -1780,7 +1787,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     self._remove_abbreviated_entry(para)
                     self.stats['overflow_bullets_added'] += 1
                     if self.verbose:
-                        print(f"  Added overflow bullet in section {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
+                        logger.info(f"  Added overflow bullet in section {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
                 else:
                     # Insertion failed — fall back to appendix, keep original in place
                     self._route_overflow_to_appendix(entry, coverage_pct)
@@ -1866,7 +1873,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return first_para
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not insert overflow bullet: {e}")
+                logger.warning(f"  Warning: Could not insert overflow bullet: {e}")
             return None
 
     def _remove_abbreviated_entry(self, para: Paragraph):
@@ -1895,7 +1902,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 parent.remove(p_element)
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not remove abbreviated entry: {e}")
+                logger.warning(f"  Warning: Could not remove abbreviated entry: {e}")
 
     def _route_overflow_to_appendix(self, entry: Dict, coverage_pct: float = 0):
         """Queue an overflow entry for reconsideration before adding to appendix.
@@ -1935,7 +1942,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return []
 
         if self.verbose:
-            logger.info(f"Reconsidering {len(self._appendix_pending)} appendix entries...")
+            logger.info(f"\nReconsidering {len(self._appendix_pending)} appendix entries...")
 
         # Collect all segments that could be reclassified
         segments_to_route = []  # List of (segment_text, taxonomy_code, original_entry)
@@ -2083,7 +2090,7 @@ Now analyze the text above:"""
 
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: LLM reclassification failed: {e}")
+                logger.warning(f"  Warning: LLM reclassification failed: {e}")
             return None
 
     def _insert_reconsidered_segment(self, text: str, taxonomy_code: str,
@@ -2126,13 +2133,16 @@ Now analyze the text above:"""
         if insert_idx is None:
             return False
 
-        # Insert as a bullet
+        # Insert as a real Word list paragraph (#483 R2 -- the last of the
+        # four glyph emitters #474/#483 tracked; its own tests in
+        # test_stage6_unrendered_recovery.py were rewritten alongside this).
         try:
             insert_para = self.doc.paragraphs[insert_idx]
             new_para = insert_para.insert_paragraph_before()
 
-            run = new_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
+            run = new_para.add_run(_clean_inline_tabs(_strip_taxonomy_code(text)))
             _set_font(run)
+            self._apply_list_bullet(new_para, level=0)
 
             # Add explanatory comment
             self._add_word_comment(
@@ -2145,12 +2155,12 @@ Now analyze the text above:"""
             )
 
             if self.verbose:
-                print(f"    Inserted [{taxonomy_code}]: {text[:60]}...")
+                logger.info(f"    Inserted [{taxonomy_code}]: {text[:60]}...")
             return True
 
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not insert reconsidered segment: {e}")
+                logger.warning(f"  Warning: Could not insert reconsidered segment: {e}")
             return False
 
     def _find_subsection_header(self, search_text: str,
@@ -2268,8 +2278,9 @@ Now analyze the text above:"""
         # faculty-facing text (#213).
         for segment_text, original_code, coverage_pct in remaining:
             entry_para = self.doc.add_paragraph()
-            run = entry_para.add_run(f"• {segment_text}")
+            run = entry_para.add_run(segment_text)
             _set_font(run)
+            self._apply_list_bullet(entry_para, level=0)
             self._add_word_comment(
                 entry_para,
                 f"Originally classified {original_code}; could not be mapped "
@@ -2694,7 +2705,7 @@ Now analyze the text above:"""
             self.stats['comments_added'] += 1
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not add comment: {e}")
+                logger.warning(f"  Warning: Could not add comment: {e}")
 
     def _add_track_change_insertion(self, para: Paragraph, text: str, author: str = "PubMed Enrichment"):
         """Mark text as an insertion (track change) that appears in Word's review mode.
@@ -2760,7 +2771,7 @@ Now analyze the text above:"""
             return ins
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not add track change: {e}")
+                logger.warning(f"  Warning: Could not add track change: {e}")
             # Fall back to normal text
             run = para.add_run(text)
             _set_font(run)
@@ -2823,7 +2834,7 @@ Now analyze the text above:"""
             return del_elem
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not add track change deletion: {e}")
+                logger.warning(f"  Warning: Could not add track change deletion: {e}")
             return None
 
     def _add_track_change_pair(self, para: Paragraph, original_text: str, new_text: str,
@@ -2885,16 +2896,16 @@ Now analyze the text above:"""
                 self.doc.part.relate_to(comments_part, comments_reltype)
 
                 if self.verbose:
-                    print(f"  Created comments.xml with {len(self._comments)} comment(s)")
+                    logger.info(f"  Created comments.xml with {len(self._comments)} comment(s)")
             else:
                 # Append to existing comments
                 # Parse existing and merge
                 if self.verbose:
-                    print(f"  Added {len(self._comments)} comment(s) to existing comments.xml")
+                    logger.info(f"  Added {len(self._comments)} comment(s) to existing comments.xml")
 
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not create comments.xml: {e}")
+                logger.warning(f"  Warning: Could not create comments.xml: {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -3131,12 +3142,12 @@ def main():
         if candidates:
             input_path = str(candidates[0])
         else:
-            print(f"Error: Could not find input file: {args.input}")
+            logger.error(f"Error: Could not find input file: {args.input}")
             sys.exit(1)
 
     # Note: The research summary from Stage 4.5 is auto-loaded by generate() based on document_uid
     output_path = run_stage6(input_path, args.output, verbose=not args.quiet)
-    print(f"\nGenerated: {output_path}")
+    logger.info(f"\nGenerated: {output_path}")
 
 
 if __name__ == '__main__':

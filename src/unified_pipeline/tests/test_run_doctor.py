@@ -426,31 +426,35 @@ def test_classified_unrendered_quiet_when_reformatted_downstream():
 # --------------------------------------------------- lint: taxonomy code coverage
 
 def test_taxonomy_code_coverage_fires_for_a_code_with_no_render_route():
-    # N2 is exactly #529's example: a real, confidently-classified code stage
-    # 6 has never had a renderer for.
+    # N2 was #529's original example; #529 gave it a render route, so this
+    # now uses M4 -- #291's still-parked status-aware-routing gap (see
+    # test_taxonomy_code_render_coverage.py's _KNOWN_GAPS) -- a real,
+    # confidently-classified code stage 6 has no renderer for today.
     stage3b = {"entries": [
-        _entry("Postdoctoral Fellowship $26,000", taxonomy_code="N2", start=1),
-        _entry("Mentored Research Scholar Grant", taxonomy_code="N2", start=2),
+        _entry("Postdoctoral Fellowship $26,000", taxonomy_code="M4", start=1),
+        _entry("Mentored Research Scholar Grant", taxonomy_code="M4", start=2),
     ]}
     findings = lint_taxonomy_code_coverage(stage3b)
     assert len(findings) == 1
     # #816: always INFO now -- the unrouted-code counts moved to the
     # doctor's `metrics` block (unrouted_code_entries).
     assert findings[0]["severity"] == "INFO"
-    assert "N2" in findings[0]["message"]
+    assert "M4" in findings[0]["message"]
     assert "2 entries" in findings[0]["message"]
 
 
 def test_unrouted_code_counts_matches_the_lints_own_by_code_dict():
     """#816: the doctor's `metrics` block reads this SAME dict the lint
-    above builds its findings from."""
+    above builds its findings from. M4/M4A, not N1/N2: #529 gave N1 and
+    N2 render routes (see test_taxonomy_code_render_coverage.py's
+    _KNOWN_GAPS)."""
     stage3b = {"entries": [
-        _entry("Postdoctoral Fellowship", taxonomy_code="N2", start=1),
-        _entry("Mentored Research Scholar Grant", taxonomy_code="N2", start=2),
-        _entry("Another orphan code", taxonomy_code="N1", start=3),
+        _entry("Postdoctoral Fellowship", taxonomy_code="M4", start=1),
+        _entry("Mentored Research Scholar Grant", taxonomy_code="M4", start=2),
+        _entry("Another orphan code", taxonomy_code="M4A", start=3),
         _entry("A grant", taxonomy_code="M2A", start=4),
     ]}
-    assert unrouted_code_counts(stage3b) == {"N2": 2, "N1": 1}
+    assert unrouted_code_counts(stage3b) == {"M4": 2, "M4A": 1}
     assert unrouted_code_counts({"entries": []}) == {}
 
 
@@ -1436,7 +1440,7 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
 
     stage3b = {
         "entries": [
-            _entry("Postdoctoral Fellowship", taxonomy_code="N2", start=1),
+            _entry("Postdoctoral Fellowship", taxonomy_code="M4", start=1),
             _entry("A grant", taxonomy_code="M2A", start=2),
         ],
         "meta": {"stats": {
@@ -1472,7 +1476,7 @@ def test_build_metrics_reads_every_number_from_a_realistic_run(tmp_path):
     assert metrics["appendix_share"] == round(2 / 2, 4)
     assert metrics["honors_malformed_rows"] == 1
     assert metrics["honors_rows"] == 2
-    assert metrics["unrouted_code_entries"] == {"N2": 1}
+    assert metrics["unrouted_code_entries"] == {"M4": 1}  # M4, not N2: #529 routes N2
     assert metrics["stage3b_fallback_ratio"] == round(510 / 1019, 4)
     assert metrics["t_validation_yield"] == round(28 / 93, 4)
     assert metrics["fragment_reconnection_yield"] == round(3 / 7, 4)

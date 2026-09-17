@@ -211,3 +211,36 @@ def test_refused_g_entries_plural_message(tmp_path):
     assert diversions[0]["message"] == (
         "G: 2 entries diverted to the Appendix — refused by the passthrough "
         "writer for G (source section label did not match)")
+
+
+def test_n1_n2_entries_render_and_do_not_duplicate_into_the_appendix(tmp_path):
+    """#529: N1/N2 now dispatch through `RENDER_ROUTED_CODES`, the same
+    mechanism N3A/N3B already use -- `generate()`'s unmapped-code sweep
+    (`mapped_codes = set(RENDER_ROUTED_CODES)`) must exclude both codes at
+    the source, or every entry `_fill_mentoring` already rendered would also
+    land a second time in the Appendix.
+
+    #840 gave N2 its own training-grants renderer -- a code that used to be
+    Appendix-diverted now renders, so this also pins that neither code
+    produces an `appendix_diversion` warning once its writer has claimed it
+    (`_render` returns the `(doc, sidecar)` pair since #531)."""
+    entries = [
+        _OWNER_ENTRY,
+        {"text": "DISTINCTIVE_N1_LEADERSHIP_LINE", "taxonomy_code": "N1",
+         "extracted_fields": {"role": "DISTINCTIVE_N1_LEADERSHIP_LINE"},
+         "element_idx_start": 5},
+        {"text": "DISTINCTIVE_N2_GRANT_AGENCY", "taxonomy_code": "N2",
+         "extracted_fields": {"agency": "DISTINCTIVE_N2_GRANT_AGENCY"},
+         "element_idx_start": 6},
+    ]
+    doc, sidecar = _render(tmp_path, entries)
+    full, appendix = _full_text(doc), _appendix_text(doc)
+
+    assert "DISTINCTIVE_N1_LEADERSHIP_LINE" in full, "N1 entry did not render at all"
+    assert "DISTINCTIVE_N1_LEADERSHIP_LINE" not in appendix, (
+        "N1 entry duplicated into the Appendix -- #529 regression")
+    assert "DISTINCTIVE_N2_GRANT_AGENCY" in full, "N2 entry did not render at all"
+    assert "DISTINCTIVE_N2_GRANT_AGENCY" not in appendix, (
+        "N2 entry duplicated into the Appendix -- #529 regression")
+    assert _appendix_diversion_count(sidecar, "N1") == 0
+    assert _appendix_diversion_count(sidecar, "N2") == 0

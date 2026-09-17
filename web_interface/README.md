@@ -109,7 +109,7 @@ The interface shows:
 5. **Fix Unknowns** - Re-examines unclassified entries
 6. **Extract Structured Data** - Pulls out specific fields
 7. **AI Assist (LLM Fallback)** - Handles tricky entries
-8. **Add Organization Data** - Matches institutions to ROR (optional)
+8. **Add Organization Data** - Adds institution location data via LLM lookups (optional)
 9. **Generate Final Template** - Produces final .docx
 
 ## Project Structure
