@@ -189,16 +189,22 @@ def _real_storage_patches(tmp_path):
     ("cv.txt", ".txt"),
     ("cv.DOC", ".doc"),   # suffix is lower-cased before the check
     ("cv", ""),           # no suffix at all -> "Unsupported file type: ."
+    ("cv.pdf", ".pdf"),   # #524: PDF is no longer accepted at the API
+    ("cv.PDF", ".pdf"),   # suffix is lower-cased before the check
 ])
 def test_upload_rejects_unsupported_extension(client, db, seed_simple_mode, tmp_path, filename, reported_ext):
     """PR #779 review thread web_interface/backend/tests/test_upload_atomicity.py item 1
 
-    A filename whose suffix is not .docx/.pdf is rejected with the exact
-    400 message from upload.py:325-326, BEFORE the rate limiter is consulted
+    A filename whose suffix is not .docx is rejected with the exact 400
+    message from upload.py:325-328, BEFORE the rate limiter is consulted
     (upload.py:328 -- "after file validation so bad uploads don't count") and
     before any storage write; no Run row is created. An empty filename cannot
     be tested through multipart: FastAPI itself 422s a file part with no
     filename before the endpoint's "No filename provided" guard runs.
+
+    #524: .pdf is now rejected the same as any other unsupported extension
+    (ALLOWED_UPLOAD_EXTENSIONS == (".docx",)), matching the frontend's
+    .docx-only guard -- every downstream reader is python-docx only.
     """
     user = _make_user(db)
     _auth(client, user)
@@ -215,12 +221,57 @@ def test_upload_rejects_unsupported_extension(client, db, seed_simple_mode, tmp_
     assert resp.status_code == 400, resp.text
     assert resp.json()["detail"] == {
         "error": "bad_request",
-        "message": f"Unsupported file type: {reported_ext}. Only .docx and .pdf are supported.",
+        "message": (
+            f"Unsupported file type: {reported_ext}. Only .docx files are supported. "
+            "Please convert your file to .docx before uploading."
+        ),
     }
     rate_limit.assert_not_called()
     storage.put_file_exclusive.assert_not_called()
     assert db.query(Run).count() == 0
     assert list(tmp_path.iterdir()) == []
+
+
+# --- G-524: PDF rejected at both API validators (#524, #525) ----------------
+
+@pytest.mark.parametrize("filename", ["cv.pdf", "cv.PDF"])
+def test_estimate_rejects_pdf(client, db, seed_simple_mode, filename):
+    """#524/#525: /estimate (upload.py:~511) applies the same
+    ALLOWED_UPLOAD_EXTENSIONS gate as /upload, so a PDF can no longer reach
+    the (now-deleted) pypdf-import branch. Uppercase suffix (cv.PDF) covers
+    the same lower-casing the extension check applies before the gate."""
+    user = _make_user(db)
+    _auth(client, user)
+
+    resp = client.post(
+        "/api/estimate",
+        files={"file": (filename, b"%PDF-1.4 dummy pdf content", "application/pdf")},
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert resp.json()["detail"] == {
+        "error": "bad_request",
+        "message": (
+            "Unsupported file type: .pdf. Only .docx files are supported. "
+            "Please convert your file to .docx before uploading."
+        ),
+    }
+
+
+def test_upload_still_accepts_docx_after_pdf_rejection(client, db, seed_simple_mode, tmp_path):
+    """#524 regression: rejecting .pdf must not disturb the .docx path -- the
+    ONLY accepted extension is unchanged."""
+    user = _make_user(db)
+    _auth(client, user)
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+    resp = _run_patches(
+        patches, lambda: _post_upload(client, "cv.docx", b"PK\x03\x04dummy-docx-bytes", DOCX_MIME)
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert db.query(Run).count() == 1
+    assert db.get(Run, resp.json()["run_id"]).file_type == "docx"
 
 
 # --- item 3: .docx with a broken ZIP / no word/document.xml ------------------
@@ -280,21 +331,65 @@ def test_validate_docx_magic_accepts_a_real_docx():
     assert _validate_docx_magic(_docx_bytes("real content")) is True
 
 
-# --- item 7: password-protected document ------------------------------------
+# --- #865 review: _extract_text catches only the measured read failures ------
 
-@pytest.mark.parametrize("file_ext, opener, error_text", [
-    (".docx", "docx.Document", "Package is encrypted"),
-    (".pdf", "pdfplumber.open", "File has not been decrypted"),
+def _zip_bytes(**members: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, body in members.items():
+            z.writestr(name.replace("__", "/"), body)
+    return buf.getvalue()
+
+
+_CONTENT_TYPES = (
+    "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>"
+    "<Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats"
+    "-officedocument.wordprocessingml.document.main+xml'/></Types>"
+)
+_RELS = (
+    "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>"
+    "<Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/"
+    "relationships/officeDocument' Target='word/document.xml'/></Relationships>"
+)
+
+
+@pytest.mark.parametrize("label, content", [
+    ("not a zip at all -> PackageNotFoundError", b"PK\x03\x04 but not really a zip"),
+    ("truncated docx -> PackageNotFoundError", _docx_bytes("hello")[:1200]),
+    ("zip with no parts -> KeyError", _zip_bytes()),
+    ("malformed document.xml -> XMLSyntaxError",
+     _zip_bytes(**{"[Content_Types].xml": _CONTENT_TYPES, "_rels__.rels": _RELS,
+                   "word__document.xml": "<<<not xml"})),
 ])
-def test_extract_text_returns_empty_for_encrypted_document(file_ext, opener, error_text):
-    """PR #779 review thread web_interface/backend/tests/test_upload_atomicity.py item 7
+def test_extract_text_returns_none_and_logs_a_traceback_for_a_known_read_failure(label, content, caplog):
+    """PR #865 review thread on upload.py's ``except Exception`` (r4034042444):
+    the catch is now the measured ``_DOCX_READ_ERRORS`` tuple. Each shape a
+    corrupt zip-shaped upload can take maps to None ("cannot determine", the
+    guard is skipped) and leaves a WARNING that carries the traceback."""
+    with caplog.at_level(logging.WARNING, logger="app.api.upload"):
+        assert _extract_text(content, ".docx") is None, label
+    records = [r for r in caplog.records if "empty-doc guard failed" in r.getMessage()]
+    assert len(records) == 1, label
+    assert records[0].exc_info is not None, label
 
-    upload.py:101-106: an extraction error whose message names
-    password/encrypt/decrypt maps to "" (trips the unreadable-document guard),
-    NOT to None (which would fail open and let the upload through).
-    """
-    with patch(opener, side_effect=Exception(error_text)):
-        assert _extract_text(b"PK\x03\x04payload", file_ext) == ""
+
+def test_extract_text_lets_an_unexpected_error_surface():
+    """The other half of narrowing the catch: an exception that is NOT a known
+    read failure is a bug in the reader, and it propagates instead of being
+    swallowed into a fail-open None (§5.4). Widening the tuple back to
+    ``Exception`` fails this test."""
+    with patch("app.api.upload.Document", side_effect=RuntimeError("reader bug")):
+        with pytest.raises(RuntimeError):
+            _extract_text(_docx_bytes("hello"), ".docx")
+
+
+def test_extract_text_returns_none_for_unrecognized_extension():
+    """#524: _extract_text's if/elif now only names .docx. Any other
+    extension (e.g. the deleted .pdf arm) falls through to the final
+    ``return None`` with no attempt at extraction -- "cannot determine",
+    not "read and found nothing." Guards the deletion of the .pdf branch
+    against silently returning "" instead."""
+    assert _extract_text(b"%PDF-1.4 dummy", ".pdf") is None
 
 
 def test_upload_rejects_password_protected_document(client, db, seed_simple_mode, tmp_path):

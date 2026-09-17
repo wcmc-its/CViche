@@ -150,9 +150,13 @@ class TestEmptyUploadRejection:
         assert "Hello world" in text
         assert "Second line" in text
 
-    def test_corrupt_pdf_fails_open(self):
-        # Not a real PDF -> extraction errors with no password hint -> None
-        # (fail open) so we never block on a library quirk.
+    def test_extract_text_skips_unrecognized_extension(self):
+        # #524: _extract_text's if/elif now names only .docx (the .pdf
+        # branch was deleted along with .pdf's acceptance at the API). Any
+        # other extension -- .pdf included -- is "cannot determine": no
+        # extraction is attempted and the guard is skipped (fail open), the
+        # same outcome the old .pdf branch produced on a corrupt file, but
+        # now by never trying rather than by catching an exception.
         from app.api.upload import _extract_text
         assert _extract_text(b"%PDF-1.4 not really a pdf", ".pdf") is None
 
