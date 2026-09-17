@@ -5,7 +5,7 @@
   "3.7 no metaprogramming [waived]": 1,
   "5.4 bare swallows (`except Exception: pass`)": 3,
   "5.4 blind `except Exception` (BLE001)": 101,
-  "7.1 print() in library code (T201)": 884,
+  "7.1 print() in library code (T201)": 882,
   "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)": 4,
   "8.3 missing annotations (ANN*, RUF012)": 553,
   "8.3 typing syntax (UP*, RUF013)": 228
