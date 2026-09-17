@@ -135,10 +135,10 @@ def process_cv(
     fragment_count = len([e for e in mapped_entries if e.get("is_fragment")])
     duplicate_count = len([e for e in mapped_entries if e.get("is_duplicate")])
 
-    print(f"  Total entries from Stage 3b: {len(mapped_entries)}")
-    print(f"  - Fragments (skipped): {fragment_count}")
-    print(f"  - Duplicates (skipped): {duplicate_count}")
-    print(f"  - Valid for extraction: {len(valid_entries)}")
+    logger.info(f"  Total entries from Stage 3b: {len(mapped_entries)}")
+    logger.info(f"  - Fragments (skipped): {fragment_count}")
+    logger.info(f"  - Duplicates (skipped): {duplicate_count}")
+    logger.info(f"  - Valid for extraction: {len(valid_entries)}")
 
     # Extract fields
     result = extract_fields_from_mapped_entries(
@@ -178,19 +178,19 @@ def process_cv(
     with open(output_path, "w") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
 
-    print(f"\n{'='*80}")
-    print("Stage 4 Complete")
-    print(f"{'='*80}")
-    print(f"Total entries: {len(result['entries'])}")
-    print(f"  - Extracted: {result['stats']['extracted']}")
-    print(f"  - Skipped (empty/minimal): {result['stats']['skipped']}")
-    print(f"  - Fragments (excluded): {fragment_count}")
-    print(f"  - Duplicates (excluded): {duplicate_count}")
-    print(f"  - Reformatted: {result['stats'].get('entries_reformatted', 0)}")
-    print(f"Total cost: ${result['total_cost']:.4f}")
-    print(f"Total tokens: {result['total_tokens']:,}")
-    print(f"Output: {output_path}")
-    print(f"{'='*80}\n")
+    logger.info(f"\n{'='*80}")
+    logger.info("Stage 4 Complete")
+    logger.info(f"{'='*80}")
+    logger.info(f"Total entries: {len(result['entries'])}")
+    logger.info(f"  - Extracted: {result['stats']['extracted']}")
+    logger.info(f"  - Skipped (empty/minimal): {result['stats']['skipped']}")
+    logger.info(f"  - Fragments (excluded): {fragment_count}")
+    logger.info(f"  - Duplicates (excluded): {duplicate_count}")
+    logger.info(f"  - Reformatted: {result['stats'].get('entries_reformatted', 0)}")
+    logger.info(f"Total cost: ${result['total_cost']:.4f}")
+    logger.info(f"Total tokens: {result['total_tokens']:,}")
+    logger.info(f"Output: {output_path}")
+    logger.info(f"{'='*80}\n")
 
     return {
         "output": output,
@@ -212,13 +212,13 @@ def run_validation(output_path: str) -> None:
     validator_path = Path(__file__).parent.parent.parent / "validate_stage4_extraction.py"
 
     if not validator_path.exists():
-        print(f"\n⚠️  Validation script not found: {validator_path}")
-        print("   Skipping validation (extraction still successful)")
+        logger.warning(f"\n⚠️  Validation script not found: {validator_path}")
+        logger.warning("   Skipping validation (extraction still successful)")
         return
 
-    print(f"\n{'='*80}")
-    print("Running Validation")
-    print(f"{'='*80}\n")
+    logger.info(f"\n{'='*80}")
+    logger.info("Running Validation")
+    logger.info(f"{'='*80}\n")
 
     try:
         # Run validation script
@@ -229,18 +229,18 @@ def run_validation(output_path: str) -> None:
         )
 
         if result.returncode != 0:
-            print(f"\n⚠️  Validation completed with warnings")
+            logger.warning("\n⚠️  Validation completed with warnings")
 
     except Exception as e:
-        print(f"\n⚠️  Validation error: {e}")
-        print("   Extraction still successful")
+        logger.exception(f"\n⚠️  Validation error: {e}")
+        logger.warning("   Extraction still successful")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python stage_4_field_extractor.py <document_uid_or_path>")
-        print("  document_uid_or_path: Either the document UID (e.g., '2005_Bpg')")
-        print("                        or path to CV document (e.g., 'path/to/2005_Bpg.docx')")
-        print("  (the LLM model is configured in llm_config.yaml)")
+        logger.info("Usage: python stage_4_field_extractor.py <document_uid_or_path>")
+        logger.info("  document_uid_or_path: Either the document UID (e.g., '2005_Bpg')")
+        logger.info("                        or path to CV document (e.g., 'path/to/2005_Bpg.docx')")
+        logger.info("  (the LLM model is configured in llm_config.yaml)")
         sys.exit(1)
 
     input_arg = sys.argv[1]
@@ -261,10 +261,8 @@ if __name__ == "__main__":
         # Run validation on the output
         run_validation(output_path)
 
-        print("\n Success")
+        logger.info("\n Success")
 
     except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"Error: {e}")
         sys.exit(1)
