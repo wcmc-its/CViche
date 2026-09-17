@@ -9,15 +9,20 @@ header text differ:
 
 The validation step is the part worth knowing about. `_find_table_after_paragraph`
 returns whatever table comes next in the document, and in CVs where a clinical
-subsection is empty that is the *funding* table from a later section (the blank
-WCM template ships no table of its own under any of L1/L2/L3 -- verified via
-python-docx, #625 review). Each of the three branches therefore classifies row 0
-via `_clinical_header_match`: a header matching the WCM template's standard
-"Title | Institution/Location | Dates" convention, or an ambiguous one, is
-accepted; only a header confidently saying "Award Source" or "Funding" is
-refused. An unrecognized header is never rejected outright, so a table this
-function can't positively classify still gets filled rather than silently
-dropping content.
+subsection is empty that is somebody ELSE's table -- the blank WCM template
+ships no table of its own under any of L1/L2/L3 (verified via python-docx,
+#625 review), so "the next table" is always foreign: a mentee placeholder,
+N2's funding table, or Section O's leadership table. Each of the three
+branches therefore classifies row 0 via `_clinical_header_match` and accepts
+the table ONLY on a positive match against the real header ("Title |
+Institution/Location | Dates"); a confident non-match ("Award Source" /
+"Funding") and an ambiguous header both reject it, falling back to the
+bullet path below. (An earlier version accepted ambiguous headers too -- the
+#625 review's "failing closed would silently drop real clinical content"
+premise was backwards: the bullet fallback already renders the content, in
+the right place, so the permissive accept only ever clobbered another
+section's table. 21 of 105 corpus CVs lost a mentee's rendered table this
+way; see #841.)
 
 `_insert_multiline_as_bullets` is the bullet fallback used by all three
 subsections (L2 joined L1 and L3 in #572; it used the single-bullet inserter,
@@ -201,12 +206,13 @@ def _clinical_header_match(first_row_cells: Sequence[_Cell]) -> bool | None:
     byte-exact match), False when the header is confidently a funding table
     ("Award Source"/"Funding"), and None otherwise.
 
-    An ambiguous header (education, membership, awards, or anything else
-    `_find_table_after_paragraph` might have handed back) stays None so the
-    caller can fall back to the existing permissive accept-by-default
-    behaviour rather than reject a table it isn't sure about -- failing
-    closed here would silently drop real clinical content into no table at
-    all (HARD SAFETY GATE, #625 review).
+    The three call sites (L1/L2/L3) accept a table ONLY on True; both False
+    and the ambiguous None are a rejection, and the caller falls back to the
+    bullet path. An earlier version treated None as an accept ("HARD SAFETY
+    GATE", #625 review) -- see #841: the bullet fallback already renders the
+    content in the right place, so accepting an unrecognized header only
+    ever meant writing over some OTHER section's table (the WCM template has
+    no table of its own under any clinical heading).
     """
     texts = [c.text.strip().lower() for c in first_row_cells]
     joined = ' '.join(texts)
@@ -311,18 +317,21 @@ class ClinicalPracticeSection:
         if section_idx is not None:
             table = self._find_table_after_paragraph(section_idx)
 
-            # Validate table is actually for Clinical Practice, not a different section.
-            # A positive match against the real header confirms it; a
-            # confident non-match (funding table) rejects it; anything
-            # ambiguous falls back to the previous permissive accept
-            # (#625 review -- see `_clinical_header_match`).
+            # Validate table is actually for Clinical Practice, not a different
+            # section. Only a positive match against the real header is
+            # accepted; a confident non-match (funding table) rejects it,
+            # and an AMBIGUOUS header rejects it too -- accepting an
+            # unrecognized header meant writing over another section's
+            # table (the WCM template has no table of its own here); the
+            # bullet fallback below already renders the content in the
+            # right place (#841 review; was permissive-accept, #625).
             table_is_valid = False
             if table and table.rows:
                 header_match = _clinical_header_match(table.rows[0].cells)
                 if header_match is False:
                     if self.verbose:
                         print(f"  Skipping table (appears to be grant table, not clinical practice)")
-                else:
+                elif header_match is True:
                     table_is_valid = True
 
             sorted_entries = sort_entries_reverse_chronological(l1_entries)
@@ -418,16 +427,18 @@ class ClinicalPracticeSection:
         if section_idx is not None:
             table = self._find_table_after_paragraph(section_idx)
 
-            # Validate the table is actually for innovations, not a grant/funding table
-            # (see `_clinical_header_match`: positive match confirms it, a
-            # confident non-match rejects it, ambiguous falls back to accept).
+            # Validate the table is actually for innovations, not a grant/funding
+            # table. Only a positive match against the real header is
+            # accepted; a confident non-match rejects it, and an AMBIGUOUS
+            # header rejects it too -- see `_clinical_header_match` and
+            # #841 review (was permissive-accept, #625).
             table_is_valid = False
             if table and table.rows:
                 header_match = _clinical_header_match(table.rows[0].cells)
                 if header_match is False:
                     if self.verbose:
                         print(f"  Skipping table (appears to be grant table, not clinical innovations)")
-                else:
+                elif header_match is True:
                     table_is_valid = True
 
             sorted_entries = sort_entries_reverse_chronological(l2_entries)
@@ -501,16 +512,18 @@ class ClinicalPracticeSection:
         if section_idx is not None:
             table = self._find_table_after_paragraph(section_idx)
 
-            # Validate the table is actually a leadership table, not a grant/funding table
-            # (see `_clinical_header_match`: positive match confirms it, a
-            # confident non-match rejects it, ambiguous falls back to accept).
+            # Validate the table is actually a leadership table, not a
+            # grant/funding table. Only a positive match against the real
+            # header is accepted; a confident non-match rejects it, and an
+            # AMBIGUOUS header rejects it too -- see `_clinical_header_match`
+            # and #841 review (was permissive-accept, #625).
             table_is_valid = False
             if table and table.rows:
                 header_match = _clinical_header_match(table.rows[0].cells)
                 if header_match is False:
                     if self.verbose:
                         print(f"  Skipping table (appears to be grant table, not clinical leadership)")
-                else:
+                elif header_match is True:
                     table_is_valid = True
 
             sorted_entries = sort_entries_reverse_chronological(l3_entries)

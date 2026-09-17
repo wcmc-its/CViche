@@ -31,10 +31,18 @@ WCM template's standard 3-column convention used verbatim by those three
 tables and by Section O's sibling header ('Role(s)/Position |
 Institution/Location | Dates', see leadership.py) -- but it is a
 same-convention guess, not a byte-verified in-place Clinical Practice
-header. That is exactly why a header this function doesn't recognize is
-classified ambiguous rather than rejected: the actual protection for a real,
-differently-worded Clinical Practice table is the permissive fallback, not
-this specific string (HARD SAFETY GATE).
+header. `_clinical_header_match` itself still classifies an unrecognized
+header as ambiguous (None) rather than rejected (False) -- that tri-state
+return is unchanged. What changed in #841 is what the THREE CALL SITES do
+with None: they used to accept it (permissive accept, "HARD SAFETY GATE"),
+which meant writing over some OTHER section's table, because the blank WCM
+template has no table of its own under any clinical heading -- so a table
+this function can't positively classify is never actually a
+differently-worded Clinical Practice table, it is always foreign. The call
+sites now treat None the same as False: a rejection that falls back to the
+bullet path, which already renders the content in the right place. See
+`test_l1_ambiguous_header_table_is_rejected_and_falls_back_to_bullets` below
+and issue #841.
 
 Run with:
 
@@ -174,17 +182,46 @@ class TestPositiveHeaderValidationEndToEnd:
         assert gen.stats["tables_populated"] == 0
         assert gen.stats["entries_inserted"] == 0
 
-    def test_l1_ambiguous_header_table_still_renders(self):
-        # HARD SAFETY GATE "still renders" proof: a table whose header this
-        # function can't positively classify must still be accepted, exactly
-        # as the pre-existing behaviour was -- never fail closed on
-        # uncertainty.
+    def test_l1_ambiguous_header_table_is_rejected_and_falls_back_to_bullets(self):
+        # #841 (this pin used to assert the opposite -- "still renders" into
+        # the ambiguous table -- which was pinning the defect: on a real
+        # render the table `_find_table_after_paragraph` hands back after a
+        # clinical heading is NEVER this section's own, because the blank
+        # WCM template has no table under any clinical heading at all. So an
+        # unrecognized header is always some OTHER section's table (in the
+        # corpus, most often a mentee placeholder -- 21 of 105 CVs lost a
+        # rendered mentee table to this accept-by-default). The bullet
+        # fallback already renders the content, in the right place, so #841
+        # makes ambiguous a rejection, same as a confident funding-table
+        # non-match. The "HARD SAFETY GATE" comment this replaced argued the
+        # opposite failure mode (dropping real clinical content); that
+        # premise was backwards.
         gen, table = _fake_doc_with_table("Clinical Practice", ["Activity", "Where"])
-        entry = {"text": "", "extracted_fields": {"activity": "Attending", "location": "NYP"}}
+        # `_insert_bulleted_entry` inserts a new paragraph BEFORE the
+        # paragraph at its target index and returns None (no-op) when that
+        # index is out of range -- `_fake_doc_with_table`'s minimal fixture
+        # (heading immediately followed by the table, nothing after) has no
+        # paragraph there. A trailing paragraph gives the bullet path
+        # somewhere to insert before, same as a real document always has
+        # (the next section's heading).
+        gen.doc.add_paragraph("")
+        entry = {"text": "Attending, inpatient medicine", "extracted_fields": {"activity": "Attending", "location": "NYP"}}
         gen._fill_clinical_practice({"L1": [entry]})
 
-        assert gen.stats["tables_populated"] == 1
+        # Foreign table left completely untouched: header row plus the
+        # original sentinel row, nothing added or cleared.
+        assert [tuple(c.text for c in r.cells) for r in table.rows] == [
+            ("Activity", "Where"),
+            ("SENTINEL-DO-NOT-TOUCH", ""),
+        ]
+        assert gen.stats["tables_populated"] == 0
+        # `entries_inserted` counts BOTH the table-write and bullet paths
+        # (`_insert_bulleted_entry` increments it too) -- 1 here is the
+        # bullet, not a table row.
         assert gen.stats["entries_inserted"] == 1
+        # Rendered as a bullet after the heading instead of into the table.
+        bullet_texts = [p.text for p in gen.doc.paragraphs if "Attending" in p.text]
+        assert bullet_texts == ["Attending, inpatient medicine"]
 
 
 class TestL1PipeFallbackKeepsLocation:
@@ -226,9 +263,14 @@ class TestL2NoTruncation:
     """Thread 3850753654, item 3: no business rule behind the 100-char cut."""
 
     def test_l2_fallback_preserves_full_text_over_100_chars(self):
+        # #841: header must positively match to reach the table-write path
+        # at all (an ambiguous header like the original "Dates |
+        # Title/Location | Role/Description" is now rejected, same as a
+        # confident funding non-match) -- the column COUNT this test is
+        # about (3) is unaffected by the header text.
         gen, table = _fake_doc_with_table(
             "Clinical Innovations",
-            ["Dates", "Title/Location", "Role/Description"],
+            ["Title", "Institution/Location", "Dates (yyyy)"],
         )
         long_text = "A" * 150
         entry = {"text": long_text, "extracted_fields": {}}
@@ -274,9 +316,12 @@ class TestNormalizationBoundary:
         assert rows == [("Attending physician; Consulting physician", "NYP Weill Cornell", "2019-2022")]
 
     def test_l3_dict_valued_role_does_not_crash_and_is_extracted(self):
+        # #841: header must positively match to reach the table-write path
+        # (see test_l2_fallback_preserves_full_text_over_100_chars above);
+        # the column COUNT this test is about (3) is unaffected.
         gen, table = _fake_doc_with_table(
             "Clinical Leadership",
-            ["Dates", "Role", "Institution/Description"],
+            ["Title", "Institution/Location", "Dates (yyyy)"],
         )
         entry = {
             "text": "",
@@ -301,7 +346,11 @@ class TestAddTableRowCentralization:
     """
 
     def test_two_column_table_uses_the_two_column_fallback(self):
-        gen, table = _fake_doc_with_table("Clinical Practice", ["Activity/Location", "Dates"])
+        # #841: header must positively match to reach the table-write path;
+        # a 2-cell header row can still satisfy `_clinical_header_match`
+        # (it only inspects the first two cells), so "Title | Location"
+        # keeps this a genuinely 2-column table.
+        gen, table = _fake_doc_with_table("Clinical Practice", ["Title", "Location"])
         entry = {
             "text": "",
             "extracted_fields": {
@@ -316,15 +365,165 @@ class TestAddTableRowCentralization:
         assert rows == [("Attending physician", "2020-2021")]
 
     def test_one_column_table_uses_the_one_column_fallback(self):
-        gen, table = _fake_doc_with_table("Clinical Innovations", ["Everything"])
-        entry = {
-            "text": "",
-            "extracted_fields": {"title": "New triage protocol", "start_date": "2021"},
-        }
-        gen._fill_clinical_practice({"L2": [entry]})
+        # A 1-column table can never satisfy `_clinical_header_match`'s
+        # positive match -- it requires a second cell to check for
+        # "institution"/"location" -- so after #841 it can never reach
+        # `_add_clinical_table_row` through the render path at all (an
+        # unrecognized header is now a rejection, same as a funding table).
+        # Exercise the centralized helper directly instead, same as its own
+        # docstring describes ("the narrower branches exist only so a
+        # differently-shaped table still renders something instead of
+        # raising").
+        gen = WCMTemplateGenerator(verbose=False)
+        doc = Document()
+        table = doc.add_table(rows=1, cols=1)
+        table.rows[0].cells[0].text = "Everything"
+        gen.doc = doc
+
+        gen._add_clinical_table_row(
+            table,
+            three_col=["2021", "New triage protocol", "some description"],
+            two_col=["New triage protocol", "2021"],
+            one_col=["2021: New triage protocol"],
+        )
 
         rows = [tuple(c.text for c in r.cells) for r in table.rows[1:]]
         assert rows == [("2021: New triage protocol",)]
+
+
+def _fake_doc_with_mentee_shaped_table(heading_text):
+    """Heading immediately followed by a 6-row `Name`-headed table -- the
+    WCM template's own mentee-placeholder shape (#841: this is the table
+    the corpus cascade actually leaves as "the next table" after a clinical
+    heading in 21 of 105 CVs) -- with a SENTINEL marker in a data row, plus
+    a trailing paragraph so the bullet fallback has somewhere to insert
+    before (see the comment on `test_l1_ambiguous_header_table_is_rejected_
+    and_falls_back_to_bullets` above). Returns (gen, table, rows_before), a
+    byte-copy of the table's cell text for the untouched-table assertion.
+    """
+    gen = WCMTemplateGenerator(verbose=False)
+    doc = Document()
+    doc.add_paragraph(heading_text)
+    table = doc.add_table(rows=6, cols=2)
+    table.rows[0].cells[0].text = "Name"
+    table.rows[0].cells[1].text = "Institution/Program"
+    table.rows[1].cells[0].text = "SENTINEL-DO-NOT-TOUCH"
+    doc.add_paragraph("")
+    gen.doc = doc
+    rows_before = [tuple(c.text for c in r.cells) for r in table.rows]
+    return gen, table, rows_before
+
+
+class TestSubsectionMenteeShapedTableProtection841:
+    """#841, ticket D-836-R2 TASK 2: per subsection (a) a mentee-shaped
+    table is untouched and the entry falls back to bullets. (b) and (c) --
+    a positively-matching table still fills, a funding table is still
+    rejected -- already exist for L1 (`TestPositiveHeaderValidationEndToEnd`)
+    and are added here for L2/L3, which had no end-to-end coverage of
+    either branch before this round.
+    """
+
+    # --- (a) mentee-shaped table untouched, L1/L2/L3 ---------------------
+
+    def test_l1_mentee_shaped_table_is_untouched_and_falls_back_to_bullets(self):
+        gen, table, rows_before = _fake_doc_with_mentee_shaped_table("Clinical Practice")
+        entry = {"text": "Attending, inpatient medicine",
+                  "extracted_fields": {"activity": "Attending", "location": "NYP"}}
+        gen._fill_clinical_practice({"L1": [entry]})
+
+        rows_after = [tuple(c.text for c in r.cells) for r in table.rows]
+        assert rows_after == rows_before
+        assert gen.stats["tables_populated"] == 0
+        assert any("Attending, inpatient medicine" in p.text for p in gen.doc.paragraphs)
+
+    def test_l2_mentee_shaped_table_is_untouched_and_falls_back_to_bullets(self):
+        gen, table, rows_before = _fake_doc_with_mentee_shaped_table("Clinical Innovations")
+        entry = {"text": "New triage protocol", "extracted_fields": {"title": "New triage protocol"}}
+        gen._fill_clinical_practice({"L2": [entry]})
+
+        rows_after = [tuple(c.text for c in r.cells) for r in table.rows]
+        assert rows_after == rows_before
+        assert gen.stats["tables_populated"] == 0
+        assert any("New triage protocol" in p.text for p in gen.doc.paragraphs)
+
+    def test_l3_mentee_shaped_table_is_untouched_and_falls_back_to_bullets(self):
+        gen, table, rows_before = _fake_doc_with_mentee_shaped_table("Clinical Leadership")
+        entry = {"text": "Director, Wound Care Program",
+                  "extracted_fields": {"role": "Director, Wound Care Program"}}
+        gen._fill_clinical_practice({"L3": [entry]})
+
+        rows_after = [tuple(c.text for c in r.cells) for r in table.rows]
+        assert rows_after == rows_before
+        assert gen.stats["tables_populated"] == 0
+        assert any("Director, Wound Care Program" in p.text for p in gen.doc.paragraphs)
+
+    # --- (b) positively-matching table still fills, L2/L3 (L1 exists) ----
+
+    def test_l2_convention_header_table_accepts_and_renders(self):
+        gen, table = _fake_doc_with_table(
+            "Clinical Innovations",
+            ["Title", "Institution/Location", "Dates (yyyy)"],
+        )
+        entry = {"text": "", "extracted_fields": {"title": "New triage protocol", "start_date": "2021"}}
+        gen._fill_clinical_practice({"L2": [entry]})
+
+        assert gen.stats["tables_populated"] == 1
+        assert gen.stats["entries_inserted"] == 1
+        rows = [tuple(c.text for c in r.cells) for r in table.rows[1:]]
+        assert rows == [("2021", "New triage protocol", "")]
+
+    def test_l3_convention_header_table_accepts_and_renders(self):
+        gen, table = _fake_doc_with_table(
+            "Clinical Leadership",
+            ["Title", "Institution/Location", "Dates (yyyy)"],
+        )
+        entry = {
+            "text": "",
+            "extracted_fields": {
+                "role": "Director, Wound Care Program",
+                "institution": "NYP Weill Cornell",
+                "start_date": "2020",
+                "end_date": "2023",
+            },
+        }
+        gen._fill_clinical_practice({"L3": [entry]})
+
+        assert gen.stats["tables_populated"] == 1
+        assert gen.stats["entries_inserted"] == 1
+        rows = [tuple(c.text for c in r.cells) for r in table.rows[1:]]
+        assert rows == [("2020-2023", "Director, Wound Care Program", "NYP Weill Cornell")]
+
+    # --- (c) funding table still rejected, L2/L3 (L1 exists) -------------
+
+    def test_l2_award_source_table_is_rejected_and_falls_back_to_bullets(self):
+        gen, table = _fake_doc_with_table(
+            "Clinical Innovations",
+            ["Award Source: (funding agency)", ""],
+        )
+        entry = {"text": "New triage protocol", "extracted_fields": {}}
+        gen._fill_clinical_practice({"L2": [entry]})
+
+        assert [tuple(c.text for c in r.cells) for r in table.rows] == [
+            ("Award Source: (funding agency)", ""),
+            ("SENTINEL-DO-NOT-TOUCH", ""),
+        ]
+        assert gen.stats["tables_populated"] == 0
+        assert gen.stats["entries_inserted"] == 0
+
+    def test_l3_award_source_table_is_rejected_and_falls_back_to_bullets(self):
+        gen, table = _fake_doc_with_table(
+            "Clinical Leadership",
+            ["Award Source: (funding agency)", ""],
+        )
+        entry = {"text": "Director, Wound Care Program", "extracted_fields": {}}
+        gen._fill_clinical_practice({"L3": [entry]})
+
+        assert [tuple(c.text for c in r.cells) for r in table.rows] == [
+            ("Award Source: (funding agency)", ""),
+            ("SENTINEL-DO-NOT-TOUCH", ""),
+        ]
+        assert gen.stats["tables_populated"] == 0
+        assert gen.stats["entries_inserted"] == 0
 
 
 if __name__ == "__main__":

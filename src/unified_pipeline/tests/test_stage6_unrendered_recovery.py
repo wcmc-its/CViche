@@ -26,6 +26,7 @@ if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
 from docx import Document  # noqa: E402
+from docx.oxml.ns import qn  # noqa: E402
 
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     WCMTemplateGenerator,
@@ -39,6 +40,29 @@ def _generator(**kwargs):
     gen = WCMTemplateGenerator(verbose=False, **kwargs)
     gen.doc = Document(gen.template_path)
     return gen
+
+
+def _num_level(para):
+    """The paragraph's w:ilvl, or None when it carries no list markup.
+
+    Mirrors test_stage6_k_list_bullets.py's helper of the same name.
+    """
+    pPr = para._p.pPr
+    numPr = pPr.find(qn("w:numPr")) if pPr is not None else None
+    if numPr is None:
+        return None
+    return numPr.find(qn("w:ilvl")).get(qn("w:val"))
+
+
+def _bulleted_texts(paragraphs):
+    """Text of every real Word list paragraph among the given paragraphs.
+
+    Both recovery emitters -- `_insert_reconsidered_segment` and
+    `_add_remaining_to_appendix` -- write real list paragraphs as of #483 R2
+    (previously `_insert_reconsidered_segment` prefixed a literal "•", which
+    is what the old `startswith("•")` scans across this file matched on).
+    """
+    return [p.text for p in paragraphs if _num_level(p) is not None]
 
 
 # Mirrors the KFGXBW entry-21 shape: date-range comma lines, flat singular
@@ -96,20 +120,21 @@ def test_d1_remainder_recovered_in_positions_section():
     gen._fill_positions({"D1": [entry]})
     gen._recover_unrendered_records({"D1": [entry]})
 
-    texts = [p.text for p in gen.doc.paragraphs]
-    assert any(t.startswith("• Aug 2019-Dec 2023, Associate Director of "
-                            "Quantitative Basketweaving") for t in texts)
-    assert any(t.startswith("• Mar 2015-Jul 2019, Program Coordinator for "
-                            "Wombat Logistics") for t in texts)
+    paras = gen.doc.paragraphs
+    texts = [p.text for p in paras]
+    bullets = _bulleted_texts(paras)
+    assert any(t.startswith("Aug 2019-Dec 2023, Associate Director of "
+                            "Quantitative Basketweaving") for t in bullets)
+    assert any(t.startswith("Mar 2015-Jul 2019, Program Coordinator for "
+                            "Wombat Logistics") for t in bullets)
     # The extracted record rendered as a table row — never duplicated as a
     # bullet.
-    assert not any(t.startswith("•") and "Interdimensional Affairs" in t
-                   for t in texts)
+    assert not any("Interdimensional Affairs" in t for t in bullets)
     # Recovered into the entry's own section, not the appendix.
     header_idx = next(i for i, t in enumerate(texts)
                       if "Academic Appointments" in t)
-    bullet_idx = next(i for i, t in enumerate(texts)
-                      if t.startswith("• Aug 2019"))
+    bullet_idx = next(i for i, (p, t) in enumerate(zip(paras, texts))
+                      if _num_level(p) is not None and t.startswith("Aug 2019"))
     assert bullet_idx > header_idx
     assert not any("T. APPENDIX" in t for t in texts)
 
@@ -134,11 +159,10 @@ def test_reformatted_rendered_line_not_recovered():
 
     gen._recover_unrendered_records({"D1": [entry]})
 
-    texts = [p.text for p in gen.doc.paragraphs]
-    assert not any(t.startswith("•") and "Improbable Archives" in t
-                   for t in texts)
-    assert any(t.startswith("• Feb 2011-Jul 2015, Keeper of Ceremonial "
-                            "Spreadsheets") for t in texts)
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert not any("Improbable Archives" in t for t in bullets)
+    assert any(t.startswith("Feb 2011-Jul 2015, Keeper of Ceremonial "
+                            "Spreadsheets") for t in bullets)
 
 
 def test_short_title_extracted_record_not_double_rendered():
@@ -168,13 +192,12 @@ def test_short_title_extracted_record_not_double_rendered():
     gen._fill_positions({"D1": [entry]})
     gen._recover_unrendered_records({"D1": [entry]})
 
-    texts = [p.text for p in gen.doc.paragraphs]
+    bullets = _bulleted_texts(gen.doc.paragraphs)
     # The extracted record rendered as a table row — never also as a bullet.
-    assert not any(t.strip().startswith("•") and "Jul 2014-Present" in t
-                   for t in texts)
+    assert not any("Jul 2014-Present" in t for t in bullets)
     # The dropped sibling is still recovered.
-    assert any(t.startswith("• Aug 2009-Jun 2014, Associate Professor")
-               for t in texts)
+    assert any(t.startswith("Aug 2009-Jun 2014, Associate Professor")
+               for t in bullets)
 
 
 def test_short_title_guard_requires_both_date_anchors():
@@ -212,8 +235,9 @@ def test_unverifiable_short_line_never_recovered():
 
     texts = [p.text for p in gen.doc.paragraphs]
     assert not any("ZQ Camp" in t for t in texts)
-    assert any(t.startswith("• Feb 2001-Jul 2005, Cartographer of Forgotten "
-                            "Stairwells") for t in texts)
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any(t.startswith("Feb 2001-Jul 2005, Cartographer of Forgotten "
+                            "Stairwells") for t in bullets)
 
 
 # --------------------------------------------------- F1 licensure path (2071)
@@ -253,8 +277,7 @@ def test_f1_dropped_license_recovered_column_header_not():
     gen._fill_licensure([entry])
     gen._recover_unrendered_records({"F1": [entry]})
 
-    texts = [p.text for p in gen.doc.paragraphs]
-    bullets = [t for t in texts if t.strip().startswith("•")]
+    bullets = _bulleted_texts(gen.doc.paragraphs)
     assert any("83412" in b for b in bullets)          # dropped second license
     assert not any("License Number" in b for b in bullets)  # column header
     assert not any("4471" in b for b in bullets)       # rendered license
@@ -279,9 +302,8 @@ def test_two_cell_no_digit_record_recovered():
 
     gen._recover_unrendered_records({"D2": [entry]})
 
-    texts = [p.text for p in gen.doc.paragraphs]
-    assert any(t.strip().startswith("•") and "Ornamental Calculus" in t
-               for t in texts)
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Ornamental Calculus" in t for t in bullets)
 
 
 def test_dateless_committee_row_recovered():
@@ -305,9 +327,8 @@ def test_dateless_committee_row_recovered():
 
     gen._recover_unrendered_records({"P": [entry]})
 
-    texts = [p.text for p in gen.doc.paragraphs]
-    assert any(t.strip().startswith("•") and "Subterranean Balloon" in t
-               for t in texts)
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    assert any("Subterranean Balloon" in t for t in bullets)
 
 
 def test_near_duplicate_variant_across_entries_recovered_once():
@@ -342,9 +363,8 @@ def test_near_duplicate_variant_across_entries_recovered_once():
 
     gen._recover_unrendered_records({"D1": [entry_a, entry_b]})
 
-    texts = [p.text for p in gen.doc.paragraphs]
-    hits = [t for t in texts
-            if t.strip().startswith("•") and "Quantitative Basketweaving" in t]
+    bullets = _bulleted_texts(gen.doc.paragraphs)
+    hits = [t for t in bullets if "Quantitative Basketweaving" in t]
     assert len(hits) == 1
 
 
@@ -370,14 +390,15 @@ def test_s_code_recovery_lands_in_bibliography_section():
 
     gen._recover_unrendered_records({"S1": [entry]})
 
-    texts = [p.text for p in gen.doc.paragraphs]
+    paras = gen.doc.paragraphs
+    texts = [p.text for p in paras]
     biblio_idx = next(i for i, t in enumerate(texts)
                       if t.strip() == "BIBLIOGRAPHY")
     optional_idx = next(i for i, t in enumerate(texts)
                         if t.strip().startswith("**Optional"))
     assert optional_idx < biblio_idx  # template invariant the bug relied on
-    bullet_idxs = [i for i, t in enumerate(texts)
-                   if t.strip().startswith("•") and "Ornamental calculus" in t]
+    bullet_idxs = [i for i, (p, t) in enumerate(zip(paras, texts))
+                   if _num_level(p) is not None and "Ornamental calculus" in t]
     assert bullet_idxs, "citation line was not recovered"
     assert all(i > biblio_idx for i in bullet_idxs)
 
@@ -422,7 +443,7 @@ def test_m2b_sibling_routed_home_extracted_grant_guarded():
     gen._recover_unrendered_records({"M2B": [entry]})
 
     texts = [p.text for p in gen.doc.paragraphs]
-    bullets = [t for t in texts if t.strip().startswith("•")]
+    bullets = _bulleted_texts(gen.doc.paragraphs)
     assert any("Panuvian Wetland Acoustics Survey" in b for b in bullets)
     assert not any("Cartography of Subterranean" in b for b in bullets)
     # Routed to the funding subsection (the #214 precedent), not the appendix.
@@ -476,8 +497,7 @@ def test_m2b_datelike_field_values_do_not_vouch_sibling_recovered():
 
     gen._recover_unrendered_records({"M2B": [entry]})
 
-    texts = [p.text for p in gen.doc.paragraphs]
-    bullets = [t for t in texts if t.strip().startswith("•")]
+    bullets = _bulleted_texts(gen.doc.paragraphs)
     hits = [b for b in bullets if "Meandering Auditors Guild Junior" in b]
     assert len(hits) == 1  # sibling recovered, exactly once
     # The extracted grant's line still blocked by its (prose) title.
@@ -506,8 +526,7 @@ def test_prose_identifying_values_still_vouch_and_block_recovery():
 
     gen._recover_unrendered_records({"P": [entry]})
 
-    texts = [p.text for p in gen.doc.paragraphs]
-    bullets = [t for t in texts if t.strip().startswith("•")]
+    bullets = _bulleted_texts(gen.doc.paragraphs)
     assert not any("Improbable Weights" in b for b in bullets)
     assert any("Subterranean Balloon" in b for b in bullets)
 
@@ -532,12 +551,13 @@ def test_recovery_not_swallowed_by_appendix_group_head():
 
     gen._recover_unrendered_records({"D1": [entry]})
 
-    texts = [p.text for p in gen.doc.paragraphs]
+    paras = gen.doc.paragraphs
+    texts = [p.text for p in paras]
     header_idx = next(i for i, t in enumerate(texts)
                       if "Academic Appointments" in t)
     appendix_idx = next(i for i, t in enumerate(texts) if "T. APPENDIX" in t)
-    bullet_idx = next(i for i, t in enumerate(texts)
-                      if t.startswith("• Aug 2019"))
+    bullet_idx = next(i for i, (p, t) in enumerate(zip(paras, texts))
+                      if _num_level(p) is not None and t.startswith("Aug 2019"))
     assert header_idx < bullet_idx < appendix_idx
 
 
@@ -560,11 +580,19 @@ def test_unmapped_code_falls_back_to_appendix_untruncated():
 
     texts = [p.text for p in gen.doc.paragraphs]
     assert any("T. APPENDIX" in t for t in texts)
-    # Untruncated verbatim bullets (the 200-char _fill_appendix truncation is
-    # part of what masked the KFGXBW loss).
-    assert any(t == "• Jan 2012-Dec 2016, Fellowship of Ornithological "
-                    "Cryptography, Guild of Meandering Auditors, Crab Hollow, "
-                    "ZQ" for t in texts)
+    # Untruncated verbatim, as a real Word list paragraph (#483) -- the
+    # 200-char _fill_appendix truncation is part of what masked the KFGXBW
+    # loss.
+    matches = [p for p in gen.doc.paragraphs
+               if p.text == "Jan 2012-Dec 2016, Fellowship of Ornithological "
+                             "Cryptography, Guild of Meandering Auditors, "
+                             "Crab Hollow, ZQ"]
+    assert len(matches) == 1
+    assert _num_level(matches[0]) == "0"
+    # No other paragraph duplicates it (the pre-#483 glyph path could
+    # theoretically double-insert without the exact-text match above
+    # catching it, since a glyph prefix changes the string).
+    assert len([t for t in texts if "Ornithological Cryptography" in t]) == 1
 
 
 def test_reconsider_insert_failure_falls_back_to_appendix(monkeypatch):
@@ -625,9 +653,8 @@ def test_generate_recovers_remainder_by_default(tmp_path):
 
     out = run_stage6(str(input_path), str(tmp_path / "out.docx"), verbose=False)
 
-    texts = [p.text for p in Document(out).paragraphs]
-    assert any(t.startswith("•") and "Quantitative Basketweaving" in t
-               for t in texts)
+    bullets = _bulleted_texts(Document(out).paragraphs)
+    assert any("Quantitative Basketweaving" in t for t in bullets)
 
 
 def test_deduped_entry_unique_record_still_recovered(tmp_path, monkeypatch):
@@ -697,5 +724,7 @@ def test_generate_flag_off_drops_remainder(tmp_path):
                      verbose=False, recover_unrendered_records=False)
 
     texts = [p.text for p in Document(out).paragraphs]
-    assert not any(t.startswith("•") and "Quantitative Basketweaving" in t
-                   for t in texts)
+    # The flag being off means the record is never touched at all -- checking
+    # for a plain substring, not a glyph-prefixed one, since #483 R2 removed
+    # the glyph representation the recovery path could have produced.
+    assert not any("Quantitative Basketweaving" in t for t in texts)

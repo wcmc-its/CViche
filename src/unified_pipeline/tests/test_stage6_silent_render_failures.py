@@ -51,7 +51,16 @@ from docx.table import Table  # noqa: E402
 from docx.text.paragraph import Paragraph  # noqa: E402
 
 from unified_pipeline.stage6.formatting import DetachedAnchorError, _insert_after  # noqa: E402
-from unified_pipeline.stage6.sections.mentoring import MenteeRecord  # noqa: E402
+from unified_pipeline.stage6.sections.mentoring import (  # noqa: E402
+    MenteeRecord,
+    N1_HEADING,
+    N2_HEADING,
+    N2_INSTRUCTION,
+    _looks_like_training_grant_table,
+    _program_leadership_line,
+    _training_grant_is_sparse,
+    _training_grant_rows,
+)
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 MENTORING_LOGGER = 'unified_pipeline.stage6.sections.mentoring'
@@ -300,10 +309,341 @@ def test_mentoring_real_template_body_order():
     assert past[:2] == [('tbl', 'Carol C'), ('p', '')]
     assert past[2][1].startswith('Duplicate table below')
     assert _body_after(gen.doc, "MENTORING", 1) == [('p', 'One mentee now leads a lab.')]
-    # Two placeholders out, three mentee tables in.
-    assert len(gen.doc.tables) == template_tables - 2 + 3
+    # Two mentee placeholders out, three mentee tables in; the N2 placeholder
+    # also disappears as a side effect -- `_fill_mentoring` calls
+    # `_fill_training_grants([])` first, and its removal is now
+    # unconditional-but-guarded (#529 round 2, F3), so it fires even though
+    # this test has no N2 entries.
+    assert len(gen.doc.tables) == template_tables - 3 + 3
     assert gen.stats['tables_populated'] == 3
     assert gen.stats['entries_inserted'] == 5
+
+
+# --- N1/N2: pure builders (#529) -------------------------------------------------
+
+def test_program_leadership_line_uses_text_verbatim_when_present():
+    """(a) The line equals the entry `text` exactly (stripped) -- no field
+    assembly at all (#529 round 3)."""
+    fields = {'role': 'Director', 'program_name': 'Scholars Program',
+              'institution': 'Test University', 'start_date': '2019',
+              'end_date': '2022'}
+    assert _program_leadership_line(fields, '  Directed the Scholars Program.  ') == \
+        'Directed the Scholars Program.'
+
+
+def test_program_leadership_line_ignores_fields_when_text_present():
+    """A role-only entry keeps its FULL text rather than shrinking to just
+    the field -- the round 1-2 defect this round fixes (#529 round 3)."""
+    assert _program_leadership_line(
+        {'role': 'Director'}, 'Directed a mentoring initiative in 2019.') == \
+        'Directed a mentoring initiative in 2019.'
+
+
+def test_program_leadership_line_empty_text_falls_back_to_joined_fields():
+    """(b) Empty `text` with fields present -> the non-empty fields joined
+    with ', ' -- the only fallback (#529 round 3)."""
+    fields = {'role': 'Director', 'program_name': 'Scholars Program',
+              'institution': 'Test University', 'start_date': '2019',
+              'end_date': '2022'}
+    assert _program_leadership_line(fields, '') == \
+        'Director, Scholars Program, Test University, 2019-2022'
+
+
+def test_program_leadership_line_empty_text_falls_back_to_partial_fields():
+    assert _program_leadership_line({'role': 'Director'}, '') == 'Director'
+    assert _program_leadership_line(
+        {'program_name': 'Scholars Program', 'institution': 'Test University'}, '') == \
+        'Scholars Program, Test University'
+
+
+def test_program_leadership_line_empty_text_and_fields_is_empty_string():
+    """Never a blank paragraph: `_fill_program_leadership` checks for a
+    non-empty line before inserting, so this is the one input that produces
+    no line at all rather than an inserted blank one (#529 round 3)."""
+    assert _program_leadership_line({}, '') == ''
+    assert _program_leadership_line({}, '   ') == ''
+
+
+def test_program_leadership_line_none_text_is_safe():
+    """(d) `None`/missing `text` is safe -- falls back to fields exactly
+    like an empty string does (#529 round 3)."""
+    assert _program_leadership_line({'role': 'Director'}, None) == 'Director'
+    assert _program_leadership_line({}, None) == ''
+
+
+def test_program_leadership_line_none_field_values_are_safe():
+    fields = {'role': None, 'program_name': None, 'institution': None,
+              'start_date': None, 'end_date': None}
+    assert _program_leadership_line(fields, None) == ''
+    assert _program_leadership_line(fields, '') == ''
+
+
+def test_training_grant_rows_full_fields():
+    fields = {'agency': 'National Test Institute', 'grant_number': 'T32-999',
+              'role': 'Mentor', 'grant_title': 'Test Training Program',
+              'start_date': '2018', 'end_date': '2021'}
+    assert _training_grant_rows(fields) == [
+        ('Award Source (funding agency, type of grant):',
+         'National Test Institute (T32-999) (Mentor)'),
+        ('Project title:', 'Test Training Program'),
+        ('Duration of support (mm/yyyy-mm/yyyy):', '2018-2021'),
+    ]
+
+
+def test_training_grant_rows_grant_number_already_in_agency_is_not_repeated():
+    fields = {'agency': 'National Test Institute T32-999', 'grant_number': 'T32-999'}
+    assert _training_grant_rows(fields)[0] == (
+        'Award Source (funding agency, type of grant):',
+        'National Test Institute T32-999')
+
+
+def test_training_grant_rows_title_precedence_grant_title_then_title():
+    assert _training_grant_rows({'grant_title': 'A', 'title': 'B'})[1] == \
+        ('Project title:', 'A')
+    assert _training_grant_rows({'title': 'B'})[1] == ('Project title:', 'B')
+
+
+def test_training_grant_rows_none_values_are_safe():
+    fields = {'agency': None, 'grant_number': None, 'role': None,
+              'grant_title': None, 'title': None, 'start_date': None, 'end_date': None}
+    assert _training_grant_rows(fields) == [
+        ('Award Source (funding agency, type of grant):', ''),
+        ('Project title:', ''),
+        ('Duration of support (mm/yyyy-mm/yyyy):', ''),
+    ]
+
+
+def test_training_grant_is_sparse_true_when_no_identifying_field():
+    assert _training_grant_is_sparse({}) is True
+    assert _training_grant_is_sparse({'role': 'Mentor'}) is True
+
+
+def test_training_grant_is_sparse_false_when_any_identifying_field_present():
+    assert _training_grant_is_sparse({'grant_number': 'T32-1'}) is False
+    assert _training_grant_is_sparse({'agency': 'A'}) is False
+    assert _training_grant_is_sparse({'grant_title': 'A'}) is False
+
+
+# --- N1/N2: rendering into their template slots (#529) ---------------------------
+
+def _n1(**fields) -> dict:
+    text = fields.pop('text', 'N1 entry')
+    return {'taxonomy_code': 'N1', 'text': text, 'extracted_fields': fields}
+
+
+def _n2(**fields) -> dict:
+    text = fields.pop('text', 'N2 entry')
+    return {'taxonomy_code': 'N2', 'text': text, 'extracted_fields': fields}
+
+
+def test_n1_missing_anchor_falls_back_to_mentoring_header(caplog):
+    """Blank Document() with only MENTORING: warning emitted, the entry
+    still renders (as a fallback line), nothing raised (#529)."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+
+    with caplog.at_level(logging.WARNING, logger=MENTORING_LOGGER):
+        gen._fill_mentoring({'N1': [_n1()]})
+
+    assert [w.getMessage() for w in _warnings(caplog, MENTORING_LOGGER)] == [
+        "Mentoring: 'Leadership and mentoring in programs (Describe "
+        "activity; include dates)' heading not found; 1 entries rendered "
+        "under MENTORING instead"]
+    assert _body_after(gen.doc, "MENTORING", 1) == [('p', 'N1 entry')]
+
+
+def test_n2_missing_anchor_falls_back_to_mentoring_header(caplog):
+    """Same fallback shape as N1, for the table-shaped code (#529)."""
+    gen = _new_generator()
+    gen.doc.add_paragraph("MENTORING")
+
+    with caplog.at_level(logging.WARNING, logger=MENTORING_LOGGER):
+        gen._fill_mentoring({'N2': [_n2(agency='National Test Institute')]})
+
+    assert [w.getMessage() for w in _warnings(caplog, MENTORING_LOGGER)] == [
+        "Mentoring: 'Institutional Training Grants and Mentored Trainee "
+        "Grants' heading not found; 1 entries rendered under MENTORING "
+        "instead"]
+    assert len(gen.doc.tables) == 1
+    assert gen.doc.tables[0].rows[0].cells[1].text == 'National Test Institute'
+
+
+def test_n1_real_template_three_lines_in_order_text_verbatim_and_fallback():
+    """(c) Real template: three N1 entries land after "Leadership and
+    mentoring in programs..." in input order (#529). The first two render
+    their own `text` verbatim -- unshortened, even though the second's
+    fields alone would describe less -- and the third has no `text` at all
+    so it falls back to its non-empty fields joined with ', ' (#529
+    round 3)."""
+    gen = _template_generator()
+    entries_by_code = {
+        'N1': [
+            _n1(role='Director', text='Directed the Scholars Program from 2015-2020.'),
+            _n1(program_name='Scholars Program', institution='Test University',
+                text='Served as a mentor to junior faculty in the program.'),
+            _n1(role='Advisor', institution='Test University', text=''),
+        ],
+    }
+
+    gen._fill_mentoring(entries_by_code)
+
+    assert _body_after(gen.doc, N1_HEADING, 3) == [
+        ('p', 'Directed the Scholars Program from 2015-2020.'),
+        ('p', 'Served as a mentor to junior faculty in the program.'),
+        ('p', 'Advisor, Test University'),
+    ]
+    assert gen.stats['entries_inserted'] == 3
+
+
+def test_n1_entry_with_empty_text_and_no_fields_inserts_no_blank_line():
+    """An N1 entry with nothing to say -- empty `text`, no populated fields --
+    must not become a blank paragraph under the heading (#529 round 3). The
+    `if line:` guard in `_fill_program_leadership` is what keeps it out; the
+    two real entries around it still render, in order, and the counter only
+    counts what was written."""
+    gen = _template_generator()
+    entries_by_code = {
+        'N1': [
+            _n1(text='First real line.'),
+            _n1(text='', role='', program_name=None),
+            _n1(text='Second real line.'),
+        ],
+    }
+
+    gen._fill_mentoring(entries_by_code)
+
+    assert _body_after(gen.doc, N1_HEADING, 2) == [
+        ('p', 'First real line.'),
+        ('p', 'Second real line.'),
+    ]
+    assert gen.stats['entries_inserted'] == 2
+
+
+def test_n2_real_template_tables_in_order_placeholder_removed_sparse_as_line():
+    """Real template: two N2 entries -> placeholder table gone, two 3-row
+    tables land AFTER the instruction paragraph ("Duplicate table below
+    as needed...") in input order with a spacer between -- heading ->
+    instruction -> tables, the template's own order (#529 round 2, F1;
+    was between the heading and the instruction before this fix). A
+    third, sparse entry renders as one plain line and adds no table."""
+    gen = _template_generator()
+    template_tables = len(gen.doc.tables)
+    entries_by_code = {
+        'N2': [
+            _n2(grant_title='Test Training Program A', agency='National Test Institute',
+                grant_number='T32-100', role='Mentor', start_date='2018', end_date='2021'),
+            _n2(title='Test Training Program B', agency='Regional Test Foundation',
+                start_date='2020', end_date='2023'),
+            _n2(text='A sparse training-grant line with no identifying field.'),
+        ],
+    }
+
+    gen._fill_mentoring(entries_by_code)
+
+    n2_region = _body_after(gen.doc, N2_HEADING, 6)
+    assert n2_region[0] == ('p', N2_INSTRUCTION)
+    assert n2_region[1] == ('tbl', 'National Test Institute (T32-100) (Mentor)')
+    assert n2_region[2] == ('p', '')
+    assert n2_region[3] == ('tbl', 'Regional Test Foundation')
+    assert n2_region[4] == ('p', '')
+    assert n2_region[5] == (
+        'p', 'A sparse training-grant line with no identifying field.')
+    body = list(gen.doc.element.body)
+    instruction_idx = next(
+        i for i, el in enumerate(body) if el.tag == qn('w:p')
+        and Paragraph(el, gen.doc).text.strip() == N2_INSTRUCTION)
+    table_a = Table(body[instruction_idx + 1], gen.doc)
+    assert [row.cells[1].text for row in table_a.rows] == [
+        'National Test Institute (T32-100) (Mentor)', 'Test Training Program A', '2018-2021']
+    # One placeholder out, two grant tables in; the sparse entry built none.
+    assert len(gen.doc.tables) == template_tables - 1 + 2
+    assert gen.stats['tables_populated'] == 2
+    assert gen.stats['entries_inserted'] == 3
+
+
+def test_n2_real_template_tables_after_heading_when_instruction_paragraph_missing():
+    """F1 fallback (#529 round 2): with the instruction paragraph absent
+    from the template, N2's tables anchor on the heading itself instead of
+    raising or landing under the wrong content."""
+    gen = _template_generator()
+    instruction_idx = next(
+        i for i, p in enumerate(gen.doc.paragraphs)
+        if p.text.strip() == N2_INSTRUCTION)
+    instruction_element = gen.doc.paragraphs[instruction_idx]._element
+    instruction_element.getparent().remove(instruction_element)
+    assert gen._find_paragraph_exact(N2_INSTRUCTION) is None
+
+    gen._fill_mentoring({'N2': [_n2(agency='National Test Institute')]})
+
+    assert _body_after(gen.doc, N2_HEADING, 1) == [('tbl', 'National Test Institute')]
+
+
+def test_n2_foreign_table_after_heading_survives_the_shape_guard():
+    """Shape guard, negative path (#529 round 2, F3): a table that does not
+    look like N2's own placeholder is never removed, even though it is the
+    first (and only) table `_first_table_after` finds; the new N2 table is
+    inserted ahead of it, after the heading."""
+    gen = _new_generator()
+    gen.doc.add_paragraph(N2_HEADING)
+    foreign = gen.doc.add_table(rows=5, cols=2)
+    foreign.rows[0].cells[0].text = 'Something else:'
+    assert not _looks_like_training_grant_table(foreign)
+
+    gen._fill_mentoring({'N2': [_n2(agency='National Test Institute')]})
+
+    assert len(gen.doc.tables) == 2
+    # New N2 table, its spacer paragraph, then the foreign table -- still
+    # there, unharmed.
+    region = _body_after(gen.doc, N2_HEADING, 3)
+    assert region[0] == ('tbl', 'National Test Institute')
+    assert region[1] == ('p', '')
+    assert region[2] == ('tbl', '')
+    tables_by_label = {t.rows[0].cells[0].text: t for t in gen.doc.tables}
+    assert 'Something else:' in tables_by_label
+    assert len(tables_by_label['Something else:'].rows) == 5
+
+
+def test_n2_real_template_no_entries_removes_placeholder_region_otherwise_unchanged():
+    """F3's removal policy: unconditional-but-guarded. With NO N2 entries at
+    all, the placeholder table is still removed (#836's real-pipeline
+    cascade already does this on every render, N2 content or not -- see the
+    PR description), but every other element in the MENTORING -> Mentees
+    body region is untouched at the XML level (#529 round 2, F3)."""
+    from lxml import etree
+
+    def region_elements(doc):
+        body = list(doc.element.body)
+        start = next(i for i, el in enumerate(body) if el.tag == qn('w:p')
+                     and Paragraph(el, doc).text.strip() == 'MENTORING')
+        end = next(i for i, el in enumerate(body) if el.tag == qn('w:p')
+                   and Paragraph(el, doc).text.strip() == 'Mentees')
+        return body[start:end]
+
+    gen = _template_generator()
+    before = region_elements(gen.doc)
+    assert sum(1 for el in before if el.tag == qn('w:tbl')) == 1
+    before_non_tables = [etree.tostring(el) for el in before if el.tag != qn('w:tbl')]
+
+    gen._fill_mentoring({})
+
+    after = region_elements(gen.doc)
+    after_non_tables = [etree.tostring(el) for el in after if el.tag != qn('w:tbl')]
+    assert after_non_tables == before_non_tables
+    assert not any(el.tag == qn('w:tbl') for el in after)
+
+
+def test_n1_n2_only_entries_still_render_when_no_n3_n4_content():
+    """N1/N2 must not depend on the N3/N4 partition being non-empty -- a CV
+    with ONLY N1/N2 content must not hit `_fill_mentoring`'s early return
+    for an empty mentee/outcome partition (#529)."""
+    gen = _template_generator()
+    gen._fill_mentoring({'N1': [_n1()],
+                         'N2': [_n2(agency='National Test Institute')]})
+
+    assert _body_after(gen.doc, N1_HEADING, 1) == [('p', 'N1 entry')]
+    n2_region = _body_after(gen.doc, N2_HEADING, 2)
+    assert n2_region[0] == ('p', N2_INSTRUCTION)
+    assert n2_region[1] == ('tbl', 'National Test Institute')
 
 
 # --- other education: template structure, three-column rendering -----------------
