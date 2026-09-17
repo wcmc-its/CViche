@@ -387,6 +387,76 @@ def _extend_ancestors_to_cover_repaired_children(
             section["element_idx_end"] = max(section["element_idx_end"], child_max_end)
 
 
+def _apply_preamble_handling(sections: list[dict], doc_length: int) -> None:
+    """
+    Capture any unmapped content before the first real section.
+
+    If there's content before the first section (indices 0 to
+    first_section_start - 1), extend an existing "Personal Data"-like
+    section to cover it, or create a synthetic one. If no sections exist at
+    all but the document has content, create a single fallback section for
+    the whole document.
+
+    A pure move out of `compute_section_boundaries` (no behaviour change --
+    #851 R2, to keep that function under the §3.2 / ratchet line threshold
+    after the tree-identity rewrite added lines to it).
+
+    Mutates `sections` in place.
+    """
+    if sections:
+        # Find the earliest element_idx_start among all sections
+        first_section_start = min(s["element_idx_start"] for s in sections)
+
+        if first_section_start > 0:
+            # There's content before the first section (preamble)
+            preamble_end = first_section_start - 1
+
+            # Check if "Personal Data" section already exists
+            personal_data_sections = [
+                s for s in sections
+                if s["hierarchy"] and s["hierarchy"][0].lower().strip() in [
+                    "personal data", "personal information", "contact information",
+                    "contact", "profile", "header"
+                ]
+            ]
+
+            if personal_data_sections:
+                # Extend existing Personal Data section to include preamble
+                # Find the one with the earliest start
+                pd_section = min(personal_data_sections, key=lambda s: s["element_idx_start"])
+                if pd_section["element_idx_start"] > 0:
+                    # Extend backwards to include preamble
+                    pd_section["element_idx_start"] = 0
+                    # Update parent section if exists
+                    for s in sections:
+                        if s["has_children"] and pd_section["hierarchy"][0] in s["hierarchy"]:
+                            s["element_idx_start"] = min(s["element_idx_start"], 0)
+            else:
+                # Create synthetic "Personal Data" section for preamble
+                preamble_section = {
+                    "hierarchy": ["Personal Data"],
+                    "element_idx_start": 0,
+                    "element_idx_end": preamble_end,
+                    "level": "H1",
+                    "has_children": False,
+                    "synthetic": True  # Flag to indicate this was auto-generated
+                }
+                # Insert at the beginning of sections list
+                sections.insert(0, preamble_section)
+    elif doc_length > 0:
+        # No sections found at all, but document has content
+        # Create a single "Personal Data" section for entire document
+        preamble_section = {
+            "hierarchy": ["Personal Data"],
+            "element_idx_start": 0,
+            "element_idx_end": doc_length - 1,
+            "level": "H1",
+            "has_children": False,
+            "synthetic": True
+        }
+        sections.append(preamble_section)
+
+
 def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) -> list[dict]:
     """
     Compute start/end element indices for each section.
@@ -534,58 +604,7 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
         _extend_ancestors_to_cover_repaired_children(sections, direct_children_by_id)
 
     # PREAMBLE HANDLING: Check for unmapped content at the beginning of the document
-    if sections:
-        # Find the earliest element_idx_start among all sections
-        first_section_start = min(s["element_idx_start"] for s in sections)
-
-        if first_section_start > 0:
-            # There's content before the first section (preamble)
-            preamble_end = first_section_start - 1
-
-            # Check if "Personal Data" section already exists
-            personal_data_sections = [
-                s for s in sections
-                if s["hierarchy"] and s["hierarchy"][0].lower().strip() in [
-                    "personal data", "personal information", "contact information",
-                    "contact", "profile", "header"
-                ]
-            ]
-
-            if personal_data_sections:
-                # Extend existing Personal Data section to include preamble
-                # Find the one with the earliest start
-                pd_section = min(personal_data_sections, key=lambda s: s["element_idx_start"])
-                if pd_section["element_idx_start"] > 0:
-                    # Extend backwards to include preamble
-                    pd_section["element_idx_start"] = 0
-                    # Update parent section if exists
-                    for s in sections:
-                        if s["has_children"] and pd_section["hierarchy"][0] in s["hierarchy"]:
-                            s["element_idx_start"] = min(s["element_idx_start"], 0)
-            else:
-                # Create synthetic "Personal Data" section for preamble
-                preamble_section = {
-                    "hierarchy": ["Personal Data"],
-                    "element_idx_start": 0,
-                    "element_idx_end": preamble_end,
-                    "level": "H1",
-                    "has_children": False,
-                    "synthetic": True  # Flag to indicate this was auto-generated
-                }
-                # Insert at the beginning of sections list
-                sections.insert(0, preamble_section)
-    elif doc_length > 0:
-        # No sections found at all, but document has content
-        # Create a single "Personal Data" section for entire document
-        preamble_section = {
-            "hierarchy": ["Personal Data"],
-            "element_idx_start": 0,
-            "element_idx_end": doc_length - 1,
-            "level": "H1",
-            "has_children": False,
-            "synthetic": True
-        }
-        sections.append(preamble_section)
+    _apply_preamble_handling(sections, doc_length)
 
     return sections
 

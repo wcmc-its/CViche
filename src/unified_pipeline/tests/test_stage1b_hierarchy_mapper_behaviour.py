@@ -568,6 +568,32 @@ def test_compute_section_boundaries_grandchild_repair_cascades_through_multiple_
     assert a["element_idx_end"] >= a1["element_idx_end"]
 
 
+def test_compute_section_boundaries_extend_never_shrinks_a_parent_below_its_own_naive_end():
+    # Out-of-order top-level list [Z@10, P@2 (child C@8), W@0]: P's own naive
+    # sibling-bound (from W@0) is invalid (-1), and its merge with C's own
+    # (also invalid) naive end is still invalid, so BOTH fall back to the
+    # top-level default_end (doc_length - 1 = 19) -- P's own pre-repair end
+    # is 19, well past its child's eventual repaired end. C's post-process
+    # repair is bounded tightly by the next later start (Z@10), giving C
+    # 8..9 -- much SMALLER than P's already-settled 19. The extension step
+    # must take max(parent's own end, child ends), never just the child
+    # ends, or the parent wrongly SHRINKS from 19 down to 9 (#851 F3).
+    mapped = [
+        {"text": "Z", "level": "H1", "element_idx": 10, "children": []},
+        {
+            "text": "P",
+            "level": "H1",
+            "element_idx": 2,
+            "children": [{"text": "C", "level": "H2", "element_idx": 8, "children": []}],
+        },
+        {"text": "W", "level": "H1", "element_idx": 0, "children": []},
+    ]
+    sections = compute_section_boundaries(mapped, doc_length=20)
+    by_path = {tuple(s["hierarchy"]): s for s in sections}
+    assert by_path[("P", "C")]["element_idx_end"] == 9
+    assert by_path[("P",)]["element_idx_end"] == 19
+
+
 def test_compute_section_boundaries_preamble_extends_personal_data_parent_with_children():
     # "Personal Data" is itself a real top-level node with a mapped child,
     # and there's a gap before it -- both the section itself and the
