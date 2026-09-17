@@ -474,6 +474,19 @@ def test_remove_subset_delimiters_mixed_subindexed_start_bare_end_both_rows_surv
     ]
 
 
+def test_remove_subset_delimiters_kept_side_mixed_delimiter_uses_normalized_key():
+    """#854, kept side: the containment check normalizes the KEPT delimiter
+    too. A mixed ("9.1", 9) row already kept would otherwise read as the
+    empty span (9,1)..(9,0), and an exact duplicate of it, ("9.1", "9.1"),
+    would test as not-contained and survive as a second copy."""
+    delimiters = [
+        _d("9.1", 9, "2021 | Second row"),
+        _d("9.1", "9.1", "2021 | Second row"),
+    ]
+    kept = remove_subset_delimiters(delimiters)
+    assert len(kept) == 1
+
+
 def test_remove_subset_delimiters_plain_int_start_and_end_unchanged():
     """Negative case for #854's fix: a delimiter that is bare on BOTH ends
     must not be touched by the mixed-shape normalization -- ordinary int
