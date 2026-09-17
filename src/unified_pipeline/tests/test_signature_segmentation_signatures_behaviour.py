@@ -943,6 +943,20 @@ def test_rescue_locked_headers_bug_document_title_with_trailing_punctuation_not_
     assert "classification" not in sig  # correct behaviour: document titles must never be rescued
 
 
+def test_rescue_locked_headers_tolerates_none_or_blank_text():
+    # A flagged paragraph with text=None or all-whitespace text must not
+    # crash on `.strip()`/`.lower()` and must never be promoted to a header.
+    groups_none, classifications_none, para_none = _rescue_group("placeholder", level="NOT_HEADER", matches_locked=True)
+    para_none["text"] = None
+    groups_blank, classifications_blank, para_blank = _rescue_group("  ", level="NOT_HEADER", matches_locked=True)
+
+    sbs.rescue_locked_headers(groups_none, classifications_none)
+    sbs.rescue_locked_headers(groups_blank, classifications_blank)
+
+    assert "classification" not in para_none
+    assert "classification" not in para_blank
+
+
 # ---------------------------------------------------------------------------
 # ensure_personal_data_first (and its nested is_document_title)
 # ---------------------------------------------------------------------------
