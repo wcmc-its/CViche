@@ -124,7 +124,6 @@ def test_is_header_match_non_strict_mode_rejects_paragraph_at_150_chars_or_more(
     assert is_header_match("education", long_text, strict=False) is False
 
 
-@pytest.mark.xfail(strict=True, reason="suspected bug: '' is a substring of every header, so an empty paragraph matches ANY header (#851)")
 def test_is_header_match_empty_paragraph_does_not_match():
     # Every caller skips empty text before calling is_header_match, which is
     # why this has never bitten a run -- but the function itself should say no.
@@ -409,9 +408,9 @@ def test_compute_section_boundaries_nested_bounds_extend_parent_to_cover_child()
 
 def test_compute_section_boundaries_parent_end_extends_past_next_sibling_to_cover_a_late_child():
     # A's next sibling B sits at 3, so A's naive end is 2 -- but A's second
-    # child A2 lives at 9, past B. The parent is extended to the children's
-    # max end as computed inside compute_bounds (A1 runs 1..8, up to A2), not
-    # stopped at 2. (A2's own 9..11 is still not covered -- see #851.)
+    # child A2 lives at 9, past B. The parent is extended to cover its full
+    # descendant subtree (A2's repaired 9..11), not stopped at 2 or at A1's
+    # own 1..8 (docstring invariant #3, fixed by #851).
     mapped = [
         {
             "text": "A",
@@ -428,11 +427,10 @@ def test_compute_section_boundaries_parent_end_extends_past_next_sibling_to_cove
     by_path = {tuple(s["hierarchy"]): s for s in sections}
     assert by_path[("A", "A1")]["element_idx_end"] == 8
     assert by_path[("A", "A2")]["element_idx_end"] == 11
-    assert by_path[("A",)]["element_idx_end"] == 8
+    assert by_path[("A",)]["element_idx_end"] == 11
     assert by_path[("A",)]["element_idx_end"] > by_path[("B",)]["element_idx_start"]
 
 
-@pytest.mark.xfail(strict=True, reason="suspected bug: parent end is fixed before the post-process step repairs an out-of-order child, so invariant #3 (parent end >= last child end) is violated (#851)")
 def test_compute_section_boundaries_parent_covers_a_child_repaired_by_the_post_process_step():
     # A's child A1 sits at 8, but A's next sibling B is at 3, so A1's naive
     # end (2) is before its own start. The post-process step repairs A1 to
@@ -479,7 +477,10 @@ def test_compute_section_boundaries_unmapped_sibling_bounds_by_its_first_child()
 def test_compute_section_boundaries_out_of_order_last_section_extends_to_doc_end():
     # Same out-of-order pathology as above, but this time the buggy child is
     # the LAST section in document order (nothing starts after it) -- the
-    # POST-PROCESS repair has no next_starts, so it falls back to doc_length - 1.
+    # POST-PROCESS repair has no next_starts, so it falls back to
+    # doc_length - 1. Second #851 reproducer shape: the parent ("A") must
+    # still be extended to cover the repaired child via this fallback path,
+    # not just the next_starts path the other repair test covers.
     mapped = [
         {
             "text": "A",
@@ -491,8 +492,106 @@ def test_compute_section_boundaries_out_of_order_last_section_extends_to_doc_end
     ]
     sections = compute_section_boundaries(mapped, doc_length=20)
     a1 = next(s for s in sections if s["hierarchy"] == ["A", "A1"])
+    a = next(s for s in sections if s["hierarchy"] == ["A"])
     assert a1["element_idx_start"] == 8
     assert a1["element_idx_end"] == 19
+    assert a["element_idx_end"] >= a1["element_idx_end"]
+
+
+def test_compute_section_boundaries_duplicate_named_siblings_do_not_cross_extend():
+    # Two DIFFERENT top-level nodes share the hierarchy name "X"; each has
+    # its own child and neither child needs post-process repair. Matching
+    # descendants by hierarchy-path prefix (rather than tree identity) would
+    # make the first "X" absorb the second "X" (and the "Y" sibling between
+    # them) because `other["hierarchy"][:1] == ["X"]` is true for both --
+    # violating invariant #2 (siblings are disjoint) even though nothing was
+    # repaired (#851 F1). Each "X" must only be extended by its OWN child.
+    mapped = [
+        {
+            "text": "X",
+            "level": "H1",
+            "element_idx": 0,
+            "children": [{"text": "X1", "level": "H2", "element_idx": 1, "children": []}],
+        },
+        {"text": "Y", "level": "H1", "element_idx": 5, "children": []},
+        {
+            "text": "X",
+            "level": "H1",
+            "element_idx": 10,
+            "children": [{"text": "X2", "level": "H2", "element_idx": 11, "children": []}],
+        },
+    ]
+    sections = compute_section_boundaries(mapped, doc_length=20)
+    first_x = next(s for s in sections if s["hierarchy"] == ["X"] and s["element_idx_start"] == 0)
+    second_x = next(s for s in sections if s["hierarchy"] == ["X"] and s["element_idx_start"] == 10)
+    y = next(s for s in sections if s["hierarchy"] == ["Y"])
+    assert first_x["element_idx_end"] == 4
+    assert y["element_idx_start"] == 5
+    assert y["element_idx_end"] == 9
+    assert second_x["element_idx_start"] == 10
+    assert second_x["element_idx_end"] == 19
+    # The first "X" must not swallow "Y" or the second "X".
+    assert first_x["element_idx_end"] < y["element_idx_start"]
+    assert y["element_idx_end"] < second_x["element_idx_start"]
+
+
+def test_compute_section_boundaries_grandchild_repair_cascades_through_multiple_levels():
+    # A three-level chain A > A1 > A1a where the LEAF (A1a) is the one whose
+    # naive end is invalid and needs post-process repair. Extending only
+    # DIRECT children (by identity) still has to cascade the repaired value
+    # up through A1 to A, one level per pass, because descendants are always
+    # appended to the flat section list before their ancestor (#851 F4).
+    mapped = [
+        {
+            "text": "A",
+            "level": "H1",
+            "element_idx": 2,
+            "children": [
+                {
+                    "text": "A1",
+                    "level": "H2",
+                    "element_idx": 4,
+                    "children": [{"text": "A1a", "level": "H3", "element_idx": 8, "children": []}],
+                }
+            ],
+        },
+        {"text": "B", "level": "H1", "element_idx": 3, "children": []},
+        {"text": "C", "level": "H1", "element_idx": 12, "children": []},
+    ]
+    sections = compute_section_boundaries(mapped, doc_length=20)
+    by_path = {tuple(s["hierarchy"]): s for s in sections}
+    a1a = by_path[("A", "A1", "A1a")]
+    a1 = by_path[("A", "A1")]
+    a = by_path[("A",)]
+    assert (a1a["element_idx_start"], a1a["element_idx_end"]) == (8, 11)
+    assert a1["element_idx_end"] >= a1a["element_idx_end"]
+    assert a["element_idx_end"] >= a1["element_idx_end"]
+
+
+def test_compute_section_boundaries_extend_never_shrinks_a_parent_below_its_own_naive_end():
+    # Out-of-order top-level list [Z@10, P@2 (child C@8), W@0]: P's own naive
+    # sibling-bound (from W@0) is invalid (-1), and its merge with C's own
+    # (also invalid) naive end is still invalid, so BOTH fall back to the
+    # top-level default_end (doc_length - 1 = 19) -- P's own pre-repair end
+    # is 19, well past its child's eventual repaired end. C's post-process
+    # repair is bounded tightly by the next later start (Z@10), giving C
+    # 8..9 -- much SMALLER than P's already-settled 19. The extension step
+    # must take max(parent's own end, child ends), never just the child
+    # ends, or the parent wrongly SHRINKS from 19 down to 9 (#851 F3).
+    mapped = [
+        {"text": "Z", "level": "H1", "element_idx": 10, "children": []},
+        {
+            "text": "P",
+            "level": "H1",
+            "element_idx": 2,
+            "children": [{"text": "C", "level": "H2", "element_idx": 8, "children": []}],
+        },
+        {"text": "W", "level": "H1", "element_idx": 0, "children": []},
+    ]
+    sections = compute_section_boundaries(mapped, doc_length=20)
+    by_path = {tuple(s["hierarchy"]): s for s in sections}
+    assert by_path[("P", "C")]["element_idx_end"] == 9
+    assert by_path[("P",)]["element_idx_end"] == 19
 
 
 def test_compute_section_boundaries_preamble_extends_personal_data_parent_with_children():
@@ -591,6 +690,19 @@ def test_compute_section_boundaries_preamble_extends_existing_personal_data():
     # extended backwards to 0 instead.
     assert pd["element_idx_start"] == 0
     assert len([s for s in sections if s["hierarchy"] == ["Personal Data"]]) == 1
+
+
+def test_compute_section_boundaries_preamble_extends_existing_contact_information():
+    # "Contact Information" is one of the non-"Personal Data" aliases in
+    # _PREAMBLE_SECTION_ALIASES -- it must be recognized the same way.
+    mapped = [
+        {"text": "Contact Information", "level": "H1", "element_idx": 2, "children": []},
+        {"text": "Education", "level": "H1", "element_idx": 5, "children": []},
+    ]
+    sections = compute_section_boundaries(mapped, doc_length=8)
+    ci = next(s for s in sections if s["hierarchy"] == ["Contact Information"])
+    assert ci["element_idx_start"] == 0
+    assert len([s for s in sections if s["hierarchy"] == ["Contact Information"]]) == 1
 
 
 def test_compute_section_boundaries_no_sections_creates_single_fallback_section():

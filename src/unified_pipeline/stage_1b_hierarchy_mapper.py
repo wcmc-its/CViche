@@ -18,12 +18,58 @@ Output: Hierarchy with element indices (the "fenceposts" for sections)
 import sys
 import json
 from pathlib import Path
+from typing import Any, NotRequired, TypedDict
 
 # Add to path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from core.output_manager import OutputManager
 from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
+
+_PREAMBLE_SECTION_ALIASES = frozenset({
+    "personal data", "personal information", "contact information",
+    "contact", "profile", "header",
+})
+
+
+# ------------------------------------------------------------- typed structures
+# TypedDict is structural documentation only here (#851 review): no runtime
+# change, and no dataclass/Pydantic model, because every read in this module
+# is already an `s["key"]` / `s.get("key", default)` lookup on a plain dict
+# that also gets `json.dump`-ed verbatim as this stage's output -- swapping
+# the storage type would touch every one of those reads and the serializer,
+# which is the wrong tool for a pure type-annotation pass.
+
+class HierarchyNode(TypedDict, total=False):
+    """One node of the Stage 1 hierarchy this module consumes (not owned by
+    it -- the extractor's contract). Every field is read via `.get()`."""
+    text: str
+    level: str
+    children: list[HierarchyNode]
+    text_metadata: dict[str, Any]
+    paragraph_index: int
+
+
+class MappedNode(TypedDict):
+    """A `HierarchyNode` after `map_hierarchy_node` resolves it to a
+    document element index (or `None` if no match was found)."""
+    text: str
+    level: str
+    element_idx: int | None
+    synthetic: bool
+    children: NotRequired[list[MappedNode]]
+
+
+class SectionRecord(TypedDict):
+    """A flattened, bounded section as `compute_section_boundaries` emits
+    it. `synthetic` is only present on the preamble section
+    `_apply_preamble_handling` may insert."""
+    hierarchy: list[str]
+    element_idx_start: int
+    element_idx_end: int
+    level: str
+    has_children: bool
+    synthetic: NotRequired[bool]
 
 
 def normalize_text(text: str) -> str:
@@ -50,6 +96,13 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
         True if this is a valid header match
     """
     import re
+
+    # An empty paragraph is a substring of every string, so the "contained"
+    # branch below would otherwise match it against ANY header (#851). Every
+    # caller already skips empty text before calling this function, but the
+    # function itself must not silently say yes.
+    if not para_text:
+        return False
 
     # Exact match - always accept
     if para_text == expected_header:
@@ -83,7 +136,7 @@ def is_header_match(expected_header: str, para_text: str, strict: bool = False) 
 
 
 def find_header_in_sequence(
-    elements: list[dict],
+    elements: list[dict[str, Any]],
     hierarchy_sequence: list[str],
     start_idx: int = 0
 ) -> list[tuple[str, int]] | None:
@@ -105,7 +158,7 @@ def find_header_in_sequence(
     normalized_sequence = [normalize_text(h) for h in hierarchy_sequence]
 
     # Try to find the sequence
-    matches = []
+    matches: list[tuple[str, int]] = []
     current_search_idx = start_idx
 
     for expected_header in normalized_sequence:
@@ -144,11 +197,11 @@ def find_header_in_sequence(
 
 
 def map_hierarchy_node(
-    node: dict,
-    elements: list[dict],
-    parent_path: list[str] = None,
+    node: HierarchyNode,
+    elements: list[dict[str, Any]],
+    parent_path: list[str] | None = None,
     start_search_idx: int = 0
-) -> tuple[dict, int]:
+) -> tuple[MappedNode, int]:
     """
     Map a single hierarchy node and its children to element indices.
 
@@ -174,7 +227,7 @@ def map_hierarchy_node(
     )
 
     # Try to find this node's header in the document
-    element_idx = None
+    element_idx: int | None = None
 
     if node_text and not is_synthetic:
         # Try sequence-based matching with parent context
@@ -220,7 +273,7 @@ def map_hierarchy_node(
                 element_idx = search_for_header(0, start_search_idx)
 
     # Build mapped node
-    mapped_node = {
+    mapped_node: MappedNode = {
         "text": node_text,
         "level": node.get("level", ""),
         "element_idx": element_idx,
@@ -232,7 +285,7 @@ def map_hierarchy_node(
 
     # Process children
     if "children" in node and node["children"]:
-        mapped_children = []
+        mapped_children: list[MappedNode] = []
 
         # For synthetic headers, children should search from the original start position
         # because the LLM may have grouped items out of document order
@@ -253,7 +306,9 @@ def map_hierarchy_node(
                 child_search_start = child_next_idx
 
         # Update next_search_idx to be after all children
-        child_indices = [c.get("element_idx") for c in mapped_children if c.get("element_idx") is not None]
+        child_indices = [
+            idx for c in mapped_children if (idx := c.get("element_idx")) is not None
+        ]
         if child_indices:
             next_search_idx = max(max(child_indices) + 1, next_search_idx)
 
@@ -262,7 +317,7 @@ def map_hierarchy_node(
     return mapped_node, next_search_idx
 
 
-def get_first_child_element_idx(children: list[dict]) -> int | None:
+def get_first_child_element_idx(children: list[MappedNode]) -> int | None:
     """
     Recursively find the first element_idx in a list of children.
 
@@ -275,10 +330,11 @@ def get_first_child_element_idx(children: list[dict]) -> int | None:
     Returns:
         The first (minimum) element_idx found, or None if none exist
     """
-    indices = []
+    indices: list[int] = []
     for child in children:
-        if child.get("element_idx") is not None:
-            indices.append(child["element_idx"])
+        child_element_idx = child.get("element_idx")
+        if child_element_idx is not None:
+            indices.append(child_element_idx)
         # Also check grandchildren
         if "children" in child and child["children"]:
             grandchild_idx = get_first_child_element_idx(child["children"])
@@ -288,7 +344,7 @@ def get_first_child_element_idx(children: list[dict]) -> int | None:
     return min(indices) if indices else None
 
 
-def has_mapped_children(node: dict) -> bool:
+def has_mapped_children(node: MappedNode) -> bool:
     """
     Check if a hierarchy node has any children with actual element indices.
 
@@ -316,7 +372,138 @@ def has_mapped_children(node: dict) -> bool:
     return False
 
 
-def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) -> list[dict]:
+def _repair_out_of_order_section_bounds(sections: list[SectionRecord], doc_length: int) -> None:
+    """
+    Fix invalid boundaries caused by out-of-order hierarchies.
+
+    A section's naive end (computed in `compute_bounds`) can inherit a
+    `default_end` from before a later sibling actually appears, leaving
+    `element_idx_end < element_idx_start`. For each such section, find the
+    next section in document order (by start index) and end just before it,
+    or run to the document end if none follows.
+
+    Mutates `sections` in place.
+    """
+    for section in sections:
+        if section["element_idx_end"] < section["element_idx_start"]:
+            current_start = section["element_idx_start"]
+            next_starts = [
+                s["element_idx_start"]
+                for s in sections
+                if s["element_idx_start"] > current_start
+            ]
+            if next_starts:
+                section["element_idx_end"] = min(next_starts) - 1
+            else:
+                section["element_idx_end"] = doc_length - 1
+
+
+def _extend_ancestors_to_cover_repaired_children(
+    sections: list[SectionRecord],
+    direct_children_by_id: dict[int, list[SectionRecord]],
+) -> None:
+    """
+    Re-extend every ancestor's end to cover its full descendant subtree.
+
+    `compute_bounds` extends a parent's end to its children's max end BEFORE
+    `_repair_out_of_order_section_bounds` runs, so a child repaired above can
+    grow past the bound its parent already settled on, violating this
+    function's docstring invariant #3 ("parent end >= last child end").
+
+    `sections` is built in document-order-of-completion (DFS post-order): a
+    node's own section is appended only after every section in its subtree
+    has already been appended, so descendants always precede their ancestor
+    in the list. Walking the list in order and extending each section by
+    only its DIRECT children (looked up by object identity in
+    `direct_children_by_id`, keyed by `id(parent_section)`) therefore still
+    cascades correctly through multi-level nesting in one pass: a grandchild
+    repair has already been folded into its parent's end by the time the
+    grandparent is visited.
+
+    Matching by object identity (rather than by hierarchy-path prefix) keeps
+    this scoped to the actual tree: two different sections that happen to
+    share a hierarchy name at the same depth (duplicate-named siblings) must
+    never be treated as one another's descendants.
+
+    Mutates `sections` in place.
+    """
+    for section in sections:
+        if not section["has_children"]:
+            continue
+        children = direct_children_by_id.get(id(section), [])
+        if children:
+            child_max_end = max(child["element_idx_end"] for child in children)
+            section["element_idx_end"] = max(section["element_idx_end"], child_max_end)
+
+
+def _apply_preamble_handling(sections: list[SectionRecord], doc_length: int) -> None:
+    """
+    Capture any unmapped content before the first real section.
+
+    If there's content before the first section (indices 0 to
+    first_section_start - 1), extend an existing "Personal Data"-like
+    section to cover it, or create a synthetic one. If no sections exist at
+    all but the document has content, create a single fallback section for
+    the whole document.
+
+    A pure move out of `compute_section_boundaries` (no behaviour change --
+    #851 R2, to keep that function under the §3.2 / ratchet line threshold
+    after the tree-identity rewrite added lines to it).
+
+    Mutates `sections` in place.
+    """
+    if sections:
+        # Find the earliest element_idx_start among all sections
+        first_section_start = min(s["element_idx_start"] for s in sections)
+
+        if first_section_start > 0:
+            # There's content before the first section (preamble)
+            preamble_end = first_section_start - 1
+
+            # Check if "Personal Data" section already exists
+            personal_data_sections = [
+                s for s in sections
+                if s["hierarchy"] and s["hierarchy"][0].lower().strip() in _PREAMBLE_SECTION_ALIASES
+            ]
+
+            if personal_data_sections:
+                # Extend existing Personal Data section to include preamble
+                # Find the one with the earliest start
+                pd_section = min(personal_data_sections, key=lambda s: s["element_idx_start"])
+                if pd_section["element_idx_start"] > 0:
+                    # Extend backwards to include preamble
+                    pd_section["element_idx_start"] = 0
+                    # Update parent section if exists
+                    for s in sections:
+                        if s["has_children"] and pd_section["hierarchy"][0] in s["hierarchy"]:
+                            s["element_idx_start"] = min(s["element_idx_start"], 0)
+            else:
+                # Create synthetic "Personal Data" section for preamble
+                preamble_section: SectionRecord = {
+                    "hierarchy": ["Personal Data"],
+                    "element_idx_start": 0,
+                    "element_idx_end": preamble_end,
+                    "level": "H1",
+                    "has_children": False,
+                    "synthetic": True  # Flag to indicate this was auto-generated
+                }
+                # Insert at the beginning of sections list
+                sections.insert(0, preamble_section)
+    elif doc_length > 0:
+        # No sections found at all, but document has content
+        # Create a single "Personal Data" section for entire document
+        preamble_section = {
+            "hierarchy": ["Personal Data"],
+            "element_idx_start": 0,
+            "element_idx_end": doc_length - 1,
+            "level": "H1",
+            "has_children": False,
+            "synthetic": True
+        }
+        sections.append(preamble_section)
+
+
+def compute_section_boundaries(mapped_hierarchy: list[MappedNode], doc_length: int) -> list[SectionRecord]:
     """
     Compute start/end element indices for each section.
 
@@ -337,16 +524,24 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
     Returns:
         Flattened list of sections with boundaries
     """
-    sections = []
+    sections: list[SectionRecord] = []
+    # Maps id(parent_section) -> the list of that section's own direct child
+    # section dicts (by object identity, never by hierarchy-name -- #851).
+    # A synthetic node with no element_idx creates no section of its own, so
+    # its real children are flattened into its parent's direct-children list
+    # (see the `else` branch below).
+    direct_children_by_id: dict[int, list[SectionRecord]] = {}
 
     def compute_bounds(
-        nodes: list[dict],
-        parent_path: list[str] = None,
-        default_end: int = None
-    ):
+        nodes: list[MappedNode],
+        parent_path: list[str] | None = None,
+        default_end: int | None = None
+    ) -> tuple[int, list[SectionRecord]]:
         """
         Compute boundaries for nodes at the same level.
-        Returns the maximum end index seen (for parent to use).
+
+        Returns (max end index seen, the section dicts created at this level
+        -- for parent to use as its own direct-children list).
         """
         if parent_path is None:
             parent_path = []
@@ -354,6 +549,7 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
             default_end = doc_length - 1
 
         max_end_seen = 0
+        level_sections: list[SectionRecord] = []
 
         for i, node in enumerate(nodes):
             node_text = node.get("text", "")
@@ -382,8 +578,9 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
 
                 # If this node has children, compute their bounds first
                 # and extend this section's end to include them
+                child_sections: list[SectionRecord] = []
                 if "children" in node and node["children"]:
-                    children_max_end = compute_bounds(
+                    children_max_end, child_sections = compute_bounds(
                         node["children"],
                         current_path,
                         default_end=end_idx
@@ -396,7 +593,7 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
                 if end_idx < element_idx:
                     end_idx = default_end
 
-                section = {
+                section: SectionRecord = {
                     "hierarchy": current_path,
                     "element_idx_start": element_idx,
                     "element_idx_end": end_idx,  # Inclusive
@@ -407,6 +604,9 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
                     "has_children": has_mapped_children(node)
                 }
                 sections.append(section)
+                if child_sections:
+                    direct_children_by_id[id(section)] = child_sections
+                level_sections.append(section)
 
                 max_end_seen = max(max_end_seen, end_idx)
 
@@ -428,104 +628,34 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
                                 bounded_end = first_child_idx - 1
                                 break
 
-                    children_max_end = compute_bounds(
+                    children_max_end, children_level_sections = compute_bounds(
                         node["children"],
                         current_path,
                         default_end=bounded_end  # Use bounded end, not raw default_end
                     )
                     max_end_seen = max(max_end_seen, children_max_end)
+                    # This synthetic node created no section of its own, so
+                    # its real children are this level's direct children too.
+                    level_sections.extend(children_level_sections)
 
-        return max_end_seen
+        return max_end_seen, level_sections
 
     compute_bounds(mapped_hierarchy)
 
-    # POST-PROCESS: Fix invalid boundaries caused by out-of-order hierarchies
-    # For each section, if end < start, find the actual next section in document order
-    # and set end to just before it
+    # POST-PROCESS: fix invalid boundaries caused by out-of-order hierarchies,
+    # then re-extend every ancestor to cover any child the repair just grew
+    # (docstring invariant #3: parent end >= last child end -- #851).
     if sections:
-        # Sort sections by start index to find actual document order
-        sections_by_start = sorted(
-            [(i, s["element_idx_start"]) for i, s in enumerate(sections)],
-            key=lambda x: x[1]
-        )
-
-        for i, section in enumerate(sections):
-            if section["element_idx_end"] < section["element_idx_start"]:
-                # Find the next section in document order (by start index)
-                current_start = section["element_idx_start"]
-
-                # Find all sections that start after this one
-                next_starts = [
-                    s["element_idx_start"]
-                    for s in sections
-                    if s["element_idx_start"] > current_start
-                ]
-
-                if next_starts:
-                    # End just before the next section starts
-                    section["element_idx_end"] = min(next_starts) - 1
-                else:
-                    # No next section - extend to document end
-                    section["element_idx_end"] = doc_length - 1
+        _repair_out_of_order_section_bounds(sections, doc_length)
+        _extend_ancestors_to_cover_repaired_children(sections, direct_children_by_id)
 
     # PREAMBLE HANDLING: Check for unmapped content at the beginning of the document
-    if sections:
-        # Find the earliest element_idx_start among all sections
-        first_section_start = min(s["element_idx_start"] for s in sections)
-
-        if first_section_start > 0:
-            # There's content before the first section (preamble)
-            preamble_end = first_section_start - 1
-
-            # Check if "Personal Data" section already exists
-            personal_data_sections = [
-                s for s in sections
-                if s["hierarchy"] and s["hierarchy"][0].lower().strip() in [
-                    "personal data", "personal information", "contact information",
-                    "contact", "profile", "header"
-                ]
-            ]
-
-            if personal_data_sections:
-                # Extend existing Personal Data section to include preamble
-                # Find the one with the earliest start
-                pd_section = min(personal_data_sections, key=lambda s: s["element_idx_start"])
-                if pd_section["element_idx_start"] > 0:
-                    # Extend backwards to include preamble
-                    pd_section["element_idx_start"] = 0
-                    # Update parent section if exists
-                    for s in sections:
-                        if s["has_children"] and pd_section["hierarchy"][0] in s["hierarchy"]:
-                            s["element_idx_start"] = min(s["element_idx_start"], 0)
-            else:
-                # Create synthetic "Personal Data" section for preamble
-                preamble_section = {
-                    "hierarchy": ["Personal Data"],
-                    "element_idx_start": 0,
-                    "element_idx_end": preamble_end,
-                    "level": "H1",
-                    "has_children": False,
-                    "synthetic": True  # Flag to indicate this was auto-generated
-                }
-                # Insert at the beginning of sections list
-                sections.insert(0, preamble_section)
-    elif doc_length > 0:
-        # No sections found at all, but document has content
-        # Create a single "Personal Data" section for entire document
-        preamble_section = {
-            "hierarchy": ["Personal Data"],
-            "element_idx_start": 0,
-            "element_idx_end": doc_length - 1,
-            "level": "H1",
-            "has_children": False,
-            "synthetic": True
-        }
-        sections.append(preamble_section)
+    _apply_preamble_handling(sections, doc_length)
 
     return sections
 
 
-def run_stage_1b(docx_path: str, hierarchy_json_path: str = None):
+def run_stage_1b(docx_path: str, hierarchy_json_path: str | Path | None = None) -> tuple[dict[str, Any], Path]:
     """
     Main Stage 1b: Map hierarchy headers to element indices
 
@@ -583,7 +713,7 @@ def run_stage_1b(docx_path: str, hierarchy_json_path: str = None):
 
     # Map hierarchy to element indices
     print("Mapping headers to element indices...")
-    mapped_hierarchy = []
+    mapped_hierarchy: list[MappedNode] = []
     next_search_idx = 0
 
     for node in hierarchy_data.get("hierarchy", []):
