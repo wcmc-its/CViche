@@ -65,7 +65,7 @@ Lints, ranked by the severity of the failure class they catch:
                           ONE-block shape duplicate_passages cannot see by
                           construction (#446)
 
-Lints 14-16 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
+Lints 14-17 (plus 5a, stage3b_fallback_ratio, above) are the quality-score
 HARD-FAIL gates and sit outside that ranking: they are the only ERROR-by-
 construction lints, because each one on its own caps quality_score.py's final
 score into the RED do-not-deliver band.
@@ -88,6 +88,17 @@ independent confirmation that the gate itself is calibrated:
                           — nothing to deliver — capped at 20 (#745: web204
                           scored 88 GREEN with this reported only as an INFO
                           'skipped: missing stage_6_docx')
+17. protected_data_in_output a date of birth, SSN, or other protected-data
+                          label/value shape reaches the rendered docx's
+                          paragraphs or table cells — the last line of
+                          defence behind the pre-render detector and deny
+                          pass (#820); capped at 25, same as the owner gate.
+                          Unlike 14/15 this one IS an ordinary
+                          `LINT_REGISTRY` row (it only needs the docx, not a
+                          missing-artifact special case), but it is still
+                          ERROR-by-construction and still caps the score, so
+                          it is listed here rather than in the ranked list
+                          above.
 
 The doctor also returns a `metrics` dict alongside `findings` (#816): numbers
 a batch layer can trend over many runs -- Appendix share, the honors-table
@@ -144,6 +155,10 @@ from unified_pipeline.doctor.shared import (  # noqa: F401,E402
     _long_word_tokens,
     _magnitude_severity,
     _output_section_header,
+    _cell_text,
+    _docx_text,
+    _table_lines,
+    docx_body_blocks,
 )
 from unified_pipeline.doctor.lints.extraction import (  # noqa: F401,E402
     CLASSIFIED_UNRENDERED_WARN_ENTRIES,
@@ -219,6 +234,9 @@ from unified_pipeline.doctor.lints.segmentation import (  # noqa: F401,E402
     lint_missed_headers,
     lint_segmentation,
 )
+from unified_pipeline.doctor.lints.protected_data import (  # noqa: F401,E402
+    lint_protected_data_in_output,
+)
 from unified_pipeline.doctor.lints.runtime import (  # noqa: F401,E402
     lint_no_output,
     lint_pipeline_errors,
@@ -284,6 +302,7 @@ KNOWN_LINTS = (
     "table_shape",
     "duplicate_passages",
     "duplicate_records",
+    "protected_data_in_output",
     "owner_contact_missing",
     "pipeline_errors_present",
     "no_output",
@@ -295,6 +314,9 @@ KNOWN_LINTS = (
 # every other entry in this table was measured on (#438's 73 scored runs /
 # #446's 125 rendered corpus outputs) -- the two are not comparable counts,
 # only comparable ROUGH ORDER-OF-MAGNITUDE signals for `lint_surprise`.
+# protected_data_in_output's is a THIRD, smaller, more recent basis still:
+# the #820 retro-scan of 89 canonical batch outputs + 65 farm outputs (one
+# uid), 1/154.
 LINT_PREVALENCE = {
     "output_hygiene": 0.877,
     "table_shape": 0.562,
@@ -329,6 +351,7 @@ LINT_PREVALENCE = {
     # rough-order-of-magnitude caveat as duplicate_records): web204 is the
     # one uid of 40 with no stage-6 output at all (1/40 = 0.025).
     "no_output": 0.025,
+    "protected_data_in_output": 0.006,
 }
 
 
@@ -471,47 +494,11 @@ def iter_header_candidates(docx_path: str) -> list[str]:
     return candidates
 
 
-def _docx_text(element) -> str:
-    """All ``w:t`` text under a docx element in document order. Unlike
-    python-docx's ``.text``, this INCLUDES text inside tracked-change ``<w:ins>``
-    runs and EXCLUDES ``<w:delText>`` — the accepted-changes view a reader sees.
-    Stage 6 inserts LLM-enriched content (research summaries, reformatted
-    citations) as tracked INSERTIONS, so a reader that ignores ``<w:ins>``
-    under-reports what actually rendered and false-flags content as 'unrendered'
-    (issue #249: M1 summaries and reformatted citations read as dropped)."""
-    from docx.oxml.ns import qn
-    return "".join(node.text or "" for node in element.iter(qn("w:t")))
-
-
-def _cell_text(cell) -> str:
-    """Track-change-aware equivalent of ``cell.text``: the cell's own paragraphs
-    (nested tables excluded, matching python-docx), including ``<w:ins>`` text."""
-    return "\n".join(_docx_text(p._p) for p in cell.paragraphs)
-
-
-def _table_lines(tbl) -> List[str]:
-    """Text lines of one Word table: each non-empty cell, nested tables
-    recursed into (cell.text never surfaces them), and every row with more
-    than one non-empty cell ALSO joined as one line — a record rendered as a
-    structured row (label/value cells) keeps its tokens together the way one
-    source line does only in the joined view. KEEP IN SYNC with the by-name
-    mirror in stage_6_word_template.py's _rendered_output_lines() (the #221
-    recovery pass, PR #225): both sides must agree on what counts as
-    rendered. Extra lines only ever prove presence — strictly fewer false
-    'absent' verdicts, never more."""
-    lines: List[str] = []
-    for row in tbl.rows:
-        cell_texts = []
-        for cell in row.cells:
-            ctext = _cell_text(cell)
-            if ctext.strip():
-                cell_texts.append(ctext)
-                lines.append(ctext)
-            for nested in cell.tables:
-                lines.extend(_table_lines(nested))
-        if len(cell_texts) > 1:
-            lines.append(" | ".join(" ".join(t.split()) for t in cell_texts))
-    return lines
+# `_docx_text`, `_cell_text`, `_table_lines` and the body-order block walk
+# moved to `doctor/shared.py` (#820 round 2) so `quality_score.py` can read a
+# rendered document through the SAME reader the lints use without importing
+# this module (a cycle: run_doctor -> lints.enrichment -> quality_score).
+# Re-exported by name above for the five files that import them from here.
 
 
 def read_docx_blocks(docx_path: str) -> List[Tuple[str, str]]:
@@ -519,17 +506,7 @@ def read_docx_blocks(docx_path: str) -> List[Tuple[str, str]]:
     _table_lines joined by newlines) per table. Grants render as one Word
     table per grant, so any output check must read tables AND paragraphs."""
     Document = _get_docx_document()
-    from docx.oxml.ns import qn
-    from docx.table import Table
-
-    doc = Document(docx_path)
-    blocks: List[Tuple[str, str]] = []
-    for child in doc.element.body.iterchildren():
-        if child.tag == qn("w:p"):
-            blocks.append(("p", _docx_text(child)))
-        elif child.tag == qn("w:tbl"):
-            blocks.append(("table", "\n".join(_table_lines(Table(child, doc)))))
-    return blocks
+    return docx_body_blocks(Document(docx_path))
 
 
 def read_docx_table_rows(docx_path: str) -> List[List[List[str]]]:
@@ -815,6 +792,7 @@ LINT_REGISTRY: tuple[LintSpec, ...] = (
     LintSpec("table_shape", lint_table_shape, ("table_rows",)),
     LintSpec("duplicate_passages", lint_duplicate_passages, ("blocks",)),
     LintSpec("duplicate_records", lint_duplicate_records, ("blocks",)),
+    LintSpec("protected_data_in_output", lint_protected_data_in_output, ("blocks",)),
 )
 
 

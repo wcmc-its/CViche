@@ -7,6 +7,13 @@ the table; a DEA registration and an NPI belong in a separate two-row table
 further down the template, which is why `_fill_dea_npi` lives here rather than
 anywhere else: it is the second half of one section's output.
 
+#821 (settled 2026-09-14): a DEA number is withheld with notice, like every
+other #820/#821 protected-data category, but enforced HERE rather than by
+`stage6/normalization/pii.py`'s policy table -- `_resolve_licensure` never
+lets an entry it classifies as DEA reach `identifiers.dea`, whether the
+classification came from a label or from the number's shape alone. The NPI
+is a public identifier and still renders.
+
 The section runs as four steps, and only the last one touches the document:
 
     raw stage-4 entries
@@ -29,7 +36,10 @@ shape alone cannot do it (#573):
   not running on into letters (a fused "NPI15180546000" still counts) -- the
   old substring test fired on any entry mentioning "Dean";
 - else, and only when the entry names no state, the number's shape: an NPI
-  is 10 or 11 digits, a DEA number two letters plus seven alphanumerics. An
+  is 10 or 11 digits, a DEA-LIKE number two letters plus seven alphanumerics
+  (wider than the real two-letters-plus-seven-DIGITS format on purpose --
+  this tiebreak withholds, so it fails safe by over-matching; the tight
+  `_DEA_NUMBER_RE` is what may DELETE a line. See both regexes' comment). An
   all-numeric 10-11 digit state licence number is indistinguishable from an
   NPI by shape, which is why a stated jurisdiction disables the tiebreak.
 
@@ -56,11 +66,12 @@ what that guard checks.
 """
 import logging
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from ..formatting import _clear_table_data, _set_font, format_date_for_section
+from ..normalization import CAT_DEA, WithheldItem
 from ..sorting import sort_entries_reverse_chronological
 
 logger = logging.getLogger(__name__)
@@ -75,7 +86,33 @@ logger = logging.getLogger(__name__)
 _NPI_LABEL_RE = re.compile(r'\bNPI(?![A-Za-z])', re.IGNORECASE)
 _DEA_LABEL_RE = re.compile(r'\bDEA(?![A-Za-z])', re.IGNORECASE)
 _NPI_SHAPE_RE = re.compile(r'^\d{10,11}$')
-_DEA_SHAPE_RE = re.compile(r'^[A-Za-z]{2}[A-Za-z0-9]{7}$')
+
+# Two DEA shapes, deliberately different widths, because the two callers
+# fail in OPPOSITE directions (#821 R3 F-A).
+#
+# `_DEA_NUMBER_RE` is the real format -- two letters then SEVEN DIGITS (the
+# first letter is the registrant type, the second the registrant's surname
+# initial, the last digit a checksum). It is the only one of the two that
+# may drive a DELETION: `_strip_dea_lines` removes a whole line of an
+# entry's raw text on it, so a predicate wider than the thing it is named
+# for silently destroys content -- the loose shape below matches every
+# nine-letter English word ("Wisconsin", "Certified", "Emergency"), which
+# took a fused entry's real state-licence lines out of the #221 recovery
+# pass (#821 R3 F-A, found by the round-2 verifier).
+#
+# `_DEA_LIKE_SHAPE_RE` is that same shape widened to any alphanumeric tail,
+# and it stays wide on purpose: its ONLY use is the classifier's tiebreak
+# (`_classify_licensure_entry`, reached only for an entry that carries no
+# NPI/DEA label at all, names no state, and DOES carry a `license_number`),
+# where a match WITHHOLDS the entry instead of rendering it. Failing safe
+# there means over-matching -- a DEA number mis-transcribed with a letter
+# for a digit ("AB123456O") must still be withheld, and the cost of a false
+# positive is one licence row withheld with a notice, not a leak. Corpus
+# check before splitting the two (both farms, 196 F1 entries): zero
+# `license_number` values match the loose shape but not the tight one, so
+# the split changes no rendered output today.
+_DEA_NUMBER_RE = re.compile(r'^[A-Za-z]{2}\d{7}$')
+_DEA_LIKE_SHAPE_RE = re.compile(r'^[A-Za-z]{2}[A-Za-z0-9]{7}$')
 
 # Classification results for one F1 entry.
 KIND_LICENSE = 'license'
@@ -125,6 +162,10 @@ class IdentifierSet:
 
     `None` means no candidate was seen at all; it is written to the document
     as an empty string, which blanks any stale template value.
+
+    `dea` is ALWAYS `None` (#821): every entry `_resolve_licensure`
+    classifies as DEA is withheld, never claimed into this slot -- see
+    `LicensureResult.dea_withheld`.
     """
 
     dea: str | None = None
@@ -133,10 +174,18 @@ class IdentifierSet:
 
 @dataclass(frozen=True)
 class LicensureResult:
-    """Everything section F1 renders, decided without touching a document."""
+    """Everything section F1 renders, decided without touching a document.
+
+    `dea_withheld` is #821's decision surfacing out of a pure function: True
+    when at least one entry classified as DEA. `_fill_licensure` is the one
+    that touches `self._pii_result` and the document, so it is the one that
+    records the `WithheldItem` and skips writing a value -- this field is
+    what tells it to.
+    """
 
     licenses: tuple[LicenseRecord, ...]
     identifiers: IdentifierSet
+    dea_withheld: bool = False
 
 
 def _classify_licensure_entry(state: str, license_number: str,
@@ -171,7 +220,7 @@ def _classify_licensure_entry(state: str, license_number: str,
     if not state:
         if _NPI_SHAPE_RE.match(license_number):
             return KIND_NPI
-        if _DEA_SHAPE_RE.match(license_number):
+        if _DEA_LIKE_SHAPE_RE.match(license_number):
             return KIND_DEA
     return KIND_LICENSE
 
@@ -243,16 +292,80 @@ def _license_record(entry: LicensureEntry) -> LicenseRecord | None:
     return None
 
 
-def _resolve_licensure(entries: Sequence[Mapping[str, Any]]) -> LicensureResult:
+def _strip_dea_lines(text: str) -> str:
+    """Remove only the DEA label/value line(s) of a (possibly fused) F1
+    entry's raw text, keeping every other line intact (#821 R2 F4).
+
+    `_resolve_licensure` used to blank a DEA-classified entry's `text`
+    entirely; that also erased any real state-licence record lines fused
+    into the SAME entry (one entry, classified once, by label or shape
+    anywhere in its text -- see `_classify_licensure_entry`), which took
+    them out of reach of `generate()`'s #221 post-render recovery pass too,
+    since that pass reads `entry['text']` directly. A line is stripped when
+    it names DEA (`_DEA_LABEL_RE`) or carries a token that is a DEA NUMBER
+    (`_DEA_NUMBER_RE`: two letters then seven digits, matched per
+    alphanumeric token so it cannot also consume a same-length state
+    licence number sitting on the SAME line as unrelated content).
+
+    The token test is the tight shape, never the classifier's deliberately
+    loose `_DEA_LIKE_SHAPE_RE` (#821 R3 F-A): that one matches any nine
+    alphanumerics opening with two letters, i.e. every nine-letter English
+    word, so a fused entry's "Wisconsin ... licence" or "Certified ..."
+    line was dropped here as if it were a DEA registration -- and with it
+    every licence number on that line, silently, exactly the content loss
+    this function was written to stop. See the two regexes' own comment for
+    why the classifier keeps the wide one."""
+    kept = []
+    for line in str(text or '').split('\n'):
+        if _DEA_LABEL_RE.search(line):
+            continue
+        if any(_DEA_NUMBER_RE.match(tok)
+               for tok in re.findall(r'[A-Za-z0-9]+', line)):
+            continue
+        kept.append(line)
+    return '\n'.join(kept)
+
+
+def _resolve_licensure(
+        entries: Sequence[MutableMapping[str, Any]]) -> LicensureResult:
     """Decide the whole of section F1 without touching a document.
 
     Sorts, normalizes, classifies, routes each entry to the licence table or
     to one of the two identifier slots, and formats the dates. Takes no
     `docx` object and no stats counter, so a change to Word table handling
     cannot reach classification and vice versa (#624 review).
+
+    A DEA-classified entry never reaches `identifiers.dea` (#821: withheld,
+    never rendered) -- `dea_withheld` records that it happened instead, by
+    classification kind rather than by re-detecting protected data with a
+    second vocabulary: `_classify_licensure_entry` already tells DEA apart
+    from NPI and from an ordinary licence, by label OR by number shape, and
+    that is the only place in the pipeline that can (`stage6/normalization/
+    pii.py`'s policy table intentionally does not reach an F1 entry's text --
+    see that row's own comment). `_claim_identifier_slot`'s single-valued,
+    keep-first-and-warn dedup does not apply to DEA any more: nothing is
+    ever claimed, so there is nothing to conflict.
+
+    A DEA-classified `raw` entry's `text` has its DEA line(s) stripped
+    (`_strip_dea_lines`) in place, the one exception to "no side effects"
+    this function has: `generate()`'s #221 post-render recovery
+    (`_recover_unrendered_records`) re-scans every entry's raw text line by
+    line afterwards and re-inserts any line it cannot verify rendered,
+    reading `entry['text']` directly rather than this section's own output
+    -- exactly the class of leak `stage6/pii_pass.py` closes for every OTHER
+    category by mutating `entry['text']` in place before anything downstream
+    can read it (see that module's docstring). A single-line DEA entry never
+    reaches that recovery pass at all (it requires >= 2 fused record lines
+    to even be considered), but a DEA number fused into a multi-line F1
+    entry alongside real licence lines does, so the DEA content is stripped
+    here too, at the only point that knows an entry was classified as
+    DEA -- narrowly, so the fused licence lines survive for that pass to
+    find, rather than being discarded along with the DEA line (#821 R2 F4:
+    a whole-text blank silently dropped a fused entry's real licence lines
+    from #221 recovery).
     """
     npi_number: str | None = None
-    dea_number: str | None = None
+    dea_withheld = False
     licenses: list[LicenseRecord] = []
 
     for raw in sort_entries_reverse_chronological(entries):
@@ -267,8 +380,8 @@ def _resolve_licensure(entries: Sequence[Mapping[str, Any]]) -> LicensureResult:
                 'NPI', npi_number, entry.number, entry.original_text)
             continue
         if kind == KIND_DEA:
-            dea_number = _claim_identifier_slot(
-                'DEA', dea_number, entry.number, entry.original_text)
+            dea_withheld = True
+            raw['text'] = _strip_dea_lines(entry.original_text)
             continue
 
         record = _license_record(entry)
@@ -277,8 +390,18 @@ def _resolve_licensure(entries: Sequence[Mapping[str, Any]]) -> LicensureResult:
 
     return LicensureResult(
         licenses=tuple(licenses),
-        identifiers=IdentifierSet(dea=dea_number, npi=npi_number),
+        identifiers=IdentifierSet(dea=None, npi=npi_number),
+        dea_withheld=dea_withheld,
     )
+
+
+#: The section name the #821 Word comment names a withheld DEA number
+#: under -- the same vocabulary `stage6/pii_pass.py`'s `_section_label`
+#: would produce for code F1 (`TAXONOMY_TO_SECTION['F1'] = 'licensure'`,
+#: title-cased), named here directly rather than imported: this package is
+#: imported BY `stage_6_word_template`, not the reverse (see `pii_pass.py`'s
+#: own module docstring on the same back-edge constraint).
+_LICENSURE_SECTION_LABEL = "Licensure"
 
 
 class LicensureSection:
@@ -321,6 +444,18 @@ class LicensureSection:
         for record in result.licenses:
             if self._write_license_row(table, record):
                 self.stats['entries_inserted'] += 1
+
+        # #821: a DEA number is withheld with notice, never written --
+        # `result.identifiers.dea` is already None (`_resolve_licensure`
+        # never claims one), so this only records the fact on the SAME
+        # list the document-wide notice paragraph and Word comment read
+        # (`self._pii_result`, populated earlier in `generate()` by
+        # `run_pii_pass` for every other category -- see that row's
+        # comment in `stage6/normalization/pii.py` for why this one is
+        # recorded here instead).
+        if result.dea_withheld:
+            self._pii_result.withheld.append(
+                WithheldItem(CAT_DEA, _LICENSURE_SECTION_LABEL, None))
 
         # Fill DEA/NPI table (Table 9 in template)
         self._fill_dea_npi(result.identifiers.dea, result.identifiers.npi)

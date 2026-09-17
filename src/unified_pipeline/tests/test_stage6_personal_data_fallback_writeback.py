@@ -59,6 +59,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.normalization.pii import CAT_HOME_CONTACT  # noqa: E402
 from unified_pipeline.stage6.sections import personal_data as personal_data_module  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator, run_stage6  # noqa: E402
 
@@ -527,13 +528,55 @@ def test_a_structured_phone_naming_both_slots_fills_both_rows(tmp_path):
 def test_a_home_labelled_phone_fills_neither_phone_row(tmp_path):
     """The WCM template has no home-phone row, and squatting in one of the
     two it does have took the office row on web113 and skipped the real
-    business number as already-set."""
-    rows, _gen = _render(tmp_path, entries=[
+    business number as already-set.
+
+    #821 makes the never-rendering a recorded policy fact rather than an
+    accident: a "Home phone:" label is now a policy row (CAT_HOME_CONTACT),
+    so `run_pii_pass` records it withheld too."""
+    rows, gen = _render(tmp_path, entries=[
         _a("Home phone: 555-111-2222", {"phone": "555-111-2222"}),
     ])
 
     assert rows.get("office telephone:", "") == ""
     assert rows.get("cell phone:", "") == ""
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
+
+
+def test_a_reformatted_home_phone_does_not_leak_into_office(tmp_path):
+    """Regression: `run_pii_pass` cuts the WHOLE entry text when the #821
+    home-contact label IS the entry's only content, leaving `text` empty
+    for `_fill_personal_data`'s own 'home'/'office' classification. When
+    `extracted_fields['phone']` is reformatted from the raw label line (a
+    real corpus shape -- stage 4 normalizes "555.111.2222" to
+    "555-111-2222"), `_from_pii_fragment`'s containment check can fail to
+    null it upstream too, so nothing catches it: `has_home` reads False on
+    the now-empty text and the number falls through to the OFFICE
+    telephone row -- worse than the #442-class drop this file otherwise
+    guards against. `_label_word_present` (personal_data.py) is the fix:
+    it also reads the pass's own pre-strip `_pii_fragments`."""
+    rows, gen = _render(tmp_path, entries=[
+        _a("Home phone: 555.111.2222", {"phone": "555-111-2222"}),
+    ])
+
+    assert rows.get("office telephone:", "") == ""
+    assert rows.get("cell phone:", "") == ""
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
+
+
+def test_a_reformatted_home_address_does_not_leak_into_office(tmp_path):
+    """The address-block twin of the phone regression above: stage 4
+    enriches "Home Address: 12 Elm St" with a city/state the raw label
+    line never had, so the enriched value is not a verbatim substring of
+    the cut fragment either."""
+    rows, gen = _render(tmp_path, entries=[
+        _a("Home Address: 12 Elm St", {"address": "12 Elm St, Rye, NY 10580"}),
+    ])
+
+    assert rows.get("home address:", "") == ""
+    assert rows.get("office address:", "") == "", (
+        "a home address leaked into the office row"
+    )
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
 
 
 # --------------------------------------------------------------------------
@@ -542,14 +585,23 @@ def test_a_home_labelled_phone_fills_neither_phone_row(tmp_path):
 
 def test_a_structured_address_naming_both_slots_fills_both_rows(tmp_path):
     """#442: a dict naming home and office was forced whole into whichever
-    slot the raw text happened to label."""
-    rows, _gen = _render(tmp_path, entries=[
+    slot the raw text happened to label.
+
+    #821: the home half is now withheld with notice -- a structured dict
+    carries no text label at all for `pii.py`'s policy table to match
+    ("Contact" is the entry's whole raw text here), so this is exactly the
+    path `_fill_personal_data`'s unconditional home_address/home_phone
+    guard exists for (see that guard's own comment). Office address is
+    unaffected."""
+    rows, gen = _render(tmp_path, entries=[
         _a("Contact", {"address": {"home_address": "10 Bank Street, New York, NY",
                                    "office_address": "1300 York Avenue, New York, NY"}}),
     ])
 
-    assert rows.get("home address:") == "10 Bank Street, New York, NY"
+    assert rows.get("home address:", "") == ""
+    assert "10 Bank Street" not in rows.get("home address:", "")
     assert rows.get("office address:") == "1300 York Avenue, New York, NY"
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
 
 
 # --------------------------------------------------------------------------
@@ -743,3 +795,144 @@ def test_split_phone_entry_never_renders_a_truncated_number(
     rows, _ = _render(tmp_path, [_a(text, {"phone": raw})])
     assert rows["cell phone:"] == expected_cell
     assert rows["office telephone:"] == expected_office
+
+
+# --------------------------------------------------------------------------
+# #820 round 2: the docx recovery goes through the same protected-data gate
+# as the entry path (#820's "Related" note on #550/#730). With --source-dir,
+# web198's source table had a "Home Address:" label cell whose VALUE cell was
+# a "Birth Place:" line, and the scan rendered that line into the Office
+# address cell on both arms.
+# --------------------------------------------------------------------------
+
+def _docx_texts(docx_path) -> str:
+    doc = Document(str(docx_path))
+    return "\n".join(n.text or "" for n in doc.element.body.iter(W_T))
+
+
+def test_recovered_address_value_that_is_a_birth_place_line_is_withheld(tmp_path):
+    """The web198 shape: a label cell an address classifier accepts, a
+    value cell that is protected data. Nothing of it reaches the table,
+    and the withheld notice + comment name the category."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Home Address: 1 Example Street", "Birth Place: Example City, EX"),
+    ])
+    rows, gen = _render(tmp_path, entries=[_a("Office phone: 212-555-0100",
+                                              {"phone": "212-555-0100"})],
+                        original_doc_path=str(src))
+    rendered = _docx_texts(tmp_path / "out.docx")
+    assert "Example City" not in rendered, "a birth place rendered as the Office address"
+    assert rows.get("office address:", "") == ""
+    assert [i.category for i in gen._pii_result.withheld] == ["place of birth"]
+    assert gen._pii_result.withheld[0].section_label == "Personal Data"
+    assert gen._pii_result.withheld[0].entry_index is None
+
+
+def test_recovery_stops_at_a_withheld_office_address_row_instead_of_taking_the_next_one(tmp_path):
+    """#820 R3 finding 1: web198's source table has a withheld office_address
+    row followed by a second, unrelated office_address-classified row.
+    Before this fix, the first row's content was withheld in full (leaving
+    `office_address` empty) and the `not office_address` guard let the
+    SECOND row fill the slot instead -- rendering an unrelated line
+    (web198: the next address-classified row's value) as the office
+    address. Once a slot's row content has been policy-denied, the slot
+    must render EMPTY for the rest of the document, not take whatever
+    office_address row comes next."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Office Address:", "Place of Birth: Example City, EX"),
+        ("Office Address:", "42 Example Ave, Example City, EX 00000"),
+    ])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    rendered = _docx_texts(tmp_path / "out.docx")
+    assert rows.get("office address:", "") == "", (
+        "the office address slot took the SECOND row's value after the "
+        "first row's content was withheld"
+    )
+    assert "42 Example Ave" not in rendered
+    assert "Example City" not in rendered
+    assert [i.category for i in gen._pii_result.withheld] == ["place of birth"]
+
+
+def test_recovery_takes_the_next_row_when_the_first_had_nothing_withheld(tmp_path):
+    """#820 R4 (verifier round 3 finding 1, MR3c): the guard at
+    `personal_data.py` around ``office_address_withheld`` must tell "this
+    row supplied no address" apart from "this row's address was withheld" --
+    only the latter should stop the scan. A phone-only Office Address row
+    parses to an empty address block but withholds nothing (there is no
+    protected data in it), so `len(withheld) > withheld_before` stays False
+    and `office_address_withheld` must stay False too: the SECOND, genuine
+    address row still fills the slot. Dropping that conjunct (stopping on
+    ANY empty-address row) would leave the slot empty instead -- see the
+    mutant proof in the report."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Office Address:", "Phone: 212-555-0100"),
+        ("Office Address:", "42 Example Ave, Example City, EX 00000"),
+    ])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert "42 Example Ave" in rows.get("office address:", ""), (
+        "the office address slot stayed empty even though nothing in the "
+        "first (phone-only) row was withheld"
+    )
+    assert gen._pii_result.withheld == []
+
+
+def test_recovered_address_keeps_its_clean_lines_and_drops_the_protected_one(tmp_path):
+    """Line-level, like the entry path's value-level gate: the street lines
+    render, the one protected line inside the same cell does not."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("BUSINESS ADDRESS:", "1 Example Street\nExample City, EX 00000\n"
+                              "Date of Birth: 01/02/1970"),
+    ])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert "1 Example Street" in rows["office address:"]
+    assert "01/02/1970" not in _docx_texts(tmp_path / "out.docx")
+    assert [i.category for i in gen._pii_result.withheld] == ["date of birth"]
+
+
+def test_recovered_phone_email_and_name_from_a_protected_row_are_withheld(tmp_path):
+    """Every recovered value kind goes through the gate, not just the
+    address: an emergency contact's phone and email in a phone/email row,
+    and a spouse's name in a name row."""
+    src = tmp_path / "source.docx"
+    _make_label_table_docx(src, rows=[
+        ("Name:", "Wife's name: Pat Example"),
+        ("Phone:", "Emergency contact: Pat Example 212-555-0199"),
+        ("E-mail:", "Emergency contact: pat.example@example.com"),
+    ])
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    rendered = _docx_texts(tmp_path / "out.docx")
+    assert "Pat Example" not in rendered
+    assert "212-555-0199" not in rendered
+    assert "pat.example@example.com" not in rendered
+    assert sorted(i.category for i in gen._pii_result.withheld) == sorted(
+        ["spouse", "emergency contact", "emergency contact"])
+
+
+def test_recovered_paragraph_email_inside_a_protected_fragment_is_withheld(tmp_path):
+    """The paragraph email scan (no table) is gated the same way, and keeps
+    looking past a withheld one."""
+    src = tmp_path / "source.docx"
+    doc = Document()
+    doc.add_paragraph("Emergency contact: Pat Example, pat.example@example.com")
+    doc.add_paragraph("Work: roe@med.example.edu")
+    doc.save(str(src))
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows["work email:"] == "roe@med.example.edu"
+    assert "pat.example@example.com" not in _docx_texts(tmp_path / "out.docx")
+    assert [i.category for i in gen._pii_result.withheld] == ["emergency contact"]
+
+
+def test_a_clean_recovery_records_nothing_withheld(tmp_path):
+    """Negative control: the positive-control fixture (a real contact block)
+    is recovered in full and the withheld list stays empty -- no notice, no
+    comment."""
+    src = tmp_path / "source.docx"
+    _make_source_docx(src)
+    rows, gen = _render(tmp_path, entries=[], original_doc_path=str(src))
+    assert rows["work email:"] == "plo4@pitt.edu"
+    assert gen._pii_result.withheld == []
+    assert "withheld" not in _docx_texts(tmp_path / "out.docx")
