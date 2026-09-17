@@ -7,5 +7,5 @@
   "7.1 print() in library code (T201)": 884,
   "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)": 4,
   "8.3 missing annotations (ANN*, RUF012)": 556,
-  "8.3 typing syntax (UP*, RUF013)": 236
+  "8.3 typing syntax (UP*, RUF013)": 233
 }
