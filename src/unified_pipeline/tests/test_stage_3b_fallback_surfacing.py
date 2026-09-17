@@ -407,3 +407,95 @@ def test_run_with_only_empty_entries_does_not_fail(monkeypatch, tmp_path):
     assert cstats["failed_batches"] == 0
     assert cstats["empty_entries"] == 1
     assert cstats["had_classification_errors"] is False
+
+
+# --- run_stage_3b: hierarchy groups on a thread pool (#881) --------------------
+
+_MANY_GROUPS = [f"SECTION {i:02d}" for i in range(8)]
+_MANY_MAPPINGS = [
+    {"title": t, "taxonomy_options": [{"code": "H", "confidence": 0.9}], "children": []}
+    for t in _MANY_GROUPS
+]
+_MANY_ENTRIES = [
+    {"element_type": "text", "text": f"Award {i} for section {t}, 2015", "hierarchy": [t]}
+    for t in _MANY_GROUPS for i in range(2)
+]
+
+
+def _run(tmp_path, monkeypatch, call, workers):
+    monkeypatch.setattr(stage3b_classify, "call_llm", call)
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, _MANY_ENTRIES, _MANY_MAPPINGS)
+    result = stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV", stage_2_path=str(stage_2), stage_3a_path=str(stage_3a),
+        output_dir=str(tmp_path / f"out_w{workers}"), workers=workers,
+    )
+    artifact = json.loads(Path(result["output_path"]).read_text())
+    del artifact["meta"]["generated_at"]  # the only field that legitimately differs run to run
+    return artifact
+
+
+def test_parallel_groups_write_the_same_artifact_as_the_serial_loop(tmp_path, monkeypatch):
+    """Groups finish in reverse order under the pool; the artifact must not."""
+    import threading
+    import time
+    in_flight = {"now": 0, "peak": 0}
+    lock = threading.Lock()
+
+    def slow_early_sections(**kwargs):
+        with lock:
+            in_flight["now"] += 1
+            in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        prompt = kwargs["messages"][-1]["content"]
+        # Later sections answer first: SECTION 07 sleeps least.
+        idx = next(int(t[-2:]) for t in _MANY_GROUPS if t in prompt)
+        time.sleep((len(_MANY_GROUPS) - idx) * 0.005)
+        with lock:
+            in_flight["now"] -= 1
+        return _ok_response([0, 1])
+
+    serial = _run(tmp_path, monkeypatch, slow_early_sections, workers=1)
+    assert in_flight["peak"] == 1  # workers=1 really is the serial loop
+    parallel = _run(tmp_path, monkeypatch, slow_early_sections, workers=4)
+    assert in_flight["peak"] > 1  # and workers=4 really overlapped
+
+    assert serial == parallel
+    entries = parallel["entries"]
+    assert [e["hierarchy"][0] for e in entries] == [t for t in _MANY_GROUPS for _ in range(2)]
+
+
+def test_group_progress_lines_are_monotonic_and_unspliced(tmp_path, monkeypatch, capsys):
+    import time
+
+    def slow_early_sections(**kwargs):
+        prompt = kwargs["messages"][-1]["content"]
+        idx = next(int(t[-2:]) for t in _MANY_GROUPS if t in prompt)
+        time.sleep((len(_MANY_GROUPS) - idx) * 0.005)
+        return _ok_response([0, 1])
+
+    _run(tmp_path, monkeypatch, slow_early_sections, workers=4)
+
+    out = capsys.readouterr().out.splitlines()
+    progress = [line for line in out if line.startswith("[") and "/8]" in line]
+    # orchestrator.py's PROGRESS_PATTERNS read "[N/M]"; N must never go backwards.
+    assert [int(line[1:line.index("/")]) for line in progress] == list(range(1, 9))
+    # Each group's block is one atomic print: its "Entries:" line follows its header.
+    for i, line in enumerate(out):
+        if line.startswith("[") and "/8]" in line:
+            assert out[i + 1].strip().startswith("Entries: 2"), out[i:i + 2]
+
+
+def test_groups_run_inside_the_callers_run_id_context(tmp_path, monkeypatch):
+    from unified_pipeline.core import prompt_logger
+    seen = set()
+
+    def record(**kwargs):
+        seen.add(prompt_logger._current_run_id.get())
+        return _ok_response([0, 1])
+
+    token = prompt_logger.set_current_run_id("run-3b")
+    try:
+        _run(tmp_path, monkeypatch, record, workers=4)
+    finally:
+        prompt_logger.reset_current_run_id(token)
+
+    assert seen == {"run-3b"}

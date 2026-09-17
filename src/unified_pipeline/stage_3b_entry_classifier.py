@@ -18,10 +18,12 @@ resolve ambiguity and provides constraints.
 
 import json
 import logging
+import threading
 import os
 import sys
 from pathlib import Path
 from datetime import datetime
+from collections.abc import Callable
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -74,6 +76,7 @@ from unified_pipeline.stage3b.prompt import (  # noqa: F401
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
     build_taxonomy_codes_for_prompt,
 )
+from unified_pipeline.core.batch_pool import map_in_order
 from unified_pipeline.stage3b.classify import (  # noqa: F401
     _BatchStats,
     _build_taxonomy_ref_for_batch,
@@ -87,12 +90,62 @@ from unified_pipeline.stage3b.classify import (  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
+# Hierarchy groups are independent of one another (each builds its own
+# taxonomy context; results are merged in group order), so they run on a
+# small thread pool. Sized under llm/retry.py's per-pod semaphore (8) so one
+# run cannot starve the others admitted alongside it (#881).
+STAGE3B_GROUP_WORKERS = 4
+
+
+def _group_progress_reporter(total_groups: int) -> Callable[[str, list[str]], None]:
+    """One atomic print per finished group, numbered by completion.
+
+    The ``[N/M]`` line is a parsed contract -- orchestrator.py's
+    PROGRESS_PATTERNS read it into the progress bar -- so N counts groups
+    *finished*, which stays monotonic however the pool orders completions,
+    and the whole block goes out in one print under a lock so two groups'
+    lines cannot splice.
+    """
+    lock = threading.Lock()
+    done = 0
+
+    def report(hierarchy_key: str, lines: list[str]) -> None:
+        nonlocal done
+        with lock:
+            done += 1
+            print("\n".join([f"[{done}/{total_groups}] {hierarchy_key[:60]}...", *lines]))
+
+    return report
+
+
+def _classify_group(
+    hierarchy_key: str,
+    group_entries: list[dict],
+    mapping_index: dict,
+    taxonomy: dict,
+    report: Callable[[str, list[str]], None],
+) -> tuple[list[dict], dict]:
+    """Classify one hierarchy group; the per-group body of run_stage_3b's loop."""
+    hierarchy = [] if hierarchy_key == "(no hierarchy)" else hierarchy_key.split(" > ")
+    context = get_taxonomy_context(hierarchy, mapping_index)
+    primary_codes = context.get_primary_codes()
+
+    classified, stats = classify_entries_batch(group_entries, context, taxonomy)
+
+    lines = [f"    Entries: {len(group_entries)}"]
+    if primary_codes:
+        lines.append(f"    Suggested codes: {', '.join(primary_codes[:3])}")
+    lines.append(f"    ✓ Classified {stats['entries_classified']} entries (${stats['cost']:.4f})")
+    report(hierarchy_key, lines)
+    return classified, stats
+
 
 def run_stage_3b(
     document_uid: str,
     stage_2_path: str | None = None,
     stage_3a_path: str | None = None,
-    output_dir: str | None = None
+    output_dir: str | None = None,
+    workers: int = STAGE3B_GROUP_WORKERS,
 ) -> dict:
     """
     Run Stage 3b entry classification.
@@ -102,6 +155,8 @@ def run_stage_3b(
         stage_2_path: Path to Stage 2 entries (optional, will auto-detect)
         stage_3a_path: Path to Stage 3a mappings (optional, will auto-detect)
         output_dir: Output directory (optional, will auto-detect)
+        workers: Hierarchy groups classified at once (default
+            STAGE3B_GROUP_WORKERS). 1 reproduces the pre-#881 serial loop.
 
     No `model` parameter: it used to exist here purely to be silently
     dropped -- never forwarded to call_llm() -- so it was removed rather
@@ -180,30 +235,13 @@ def run_stage_3b(
         "model": None
     }
 
-    for group_idx, (hierarchy_key, group_entries) in enumerate(groups.items(), 1):
-        # Parse hierarchy from key
-        if hierarchy_key == "(no hierarchy)":
-            hierarchy = []
-        else:
-            hierarchy = hierarchy_key.split(" > ")
-
-        print(f"[{group_idx}/{len(groups)}] {hierarchy_key[:60]}...")
-        print(f"    Entries: {len(group_entries)}")
-
-        # Get taxonomy context
-        context = get_taxonomy_context(hierarchy, mapping_index)
-        primary_codes = context.get_primary_codes()
-
-        if primary_codes:
-            print(f"    Suggested codes: {', '.join(primary_codes[:3])}")
-
-        # Classify entries
-        classified, stats = classify_entries_batch(
-            group_entries,
-            context,
-            taxonomy
-        )
-
+    report = _group_progress_reporter(len(groups))
+    results = map_in_order(
+        _classify_group,
+        [(key, entries, mapping_index, taxonomy, report) for key, entries in groups.items()],
+        workers,
+    )
+    for classified, stats in results:
         all_classified.extend(classified)
 
         # Update totals
@@ -219,8 +257,6 @@ def run_stage_3b(
         total_stats["fallback_entries"] += stats["fallback_entries"]
         total_stats["empty_entries"] += stats["empty_entries"]
         total_stats["model"] = stats.get("model") or total_stats.get("model")
-
-        print(f"    ✓ Classified {stats['entries_classified']} entries (${stats['cost']:.4f})")
 
     print()
     print(f"Total: {total_stats['entries_classified']} entries classified")
