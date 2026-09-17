@@ -395,16 +395,22 @@ def _merge_first_cell_continuation(lines: Sequence[str]) -> list[str]:
     that fails any of those checks, are returned unchanged and fall through
     to `_parse_honor_lines` exactly as before.
 
-    Guard order deliberately mirrors the pre-R3 code with only the roles of
-    the two lines swapped (#828 review round 3): the bare-year and
-    fused-header checks run on the whole of `second`, before `_honor_columns`
-    parses it, exactly where they ran before. They are guaranteed redundant
-    with the `columns is None` check below for a bare year specifically --
-    `_YEAR_ONLY_RE` requires the whole line to be nothing but a year, and a
-    pipe-free line can never satisfy `_honor_columns`'s 2- or 3-cell shape
-    either way -- but NOT for the fused-header case: "Name of Award |
-    Organization | 10/30/2017" has its own org and date cells and would
-    otherwise merge as if it were a real continuation row, which
+    The three guard conditions are computed up front, named, then combined
+    into one early return (#828 review round 4): whether `second` is a bare
+    year or the source table's fused header row (`is_year_or_header`), and
+    whether it fails to parse as a proper 3-column row with its own
+    organization AND date (`is_invalid_column_shape`). `_honor_columns` now
+    runs before the tab check rather than after -- all three are pure
+    (`_honor_columns` and `_looks_like_column_header` only split/lower/regex
+    the string; neither has a side effect or a code path that raises on a
+    tab-containing, bare-year, or header-shaped `second`), so reordering
+    their evaluation cannot change which lines return early. `is_year_or_header`
+    is guaranteed redundant with `is_invalid_column_shape` for a bare year
+    specifically -- `_YEAR_ONLY_RE` requires the whole line to be nothing but
+    a year, and a pipe-free line can never satisfy `_honor_columns`'s 2- or
+    3-cell shape either way -- but NOT for the fused-header case: "Name of
+    Award | Organization | 10/30/2017" has its own org and date cells and
+    would otherwise merge as if it were a real continuation row, which
     `_looks_like_column_header` alone catches (proved in the test suite: the
     bare-year guard's own mutant survives on the `columns is None` fallback,
     the header guard's does not).
@@ -412,12 +418,10 @@ def _merge_first_cell_continuation(lines: Sequence[str]) -> list[str]:
     if len(lines) != 2 or '\t' in lines[0] or '|' in lines[0]:
         return list(lines)
     first, second = lines
-    if '\t' in second:
-        return list(lines)
-    if _YEAR_ONLY_RE.match(second) or _looks_like_column_header(second):
-        return list(lines)
+    is_year_or_header = bool(_YEAR_ONLY_RE.match(second)) or _looks_like_column_header(second)
     columns = _honor_columns(second)
-    if columns is None or not columns.organization or not columns.date:
+    is_invalid_column_shape = columns is None or not columns.organization or not columns.date
+    if '\t' in second or is_year_or_header or is_invalid_column_shape:
         return list(lines)
     parts = [p.strip() for p in second.split('|') if p.strip()]
     parts[0] = f"{first} {parts[0]}".strip()
