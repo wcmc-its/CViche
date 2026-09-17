@@ -427,7 +427,7 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 1.3 peers do not import peers | 0 | 0 | ✓ |
 | 1.4 core does not import the web backend | 0 | 1 | ✗ |
 | 2.1 no `db.query(` in `api/` | falling | 30 | ratchet |
-| 3.x oversized-function debt (excess lines) | falling | 2354 | ratchet |
+| 3.x oversized-function debt (excess lines) | falling | 2347 | ratchet |
 | 3.7 no metaprogramming | 0 | 0 (1 waived) | ~ |
 | 3.7 dynamic attribute access (non-literal) | falling | 6 | ratchet |
 | 5.4 bare swallows (`except Exception: pass`) | falling | 3 | ratchet |
@@ -435,8 +435,8 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 | 7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`) | falling | 4 | ratchet |
 | 7.1 print() in library code (T201) | falling | 884 | ratchet |
 | 7.9 restated Python version != the build image | 0 | 0 | ✓ |
-| 8.3 typing syntax (UP*, RUF013) | falling | 228 | ratchet |
-| 8.3 missing annotations (ANN*, RUF012) | falling | 553 | ratchet |
+| 8.3 typing syntax (UP*, RUF013) | falling | 224 | ratchet |
+| 8.3 missing annotations (ANN*, RUF012) | falling | 551 | ratchet |
 
 <!-- check_standards:auto:end -->
 
