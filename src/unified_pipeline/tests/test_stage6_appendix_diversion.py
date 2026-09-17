@@ -79,8 +79,16 @@ _APPENDIX_HEADER = "T. APPENDIX"
 
 # ------------------------------------------------------------- pure-function
 
+# "ZZ" stands in for "some taxonomy code with no renderer at all" everywhere
+# below. This suite originally used N2 for that role; #840 gave N2 its own
+# training-grants renderer (added it to RENDER_ROUTED_CODES), which flipped
+# every one of these fixtures from no_render_route to renderer_declined
+# under a real code's dispatch. "ZZ" (same placeholder test_stage4_schemas.py
+# uses for "not a real taxonomy code") can never be assigned a renderer, so
+# it will not go stale the way N2 did.
+
 def test_reason_no_render_route_for_a_code_never_in_render_routed_codes():
-    assert _appendix_diversion_reason("N2", RENDER_ROUTED_CODES, PASSTHROUGH_CODES) == REASON_NO_RENDER_ROUTE
+    assert _appendix_diversion_reason("ZZ", RENDER_ROUTED_CODES, PASSTHROUGH_CODES) == REASON_NO_RENDER_ROUTE
 
 
 def test_reason_renderer_declined_for_a_code_in_render_routed_codes():
@@ -105,25 +113,25 @@ def _entry(code: str) -> dict:
 
 
 def test_build_warnings_one_unrouted_code_three_entries():
-    written = [_entry("N2"), _entry("N2"), _entry("N2")]
+    written = [_entry("ZZ"), _entry("ZZ"), _entry("ZZ")]
     warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
     assert len(warnings) == 1
     w = warnings[0]
     assert w["check"] == "appendix_diversion"
-    assert w["code"] == "N2"
+    assert w["code"] == "ZZ"
     assert w["section"] == "T. APPENDIX"
     assert w["count"] == 3
     assert w["reason"] == REASON_NO_RENDER_ROUTE
     assert w["message"] == (
-        "N2: 3 entries diverted to the Appendix — "
+        "ZZ: 3 entries diverted to the Appendix — "
         "no stage 6 section is routed to render this taxonomy code")
     assert w["evidence"] == []
 
 
 def test_build_warnings_two_unrouted_codes_sorted_by_code():
-    written = [_entry("N2"), _entry("M4A"), _entry("M4A")]
+    written = [_entry("ZZ"), _entry("M4A"), _entry("M4A")]
     warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
-    assert [w["code"] for w in warnings] == ["M4A", "N2"]
+    assert [w["code"] for w in warnings] == ["M4A", "ZZ"]
     assert [w["count"] for w in warnings] == [2, 1]
     assert all(w["reason"] == REASON_NO_RENDER_ROUTE for w in warnings)
 
@@ -133,7 +141,7 @@ def test_build_warnings_empty_written_list_returns_no_warnings():
 
 
 def test_build_warnings_evidence_always_empty_never_entry_text():
-    written = [{"taxonomy_code": "N2", "text": "some real CV sentence"}]
+    written = [{"taxonomy_code": "ZZ", "text": "some real CV sentence"}]
     warnings = build_appendix_diversion_warnings(written, [], RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
     assert warnings[0]["evidence"] == []
     assert "some real CV sentence" not in json.dumps(warnings)
@@ -228,16 +236,16 @@ def _appendix_numbered_lines(doc: Document) -> list[str]:
 
 def test_positive_one_unrouted_code_three_entries(tmp_path):
     entries = [_OWNER_ENTRY,
-               _t_entry("N2_ONE reviewed grant applications for the Foundation "
-                        "for Anesthesia Education and Research", "N2", ["Peer Review"], 1),
-               _t_entry("N2_TWO served as ad hoc reviewer for the Journal of "
-                        "Perioperative Medicine manuscripts", "N2", ["Peer Review"], 2),
-               _t_entry("N2_THREE participated in the National Institutes of "
-                        "Health study section panel review", "N2", ["Peer Review"], 3)]
+               _t_entry("ZZ_ONE reviewed grant applications for the Foundation "
+                        "for Anesthesia Education and Research", "ZZ", ["Peer Review"], 1),
+               _t_entry("ZZ_TWO served as ad hoc reviewer for the Journal of "
+                        "Perioperative Medicine manuscripts", "ZZ", ["Peer Review"], 2),
+               _t_entry("ZZ_THREE participated in the National Institutes of "
+                        "Health study section panel review", "ZZ", ["Peer Review"], 3)]
     doc, sidecar = _render(tmp_path, "T531A", entries)
     diversions = _diversion_warnings(sidecar)
     assert len(diversions) == 1
-    assert diversions[0]["code"] == "N2"
+    assert diversions[0]["code"] == "ZZ"
     assert diversions[0]["count"] == 3
     assert diversions[0]["reason"] == REASON_NO_RENDER_ROUTE
     assert len(_appendix_numbered_lines(doc)) == 3
@@ -245,15 +253,15 @@ def test_positive_one_unrouted_code_three_entries(tmp_path):
 
 def test_positive_two_unrouted_codes_sorted_by_code(tmp_path):
     entries = [_OWNER_ENTRY,
-               _t_entry("N2_ONE reviewed grant applications for the Foundation "
-                        "for Anesthesia Education and Research", "N2", ["Peer Review"], 1),
+               _t_entry("ZZ_ONE reviewed grant applications for the Foundation "
+                        "for Anesthesia Education and Research", "ZZ", ["Peer Review"], 1),
                _t_entry("M4A_ONE Phase II interventional trial of a novel "
                         "analgesic in postoperative pain", "M4A", ["Clinical Trials"], 2),
                _t_entry("M4A_TWO Phase III device trial evaluating a wearable "
                         "cardiac monitor", "M4A", ["Clinical Trials"], 3)]
     _doc, sidecar = _render(tmp_path, "T531B", entries)
     diversions = _diversion_warnings(sidecar)
-    assert [w["code"] for w in diversions] == ["M4A", "N2"]
+    assert [w["code"] for w in diversions] == ["M4A", "ZZ"]
     assert [w["count"] for w in diversions] == [2, 1]
 
 
@@ -278,18 +286,18 @@ def test_positive_m1_discard_path_reason_renderer_declined(tmp_path):
 
 
 def test_dropped_entries_blank_boilerplate_header_are_not_counted(tmp_path):
-    # One genuine N2 entry plus three that _appendix_drop_reason removes
+    # One genuine ZZ entry plus three that _appendix_drop_reason removes
     # before anything is written: blank, source-boilerplate, column-header.
     entries = [_OWNER_ENTRY,
-               _t_entry("N2_GENUINE reviewed grant applications for the "
-                        "Foundation for Anesthesia Research", "N2", ["Peer Review"], 1),
-               _t_entry("Curriculum Vitae", "N2", ["Peer Review"], 2),
-               _t_entry("Title | Institution/Location | Dates", "N2", ["Peer Review"], 3),
-               _t_entry("", "N2", ["Peer Review"], 4)]
+               _t_entry("ZZ_GENUINE reviewed grant applications for the "
+                        "Foundation for Anesthesia Research", "ZZ", ["Peer Review"], 1),
+               _t_entry("Curriculum Vitae", "ZZ", ["Peer Review"], 2),
+               _t_entry("Title | Institution/Location | Dates", "ZZ", ["Peer Review"], 3),
+               _t_entry("", "ZZ", ["Peer Review"], 4)]
     doc, sidecar = _render(tmp_path, "T531D", entries)
     diversions = _diversion_warnings(sidecar)
     assert len(diversions) == 1
-    assert diversions[0]["code"] == "N2"
+    assert diversions[0]["code"] == "ZZ"
     assert diversions[0]["count"] == 1
     assert len(_appendix_numbered_lines(doc)) == 1
 
@@ -345,16 +353,16 @@ def test_recovered_unrendered_one_routed_code_bullet(tmp_path):
 
 
 def test_recovered_unrendered_mixed_with_numbered_same_code_two_warnings_sorted(tmp_path):
-    """One N2 entry reaches `_fill_appendix` as a numbered line
-    (`no_render_route`) while a synthetic N2 bullet is separately recovered
+    """One ZZ entry reaches `_fill_appendix` as a numbered line
+    (`no_render_route`) while a synthetic ZZ bullet is separately recovered
     (`recovered_unrendered`) -- two distinct warnings for the SAME code,
     sorted by (code, reason) so they are adjacent (#531-R2 finding F1)."""
     entries = [_OWNER_ENTRY,
-               _t_entry("N2_ONE reviewed grant applications for the Foundation "
-                        "for Anesthesia Education and Research", "N2", ["Peer Review"], 1)]
+               _t_entry("ZZ_ONE reviewed grant applications for the Foundation "
+                        "for Anesthesia Education and Research", "ZZ", ["Peer Review"], 1)]
     gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
     gen._reconsider_appendix_entries = lambda: gen._add_remaining_to_appendix(
-        [("SYNTHETIC_RECOVERED_N2 record line", "N2", 0.0)])
+        [("SYNTHETIC_RECOVERED_ZZ record line", "ZZ", 0.0)])
     data = {"document_uid": "T531L", "entries": entries}
     input_path = tmp_path / "in.json"
     output_path = tmp_path / "out.docx"
@@ -363,8 +371,8 @@ def test_recovered_unrendered_mixed_with_numbered_same_code_two_warnings_sorted(
     sidecar = json.loads((tmp_path / "T531L_render_warnings.json").read_text())
     diversions = _diversion_warnings(sidecar)
     assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
-        ("N2", REASON_NO_RENDER_ROUTE, 1),
-        ("N2", REASON_RECOVERED_UNRENDERED, 1),
+        ("ZZ", REASON_NO_RENDER_ROUTE, 1),
+        ("ZZ", REASON_RECOVERED_UNRENDERED, 1),
     ]
 
 
@@ -374,8 +382,8 @@ def test_recovered_unrendered_no_bullets_no_such_warning(tmp_path):
     warning at all -- the merge is purely additive per stream, same as the
     existing no-appendix-at-all negative case."""
     entries = [_OWNER_ENTRY,
-               _t_entry("N2_ONE reviewed grant applications for the Foundation "
-                        "for Anesthesia Education and Research", "N2", ["Peer Review"], 1)]
+               _t_entry("ZZ_ONE reviewed grant applications for the Foundation "
+                        "for Anesthesia Education and Research", "ZZ", ["Peer Review"], 1)]
     gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
     gen._reconsider_appendix_entries = lambda: gen._add_remaining_to_appendix([])
     data = {"document_uid": "T531M", "entries": entries}
@@ -385,7 +393,7 @@ def test_recovered_unrendered_no_bullets_no_such_warning(tmp_path):
     gen.generate(str(input_path), str(output_path), research_summary_path=None)
     sidecar = json.loads((tmp_path / "T531M_render_warnings.json").read_text())
     diversions = _diversion_warnings(sidecar)
-    assert [(w["code"], w["reason"]) for w in diversions] == [("N2", REASON_NO_RENDER_ROUTE)]
+    assert [(w["code"], w["reason"]) for w in diversions] == [("ZZ", REASON_NO_RENDER_ROUTE)]
     assert all(w["reason"] != REASON_RECOVERED_UNRENDERED for w in diversions)
 
 
@@ -393,8 +401,8 @@ def test_end_to_end_generate_writes_warning_into_sidecar_json(tmp_path):
     """The sidecar file on disk, read back exactly as run_doctor reads it --
     not just the in-memory validation_issues list."""
     entries = [_OWNER_ENTRY,
-               _t_entry("N2_ONE reviewed grant applications for the Foundation "
-                        "for Anesthesia Education and Research", "N2", ["Peer Review"], 1)]
+               _t_entry("ZZ_ONE reviewed grant applications for the Foundation "
+                        "for Anesthesia Education and Research", "ZZ", ["Peer Review"], 1)]
     gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
     gen._reconsider_appendix_entries = lambda: None
     data = {"document_uid": "T531F", "entries": entries}
@@ -409,9 +417,9 @@ def test_end_to_end_generate_writes_warning_into_sidecar_json(tmp_path):
     assert on_disk["document_uid"] == "T531F"
     diversions = [w for w in on_disk["warnings"] if w["check"] == "appendix_diversion"]
     assert diversions == [{
-        "check": "appendix_diversion", "code": "N2", "section": "T. APPENDIX",
+        "check": "appendix_diversion", "code": "ZZ", "section": "T. APPENDIX",
         "count": 1, "reason": REASON_NO_RENDER_ROUTE,
-        "message": ("N2: 1 entry diverted to the Appendix — no stage 6 "
+        "message": ("ZZ: 1 entry diverted to the Appendix — no stage 6 "
                     "section is routed to render this taxonomy code"),
         "evidence": [],
     }]
@@ -459,8 +467,8 @@ def test_negative_existing_checks_output_unchanged_when_diversion_also_fires(tmp
     a new appendix_diversion warning, in a fixed dict order (existing checks
     first, since _validate_output runs before the appendix-diversion merge)."""
     entries = [_OWNER_ENTRY,
-               _t_entry("N2_ONE reviewed grant applications for the Foundation "
-                        "for Anesthesia Education and Research", "N2", ["Peer Review"], 1)]
+               _t_entry("ZZ_ONE reviewed grant applications for the Foundation "
+                        "for Anesthesia Education and Research", "ZZ", ["Peer Review"], 1)]
     _doc, sidecar = _render(tmp_path, "T531I", entries)
     assert sidecar["warnings"] == [
         {"check": "no_visible_teaching_content", "code": "K",
@@ -468,9 +476,9 @@ def test_negative_existing_checks_output_unchanged_when_diversion_also_fires(tmp
          "message": ("K (Teaching): No visible bulleted content found - may "
                      "be using track changes only"),
          "evidence": []},
-        {"check": "appendix_diversion", "code": "N2", "section": "T. APPENDIX",
+        {"check": "appendix_diversion", "code": "ZZ", "section": "T. APPENDIX",
          "count": 1, "reason": REASON_NO_RENDER_ROUTE,
-         "message": ("N2: 1 entry diverted to the Appendix — no stage "
+         "message": ("ZZ: 1 entry diverted to the Appendix — no stage "
                      "6 section is routed to render this taxonomy code"),
          "evidence": []},
     ]
@@ -535,8 +543,8 @@ def test_reconsider_appendix_entries_real_tail_wires_recovered_codes(tmp_path):
     warning below entirely -- FAILING this test.
     """
     entries = [_OWNER_ENTRY,
-               _t_entry("N2_ONE reviewed grant applications for the Foundation "
-                        "for Anesthesia Education and Research", "N2", ["Peer Review"], 1)]
+               _t_entry("ZZ_ONE reviewed grant applications for the Foundation "
+                        "for Anesthesia Education and Research", "ZZ", ["Peer Review"], 1)]
     gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
     pending_entry = {"text": "SYNTHETIC_PENDING_D2 record awaiting reconsideration",
                       "taxonomy_code": "D2", "extracted_fields": {}}
@@ -551,7 +559,7 @@ def test_reconsider_appendix_entries_real_tail_wires_recovered_codes(tmp_path):
     diversions = _diversion_warnings(sidecar)
     assert [(w["code"], w["reason"], w["count"]) for w in diversions] == [
         ("D2", REASON_RECOVERED_UNRENDERED, 1),
-        ("N2", REASON_NO_RENDER_ROUTE, 1),
+        ("ZZ", REASON_NO_RENDER_ROUTE, 1),
     ]
 
 
