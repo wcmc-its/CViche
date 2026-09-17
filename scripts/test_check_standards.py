@@ -10,10 +10,10 @@ check_function_size.py's own self-test copies the script into a temp
 scripts/ dir rather than pointing it at synthetic files anywhere). One
 planted violation per check, run --report, assert it's counted; then the
 --update / diff-gate mechanics against CODING_STANDARDS.md's auto block;
-then the seven ratcheted rows' baseline mechanics (RATCHETED_ROWS); then
+then the eight ratcheted rows' baseline mechanics (RATCHETED_ROWS); then
 the waiver mechanism (WAIVABLE_ROWS) -- a waived hit is excused from its
 row's count but not forgotten, and the waived count itself ratchets; then
-the three ruff-backed rows (7.1 print(), both 8.3 rows) -- the count is
+the four ruff-backed rows (5.4 BLE001, 7.1 print(), both 8.3 rows) -- the count is
 summed from ruff's own statistics, a rise blocks, and a missing ruff is a
 hard failure rather than a zero; then the staleness helpers, which run
 against the real repo rather than the fixture since there's no git history
@@ -37,18 +37,27 @@ RUFF_TOML = os.path.join(os.path.dirname(HERE), "ruff.toml")
 
 # One library file that trips every ruff family the three rows sum, with a
 # known count per row: typing syntax UP035 + UP006 + UP045 + UP037 + RUF013
-# = 5; annotations RUF012 + ANN401 = 2; print T201 = 1.
+# = 5; annotations RUF012 + ANN401 = 2; print T201 = 1; blind except
+# BLE001 = 1 (fully annotated so it adds nothing to the ANN row).
 RUFF_BAIT = (
     "from typing import Any, List, Optional\n\n\n"
     "class Bait:\n"
     "    tags = []\n\n\n"
     "def typed(x: List[int], y: Optional[str] = None, z: str = None, w: Any = 1) -> \"None\":\n"
-    "    print(x, y, z, w)\n"
+    "    print(x, y, z, w)\n\n\n"
+    "def guarded() -> None:\n"
+    "    try:\n"
+    "        typed([])\n"
+    "    except Exception:\n"
+    "        return\n"
 )
-# Under tests/: ruff.toml's per-file-ignores drop ANN and T201 there but
-# keep UP, so this adds UP035 + UP006 = 2 to the syntax row and nothing to
-# the other two.
-RUFF_TEST_BAIT = "from typing import List\n\n\ndef t(a: List[int]):\n    print(a)\n"
+# Under tests/: ruff.toml's per-file-ignores drop ANN, T201 and BLE001 there
+# but keep UP, so this adds UP035 + UP006 = 2 to the syntax row and nothing
+# to the other three.
+RUFF_TEST_BAIT = (
+    "from typing import List\n\n\ndef t(a: List[int]):\n    print(a)\n\n\n"
+    "def g():\n    try:\n        t([])\n    except Exception:\n        return\n"
+)
 
 DOC_TEMPLATE = """# CODING_STANDARDS.md (fixture)
 
@@ -211,6 +220,12 @@ def main():
         # above is unannotated, 17 ANN hits in all (bad.py 1, alpha 1,
         # beta 1, reaches_back 1, widgets 2, meta 2, waived_meta 2,
         # dynattr 5, swallows 2).
+        blind_section = out.split("5.4 blind `except Exception` (BLE001)")[1].split("\n")[0]
+        # ruffbait's 1 plus swallows.py's 2 `except Exception: pass` -- BLE001
+        # counts those too (a comment excuses the AST row, not this one).
+        assert "today=3" in blind_section, blind_section
+        print("5.4 blind except (BLE001)                  counted   ok (tests/ excluded)")
+
         print_section = out.split("7.1 print() in library code (T201)")[1].split("\n")[0]
         assert "today=1" in print_section, print_section
         print("7.1 print() in library code (T201)         counted   ok (tests/ and scripts/ excluded)")

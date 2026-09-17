@@ -664,3 +664,13 @@ class PassthroughSection:
                 for run in para.runs:
                     _set_font(run)
         self.stats['entries_inserted'] += 1
+
+
+# The section codes `_fill_passthrough_sections` writes (E, G, J). This is
+# the ONE home for that set: `generate()` threads it into the Appendix
+# diversion reporting (#531) rather than `appendix.py` importing a peer
+# (CODING_STANDARDS 1.3). A plain literal, not a docstring derivation -- the
+# writer selects by hierarchy label, so there is no runtime structure to
+# derive it from; `test_passthrough_codes_matches_pinned_value_and_its_own_docstring_source`
+# pins it against the "Sections handled:" docstring so the two cannot drift.
+PASSTHROUGH_CODES: frozenset[str] = frozenset({'E', 'G', 'J'})

@@ -927,3 +927,20 @@ def test_a_bare_label_cut_stops_only_at_a_known_field_label(
     else:
         assert survives in rendered, "the sibling field did not reach the document"
     assert PII_REDACTED_NOTICE in rendered
+
+
+def test_redaction_notice_is_not_reported_as_a_recovered_appendix_entry(tmp_path):
+    """#531 x #820: `_recover_unrendered_records` reports the code of every
+    appendix bullet it recovered so the render_warnings sidecar can name it
+    as an `appendix_diversion`. The withheld notice is a bullet in that
+    appendix too, but it is a notice, not a recovered entry -- it must not
+    show up in the sidecar as an A-coded `recovered_unrendered` diversion."""
+    _render(tmp_path, [
+        _a("Date of Birth: 12/13/1947"),
+        _a("Marital Status: Married, spouse Jane Roe"),
+    ])
+    sidecar = json.loads((tmp_path / "TESTPD_render_warnings.json").read_text())
+    recovered = [w for w in sidecar["warnings"]
+                 if w.get("check") == "appendix_diversion"
+                 and w.get("reason") == "recovered_unrendered"]
+    assert recovered == [], recovered

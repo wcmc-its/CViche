@@ -22,17 +22,18 @@ build note at its top for which is which and why.
                                                     # in place (never raises a
                                                     # baseline -- see check_function_size.py)
 
-Six of the thirteen rows are a snapshot, not a debt budget -- a row going up
+Six of the fourteen rows are a snapshot, not a debt budget -- a row going up
 is information, not a failure to refuse, and --update always writes the
-fresh number either direction. Seven rows (2.1, 3.7's dynamic-attribute row,
-5.4, both 7.1 rows, both 8.3 rows) are ratcheted instead, the same way
+fresh number either direction. Eight rows (2.1, 3.7's dynamic-attribute row,
+both 5.4 rows, both 7.1 rows, both 8.3 rows) are ratcheted instead, the same way
 check_function_size.py ratchets 3.x: scripts/standards-baseline.json holds
 one number per row, --update refuses to write one higher than what's on
 disk, and the bare command fails if a fresh count exceeds its baseline. See
 RATCHETED_ROWS below and CODING_STANDARDS.md's "Closing the loop" section
 for which rows qualify.
 
-Three of the ratcheted rows (7.1's print() row and both 8.3 rows) are not
+Four of the ratcheted rows (5.4's BLE001 row, 7.1's print() row and both
+8.3 rows) are not
 AST walks here but sums over `ruff check --statistics`, with ruff.toml at the
 repo root as the one definition of what is counted. ruff missing from PATH
 is a hard failure (exit 2, §5.5), never a zero.
@@ -76,6 +77,7 @@ RATCHETED_ROWS = {
     "2.1 no `db.query(` in `api/`",
     "3.7 dynamic attribute access (non-literal)",
     "5.4 bare swallows (`except Exception: pass`)",
+    "5.4 blind `except Exception` (BLE001)",
     "7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)",
     "7.1 print() in library code (T201)",
     "8.3 typing syntax (UP*, RUF013)",
@@ -446,7 +448,7 @@ def check_python_version_drift():
     return len(hits), hits
 
 
-# 7.1 / 8.3 -- three rows that sum `ruff check --statistics` by rule family.
+# 5.4 / 7.1 / 8.3 -- four rows that sum `ruff check --statistics` by rule family.
 # ruff.toml at the repo root is the one definition of the rule set (§1.5);
 # passing it explicitly turns off ruff's per-directory config discovery so a
 # stray pyproject.toml somewhere below can't widen or narrow one row's count.
@@ -457,7 +459,7 @@ RUFF_CONFIG = os.path.join(ROOT, "ruff.toml")
 
 
 class RuffUnavailable(RuntimeError):
-    """ruff could not be run, so the three ruff-backed rows have no number.
+    """ruff could not be run, so the four ruff-backed rows have no number.
     §5.5: a gate that cannot do its job fails, it does not read zero."""
 
 
@@ -488,6 +490,14 @@ def _ruff_family_count(*prefixes: str) -> tuple[int, list[str]]:
     matched = {code: n for code, n in stats.items() if code.startswith(prefixes)}
     detail = [f"{code}: {n}" for code, n in sorted(matched.items(), key=lambda kv: (-kv[1], kv[0]))]
     return sum(matched.values()), detail
+
+
+def check_blind_except() -> tuple[int, list[str]]:
+    """§5.4 -- `except Exception`/`except BaseException` that neither
+    re-raises nor logs the traceback (ruff BLE001), outside tests/. The AST
+    row above counts only the `: pass` shape; this one is every broad catch
+    that turns a programming error into a handled condition."""
+    return _ruff_family_count("BLE001")
 
 
 def check_print_in_library() -> tuple[int, list[str]]:
@@ -521,6 +531,7 @@ ROWS = [
     ("3.7 no metaprogramming", "0", check_no_metaprogramming),
     ("3.7 dynamic attribute access (non-literal)", "falling", check_dynamic_attribute_access),
     ("5.4 bare swallows (`except Exception: pass`)", "falling", check_bare_swallows),
+    ("5.4 blind `except Exception` (BLE001)", "falling", check_blind_except),
     ("7.1 stdout-parsing regexes (`PROGRESS_PATTERNS`)", "falling", check_progress_patterns),
     ("7.1 print() in library code (T201)", "falling", check_print_in_library),
     ("7.9 restated Python version != the build image", "0", check_python_version_drift),
