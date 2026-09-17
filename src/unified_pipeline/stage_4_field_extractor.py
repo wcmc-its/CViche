@@ -23,6 +23,7 @@ Examples:
 
 import sys
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -81,6 +82,8 @@ from unified_pipeline.stage4.schemas import (  # noqa: F401
     load_field_schemas_from_config,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def process_cv(
     docx_path: str,
@@ -105,28 +108,24 @@ def process_cv(
     filename = Path(docx_path).stem
     document_uid = filename
 
-    # Try Stage 3b output first (new format), fall back to Stage 3 (legacy)
+    # Stage 3b is the only live producer of classified entries -- the legacy
+    # stage_3_taxonomy_mapping/ fallback this used to check for is dead: no
+    # live driver (run_full_pipeline.py, orchestrator.py, scripts/) writes
+    # that directory any more (#852), so treating its presence as a second
+    # source of provenance was never reachable outside a hand-crafted fixture.
     stage3b_path = Path(__file__).parent / "outputs" / "stage_3b_classified_entries" / f"{document_uid}_classified.json"
-    stage3_path = Path(__file__).parent / "outputs" / "stage_3_taxonomy_mapping" / f"{document_uid}_mapped.json"
 
-    if stage3b_path.exists():
-        print(f"\n Loading Stage 3b output: {stage3b_path.name}")
-        with open(stage3b_path, "r") as f:
-            stage_data = json.load(f)
-        # Stage 3b uses "entries" key
-        mapped_entries = stage_data.get("entries", [])
-    elif stage3_path.exists():
-        print(f"\n Loading Stage 3 output (legacy): {stage3_path.name}")
-        with open(stage3_path, "r") as f:
-            stage_data = json.load(f)
-        # Legacy Stage 3 uses "mapped_entries" key
-        mapped_entries = stage_data.get("mapped_entries", [])
-    else:
+    if not stage3b_path.exists():
         raise FileNotFoundError(
-            f"No Stage 3b or Stage 3 output found for {document_uid}.\n"
-            f"  Tried: {stage3b_path}\n"
-            f"  Tried: {stage3_path}"
+            f"No Stage 3b output found for {document_uid}.\n"
+            f"  Tried: {stage3b_path}"
         )
+
+    logger.info("Loading Stage 3b output: %s", stage3b_path.name)
+    with open(stage3b_path, "r", encoding="utf-8") as f:
+        stage_data = json.load(f)
+    # Stage 3b uses "entries" key
+    mapped_entries = stage_data.get("entries", [])
 
     # Filter out fragments and duplicates (they don't need field extraction)
     valid_entries = [
@@ -136,10 +135,10 @@ def process_cv(
     fragment_count = len([e for e in mapped_entries if e.get("is_fragment")])
     duplicate_count = len([e for e in mapped_entries if e.get("is_duplicate")])
 
-    print(f"  Total entries from Stage 3b: {len(mapped_entries)}")
-    print(f"  - Fragments (skipped): {fragment_count}")
-    print(f"  - Duplicates (skipped): {duplicate_count}")
-    print(f"  - Valid for extraction: {len(valid_entries)}")
+    logger.info(f"  Total entries from Stage 3b: {len(mapped_entries)}")
+    logger.info(f"  - Fragments (skipped): {fragment_count}")
+    logger.info(f"  - Duplicates (skipped): {duplicate_count}")
+    logger.info(f"  - Valid for extraction: {len(valid_entries)}")
 
     # Extract fields
     result = extract_fields_from_mapped_entries(
@@ -179,19 +178,19 @@ def process_cv(
     with open(output_path, "w") as f:
         json.dump(output, f, indent=2, ensure_ascii=False)
 
-    print(f"\n{'='*80}")
-    print("Stage 4 Complete")
-    print(f"{'='*80}")
-    print(f"Total entries: {len(result['entries'])}")
-    print(f"  - Extracted: {result['stats']['extracted']}")
-    print(f"  - Skipped (empty/minimal): {result['stats']['skipped']}")
-    print(f"  - Fragments (excluded): {fragment_count}")
-    print(f"  - Duplicates (excluded): {duplicate_count}")
-    print(f"  - Reformatted: {result['stats'].get('entries_reformatted', 0)}")
-    print(f"Total cost: ${result['total_cost']:.4f}")
-    print(f"Total tokens: {result['total_tokens']:,}")
-    print(f"Output: {output_path}")
-    print(f"{'='*80}\n")
+    logger.info(f"\n{'='*80}")
+    logger.info("Stage 4 Complete")
+    logger.info(f"{'='*80}")
+    logger.info(f"Total entries: {len(result['entries'])}")
+    logger.info(f"  - Extracted: {result['stats']['extracted']}")
+    logger.info(f"  - Skipped (empty/minimal): {result['stats']['skipped']}")
+    logger.info(f"  - Fragments (excluded): {fragment_count}")
+    logger.info(f"  - Duplicates (excluded): {duplicate_count}")
+    logger.info(f"  - Reformatted: {result['stats'].get('entries_reformatted', 0)}")
+    logger.info(f"Total cost: ${result['total_cost']:.4f}")
+    logger.info(f"Total tokens: {result['total_tokens']:,}")
+    logger.info(f"Output: {output_path}")
+    logger.info(f"{'='*80}\n")
 
     return {
         "output": output,
@@ -213,13 +212,13 @@ def run_validation(output_path: str) -> None:
     validator_path = Path(__file__).parent.parent.parent / "validate_stage4_extraction.py"
 
     if not validator_path.exists():
-        print(f"\n⚠️  Validation script not found: {validator_path}")
-        print("   Skipping validation (extraction still successful)")
+        logger.warning(f"\n⚠️  Validation script not found: {validator_path}")
+        logger.warning("   Skipping validation (extraction still successful)")
         return
 
-    print(f"\n{'='*80}")
-    print("Running Validation")
-    print(f"{'='*80}\n")
+    logger.info(f"\n{'='*80}")
+    logger.info("Running Validation")
+    logger.info(f"{'='*80}\n")
 
     try:
         # Run validation script
@@ -230,18 +229,18 @@ def run_validation(output_path: str) -> None:
         )
 
         if result.returncode != 0:
-            print(f"\n⚠️  Validation completed with warnings")
+            logger.warning("\n⚠️  Validation completed with warnings")
 
     except Exception as e:
-        print(f"\n⚠️  Validation error: {e}")
-        print("   Extraction still successful")
+        logger.exception(f"\n⚠️  Validation error: {e}")
+        logger.warning("   Extraction still successful")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python stage_4_field_extractor.py <document_uid_or_path>")
-        print("  document_uid_or_path: Either the document UID (e.g., '2005_Bpg')")
-        print("                        or path to CV document (e.g., 'path/to/2005_Bpg.docx')")
-        print("  (the LLM model is configured in llm_config.yaml)")
+        logger.info("Usage: python stage_4_field_extractor.py <document_uid_or_path>")
+        logger.info("  document_uid_or_path: Either the document UID (e.g., '2005_Bpg')")
+        logger.info("                        or path to CV document (e.g., 'path/to/2005_Bpg.docx')")
+        logger.info("  (the LLM model is configured in llm_config.yaml)")
         sys.exit(1)
 
     input_arg = sys.argv[1]
@@ -262,10 +261,8 @@ if __name__ == "__main__":
         # Run validation on the output
         run_validation(output_path)
 
-        print("\n Success")
+        logger.info("\n Success")
 
     except Exception as e:
-        print(f"Error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.exception(f"Error: {e}")
         sys.exit(1)

@@ -36,6 +36,7 @@ python-docx does not produce.
 """
 
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -469,29 +470,23 @@ def test_process_cv_reads_stage3b_and_filters_fragments_and_duplicates(tmp_path,
     assert on_disk == output
 
 
-def test_process_cv_falls_back_to_legacy_stage3_when_stage3b_is_absent(tmp_path, monkeypatch):
+def test_process_cv_raises_when_only_legacy_stage3_output_exists(tmp_path, monkeypatch):
+    """#852: process_cv used to fall back to the legacy stage_3_taxonomy_mapping/
+    output when stage 3b was absent, but no live driver (run_full_pipeline.py,
+    orchestrator.py, scripts/) writes that directory any more, so the fallback
+    was dead code that could only be reached by a hand-crafted fixture -- and
+    on that unreachable path it mislabeled its own provenance, always
+    stamping `source_stage: "3b"` even when the legacy branch loaded the data.
+    The fallback branch is removed rather than fixed; this pins that a
+    legacy-only artifact (no stage3b) now raises, same as no artifact at all."""
     _rebind_module_file(monkeypatch, tmp_path, depth=1)
     base = Path(stage4_facade.__file__).parent
     uid = "LEGACYUID"
     _write_legacy_stage3(base, uid, [{"text": "Legacy entry", "taxonomy_code": "D1"}])
     _stub_extract_fields(monkeypatch)
 
-    result = stage4_facade.process_cv(f"{uid}.docx")
-
-    assert result["output"]["total_entries"] == 1
-    assert result["output"]["source_stage"] == "3b"  # hard-coded literal; see the xfail below
-
-
-@pytest.mark.xfail(strict=True, reason="suspected bug: process_cv hard-codes source_stage='3b' even when the legacy stage-3 fallback loaded the data (#852)")
-def test_process_cv_reports_the_legacy_stage_as_its_source(tmp_path, monkeypatch):
-    _rebind_module_file(monkeypatch, tmp_path, depth=1)
-    base = Path(stage4_facade.__file__).parent
-    uid = "LEGACYUID"
-    _write_legacy_stage3(base, uid, [{"text": "Legacy entry", "taxonomy_code": "D1"}])
-    _stub_extract_fields(monkeypatch)
-
-    result = stage4_facade.process_cv(f"{uid}.docx")
-    assert result["output"]["source_stage"] != "3b"
+    with pytest.raises(FileNotFoundError):
+        stage4_facade.process_cv(f"{uid}.docx")
 
 
 def test_process_cv_raises_when_neither_stage_output_exists(tmp_path, monkeypatch):
@@ -518,8 +513,9 @@ def test_process_cv_threads_cancel_check_through_to_extraction(tmp_path, monkeyp
     assert captured["cancel_check"] is sentinel_cancel
 
 
-def test_run_validation_skips_quietly_when_the_validator_script_is_absent(tmp_path, monkeypatch, capsys):
+def test_run_validation_skips_quietly_when_the_validator_script_is_absent(tmp_path, monkeypatch, caplog):
     _rebind_module_file(monkeypatch, tmp_path, depth=2)
+    caplog.set_level(logging.INFO)
 
     def fail_if_called(args, capture_output=False, text=True):
         raise AssertionError(
@@ -536,7 +532,7 @@ def test_run_validation_skips_quietly_when_the_validator_script_is_absent(tmp_pa
     # through into the try/subprocess.run block and this test fails.
     stage4_facade.run_validation(str(tmp_path / "out.json"))
 
-    out = capsys.readouterr().out
+    out = caplog.text  # #875: run_validation logs, it no longer prints
     assert "Skipping validation" in out
     assert "Running Validation" not in out
 
@@ -566,8 +562,9 @@ def test_run_validation_invokes_the_validator_with_the_output_path(tmp_path, mon
     assert calls[0][2] == out_path
 
 
-def test_run_validation_survives_a_nonzero_validator_exit(tmp_path, monkeypatch, capsys):
+def test_run_validation_survives_a_nonzero_validator_exit(tmp_path, monkeypatch, caplog):
     _rebind_module_file(monkeypatch, tmp_path, depth=2)
+    caplog.set_level(logging.INFO)
     (tmp_path / "validate_stage4_extraction.py").write_text("# stub\n")
 
     def fake_run(args, capture_output=False, text=True):
@@ -578,13 +575,14 @@ def test_run_validation_survives_a_nonzero_validator_exit(tmp_path, monkeypatch,
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     stage4_facade.run_validation(str(tmp_path / "out.json"))  # must not raise
-    out = capsys.readouterr().out
+    out = caplog.text  # #875: run_validation logs, it no longer prints
     assert "Validation completed with warnings" in out
     assert "Validation error" not in out
 
 
-def test_run_validation_survives_a_subprocess_exception(tmp_path, monkeypatch, capsys):
+def test_run_validation_survives_a_subprocess_exception(tmp_path, monkeypatch, caplog):
     _rebind_module_file(monkeypatch, tmp_path, depth=2)
+    caplog.set_level(logging.INFO)
     (tmp_path / "validate_stage4_extraction.py").write_text("# stub\n")
 
     def fake_run(args, capture_output=False, text=True):
@@ -592,6 +590,6 @@ def test_run_validation_survives_a_subprocess_exception(tmp_path, monkeypatch, c
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     stage4_facade.run_validation(str(tmp_path / "out.json"))  # caught, must not raise
-    out = capsys.readouterr().out
+    out = caplog.text  # #875: run_validation logs, it no longer prints
     assert "Validation error: boom" in out
     assert "Extraction still successful" in out
