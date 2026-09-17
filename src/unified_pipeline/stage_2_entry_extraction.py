@@ -295,19 +295,47 @@ def remove_subset_delimiters(delimiters: list) -> list:
                 return (float(idx), 0)
         return (float(idx), 0)
 
-    def span_size(d):
-        """Calculate span size, handling string indices."""
+    def is_bare(idx):
+        """True when idx carries no ".row" sub-index (i.e. a whole element)."""
+        return not (isinstance(idx, str) and "." in idx)
+
+    def normalize_span(d: dict) -> tuple[tuple[float, float], tuple[float, float]]:
+        """Return (start, end) sort keys for a delimiter.
+
+        A mixed delimiter -- a sub-indexed start ("9.1") paired with a bare
+        int end (9) -- normalizes its end to (9, 0), which sorts BELOW the
+        start's own (9, 1). The delimiter's own "end" then reads as earlier
+        than its "start", so it tests as fully contained inside an unrelated
+        sibling row and is silently dropped (#854). The LLM does return this
+        shape (start carries the row sub-index the model resolved, end does
+        not), so this is not a defensive case -- it is an observed one.
+
+        When the end is bare but the start is sub-indexed and the raw
+        (uncorrected) end would sort below the start, treat the end as equal
+        to the start's own key instead. This never touches a delimiter whose
+        end is itself sub-indexed (the true-subset case is unaffected), and
+        never touches a delimiter that is bare on both ends (ordinary int
+        spans are unaffected). The delimiter's own element_idx_end field is
+        left untouched -- only the sort/containment key changes.
+        """
         start = normalize_idx(d["element_idx_start"])
         end = normalize_idx(d["element_idx_end"])
+        if (
+            is_bare(d["element_idx_end"])
+            and not is_bare(d["element_idx_start"])
+            and end < start
+        ):
+            end = start
+        return start, end
+
+    def span_size(d):
+        """Calculate span size, handling string indices."""
+        start, end = normalize_span(d)
         # For row entries (same parent), span is end[1] - start[1]
         # For regular entries, span is end[0] - start[0]
         if start[0] == end[0]:
             return end[1] - start[1]
         return end[0] - start[0]
-
-    def is_bare(idx):
-        """True when idx carries no ".row" sub-index (i.e. a whole element)."""
-        return not (isinstance(idx, str) and "." in idx)
 
     def content_lines(text):
         """Non-trivial content lines of an entry.
@@ -358,26 +386,33 @@ def remove_subset_delimiters(delimiters: list) -> list:
             rows = sub_row_parents[main]
             haystack = " \n ".join(str(r.get("text", "")) for r in rows)
             haystack = " ".join(haystack.replace("\t", " ").split()).lower()
-            return all(line in haystack for line in content_lines(d.get("text", "")))
+            lines = content_lines(d.get("text", ""))
+            if not lines:
+                # Every line of the parent's own text was under the 12-char
+                # noise floor (e.g. "PI\n2020\nWCM"): all(... for x in <empty
+                # set>) is vacuously True, which would read as "every content
+                # line already proven present in the sibling rows" when in
+                # fact nothing was checked at all. Not proven -> not
+                # redundant; leave the parent in place (#855).
+                return False
+            return all(line in haystack for line in lines)
 
         delimiters = [d for d in delimiters if not is_redundant_table_parent(d)]
 
     # Sort by start index, then by span size (largest first)
     sorted_delims = sorted(
         delimiters,
-        key=lambda d: (normalize_idx(d["element_idx_start"]), -span_size(d))
+        key=lambda d: (normalize_span(d)[0], -span_size(d))
     )
 
     kept = []
     for delim in sorted_delims:
-        start = normalize_idx(delim["element_idx_start"])
-        end = normalize_idx(delim["element_idx_end"])
+        start, end = normalize_span(delim)
 
         # Check if this delimiter is a subset of any already-kept delimiter
         is_subset = False
         for kept_delim in kept:
-            kept_start = normalize_idx(kept_delim["element_idx_start"])
-            kept_end = normalize_idx(kept_delim["element_idx_end"])
+            kept_start, kept_end = normalize_span(kept_delim)
 
             # Check if current is fully contained within kept
             if start >= kept_start and end <= kept_end:
@@ -1005,6 +1040,28 @@ Respond **only** with a JSON array containing the identified entries. If no entr
     return all_validated_entries, cost_info
 
 
+def _bound_coverage_indices(
+    all_assigned_indices: set[int | str], doc_length: int
+) -> tuple[set[int], set[int]]:
+    """Coverage indices bounded to doc_length's own index space (#856).
+
+    `all_assigned_indices` mixes real integer paragraph positions with
+    table-row string sub-indices ("2.1") and the artificial int parent
+    marker added alongside each claimed row's string index -- a set already
+    de-dupes those two against each other, but a table's own unified index
+    can still land outside doc_length's paragraph-only count (doc_length is
+    built from num_paragraphs/num_empty only, which never counts a table as
+    a paragraph slot). Intersecting with `range(doc_length)` keeps both the
+    gap check and the coverage numerator subsets of doc_length, so a caller
+    computing `len(covered) / doc_length` can never exceed 100%.
+
+    Returns (unaccounted_indices, covered_doc_indices).
+    """
+    all_doc_indices = set(range(doc_length))
+    integer_assigned = {idx for idx in all_assigned_indices if isinstance(idx, int)}
+    return all_doc_indices - integer_assigned, all_doc_indices & integer_assigned
+
+
 def run_stage_2(
     docx_path: str,
     hierarchy_json_path: str = None,
@@ -1296,11 +1353,9 @@ def run_stage_2(
     header_entries = [e for e in all_entries if e["element_type"] == "header"]
     break_entries = [e for e in all_entries if e["element_type"] == "break"]
 
-    # Check for any gaps in coverage
-    # Only check integer indices (sub-row indices like "22.2" are accounted for by parent)
-    all_doc_indices = set(range(doc_length))
-    integer_assigned = {idx for idx in all_assigned_indices if isinstance(idx, int)}
-    unaccounted_indices = all_doc_indices - integer_assigned
+    # Check for any gaps in coverage; the coverage numerator is bounded to
+    # doc_length's own index space (see _bound_coverage_indices -- #856).
+    unaccounted_indices, covered_doc_indices = _bound_coverage_indices(all_assigned_indices, doc_length)
 
     # Drop WCM-template instruction boilerplate (Layer 1, primary filter).
     # Faculty leave the blank template's instruction scaffolding in their CVs;
@@ -1340,9 +1395,9 @@ def run_stage_2(
             "content_entries": len(content_entries),
             "header_entries": len(header_entries),
             "break_entries": len(break_entries),
-            "assigned_indices": len(all_assigned_indices),
+            "assigned_indices": len(covered_doc_indices),  # bounded to doc_length -- see _bound_coverage_indices (#856)
             "unaccounted_indices": sorted(list(unaccounted_indices)) if unaccounted_indices else [],
-            "coverage_percentage": round(len(all_assigned_indices) / doc_length * 100, 1) if doc_length > 0 else 100.0
+            "coverage_percentage": round(len(covered_doc_indices) / doc_length * 100, 1) if doc_length > 0 else 100.0
         },
         "entries": all_entries
     }

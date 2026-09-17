@@ -708,19 +708,6 @@ def test_run_stage_2_sorts_table_row_string_indices_and_excludes_tables_from_doc
     assert not any(e["element_type"] == "break" for e in entries)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "suspected bug (#856): coverage_percentage (stage_2_entry_extraction.py:1345) "
-        "divides by len(all_assigned_indices), which mixes real integer doc "
-        "positions with table-row string sub-indices ('2.0'/'2.1') AND the "
-        "artificial int table-parent marker added alongside them -- instead "
-        "of the already-computed, de-duped integer_assigned set (line 1302, "
-        "used today only for unaccounted_indices). A claimed table row can "
-        "therefore push coverage_percentage past 100% and assigned_indices "
-        "past document_length, both nonsensical for a coverage metric."
-    ),
-)
 def test_run_stage_2_coverage_percentage_never_exceeds_100_percent(tmp_path, monkeypatch):
     # Same fixture as the sort-order test above. Every doc index is
     # accounted for there (coverage.unaccounted_indices == []), so a correct
@@ -733,6 +720,50 @@ def test_run_stage_2_coverage_percentage_never_exceeds_100_percent(tmp_path, mon
     assert coverage["coverage_percentage"] <= 100.0
     assert coverage["coverage_percentage"] == pytest.approx(100.0)
     assert coverage["assigned_indices"] <= output_data["document_length"]
+
+
+def test_run_stage_2_coverage_percentage_bounded_when_table_is_last_section(tmp_path, monkeypatch):
+    # Distinct shape from the fixture above: with NO paragraph after the
+    # table, the table's own unified index (2) sits OUTSIDE
+    # range(document_length) == {0, 1} entirely (document_length only counts
+    # the 2 real paragraphs). Deduping into a set is not enough here -- the
+    # artificial int parent marker for the claimed/recovered rows is itself
+    # >= document_length, so an unbounded integer_assigned would still read
+    # len({0, 1, 2}) / 2 == 150%. Only intersecting with range(document_length)
+    # (_bound_coverage_indices) keeps this at 100%.
+    _redirect_output_manager(monkeypatch, tmp_path)
+
+    doc = Document()
+    doc.add_paragraph("Jane Doe")
+    doc.add_paragraph("AWARDS")
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "2020"
+    table.cell(0, 1).text = "Best Paper"
+    table.cell(1, 0).text = "2021"
+    table.cell(1, 1).text = "Rising Star"
+    docx_path = tmp_path / "tbl_last.docx"
+    doc.save(docx_path)
+
+    hpath = _write_hierarchy(
+        tmp_path, "tbl_last_h.json", "TBL2",
+        hierarchy_with_indices=[{"text": "Awards", "level": "H1", "element_idx": 1, "children": []}],
+        section_boundaries=[{"hierarchy": ["Awards"], "element_idx_start": 1, "element_idx_end": 2, "has_children": False}],
+    )
+    _route_call_llm(monkeypatch, {
+        "Personal Data": [{"element_idx_start": 0, "element_idx_end": 0, "element_type": "paragraph", "confidence": 0.9}],
+        "Awards": [
+            {"element_idx_start": "2.1", "element_idx_end": "2.1", "element_type": "table_row", "confidence": 0.8},
+        ],
+    })
+
+    output_data, _ = stage2.run_stage_2(str(docx_path), str(hpath))
+
+    assert output_data["document_length"] == 2
+    coverage = output_data["coverage"]
+    assert coverage["unaccounted_indices"] == []
+    assert coverage["assigned_indices"] <= output_data["document_length"]
+    assert coverage["coverage_percentage"] <= 100.0
+    assert coverage["coverage_percentage"] == pytest.approx(100.0)
 
 
 def test_run_stage_2_no_personal_data_preamble_when_first_element_is_mapped_header(tmp_path, monkeypatch):
