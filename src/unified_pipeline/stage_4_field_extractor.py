@@ -23,6 +23,7 @@ Examples:
 
 import sys
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -81,6 +82,8 @@ from unified_pipeline.stage4.schemas import (  # noqa: F401
     load_field_schemas_from_config,
 )
 
+logger = logging.getLogger(__name__)
+
 
 def process_cv(
     docx_path: str,
@@ -118,8 +121,8 @@ def process_cv(
             f"  Tried: {stage3b_path}"
         )
 
-    print(f"\n Loading Stage 3b output: {stage3b_path.name}")
-    with open(stage3b_path, "r") as f:
+    logger.info("Loading Stage 3b output: %s", stage3b_path.name)
+    with open(stage3b_path, "r", encoding="utf-8") as f:
         stage_data = json.load(f)
     # Stage 3b uses "entries" key
     mapped_entries = stage_data.get("entries", [])
