@@ -45,7 +45,7 @@ class HierarchyNode(TypedDict, total=False):
     it -- the extractor's contract). Every field is read via `.get()`."""
     text: str
     level: str
-    children: list["HierarchyNode"]
+    children: list[HierarchyNode]
     text_metadata: dict[str, Any]
     paragraph_index: int
 
@@ -57,7 +57,7 @@ class MappedNode(TypedDict):
     level: str
     element_idx: int | None
     synthetic: bool
-    children: NotRequired[list["MappedNode"]]
+    children: NotRequired[list[MappedNode]]
 
 
 class SectionRecord(TypedDict):
