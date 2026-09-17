@@ -21,10 +21,13 @@ import logging
 import os
 import sys
 import json
+import traceback
 from types import MappingProxyType
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Dict, List, Any, Literal, Optional, Tuple
+from collections.abc import Callable
 from datetime import datetime
 from collections import defaultdict
 
@@ -99,8 +102,6 @@ from unified_pipeline.stage6.normalization import (  # noqa: F401
     _ALL_PHONE_SLOT_KEYS,
     _labels_its_own_phone_slots,
     _phone_cell_text,
-    _PII_LABEL_RE,
-    _PII_FIELD_KEY_RE,
     _PII_FRAGMENT_SPLIT_RE,
     _squash,
     _pii_fragments,
@@ -159,6 +160,13 @@ from unified_pipeline.stage6.render_check import (  # noqa: F401
     normalize_retired_code,
     segment_already_rendered,
 )
+from unified_pipeline.stage6.pii_pass import (  # noqa: F401
+    PII_REDACTED_NOTICE,
+    WITHHELD_COMMENT_AUTHOR,
+    PiiPassResult,
+    run_pii_pass,
+    withheld_comment_text,
+)
 from unified_pipeline.stage6.sections import (  # noqa: F401
     AdministrativeActivitiesSection,
     AppendixSection,
@@ -184,6 +192,11 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     ServiceSection,
     TeachingSection,
 )
+from unified_pipeline.stage6.sections.appendix import (
+    UnmappedEntry,
+    build_appendix_diversion_warnings,
+)
+from unified_pipeline.stage6.sections.passthrough import PASSTHROUGH_CODES
 
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
@@ -255,6 +268,58 @@ def _is_bullet_paragraph(para: Paragraph) -> bool:
         return True
     pPr = para._p.pPr
     return pPr is not None and pPr.find(qn('w:numPr')) is not None
+
+
+#: Punctuation a PII cut can leave dangling on the kept residual (#821 R2
+#: F3 / #834): `pii_pass.py`'s `_cut_spans` removes exactly the withheld
+#: SPAN `pii.py`'s `_pii_matches` found, which stops short of whichever
+#: hard delimiter (`\n`, `\t`, `|`, `;`, or a run of whitespace --
+#: `normalization/pii.py`'s own `_PII_FRAGMENT_SPLIT_RE`) used to separate
+#: it from a kept neighbour: "Home Phone: 555-1234; Citizenship: US" ->
+#: "; Citizenship: US" after the cut. `,` and `:` are deliberately absent
+#: from this set -- they are ALLOWED PRECEDING punctuation for a label
+#: match (`pii.py`'s `_boundary_ok`), not hard splits, so they never sit
+#: alone at a residual's edge the way the four above do; stripping them
+#: too would eat real content ("U.S." or a trailing "expires 2028:" left
+#: as the last kept fragment).
+_DANGLING_SEPARATOR_RE = re.compile(r'^[|;\s]+|[|;\s]+$')
+
+
+def _strip_dangling_separators(text: str) -> str:
+    """A PII cut's residual, its own leftover fragment-delimiter
+    punctuation trimmed off both ends (#821 R2 F3 / #834; see
+    `_DANGLING_SEPARATOR_RE`)."""
+    return _DANGLING_SEPARATOR_RE.sub('', text)
+
+
+def _pii_cut_left_a_bare_label(entry: Mapping[str, Any]) -> bool:
+    """True when `run_pii_pass` cut a BARE LABEL off this entry and the
+    label's own value is still sitting in the residual text, uncut and now
+    unlabelled (#821 R2 F3 safety check; the corpus shape is a label and
+    its value joined by a literal pipe).
+
+    Every `WITHHOLD_POLICY` label row's span runs "from the opener's own
+    start to the next hard delimiter" (`normalization/pii.py`'s
+    `_label_spans`): a hard delimiter (`|`, a tab, 3+ spaces --
+    `_PII_FRAGMENT_SPLIT_RE`) sitting directly after the label's colon --
+    a "Home telephone: | <phone>" shape several A-coded orphan entries in
+    this corpus use, one field per entry, label and value joined by " | "
+    the way a two-cell table row is elsewhere in this pipeline -- stops the
+    span AT the colon, so the phone number itself is never cut and survives
+    as what looks like a safe residual; `_clean_inline_tabs` then drops the
+    now-empty label cell entirely, leaving a bare, unlabelled protected
+    value. Rendering the residual is refused whenever that happened -- the
+    whole entry stays denied instead, the pre-#821-R2-F3 behavior.
+
+    The verdict is the pass's own (`_pii_orphaned_value`, written by
+    `_extend_bare_label_span`) rather than a re-read of the fragment
+    strings, because by this point the strings cannot answer the question:
+    "the cut fragment ends in a colon" is equally true of a label whose
+    value was left behind and of a label that had NOTHING after it at all
+    ("Citizenship: US\\nHome Address:" -- a template leftover, nothing
+    protected, and refusing it cost the citizenship line, #821 R3 F-D).
+    Only the pass still holds the text on both sides of the cut."""
+    return bool(entry.get('_pii_orphaned_value'))
 
 
 
@@ -402,9 +467,28 @@ RENDER_ROUTED_CODES = frozenset({
     # NOTE: T is intentionally NOT here - T entries go to Appendix
 })
 
+# Position/training codes represent career-progression stages that share most
+# words but differ in rank -- `_group_and_dedup_entries` uses date-aware dedup
+# for them, merging only entries whose date ranges overlap or match. A
+# taxonomy fact, not a setting (§7.2: no new configuration mechanism).
+_DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1'})
 
 
-
+def _merge_appendix_diversion_warnings(
+    issues: list[dict], written: list[UnmappedEntry], recovered: list[str],
+) -> list[dict]:
+    """Append #531/#531-R2 per-(code, reason) Appendix-diversion warnings
+    (from what `_fill_appendix`/`_add_remaining_to_appendix` report they
+    wrote, never re-derived from the document) to *issues*; unchanged when
+    there is nothing to add. Passes `PASSTHROUGH_CODES` down rather than
+    letting `appendix.py` import it from `passthrough.py` directly -- both
+    are `stage6/sections/*` peers (CODING_STANDARDS.md 1.3, `[gate]`); this
+    module is not a peer of either and is free to import both (#531-R3
+    task 4)."""
+    if not written and not recovered:
+        return issues
+    return issues + build_appendix_diversion_warnings(
+        written, recovered, RENDER_ROUTED_CODES, PASSTHROUGH_CODES)
 
 
 # Personal data that must not be carried onto a WCM CV. Source CVs routinely
@@ -434,11 +518,9 @@ RENDER_ROUTED_CODES = frozenset({
 # ordinary keys out.
 
 
-PII_REDACTED_NOTICE = (
-    "[Personal data from the source CV was withheld here "
-    "(e.g. date or place of birth, marital status, family members' names). "
-    "Review the original CV if this content is needed.]"
-)
+# PII_REDACTED_NOTICE moved to `stage6/pii_pass.py` (#820 round 2) so the
+# doctor lint can skip the notice paragraph without importing this module;
+# re-exported above for the existing importers.
 
 
 
@@ -500,11 +582,21 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         self._revision_id = 0
         self._comments = []  # Store comments to add to comments.xml
 
+        # What the #820 pre-render pass withheld this run -- set by generate();
+        # empty means no notice and no comment. Per-instance, never shared.
+        self._pii_result = PiiPassResult()
+
         # Content overflow tracking: entries where extraction lost significant content
         self._overflow_entries = []  # List of (entry, para, taxonomy_code) tuples
 
         # Appendix entries pending reconsideration
         self._appendix_pending = []  # List of (entry, coverage_pct) tuples
+
+        # Per-section render failures caught by _render_section (#565): one
+        # dict per isolated section that raised, merged into the
+        # render-warnings sidecar ahead of the self-check findings. Reset at
+        # the top of generate(), declared here for typing/reuse across renders.
+        self._section_failures: list[dict[str, Any]] = []
 
         # Memoizes _classify_geographic_scope's LLM calls for the life of one
         # render, keyed on (activity location, owner institutions).
@@ -667,6 +759,170 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         if removed and self.verbose:
             logger.info(f"Removed {removed} WCM-template instruction box(es)")
 
+    def _load_cv_owner_location_from_stage4(self, document_uid: str, cv_owner_location: dict[str, Any]) -> dict[str, Any]:
+        stage4_dir = Path(__file__).parent / "outputs" / "stage_4_field_extraction"
+        stage4_candidates = list(stage4_dir.glob(f"*{document_uid}*_fields.json"))
+        if stage4_candidates:
+            try:
+                with open(stage4_candidates[0], 'r') as f:
+                    stage4_data = json.load(f)
+                cv_owner_location = stage4_data.get('cv_owner_location', {})
+                if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
+                    logger.info("Loaded cv_owner_location from Stage 4 output")
+            except (OSError, ValueError) as e:
+                # Non-fatal: geographic-scope classification just falls back to its
+                # default. Still say so -- a permission error or a truncated stage-4
+                # JSON should not vanish without a trace. Only file and JSON errors
+                # are expected here; a code bug must surface, not read as a missing
+                # file (#531 review).
+                if self.verbose:
+                    logger.warning(f"Could not load cv_owner_location from Stage 4: {e}")
+        return cv_owner_location
+
+    def _resolve_original_doc_path(
+            self, document_uid: str, original_doc_path: str | None
+    ) -> str | None:
+        """The original document path if not already given, or None.
+
+        Every live run is: only `render_gate.py --source-dir` and stage 6's
+        own tests pass one, and `SAMPLE_CV_DIR` is an empty directory in the
+        deployed image (see the constant). Anchored on the module-relative
+        `SAMPLE_CV_DIR` constant plus the process CWD, instead of a stack of
+        brittle '..'/.parent chains that broke silently on any restructure.
+
+        Split out of `generate()` as a PURE move (#820 R3, §3.2): identical
+        body, no behaviour change.
+        """
+        if original_doc_path:
+            return original_doc_path
+        possible_paths = [
+            SAMPLE_CV_DIR / f"{document_uid}.docx",
+            SAMPLE_CV_DIR / f"{document_uid}.doc",
+            Path('data/sample_cvs/word') / f"{document_uid}.docx",  # relative to CWD
+        ]
+        for path in possible_paths:
+            if path.exists():
+                original_doc_path = str(path.resolve())
+                if self.verbose:
+                    logger.info(f"Found original document: {original_doc_path}")
+                break
+        else:
+            if self.verbose:
+                logger.info(f"No original document found for {document_uid} in "
+                            f"{SAMPLE_CV_DIR} or ./data/sample_cvs/word")
+        return original_doc_path
+
+    def _load_research_summary_data(
+            self, research_summary_path: str | None, input_path: str,
+            document_uid: str) -> dict | None:
+        """Stage 4.5 research-summary JSON, given explicitly or auto-found
+        next to `input_path`; None when neither exists.
+
+        Split out of `generate()` as a PURE move (#820 R3, §3.2): identical
+        body, no behaviour change.
+        """
+        if research_summary_path and os.path.exists(research_summary_path):
+            with open(research_summary_path, 'r') as f:
+                research_summary_data = json.load(f)
+            if self.verbose:
+                logger.info(f"Loaded research summary from Stage 4.5: {research_summary_path}")
+            return research_summary_data
+
+        # Try to find it automatically
+        input_dir = Path(input_path).parent.parent
+        auto_summary_path = input_dir / "stage_4_5_research_summary" / f"{document_uid}_research_summary.json"
+        if auto_summary_path.exists():
+            with open(auto_summary_path, 'r') as f:
+                research_summary_data = json.load(f)
+            if self.verbose:
+                logger.info(f"Auto-loaded research summary from: {auto_summary_path}")
+            return research_summary_data
+        return None
+
+    def _group_entries_by_code(
+        self, entries: list[dict[str, Any]]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """Group entries by taxonomy code, applying mismatch corrections.
+
+        Split out of what #843 landed as `_group_and_dedup_entries` (itself
+        a pure move out of `generate()`, #565 §3.2a) so the #820 piece-2 PII
+        deny pass can run on the freshly-grouped `entries_by_code`, between
+        this and `_dedup_grouped_entries` below -- a near-duplicate dedup is
+        about to drop is still re-scanned by `_recover_unrendered_records`
+        (`stage6/pii_pass.py`), so it needs its own strip too, before dedup
+        ever removes it. Behaviour unchanged.
+        """
+        entries_by_code: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        mismatch_corrections = 0
+        for entry in entries:
+            code = normalize_retired_code(entry)
+            code = self._correct_mismatch_if_needed(entry, code)
+            if code != entry.get('taxonomy_code', 'T'):
+                mismatch_corrections += 1
+            entries_by_code[code].append(entry)
+
+        if self.verbose:
+            logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
+            if mismatch_corrections > 0:
+                logger.info(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
+        return entries_by_code
+
+    def _dedup_grouped_entries(
+        self, entries_by_code: dict[str, list[dict[str, Any]]]
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+        """Snapshot `entries_by_code` pre-dedup, then deduplicate within each
+        taxonomy-code group. Second half of what #843 landed as
+        `_group_and_dedup_entries` (see `_group_entries_by_code` for the
+        first half and why the two were split). Behaviour unchanged.
+
+        Returns (entries_by_code, pre_dedup_entries_by_code, dedup_decisions).
+        ``pre_dedup_entries_by_code`` is the snapshot the #221 recovery pass
+        scans: dedup keeps the longer near-duplicate, which can eat a unique
+        record line fused into the dropped entry, so recovery needs the
+        pre-dedup groups to re-verify against.
+        """
+        pre_dedup_entries_by_code = {code: list(group)
+                                     for code, group in entries_by_code.items()}
+        total_deduped = 0
+        dedup_decisions: list[dict[str, Any]] = []
+        for code in list(entries_by_code.keys()):
+            before = len(entries_by_code[code])
+            date_aware = code in _DATE_AWARE_DEDUP_CODES
+            group_decisions: list[dict[str, Any]] = []
+            entries_by_code[code] = deduplicate_entries(
+                entries_by_code[code], verbose=self.verbose,
+                require_date_overlap=date_aware,
+                decisions=group_decisions)
+            for decision in group_decisions:
+                decision["code"] = code
+            dedup_decisions.extend(group_decisions)
+            removed = before - len(entries_by_code[code])
+            if removed > 0:
+                total_deduped += removed
+        if self.verbose and total_deduped > 0:
+            logger.info(f"  Deduplicated: {total_deduped} near-duplicate entries removed")
+
+        return entries_by_code, pre_dedup_entries_by_code, dedup_decisions
+
+    def _run_pii_deny_pass(
+        self, entries_by_code: dict[str, list[dict[str, Any]]]
+    ) -> None:
+        """Run the pre-render PII deny pass over every entry, every code,
+        and store its result onto `self._pii_result`.
+
+        #820 piece 2: called from `generate()` on the freshly-grouped
+        `entries_by_code`, BEFORE `_dedup_grouped_entries`'s pre-dedup
+        snapshot -- a near-duplicate dedup is about to discard is still
+        re-scanned by `_recover_unrendered_records` (`stage6/pii_pass.py`),
+        so it needs this pass's strip too. Scope comes from the SAME
+        routing set the appendix batch is built from. Read by the notice,
+        the comment on it, and `_fill_personal_data`'s docx recovery (which
+        appends).
+        """
+        self._pii_result = run_pii_pass(
+            entries_by_code, routed_codes=RENDER_ROUTED_CODES,
+            section_names=TAXONOMY_TO_SECTION)
+
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
                  original_doc_path: str = None) -> str:
         """
@@ -684,6 +940,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         Returns:
             Path to generated document
         """
+        # Reset per-render section-failure tracking (#565) -- a generator
+        # instance can render more than once, and a failure from a prior
+        # render must never leak into this one's sidecar.
+        self._section_failures = []
+
         # Load input data - each stage output is self-contained
         with open(input_path, 'r') as f:
             data = json.load(f)
@@ -695,21 +956,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         # If cv_owner_location not in input file, try to load from Stage 4 output
         if not cv_owner_location or not cv_owner_location.get('inference_success'):
-            stage4_dir = Path(__file__).parent / "outputs" / "stage_4_field_extraction"
-            stage4_candidates = list(stage4_dir.glob(f"*{document_uid}*_fields.json"))
-            if stage4_candidates:
-                try:
-                    with open(stage4_candidates[0], 'r') as f:
-                        stage4_data = json.load(f)
-                    cv_owner_location = stage4_data.get('cv_owner_location', {})
-                    if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
-                        logger.info("Loaded cv_owner_location from Stage 4 output")
-                except Exception as e:
-                    # Non-fatal: geographic-scope classification just falls back
-                    # to its default. Still say so -- a permission error or a
-                    # truncated stage-4 JSON should not vanish without a trace.
-                    if self.verbose:
-                        logger.warning(f"  Warning: Could not load cv_owner_location from Stage 4: {e}")
+            cv_owner_location = self._load_cv_owner_location_from_stage4(document_uid, cv_owner_location)
 
         # Store location context for geographic scope classification
         self.cv_owner_location = cv_owner_location if cv_owner_location and cv_owner_location.get('inference_success') else None
@@ -719,45 +966,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             if primary:
                 logger.info(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
-        # Try to find original document if not provided -- which every live run
-        # is: only render_gate.py --source-dir and stage 6's tests pass one, and
-        # SAMPLE_CV_DIR is an empty directory in the deployed image (see the
-        # constant). Anchored on the module-relative
-        # SAMPLE_CV_DIR constant plus the process CWD, instead of a stack of
-        # brittle '..'/.parent chains that broke silently on any restructure.
-        if not original_doc_path:
-            possible_paths = [
-                SAMPLE_CV_DIR / f"{document_uid}.docx",
-                SAMPLE_CV_DIR / f"{document_uid}.doc",
-                Path('data/sample_cvs/word') / f"{document_uid}.docx",  # relative to CWD
-            ]
-            for path in possible_paths:
-                if path.exists():
-                    original_doc_path = str(path.resolve())
-                    if self.verbose:
-                        logger.info(f"Found original document: {original_doc_path}")
-                    break
-            else:
-                if self.verbose:
-                    logger.info(f"No original document found for {document_uid} in "
-                          f"{SAMPLE_CV_DIR} or ./data/sample_cvs/word")
-
-        # Load Stage 4.5 research summary if available
-        research_summary_data = None
-        if research_summary_path and os.path.exists(research_summary_path):
-            with open(research_summary_path, 'r') as f:
-                research_summary_data = json.load(f)
-            if self.verbose:
-                logger.info(f"Loaded research summary from Stage 4.5: {research_summary_path}")
-        else:
-            # Try to find it automatically
-            input_dir = Path(input_path).parent.parent
-            auto_summary_path = input_dir / "stage_4_5_research_summary" / f"{document_uid}_research_summary.json"
-            if auto_summary_path.exists():
-                with open(auto_summary_path, 'r') as f:
-                    research_summary_data = json.load(f)
-                if self.verbose:
-                    logger.info(f"Auto-loaded research summary from: {auto_summary_path}")
+        # Original-document discovery and the Stage 4.5 research-summary load
+        # are lifted out to their own helpers (#820 R3, pure moves -- §3.2):
+        # identical bodies, no behaviour change.
+        original_doc_path = self._resolve_original_doc_path(
+            document_uid, original_doc_path)
+        research_summary_data = self._load_research_summary_data(
+            research_summary_path, input_path, document_uid)
 
         if self.verbose:
             logger.info(f"\n{'='*60}")
@@ -765,51 +980,14 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             logger.info(f"{'='*60}")
             logger.info(f"Total entries: {len(entries)}")
 
-        # Group entries by taxonomy code, applying mismatch corrections
-        entries_by_code = defaultdict(list)
-        mismatch_corrections = 0
-        for entry in entries:
-            code = normalize_retired_code(entry)
-            code = self._correct_mismatch_if_needed(entry, code)
-            if code != entry.get('taxonomy_code', 'T'):
-                mismatch_corrections += 1
-            entries_by_code[code].append(entry)
-
-        if self.verbose:
-            logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
-            if mismatch_corrections > 0:
-                logger.info(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
-
-        # Deduplicate within each code group.
-        # Position/training codes (D1, D2, D3, C, B1) represent career progression
-        # stages that share most words but differ in rank — use date-aware dedup
-        # that only merges entries whose date ranges overlap or match.
-        DATE_AWARE_DEDUP_CODES = {'D1', 'D2', 'D3', 'C', 'B1'}
-        # Snapshot the pre-dedup groups for the #221 recovery pass: dedup keeps
-        # the longer near-duplicate, which can eat a unique record line fused
-        # into the dropped entry. Recovery re-verifies every line against the
-        # rendered document, so scanning dropped entries is safe — content the
-        # surviving duplicate rendered is seen as rendered.
-        pre_dedup_entries_by_code = {code: list(group)
-                                     for code, group in entries_by_code.items()}
-        total_deduped = 0
-        dedup_decisions: List[Dict] = []
-        for code in list(entries_by_code.keys()):
-            before = len(entries_by_code[code])
-            date_aware = code in DATE_AWARE_DEDUP_CODES
-            group_decisions: List[Dict] = []
-            entries_by_code[code] = deduplicate_entries(
-                entries_by_code[code], verbose=self.verbose,
-                require_date_overlap=date_aware,
-                decisions=group_decisions)
-            for decision in group_decisions:
-                decision["code"] = code
-            dedup_decisions.extend(group_decisions)
-            removed = before - len(entries_by_code[code])
-            if removed > 0:
-                total_deduped += removed
-        if self.verbose and total_deduped > 0:
-            logger.info(f"  Deduplicated: {total_deduped} near-duplicate entries removed")
+        # Group entries by taxonomy code (#843, split into
+        # _group_entries_by_code / _dedup_grouped_entries so the #820
+        # piece-2 PII deny pass can run between them -- see
+        # _run_pii_deny_pass's docstring for why the ordering matters).
+        entries_by_code = self._group_entries_by_code(entries)
+        self._run_pii_deny_pass(entries_by_code)
+        entries_by_code, pre_dedup_entries_by_code, dedup_decisions = \
+            self._dedup_grouped_entries(entries_by_code)
 
         # Load template
         self.doc = Document(self.template_path)
@@ -817,33 +995,51 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Flatten all entries for fallback searches
         all_entries = [entry for entries in entries_by_code.values() for entry in entries]
 
-        # Fill each section
+        # Fill each section. _fill_personal_data is FATAL and stays outside
+        # the boundary below by deliberate judgement call (#565): a document
+        # with no owner on it is worse than a failed run, so its raise still
+        # propagates out of generate() and no docx is written. Every other
+        # section -- including passthrough and the appendix below -- runs
+        # through _render_section, so one section raising costs that section
+        # only; the rest still render and the run still produces a document.
         self._fill_personal_data(entries_by_code.get('A', []), cv_owner, document_uid, all_entries, original_doc_path)
-        self._fill_researcher_profiles(entries_by_code.get('S0', []))  # S0 section for ORCID, etc.
-        self._fill_education(entries_by_code.get('B1', []))  # B1 = Academic Degrees only
-        self._fill_other_education(entries_by_code.get('B2', []))  # B2 = Other Educational Experiences
-        self._fill_postdoc_training(entries_by_code, all_entries)
-        self._fill_positions(entries_by_code)
-        self._fill_licensure(entries_by_code.get('F1', []))  # F1 = Licensure
-        self._fill_board_certification(entries_by_code.get('F2', []))  # F2 = Board Certification
-        self._fill_honors(entries_by_code.get('H', []))  # H = Honors and Awards
-        self._fill_memberships(entries_by_code.get('I', []))  # I = Professional Memberships
-        self._fill_teaching(entries_by_code)  # K1-K5 = Teaching Activities
-        research_summary_rendered = self._fill_research_summary(research_summary_data)  # Stage 4.5 output
-        self._fill_research_support(entries_by_code, cv_owner, document_uid)
-        # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
-        self._fill_patents(entries_by_code.get('M2D', []))
-        self._fill_mentoring(entries_by_code)
-        self._fill_clinical_practice(entries_by_code)  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
-        self._fill_leadership(entries_by_code.get('O', []))  # O = Institutional Leadership
-        self._fill_administrative_activities(entries_by_code.get('P', []))  # P = Administrative Committees
-        self._fill_service(entries_by_code)  # Q1-Q4D = Service Activities
-        self._fill_presentations(entries_by_code.get('R', []))  # R = Invited Presentations
-        self._fill_bibliography(entries_by_code, cv_owner, document_uid)
+
+        # (label, callable) in the SAME order as the flat dispatch this
+        # replaced -- test_stage6_section_boundary.py pins that order.
+        section_dispatch: list[tuple[str, Callable[[], Any]]] = [
+            ('researcher_profiles', lambda: self._fill_researcher_profiles(entries_by_code.get('S0', []))),  # S0 section for ORCID, etc.
+            ('education', lambda: self._fill_education(entries_by_code.get('B1', []))),  # B1 = Academic Degrees only
+            ('other_education', lambda: self._fill_other_education(entries_by_code.get('B2', []))),  # B2 = Other Educational Experiences
+            ('postdoc_training', lambda: self._fill_postdoc_training(entries_by_code, all_entries)),
+            ('positions', lambda: self._fill_positions(entries_by_code)),
+            ('licensure', lambda: self._fill_licensure(entries_by_code.get('F1', []))),  # F1 = Licensure
+            ('board_certification', lambda: self._fill_board_certification(entries_by_code.get('F2', []))),  # F2 = Board Certification
+            ('honors', lambda: self._fill_honors(entries_by_code.get('H', []))),  # H = Honors and Awards
+            ('memberships', lambda: self._fill_memberships(entries_by_code.get('I', []))),  # I = Professional Memberships
+            ('teaching', lambda: self._fill_teaching(entries_by_code)),  # K1-K5 = Teaching Activities
+            ('research_summary', lambda: self._fill_research_summary(research_summary_data)),  # Stage 4.5 output
+            ('research_support', lambda: self._fill_research_support(entries_by_code, cv_owner, document_uid)),
+            # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
+            ('patents', lambda: self._fill_patents(entries_by_code.get('M2D', []))),
+            ('mentoring', lambda: self._fill_mentoring(entries_by_code)),
+            ('clinical_practice', lambda: self._fill_clinical_practice(entries_by_code)),  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
+            ('leadership', lambda: self._fill_leadership(entries_by_code.get('O', []))),  # O = Institutional Leadership
+            ('administrative_activities', lambda: self._fill_administrative_activities(entries_by_code.get('P', []))),  # P = Administrative Committees
+            ('service', lambda: self._fill_service(entries_by_code)),  # Q1-Q4D = Service Activities
+            ('presentations', lambda: self._fill_presentations(entries_by_code.get('R', []))),  # R = Invited Presentations
+            ('bibliography', lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
+        ]
+        research_summary_rendered = False
+        for label, fn in section_dispatch:
+            result = self._render_section(label, fn)
+            if label == 'research_summary':
+                research_summary_rendered = bool(result)
 
         # Fill passthrough sections (Employment Status, Institutional Affiliation,
         # Percent Effort) -- copied from source CV when it matches WCM (#294, #260).
-        passthrough_consumed_ids = {id(e) for e in self._fill_passthrough_sections(all_entries)}
+        passthrough_result = self._render_section(
+            'passthrough_sections', lambda: self._fill_passthrough_sections(all_entries))
+        passthrough_consumed_ids = {id(e) for e in (passthrough_result or [])}
 
         # Add appendix for ALL unmapped content. Local mutable copy of the
         # module-level RENDER_ROUTED_CODES: the M1 discard just below mutates
@@ -877,22 +1073,20 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # second time. They are recovered after every section has rendered, by
         # _unconsumed_personal_data_batch.
 
+        written_appendix_entries: list[UnmappedEntry] = []
         if unmapped_entries:
-            self._fill_appendix(unmapped_entries)
+            written_appendix_entries = self._render_section(
+                'appendix', lambda: self._fill_appendix(unmapped_entries)) or []
 
         # Route content-overflow entries as tracked-change bullets
         self._route_overflow_entries()
 
-        # Reconsider appendix entries - reclassify segments to appropriate sections
-        self._reconsider_appendix_entries()
-
-        # Post-render safety net: re-emit record lines the structured render
-        # dropped (#221). Runs after the overflow/reconsider passes so their
-        # inserts count as rendered, and before comment finalization and
-        # instruction-box removal (anchor lookups are text-based). Scans the
-        # PRE-dedup entries so records fused into a deduped-away entry are
-        # still checked.
-        self._recover_unrendered_records(pre_dedup_entries_by_code)
+        # Reconsider appendix entries (reclassify segments to other sections)
+        # then recover unrendered records (#221, after reconsider so its
+        # inserts count as rendered) -- both bullet leftover content into the
+        # Appendix and report back each bullet's code (#531-R2 finding F1).
+        recovered_appendix_codes = list(self._reconsider_appendix_entries() or [])
+        recovered_appendix_codes += self._recover_unrendered_records(pre_dedup_entries_by_code) or []
 
         # Finalize comments (add to comments.xml)
         self._finalize_comments()
@@ -917,31 +1111,28 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Save
         self.doc.save(output_path)
 
-        # Run post-generation validation to catch common issues
+        # Run post-generation validation to catch common issues. Section
+        # failures caught by _render_section are merged in ahead of the
+        # self-check findings (#565) -- one list feeds both the banner below
+        # and the sidecar, so a missing section is never quieter than a
+        # cosmetic self-check finding.
         validation_issues = self._validate_output()
-        if validation_issues:
-            logger.info(f"\n{'!'*60}")
-            logger.info("VALIDATION WARNINGS")
-            logger.info(f"{'!'*60}")
-            for issue in validation_issues:
-                logger.warning(f"  ⚠ {issue['message']}")
-            logger.info(f"{'!'*60}")
 
-        # Persist the self-check warnings and dedup decision trail next to
-        # the docx so the run doctor can re-emit them (#227/#228) — until now
-        # they only ever reached the pod log. Written even when empty, so the
-        # doctor can tell a clean run from a pre-sidecar build. Fail-soft: a
-        # sidecar failure must never fail the render.
-        try:
-            report_path = Path(output_path).with_name(
-                f"{document_uid}_render_warnings.json")
-            report_path.write_text(json.dumps({
-                "document_uid": document_uid,
-                "warnings": validation_issues,
-                "dedup_decisions": dedup_decisions,
-            }, indent=2))
-        except Exception as exc:
-            logger.warning(f"  ⚠ could not write render-warnings sidecar: {exc}")
+        # Appendix-diversion warnings (#531, #531-R2) -- see the helper's
+        # own docstring for what it merges and why.
+        validation_issues = _merge_appendix_diversion_warnings(
+            validation_issues, written_appendix_entries, recovered_appendix_codes)
+
+        all_warnings = self._section_failures + validation_issues
+        if all_warnings:
+            logger.warning("!" * 60)
+            logger.warning("VALIDATION WARNINGS")
+            logger.warning("!" * 60)
+            for issue in all_warnings:
+                logger.warning(f"  ⚠ {issue['message']}")
+            logger.warning("!" * 60)
+
+        self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
 
         if self.verbose:
             logger.info(f"\n{'='*60}")
@@ -961,6 +1152,54 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             logger.info(f"\nSaved to: {output_path}")
 
         return output_path
+
+    def _render_section(self, label: str, fn: Callable[[], Any]) -> Any:  # noqa: ANN401
+        """Call one section-dispatch entry, isolating a raise to this section
+        only (#565). Returns fn()'s result on success; on any Exception it
+        logs the traceback, records a severity-carrying failure onto
+        ``self._section_failures`` (merged into the render-warnings sidecar
+        by generate()), and returns None so the caller can fall back.
+
+        Never swallows: every caught exception gets both the log line and
+        the record (§5.4) -- an isolated section must fail loudly, or the
+        isolation trades a whole-document crash for a silent partial render,
+        which is worse.
+        """
+        try:
+            return fn()
+        except Exception as exc:
+            logger.exception(
+                "Stage 6: section %s failed; rendering the remaining sections", label)
+            evidence = [line[:200] for line in traceback.format_exc().splitlines()[-3:]]
+            self._section_failures.append({
+                "check": "section_render_failed",
+                "code": None,
+                "section": label,
+                "message": f"section {label} failed: {type(exc).__name__}: {exc}",
+                "evidence": evidence,
+                "severity": "ERROR",
+            })
+            return None
+
+    def _write_render_warnings_sidecar(self, output_path: str, document_uid: str,
+                                        warnings: list[dict[str, Any]], dedup_decisions: list[dict[str, Any]]) -> None:
+        """Persist the self-check + section-failure warnings and dedup
+        decision trail next to the docx so the run doctor can re-emit them
+        (#227/#228) — until now they only ever reached the pod log. Written
+        even when empty, so the doctor can tell a clean run from a
+        pre-sidecar build. Fail-soft: a sidecar failure must never fail the
+        render.
+        """
+        try:
+            report_path = Path(output_path).with_name(
+                f"{document_uid}_render_warnings.json")
+            report_path.write_text(json.dumps({
+                "document_uid": document_uid,
+                "warnings": warnings,
+                "dedup_decisions": dedup_decisions,
+            }, indent=2))
+        except Exception:
+            logger.exception("could not write render-warnings sidecar")
 
 
 
@@ -1897,7 +2136,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             taxonomy_code = entry.get('taxonomy_code', '?')
             logger.info(f"  Queued for reconsideration: {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
 
-    def _reconsider_appendix_entries(self):
+    def _reconsider_appendix_entries(self) -> list[str]:
         """Analyze appendix-pending entries and reclassify segments to appropriate sections.
 
         For each entry queued for appendix, this method:
@@ -1905,9 +2144,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         2. Uses LLM to classify each segment to a taxonomy code
         3. Routes segments to appropriate WCM sections as bullets
         4. Only truly unmappable content remains for the appendix
+
+        Returns the taxonomy code of each bullet `_add_remaining_to_appendix`
+        actually wrote for the entries that stayed unmappable (#531-R2
+        finding F1) -- `[]` when nothing was pending or everything was
+        reclassified elsewhere.
         """
         if not self._appendix_pending:
-            return
+            return []
 
         if self.verbose:
             logger.info(f"\nReconsidering {len(self._appendix_pending)} appendix entries...")
@@ -1952,11 +2196,14 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 remaining_for_appendix.append((segment_text, new_code, 0.0))
 
         # Add remaining unmappable content to appendix
+        recovered_codes: list[str] = []
         if remaining_for_appendix:
-            self._add_remaining_to_appendix(remaining_for_appendix)
+            recovered_codes = self._add_remaining_to_appendix(remaining_for_appendix)
 
         if self.verbose and segments_to_route:
             logger.info(f"  Reclassified {len(segments_to_route)} segments to other sections")
+
+        return recovered_codes
 
     def _reclassify_entry_segments(self, text: str, original_code: str) -> List[Tuple[str, str]]:
         """Use LLM to segment and reclassify content from an appendix entry.
@@ -2199,8 +2446,16 @@ Now analyze the text above:"""
         # Fallback to end of section
         return self._find_section_end_paragraph_idx(header_idx)
 
-    def _add_remaining_to_appendix(self, remaining: List[Tuple[str, str, float]]):
-        """Add remaining unmappable segments to the appendix."""
+    def _add_remaining_to_appendix(self, remaining: List[Tuple[str, str, float]]) -> list[str]:
+        """Add remaining unmappable segments to the appendix as bullet lines.
+
+        Returns the taxonomy code of each segment actually written -- one
+        entry per "• text" bullet, in write order -- the same "report back
+        what was actually consumed" contract `_fill_appendix` and the
+        passthrough writers use (#531-R2 finding F1). A segment this method
+        drops (blank, template-instruction, source-boilerplate) is NOT in
+        the returned list.
+        """
         # Filter BEFORE creating the section header so an all-noise batch
         # doesn't leave an empty T. APPENDIX behind (#213).
         remaining = [
@@ -2210,7 +2465,7 @@ Now analyze the text above:"""
             and not is_source_boilerplate(text)
         ]
         if not remaining:
-            return
+            return []
 
         # Find or create the T. APPENDIX section
         appendix_idx = self._find_paragraph_with_text("T. APPENDIX")
@@ -2238,12 +2493,23 @@ Now analyze the text above:"""
             run = entry_para.add_run(segment_text)
             _set_font(run)
             self._apply_list_bullet(entry_para, level=0)
+            if segment_text == PII_REDACTED_NOTICE:
+                # The A-820 addendum: ONE sidebar comment on the notice
+                # saying what the policy removed -- categories, counts and
+                # sections, never a value. Not a classification comment, so
+                # it is emitted whatever `emit_comments` says (#153).
+                self._add_word_comment(
+                    entry_para, withheld_comment_text(self._pii_result.withheld),
+                    author=WITHHELD_COMMENT_AUTHOR, always=True)
+                continue
             self._add_word_comment(
                 entry_para,
                 f"Originally classified {original_code}; could not be mapped "
                 f"to a template section.",
                 author="Classification",
             )
+
+        return [code for _, code, _ in remaining]
 
     def _rendered_output_lines(self) -> List[str]:
         """Every rendered text line of the in-memory document: body paragraphs
@@ -2281,7 +2547,7 @@ Now analyze the text above:"""
             walk_table(tbl)
         return lines
 
-    def _recover_unrendered_records(self, entries_by_code: Dict[str, List[Dict]]):
+    def _recover_unrendered_records(self, entries_by_code: Dict[str, List[Dict]]) -> list[str]:
         """Post-render safety net (#221): re-emit record lines the structured
         render dropped.
 
@@ -2297,81 +2563,111 @@ Now analyze the text above:"""
         fallback. Lines that cannot be VERIFIED absent are never re-inserted:
         duplicating faculty-facing content is worse than leaving a loss for the
         offline doctor to flag.
-        """
-        if not self.recover_unrendered_records:
-            return
 
+        `self.recover_unrendered_records=False` disables ONLY the record-line
+        recovery above -- never the #820 withheld notice and its Word comment
+        below. Those must reach the reader whenever `_pii_result.withheld` is
+        non-empty regardless of this flag (#820 R3 finding 3): the pass has
+        already stripped the PII either way, and gating the reader's only
+        indication of that behind an unrelated recovery toggle was a second,
+        silent loss on top of the first.
+
+        Returns the taxonomy code of each bullet `_add_remaining_to_appendix`
+        actually wrote for the lines that landed in the appendix fallback
+        (#531-R2 finding F1) -- `[]` when nothing fell through to the
+        appendix. The #820 withheld notice is written by its own call and is
+        never in the returned list: it is not a recovered entry.
+        """
         out_lines = self._rendered_output_lines()
         haystack = "\x00".join(_squash(line) for line in out_lines)
-        line_token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line)))
-                           for line in out_lines]
 
         appendix_batch = []   # (text, code, coverage) for _add_remaining_to_appendix
         n_recovered = 0
 
-        for code, entries in entries_by_code.items():
-            if code == 'T':
-                # Appendix catch-all — _fill_appendix already carries these.
-                continue
-            for entry in entries:
-                records = _record_lines(entry.get('text'))
-                if len(records) < UNRENDERED_MIN_RECORD_LINES:
-                    continue  # not a fused multi-record entry
-                fields = entry.get('extracted_fields') or {}
-                coverage = (entry.get('extraction_coverage') or {}).get(
-                    'extraction_coverage_percent', 0)
-                for line in records:
-                    if _record_rendered(line, haystack, line_token_sets) is not False:
-                        # Rendered (possibly reformatted), or too short to
-                        # verify either way — never re-insert.
-                        continue
-                    if segment_already_rendered(line, fields):
-                        # The record that DID render from extracted fields: a
-                        # grant table splits its tokens across label/value
-                        # rows, so the token check alone can miss it (#209).
-                        continue
-                    if (not re.search(r'\d', line)
-                            and line.count('\t') + line.count('|') >= 2
-                            and _is_column_header_row(line)):
-                        # Multi-column rows with no year/number payload AND
-                        # majority column-label words are tabular header rows
-                        # ("State/Country  License Number  Status ...")
-                        # satisfying the tab-record heuristic — not CV
-                        # records. A dateless multi-cell row of real content
-                        # (committee membership: "Member | Committee on X |
-                        # Organization") is still recovered.
-                        continue
-                    if is_template_instruction(line) or is_source_boilerplate(line):
-                        continue
-                    inserted = self._insert_reconsidered_segment(
-                        line, code,
-                        comment=(
-                            f"Recovered: this record from the source CV was not "
-                            f"rendered by the structured {code} section. "
-                            f"Review placement and formatting."
-                        ))
-                    if not inserted:
-                        appendix_batch.append((line, code, coverage))
-                    # Count the re-inserted line as rendered so a
-                    # near-identical variant in another pre-dedup entry
-                    # (trailing period, 'Sep' vs 'Sept') is verified rendered
-                    # instead of inserted a second time — dedup drops entries
-                    # precisely because they near-duplicate a kept one, so
-                    # exact-squash matching is not enough.
-                    haystack += "\x00" + _squash(line)
-                    line_token_sets.append(
-                        set(_RENDER_TOKEN_RE.findall(_norm(line))))
-                    self.stats['unrendered_records_recovered'] += 1
-                    n_recovered += 1
+        if self.recover_unrendered_records:
+            line_token_sets = [set(_RENDER_TOKEN_RE.findall(_norm(line)))
+                               for line in out_lines]
 
-        appendix_batch.extend(self._unconsumed_personal_data_batch(haystack))
+            for code, entries in entries_by_code.items():
+                if code == 'T':
+                    # Appendix catch-all — _fill_appendix already carries these.
+                    continue
+                for entry in entries:
+                    records = _record_lines(entry.get('text'))
+                    if len(records) < UNRENDERED_MIN_RECORD_LINES:
+                        continue  # not a fused multi-record entry
+                    fields = entry.get('extracted_fields') or {}
+                    coverage = (entry.get('extraction_coverage') or {}).get(
+                        'extraction_coverage_percent', 0)
+                    for line in records:
+                        if _record_rendered(line, haystack, line_token_sets) is not False:
+                            # Rendered (possibly reformatted), or too short to
+                            # verify either way — never re-insert.
+                            continue
+                        if segment_already_rendered(line, fields):
+                            # The record that DID render from extracted fields: a
+                            # grant table splits its tokens across label/value
+                            # rows, so the token check alone can miss it (#209).
+                            continue
+                        if (not re.search(r'\d', line)
+                                and line.count('\t') + line.count('|') >= 2
+                                and _is_column_header_row(line)):
+                            # Multi-column rows with no year/number payload AND
+                            # majority column-label words are tabular header rows
+                            # ("State/Country  License Number  Status ...")
+                            # satisfying the tab-record heuristic — not CV
+                            # records. A dateless multi-cell row of real content
+                            # (committee membership: "Member | Committee on X |
+                            # Organization") is still recovered.
+                            continue
+                        if is_template_instruction(line) or is_source_boilerplate(line):
+                            continue
+                        inserted = self._insert_reconsidered_segment(
+                            line, code,
+                            comment=(
+                                f"Recovered: this record from the source CV was not "
+                                f"rendered by the structured {code} section. "
+                                f"Review placement and formatting."
+                            ))
+                        if not inserted:
+                            appendix_batch.append((line, code, coverage))
+                        # Count the re-inserted line as rendered so a
+                        # near-identical variant in another pre-dedup entry
+                        # (trailing period, 'Sep' vs 'Sept') is verified rendered
+                        # instead of inserted a second time — dedup drops entries
+                        # precisely because they near-duplicate a kept one, so
+                        # exact-squash matching is not enough.
+                        haystack += "\x00" + _squash(line)
+                        line_token_sets.append(
+                            set(_RENDER_TOKEN_RE.findall(_norm(line))))
+                        self.stats['unrendered_records_recovered'] += 1
+                        n_recovered += 1
 
+            # Unconsumed A-coded orphans (#316) are part of the SAME record-
+            # recovery safety net the flag above governs -- gated with it,
+            # unlike the notice below.
+            appendix_batch.extend(self._unconsumed_personal_data_batch(haystack))
+
+        recovered_codes: list[str] = []
         if appendix_batch:
-            self._add_remaining_to_appendix(appendix_batch)
+            recovered_codes = self._add_remaining_to_appendix(appendix_batch)
+
+        if self._pii_result.withheld:
+            # The withheld notice is NOT part of the recovery safety net: the
+            # #820 pass has already stripped the PII from `entry['text']`
+            # regardless of this flag, so suppressing the reader's only
+            # indication of that behind an unrelated toggle was a second,
+            # silent loss on top of the first (#820 R3 finding 3). One
+            # notice per document, not one per entry. Written by its own
+            # call, after the recovered lines, so its 'A' never reaches the
+            # appendix_diversion report as a recovered entry (#531).
+            self._add_remaining_to_appendix([(PII_REDACTED_NOTICE, 'A', 0)])
 
         if self.verbose and n_recovered:
             logger.info(f"  Recovered {n_recovered} unrendered record line(s) "
-                  f"({len(appendix_batch)} routed to appendix)")
+                        f"({len(appendix_batch)} routed to appendix)")
+
+        return recovered_codes
 
     def _unconsumed_personal_data_batch(self, haystack: str
                                         ) -> List[Tuple[str, str, float]]:
@@ -2392,40 +2688,79 @@ Now analyze the text above:"""
           member's own name/title banner, which renders from `cv_owner` rather
           than from the A entry -- 75 of 76 are already on the page, and
           appending them would be pure duplication.
-        - PII entries are replaced by a single notice rather than dropped
-          silently. Here the whole entry is denied, unlike the consumption
-          path: this entry renders nothing, so discarding it costs nothing,
-          and fragment-level filtering would keep the birth date and drop only
-          its label.
+        - A PII-withheld entry renders its RESIDUAL text -- `entry['text']`
+          after `run_pii_pass` (#820 piece 2, `pii_pass.py`) has already cut
+          only the withheld fragment(s) out of it (`_cut_spans`), not the
+          whole entry (#821 R2 F3 / #834: a fused orphan carrying BOTH a
+          withheld fragment and unrelated content -- e.g. "Home Phone: ..."
+          fused with "Citizenship: US" -- used to lose the citizenship line
+          too, because the whole entry was denied on the fragment-level
+          pass's OWN `_pii_withheld` flag, a category mismatch: that flag
+          means "this entry was TOUCHED", not "this entry is entirely PII").
+          Rendering the residual only applies when the pass actually cut a
+          RAW-TEXT fragment (`entry['_pii_fragments']` non-empty): a
+          field-key-only withhold (the PII lived in `extracted_fields`,
+          e.g. `marital_status_spouse`, and never appeared in `entry['text']`
+          at all) leaves the raw text completely untouched -- usually the
+          entry's own uninformative label ("Additional information") with
+          nothing left to say once its one associated value is gone, so
+          that whole entry stays denied, same as before this fix. Likewise
+          a raw-text cut whose residual comes out empty (the whole text WAS
+          the withheld value, e.g. a bare "Date of Birth: ...") still
+          contributes nothing. Either way the single document-wide notice
+          already tells the reader something was withheld.
         """
         batch: List[Tuple[str, str, float]] = []
         redacted = 0
         for entry in getattr(self, '_unconsumed_personal_data', []):
-            # The PII scan reads RAW text, the render reads cleaned text, and
-            # the order matters: _clean_inline_tabs rewrites '\t' to ': ' and
-            # ' | ' to ' — ', which are exactly the fragment boundaries
-            # _pii_fragments splits on. Scanning the cleaned text merges a PII
-            # cell into its neighbour and the label no longer starts a
-            # fragment, so the entry renders. Pinned by
-            # test_pii_in_a_tab_separated_cell_is_still_caught.
+            # #820 piece 2 / #821 R2 F3: read the pre-render pass's own
+            # verdict (`entry['_pii_withheld']`) and its already-cut
+            # `entry['text']`, not a second PII scan. By this point
+            # `run_pii_pass` has already stripped every in-scope fragment
+            # and PII-keyed `extracted_fields` entry it found, so
+            # re-running `_pii_fragments`/`_PII_FIELD_KEY_RE` here would
+            # find nothing left to redact on -- the two call sites must not
+            # diverge from the pass. What remains in `entry['text']` is, by
+            # construction, content the policy did NOT withhold.
             raw_text = entry.get('text', '') or ''
             text = _clean_inline_tabs(raw_text).strip()
-            if not text:
-                continue
-            fields = entry.get('extracted_fields') or {}
-            if (_pii_fragments(raw_text)
-                    or any(_PII_FIELD_KEY_RE.match(k) for k in fields)):
+            if entry.get('_pii_withheld'):
+                # A raw-text cut (`_pii_fragments` non-empty) can leave a
+                # real residual; a field-key-only withhold cannot (the raw
+                # text was never touched) -- see the method docstring. A
+                # bare-label cut whose value the pass could not reach
+                # (`_pii_cut_left_a_bare_label`) means the VALUE never got
+                # cut at all and is hiding in what looks like a safe
+                # residual -- refuse it too (#821 R2 F3 safety check).
+                # Either way this entry had protected data removed from it,
+                # so it counts as redacted (#821 R3 F-H). Before the #834
+                # residual fix every withheld entry was dropped whole, so
+                # "redacted" and "dropped" were one population; leaving the
+                # counter on the drop-only branch silently redefined it as
+                # "entries dropped" and under-reported the redaction on
+                # exactly the entries the residual fix changed.
+                # `personal_data_recovered` right below is the count of what
+                # RENDERED, so the two together still separate the cases.
                 redacted += 1
+                fragments = entry.get('_pii_fragments') or []
+                if fragments and not _pii_cut_left_a_bare_label(entry):
+                    text = _strip_dangling_separators(text).strip()
+                    if text and _squash(text) not in haystack:
+                        batch.append((text, 'A', 0))
+                        continue
+                continue
+            if not text:
                 continue
             if _squash(text) in haystack:
                 continue
             batch.append((text, 'A', 0))
 
-        if redacted:
-            # One notice per document, not one per entry: the point is that the
-            # reader knows something was withheld, not how many times.
-            batch.append((PII_REDACTED_NOTICE, 'A', 0))
-        self.stats['personal_data_recovered'] = len(batch) - (1 if redacted else 0)
+        # The withheld notice itself is NOT added here: it must reach the
+        # reader whenever `self._pii_result.withheld` is non-empty regardless
+        # of `self.recover_unrendered_records`, and this method only runs
+        # when that flag is on (#820 R3 finding 3) -- `_recover_unrendered_
+        # records` appends the notice itself, unconditionally.
+        self.stats['personal_data_recovered'] = len(batch)
         self.stats['personal_data_redacted'] = redacted
         return batch
 
@@ -2600,18 +2935,25 @@ Now analyze the text above:"""
         for comment_info in comments_to_add:
             self._add_word_comment(para, comment_info['text'], author=comment_info['author'])
 
-    def _add_word_comment(self, para: Paragraph, comment_text: str, author: str = "CV Pipeline"):
+    def _add_word_comment(self, para: Paragraph, comment_text: str, author: str = "CV Pipeline",
+                          always: bool = False):
         """Add a Word comment to a paragraph that appears in the sidebar.
 
         Creates proper Word comment structure with:
         - commentRangeStart/End markers in document
         - commentReference in the text
         - comment content stored for comments.xml
+
+        A multi-line `comment_text` renders one comment paragraph per line
+        (`_create_comments_xml`).
         """
         # Issue #153: when classification comments are disabled, emit nothing.
         # Skipping here means no commentReference is added and _comments stays
         # empty, so _finalize_comments never creates a comments.xml part.
-        if not self.emit_comments:
+        # `always=True` is for the one comment that is NOT a classification
+        # comment -- the withheld-data summary (A-820 addendum) -- which the
+        # reader must see whatever that toggle says.
+        if not self.emit_comments and not always:
             return
         try:
             comment_id = str(self._comment_id)
@@ -2870,11 +3212,15 @@ Now analyze the text above:"""
             escaped_author = html.escape(comment["author"], quote=True)
 
             lines.append(f'<w:comment w:id="{comment["id"]}" w:author="{escaped_author}" w:date="{comment["date"]}">')
-            lines.append('<w:p>')
-            lines.append('<w:r>')
-            lines.append(f'<w:t>{escaped_text}</w:t>')
-            lines.append('</w:r>')
-            lines.append('</w:p>')
+            # One comment paragraph per text line: a newline inside a
+            # single w:t collapses to a space in Word, which would run the
+            # withheld-data summary's bullets together.
+            for text_line in escaped_text.split("\n"):
+                lines.append('<w:p>')
+                lines.append('<w:r>')
+                lines.append(f'<w:t xml:space="preserve">{text_line}</w:t>')
+                lines.append('</w:r>')
+                lines.append('</w:p>')
             lines.append('</w:comment>')
 
         lines.append('</w:comments>')

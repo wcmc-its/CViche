@@ -156,15 +156,15 @@ def test_hyphen_compound_stem_is_not_denied():
         assert not _pii_fragments(keeper), f"false positive on {keeper!r}"
 
 
-def test_disclosed_gap_single_space_separator_is_not_caught():
-    """Judgement call (#532): the separator set is the issue's own list --
-    tab, dash, 2+ spaces. A single space is deliberately not in it, so
-    "SSN 123-45-6789" is a residual leak; pinned here so the boundary of
-    the predicate is disclosed rather than silent. Widening to a single
-    space is a deny widening over every sentence containing one of these
-    stems and needs its own corpus false-positive measurement."""
-    for residual in [
+def test_single_space_separator_is_now_caught_for_shaped_values():
+    """#820 (comment) closes #532's disclosed gap: a single space IS now
+    accepted, but only ahead of a value shaped distinctively enough not to
+    occur in ordinary prose -- a full date or an SSN. Widening to a bare
+    year was considered and declined (it would deny "born 1970" inside a
+    sentence) -- see `test_stem_with_non_date_value_is_not_denied` and the
+    module docstring in `pii.py`."""
+    for now_caught in [
         "SSN 123-45-6789",
         "Date of Birth 01/01/1990",
     ]:
-        assert not _pii_fragments(residual)
+        assert _pii_fragments(now_caught), f"missed {now_caught!r}"

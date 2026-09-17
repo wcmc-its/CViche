@@ -835,11 +835,31 @@ def extract_fields_batch(
         "failed_groups": failed_groups,
     }
 
+
+def _extract_and_log_cv_owner_name(
+    document_uid: str,
+    mapped_entries: list[dict[str, Any]],
+    docx_path: str | None,
+) -> dict[str, Any]:
+    """Call `extract_cv_owner_name` and log the result when a last name was
+    found. Pure move out of `extract_fields_from_mapped_entries` (#456-R3
+    §3.2a) -- same call, same kwargs, same logging."""
+    cv_owner_name = extract_cv_owner_name(document_uid, mapped_entries, docx_path=docx_path)
+    if cv_owner_name.get('last_name'):
+        logger.info(
+            "CV Owner: %s (last name: %s)",
+            cv_owner_name.get('full_name', cv_owner_name['last_name']),
+            cv_owner_name['last_name'],
+        )
+    return cv_owner_name
+
+
 def extract_fields_from_mapped_entries(
     mapped_entries: list[dict[str, Any]],
     batch_size: int = 10,
     document_uid: str = "",
     cancel_check: Callable[[], None] | None = None,
+    docx_path: str | None = None,  # #456 owner-name side channel; None = pre-#456 behavior
 ) -> ExtractionResult:
     """
     Extract structured fields from all mapped entries.
@@ -866,13 +886,7 @@ def extract_fields_from_mapped_entries(
     logger.info("Field schemas: v%s (%d taxonomy codes)", FIELD_SCHEMA_VERSION, len(schemas))
 
     # Extract CV owner's name for target_name identification
-    cv_owner_name = extract_cv_owner_name(document_uid, mapped_entries)
-    if cv_owner_name.get('last_name'):
-        logger.info(
-            "CV Owner: %s (last name: %s)",
-            cv_owner_name.get('full_name', cv_owner_name['last_name']),
-            cv_owner_name['last_name'],
-        )
+    cv_owner_name = _extract_and_log_cv_owner_name(document_uid, mapped_entries, docx_path)
 
     # Location inference runs *after* extraction -- see the call site below.
 

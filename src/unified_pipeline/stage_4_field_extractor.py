@@ -146,6 +146,7 @@ def process_cv(
         batch_size=10,
         document_uid=document_uid,
         cancel_check=cancel_check,
+        docx_path=docx_path,
     )
 
     # Build output with stage metadata

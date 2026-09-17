@@ -30,18 +30,32 @@ inside <w:ins> tracked changes and under-reports by 11-19% (#461).
 
 import json
 import sys
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 
+import pytest
 from docx import Document
+from docx.oxml.ns import qn
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.normalization.pii import (  # noqa: E402
+    SCOPE_ALL_CODES,
+    _PII_FIELD_KEY_RE,
+)
+from unified_pipeline.stage6.pii_pass import (  # noqa: E402
+    WITHHELD_COMMENT_AUTHOR,
+    WITHHELD_COMMENT_HEADER,
+    run_pii_pass,
+)
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     PII_REDACTED_NOTICE,
+    RENDER_ROUTED_CODES,
+    TAXONOMY_TO_SECTION,
     WCMTemplateGenerator,
-    _PII_FIELD_KEY_RE,
     _pii_fragments,
 )
 
@@ -53,8 +67,25 @@ def _all_text(docx_path) -> str:
     return "\n".join(n.text or "" for n in doc.element.body.iter(W_T))
 
 
-def _render(tmp_path, entries, cv_owner=None) -> str:
-    gen = WCMTemplateGenerator(verbose=False)
+def _list_item_texts(docx_path) -> set[str]:
+    """Every paragraph's text (raw w:t join, matching `_paragraph_texts`)
+    for paragraphs that carry `w:numPr` -- i.e. render as a real Word list
+    item rather than a literal bullet glyph. `_add_remaining_to_appendix`
+    switched from `f"• {text}"` to `_apply_list_bullet` (#864), so an
+    appendix residual's paragraph text no longer starts with the glyph; the
+    list membership is asserted through the numbering property instead."""
+    doc = Document(str(docx_path))
+    out = set()
+    for para in doc.paragraphs:
+        pPr = para._p.pPr
+        numPr = pPr.find(qn("w:numPr")) if pPr is not None else None
+        if numPr is not None:
+            out.add("".join(n.text or "" for n in para._p.iter(W_T)))
+    return out
+
+
+def _render(tmp_path, entries, cv_owner=None, **generator_kwargs) -> str:
+    gen = WCMTemplateGenerator(verbose=False, **generator_kwargs)
     gen._reconsider_appendix_entries = lambda: None
     ip, op = tmp_path / "in.json", tmp_path / "out.docx"
     payload = {"document_uid": "TESTPD", "entries": entries}
@@ -63,6 +94,36 @@ def _render(tmp_path, entries, cv_owner=None) -> str:
     ip.write_text(json.dumps(payload))
     gen.generate(str(ip), str(op), research_summary_path=None)
     return _all_text(op)
+
+
+def _entry(text, code, fields=None, idx=0):
+    return {"text": text, "taxonomy_code": code,
+            "extracted_fields": fields or {}, "element_idx_start": idx}
+
+
+def _comments(docx_path) -> list[tuple[str, str]]:
+    """(author, text) of every comment in the docx's comments part, text
+    lines joined with newlines; [] when the part does not exist."""
+    with zipfile.ZipFile(docx_path) as z:
+        if "word/comments.xml" not in z.namelist():
+            return []
+        root = ET.fromstring(z.read("word/comments.xml"))
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    out = []
+    for c in root.iter(f"{W}comment"):
+        lines = ["".join(t.text or "" for t in p.iter(f"{W}t")) for p in c.iter(f"{W}p")]
+        out.append((c.get(f"{W}author"), "\n".join(lines)))
+    return out
+
+
+def _paragraph_texts(docx_path) -> list[str]:
+    """Every paragraph's text, read from raw w:t nodes like `_all_text` --
+    one string per PARAGRAPH, which `_all_text` cannot give (it joins node
+    by node), and which an assertion about what a line renders AS rather
+    than what it CONTAINS needs."""
+    doc = Document(str(docx_path))
+    return ["".join(n.text or "" for n in para._p.iter(W_T))
+            for para in doc.paragraphs]
 
 
 def _a(text, fields=None, idx=0):
@@ -183,6 +244,21 @@ def test_pii_orphan_is_redacted_with_a_visible_notice(tmp_path):
     assert "Canada" in text, "non-PII entry withheld along with the PII"
 
 
+def test_home_phone_only_orphan_is_withheld_not_appended(tmp_path):
+    """#821: the template has no home-phone row, so an entry supplying only
+    a home phone was ALREADY unconsumed by `_fill_personal_data` (nothing
+    excludes `home_phone` from the appendix-orphan check the way a
+    classified value does) -- before the #821 policy row, that raw entry
+    text reached the Appendix unfiltered as a safety-net "orphan"
+    (test_unconsumed_entry_reaches_the_appendix, above, is exactly that
+    mechanism). Now it is withheld with notice like everything else."""
+    text = _render(tmp_path, [
+        _a("Home phone: 555-111-2222", {"phone": "555-111-2222"}),
+    ])
+    assert "555-111-2222" not in text, "a home phone reached the document"
+    assert PII_REDACTED_NOTICE in text
+
+
 def test_one_redaction_notice_per_document(tmp_path):
     text = _render(tmp_path, [
         _a("Date of Birth: 12/13/1947"),
@@ -212,7 +288,14 @@ def test_appendix_removal_catches_raw_text_and_field_key_pii_alike(tmp_path: Pat
     batch still renders. `test_pii_orphan_is_redacted_with_a_visible_notice`
     and `test_pii_named_only_by_field_key_is_caught` pin the two halves
     separately; this pins them together in one batch, which is what item 1
-    actually asks for."""
+    actually asks for.
+
+    #821 R2 F3 (issue #834) narrowed the raw-text-cut half of this to a
+    per-VALUE deny (see the test right below) -- this test's middle entry
+    stays a whole-ENTRY deny on purpose: its PII lives ONLY in
+    `extracted_fields`, so `run_pii_pass` never touches `entry['text']` at
+    all ("Additional information" is never cut), and there is no residual
+    fragment for the #834 fix to have anything to recover."""
     text = _render(tmp_path, [
         _a("Date of Birth: 04/01/1958"),
         _a("Additional information", {"marital_status_spouse": "Pat Roe"}),
@@ -227,6 +310,172 @@ def test_appendix_removal_catches_raw_text_and_field_key_pii_alike(tmp_path: Pat
     assert "French" in text, "a non-PII sibling in the same batch was dropped too"
 
 
+def test_appendix_residual_survives_a_fused_withheld_and_kept_fragment(tmp_path: Path) -> None:
+    """#821 R2 F3 (issue #834): an A-coded orphan whose raw text FUSES a
+    withheld fragment with unrelated, non-PII content used to lose the
+    WHOLE entry -- `_unconsumed_personal_data_batch` denied by ENTRY
+    (`entry['_pii_withheld']`), the same granularity the appendix path
+    deliberately uses for an entry that renders nothing on its own, but
+    this entry is not "nothing": `run_pii_pass` (`pii_pass.py`'s
+    `_cut_spans`) already cut only the withheld SPAN out of `entry['text']`,
+    so the kept fragment survives in the entry's own residual text and
+    should have reached the Appendix all along (the corpus shape: a fused
+    "Home Phone" + "Citizenship" orphan). The residual renders as an
+    ordinary Appendix bullet with its dangling separator punctuation
+    trimmed (`_strip_dangling_separators`) and its normal classification
+    comment attached, same as any other appendix line."""
+    text = _render(tmp_path, [
+        _a("Home Phone: 555-123-4567; Citizenship: US"),
+    ], emit_comments=True)
+    assert "Citizenship: US" in text, (
+        "the kept fragment was dropped along with its withheld sibling"
+    )
+    assert "555-123-4567" not in text, "the withheld home phone reached the document"
+    assert PII_REDACTED_NOTICE in text
+    comments = _comments(tmp_path / "out.docx")
+    assert any("Originally classified" in body for _, body in comments), (
+        "the recovered residual line lost its usual classification comment"
+    )
+
+
+def test_appendix_residual_is_refused_when_the_value_sits_past_a_hard_delimiter(
+        tmp_path: Path) -> None:
+    """#821 R2 F3 safety check, corpus-observed: a "Label: |
+    value" shape -- a pipe, the pipeline's own inline-cell separator,
+    sitting directly after the label's colon. `pii.py`'s label span runs
+    "to the next hard delimiter", and `|` IS one, so an UNEXTENDED cut
+    would remove only "Home telephone:" and leave the phone number
+    completely uncut in `entry['text']` -- indistinguishable, at that
+    point, from a safe residual (`_clean_inline_tabs` then drops the
+    now-empty label cell entirely, leaving a bare, unlabelled phone
+    number). `pii_pass.py`'s `_extend_bare_label_span` closes this at the
+    pass itself (the phone number is now PART of the cut fragment, so this
+    entry has nothing left at all -- see the sibling test right below for
+    the case where a value trails the same shape); `_unconsumed_personal_
+    data_batch`'s own `_pii_cut_left_a_bare_label` is the second layer,
+    for any shape that extension does not catch."""
+    text = _render(tmp_path, [
+        _a("Home telephone: | 212 555 1234"),
+    ])
+    assert "212 555 1234" not in text, (
+        "a home phone number separated from its label by a hard delimiter "
+        "reached the document unlabelled"
+    )
+    assert "Home telephone" not in text
+    assert PII_REDACTED_NOTICE in text
+
+
+def test_appendix_residual_recovers_a_sibling_field_past_a_wide_gap(
+        tmp_path: Path) -> None:
+    """#821 R2 F3 (issue #834), the corpus shape that needed
+    `_extend_bare_label_span`: a fused "Home Phone" + "Citizenship"
+    A-coded orphan column-aligns its fields with a wide run of spaces
+    instead of a colon-adjacent value ("Home Phone:        <phone>
+    Citizenship: ..."). 3+ spaces is ALSO one of `pii.py`'s hard
+    delimiters, so the UNEXTENDED label match stops at the colon, same as
+    the pipe shape above -- but here a sibling field follows, not the end
+    of the entry, so simply discarding the whole entry (as F3's original,
+    unextended fix did) cost the citizenship line. The extension pulls the
+    orphaned phone value into the SAME cut, stopping before the next hard
+    delimiter, so the residual is exactly the sibling field with nothing
+    of the phone left in it."""
+    text = _render(tmp_path, [
+        _a("Home Phone:        212 555 1234"
+           "                                               Citizenship:  US"),
+    ], emit_comments=True)
+    assert "Citizenship" in text and "US" in text, (
+        "the sibling field past the wide gap was dropped along with the phone"
+    )
+    assert "212 555 1234" not in text, "the withheld home phone reached the document"
+    assert "Home Phone" not in text
+    assert PII_REDACTED_NOTICE in text
+
+
+def test_appendix_residual_renders_exactly_the_kept_fragment(tmp_path: Path) -> None:
+    """#821 R3 F-E: the residual is asserted by EQUALITY on the rendered
+    paragraph, not by substring. The cut stops at the hard delimiter that
+    separated the withheld fragment from its neighbour, so the delimiter
+    itself is left dangling on the front of the residual (`"; Citizenship:
+    US"`); `_strip_dangling_separators` trims it. A substring assertion
+    ("Citizenship: US" in text) passes either way and left that trim
+    untested on the wire -- this one fails the moment the residual renders
+    with its leading separator. The appendix bullet is a real Word list
+    item (#864), not a literal glyph, so the equality check is against
+    `_list_item_texts`, not a "\u2022 " prefix."""
+    _render(tmp_path, [
+        _a("Home Phone: 555-123-4567; Citizenship: US"),
+    ])
+    list_items = _list_item_texts(tmp_path / "out.docx")
+    assert "Citizenship: US" in list_items, (
+        "the residual did not render as a clean appendix list item: "
+        f"{[x for x in _paragraph_texts(tmp_path / 'out.docx') if 'Citizenship' in x]}"
+    )
+
+
+def test_appendix_residual_renders_when_a_bare_label_had_no_value_after_it(
+        tmp_path: Path) -> None:
+    """#821 R3 F-D: a protected label with NOTHING after it -- a fielded
+    template's leftover empty row -- is not a leak. The R2 refusal keyed on
+    "the cut fragment ends in a colon", which is equally true of a label
+    whose value survived the cut and of one that never had a value at all,
+    so this entry lost its citizenship line (a #821 "render" item) to
+    protect nothing. `run_pii_pass` now records which of the two happened
+    (`_pii_orphaned_value`) and only the first refuses the residual."""
+    text = _render(tmp_path, [
+        _a("Citizenship: US\nHome Address:"),
+    ])
+    assert "Citizenship: US" in text, (
+        "a bare protected label with no value after it withheld its sibling field"
+    )
+    assert "Home Address" not in text, "the protected label itself rendered"
+    assert PII_REDACTED_NOTICE in text
+
+
+def test_appendix_residual_is_refused_when_the_value_sits_on_the_next_line(
+        tmp_path: Path) -> None:
+    """The negative half of the case above, and the reason the refusal
+    still exists: the same bare label, but with an unlabelled value on the
+    line below it. The pass will not extend a cut across a newline (a
+    newline is the source document's own field separator -- extending
+    across one swallowed the NEXT field, #821 R3 F-B), so the address is
+    still in the residual, unlabelled, indistinguishable from safe content.
+    The whole entry is denied instead -- including its other, harmless
+    field, which is the price of not leaking the address."""
+    text = _render(tmp_path, [
+        _a("Citizenship: US\nHome Address:\n12 Example Street"),
+    ])
+    assert "12 Example Street" not in text, (
+        "an unlabelled home address reached the Appendix as a safe residual"
+    )
+    assert "Citizenship" not in text, (
+        "the residual rendered even though the protected value was still in it"
+    )
+    assert PII_REDACTED_NOTICE in text
+
+
+def test_personal_data_redacted_counts_every_entry_the_policy_cut(
+        tmp_path: Path) -> None:
+    """#821 R3 F-H: `stats['personal_data_redacted']` means "A-coded
+    orphans the policy removed something from", so it counts the entry
+    whose residual rendered as well as the one denied whole -- before the
+    #834 residual fix those were the same population and the counter sat on
+    the deny branch alone, which silently turned it into "entries dropped".
+    `personal_data_recovered` is the count of what actually reached the
+    Appendix, so the two still separate the cases: 2 cut, 2 rendered (the
+    residual and the clean sibling)."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None
+    ip, op = tmp_path / "in.json", tmp_path / "out.docx"
+    ip.write_text(json.dumps({"document_uid": "TESTPD", "entries": [
+        _a("Home Phone: 555-123-4567; Citizenship: US"),
+        _a("Date of Birth: 04/01/1958", idx=1),
+        _a("Foreign Languages: French", idx=2),
+    ]}))
+    gen.generate(str(ip), str(op), research_summary_path=None)
+    assert gen.stats["personal_data_redacted"] == 2
+    assert gen.stats["personal_data_recovered"] == 2
+
+
 def test_pii_in_a_tab_separated_cell_is_still_caught(tmp_path):
     """The scan must read the RAW entry text. _clean_inline_tabs rewrites the
     first '\\t' to ': ' and ' | ' to ' — ', destroying the fragment boundaries
@@ -239,6 +488,209 @@ def test_pii_in_a_tab_separated_cell_is_still_caught(tmp_path):
     assert "12/13/1947" not in text
     assert "Married" not in text
     assert PII_REDACTED_NOTICE in text
+
+
+def test_web057_shape_is_withheld_from_a_t_coded_appendix_line(tmp_path):
+    """#820's local instance, end to end: a T-coded line with the spouse
+    label buried after another label (`Personal Information:: Husband:`)
+    -- the unanchored-matching case, through the real Appendix path."""
+    text = _render(tmp_path, [
+        _entry("Personal Information:: Husband: Pat Example, MD", "T"),
+        _entry("Foreign Languages: French", "T"),
+    ])
+    assert "Pat Example" not in text, "spouse name reached the Appendix"
+    assert PII_REDACTED_NOTICE in text
+    assert "French" in text
+
+
+def test_notice_is_keyed_on_something_withheld_not_on_appendix_redaction(tmp_path):
+    """M20: the notice used to be keyed on the A-orphan redaction count.
+    PII withheld from a RENDERED section (an F1 entry's text) with no
+    A-coded orphan at all must still produce the notice."""
+    text = _render(tmp_path, [
+        _entry("Medical license, Example State; SSN: 123-45-6789", "F1",
+               {"license_number": "X1", "state": "Example State"}),
+    ])
+    assert "123-45-6789" not in text
+    assert PII_REDACTED_NOTICE in text
+
+
+def test_no_notice_when_the_only_label_is_out_of_scope(tmp_path):
+    """The round-1 false notice: an ambiguous label on a routed content
+    code is not withheld, so nothing is recorded and the document carries
+    neither the notice nor a comment (the render gate's CHANGED 0).
+
+    An F1 DEA entry used to ride alongside this as a second "out of scope"
+    example; #821 flipped that decision (see
+    test_dea_in_licensure_is_withheld_with_notice_and_comment below), so it
+    is no longer a valid negative control here and was removed rather than
+    updated in place -- the S4 title is this test's whole subject."""
+    text = _render(tmp_path, [
+        _entry("Children: Research, Practice and Policy. Example Press, 2001.", "S4",
+               {"title": "Children: Research, Practice and Policy",
+                "authors": "Roe J", "year": "2001", "publisher": "Example Press"}),
+    ])
+    assert "Children: Research" in text, "a content-code title was withheld"
+    assert PII_REDACTED_NOTICE not in text
+    assert _comments(tmp_path / "out.docx") == []
+
+
+def test_dea_in_licensure_is_withheld_with_notice_and_comment(tmp_path):
+    """#821: a licensure DEA entry is withheld with notice through the full
+    render path -- the slot renders no value, the document-wide notice
+    paragraph appears, and the Word comment names "DEA number" under
+    "Licensure" (the same vocabulary/mechanism every other withheld
+    category uses -- see WITHHELD_COMMENT_HEADER)."""
+    text = _render(tmp_path, [
+        _entry("DEA registration AB1234567", "F1", {"license_number": "AB1234567"}),
+    ])
+    assert "AB1234567" not in text
+    assert PII_REDACTED_NOTICE in text
+    comments = _comments(tmp_path / "out.docx")
+    assert len(comments) == 1
+    author, comment_text = comments[0]
+    assert author == WITHHELD_COMMENT_AUTHOR
+    assert comment_text.startswith(WITHHELD_COMMENT_HEADER)
+    assert "DEA number" in comment_text
+    assert "Licensure" in comment_text
+
+
+def test_email_field_fallback_does_not_harvest_from_a_pii_fragment_on_any_code(tmp_path):
+    """M23: the all-entries email fallback (`personal_data.py`, the
+    `_pii_fragments` read at its second site) must consult the pass's
+    stored fragments -- a T-coded emergency-contact entry whose
+    `extracted_fields['email']` was lifted from the fragment must not
+    supply the Work email slot."""
+    text = _render(tmp_path, [
+        _entry("Emergency Contact: Pat Example, pat.example@example.com", "T",
+               {"email": "pat.example@example.com"}),
+    ])
+    assert "pat.example@example.com" not in text
+
+
+def test_pass_runs_before_dedup_so_a_dropped_near_duplicate_is_still_scanned(tmp_path):
+    """`_recover_unrendered_records` re-scans the PRE-dedup entries, so an
+    entry dedup drops can still put a record line on the page. The pass
+    therefore runs before the pre-dedup snapshot: the dropped
+    near-duplicate's SSN is recorded (notice emitted) rather than skipped.
+    With the pass after dedup this document carried no notice."""
+    kept = ("2001 - 2002\tExample Award for Distinguished Example Work, Example Society of Examples\n"
+            "2003 - 2004\tExample Prize for Outstanding Example Research, Example Foundation of Examples")
+    dropped = ("2001 - 2002\tExample Award for Distinguished Example Work, Example Society\n"
+               "2003 - 2004\tExample Prize for Outstanding Example Research; SSN: 123-45-6789")
+    text = _render(tmp_path, [_entry(kept, "H"), _entry(dropped, "H", idx=1)])
+    assert "123-45-6789" not in text
+    assert PII_REDACTED_NOTICE in text
+    assert "Example Award for Distinguished Example Work" in text
+
+
+# --------------------------------------------------------------------------
+# the Word comment on the notice (A-820 addendum)
+# --------------------------------------------------------------------------
+
+def test_withheld_notice_carries_one_word_comment_listing_categories(tmp_path):
+    """Round trip: save, reopen the package, read the comment part back.
+    Exactly one comment, on the notice, author "CViche", listing both
+    categories with counts and sections and NOT the values -- and present
+    with `emit_comments=False` (it is not a classification comment, #153)."""
+    text = _render(tmp_path, [
+        _entry("Date of Birth: 01/02/1970", "A"),
+        _entry("Visa Status: O-1", "T"),
+    ], emit_comments=False)
+    assert "01/02/1970" not in text and "O-1" not in text
+    assert PII_REDACTED_NOTICE in text
+    comments = _comments(tmp_path / "out.docx")
+    assert len(comments) == 1, comments
+    author, body = comments[0]
+    assert author == WITHHELD_COMMENT_AUTHOR
+    lines = body.split("\n")
+    assert lines[0] == WITHHELD_COMMENT_HEADER
+    assert " • date of birth — 1 item, Personal Data" in lines
+    assert " • visa / immigration status — 1 item, Appendix" in lines
+    assert "01/02/1970" not in body and "O-1" not in body, "a withheld value re-leaked into the comment"
+
+
+def test_the_comment_element_splits_one_w_p_per_line(tmp_path):
+    """`_create_comments_xml` must emit one <w:p> per line of the comment
+    text, not join every line into a single paragraph's <w:t> -- Word
+    collapses an embedded newline inside one <w:t> to a space, running the
+    header, every bullet and the footer together on one line (#820 R3
+    finding 2). The round-trip helper `_comments()` re-groups text by
+    whatever <w:p> boundaries already exist, so it reads a single paragraph
+    holding embedded '\\n' characters identically to one <w:p> per line and
+    cannot tell them apart -- this test reads the raw <w:p> COUNT instead."""
+    text = _render(tmp_path, [
+        _entry("Date of Birth: 01/02/1970", "A"),
+        _entry("Visa Status: O-1", "T"),
+    ], emit_comments=False)
+    assert PII_REDACTED_NOTICE in text
+    with zipfile.ZipFile(tmp_path / "out.docx") as z:
+        root = ET.fromstring(z.read("word/comments.xml"))
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    comments = root.findall(f"{W}comment")
+    assert len(comments) == 1, comments
+    paragraphs = comments[0].findall(f"{W}p")
+    # header line + one bullet per category (date of birth, visa) + footer.
+    expected = 1 + 2 + 1
+    assert len(paragraphs) == expected, [
+        "".join(t.text or "" for t in p.iter(f"{W}t")) for p in paragraphs]
+    # And every <w:p> holds exactly one line's worth of text -- no line was
+    # merged into its neighbor.
+    for p in paragraphs:
+        line_text = "".join(t.text or "" for t in p.iter(f"{W}t"))
+        assert "\n" not in line_text
+
+
+def test_withheld_comment_is_anchored_on_the_notice_paragraph(tmp_path):
+    _render(tmp_path, [_entry("Date of Birth: 01/02/1970", "A")], emit_comments=False)
+    doc = Document(str(tmp_path / "out.docx"))
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    anchored = [p for p in doc.paragraphs
+                if p._p.find(f"{W}commentRangeStart") is not None]
+    assert len(anchored) == 1
+    assert PII_REDACTED_NOTICE in anchored[0].text
+
+
+def test_withheld_comment_is_the_only_comment_even_with_classification_comments_on(tmp_path):
+    """With emit_comments=True the Appendix's other bullets get their
+    classification comments; the notice paragraph gets ONLY the withheld
+    summary, not a second "Originally classified A" comment."""
+    _render(tmp_path, [
+        _entry("Date of Birth: 01/02/1970", "A"),
+        _entry("Foreign Languages: French", "A"),
+    ], emit_comments=True)
+    comments = _comments(tmp_path / "out.docx")
+    assert len([c for c in comments if c[0] == WITHHELD_COMMENT_AUTHOR]) == 1
+    assert any("Originally classified" in body for _, body in comments), (
+        "the classification comments were not emitted with emit_comments=True")
+    doc = Document(str(tmp_path / "out.docx"))
+    W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    notice = [p for p in doc.paragraphs if PII_REDACTED_NOTICE in p.text]
+    assert len(notice) == 1
+    assert len(notice[0]._p.findall(f"{W}commentRangeStart")) == 1
+
+
+def test_notice_and_comment_still_emitted_with_recovery_disabled(tmp_path):
+    """#820 R3 finding 3: `recover_unrendered_records=False` must disable
+    ONLY the #221 record-line recovery -- never the withheld notice and its
+    Word comment. The pass has already stripped the PII from the entry text
+    either way; before this fix both were built inside
+    `_recover_unrendered_records`, gated behind
+    `if not self.recover_unrendered_records: return`, so setting the flag
+    False silently suppressed the reader's only indication that something
+    was withheld -- a second, silent loss stacked on top of the first."""
+    text = _render(tmp_path, [
+        _entry("SSN: 123-45-6789", "A"),
+    ], recover_unrendered_records=False)
+    assert "123-45-6789" not in text, "an SSN reached the rendered document"
+    assert PII_REDACTED_NOTICE in text, (
+        "the withheld notice was suppressed by an unrelated recovery flag")
+    comments = _comments(tmp_path / "out.docx")
+    assert len(comments) == 1, comments
+    author, body = comments[0]
+    assert author == WITHHELD_COMMENT_AUTHOR
+    assert "social security number" in body.lower()
+    assert "123-45-6789" not in body
 
 
 # --------------------------------------------------------------------------
@@ -296,12 +748,199 @@ def test_person_field_keys_accept_a_suffix():
         assert not _PII_FIELD_KEY_RE.match(keeper), f"false positive {keeper!r}"
 
 
-def test_research_vocabulary_is_not_denied():
-    """gender/sex/race/ethnicity/religion are deliberately NOT on the list:
-    they are ordinary research vocabulary and occur as publication titles."""
+def test_research_vocabulary_still_off_the_list_is_not_denied():
+    """sex/race are still deliberately NOT on the list -- ordinary research
+    vocabulary that occurs as publication titles, unchanged by #820.
+
+    `gender`/`ethnicity`/`religion` ARE on the list since #820, but only at
+    the Personal Data / Appendix scope (`SCOPE_PERSONAL_AND_APPENDIX`): the
+    #473 control "Gender: A Review of the Literature" is restored for every
+    routed content code, where the ambiguous rows never apply -- see
+    `test_protected_class_labels_deny_only_the_colon_form` for the two
+    scopes side by side."""
     for keeper in [
-        "Gender: A Review of the Literature",
         "Sex: differences in galanin expression",
         "Race: reporting practices in clinical trials",
     ]:
         assert not _pii_fragments(keeper), f"false positive on {keeper!r}"
+    for content_title in [
+        "Gender: A Review of the Literature",
+        "Children: Research, Practice and Policy",
+        "Health: A Journal Title",
+    ]:
+        assert not _pii_fragments(content_title, SCOPE_ALL_CODES), (
+            f"content-code false positive on {content_title!r}")
+
+
+def test_protected_class_labels_deny_only_the_colon_form():
+    """#820 comment: religion/ethnicity/gender/veteran status/disability/
+    health/blood type join the vocabulary as colon-terminated labels --
+    every one of these leaked on a real CV before this ticket.
+
+    The colon terminator is the same guard #473 built for
+    marital-status/spouse/children, applied to this class for the first
+    time: a bare occurrence of the word, with no colon directly after it,
+    must still pass through untouched -- these are the ticket's own named
+    negative controls (`docs` A-820, MUST NOT list). A *colon-terminated*
+    title starting with one of these words ("Gender: A Review of the
+    Literature") is denied ONLY where the entry is A-coded or Appendix-bound
+    (#820 round 2's scope split); on a routed content code it renders.
+    """
+    for pii in [
+        "Religion: Catholic",
+        "Ethnicity: Hispanic",
+        "Gender: Female",
+        "Veteran Status: Yes",
+        "Disability: None",
+        "Health: Good",
+        "Blood Type: O+",
+    ]:
+        assert _pii_fragments(pii), f"missed {pii!r}"
+    for keeper in [
+        "Health Sciences",
+        "Public Health",
+        "Gender Medicine",
+        "Veterans Affairs Medical Center",
+        "Age-related macular degeneration",
+    ]:
+        assert not _pii_fragments(keeper), f"false positive on {keeper!r}"
+
+
+# --------------------------------------------------------------------------
+# #821 R4 F-1: a bare-label cut may stop only at a KNOWN field label
+#
+# The round-3 stop searched the run for "1-4 word tokens then a colon", a
+# WORD SHAPE, and the protected value's own trailing words satisfy it: a
+# home address followed on the same run by a sibling field had its
+# city/state -- or, for an address with no digits, nearly all of it --
+# left in the residual and rendered into the Appendix. The stop is now a
+# VOCABULARY (`pii_pass.py::_KNOWN_FIELD_LABEL_RE`, built from
+# `WITHHOLD_POLICY`'s label rows plus `_RENDER_SET_FIELD_LABELS`), so it
+# can only stop where a field is actually NAMED, and a run with no known
+# label in it is cut whole.
+#
+# Every case is asserted twice: on the pass's own residual by EQUALITY
+# (`run_pii_pass` -- the leak-proof statement: the residual contains no
+# token of the value), and on the rendered document (`_render` -- the
+# wire: the survivor reached it, every forbidden token did not). All
+# values synthetic.
+# --------------------------------------------------------------------------
+
+_KNOWN_LABEL_CASES = [
+    # (id, text, residual, survives_in_document, forbidden_in_document)
+    ("value_tail_is_words_then_a_known_label",
+     "Home Address:        12 Elm St New York NY Citizenship: US",
+     "Citizenship: US", "• Citizenship: US", ["Elm", "New York"]),
+    ("value_is_all_words_then_a_known_label",
+     "Home Address:        Elm House Oak Lane Citizenship: US",
+     "Citizenship: US", "• Citizenship: US", ["Elm", "Oak Lane", "House"]),
+    ("pipe_value_tail_is_words_then_a_known_label",
+     "Home Address: | 12 Elm St Apt 4 Anytown Citizenship: US",
+     "Citizenship: US", "• Citizenship: US", ["Elm", "Anytown", "Apt"]),
+    ("value_carries_its_own_colon",
+     # "Apt:" is colon-terminated and would stop a shape-based search
+     # dead, leaving "4 Anytown" in the residual. It is not a field this
+     # codebase renders, so it is not in the vocabulary and is cut with
+     # the rest of the value.
+     "Home Address: | 12 Elm St Apt: 4 Anytown Citizenship: US",
+     "Citizenship: US", "• Citizenship: US", ["Elm", "Anytown", "Apt"]),
+    ("gapped_phone_then_a_known_label",
+     # The corpus shape the extension was built for: a column-aligned
+     # field pair whose label is padded to a fixed width with spaces, a
+     # phone value, then a sibling field one plain space later.
+     "Home Phone:        555-0100 Citizenship: US",
+     "Citizenship: US", "• Citizenship: US", ["555-0100"]),
+    ("gapped_phone_then_a_known_render_set_label",
+     # The survivor here is a render-set field rather than a policy
+     # "render" default, and it reaches the PERSONAL DATA table's Work
+     # email cell rather than the Appendix -- which is why the document
+     # assertion is a substring and the residual assertion is equality.
+     "Home Phone:        555-0100 Work Email: someone@example.org",
+     "Work Email: someone@example.org", "someone@example.org", ["555-0100"]),
+    ("no_known_label_in_the_run_cuts_the_whole_run",
+     # The stated cost of a vocabulary: "Foo:" names no field this
+     # pipeline renders, so the run is cut whole. The sibling is lost;
+     # nothing of the address is leaked.
+     "Home Address:        12 Elm St Anytown Foo: bar",
+     "", None, ["Elm", "Anytown", "Foo", "bar"]),
+    ("a_known_label_glued_into_a_word_is_not_a_label",
+     # The word-start anchor. Without it the search stops on the
+     # "citizenship" INSIDE "Noncitizenship" and everything before it --
+     # the whole address -- renders.
+     "Home Address: | 12 Elm St Noncitizenship: none",
+     "", None, ["Elm", "Noncitizenship", "citizenship"]),
+    ("newline_before_a_known_label_is_untouched",
+     "Home Address:\nCitizenship: US",
+     "Citizenship: US", "• Citizenship: US", ["Home Address"]),
+    ("newline_before_a_numbered_known_label_is_untouched",
+     "2. Home Address:\n3. Work Email: someone@example.org",
+     "2. \n3. Work Email: someone@example.org", "someone@example.org",
+     ["Home Address"]),
+    ("delimiter_then_newline_refuses_the_residual",
+     # #821 R3 F-2 / the verifier's g13b mutant: the `text[value_start]
+     # == "\n"` guard in `_extend_bare_label_span`. The delimiter is a
+     # pipe, so the extension starts, but the value is on the NEXT line --
+     # the one place a cut may not reach. The value stays in the residual
+     # uncut, the pass flags the entry (`_pii_orphaned_value`), and the
+     # Appendix refuses it whole. Without the guard the address renders.
+     "Home Address: | \n12 Elm St",
+     "| \n12 Elm St", None, ["Elm"]),
+]
+
+
+@pytest.mark.parametrize(
+    "text,residual,survives,forbidden",
+    [(text, residual, survives, forbidden)
+     for _, text, residual, survives, forbidden in _KNOWN_LABEL_CASES],
+    ids=[case_id for case_id, *_ in _KNOWN_LABEL_CASES],
+)
+def test_a_bare_label_cut_stops_only_at_a_known_field_label(
+        tmp_path: Path, text: str, residual: str, survives: str | None,
+        forbidden: list[str]) -> None:
+    """#821 R4 F-1, both halves in one case list.
+
+    `residual` is `entry['text']` after the real `run_pii_pass`, asserted
+    by equality: that is the statement "no token of the protected value is
+    left behind", which a substring assertion cannot make. `survives` is
+    what must reach the rendered document (None: nothing from this entry
+    may), and `forbidden` is every value token that must not, read from
+    the whole document rather than from one paragraph. A leading "• "
+    on `survives` is a case-list sentinel meaning "must render as the
+    appendix's Word list item", not a literal glyph (#864) -- checked via
+    `_list_item_texts`, not a text-prefix match."""
+    entry = {"text": text, "taxonomy_code": "A", "extracted_fields": {}}
+    run_pii_pass({"A": [entry]}, routed_codes=RENDER_ROUTED_CODES,
+                 section_names=TAXONOMY_TO_SECTION)
+    assert entry["text"] == residual, (
+        "the pass's residual is not exactly the sibling field")
+
+    rendered = _render(tmp_path, [_a(text)])
+    for token in forbidden:
+        assert token not in rendered, f"{token!r} reached the document"
+    if survives is None:
+        assert "Citizenship: US" not in rendered
+    elif survives.startswith("•"):
+        expected_item = survives[len("• "):]
+        assert expected_item in _list_item_texts(tmp_path / "out.docx"), (
+            "the residual did not render as exactly that appendix list item: "
+            f"{[p for p in _paragraph_texts(tmp_path / 'out.docx') if p.strip()][-6:]}")
+    else:
+        assert survives in rendered, "the sibling field did not reach the document"
+    assert PII_REDACTED_NOTICE in rendered
+
+
+def test_redaction_notice_is_not_reported_as_a_recovered_appendix_entry(tmp_path):
+    """#531 x #820: `_recover_unrendered_records` reports the code of every
+    appendix bullet it recovered so the render_warnings sidecar can name it
+    as an `appendix_diversion`. The withheld notice is a bullet in that
+    appendix too, but it is a notice, not a recovered entry -- it must not
+    show up in the sidecar as an A-coded `recovered_unrendered` diversion."""
+    _render(tmp_path, [
+        _a("Date of Birth: 12/13/1947"),
+        _a("Marital Status: Married, spouse Jane Roe"),
+    ])
+    sidecar = json.loads((tmp_path / "TESTPD_render_warnings.json").read_text())
+    recovered = [w for w in sidecar["warnings"]
+                 if w.get("check") == "appendix_diversion"
+                 and w.get("reason") == "recovered_unrendered"]
+    assert recovered == [], recovered

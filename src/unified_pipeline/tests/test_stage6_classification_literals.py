@@ -127,12 +127,15 @@ def test_dean_text_is_not_a_dea_number():
 
 
 def test_labelled_dea_and_npi_route_to_their_slots():
+    """A DEA number still classifies out of the licence table -- #821
+    withholds the identifier itself, so the slot renders empty rather than
+    the value; the NPI is public and still renders."""
     rows, dea, npi = _render_licensure([
         _f1("DEA registration AB1234567", number="AB1234567"),
         _f1("NPI 1234567890", number="1234567890"),
     ])
     assert rows == []
-    assert dea == "AB1234567"
+    assert dea == ""
     assert npi == "1234567890"
 
 
@@ -161,12 +164,14 @@ def test_license_type_field_routes_before_text():
 
 
 def test_license_type_dea_routes_before_text():
-    """The 'dea' license_type route, with a number no shape test matches."""
+    """The 'dea' license_type route, with a number no shape test matches --
+    still classified DEA, so #821 still withholds it (the slot is empty,
+    not the raw "55443")."""
     rows, dea, npi = _render_licensure([
         _f1("Registration 55443", number="55443", license_type="DEA"),
     ])
     assert rows == []
-    assert dea == "55443"
+    assert dea == ""
     assert npi == ""
 
 
@@ -182,14 +187,15 @@ def test_unstructured_npi_labelled_entry_stays_out_of_fallback():
 
 
 def test_shape_tiebreak_applies_only_without_a_state():
-    """Unlabelled, state-less entries still classify by shape."""
+    """Unlabelled, state-less entries still classify by shape -- the
+    DEA-shaped one is still withheld (#821), the NPI-shaped one renders."""
     rows, dea, npi = _render_licensure([
         _f1("1234567890", number="1234567890"),
         _f1("AB1234567", number="AB1234567"),
     ])
     assert rows == []
     assert npi == "1234567890"
-    assert dea == "AB1234567"
+    assert dea == ""
 
 
 def test_second_npi_candidate_warns_and_keeps_first(caplog):
@@ -371,8 +377,9 @@ def test_resolve_licensure_returns_a_typed_result_without_a_document():
         LicenseRecord(state="New York", number="123456",
                       issue_date="07/01/2015", last_registration_date=""),
     )
-    assert result.identifiers == IdentifierSet(dea="AB1234567",
-                                               npi="1234567890")
+    # #821: the DEA identifier is withheld, never reaches `identifiers.dea`.
+    assert result.identifiers == IdentifierSet(dea=None, npi="1234567890")
+    assert result.dea_withheld is True
 
 
 def test_resolve_licensure_leaves_unseen_identifier_slots_none():

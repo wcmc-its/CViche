@@ -68,6 +68,10 @@ from typing import Dict, List, NamedTuple
 
 try:
     from docx import Document
+    # The class `Document()` (the factory function above) returns -- aliased
+    # so `_recover_contact_fields_from_table_rows` can annotate its
+    # `original_doc` parameter without shadowing the factory import (#820 R3).
+    from docx.document import Document as _WordDocument
     from docx.opc.exceptions import PackageNotFoundError
     from lxml.etree import XMLSyntaxError
 except ImportError as exc:
@@ -76,7 +80,16 @@ except ImportError as exc:
     ) from exc
 
 from ..formatting import _set_cell_text, _set_font
-from ..normalization import _address_cell_text, _from_pii_fragment, _labels_its_own_address_slots, _labels_its_own_phone_slots, _phone_cell_text, _pii_fragments
+from ..normalization import (
+    CAT_HOME_CONTACT,
+    WithheldItem,
+    _address_cell_text,
+    _from_pii_fragment,
+    _labels_its_own_address_slots,
+    _labels_its_own_phone_slots,
+    _phone_cell_text,
+    _pii_category_of,
+)
 from ..parsing import _extract_name_from_uid
 
 logger = logging.getLogger(__name__)
@@ -192,6 +205,102 @@ def _classify_contact_label(label: str) -> str | None:
     return None
 
 
+#: The section a docx-recovered value would have rendered in -- the only
+#: place `_recover_contact_fields_from_docx` writes to.
+_PERSONAL_DATA_SECTION_LABEL = "Personal Data"
+
+
+def _label_word_present(word: str, text: str, pii_fragments: list[str]) -> bool:
+    """Whether `word` (already lowercase) labels this entry -- read from
+    `text` AND from the pass's own pre-strip `pii_fragments`.
+
+    #821's home-address/phone policy row can consume the WHOLE entry text
+    (an entry whose sole content is "Home Address: 12 Elm St" has no other
+    delimiter for the label span to stop at), destroying the "home"/
+    "office" signal the phone/address classification below depends on
+    BEFORE it ever runs -- an entry whose `extracted_fields` value differs
+    from the raw text's own (stage 4 adding a city/state the label line
+    never had, `test_a_structured_address_naming_both_slots_fills_both_
+    rows`'s sibling test) then fails `_from_pii_fragment`'s containment
+    check too, so nothing upstream catches it either: `text` reads empty,
+    the address falls through the now-blind 'home' check to the OFFICE
+    catch-all, and a home address renders in the OFFICE cell -- worse than
+    the #442 drop this same file's docstring already calls out. The
+    fragments hold the ORIGINAL text `run_pii_pass` matched, exactly what
+    is needed to recover the signal."""
+    if word in text:
+        return True
+    return any(word in frag.lower() for frag in pii_fragments)
+
+
+def _withhold_home_contact(
+        withheld: list[WithheldItem], home_address: str | None,
+        home_phone: str | None) -> tuple[str | None, str | None]:
+    """(home_address, home_phone) with either withheld to None (#821),
+    recorded on `withheld` -- the SAME list the document-wide notice
+    paragraph and Word comment are built from.
+
+    Unconditional, not a re-check against a PII fragment: `home_address`
+    can already have arrived with no text label to match at all -- a
+    structured `address: {home_address: ..., office_address: ...}` dict is
+    routed by its own key names (`_labels_its_own_address_slots`), not by
+    reading the entry's text -- so the #821 policy row in `pii.py` (which
+    still closes the Appendix leak for a home-phone-only unconsumed
+    orphan, since the template has no home-phone row at all for it to
+    reach otherwise) cannot be the only guard on these two destinations.
+    `home_phone` never reaches a template cell either way -- this makes
+    that a recorded policy fact instead of an accident. Office
+    address/phone are unaffected; lifted out of `_fill_personal_data` as a
+    pure move (§3.2) so its own length does not carry this block.
+    """
+    if home_address:
+        withheld.append(
+            WithheldItem(CAT_HOME_CONTACT, _PERSONAL_DATA_SECTION_LABEL, None))
+        home_address = None
+    if home_phone:
+        withheld.append(
+            WithheldItem(CAT_HOME_CONTACT, _PERSONAL_DATA_SECTION_LABEL, None))
+        home_phone = None
+    return home_address, home_phone
+
+
+def _withhold_recovered(value: str | None, source_text: str,
+                        withheld: list[WithheldItem]) -> str | None:
+    """`value`, unless it was lifted out of a protected-data fragment of
+    `source_text` -- the docx row or paragraph it came from -- in which
+    case None, with the policy category recorded on `withheld`.
+
+    The SAME gate the entry path applies (`_from_pii_fragment`, via
+    `_pii_category_of`): #820's own "Related" note says the #550/#730
+    recovery must go through it, and it did not -- with `--source-dir`,
+    web198 rendered a `Birth Place:` line into the Office-address cell
+    because its source table's value cell WAS that line and this scan took
+    it verbatim (the doctor lint fired on both arms). Recorded, not just
+    dropped, so the notice and the Word comment name it.
+    """
+    if not value:
+        return value
+    category = _pii_category_of(value, source_text)
+    if category is None:
+        return value
+    withheld.append(WithheldItem(category, _PERSONAL_DATA_SECTION_LABEL, None))
+    return None
+
+
+def _withhold_recovered_lines(block: str | None, source_text: str,
+                              withheld: list[WithheldItem]) -> str | None:
+    """A multi-line recovered address with every protected line removed
+    (`_withhold_recovered` per line); None when nothing is left. The caller
+    tells a genuinely address-empty row apart from a fully-withheld one by
+    checking whether `withheld` grew, and stops trying further rows for this
+    slot in the latter case (#820 R3 finding 1)."""
+    if not block:
+        return block
+    kept = [line for line in block.split('\n')
+            if _withhold_recovered(line, source_text, withheld) is not None]
+    return '\n'.join(kept) or None
+
+
 class _RecoveredContact(NamedTuple):
     """What `_recover_contact_fields_from_docx` found, or was given (#550).
 
@@ -280,7 +389,15 @@ class PersonalDataSection:
             # Office address row renders "Cincinnati, Ohio" today, taken
             # straight from "PLACE OF BIRTH: Cincinnati, Ohio" by the address
             # catch-all below.
-            pii_fragments = _pii_fragments(entry.get('text', ''))
+            #
+            # Read from the #820 pre-render pass (`_pii_pass.py`), not
+            # recomputed here: by this point `entry['text']` has already had
+            # its PII fragments STRIPPED by that pass, so re-running
+            # `_pii_fragments` against it would find nothing. The pass
+            # stores what it found -- computed against the ORIGINAL text --
+            # on the entry precisely so this check can still answer "did
+            # this extracted_fields value come from a PII fragment?"
+            pii_fragments = entry.get('_pii_fragments', [])
 
             # Determine type based on original text labels
             extracted_phone = fields.get('phone')
@@ -305,7 +422,7 @@ class PersonalDataSection:
                 # Check if text contains multiple phone type labels
                 has_mobile = 'cell' in text or 'mobile' in text
                 has_work = 'office' in text or 'work' in text
-                has_home = 'home' in text
+                has_home = _label_word_present('home', text, pii_fragments)
 
                 if _labels_its_own_phone_slots(extracted_phone):
                     # A structured phone names its own halves, so trust those
@@ -366,7 +483,7 @@ class PersonalDataSection:
                         home_address = _address_cell_text(extracted_address, 'home')
                     if not office_address:
                         office_address = _address_cell_text(extracted_address, 'office')
-                elif 'home' in text:
+                elif _label_word_present('home', text, pii_fragments):
                     if not home_address:
                         home_address = _address_cell_text(extracted_address, 'home')
                 elif 'office' in text or 'work' in text or 'business' in text or not office_address:
@@ -417,7 +534,9 @@ class PersonalDataSection:
         if not work_email and all_entries:
             for entry in all_entries:
                 text = entry.get('text', '')
-                entry_pii_fragments = _pii_fragments(text)
+                # Read from the #820 pass, not recomputed -- see the
+                # per-entry loop above for why.
+                entry_pii_fragments = entry.get('_pii_fragments', [])
                 # Look for email pattern
                 email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', text)
                 if email_match and not _from_pii_fragment(email_match.group(0), entry_pii_fragments):
@@ -482,45 +601,63 @@ class PersonalDataSection:
             today = datetime.now().strftime("%B %-d, %Y")  # e.g., "February 1, 2026"
             run = para.add_run(f"Date of preparation: {today}")
             _set_font(run)
+        home_address, home_phone = _withhold_home_contact(self._pii_result.withheld, home_address, home_phone)  # #821
+        # Fill email, phone, and address in the PERSONAL DATA table (Table 1).
+        # Lifted out to `_write_personal_data_table_cells` (#820 R3, pure
+        # move -- §3.2) so this function's own length does not carry it.
+        self._write_personal_data_table_cells(
+            office_address, office_phone, work_email, home_address,
+            cell_phone, personal_email)
 
-        # Fill email, phone, and address in the PERSONAL DATA table (Table 1)
-        # Table 1 structure: Office address, Office telephone, Work email, Home address, Cell phone, Personal email
+    def _write_personal_data_table_cells(
+            self, office_address: str | None, office_phone: str | None,
+            work_email: str | None, home_address: str | None,
+            cell_phone: str | None, personal_email: str | None) -> None:
+        """Write the six contact slots into Table 1, once `_fill_personal_data`
+        has resolved every value (entries, then the docx recovery fallback).
+
+        Table 1 structure: Office address, Office telephone, Work email, Home
+        address, Cell phone, Personal email -- located by its "Work email:"
+        cell rather than by index. Split out of `_fill_personal_data` as a
+        PURE move (#820 R3, §3.2): identical body, no behaviour change.
+        """
         personal_data_table = self._find_table_with_cell_text("Work email:")
-        if personal_data_table is not None:
-            for row in personal_data_table.rows:
-                cell_text = row.cells[0].text.strip().lower()
+        if personal_data_table is None:
+            return
+        for row in personal_data_table.rows:
+            cell_text = row.cells[0].text.strip().lower()
 
-                # Office address
-                if office_address and 'office address' in cell_text:
-                    formatted_address = office_address.replace('\t', '\n').replace('; ', '\n').replace(';', '\n')
-                    _set_cell_text(row.cells[1], formatted_address)
-                    self.stats['entries_inserted'] += 1
+            # Office address
+            if office_address and 'office address' in cell_text:
+                formatted_address = office_address.replace('\t', '\n').replace('; ', '\n').replace(';', '\n')
+                _set_cell_text(row.cells[1], formatted_address)
+                self.stats['entries_inserted'] += 1
 
-                # Office telephone
-                if office_phone and 'office telephone' in cell_text:
-                    _set_cell_text(row.cells[1], office_phone)
-                    self.stats['entries_inserted'] += 1
+            # Office telephone
+            if office_phone and 'office telephone' in cell_text:
+                _set_cell_text(row.cells[1], office_phone)
+                self.stats['entries_inserted'] += 1
 
-                # Work email
-                if work_email and 'work email' in cell_text:
-                    _set_cell_text(row.cells[1], work_email)
-                    self.stats['entries_inserted'] += 1
+            # Work email
+            if work_email and 'work email' in cell_text:
+                _set_cell_text(row.cells[1], work_email)
+                self.stats['entries_inserted'] += 1
 
-                # Home address
-                if home_address and 'home address' in cell_text:
-                    formatted_address = home_address.replace('\t', '\n').replace('; ', '\n').replace(';', '\n')
-                    _set_cell_text(row.cells[1], formatted_address)
-                    self.stats['entries_inserted'] += 1
+            # Home address
+            if home_address and 'home address' in cell_text:
+                formatted_address = home_address.replace('\t', '\n').replace('; ', '\n').replace(';', '\n')
+                _set_cell_text(row.cells[1], formatted_address)
+                self.stats['entries_inserted'] += 1
 
-                # Cell phone
-                if cell_phone and 'cell phone' in cell_text:
-                    _set_cell_text(row.cells[1], cell_phone)
-                    self.stats['entries_inserted'] += 1
+            # Cell phone
+            if cell_phone and 'cell phone' in cell_text:
+                _set_cell_text(row.cells[1], cell_phone)
+                self.stats['entries_inserted'] += 1
 
-                # Personal email
-                if personal_email and 'personal email' in cell_text:
-                    _set_cell_text(row.cells[1], personal_email)
-                    self.stats['entries_inserted'] += 1
+            # Personal email
+            if personal_email and 'personal email' in cell_text:
+                _set_cell_text(row.cells[1], personal_email)
+                self.stats['entries_inserted'] += 1
 
     def _recover_contact_fields_from_docx(
             self, original_doc_path: str | None, document_uid: str,
@@ -580,7 +717,58 @@ class PersonalDataSection:
             )
             return given
 
-        # First check tables (common format: label in col 0, value in col 1).
+        # Every value this scan takes is gated by provenance against the
+        # docx line it came from and, when withheld, recorded on the pass
+        # result `generate()` holds -- the same list the notice and the
+        # Word comment are built from.
+        withheld = self._pii_result.withheld
+
+        # Table scan lifted out to `_recover_contact_fields_from_table_rows`
+        # (#820 R3, pure move -- §3.2): identical body, no behaviour change.
+        (name, name_is_complete, work_email, office_phone,
+         office_address) = self._recover_contact_fields_from_table_rows(
+            original_doc, name, name_is_complete, work_email,
+            office_phone, office_address, withheld)
+
+        # Also check paragraphs for email (if not found in tables). Every
+        # paragraph, not the first twenty: where the contact block sits is a
+        # layout property, not a paragraph count, and an email in paragraph 21
+        # used to be lost.
+        if not work_email:
+            for para in original_doc.paragraphs:
+                email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+',
+                                        para.text.strip())
+                if email_match:
+                    work_email = _withhold_recovered(
+                        email_match.group(0), para.text, withheld)
+                    if self.verbose and work_email:
+                        print(f"  Found email from paragraph: {work_email}")
+                    if work_email:
+                        break
+
+        return _RecoveredContact(name, name_is_complete, work_email,
+                                 office_phone, office_address)
+
+    def _recover_contact_fields_from_table_rows(
+            self, original_doc: _WordDocument, name: str | None, name_is_complete: bool,
+            work_email: str | None, office_phone: str | None,
+            office_address: str | None, withheld: list[WithheldItem]
+    ) -> tuple[str | None, bool, str | None, str | None, str | None]:
+        """The table-row half of `_recover_contact_fields_from_docx`'s scan
+        (common format: label in col 0, value in col 1) -- split out as a
+        PURE move (#820 R3, §3.2): identical body, no behaviour change. See
+        that method's docstring for the overall recovery contract.
+        """
+        # Set once an office_address-classified row's content was policy-
+        # withheld in full (#820 R3 finding 1): web198's first office_address
+        # row is a withheld birth-place line, and without this flag the
+        # `not office_address` guard below stays true and a LATER
+        # office_address-classified row (an unrelated "Email address:" line)
+        # fills the slot instead. Once this slot has been denied, it renders
+        # empty for the rest of the document rather than taking whatever
+        # office_address row comes next.
+        office_address_withheld = False
+
         # Every table, not the first three: which table holds the contact
         # block is a layout property of the CV, and a cover or education table
         # in front of it used to cost the whole block.
@@ -603,54 +791,62 @@ class PersonalDataSection:
                         break
                 value = value_cell.text.strip()
                 field = _classify_contact_label(label_cell.text)
+                # The row as one text, for the protected-data gate below:
+                # a value is denied by provenance against the fragments of
+                # the line it came from, exactly as the entry path does.
+                row_text = f"{label_cell.text}\t{value}"
 
                 # Extract name if not yet found (or only have last name)
                 if field == _FIELD_NAME and not name_is_complete:
                     if value and len(value) > 2:
-                        name = value
-                        name_is_complete = True
-                        if self.verbose:
-                            print(f"  Found name from table: {name}")
+                        recovered_name = _withhold_recovered(value, row_text, withheld)
+                        if recovered_name is not None:
+                            name = recovered_name
+                            name_is_complete = True
+                            if self.verbose:
+                                print(f"  Found name from table: {name}")
 
                 # Extract address if not yet found
                 # Note: Business address cells often contain embedded phone/fax/email
-                elif field == _FIELD_OFFICE_ADDRESS and not office_address:
+                elif (field == _FIELD_OFFICE_ADDRESS and not office_address
+                        and not office_address_withheld):
                     if value and len(value) > 5:
-                        office_address, office_phone, work_email = (
+                        block_address, block_phone, block_email = (
                             self._parse_address_block(
                                 value, office_phone, work_email))
+                        withheld_before = len(withheld)
+                        office_address = _withhold_recovered_lines(
+                            block_address, row_text, withheld)
+                        if not office_address and len(withheld) > withheld_before:
+                            # Every address line this row supplied was
+                            # policy-denied -- stop, don't let a later
+                            # office_address row fill the slot instead.
+                            office_address_withheld = True
+                        # Only a value the block itself supplied is gated:
+                        # one already classified from the A entries is not
+                        # this row's to withhold.
+                        if not office_phone:
+                            office_phone = _withhold_recovered(block_phone, row_text, withheld)
+                        if not work_email:
+                            work_email = _withhold_recovered(block_email, row_text, withheld)
 
                 # Extract phone if not yet found
                 elif field == _FIELD_OFFICE_PHONE and not office_phone:
                     if value and len(value) > 5:
-                        office_phone = value
-                        if self.verbose:
+                        office_phone = _withhold_recovered(value, row_text, withheld)
+                        if self.verbose and office_phone:
                             print(f"  Found phone from table: {office_phone}")
 
                 # Extract email if not yet found
                 elif field == _FIELD_WORK_EMAIL and not work_email:
                     email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+', value)
                     if email_match:
-                        work_email = email_match.group(0)
-                        if self.verbose:
+                        work_email = _withhold_recovered(
+                            email_match.group(0), row_text, withheld)
+                        if self.verbose and work_email:
                             print(f"  Found email from table: {work_email}")
 
-        # Also check paragraphs for email (if not found in tables). Every
-        # paragraph, not the first twenty: where the contact block sits is a
-        # layout property, not a paragraph count, and an email in paragraph 21
-        # used to be lost.
-        if not work_email:
-            for para in original_doc.paragraphs:
-                email_match = re.search(r'[\w.+-]+@[\w-]+\.[\w.-]+',
-                                        para.text.strip())
-                if email_match:
-                    work_email = email_match.group(0)
-                    if self.verbose:
-                        print(f"  Found email from paragraph: {work_email}")
-                    break
-
-        return _RecoveredContact(name, name_is_complete, work_email,
-                                 office_phone, office_address)
+        return name, name_is_complete, work_email, office_phone, office_address
 
     def _parse_address_block(
             self, value: str, office_phone: str | None,
