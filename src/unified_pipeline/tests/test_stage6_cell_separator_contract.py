@@ -44,10 +44,12 @@ from unified_pipeline.stage6.sections.passthrough import (  # noqa: E402
 _PACKAGE = _SRC / "unified_pipeline"
 
 # Every call site, as (module path under `src/unified_pipeline`, enclosing
-# function) -> what that caller has already decided before calling. Six, and
-# not one contract: a table-backed section reaches this function only on a
-# fallback, while teaching, N4, S0 and the appendix have no table in the WCM
-# template at all, so a row-shaped record arrives there by construction.
+# function) -> what that caller has already decided before calling. Eight,
+# and not one contract: a table-backed section reaches this function only on
+# a fallback, while teaching, N1, N2 (sparse), N4, S0 and the appendix have
+# no table in the WCM template at all -- or, for N2, only a table the entry
+# itself was too sparse to fill -- so a row-shaped record arrives there by
+# construction.
 _CALL_SITES = {
     ("stage_6_word_template.py", "_insert_bulleted_entry"):
         "shared bullet helper -- its own callers are pinned by "
@@ -64,6 +66,14 @@ _CALL_SITES = {
     ("stage6/sections/mentoring.py", "_insert_mentoring_summaries"):
         "N3A/N3B are what _is_mentee_record rejected; N4 is unscreened, "
         "the template having no N4 table to screen against",
+    ("stage6/sections/mentoring.py", "_fill_program_leadership"):
+        "N1: a field-composed description line, or -- when role/"
+        "program_name/institution/dates are all empty -- the entry's raw "
+        "text, the same fallback shape N3A/N3B summaries use (#529)",
+    ("stage6/sections/mentoring.py", "_fill_training_grants"):
+        "N2: a sparse entry (no title, agency or grant number -- nothing a "
+        "table would show) falls back to its raw text, same shape as "
+        "_insert_mentoring_summaries (#529)",
     ("stage6/sections/researcher_profiles.py", "_fill_researcher_profiles"):
         "S0 identifier lines; the template has no heading or table for them",
 }

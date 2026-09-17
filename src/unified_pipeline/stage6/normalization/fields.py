@@ -24,8 +24,13 @@ from typing import Literal
 
 
 # Keys observed carrying the committee's name in a structured stage-4
-# `committee` value, in the order they are tried.
-_COMMITTEE_NAME_KEYS = ('committee_name', 'committee', 'activity', 'name', 'title')
+# `committee` value, in the order they are tried. 'journal' was added for
+# #812 (service.py's `journal_name` field arriving as a list of
+# {"name"/"journal": ..., "start_date": ..., "end_date": ...} dicts) --
+# 'name' already covered the shape actually observed on web204, but a
+# vocabulary this unbounded (see module docstring) is safer to widen now
+# than to wait for a second real CV that spells it 'journal' instead.
+_COMMITTEE_NAME_KEYS = ('committee_name', 'committee', 'activity', 'name', 'journal', 'title')
 
 
 def _committee_cell_text(value: object) -> str:
@@ -53,6 +58,13 @@ def _committee_cell_text(value: object) -> str:
     if isinstance(value, list):
         return "; ".join(t for t in (_committee_cell_text(v) for v in value) if t)
     return str(value)
+
+
+# One-line re-export (#812, §1.5: an alias, not a second implementation) for
+# call sites where "committee" would mislead -- `service.py` coerces `role`,
+# `organization`, `dates` and other non-committee fields through this same
+# function and reads oddly naming a committee helper at each of them.
+_cell_text = _committee_cell_text
 
 
 # Keys observed in structured stage-4 `address` values on the 2026-07-25 corpus:
