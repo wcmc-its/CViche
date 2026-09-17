@@ -16,9 +16,6 @@ own import-time config load, which is expected and not asserted on.
 
 Untestable without network/real corpus: none in this scope -- every function
 here is pure Python/XML manipulation over paragraph and hierarchy dicts.
-
-One suspected source bug is pinned as a strict xfail rather than fixed --
-see test_rescue_locked_headers_bug_document_title_with_trailing_punctuation_not_excluded.
 """
 
 import sys
@@ -931,17 +928,6 @@ def test_rescue_locked_headers_length_boundary_exactly_100_chars_still_rescued()
     assert para["is_rescued_locked_header"] is True
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "suspected bug (#857): rescue_locked_headers' EXCLUDED_HEADERS check compares "
-        "text.strip().lower() with no trailing-punctuation stripping, while the "
-        "matches_locked_header flag it trusts was computed after stripping "
-        "trailing ':;.' -- so 'Curriculum Vitae:' matches the locked-header set "
-        "upstream but escapes the document-title exclusion here and gets "
-        "wrongly promoted to H1."
-    ),
-)
 def test_rescue_locked_headers_bug_document_title_with_trailing_punctuation_not_excluded():
     doc = Document()
     p = doc.add_paragraph("Curriculum Vitae:")
@@ -955,6 +941,20 @@ def test_rescue_locked_headers_bug_document_title_with_trailing_punctuation_not_
     sbs.rescue_locked_headers(signature_groups, classifications)
 
     assert "classification" not in sig  # correct behaviour: document titles must never be rescued
+
+
+def test_rescue_locked_headers_tolerates_none_or_blank_text():
+    # A flagged paragraph with text=None or all-whitespace text must not
+    # crash on `.strip()`/`.lower()` and must never be promoted to a header.
+    groups_none, classifications_none, para_none = _rescue_group("placeholder", level="NOT_HEADER", matches_locked=True)
+    para_none["text"] = None
+    groups_blank, classifications_blank, para_blank = _rescue_group("  ", level="NOT_HEADER", matches_locked=True)
+
+    sbs.rescue_locked_headers(groups_none, classifications_none)
+    sbs.rescue_locked_headers(groups_blank, classifications_blank)
+
+    assert "classification" not in para_none
+    assert "classification" not in para_blank
 
 
 # ---------------------------------------------------------------------------

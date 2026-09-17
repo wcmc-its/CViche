@@ -796,8 +796,10 @@ def rescue_locked_headers(signature_groups: dict, classifications: dict) -> dict
         for para in group_paras:
             # Check if this paragraph was flagged as matching a known header
             if para.get('text_metadata', {}).get('matches_locked_header', False):
-                text = para['text'].strip()
-                text_lower = text.lower()
+                text = (para.get('text') or '').strip()
+                if not text:
+                    continue
+                text_lower = text.lower().rstrip(':;.')
 
                 # Skip document titles (not section headers)
                 if text_lower in EXCLUDED_HEADERS:
