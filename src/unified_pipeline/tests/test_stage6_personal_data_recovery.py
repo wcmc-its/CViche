@@ -36,6 +36,7 @@ from pathlib import Path
 
 import pytest
 from docx import Document
+from docx.oxml.ns import qn
 
 _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
@@ -64,6 +65,23 @@ W_T = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}t"
 def _all_text(docx_path) -> str:
     doc = Document(str(docx_path))
     return "\n".join(n.text or "" for n in doc.element.body.iter(W_T))
+
+
+def _list_item_texts(docx_path) -> set[str]:
+    """Every paragraph's text (raw w:t join, matching `_paragraph_texts`)
+    for paragraphs that carry `w:numPr` -- i.e. render as a real Word list
+    item rather than a literal bullet glyph. `_add_remaining_to_appendix`
+    switched from `f"• {text}"` to `_apply_list_bullet` (#864), so an
+    appendix residual's paragraph text no longer starts with the glyph; the
+    list membership is asserted through the numbering property instead."""
+    doc = Document(str(docx_path))
+    out = set()
+    for para in doc.paragraphs:
+        pPr = para._p.pPr
+        numPr = pPr.find(qn("w:numPr")) if pPr is not None else None
+        if numPr is not None:
+            out.add("".join(n.text or "" for n in para._p.iter(W_T)))
+    return out
 
 
 def _render(tmp_path, entries, cv_owner=None, **generator_kwargs) -> str:
@@ -381,14 +399,16 @@ def test_appendix_residual_renders_exactly_the_kept_fragment(tmp_path: Path) -> 
     US"`); `_strip_dangling_separators` trims it. A substring assertion
     ("Citizenship: US" in text) passes either way and left that trim
     untested on the wire -- this one fails the moment the residual renders
-    with its leading separator."""
+    with its leading separator. The appendix bullet is a real Word list
+    item (#864), not a literal glyph, so the equality check is against
+    `_list_item_texts`, not a "\u2022 " prefix."""
     _render(tmp_path, [
         _a("Home Phone: 555-123-4567; Citizenship: US"),
     ])
-    paragraphs = _paragraph_texts(tmp_path / "out.docx")
-    assert "\u2022 Citizenship: US" in paragraphs, (
-        "the residual did not render as a clean appendix bullet: "
-        f"{[x for x in paragraphs if 'Citizenship' in x]}"
+    list_items = _list_item_texts(tmp_path / "out.docx")
+    assert "Citizenship: US" in list_items, (
+        "the residual did not render as a clean appendix list item: "
+        f"{[x for x in _paragraph_texts(tmp_path / 'out.docx') if 'Citizenship' in x]}"
     )
 
 
@@ -884,7 +904,10 @@ def test_a_bare_label_cut_stops_only_at_a_known_field_label(
     left behind", which a substring assertion cannot make. `survives` is
     what must reach the rendered document (None: nothing from this entry
     may), and `forbidden` is every value token that must not, read from
-    the whole document rather than from one paragraph."""
+    the whole document rather than from one paragraph. A leading "• "
+    on `survives` is a case-list sentinel meaning "must render as the
+    appendix's Word list item", not a literal glyph (#864) -- checked via
+    `_list_item_texts`, not a text-prefix match."""
     entry = {"text": text, "taxonomy_code": "A", "extracted_fields": {}}
     run_pii_pass({"A": [entry]}, routed_codes=RENDER_ROUTED_CODES,
                  section_names=TAXONOMY_TO_SECTION)
@@ -897,8 +920,9 @@ def test_a_bare_label_cut_stops_only_at_a_known_field_label(
     if survives is None:
         assert "Citizenship: US" not in rendered
     elif survives.startswith("•"):
-        assert survives in _paragraph_texts(tmp_path / "out.docx"), (
-            "the residual did not render as exactly that appendix bullet: "
+        expected_item = survives[len("• "):]
+        assert expected_item in _list_item_texts(tmp_path / "out.docx"), (
+            "the residual did not render as exactly that appendix list item: "
             f"{[p for p in _paragraph_texts(tmp_path / 'out.docx') if p.strip()][-6:]}")
     else:
         assert survives in rendered, "the sibling field did not reach the document"
