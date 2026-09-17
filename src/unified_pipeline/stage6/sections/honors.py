@@ -14,6 +14,9 @@ is testable on strings alone.
 
     _entry_parts                    the entry's parts: newlines always, '|'
                                     for the newline-blind single-line case
+    _merge_first_cell_continuation  folds a 3-column row's second-paragraph
+                                    award cell back into one line before
+                                    _entry_parts sees it (#828)
     _is_honors_header_entry         whether the whole entry is the source
                                     CV's own column-header row
     _parse_honor_lines              one pass over those parts, sorting them
@@ -157,10 +160,28 @@ _MONTH_TAIL_RE = re.compile(r'[\s,]*' + _MONTH_NAME + r'$', re.IGNORECASE)
 # this whole PART a bare year, i.e. its own record separator?): a date cell
 # that stage 2 lifted out of a source table can carry the month or a slash
 # form the source wrote, and "Award | Organization | August 2025" is the same
-# three-column line as "Award | Organization | 2025".
+# three-column line as "Award | Organization | 2025". The template column
+# says "Date awarded (yyyy)" but a WCM-template CV writes the full date it
+# actually has -- "10/30/2017", "30 October 2017", "October 30, 2017" -- so
+# those three shapes are accepted alongside the bare-year and month-year ones
+# above (#828); a 3-column award row with a full-date cell used to have no
+# recognised date column at all and split into three rows. A fourth shape,
+# a two-digit year ("10/30/17"), was added in review round 3 (#828) after
+# the same incident's own farm entry showed it; a bare "dd/dd/dd" is
+# ambiguous on its own (day or year first? which two digits are the year?),
+# so the alternative requires its FIRST component to be a plausible month
+# (1-12) before it will match at all -- "12/34" (no third component) and
+# "13/45/17" (first component > 12) are both left unmatched rather than
+# guessed at.
 _DATE_COLUMN_RE = re.compile(
-    r'^(?:' + _MONTH_NAME + r'\s+)?(?:\d{1,2}/)?(?:19|20)\d{2}'
-    r'(?:\s*[-–]\s*(?:(?:19|20)\d{2}|present))?$', re.IGNORECASE)
+    r'^(?:'
+    r'(?:' + _MONTH_NAME + r'\s+)?(?:\d{1,2}/)?(?:19|20)\d{2}'
+    r'(?:\s*[-–]\s*(?:(?:19|20)\d{2}|present))?'
+    r'|\d{1,2}/\d{1,2}/(?:19|20)\d{2}'                     # mm/dd/yyyy
+    r'|\d{1,2}\s+' + _MONTH_NAME + r'\s+(?:19|20)\d{2}'    # d Month yyyy
+    r'|' + _MONTH_NAME + r'\s+\d{1,2},?\s+(?:19|20)\d{2}'  # Month d, yyyy
+    r'|(?:0?[1-9]|1[0-2])/\d{1,2}/\d{2}'                   # mm/dd/yy
+    r')$', re.IGNORECASE)
 
 # Words that are part of award descriptions, not organization names.
 _ORG_STOP_WORDS = frozenset([
@@ -246,7 +267,19 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
 
     A genuinely multi-line entry (entry_lines already returns >1 part) is
     returned UNCHANGED -- its existing per-part tab/pipe handling below stays
-    exactly as today. Reading the farm's changed uids proved this matters:
+    exactly as today, with ONE narrow exception routed through
+    `_merge_first_cell_continuation` first (#828 review round 3): the
+    extractor joins a cell's own paragraphs with '\\n' *inside* the cell and
+    then joins the row's cells with ' | ', so a parenthetical second
+    paragraph under the award name arrives as line 0 = the plain award title
+    (no '|' of its own) and line 1 = "(description) | organization | date"
+    -- the row's remaining two columns, with the continuation text still
+    attached to the first of them. Read as two lines by `entry_lines` alone,
+    that looks exactly like a second, genuinely separate award. It is only
+    folded back into one line when line 1 is a recognised 3-column row (via
+    `_honor_columns`) with its own organization AND date -- see that
+    function for the full guard. Reading the farm's changed uids proved the
+    general UNCHANGED rule matters:
     2054_Opresko_Cv's "1994 | American Chemical Society Award,\\nLehigh Valley
     Chapter of ACS" already has 2 lines by newline alone, and additionally
     splitting line 0's '|' collides with the existing (separate, pre-existing)
@@ -305,8 +338,24 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     effect: `_fill_honors` emits zero rows for that text on this branch and on
     origin/dev alike. Nothing in the farm has that shape and inventing a third
     rule for it would be untested.
+
+    A part is claimed -- filtered out of `awards` below -- only by string
+    equality with an extracted column value (#828 review round 2): an
+    earlier revision additionally claimed a part when it named the same
+    calendar date as stage 4's ISO `date` by PARSED value, so "10/30/2017"
+    in the text would claim "2017-10-30" from stage 4 even though the
+    strings differ. That comparison turned out to be dead: every full-date
+    cell shape the parsed comparison could recognise ("10/30/2017", "30
+    October 2017", "October 30, 2017", "October 30 2017") is *already*
+    matched by `_is_date_column`'s widened regex (#828) before this filter
+    ever runs, and the one shape the regex does not name -- the cell written
+    in stage 4's own ISO form -- never occurs in a source CV's own text (a
+    human writes a date one of the four ways above, never "2017-10-30").
+    Deleting the comparison left all 80 honors tests green (verified before
+    removal, not merely asserted); reintroduce it only against a wire test
+    proving a reachable input it alone catches.
     """
-    lines = entry_lines(text)
+    lines = _merge_first_cell_continuation(entry_lines(text))
     if len(lines) != 1 or '\t' in lines[0]:
         return lines
     parts = [p.strip() for p in lines[0].split('|') if p.strip()]
@@ -319,6 +368,64 @@ def _entry_parts(text: str, column_values: Sequence[str] = ()) -> list[str]:
     if dates and len(dates) != len(awards):
         return lines
     return parts
+
+
+def _merge_first_cell_continuation(lines: Sequence[str]) -> list[str]:
+    """A second paragraph in a 3-column row's first cell, read back as a
+    continuation of the award name rather than a second award (#828 review
+    round 3).
+
+    The extractor joins a cell's own paragraphs with '\\n' *inside* the cell,
+    then joins the row's cells with ' | ' (`core/docx_structure_extractor.py`).
+    So "Award Name" + "(description)" as the first cell's two paragraphs, next
+    to an organization and a date cell, arrives as exactly two `entry_lines`
+    lines: line 0 = "Award Name" (the award title alone, no '|' of its own)
+    and line 1 = "(description) | Organization | 10/30/2017" -- the row's
+    remaining two columns, with the continuation paragraph still attached to
+    the front of the first one. Read as two lines with nothing to say
+    otherwise, that looks exactly like "Award Name" followed by a genuinely
+    separate award.
+
+    Only the narrow shape that says otherwise qualifies: exactly two lines,
+    the first carrying no tab or '|' of its own (a plain title, not already a
+    multi-column line), the second carrying no tab, not itself a bare year or
+    the source table's fused header row, and a recognised 3-column row
+    (`_honor_columns`) with its own organization AND date. Two real award
+    lines, a first line that is already column-structured, or a second line
+    that fails any of those checks, are returned unchanged and fall through
+    to `_parse_honor_lines` exactly as before.
+
+    The three guard conditions are computed up front, named, then combined
+    into one early return (#828 review round 4): whether `second` is a bare
+    year or the source table's fused header row (`is_year_or_header`), and
+    whether it fails to parse as a proper 3-column row with its own
+    organization AND date (`is_invalid_column_shape`). `_honor_columns` now
+    runs before the tab check rather than after -- all three are pure
+    (`_honor_columns` and `_looks_like_column_header` only split/lower/regex
+    the string; neither has a side effect or a code path that raises on a
+    tab-containing, bare-year, or header-shaped `second`), so reordering
+    their evaluation cannot change which lines return early. `is_year_or_header`
+    is guaranteed redundant with `is_invalid_column_shape` for a bare year
+    specifically -- `_YEAR_ONLY_RE` requires the whole line to be nothing but
+    a year, and a pipe-free line can never satisfy `_honor_columns`'s 2- or
+    3-cell shape either way -- but NOT for the fused-header case: "Name of
+    Award | Organization | 10/30/2017" has its own org and date cells and
+    would otherwise merge as if it were a real continuation row, which
+    `_looks_like_column_header` alone catches (proved in the test suite: the
+    bare-year guard's own mutant survives on the `columns is None` fallback,
+    the header guard's does not).
+    """
+    if len(lines) != 2 or '\t' in lines[0] or '|' in lines[0]:
+        return list(lines)
+    first, second = lines
+    is_year_or_header = bool(_YEAR_ONLY_RE.match(second)) or _looks_like_column_header(second)
+    columns = _honor_columns(second)
+    is_invalid_column_shape = columns is None or not columns.organization or not columns.date
+    if '\t' in second or is_year_or_header or is_invalid_column_shape:
+        return list(lines)
+    parts = [p.strip() for p in second.split('|') if p.strip()]
+    parts[0] = f"{first} {parts[0]}".strip()
+    return [' | '.join(parts)]
 
 
 def _field_text(fields: Mapping, *names: str) -> str:

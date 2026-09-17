@@ -411,7 +411,7 @@ def _stub_extract_fields(monkeypatch, captured: dict | None = None) -> None:
     """Stub the name process_cv actually calls: its own module's global
     binding, not unified_pipeline.stage4.extraction (the #496 lesson)."""
 
-    def fake(valid_entries, batch_size=10, document_uid="", cancel_check=None):
+    def fake(valid_entries, batch_size=10, document_uid="", cancel_check=None, docx_path=None):
         if captured is not None:
             captured["batch_size"] = batch_size
             captured["document_uid"] = document_uid

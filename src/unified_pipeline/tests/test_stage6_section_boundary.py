@@ -335,3 +335,38 @@ def test_lint_stage6_warnings_unknown_severity_falls_back_to_warn():
     report = {"warnings": [{"message": "x", "severity": "CATASTROPHIC"}]}
     findings = lint_stage6_warnings(report)
     assert findings[0]["severity"] == "WARN"
+
+
+def test_appendix_failure_with_recovered_codes_still_writes_the_document(tmp_path, caplog):
+    """#531 on top of #565: when `_fill_appendix` raises, `_render_section`
+    returns None, and the diversion-warning builder is later handed the list of
+    written appendix entries together with the codes `_recover_unrendered_records`
+    reported. Without the `or []` on that return the builder iterates None and
+    the run dies AFTER the docx was saved -- an isolated appendix failure turned
+    back into a failed run. Pins: document written, exactly one
+    `section_render_failed` for the appendix, no appendix_diversion record
+    derived from a None `written`."""
+    gen = _new_generator()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("appendix boom")
+
+    gen._fill_appendix = _boom
+    gen._recover_unrendered_records = lambda *_a, **_k: ["T"]
+
+    entries = [
+        _personal_data_entry(),
+        {"text": "Unmapped content that would go to the appendix",
+         "taxonomy_code": "T", "extracted_fields": {}, "element_idx_start": 5},
+    ]
+    with caplog.at_level(logging.ERROR):
+        op = _render(gen, tmp_path, entries)
+
+    assert op.exists(), "an appendix raise must not cost the document"
+    sidecar = _sidecar(tmp_path)
+    failures = [w for w in sidecar["warnings"] if w["check"] == "section_render_failed"]
+    assert [f["section"] for f in failures] == ["appendix"]
+    diversions = [(w["code"], w["reason"]) for w in sidecar["warnings"]
+                  if w["check"] == "appendix_diversion"]
+    assert diversions == [("T", "recovered_unrendered")], \
+        "only the recovered code is reported; nothing is derived from the failed appendix"

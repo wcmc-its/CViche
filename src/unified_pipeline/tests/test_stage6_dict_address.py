@@ -28,6 +28,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.normalization.pii import CAT_HOME_CONTACT  # noqa: E402
 from unified_pipeline.stage_6_word_template import (  # noqa: E402
     WCMTemplateGenerator,
     _address_cell_text,
@@ -121,11 +122,15 @@ def test_every_return_is_a_string_so_the_render_sites_cannot_raise():
 
 
 def _render(tmp_path, entries):
-    """Render and return (full text, {contact label: cell value}).
+    """Render and return (full text, {contact label: cell value}, generator).
 
     The per-label mapping matters: asserting only that an address appears
     *somewhere* leaves the home/office wiring untested, and a swap of the two
-    is an objectively wrong document that no blob assertion can see."""
+    is an objectively wrong document that no blob assertion can see. The
+    generator is returned too so a #821 home-address test can check
+    `gen._pii_result.withheld` -- the home slot renders empty either way it
+    is routed wrong, so the withheld list is what still tells "correctly
+    routed to home, then withheld" apart from "never routed at all"."""
     gen = WCMTemplateGenerator(verbose=False)
     # Neutralize the LLM-driven appendix-reconsider pass: keeps the render
     # deterministic and credential-free.
@@ -143,11 +148,16 @@ def _render(tmp_path, entries):
             parts += cells
             if len(cells) >= 2 and cells[0].strip().endswith(':'):
                 contact.setdefault(cells[0].strip(), cells[1].strip())
-    return "\n".join(parts), contact
+    return "\n".join(parts), contact, gen
 
 
 def test_dict_address_still_produces_a_document(tmp_path):
-    """The actual #442 symptom: the render aborted and nothing was written."""
+    """The actual #442 symptom: the render aborted and nothing was written.
+
+    #821: the home half is withheld with notice, so it no longer lands in
+    the home CELL -- `gen._pii_result.withheld` is what still proves it was
+    routed there correctly (not dropped, not misrouted to office) before
+    being withheld."""
     entries = [
         {"text": "Home:  Office Address:\t508 Howe Road\t1701 N. 13th Street",
          "taxonomy_code": "A", "element_idx_start": 0,
@@ -160,17 +170,26 @@ def test_dict_address_still_produces_a_document(tmp_path):
          "taxonomy_code": "C", "element_idx_start": 5,
          "extracted_fields": {"title": f"{SURVIVES} Professor of Medicine"}},
     ]
-    text, contact = _render(tmp_path, entries)
+    text, contact, gen = _render(tmp_path, entries)
     assert SURVIVES in text, "whole document was lost — the #442 crash"
-    # Each half must land in its OWN cell, not merely somewhere in the document.
-    assert contact.get("Home address:") == "508 Howe Road, Merion, PA 19066"
+    # The office half still lands in its own cell, untouched by #821; the
+    # home half is withheld rather than landing in ITS cell or, worse,
+    # bleeding into the office one.
+    assert contact.get("Home address:", "") == ""
     assert contact.get("Office address:") == "1701 N. 13th Street, Philadelphia PA 19122"
+    assert "508 Howe Road" not in text, "a withheld home address reached the document"
     assert "home_address" not in text, "the dict repr leaked into the document"
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
 
 
 def test_unlabelled_dict_is_routed_by_the_entry_text_not_forced_to_office(tmp_path):
     """A dict that names no slot must obey the entry's own Home/Office label.
-    Putting a home address in the office row is worse than the old drop."""
+    Putting a home address in the office row is worse than the old drop.
+
+    #821: the routed-to-home value is now withheld rather than rendered, so
+    the home cell is empty either way it was routed -- `gen._pii_result.
+    withheld` is what still proves it reached the home slot (and was
+    withheld there) rather than never being routed, or landing in office."""
     entries = [
         {"text": "Home Address:\t12 Elm St, Rye, NY 10580", "taxonomy_code": "A",
          "element_idx_start": 0,
@@ -178,12 +197,11 @@ def test_unlabelled_dict_is_routed_by_the_entry_text_not_forced_to_office(tmp_pa
                               "address": {"street": "12 Elm St", "city": "Rye",
                                           "state": "NY 10580"}}},
     ]
-    _, contact = _render(tmp_path, entries)
-    # The render site turns the '; ' join into line breaks, as it does for any
-    # multi-part address — that is pre-existing behaviour, not part of this fix.
-    assert contact.get("Home address:") == "12 Elm St\nRye\nNY 10580"
+    _, contact, gen = _render(tmp_path, entries)
+    assert contact.get("Home address:", "") == ""
     assert not contact.get("Office address:"), \
         "a home-labelled address was rendered into the office row"
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
 
 
 def test_string_address_lands_in_the_same_cell_as_before(tmp_path):
@@ -193,21 +211,26 @@ def test_string_address_lands_in_the_same_cell_as_before(tmp_path):
          "extracted_fields": {"name": "Jane Q. Public, MD",
                               "address": "1300 York Ave, New York, NY 10065"}},
     ]
-    _, contact = _render(tmp_path, entries)
+    _, contact, _gen = _render(tmp_path, entries)
     assert contact.get("Office address:") == "1300 York Ave, New York, NY 10065"
     assert not contact.get("Home address:")
 
 
 def test_home_labelled_string_still_lands_in_the_home_cell(tmp_path):
+    """#821: a home-labelled string address is still routed to the home
+    slot (not office), it is just withheld once it gets there rather than
+    rendered -- `gen._pii_result.withheld` is what distinguishes that from
+    never being routed at all."""
     entries = [
         {"text": "Home Address: 12 Elm St", "taxonomy_code": "A",
          "element_idx_start": 0,
          "extracted_fields": {"name": "Jane Q. Public, MD",
                               "address": "12 Elm St, Rye, NY 10580"}},
     ]
-    _, contact = _render(tmp_path, entries)
-    assert contact.get("Home address:") == "12 Elm St, Rye, NY 10580"
+    _, contact, gen = _render(tmp_path, entries)
+    assert contact.get("Home address:", "") == ""
     assert not contact.get("Office address:")
+    assert any(item.category == CAT_HOME_CONTACT for item in gen._pii_result.withheld)
 
 
 if __name__ == "__main__":

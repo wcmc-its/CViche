@@ -267,7 +267,7 @@ def test_location_inference_sees_extracted_fields(monkeypatch):
 
     monkeypatch.setattr(s4, 'extract_fields_batch', fake_batch)
     monkeypatch.setattr(s4, 'infer_cv_owner_location', fake_infer)
-    monkeypatch.setattr(s4, 'extract_cv_owner_name', lambda uid, entries: {'last_name': ''})
+    monkeypatch.setattr(s4, 'extract_cv_owner_name', lambda uid, entries, **kwargs: {'last_name': ''})
 
     s4.extract_fields_from_mapped_entries(mapped, document_uid='TEST')
 

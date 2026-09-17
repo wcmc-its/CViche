@@ -291,10 +291,12 @@ def test_raw_text_genuine_npi_still_classifies():
     assert kind == KIND_NPI
 
 
-def test_resolve_licensure_raw_text_dea_and_npi_reach_identifiers():
+def test_resolve_licensure_raw_text_dea_is_withheld_npi_reaches_identifiers():
     """Same positive controls, once more through `_resolve_licensure` with
     dict entries -- the label sources feed classification the same way
-    whether reached from a unit-level string or a full raw entry dict."""
+    whether reached from a unit-level string or a full raw entry dict. The
+    NPI (public) still reaches `identifiers.npi`; the DEA (#821: withheld)
+    never reaches `identifiers.dea` -- `dea_withheld` records it instead."""
     entries = [
         {"text": "DEA AB1234567",
          "extracted_fields": {"license_number": "AB1234567", "date": "2019"}},
@@ -302,7 +304,8 @@ def test_resolve_licensure_raw_text_dea_and_npi_reach_identifiers():
          "extracted_fields": {"license_number": "1234567890", "date": "2020"}},
     ]
     result = _resolve_licensure(entries)
-    assert result.identifiers.dea == "AB1234567"
+    assert result.identifiers.dea is None
+    assert result.dea_withheld is True
     assert result.identifiers.npi == "1234567890"
     assert result.licenses == ()
 
@@ -431,5 +434,6 @@ def test_resolve_licensure_dea_npi_and_state_license_are_routed_correctly():
     assert len(result.licenses) == 1
     assert result.licenses[0].state == "New York"
     assert result.licenses[0].number == "987654"
-    assert result.identifiers.dea == "AB1234567"
+    assert result.identifiers.dea is None
+    assert result.dea_withheld is True
     assert result.identifiers.npi == "1234567890"
