@@ -36,6 +36,7 @@ python-docx does not produce.
 """
 
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -512,8 +513,9 @@ def test_process_cv_threads_cancel_check_through_to_extraction(tmp_path, monkeyp
     assert captured["cancel_check"] is sentinel_cancel
 
 
-def test_run_validation_skips_quietly_when_the_validator_script_is_absent(tmp_path, monkeypatch, capsys):
+def test_run_validation_skips_quietly_when_the_validator_script_is_absent(tmp_path, monkeypatch, caplog):
     _rebind_module_file(monkeypatch, tmp_path, depth=2)
+    caplog.set_level(logging.INFO)
 
     def fail_if_called(args, capture_output=False, text=True):
         raise AssertionError(
@@ -530,7 +532,7 @@ def test_run_validation_skips_quietly_when_the_validator_script_is_absent(tmp_pa
     # through into the try/subprocess.run block and this test fails.
     stage4_facade.run_validation(str(tmp_path / "out.json"))
 
-    out = capsys.readouterr().out
+    out = caplog.text  # #875: run_validation logs, it no longer prints
     assert "Skipping validation" in out
     assert "Running Validation" not in out
 
@@ -560,8 +562,9 @@ def test_run_validation_invokes_the_validator_with_the_output_path(tmp_path, mon
     assert calls[0][2] == out_path
 
 
-def test_run_validation_survives_a_nonzero_validator_exit(tmp_path, monkeypatch, capsys):
+def test_run_validation_survives_a_nonzero_validator_exit(tmp_path, monkeypatch, caplog):
     _rebind_module_file(monkeypatch, tmp_path, depth=2)
+    caplog.set_level(logging.INFO)
     (tmp_path / "validate_stage4_extraction.py").write_text("# stub\n")
 
     def fake_run(args, capture_output=False, text=True):
@@ -572,13 +575,14 @@ def test_run_validation_survives_a_nonzero_validator_exit(tmp_path, monkeypatch,
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     stage4_facade.run_validation(str(tmp_path / "out.json"))  # must not raise
-    out = capsys.readouterr().out
+    out = caplog.text  # #875: run_validation logs, it no longer prints
     assert "Validation completed with warnings" in out
     assert "Validation error" not in out
 
 
-def test_run_validation_survives_a_subprocess_exception(tmp_path, monkeypatch, capsys):
+def test_run_validation_survives_a_subprocess_exception(tmp_path, monkeypatch, caplog):
     _rebind_module_file(monkeypatch, tmp_path, depth=2)
+    caplog.set_level(logging.INFO)
     (tmp_path / "validate_stage4_extraction.py").write_text("# stub\n")
 
     def fake_run(args, capture_output=False, text=True):
@@ -586,6 +590,6 @@ def test_run_validation_survives_a_subprocess_exception(tmp_path, monkeypatch, c
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     stage4_facade.run_validation(str(tmp_path / "out.json"))  # caught, must not raise
-    out = capsys.readouterr().out
+    out = caplog.text  # #875: run_validation logs, it no longer prints
     assert "Validation error: boom" in out
     assert "Extraction still successful" in out
