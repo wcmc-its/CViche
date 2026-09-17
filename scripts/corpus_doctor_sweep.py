@@ -460,7 +460,20 @@ def aggregate(reports: dict[str, DoctorReport]) -> list[LintRow]:
             warn[lint] += 1
         for lint in seen_err:
             error[lint] += 1
+        # no_output (#745, round-2 N5) is dispatched by hand on artifact PATHS,
+        # not `_ready()`-checked content -- run_doctor.py emits NOTHING for it
+        # at all (not even a skip note) on a rep that never reached stage 4,
+        # so it never lands in `skipped` above and the generic rule below would
+        # count it as "ran" on every incomplete run in the corpus, including
+        # one that never got anywhere near stage 6. Its actual precondition is
+        # "stage 4 produced something", which the rep's own `artifacts.stage_4`
+        # already answers -- read that instead of inventing a second `_ready()`.
+        stage4_ran = bool((rep.get("artifacts") or {}).get("stage_4"))
+        if stage4_ran:
+            ran["no_output"] += 1
         for lint in ALL_LINTS:
+            if lint == "no_output":
+                continue
             if lint not in skipped:
                 ran[lint] += 1
     # warn[] already counts every rep with a WARN-or-ERROR finding; error[] is a

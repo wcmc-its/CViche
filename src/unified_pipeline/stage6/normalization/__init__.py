@@ -81,6 +81,7 @@ from .fields import (  # noqa: F401
     _HOME_ADDRESS_KEYS,
     _OFFICE_ADDRESS_KEYS,
     _address_cell_text,
+    _cell_text,
     _committee_cell_text,
     _labels_its_own_address_slots,
 )

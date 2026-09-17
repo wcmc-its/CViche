@@ -161,7 +161,7 @@ class TestEmptyUploadRejection:
         _auth_cookie(client, user)
         content = _docx_bytes("Hi")  # far below the 500-char floor
 
-        resp = client.post("/api/upload", files={"file": ("cv.docx", content, DOCX_MIME)})
+        resp = client.post("/api/upload", files={"file": ("cv.docx", content, DOCX_MIME)}, data={"submission_type": "own_cv"})
 
         assert resp.status_code == 400
         assert "couldn't read" in resp.json()["detail"]["message"].lower()
@@ -171,7 +171,7 @@ class TestEmptyUploadRejection:
         _auth_cookie(client, user)
         content = _docx_bytes("Curriculum Vitae. Extensive academic record. " * 30)
 
-        resp = client.post("/api/upload", files={"file": ("cv.docx", content, DOCX_MIME)})
+        resp = client.post("/api/upload", files={"file": ("cv.docx", content, DOCX_MIME)}, data={"submission_type": "own_cv"})
 
         assert resp.status_code == 200
         run_id = resp.json()["run_id"]

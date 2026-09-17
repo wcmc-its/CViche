@@ -47,7 +47,7 @@ This pipeline automates the conversion of faculty CVs (Word/PDF) into:
 - **LLM-Powered Segmentation**: Uses GPT models to identify section boundaries and headers
 - **Taxonomy Classification**: Maps CV sections to 60+ standardized WCM taxonomy codes
 - **Field Extraction**: Extracts structured fields (authors, dates, institutions) per entry type
-- **Data Enrichment**: PubMed lookup for publications, ROR API for institution locations
+- **Data Enrichment**: PubMed lookup for publications, LLM-based institution location enrichment
 - **Template Generation**: Produces formatted WCM Word documents with Vancouver citations
 
 ### Processing Statistics
@@ -82,7 +82,7 @@ This pipeline automates the conversion of faculty CVs (Word/PDF) into:
 │                                                                             │
 │  ENRICHMENT LAYER (Stages 5-5d)                                             │
 │  ├── Stage 5: PubMed Enrichment (NCBI API)                                  │
-│  ├── Stage 5b: Institution Enrichment (ROR API)                             │
+│  ├── Stage 5b: Institution Enrichment (LLM)                                 │
 │  ├── Stage 5c: Teaching Formatter (LLM)                                     │
 │  └── Stage 5d: Citation Formatter (LLM)                                     │
 │                                                                             │
@@ -325,7 +325,7 @@ CViche/
 **Output**: `*_institution_enriched.json`
 
 **Process**:
-- Query ROR (Research Organization Registry) API
+- Query an LLM for institution location data
 - Add city, state, country for institutions
 
 **Eligible Codes**: B1, B2, C, D1, D2, D3
@@ -721,7 +721,6 @@ lucide-react           # Icon library
 |---------|----------|---------|------|
 | OpenAI API | Yes | LLM processing | Pay-per-token |
 | NCBI E-utilities | No | PubMed enrichment | Free (with API key: 10 req/s) |
-| ROR API | No | Institution lookup | Free |
 
 ### Environment Variables
 
@@ -1055,7 +1054,7 @@ The web interface visualizes 9 processing steps:
 | 5 | Fix Unknowns | Re-examines unclassified entries |
 | 6 | Extract Structured Data | Pulls out specific fields per entry type |
 | 7 | AI Assist | LLM fallback for tricky entries |
-| 8 | Add Organization Data | ROR API lookup for institutions (optional) |
+| 8 | Add Organization Data | LLM lookup for institutions (optional) |
 | 9 | Generate Final Template | Produces WCM .docx output |
 
 ### API Endpoints
@@ -1240,12 +1239,11 @@ USE_TAXONOMY_MAPPING = True          # Use LLM mappings
 ```json
 {
   "institution_enrichment": {
-    "ror_id": "https://ror.org/00rs6vg23",
     "official_name": "Ohio State University",
     "city": "Columbus",
     "state": "OH",
     "country": "United States",
-    "source": "ror_api"
+    "source": "llm"
   }
 }
 ```
@@ -1281,17 +1279,6 @@ client = OpenAI()  # Reads OPENAI_API_KEY from environment
 **Rate Limits**:
 - Without API key: 3 requests/second
 - With API key: 10 requests/second
-
-### ROR API
-
-**Purpose**: Institution location lookup
-
-**Endpoint**: `https://api.ror.org/organizations`
-
-**Features**:
-- Free, no authentication required
-- Returns city, state, country
-- Cached to `config/ror_cache.json`
 
 ---
 

@@ -114,7 +114,7 @@ The pipeline viewer shows:
 6. **Field Extraction** -- Pulls out structured fields from each entry (dates, titles, institutions, author names, grant numbers, etc.).
 7. **Research Summary** -- Generates a biosketch-style research narrative summarizing your research activities.
 8. **PubMed Enrichment** -- Matches your publications against PubMed and adds metadata (full author lists, journal names, MeSH terms, PMIDs).
-9. **Institution Enrichment** -- Adds location data (city, state, country) to your education and employment entries using the ROR database.
+9. **Institution Enrichment** -- Adds location data (city, state, country) to your education and employment entries using an LLM lookup.
 10. **Teaching Formatter** -- Standardizes teaching activity descriptions into a consistent format.
 11. **Citation Formatter** -- Reformats publication citations that were not found in PubMed into standard Vancouver format.
 12. **WCM Word Template** -- Produces the final formatted Word document in the official WCM CV layout.

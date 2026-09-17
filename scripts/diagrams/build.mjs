@@ -140,8 +140,9 @@ function buildHtml(items) {
   const HERO =                                    // → hero paragraph (one for a newcomer)
     "CViche turns an unstructured academic CV (Word .docx) into a standardized Weill Cornell " +
     "Medicine CV. A 12-stage LLM pipeline segments the document, extracts and classifies entries " +
-    "against the WCM taxonomy, enriches publications via PubMed/ROR, and renders the WCM Word " +
-    "template. It runs from a CLI or a FastAPI + React web app with live progress over WebSocket.";
+    "against the WCM taxonomy, enriches publications via PubMed and institutions via LLM lookups, " +
+    "and renders the WCM Word template. It runs from a CLI or a FastAPI + React web app with live " +
+    "progress over WebSocket.";
   const META_CHIPS = [                            // → hero pills (key facts at a glance)
     "12-stage LLM pipeline", "OpenAI / AWS Bedrock", "FastAPI + WebSocket",
     "React 18 + Vite", "SQLite · MariaDB · S3", "EKS · Kustomize · HPA",

@@ -254,7 +254,11 @@ def _install_stubs(monkeypatch, calls, fail, stage5b_writer, stage5_path, tmp_pa
     def stage_3b(*, document_uid, stage_3a_path):
         calls.record('3b', document_uid=document_uid, stage_3a_path=stage_3a_path)
         boom_if('3b')
-        return {'output_path': _write(_FILES['3b']), 'stats': {'cost': 0.01},
+        # llm_classified/fallback_entries (#810): all 400 got a real code,
+        # none defaulted -- the plain, no-outage case every other stub here
+        # assumes too.
+        return {'output_path': _write(_FILES['3b']),
+                'stats': {'cost': 0.01, 'llm_classified': 400, 'fallback_entries': 0},
                 'total_entries': 400, 'code_distribution': {'A': 3}}
 
     def stage_4(*, docx_path):

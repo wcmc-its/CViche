@@ -1,0 +1,1020 @@
+"""Behaviour tests for the docx_structure_extractor reader (issue #704 round 2).
+
+Covers the full reader surface *not* already exercised by
+test_docx_structure_extractor_tracked_changes.py: get_paragraph_text (plain
+multi-run join), get_cell_text (multi-paragraph join), extract_paragraph_metadata
+(style/outline, bold-representative, italic/underline/size, alignment, indent,
+list numbering), _is_date_column, split_merged_cells_in_row (no-split /
+double-newline / aligned-line / date-column-padding branches),
+extract_table_metadata (gridSpan/merged-cell repeat behaviour), get_table_first_cell_text,
+looks_like_section_header (confidence tiers), flatten_table_to_text (skip_first_row),
+extract_unified_elements (document-order interleaving, unified_idx contiguity,
+table_header/table_content/table element types), extract_docx_structure
+(top-level shape), normalize_style_name, and create_simplified_layout_json
+(skip_empty on/off).
+
+Pure python-docx, no network: this module never calls an LLM, so there is
+nothing to stub. All fixture .docx files are built in memory with
+Document()/add_paragraph/add_table and saved to tmp_path only where a real
+path is required (extract_unified_elements / extract_docx_structure take a
+path, not a Document).
+
+Untestable: main() (argparse + sys.exit + file I/O side effects) and the
+`if __name__ == '__main__'` guard -- no network/corpus fixture is available
+and covering it would only re-test print()/json.dump plumbing already
+exercised indirectly through extract_docx_structure/create_simplified_layout_json.
+
+    python3 -m pytest src/unified_pipeline/tests/test_docx_structure_extractor_behaviour.py -p no:cacheprovider
+"""
+
+import sys
+from pathlib import Path
+
+import pytest
+
+_SRC = Path(__file__).resolve().parents[2]
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from docx import Document  # noqa: E402
+from docx.enum.text import WD_ALIGN_PARAGRAPH  # noqa: E402
+from docx.oxml import parse_xml  # noqa: E402
+from docx.oxml.ns import nsdecls  # noqa: E402
+from docx.shared import Inches, Pt  # noqa: E402
+
+from unified_pipeline.core.docx_structure_extractor import (  # noqa: E402
+    _is_date_column,
+    create_simplified_layout_json,
+    extract_docx_structure,
+    extract_paragraph_metadata,
+    extract_table_metadata,
+    extract_unified_elements,
+    flatten_table_to_text,
+    get_cell_text,
+    get_paragraph_text,
+    get_table_first_cell_text,
+    looks_like_section_header,
+    normalize_style_name,
+    split_merged_cells_in_row,
+)
+
+
+# --------------------------------------------------------------------------
+# get_paragraph_text / get_cell_text
+# --------------------------------------------------------------------------
+
+
+def test_get_paragraph_text_joins_plain_multi_run():
+    doc = Document()
+    para = doc.add_paragraph()
+    para.add_run("Hello ")
+    para.add_run("World")
+    para.add_run("!")
+
+    assert get_paragraph_text(para) == "Hello World!"
+
+
+def test_get_paragraph_text_tab_and_break_together():
+    # Covers the w:tab and w:br/w:cr branches in the same walk as a plain
+    # run, distinct from the sibling file's tab_char-parameterized test.
+    doc = Document()
+    para = doc.add_paragraph()
+    para.add_run("a")
+    para.add_run().add_tab()
+    run = para.add_run("b")
+    run.add_break()  # <w:br/>
+    para.add_run("c")
+
+    assert get_paragraph_text(para) == "a b\nc"
+
+
+def test_get_cell_text_joins_multiple_paragraphs():
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.rows[0].cells[0]
+    cell.paragraphs[0].add_run("Line one")
+    cell.add_paragraph("Line two")
+
+    assert get_cell_text(cell) == "Line one\nLine two"
+
+
+# --------------------------------------------------------------------------
+# extract_paragraph_metadata
+# --------------------------------------------------------------------------
+
+
+def test_extract_paragraph_metadata_heading_style_and_outline_level():
+    doc = Document()
+    para = doc.add_paragraph("Section Heading", style="Heading 2")
+
+    meta = extract_paragraph_metadata(para, 0)
+
+    assert meta["style"] == "Heading 2"
+    assert meta["outline_level"] == 2
+    assert meta["text"] == "Section Heading"
+
+
+def test_extract_paragraph_metadata_bold_all_run():
+    doc = Document()
+    para = doc.add_paragraph()
+    run = para.add_run("Bold text")
+    run.bold = True
+
+    meta = extract_paragraph_metadata(para, 0)
+
+    assert meta["bold"] is True
+
+
+def test_extract_paragraph_metadata_bold_partial_uses_first_run_only():
+    # extract_paragraph_metadata's own docstring says font properties come
+    # "from first run (representative)" -- a later bold run does not flip
+    # the paragraph-level flag. Documented behaviour, not a bug.
+    doc = Document()
+    para = doc.add_paragraph()
+    first = para.add_run("not bold ")
+    first.bold = False
+    second = para.add_run("bold")
+    second.bold = True
+
+    meta = extract_paragraph_metadata(para, 0)
+
+    assert meta["bold"] is False
+
+
+def test_extract_paragraph_metadata_italic_underline_size():
+    doc = Document()
+    para = doc.add_paragraph()
+    run = para.add_run("styled")
+    run.italic = True
+    run.underline = True
+    run.font.size = Pt(14)
+
+    meta = extract_paragraph_metadata(para, 0)
+
+    assert meta["italic"] is True
+    assert meta["underline"] is True
+    assert meta["font_size"] == 14.0
+
+
+def test_extract_paragraph_metadata_alignment():
+    doc = Document()
+    para = doc.add_paragraph("Centered")
+    para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    meta = extract_paragraph_metadata(para, 0)
+
+    assert meta["alignment"] == "center"
+
+
+def test_extract_paragraph_metadata_unmapped_alignment_falls_back_to_left():
+    doc = Document()
+    para = doc.add_paragraph("Distributed")
+    para.alignment = WD_ALIGN_PARAGRAPH.DISTRIBUTE  # not in the 4-entry map
+
+    meta = extract_paragraph_metadata(para, 0)
+
+    assert meta["alignment"] == "left"
+
+
+def test_extract_paragraph_metadata_indent():
+    doc = Document()
+    para = doc.add_paragraph("Indented")
+    para.paragraph_format.left_indent = Inches(0.5)
+    para.paragraph_format.first_line_indent = Inches(0.25)
+
+    meta = extract_paragraph_metadata(para, 0)
+
+    assert meta["indent_left"] == 0.5
+    assert meta["indent_first"] == 0.25
+
+
+def test_extract_paragraph_metadata_list_numbering():
+    doc = Document()
+    para = doc.add_paragraph("List item")
+    pPr = para._p.get_or_add_pPr()
+    num_pr = parse_xml(
+        f'<w:numPr {nsdecls("w")}><w:ilvl w:val="1"/><w:numId w:val="5"/></w:numPr>'
+    )
+    pPr.append(num_pr)
+
+    meta = extract_paragraph_metadata(para, 0)
+
+    assert meta["list_level"] == 1
+    assert meta["num_fmt"] == "numbered"
+
+
+# --------------------------------------------------------------------------
+# _is_date_column
+# --------------------------------------------------------------------------
+
+
+def test_is_date_column_true_at_half_threshold():
+    # 2 of 4 lines contain a year == exactly the 0.5 threshold -> True.
+    assert _is_date_column(["1999", "2000", "abc", "def"]) is True
+
+
+def test_is_date_column_false_below_threshold():
+    # 1 of 4 lines contains a year, below the 0.5 threshold -> False.
+    assert _is_date_column(["1999", "abc", "def", "ghi"]) is False
+
+
+def test_is_date_column_empty_list():
+    assert _is_date_column([]) is False
+
+
+# --------------------------------------------------------------------------
+# split_merged_cells_in_row
+# --------------------------------------------------------------------------
+
+
+def test_split_merged_cells_no_split_needed():
+    row = [{"text": "short", "row": 0, "col": 0}]
+
+    assert split_merged_cells_in_row(row) == [row]
+
+
+def test_split_merged_cells_empty_row_returns_as_is():
+    assert split_merged_cells_in_row([]) == [[]]
+
+
+def test_split_merged_cells_double_newline_substantial():
+    long_a = "A" * 60
+    long_b = "B" * 60
+    row = [{"text": f"{long_a}\n\n{long_b}", "row": 0, "col": 0}]
+
+    out = split_merged_cells_in_row(row, min_chars=50, min_newlines=2)
+
+    assert [r[0]["text"] for r in out] == [long_a, long_b]
+
+
+def test_split_merged_cells_at_min_chars_boundary_exact_no_split():
+    # A segment of exactly min_chars length fails the strict "len(s) >
+    # min_chars" has_substantial check, and the second segment is only 1
+    # char so has_multiple_items (which requires len(s) >= 2 for every
+    # segment) also fails -- neither \n\n branch fires, and the row is too
+    # short (2 lines, below the >= 3 aligned-line threshold) to trigger the
+    # second pass either, so the row comes back completely unchanged.
+    exact = "A" * 50
+    row = [{"text": f"{exact}\n\nB", "row": 0, "col": 0}]
+
+    out = split_merged_cells_in_row(row, min_chars=50, min_newlines=2)
+
+    assert out == [row]
+
+
+def test_split_merged_cells_double_newline_short_multi_item_preserves_row_col():
+    row = [{"text": "MBA\n\nBS", "row": 2, "col": 0}]
+
+    out = split_merged_cells_in_row(row)
+
+    assert out == [
+        [{"text": "MBA", "row": 2, "col": 0}],
+        [{"text": "BS", "row": 2, "col": 0}],
+    ]
+
+
+def test_split_merged_cells_double_newline_below_threshold_no_split():
+    # Only one non-empty segment after the \n\n split, and it is short --
+    # neither has_substantial nor has_multiple_items fires, so the row is
+    # returned unchanged (including the trailing \n\n).
+    row = [{"text": "A\n\n", "row": 0, "col": 0}]
+
+    assert split_merged_cells_in_row(row) == [row]
+
+
+def test_split_merged_cells_aligned_lines_with_date_column_padding():
+    # Two cells share a 3-line count (triggers aligned splitting); the third
+    # cell has only 2 date-shaped lines and gets padded to match.
+    row = [
+        {"text": "Role1\nRole2\nRole3", "row": 0, "col": 0},
+        {"text": "Site1\nSite2\nSite3", "row": 0, "col": 1},
+        {"text": "1998\n2005", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row, min_chars=50, min_newlines=2)
+
+    assert [c["text"] for c in out[0]] == ["Role1", "Site1", "1998"]
+    assert [c["text"] for c in out[1]] == ["Role2", "Site2", "2005"]
+    assert [c["text"] for c in out[2]] == ["Role3", "Site3", ""]
+    # The padded date column must go through the "splits is not None"
+    # branch, which preserves row/col metadata -- not the separate
+    # date-distribution fallback for cells with no recorded split (which
+    # only ever emits a bare {"text": ...}). Assert the full dict so a
+    # mutant that disables the second-pass padding (falling through to that
+    # bare-text fallback) is caught even though the text values still match.
+    assert out[0][2] == {"text": "1998", "row": 0, "col": 2}
+    assert out[1][2] == {"text": "2005", "row": 0, "col": 2}
+    assert out[2][2] == {"text": "", "row": 0, "col": 2}
+
+
+def test_split_merged_cells_newline_count_alone_triggers_split():
+    # Segment "a\nb\nc" is only 5 chars (well under min_chars=50) but
+    # contains 2 internal newlines (== min_newlines=2), so has_substantial
+    # must fire via the "s.count('\n') >= min_newlines" clause alone, not
+    # via length. The second segment "X" is 1 char, which fails
+    # has_multiple_items's "all segments >= 2 chars" requirement, so that
+    # sibling clause cannot be the one causing the split -- isolates the
+    # newline-count branch specifically (distinct from the existing
+    # min_chars-length fixtures above, none of which have a short,
+    # newline-only-qualifying segment).
+    row = [{"text": "a\nb\nc\n\nX", "row": 0, "col": 0}]
+
+    out = split_merged_cells_in_row(row, min_chars=50, min_newlines=2)
+
+    assert [r[0]["text"] for r in out] == ["a\nb\nc", "X"]
+
+
+def test_split_merged_cells_date_distribution_fallback_for_unsplit_cell():
+    # Cell 0's "MBA\n\nBS" triggers the double-newline first pass
+    # (max_splits=2 from THAT pass); cell 1 ("1998\n2005") has no \n\n at
+    # all, so its own cell_splits entry is set to None back on the very
+    # first pass (not via the aligned-line second pass, which never runs
+    # here because max_splits already came from the first pass -- the
+    # `if max_splits == 1:` guard skips it). Cell 1 only ends up split at
+    # all through the separate "no split for this cell - try to distribute
+    # dates" fallback, a different code path from the aligned-line padding
+    # branch already covered above (which requires the second pass to run).
+    row = [
+        {"text": "MBA\n\nBS", "row": 0, "col": 0},
+        {"text": "1998\n2005", "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row)
+
+    assert out[0][0]["text"] == "MBA"
+    assert out[1][0]["text"] == "BS"
+    # The date-distribution fallback emits a bare {"text": ...} with no
+    # row/col metadata -- unlike the aligned-line padding branch, which
+    # explicitly preserves row/col (see the dict-equality assertions above).
+    # Assert the full dict so a mutant that disables this fallback (falling
+    # through to duplicate the whole original cell at split_idx==0 and blank
+    # it elsewhere) is caught even though it would still produce SOME text.
+    assert out[0][1] == {"text": "1998"}
+    assert out[1][1] == {"text": "2005"}
+
+
+def test_split_merged_cells_double_newline_uneven_segment_counts():
+    # Two cells both split on \n\n but into a DIFFERENT number of
+    # substantial segments (3 vs 2) -- max_splits becomes 3 (the larger),
+    # and cell 1 (only 2 segments) must hit the "this cell has fewer splits
+    # than max - use empty for extras" branch at split_idx=2, not the
+    # date-distribution fallback (it was never None -- it has a recorded
+    # split list, just a shorter one) and not a duplicated/padded value.
+    # No existing fixture has two \n\n-split cells of differing segment
+    # counts in the same row.
+    seg_a = ["A" * 60, "B" * 60, "C" * 60]
+    seg_b = ["X" * 60, "Y" * 60]
+    row = [
+        {"text": "\n\n".join(seg_a), "row": 0, "col": 0},
+        {"text": "\n\n".join(seg_b), "row": 0, "col": 1},
+    ]
+
+    out = split_merged_cells_in_row(row, min_chars=50, min_newlines=2)
+
+    assert [c["text"] for c in out[0]] == [seg_a[0], seg_b[0]]
+    assert [c["text"] for c in out[1]] == [seg_a[1], seg_b[1]]
+    # Row/col metadata is preserved for the still-splitting cell 0, but the
+    # exhausted cell 1 gets a bare blank dict with no row/col -- pins the
+    # "fewer splits than max" branch's exact shape, not just its text.
+    assert out[2][0] == {"text": seg_a[2], "row": 0, "col": 0}
+    assert out[2][1] == {"text": ""}
+
+
+def test_split_merged_cells_aligned_lines_requires_exact_target_count():
+    # Two cells share a 3-line count (target_count=3 via the aligned-line
+    # pass). A third cell has FOUR lines -- MORE than target_count, not
+    # fewer -- and is not a date column, so it must fail the aligned pass's
+    # `line_counts[cell_idx] == target_count` membership test and fall
+    # through to the "no split for this cell" branch, which uses the whole
+    # original (unsplit) cell only at split_idx==0 and blanks it elsewhere.
+    # A `==` -> `>=` mutant would instead accept this cell into the aligned
+    # split and silently DROP its 4th line ("z"), since the row only emits
+    # target_count (3) split rows. No existing fixture has a cell with MORE
+    # lines than the aligned target.
+    row = [
+        {"text": "a\nb\nc", "row": 0, "col": 0},
+        {"text": "d\ne\nf", "row": 0, "col": 1},
+        {"text": "w\nx\ny\nz", "row": 0, "col": 2},
+    ]
+
+    out = split_merged_cells_in_row(row, min_chars=50, min_newlines=2)
+
+    assert [c["text"] for c in out[0]] == ["a", "d", "w\nx\ny\nz"]
+    # The unsplit cell is carried over as the ORIGINAL dict (row/col intact),
+    # not rebuilt as a bare {"text": ...}.
+    assert out[0][2] == {"text": "w\nx\ny\nz", "row": 0, "col": 2}
+    assert [c["text"] for c in out[1]] == ["b", "e", ""]
+    assert [c["text"] for c in out[2]] == ["c", "f", ""]
+
+
+def test_split_merged_cells_two_line_aligned_cells_not_split():
+    # Two cells share a 2-line count. The source comment is explicit that
+    # the aligned-line pass exists to "avoid splitting single-line or
+    # 2-line content" -- count_freq only counts line counts >= 3, so a pair
+    # of matching 2-line cells must NOT trigger a split even though they
+    # satisfy every other condition (2+ cells, equal line counts) that a
+    # >= 2 floor would accept. Pins the literal ">= 3" boundary, distinct
+    # from the existing 3-line-cell fixture above.
+    row = [
+        {"text": "a\nb", "row": 0, "col": 0},
+        {"text": "c\nd", "row": 0, "col": 1},
+    ]
+
+    assert split_merged_cells_in_row(row, min_chars=50, min_newlines=2) == [row]
+
+
+# --------------------------------------------------------------------------
+# extract_table_metadata
+# --------------------------------------------------------------------------
+
+
+def test_extract_table_metadata_basic_shape():
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "R0C0"
+    table.cell(0, 1).text = "R0C1"
+    table.cell(1, 0).text = "R1C0"
+    table.cell(1, 1).text = "R1C1"
+
+    meta = extract_table_metadata(table, idx="table_0")
+
+    assert meta["idx"] == "table_0"
+    assert meta["rows"] == 2
+    assert meta["cols"] == 2
+    assert [c["text"] for c in meta["data"][1]] == ["R1C0", "R1C1"]
+
+
+def test_extract_table_metadata_gridspan_repeats_merged_cell():
+    # python-docx repeats the merged _Cell object at every grid column it
+    # spans (verified empirically) -- the reader does not deduplicate this,
+    # so both grid positions carry identical text.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=3)
+    a = table.cell(0, 0)
+    a.text = "Merged Header"
+    b = table.cell(0, 1)
+    a.merge(b)
+    table.cell(1, 0).text = "x"
+    table.cell(1, 1).text = "y"
+    table.cell(1, 2).text = "z"
+
+    meta = extract_table_metadata(table, idx="table_0")
+
+    assert meta["cols"] == 3
+    row0 = meta["data"][0]
+    assert len(row0) == 3
+    assert row0[0]["text"] == row0[1]["text"] == "Merged Header"
+    assert row0[0]["col"] == 0
+    assert row0[1]["col"] == 1
+
+
+def test_extract_table_metadata_falls_back_to_manual_iteration_when_itertext_fails(monkeypatch):
+    # Reproduces the "cell.text returns empty for malformed/complex XML"
+    # scenario named in the source comment. get_cell_text only walks
+    # cell.paragraphs, so text sitting directly under <w:tc> (outside any
+    # <w:p>) is invisible to it -- cell_text starts "". Method 1
+    # (itertext()) is forced to raise, so the recovered "HIDDEN_TEXT" can
+    # only have come from method 2's manual node iteration, proving that
+    # specific fallback branch ran rather than the value being coincidental.
+    from docx.oxml.table import CT_Tc
+
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.rows[0].cells[0]
+    cell._tc.append(
+        parse_xml(f'<w:hiddenMarker {nsdecls("w")}>HIDDEN_TEXT</w:hiddenMarker>')
+    )
+    assert get_cell_text(cell) == ""  # confirm the primary walk sees nothing
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("simulated malformed-XML itertext failure")
+
+    monkeypatch.setattr(CT_Tc, "itertext", boom)
+    meta = extract_table_metadata(table, idx="table_0")
+
+    assert meta["data"][0][0]["text"] == "HIDDEN_TEXT"
+
+
+# --------------------------------------------------------------------------
+# looks_like_section_header
+# --------------------------------------------------------------------------
+
+
+def test_looks_like_section_header_all_caps_short_line():
+    is_header, confidence = looks_like_section_header("PUBLICATIONS")
+
+    assert is_header is True
+    assert confidence == 1.0
+
+
+def test_looks_like_section_header_multi_line_text_is_judged_by_its_first_line():
+    # A table cell whose first line is the header and whose later lines are
+    # entry text: only the first line is scored, so the citation-shaped
+    # remainder (et al., a year in parentheses) must not reject it.
+    is_header, confidence = looks_like_section_header("PUBLICATIONS\nSmith J, et al. Paper (2024).")
+
+    assert (is_header, confidence) == (True, 1.0)
+
+
+def test_looks_like_section_header_title_case_short_line():
+    # "Research Interests" stacks five separate bonuses: keyword (+0.4,
+    # matches "research"/"research interests"), title-case <=6 words (+0.2),
+    # 1-5 word short-text (+0.1), and 1-2 word known-keyword (+0.2) -- pinned
+    # to the exact sum (not just ">= the 0.4 threshold") so a mutant that
+    # drops or double-counts any one bonus is caught.
+    is_header, confidence = looks_like_section_header("Research Interests")
+
+    assert is_header is True
+    assert confidence == pytest.approx(0.9)
+
+
+def test_looks_like_section_header_keyword_only_at_exact_threshold():
+    # A CV keyword ("grants"/"funding") inside a long (>6-word), non-title-case,
+    # non-all-caps sentence earns ONLY the +0.4 keyword bonus -- every other
+    # bonus's guard (<=6 words, <=5 words, <=2 words, isupper, endswith ':')
+    # is false. This lands exactly ON the is_header threshold, so it also
+    # pins the ">= 0.4" boundary itself (a ">" mutant would flip this to
+    # False while leaving every other test in the file green).
+    text = "Grants and funding for the research program done here"
+    assert len(text.split()) == 9  # confirms none of the <=N word bonuses apply
+
+    is_header, confidence = looks_like_section_header(text)
+
+    assert (is_header, confidence) == (True, 0.4)
+
+
+def test_looks_like_section_header_long_sentence_not_header():
+    long_sentence = (
+        "This is a very long sentence describing a thing that happened "
+        "over several years in great and unnecessary detail for a CV entry."
+    )
+    is_header, confidence = looks_like_section_header(long_sentence)
+
+    assert is_header is False
+    assert confidence == 0.0
+
+
+def test_looks_like_section_header_length_cap_rejects_long_keyword_text():
+    # Over the literal 100-char cap, but otherwise scores well past the 0.4
+    # threshold on the keyword bonus alone ("research" appears 15 times) --
+    # this isolates the length guard as the deciding condition, unlike the
+    # existing long_sentence test above, which scores 0.0 for the unrelated
+    # reason that it carries no CV keyword at all and would stay under
+    # threshold even with the cap removed.
+    text = "Research " * 15
+    assert len(text.strip()) > 100  # confirms the cap is actually engaged
+
+    is_header, confidence = looks_like_section_header(text)
+
+    assert (is_header, confidence) == (False, 0.0)
+
+
+def test_looks_like_section_header_date_range_rejected_despite_keyword():
+    # "Education 2020-2024" carries a CV keyword ("education") that alone
+    # scores well past the 0.4 threshold (keyword +0.4, short-text +0.1,
+    # short-known-keyword +0.2 = 0.7), so the date-pattern guard must reject
+    # it before any bonus is computed, not merely reduce the score.
+    is_header, confidence = looks_like_section_header("Education 2020-2024")
+
+    assert (is_header, confidence) == (False, 0.0)
+
+
+def test_looks_like_section_header_citation_year_parenthetical_rejected():
+    # "Publications (2024)" carries a CV keyword ("publications") that alone
+    # scores well past the 0.4 threshold if the citation guard is skipped
+    # (keyword +0.4, short-text +0.1, short-known-keyword +0.2 = 0.7 -- the
+    # exact score a deleted citation-reject loop would produce), so the
+    # "(2024)" citation-year-parenthetical pattern must reject it before any
+    # bonus is computed. Distinct from the existing date-RANGE rejection
+    # test above, which pins a different regex in the same function (the
+    # date_patterns loop, not citation_patterns).
+    is_header, confidence = looks_like_section_header("Publications (2024)")
+
+    assert (is_header, confidence) == (False, 0.0)
+
+
+def test_looks_like_section_header_et_al_citation_rejected_despite_keyword():
+    # "et al." is a citation marker, not a header signal -- this text also
+    # carries a CV keyword ("research") that alone would score 0.5 with the
+    # citation guard skipped (keyword +0.4, short-text +0.1), so the
+    # citation_patterns loop must be the deciding condition here, not the
+    # date_patterns loop (no year/date substring appears at all in this text).
+    is_header, confidence = looks_like_section_header("Smith J, et al. Research")
+
+    assert (is_header, confidence) == (False, 0.0)
+
+
+def test_looks_like_section_header_numbered_heading_scores_low():
+    # "1. Introduction" fails the title-case check (first word starts with
+    # a digit, not an uppercase letter) and carries no CV keyword, so it
+    # lands well under the 0.4 threshold despite reading like a heading.
+    is_header, confidence = looks_like_section_header("1. Introduction")
+
+    assert is_header is False
+    assert confidence == 0.1
+
+
+def test_looks_like_section_header_empty_text():
+    assert looks_like_section_header("") == (False, 0.0)
+
+
+# --------------------------------------------------------------------------
+# get_table_first_cell_text
+# --------------------------------------------------------------------------
+
+
+def test_get_table_first_cell_text_plain():
+    doc = Document()
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "First Cell"
+
+    assert get_table_first_cell_text(table) == "First Cell"
+
+
+def test_get_table_first_cell_text_no_rows():
+    doc = Document()
+    table = doc.add_table(rows=0, cols=0)
+
+    assert get_table_first_cell_text(table) == ""
+
+
+def test_get_table_first_cell_text_row_with_no_cells():
+    from docx.oxml.ns import qn
+
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    tr = table.rows[0]._tr
+    for tc in list(tr.findall(qn("w:tc"))):
+        tr.remove(tc)
+
+    assert get_table_first_cell_text(table) == ""
+
+
+def test_get_table_first_cell_text_falls_back_to_itertext():
+    # Same "hidden text outside any <w:p>" shape as the extract_table_metadata
+    # fallback test: get_cell_text sees nothing, itertext() over the whole
+    # cell element recovers it.
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.rows[0].cells[0]
+    cell._element.append(
+        parse_xml(f'<w:hiddenMarker {nsdecls("w")}>HIDDEN_FIRST_CELL</w:hiddenMarker>')
+    )
+
+    assert get_table_first_cell_text(table) == "HIDDEN_FIRST_CELL"
+
+
+# --------------------------------------------------------------------------
+# flatten_table_to_text
+# --------------------------------------------------------------------------
+
+
+_FLATTEN_TABLE_DATA = {
+    "data": [
+        [{"text": "Header"}, {"text": ""}],
+        [{"text": "Row1A"}, {"text": "Row1B"}],
+        [{"text": ""}, {"text": "   "}],
+        [{"text": "Row3A"}, {"text": ""}],
+    ]
+}
+
+
+def test_flatten_table_to_text_skip_first_row_false():
+    out = flatten_table_to_text(_FLATTEN_TABLE_DATA, skip_first_row=False)
+
+    assert out == "Header\nRow1A\tRow1B\nRow3A"
+
+
+def test_flatten_table_to_text_skip_first_row_true():
+    out = flatten_table_to_text(_FLATTEN_TABLE_DATA, skip_first_row=True)
+
+    assert out == "Row1A\tRow1B\nRow3A"
+
+
+# --------------------------------------------------------------------------
+# extract_unified_elements
+# --------------------------------------------------------------------------
+
+
+def _build_unified_fixture_docx(path):
+    doc = Document()
+    doc.add_paragraph("CURRICULUM VITAE")
+    doc.add_paragraph("")  # empty paragraph, between the intro and the tables
+
+    # Table 1: header-detected (first cell "PUBLICATIONS"), 2 cols so it
+    # does NOT hit the single-column-per-row "explode into paragraphs" path.
+    t1 = doc.add_table(rows=2, cols=2)
+    t1.cell(0, 0).text = "PUBLICATIONS"
+    t1.cell(0, 1).text = ""
+    t1.cell(1, 0).text = "Smith J. Paper title (2024)."
+    t1.cell(1, 1).text = "2024"
+
+    # Table 2: no header-like first cell ("2020" is a bare year, not a
+    # header per looks_like_section_header) -> emitted as one "table" element.
+    t2 = doc.add_table(rows=2, cols=2)
+    t2.cell(0, 0).text = "2020"
+    t2.cell(0, 1).text = "Some Award"
+    t2.cell(1, 0).text = "2021"
+    t2.cell(1, 1).text = "Another Award"
+
+    doc.save(str(path))
+
+
+def test_extract_unified_elements_orders_types_and_indices(tmp_path):
+    docx_path = tmp_path / "unified_fixture.docx"
+    _build_unified_fixture_docx(docx_path)
+
+    result = extract_unified_elements(str(docx_path))
+    elements = result["elements"]
+
+    unified_idxs = [e["unified_idx"] for e in elements]
+    assert unified_idxs == list(range(len(elements)))  # contiguous, document order
+
+    types = [e["type"] for e in elements]
+    assert types == ["paragraph", "empty", "table_header", "table_content", "table"]
+
+    assert elements[0]["text"] == "CURRICULUM VITAE"
+    assert elements[2]["text"] == "PUBLICATIONS"
+    assert "Smith J." in elements[3]["text"]
+    assert "2020" in elements[4]["text"] and "Another Award" in elements[4]["text"]
+
+    meta = result["meta"]
+    assert meta["num_elements"] == len(elements)
+    assert meta["num_paragraphs"] == 1
+    assert meta["num_tables"] == 2
+    assert meta["num_table_headers"] == 1
+    assert meta["num_empty"] == 1
+
+
+def test_extract_unified_elements_no_header_table_splits_merged_cells(tmp_path):
+    # A table with no header-like first cell is emitted as one "table"
+    # element -- but each row still goes through split_merged_cells_in_row
+    # first, so a double-newline cell beside an aligned two-line cell
+    # becomes two rows in the element's text, not one row with embedded
+    # newlines.
+    doc = Document()
+    t = doc.add_table(rows=2, cols=2)
+    t.cell(0, 0).text = "MBA\n\nBS"
+    t.cell(0, 1).text = "1998\n2005"
+    t.cell(1, 0).text = "2021"
+    t.cell(1, 1).text = "Another Award"
+    docx_path = tmp_path / "no_header_merged.docx"
+    doc.save(str(docx_path))
+
+    elements = extract_unified_elements(str(docx_path))["elements"]
+
+    assert [e["type"] for e in elements] == ["table"]
+    assert elements[0]["rows"] == 3
+    assert elements[0]["text"] == "MBA | 1998\nBS | 2005\n2021 | Another Award"
+
+
+def test_extract_unified_elements_single_column_table_explodes_to_paragraphs(tmp_path):
+    # Documented in the source (#208): a single-column table is a layout
+    # box, not tabular data, so every non-empty cell paragraph becomes its
+    # own "paragraph" element rather than a "table"/"table_header" element.
+    doc = Document()
+    table = doc.add_table(rows=1, cols=1)
+    cell = table.rows[0].cells[0]
+    cell.paragraphs[0].add_run("First line")
+    cell.add_paragraph("Second line")
+    docx_path = tmp_path / "single_col.docx"
+    doc.save(str(docx_path))
+
+    result = extract_unified_elements(str(docx_path))
+
+    types = [e["type"] for e in result["elements"]]
+    assert types == ["paragraph", "paragraph"]
+    texts = [e["text"] for e in result["elements"]]
+    assert texts == ["First line", "Second line"]
+    assert result["meta"]["num_tables"] == 1
+    assert result["meta"]["num_paragraphs"] == 2
+
+
+def test_extract_unified_elements_single_column_vertical_merge_dedupes_and_skips_empty(tmp_path):
+    # A vertically-merged single-column table repeats the SAME cell object
+    # across rows (like gridSpan repeats it across columns) -- the reader
+    # must visit it once (seen_cells), and an empty paragraph inside a cell
+    # must be skipped rather than emitted as a blank "paragraph" element.
+    doc = Document()
+    table = doc.add_table(rows=2, cols=1)
+    top = table.cell(0, 0)
+    top.paragraphs[0].add_run("Only line")
+    top.add_paragraph("")  # empty paragraph inside the cell -> skipped
+    bottom = table.cell(1, 0)
+    top.merge(bottom)  # vertical merge: row 1's cell object == row 0's
+    docx_path = tmp_path / "single_col_vmerge.docx"
+    doc.save(str(docx_path))
+
+    result = extract_unified_elements(str(docx_path))
+
+    texts = [e["text"] for e in result["elements"]]
+    assert texts == ["Only line"]  # not duplicated, empty paragraph dropped
+    assert result["meta"]["num_paragraphs"] == 1
+
+
+def _build_subheader_fixture_docx(path):
+    """One table exercising every sub-header-scanning branch below the
+    table's own header row: a header row whose first cell carries substantial
+    remaining content after its header line, a row with an embedded \\n\\n
+    header inside one cell, an over-80-char plain content row, a row-level
+    sub-header (own row, no embedding), and a plain trailing content row."""
+    doc = Document()
+    table = doc.add_table(rows=5, cols=2)
+
+    header_cell = table.cell(0, 0)
+    header_cell.paragraphs[0].text = "K. EXTRAMURAL FUNDING"
+    header_cell.add_paragraph(
+        "Society of Example Program Directors research award for outstanding contribution."
+    )
+    table.cell(0, 1).text = "2020"
+
+    embedded_cell = table.cell(1, 0)
+    embedded_cell.paragraphs[0].text = "Some free text before section break."
+    embedded_cell.add_paragraph("")  # blank paragraph -> the \n\n separator
+    embedded_cell.add_paragraph("SUBSECTION HEADER")
+    embedded_cell.add_paragraph("Detail line 1")
+    embedded_cell.add_paragraph("Detail line 2")
+    table.cell(1, 1).text = ""
+
+    table.cell(2, 0).text = "A" * 90  # long single-line cell, no header
+    table.cell(2, 1).text = "short"
+
+    table.cell(3, 0).text = "PRESENTATIONS"  # row-level sub-header
+    table.cell(3, 1).text = ""
+
+    table.cell(4, 0).text = "Talk one at Conference X"  # plain content row
+    table.cell(4, 1).text = "New York"
+
+    doc.save(str(path))
+
+
+def test_extract_unified_elements_scans_table_rows_for_subheaders(tmp_path):
+    docx_path = tmp_path / "subheaders.docx"
+    _build_subheader_fixture_docx(docx_path)
+
+    result = extract_unified_elements(str(docx_path))
+    elements = result["elements"]
+
+    unified_idxs = [e["unified_idx"] for e in elements]
+    assert unified_idxs == list(range(len(elements)))
+
+    header_texts = [e["text"] for e in elements if e["type"] == "table_header"]
+    assert header_texts == ["K. EXTRAMURAL FUNDING", "SUBSECTION HEADER", "PRESENTATIONS"]
+    assert result["meta"]["num_table_headers"] == 3
+
+    content_texts = [e["text"] for e in elements if e["type"] == "table_content"]
+    # Row 0's remaining content is captured under the table-level header.
+    assert any("Society of Example" in t for t in content_texts)
+    # Row 0 has 2 cells, so the "len(row_0) > 1" pairing branch must fire:
+    # the OTHER row-0 cell ("2020") is paired onto the same content row via
+    # " | ", not dropped. Pin the exact first content chunk (not just a
+    # substring) -- a substring check on "Society of Example" alone
+    # is satisfied equally by the else-branch (single-cell synthetic row,
+    # which drops "2020" entirely), so it cannot tell the two branches apart.
+    assert content_texts[0] == (
+        "Society of Example Program Directors research award for "
+        "outstanding contribution. | 2020\n"
+        "Some free text before section break."
+    )
+    # The embedded header's own remaining lines and the long over-80-char
+    # row both land in accumulated content emitted before "PRESENTATIONS".
+    pre_presentations = content_texts[1]
+    assert "Detail line 1" in pre_presentations
+    assert "A" * 90 in pre_presentations
+    # The final plain content row is flushed after the last header.
+    assert any("Talk one at Conference X" in t and "New York" in t for t in content_texts)
+
+
+# --------------------------------------------------------------------------
+# extract_docx_structure
+# --------------------------------------------------------------------------
+
+
+def test_extract_docx_structure_top_level_shape(tmp_path):
+    doc = Document()
+    doc.add_paragraph("Intro paragraph")
+    doc.add_paragraph("")
+    doc.add_table(rows=1, cols=2)
+    docx_path = tmp_path / "structure_fixture.docx"
+    doc.save(str(docx_path))
+
+    struct = extract_docx_structure(str(docx_path))
+
+    assert set(struct.keys()) == {"doc_path", "elements", "meta"}
+    assert struct["doc_path"] == str(docx_path)
+    assert set(struct["meta"].keys()) == {
+        "num_elements", "num_paragraphs", "num_tables", "num_empty",
+    }
+    assert struct["meta"] == {
+        "num_elements": 3, "num_paragraphs": 1, "num_tables": 1, "num_empty": 1,
+    }
+    # Table idx is namespaced by body-wide position ("table_2": two
+    # paragraphs consumed idx 0 and 1 first), distinct from table_index.
+    table_elem = struct["elements"][2]
+    assert table_elem["idx"] == "table_2"
+    assert table_elem["table_index"] == 0
+    assert table_elem["type"] == "table"
+
+
+# --------------------------------------------------------------------------
+# normalize_style_name
+# --------------------------------------------------------------------------
+
+
+def test_normalize_style_name_heading_level():
+    assert normalize_style_name("Heading 2") == {
+        "role": "heading", "level": 2, "original": "Heading 2",
+    }
+
+
+def test_normalize_style_name_title_defaults_to_level_1():
+    assert normalize_style_name("Title") == {
+        "role": "heading", "level": 1, "original": "Title",
+    }
+
+
+def test_normalize_style_name_list_and_bullet():
+    assert normalize_style_name("List Bullet") == {
+        "role": "list", "original": "List Bullet",
+    }
+
+
+def test_normalize_style_name_bullet_only_keyword():
+    # Isolates the "'bullet' in style_lower" alternative from "'list' in
+    # style_lower" -- this style name has no substring "list" at all, unlike
+    # the "List Bullet" fixture above which satisfies both keywords at once
+    # and so cannot tell them apart.
+    assert normalize_style_name("Bullet") == {"role": "list", "original": "Bullet"}
+
+
+def test_normalize_style_name_normal():
+    assert normalize_style_name("Normal") == {"role": "normal", "original": "Normal"}
+
+
+def test_normalize_style_name_unknown_is_custom():
+    assert normalize_style_name("SomeExoticStyle") == {
+        "role": "custom", "original": "SomeExoticStyle",
+    }
+
+
+# --------------------------------------------------------------------------
+# create_simplified_layout_json
+# --------------------------------------------------------------------------
+
+
+def _simplified_fixture_structure():
+    return {
+        "elements": [
+            {
+                "idx": 0, "type": "paragraph", "text": "Section Heading",
+                "style": "Heading 1", "list_level": None, "bold": False,
+                "indent_left": 0.0,
+            },
+            {"idx": 1, "type": "empty", "text": "", "is_empty": True},
+            {
+                "idx": 2, "type": "paragraph", "text": "Bold indented text",
+                "style": "Normal", "list_level": 2, "bold": True,
+                "indent_left": 0.5,
+            },
+            {
+                "idx": 3, "type": "table", "rows": 2, "cols": 2,
+                "data": [
+                    [{"text": "R0C0"}, {"text": "R0C1"}],
+                    [{"text": "R1C0"}, {"text": "R1C1"}],
+                ],
+            },
+        ]
+    }
+
+
+def test_create_simplified_layout_json_skip_empty_true():
+    simplified = create_simplified_layout_json(_simplified_fixture_structure(), skip_empty=True)
+
+    idxs = [e["idx"] for e in simplified]
+    assert 1 not in idxs  # the empty paragraph is dropped entirely
+
+    heading = simplified[0]
+    assert heading == {"idx": 0, "text": "Section Heading", "role": "heading", "level": 1}
+
+    bold_para = next(e for e in simplified if e["idx"] == 2)
+    assert bold_para["role"] == "normal"
+    assert bold_para["bold"] is True
+    assert bold_para["list_level"] == 2
+    assert bold_para["indent"] == 0.5
+
+
+def test_create_simplified_layout_json_skip_empty_false_keeps_placeholder():
+    simplified = create_simplified_layout_json(_simplified_fixture_structure(), skip_empty=False)
+
+    placeholder = next(e for e in simplified if e["idx"] == 1)
+    assert placeholder == {"idx": 1, "type": "empty"}
+
+
+def test_create_simplified_layout_json_table_preview_is_first_row():
+    simplified = create_simplified_layout_json(_simplified_fixture_structure(), skip_empty=True)
+
+    table_elem = next(e for e in simplified if e["idx"] == 3)
+    assert table_elem["type"] == "table"
+    assert table_elem["rows"] == 2
+    assert table_elem["cols"] == 2
+    assert table_elem["preview"] == [{"text": "R0C0"}, {"text": "R0C1"}]
