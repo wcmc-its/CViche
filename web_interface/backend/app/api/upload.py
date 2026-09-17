@@ -15,6 +15,9 @@ from sqlalchemy.orm import Session
 from datetime import datetime
 from pydantic import BaseModel
 from typing import Literal, Optional
+from docx import Document
+from docx.opc.exceptions import PackageNotFoundError
+from lxml.etree import XMLSyntaxError
 
 from app.database import get_db
 from app.models import Run, Step, User
@@ -60,41 +63,42 @@ def _validate_docx_magic(content: bytes) -> bool:
         return False
 
 
+# What python-docx raises on a zip-shaped upload it cannot read (measured on
+# 1.2.0): a zip missing its parts -> KeyError; malformed part XML ->
+# XMLSyntaxError; a truncated zip -> BadZipFile; not an OPC package at all ->
+# PackageNotFoundError; the tempfile round-trip -> OSError. Anything else is a
+# bug and must surface, not be swallowed (§5.4).
+_DOCX_READ_ERRORS = (PackageNotFoundError, zipfile.BadZipFile, KeyError, XMLSyntaxError, OSError)
+
+
 def _extract_text(content: bytes, file_ext: str) -> str | None:
     """Best-effort text extraction for the empty-document guard.
 
     Returns the extracted text, an empty string when the file is readable but
-    contains no text (scan/blank) or is password-protected, or ``None`` when
-    extraction could not run at all (missing library, unexpected read error).
+    contains no text (scan/blank), or ``None`` when the document could not be
+    read at all (a known python-docx read failure, see ``_DOCX_READ_ERRORS``).
     Callers treat ``None`` as "cannot determine" and skip the guard rather than
     block a possibly-valid upload.
     """
+    if file_ext != ".docx":
+        return None
+    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+        tmp.write(content)
+        tmp_path = tmp.name
     try:
-        if file_ext == ".docx":
-            from docx import Document
-            with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
-                tmp.write(content)
-                tmp_path = tmp.name
-            try:
-                doc = Document(tmp_path)
-                parts = [p.text for p in doc.paragraphs if p.text.strip()]
-                for table in doc.tables:
-                    for row in table.rows:
-                        for cell in row.cells:
-                            if cell.text.strip():
-                                parts.append(cell.text)
-                return "\n".join(parts)
-            finally:
-                os.unlink(tmp_path)
-    except Exception as e:
-        msg = str(e).lower()
-        # A password/encryption failure means the document is genuinely
-        # unreadable -> trip the guard (empty string) rather than fail open.
-        if "password" in msg or "encrypt" in msg or "decrypt" in msg:
-            return ""
+        doc = Document(tmp_path)
+        parts = [p.text for p in doc.paragraphs if p.text.strip()]
+        for table in doc.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    if cell.text.strip():
+                        parts.append(cell.text)
+        return "\n".join(parts)
+    except _DOCX_READ_ERRORS as e:
         logger.warning("Text extraction for empty-doc guard failed (%s): %s", file_ext, e, exc_info=True)
         return None
-    return None
+    finally:
+        os.unlink(tmp_path)
 
 
 router = APIRouter()

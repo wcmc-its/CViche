@@ -331,22 +331,56 @@ def test_validate_docx_magic_accepts_a_real_docx():
     assert _validate_docx_magic(_docx_bytes("real content")) is True
 
 
-# --- item 7: password-protected document ------------------------------------
+# --- #865 review: _extract_text catches only the measured read failures ------
 
-def test_extract_text_returns_empty_for_encrypted_document():
-    """PR #779 review thread web_interface/backend/tests/test_upload_atomicity.py item 7
+def _zip_bytes(**members: str) -> bytes:
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, body in members.items():
+            z.writestr(name.replace("__", "/"), body)
+    return buf.getvalue()
 
-    upload.py:89-95: an extraction error whose message names
-    password/encrypt/decrypt maps to "" (trips the unreadable-document guard),
-    NOT to None (which would fail open and let the upload through).
 
-    #524 removed the .pdf/pdfplumber arm of this (formerly parametrized) test
-    along with _extract_text's now-unreachable .pdf branch -- .pdf can no
-    longer reach _extract_text at all (rejected earlier by the extension
-    check).
-    """
-    with patch("docx.Document", side_effect=Exception("Package is encrypted")):
-        assert _extract_text(b"PK\x03\x04payload", ".docx") == ""
+_CONTENT_TYPES = (
+    "<Types xmlns='http://schemas.openxmlformats.org/package/2006/content-types'>"
+    "<Override PartName='/word/document.xml' ContentType='application/vnd.openxmlformats"
+    "-officedocument.wordprocessingml.document.main+xml'/></Types>"
+)
+_RELS = (
+    "<Relationships xmlns='http://schemas.openxmlformats.org/package/2006/relationships'>"
+    "<Relationship Id='rId1' Type='http://schemas.openxmlformats.org/officeDocument/2006/"
+    "relationships/officeDocument' Target='word/document.xml'/></Relationships>"
+)
+
+
+@pytest.mark.parametrize("label, content", [
+    ("not a zip at all -> PackageNotFoundError", b"PK\x03\x04 but not really a zip"),
+    ("truncated docx -> PackageNotFoundError", _docx_bytes("hello")[:1200]),
+    ("zip with no parts -> KeyError", _zip_bytes()),
+    ("malformed document.xml -> XMLSyntaxError",
+     _zip_bytes(**{"[Content_Types].xml": _CONTENT_TYPES, "_rels__.rels": _RELS,
+                   "word__document.xml": "<<<not xml"})),
+])
+def test_extract_text_returns_none_and_logs_a_traceback_for_a_known_read_failure(label, content, caplog):
+    """PR #865 review thread on upload.py's ``except Exception`` (r4034042444):
+    the catch is now the measured ``_DOCX_READ_ERRORS`` tuple. Each shape a
+    corrupt zip-shaped upload can take maps to None ("cannot determine", the
+    guard is skipped) and leaves a WARNING that carries the traceback."""
+    with caplog.at_level(logging.WARNING, logger="app.api.upload"):
+        assert _extract_text(content, ".docx") is None, label
+    records = [r for r in caplog.records if "empty-doc guard failed" in r.getMessage()]
+    assert len(records) == 1, label
+    assert records[0].exc_info is not None, label
+
+
+def test_extract_text_lets_an_unexpected_error_surface():
+    """The other half of narrowing the catch: an exception that is NOT a known
+    read failure is a bug in the reader, and it propagates instead of being
+    swallowed into a fail-open None (§5.4). Widening the tuple back to
+    ``Exception`` fails this test."""
+    with patch("app.api.upload.Document", side_effect=RuntimeError("reader bug")):
+        with pytest.raises(RuntimeError):
+            _extract_text(_docx_bytes("hello"), ".docx")
 
 
 def test_extract_text_returns_none_for_unrecognized_extension():
