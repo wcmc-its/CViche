@@ -21,10 +21,12 @@ import logging
 import os
 import sys
 import json
+import traceback
 from types import MappingProxyType
 import re
 from pathlib import Path
 from typing import Dict, List, Any, Literal, Optional, Tuple
+from collections.abc import Callable
 from datetime import datetime
 from collections import defaultdict
 
@@ -407,6 +409,12 @@ RENDER_ROUTED_CODES = frozenset({
     # NOTE: T is intentionally NOT here - T entries go to Appendix
 })
 
+# Position/training codes represent career-progression stages that share most
+# words but differ in rank -- `_group_and_dedup_entries` uses date-aware dedup
+# for them, merging only entries whose date ranges overlap or match. A
+# taxonomy fact, not a setting (§7.2: no new configuration mechanism).
+_DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1'})
+
 
 def _merge_appendix_diversion_warnings(
     issues: list[dict], written: list[UnmappedEntry], recovered: list[str],
@@ -523,6 +531,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         # Appendix entries pending reconsideration
         self._appendix_pending = []  # List of (entry, coverage_pct) tuples
+
+        # Per-section render failures caught by _render_section (#565): one
+        # dict per isolated section that raised, merged into the
+        # render-warnings sidecar ahead of the self-check findings. Reset at
+        # the top of generate(), declared here for typing/reuse across renders.
+        self._section_failures: list[dict[str, Any]] = []
 
         # Memoizes _classify_geographic_scope's LLM calls for the life of one
         # render, keyed on (activity location, owner institutions).
@@ -705,6 +719,57 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                     logger.warning(f"Could not load cv_owner_location from Stage 4: {e}")
         return cv_owner_location
 
+    def _group_and_dedup_entries(
+        self, entries: list[dict[str, Any]]
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+        """Group entries by taxonomy code (applying mismatch corrections),
+        then deduplicate within each group. Pure move out of generate() --
+        carved out to offset the #565 section-dispatch table's line cost
+        under the §3.2a size ratchet; behavior is unchanged.
+
+        Returns (entries_by_code, pre_dedup_entries_by_code, dedup_decisions).
+        ``pre_dedup_entries_by_code`` is the snapshot the #221 recovery pass
+        scans: dedup keeps the longer near-duplicate, which can eat a unique
+        record line fused into the dropped entry, so recovery needs the
+        pre-dedup groups to re-verify against.
+        """
+        entries_by_code = defaultdict(list)
+        mismatch_corrections = 0
+        for entry in entries:
+            code = normalize_retired_code(entry)
+            code = self._correct_mismatch_if_needed(entry, code)
+            if code != entry.get('taxonomy_code', 'T'):
+                mismatch_corrections += 1
+            entries_by_code[code].append(entry)
+
+        if self.verbose:
+            logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
+            if mismatch_corrections > 0:
+                logger.info(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
+
+        pre_dedup_entries_by_code = {code: list(group)
+                                     for code, group in entries_by_code.items()}
+        total_deduped = 0
+        dedup_decisions: list[dict[str, Any]] = []
+        for code in list(entries_by_code.keys()):
+            before = len(entries_by_code[code])
+            date_aware = code in _DATE_AWARE_DEDUP_CODES
+            group_decisions: list[dict[str, Any]] = []
+            entries_by_code[code] = deduplicate_entries(
+                entries_by_code[code], verbose=self.verbose,
+                require_date_overlap=date_aware,
+                decisions=group_decisions)
+            for decision in group_decisions:
+                decision["code"] = code
+            dedup_decisions.extend(group_decisions)
+            removed = before - len(entries_by_code[code])
+            if removed > 0:
+                total_deduped += removed
+        if self.verbose and total_deduped > 0:
+            logger.info(f"  Deduplicated: {total_deduped} near-duplicate entries removed")
+
+        return entries_by_code, pre_dedup_entries_by_code, dedup_decisions
+
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
                  original_doc_path: str = None) -> str:
         """
@@ -722,6 +787,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         Returns:
             Path to generated document
         """
+        # Reset per-render section-failure tracking (#565) -- a generator
+        # instance can render more than once, and a failure from a prior
+        # render must never leak into this one's sidecar.
+        self._section_failures = []
+
         # Load input data - each stage output is self-contained
         with open(input_path, 'r') as f:
             data = json.load(f)
@@ -789,51 +859,10 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             logger.info(f"{'='*60}")
             logger.info(f"Total entries: {len(entries)}")
 
-        # Group entries by taxonomy code, applying mismatch corrections
-        entries_by_code = defaultdict(list)
-        mismatch_corrections = 0
-        for entry in entries:
-            code = normalize_retired_code(entry)
-            code = self._correct_mismatch_if_needed(entry, code)
-            if code != entry.get('taxonomy_code', 'T'):
-                mismatch_corrections += 1
-            entries_by_code[code].append(entry)
-
-        if self.verbose:
-            logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
-            if mismatch_corrections > 0:
-                logger.info(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
-
-        # Deduplicate within each code group.
-        # Position/training codes (D1, D2, D3, C, B1) represent career progression
-        # stages that share most words but differ in rank — use date-aware dedup
-        # that only merges entries whose date ranges overlap or match.
-        DATE_AWARE_DEDUP_CODES = {'D1', 'D2', 'D3', 'C', 'B1'}
-        # Snapshot the pre-dedup groups for the #221 recovery pass: dedup keeps
-        # the longer near-duplicate, which can eat a unique record line fused
-        # into the dropped entry. Recovery re-verifies every line against the
-        # rendered document, so scanning dropped entries is safe — content the
-        # surviving duplicate rendered is seen as rendered.
-        pre_dedup_entries_by_code = {code: list(group)
-                                     for code, group in entries_by_code.items()}
-        total_deduped = 0
-        dedup_decisions: List[Dict] = []
-        for code in list(entries_by_code.keys()):
-            before = len(entries_by_code[code])
-            date_aware = code in DATE_AWARE_DEDUP_CODES
-            group_decisions: List[Dict] = []
-            entries_by_code[code] = deduplicate_entries(
-                entries_by_code[code], verbose=self.verbose,
-                require_date_overlap=date_aware,
-                decisions=group_decisions)
-            for decision in group_decisions:
-                decision["code"] = code
-            dedup_decisions.extend(group_decisions)
-            removed = before - len(entries_by_code[code])
-            if removed > 0:
-                total_deduped += removed
-        if self.verbose and total_deduped > 0:
-            logger.info(f"  Deduplicated: {total_deduped} near-duplicate entries removed")
+        # Group entries by taxonomy code and deduplicate within each group
+        # (pure-move helper -- see _group_and_dedup_entries).
+        entries_by_code, pre_dedup_entries_by_code, dedup_decisions = \
+            self._group_and_dedup_entries(entries)
 
         # Load template
         self.doc = Document(self.template_path)
@@ -841,33 +870,51 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Flatten all entries for fallback searches
         all_entries = [entry for entries in entries_by_code.values() for entry in entries]
 
-        # Fill each section
+        # Fill each section. _fill_personal_data is FATAL and stays outside
+        # the boundary below by deliberate judgement call (#565): a document
+        # with no owner on it is worse than a failed run, so its raise still
+        # propagates out of generate() and no docx is written. Every other
+        # section -- including passthrough and the appendix below -- runs
+        # through _render_section, so one section raising costs that section
+        # only; the rest still render and the run still produces a document.
         self._fill_personal_data(entries_by_code.get('A', []), cv_owner, document_uid, all_entries, original_doc_path)
-        self._fill_researcher_profiles(entries_by_code.get('S0', []))  # S0 section for ORCID, etc.
-        self._fill_education(entries_by_code.get('B1', []))  # B1 = Academic Degrees only
-        self._fill_other_education(entries_by_code.get('B2', []))  # B2 = Other Educational Experiences
-        self._fill_postdoc_training(entries_by_code, all_entries)
-        self._fill_positions(entries_by_code)
-        self._fill_licensure(entries_by_code.get('F1', []))  # F1 = Licensure
-        self._fill_board_certification(entries_by_code.get('F2', []))  # F2 = Board Certification
-        self._fill_honors(entries_by_code.get('H', []))  # H = Honors and Awards
-        self._fill_memberships(entries_by_code.get('I', []))  # I = Professional Memberships
-        self._fill_teaching(entries_by_code)  # K1-K5 = Teaching Activities
-        research_summary_rendered = self._fill_research_summary(research_summary_data)  # Stage 4.5 output
-        self._fill_research_support(entries_by_code, cv_owner, document_uid)
-        # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
-        self._fill_patents(entries_by_code.get('M2D', []))
-        self._fill_mentoring(entries_by_code)
-        self._fill_clinical_practice(entries_by_code)  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
-        self._fill_leadership(entries_by_code.get('O', []))  # O = Institutional Leadership
-        self._fill_administrative_activities(entries_by_code.get('P', []))  # P = Administrative Committees
-        self._fill_service(entries_by_code)  # Q1-Q4D = Service Activities
-        self._fill_presentations(entries_by_code.get('R', []))  # R = Invited Presentations
-        self._fill_bibliography(entries_by_code, cv_owner, document_uid)
+
+        # (label, callable) in the SAME order as the flat dispatch this
+        # replaced -- test_stage6_section_boundary.py pins that order.
+        section_dispatch: list[tuple[str, Callable[[], Any]]] = [
+            ('researcher_profiles', lambda: self._fill_researcher_profiles(entries_by_code.get('S0', []))),  # S0 section for ORCID, etc.
+            ('education', lambda: self._fill_education(entries_by_code.get('B1', []))),  # B1 = Academic Degrees only
+            ('other_education', lambda: self._fill_other_education(entries_by_code.get('B2', []))),  # B2 = Other Educational Experiences
+            ('postdoc_training', lambda: self._fill_postdoc_training(entries_by_code, all_entries)),
+            ('positions', lambda: self._fill_positions(entries_by_code)),
+            ('licensure', lambda: self._fill_licensure(entries_by_code.get('F1', []))),  # F1 = Licensure
+            ('board_certification', lambda: self._fill_board_certification(entries_by_code.get('F2', []))),  # F2 = Board Certification
+            ('honors', lambda: self._fill_honors(entries_by_code.get('H', []))),  # H = Honors and Awards
+            ('memberships', lambda: self._fill_memberships(entries_by_code.get('I', []))),  # I = Professional Memberships
+            ('teaching', lambda: self._fill_teaching(entries_by_code)),  # K1-K5 = Teaching Activities
+            ('research_summary', lambda: self._fill_research_summary(research_summary_data)),  # Stage 4.5 output
+            ('research_support', lambda: self._fill_research_support(entries_by_code, cv_owner, document_uid)),
+            # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
+            ('patents', lambda: self._fill_patents(entries_by_code.get('M2D', []))),
+            ('mentoring', lambda: self._fill_mentoring(entries_by_code)),
+            ('clinical_practice', lambda: self._fill_clinical_practice(entries_by_code)),  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
+            ('leadership', lambda: self._fill_leadership(entries_by_code.get('O', []))),  # O = Institutional Leadership
+            ('administrative_activities', lambda: self._fill_administrative_activities(entries_by_code.get('P', []))),  # P = Administrative Committees
+            ('service', lambda: self._fill_service(entries_by_code)),  # Q1-Q4D = Service Activities
+            ('presentations', lambda: self._fill_presentations(entries_by_code.get('R', []))),  # R = Invited Presentations
+            ('bibliography', lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
+        ]
+        research_summary_rendered = False
+        for label, fn in section_dispatch:
+            result = self._render_section(label, fn)
+            if label == 'research_summary':
+                research_summary_rendered = bool(result)
 
         # Fill passthrough sections (Employment Status, Institutional Affiliation,
         # Percent Effort) -- copied from source CV when it matches WCM (#294, #260).
-        passthrough_consumed_ids = {id(e) for e in self._fill_passthrough_sections(all_entries)}
+        passthrough_result = self._render_section(
+            'passthrough_sections', lambda: self._fill_passthrough_sections(all_entries))
+        passthrough_consumed_ids = {id(e) for e in (passthrough_result or [])}
 
         # Add appendix for ALL unmapped content. Local mutable copy of the
         # module-level RENDER_ROUTED_CODES: the M1 discard just below mutates
@@ -903,7 +950,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         written_appendix_entries: list[UnmappedEntry] = []
         if unmapped_entries:
-            written_appendix_entries = self._fill_appendix(unmapped_entries)
+            written_appendix_entries = self._render_section(
+                'appendix', lambda: self._fill_appendix(unmapped_entries)) or []
 
         # Route content-overflow entries as tracked-change bullets
         self._route_overflow_entries()
@@ -938,7 +986,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Save
         self.doc.save(output_path)
 
-        # Run post-generation validation to catch common issues
+        # Run post-generation validation to catch common issues. Section
+        # failures caught by _render_section are merged in ahead of the
+        # self-check findings (#565) -- one list feeds both the banner below
+        # and the sidecar, so a missing section is never quieter than a
+        # cosmetic self-check finding.
         validation_issues = self._validate_output()
 
         # Appendix-diversion warnings (#531, #531-R2) -- see the helper's
@@ -946,29 +998,16 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         validation_issues = _merge_appendix_diversion_warnings(
             validation_issues, written_appendix_entries, recovered_appendix_codes)
 
-        if validation_issues:
-            logger.info(f"\n{'!'*60}")
-            logger.info("VALIDATION WARNINGS")
-            logger.info(f"{'!'*60}")
-            for issue in validation_issues:
+        all_warnings = self._section_failures + validation_issues
+        if all_warnings:
+            logger.warning("!" * 60)
+            logger.warning("VALIDATION WARNINGS")
+            logger.warning("!" * 60)
+            for issue in all_warnings:
                 logger.warning(f"  ⚠ {issue['message']}")
-            logger.info(f"{'!'*60}")
+            logger.warning("!" * 60)
 
-        # Persist the self-check warnings and dedup decision trail next to
-        # the docx so the run doctor can re-emit them (#227/#228) — until now
-        # they only ever reached the pod log. Written even when empty, so the
-        # doctor can tell a clean run from a pre-sidecar build. Fail-soft: a
-        # sidecar failure must never fail the render.
-        try:
-            report_path = Path(output_path).with_name(
-                f"{document_uid}_render_warnings.json")
-            report_path.write_text(json.dumps({
-                "document_uid": document_uid,
-                "warnings": validation_issues,
-                "dedup_decisions": dedup_decisions,
-            }, indent=2))
-        except Exception as exc:
-            logger.warning(f"  ⚠ could not write render-warnings sidecar: {exc}")
+        self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
 
         if self.verbose:
             logger.info(f"\n{'='*60}")
@@ -988,6 +1027,54 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             logger.info(f"\nSaved to: {output_path}")
 
         return output_path
+
+    def _render_section(self, label: str, fn: Callable[[], Any]) -> Any:  # noqa: ANN401
+        """Call one section-dispatch entry, isolating a raise to this section
+        only (#565). Returns fn()'s result on success; on any Exception it
+        logs the traceback, records a severity-carrying failure onto
+        ``self._section_failures`` (merged into the render-warnings sidecar
+        by generate()), and returns None so the caller can fall back.
+
+        Never swallows: every caught exception gets both the log line and
+        the record (§5.4) -- an isolated section must fail loudly, or the
+        isolation trades a whole-document crash for a silent partial render,
+        which is worse.
+        """
+        try:
+            return fn()
+        except Exception as exc:
+            logger.exception(
+                "Stage 6: section %s failed; rendering the remaining sections", label)
+            evidence = [line[:200] for line in traceback.format_exc().splitlines()[-3:]]
+            self._section_failures.append({
+                "check": "section_render_failed",
+                "code": None,
+                "section": label,
+                "message": f"section {label} failed: {type(exc).__name__}: {exc}",
+                "evidence": evidence,
+                "severity": "ERROR",
+            })
+            return None
+
+    def _write_render_warnings_sidecar(self, output_path: str, document_uid: str,
+                                        warnings: list[dict[str, Any]], dedup_decisions: list[dict[str, Any]]) -> None:
+        """Persist the self-check + section-failure warnings and dedup
+        decision trail next to the docx so the run doctor can re-emit them
+        (#227/#228) — until now they only ever reached the pod log. Written
+        even when empty, so the doctor can tell a clean run from a
+        pre-sidecar build. Fail-soft: a sidecar failure must never fail the
+        render.
+        """
+        try:
+            report_path = Path(output_path).with_name(
+                f"{document_uid}_render_warnings.json")
+            report_path.write_text(json.dumps({
+                "document_uid": document_uid,
+                "warnings": warnings,
+                "dedup_decisions": dedup_decisions,
+            }, indent=2))
+        except Exception:
+            logger.exception("could not write render-warnings sidecar")
 
 
 

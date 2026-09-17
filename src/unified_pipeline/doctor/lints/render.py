@@ -553,14 +553,29 @@ def lint_unrendered_records(stage4: dict,
     return findings
 
 
+# Severities a sidecar warning may carry (#565's section_render_failed
+# records add "ERROR"; every pre-existing self-check record has no severity
+# key at all). Anything else -- an unrecognized string, or the key present
+# but empty/None -- falls back to WARN rather than reaching the doctor
+# report unvalidated.
+_STAGE6_WARNING_SEVERITIES = {"INFO", "WARN", "ERROR"}
+
+
 def lint_stage6_warnings(report: Dict) -> List[Dict]:
     """Stage 6's post-generation self-check (_validate_output) findings,
-    re-emitted from the render-warnings sidecar so they reach the doctor
-    report and the Teams card instead of dying in the pod log (#228)."""
+    plus per-section render failures (#565), re-emitted from the
+    render-warnings sidecar so they reach the doctor report and the Teams
+    card instead of dying in the pod log (#228). A record's own "severity"
+    carries through when it's a recognized value; older records with no
+    "severity" key (and any unrecognized value) default to WARN, same as
+    before this lint had a severity path."""
     findings = []
     for w in report.get("warnings", []):
+        severity = w.get("severity") or "WARN"
+        if severity not in _STAGE6_WARNING_SEVERITIES:
+            severity = "WARN"
         findings.append(_finding(
-            "stage6_render_warnings", "WARN",
+            "stage6_render_warnings", severity,
             f"stage 6 self-check: {w.get('message', '')}",
             [str(e)[:100] for e in (w.get("evidence") or [])[:3]]))
     return findings
