@@ -43,9 +43,11 @@ _KNOWN_GAPS = frozenset({
     # 'J' is NOT here: #260 gave it a passthrough render route
     # (stage6/sections/passthrough.py's _fill_percent_effort), so it now
     # belongs in _RENDERED_BUT_NOT_IN_RENDER_ROUTED_CODES below, same as E/G.
-    'N2',                               # #529 -- this issue; needs a placement decision
+    # 'N1'/'N2' are NOT here: #529 gave both a render route (mentoring.py's
+    # _fill_program_leadership/_fill_training_grants), routed the same way
+    # N3A/N3B already were, via RENDER_ROUTED_CODES.
     'M2', 'M4', 'M4A', 'M4B', 'M4C',    # #291 -- parked, needs a WCM-format decision (status-aware routing)
-    'N1', 'N3',                         # no separately-filed issue found; same open question as N2
+    'N3',                                # no separately-filed issue found; parent container code, never itself assigned
 })
 
 
