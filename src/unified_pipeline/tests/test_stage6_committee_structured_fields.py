@@ -37,13 +37,17 @@ def test_dict_pulls_name_like_key():
     assert _committee_cell_text({"name": "HPE Conference Committee"}) == "HPE Conference Committee"
 
 
-@pytest.mark.parametrize("key", ["committee_name", "committee", "activity", "name", "title"])
+@pytest.mark.parametrize("key", ["committee_name", "committee", "activity", "name", "journal", "title"])
 def test_dict_pulls_each_name_like_key(key):
     assert _committee_cell_text({key: "Research Committee"}) == "Research Committee"
 
 
 def test_committee_name_keys_constant():
-    assert _COMMITTEE_NAME_KEYS == ("committee_name", "committee", "activity", "name", "title")
+    # 'journal' was added for #812 (service.py's `journal_name` field, which
+    # can carry a list of {"name"/"journal": ..., "start_date": ...,
+    # "end_date": ...} records) -- extending this tuple rather than
+    # special-casing the caller, per the ticket.
+    assert _COMMITTEE_NAME_KEYS == ("committee_name", "committee", "activity", "name", "journal", "title")
 
 
 def test_dict_key_precedence():

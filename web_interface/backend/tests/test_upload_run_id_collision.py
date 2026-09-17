@@ -70,7 +70,7 @@ def _bypass_file_validation(upload_dir):
 def _post_dummy_upload(client):
     return client.post(
         "/api/upload",
-        files={"file": ("cv.docx", b"PK\x03\x04dummy-docx-bytes", "application/octet-stream")},
+        files={"file": ("cv.docx", b"PK\x03\x04dummy-docx-bytes", "application/octet-stream")}, data={"submission_type": "own_cv"},
     )
 
 

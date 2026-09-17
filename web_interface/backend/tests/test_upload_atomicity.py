@@ -78,7 +78,7 @@ def _bypass_file_validation(tmp_path):
 def _post_dummy_upload(client):
     return client.post(
         "/api/upload",
-        files={"file": ("cv.docx", b"PK\x03\x04dummy-docx-bytes", "application/octet-stream")},
+        files={"file": ("cv.docx", b"PK\x03\x04dummy-docx-bytes", "application/octet-stream")}, data={"submission_type": "own_cv"},
     )
 
 
@@ -155,7 +155,7 @@ def _post_upload(client, filename, content, content_type="application/octet-stre
     return client.post(
         "/api/upload",
         files={"file": (filename, content, content_type)},
-        data=data or {},
+        data={"submission_type": "own_cv", **(data or {})},
     )
 
 
@@ -386,6 +386,38 @@ def test_upload_persists_render_options(client, db, seed_simple_mode, tmp_path, 
     assert resp.status_code == 200, resp.text
     run = db.get(Run, resp.json()["run_id"])
     assert (run.show_track_changes, run.show_pipeline_comments, run.strip_template_instructions) == expected
+
+
+# --- submission_type: per-upload role attestation ----------------------------
+
+@pytest.mark.parametrize("value, status", [
+    ("authorized_admin", 200),
+    ("own_cv", 200),
+    ("faculty", 422),  # not one of the two attested roles
+    (None, 422),       # absent: the attestation is required, no default
+])
+def test_upload_requires_and_persists_submission_type(client, db, seed_simple_mode, tmp_path, value, status):
+    """Every upload records which attestation the submitter accepted (Faculty
+    Affairs, 2026-09). Before this the Run.submission_type column was never
+    written -- restart copied None to None."""
+    user = _make_user(db)
+    _auth(client, user)
+    patches = _bypass_file_validation(tmp_path)
+    patches.append(patch("app.api.upload.get_storage", return_value=MagicMock()))
+    resp = _run_patches(
+        patches,
+        lambda: client.post(
+            "/api/upload",
+            files={"file": ("cv.docx", b"PK\x03\x04dummy", DOCX_MIME)},
+            data={} if value is None else {"submission_type": value},
+        ),
+    )
+
+    assert resp.status_code == status, resp.text
+    if status == 200:
+        assert db.get(Run, resp.json()["run_id"]).submission_type == value
+    else:
+        assert db.query(Run).count() == 0
 
 
 # --- item 10: manifest integrity + by-submitter index ------------------------

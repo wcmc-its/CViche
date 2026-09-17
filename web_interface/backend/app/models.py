@@ -73,12 +73,12 @@ class Feedback(Base):
     enrichment_quality = Column(Integer, nullable=True)  # 1-5 or null
     summary_generated = Column(Integer, nullable=True)  # boolean as int
     summary_quality = Column(Integer, nullable=True)  # 1-5 or null
-    issue_missing_content = Column(String(20), nullable=True)
-    issue_split_merged = Column(String(20), nullable=True)
-    issue_wrong_section = Column(String(20), nullable=True)
-    issue_inaccurate = Column(String(20), nullable=True)
-    issue_ai_enrichment = Column(String(20), nullable=True)
-    issue_formatting = Column(String(20), nullable=True)
+    issue_missing_content = Column(Text, nullable=True)
+    issue_split_merged = Column(Text, nullable=True)
+    issue_wrong_section = Column(Text, nullable=True)
+    issue_inaccurate = Column(Text, nullable=True)
+    issue_ai_enrichment = Column(Text, nullable=True)
+    issue_formatting = Column(Text, nullable=True)
     issue_locations = Column(Text, nullable=True)  # JSON array
     biggest_issue = Column(Text, nullable=True)
     likelihood_to_recommend = Column(Integer, nullable=False)  # 1-5

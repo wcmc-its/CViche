@@ -368,8 +368,11 @@ def test_a_genuinely_under_rendered_single_paragraph_entry_is_still_queued():
     assert len(scratch.gen._overflow_entries) == 1
     queued_entry, queued_para, queued_code = scratch.gen._overflow_entries[0]
     assert queued_entry is entry
-    # No list_level, so this call site prefixes the literal "• " glyph (#483).
-    assert queued_para.text == "• Attending Physician"
+    # No list_level, so this call site defaults to a level-0 list paragraph
+    # (#483) rather than a literal "• " glyph prefix -- either way, the text
+    # this test cares about (what _add_entry_comments measures against the
+    # source) is unaffected.
+    assert queued_para.text == "Attending Physician"
     assert queued_code == "L1"
 
 

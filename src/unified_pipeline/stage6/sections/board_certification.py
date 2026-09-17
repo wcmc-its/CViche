@@ -407,11 +407,17 @@ class BoardCertificationSection:
         WCM template has table with: Name of specialty | Board Certificate # | Date of Certification
 
         Handles cases where multiple certifications are merged into one entry.
-        """
-        if not entries:
-            return
 
-        if self.verbose:
+        No F2 entries still locates the table and clears it (#708): the WCM
+        template ships a blank placeholder data row in this table, and this
+        used to return before `_clear_table_data` ever ran, so that row
+        survived into the delivered document on every CV with zero F2
+        entries. The clear now always runs once the table is found; the
+        row-writing loop below is simply a no-op on an empty `entries`, so
+        no separate early return is needed. `tables_populated` only counts
+        an actual write -- a cleared placeholder is not a populated table.
+        """
+        if self.verbose and entries:
             print(f"Filling Board Certification ({len(entries)} entries)...")
 
         # Find Board Certification section - need to find the subsection header,
@@ -431,7 +437,8 @@ class BoardCertificationSection:
             return
 
         _clear_table_data(table, keep_header=True)
-        self.stats['tables_populated'] += 1
+        if entries:
+            self.stats['tables_populated'] += 1
 
         # #625 thread 3850478580: the 15 sibling section writers under this
         # same header (e.g. licensure.py) sort reverse-chronologically before
