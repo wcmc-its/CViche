@@ -1209,11 +1209,11 @@ def test_continuation_merge_requires_both_organization_and_date():
 
 
 # --- one negative test per `_merge_first_cell_continuation` guard ------------
-# Each names the guard it targets. Guard order and structure deliberately
-# mirror the pre-R3 code with only the two lines' roles swapped -- see the
+# Each names the guard it targets. The guards are three named booleans
+# combined in one `if` (tab / year-or-header / column shape) -- see the
 # function's own docstring for which of these are independently killable by
 # their own test versus provably redundant with the `columns is None`
-# fallback (disclosed, same pattern as the pre-existing equivalent-guard
+# check (disclosed, same pattern as the pre-existing equivalent-guard
 # note this file already carries for `_honor_columns`'s own '|' check).
 
 def test_continuation_merge_requires_an_organization():
@@ -1227,7 +1227,7 @@ def test_continuation_merge_requires_an_organization():
 def test_continuation_merge_rejects_a_bare_year_remainder_line():
     """A remainder line that is nothing but a year is a loose year cell for
     a genuinely separate award, not a continuation row. (This guard is
-    provably redundant with the `columns is None` fallback below it -- a
+    provably redundant with the `columns is None` check beside it -- a
     bare year has no '|' of its own and can never satisfy `_honor_columns`
     either way -- kept for the same reason the pre-existing `_honor_columns`
     '|' check is kept: harmless, and it fails closed the same way if the
