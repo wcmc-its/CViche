@@ -10,6 +10,22 @@ import ErrorBanner from './ErrorBanner'
 import RunHistory from './RunHistory'
 import UserMenu from './UserMenu'
 
+type SubmissionType = 'own_cv' | 'authorized_admin'
+
+// Attestation language agreed with Faculty Affairs (John Spiers, 2026-09).
+const ATTESTATIONS: Record<SubmissionType, { role: string; text: string }> = {
+  own_cv: {
+    role: 'I am the faculty member whose CV this is',
+    text: 'I agree to upload my CV to this tool.',
+  },
+  authorized_admin: {
+    role: 'I am an administrator uploading on behalf of a faculty member',
+    text:
+      'I have received permission of the faculty to upload the CV to this tool, and I agree to provide a copy ' +
+      'of the modified document to said faculty for their review prior to any submission.',
+  },
+}
+
 interface UploadPageProps {
   onUploadSuccess: (runId: string) => void
 }
@@ -35,11 +51,16 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
   // pile of duplicate "Pending" rows for one file (issue #177). null = nothing
   // to retry; the upload path runs normally.
   const [pendingStart, setPendingStart] = useState<{ runId: string } | null>(null)
-  // Output-rendering options (issue #153). Defaults match the backend Run
-  // column defaults: Track Changes on, classification comments off.
-  const [includeTrackChanges, setIncludeTrackChanges] = useState(true)
+  // Output-rendering options (issue #153). Track Changes is always on (Faculty
+  // Affairs asked for no opt-out); classification comments default off.
   const [includeClassificationComments, setIncludeClassificationComments] = useState(false)
   const [stripWcmInstructions, setStripWcmInstructions] = useState(true)
+  // Per-upload role + attestation (Faculty Affairs requirement). The consent
+  // page's choice is only the preselect; every upload records its own.
+  const [submissionType, setSubmissionType] = useState<SubmissionType>(
+    user?.default_submission_type === 'authorized_admin' ? 'authorized_admin' : 'own_cv',
+  )
+  const [attested, setAttested] = useState(false)
 
   // Shared selection path for both the file picker and drag-and-drop.
   const processFile = async (selectedFile: File) => {
@@ -171,9 +192,9 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
 
     try {
       const data = await uploadFile(file, {
-        includeTrackChanges,
         includeClassificationComments,
         stripWcmInstructions,
+        submissionType,
       })
       // Blank-template heuristic tripped: don't start the run yet. Surface the
       // warning and require the acknowledgement checkbox before the next click
@@ -294,18 +315,6 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
               <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
                 <input
                   type="checkbox"
-                  checked={includeTrackChanges}
-                  onChange={(e) => setIncludeTrackChanges(e.target.checked)}
-                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
-                />
-                <span>
-                  Include Track Changes
-                  <span className="block text-xs text-gray-500">Show pipeline edits as Word tracked changes you can accept or reject.</span>
-                </span>
-              </label>
-              <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
-                <input
-                  type="checkbox"
                   checked={includeClassificationComments}
                   onChange={(e) => setIncludeClassificationComments(e.target.checked)}
                   className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
@@ -325,6 +334,45 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
                 <span>
                   Strip WCM template instructions
                   <span className="block text-xs text-gray-500">Remove the WCM CV template&apos;s instructional text (e.g. &quot;When preparing the WCM CV template&hellip;&quot;) from the output. On by default.</span>
+                </span>
+              </label>
+            </fieldset>
+
+            <fieldset className="space-y-2">
+              <legend className="block text-sm font-semibold text-gray-900 mb-1">Who is uploading this CV?</legend>
+              {(Object.keys(ATTESTATIONS) as SubmissionType[]).map((value) => (
+                <label key={value} className="flex items-start gap-2 cursor-pointer text-sm text-gray-700">
+                  <input
+                    type="radio"
+                    name="submission-type"
+                    value={value}
+                    checked={submissionType === value}
+                    onChange={() => { setSubmissionType(value); setAttested(false) }}
+                    className="mt-0.5 h-4 w-4 border-gray-300 text-primary-600 focus:ring-primary-500"
+                  />
+                  <span>{ATTESTATIONS[value].role}</span>
+                </label>
+              ))}
+              <label className="flex items-start gap-2 cursor-pointer text-sm text-gray-700 pt-2">
+                <input
+                  type="checkbox"
+                  checked={attested}
+                  onChange={(e) => setAttested(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-gray-300 text-primary-600 focus:ring-primary-500"
+                />
+                <span>
+                  {ATTESTATIONS[submissionType].text}{' '}
+                  <span className="block text-xs text-gray-500 mt-1">
+                    The text of the CV is sent to a third-party AI service (currently Anthropic&apos;s Claude on Amazon
+                    Bedrock; the provider may change, for example to OpenAI). CViche attempts to withhold highly
+                    sensitive personal details such as date of birth or Social Security number, but you should not
+                    include anything you would not want these systems to see.
+                  </span>
+                  <span className="block text-xs text-gray-500 mt-1">
+                    The original CV, intermediate outputs, and final output are retained to improve CViche and test
+                    proposed changes. See the{' '}
+                    <a href="/help#data-retention" target="_blank" rel="noopener" className="text-primary-600 hover:underline">data retention policy</a>.
+                  </span>
                 </span>
               </label>
             </fieldset>
@@ -405,7 +453,7 @@ export default function UploadPage({ onUploadSuccess }: UploadPageProps) {
 
             <button
               onClick={handleUpload}
-              disabled={!file || uploading || estimating || (pendingWarning !== null && !acknowledged)}
+              disabled={!file || !attested || uploading || estimating || (pendingWarning !== null && !acknowledged)}
               className="w-full bg-primary-600 text-white py-3 px-4 rounded-lg font-semibold hover:bg-primary-700 disabled:bg-gray-300 disabled:cursor-not-allowed transition-colors focus:ring-2 focus:ring-primary-500 focus:outline-none"
               style={{ touchAction: 'manipulation' }}
             >
