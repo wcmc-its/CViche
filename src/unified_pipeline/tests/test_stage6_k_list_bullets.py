@@ -6,11 +6,15 @@ outline and navigation, accessibility tooling and anything re-parsing the output
 all see a bullet-shaped character rather than a list item -- and there is no
 level to set, which is why #423 cannot be fixed at the render without this first.
 
-Originally section K only, since `_insert_bulleted_entry` is shared. #483 then
-extended it to that helper's three non-K call sites and to
-`_fill_researcher_profiles`. The two emitters in the appendix/recovery region
-still write a literal glyph -- their own tests assert it -- and converting them
-is the remaining half of #483.
+Originally section K only, since `_insert_bulleted_entry` is shared. #483's
+first pass extended it to that helper's three non-K call sites, to
+`_fill_researcher_profiles`, to `_insert_bulleted_entry`'s own now-dead
+`list_level is None` fallback, and to `_add_remaining_to_appendix`. #483's
+second pass converts the last one, `_insert_reconsidered_segment` -- its own
+tests in test_stage6_unrendered_recovery.py were rewritten alongside this to
+assert `w:numPr` instead of the glyph. No literal-glyph emitter remains in
+this module; `test_only_the_deferred_emitter_still_writes_a_literal_glyph`
+below now expects an empty set.
 
 Level 0 for every K bullet, not a title/child split. Inferring hierarchy here
 would mean splitting `entry['text']` on newlines, and that approach was measured
@@ -103,12 +107,18 @@ def test_list_level_emits_a_word_list_paragraph_and_drops_the_glyph():
     assert para.text == "2018-2022 - PA Student Lectures"
 
 
-def test_without_list_level_the_literal_glyph_is_unchanged():
+def test_without_list_level_still_emits_a_word_list_paragraph_at_level_0():
+    # #483: the list_level-omitted fallback used to prefix a literal glyph
+    # instead of calling _apply_list_bullet. No production call site has
+    # omitted list_level since #485 (all three non-K sites pass 0), so this
+    # was dead-but-reachable code; closed for defense in depth so a future
+    # caller that forgets list_level gets a real list paragraph, not residue.
     gen = _generator()
     idx = gen._find_paragraph_with_text("EDUCATIONAL CONTRIBUTIONS")
     para = gen._insert_bulleted_entry(idx + 1, "A non-K bullet", None)
-    assert _num_level(para) is None
-    assert para.text == "• A non-K bullet"
+    assert _num_level(para) == "0"
+    assert not para.text.startswith("•")
+    assert para.text == "A non-K bullet"
 
 
 def test_teaching_entries_render_as_list_paragraphs_end_to_end():
@@ -122,6 +132,63 @@ def test_teaching_entries_render_as_list_paragraphs_end_to_end():
     assert len(rendered) == 1
     assert _num_level(rendered[0]) == "0"
     assert "•" not in rendered[0].text
+
+
+# --- and _add_remaining_to_appendix renders the same way ---------------------
+
+def test_appendix_segment_emits_a_word_list_paragraph_and_drops_the_glyph():
+    # #483: this was the second of the two remaining glyph emitters. A mutant
+    # restoring `f"• {segment_text}"` fails both this direct render check
+    # and the AST census in test_only_the_deferred_emitter_still_writes_a_literal_glyph.
+    gen = _generator()
+    gen._add_remaining_to_appendix([
+        ("Recovered committee membership, synthetic case", "P", 12.0),
+    ])
+    rendered = [p for p in gen.doc.paragraphs
+                if "Recovered committee membership" in p.text]
+    assert len(rendered) == 1
+    assert _num_level(rendered[0]) == "0"
+    assert not rendered[0].text.startswith("•")
+    assert rendered[0].text == "Recovered committee membership, synthetic case"
+
+
+def test_reconsidered_segment_emits_a_word_list_paragraph_and_drops_the_glyph():
+    # #483 R2: this was the fourth and last glyph emitter. A mutant restoring
+    # `f"• {...}"` fails both this direct render check and the AST census in
+    # test_no_literal_glyph_emitter_remains.
+    gen = _generator()
+    inserted = gen._insert_reconsidered_segment(
+        "Recovered synthetic committee record, case ZQ-4", "D1")
+    assert inserted
+    rendered = [p for p in gen.doc.paragraphs
+                if "Recovered synthetic committee record" in p.text]
+    assert len(rendered) == 1
+    assert _num_level(rendered[0]) == "0"
+    assert not rendered[0].text.startswith("•")
+    assert rendered[0].text == "Recovered synthetic committee record, case ZQ-4"
+
+
+def test_reconsidered_segment_with_no_section_anchor_returns_false():
+    # Negative path: an unmappable code returns False without inserting
+    # anything (callers fall back to _add_remaining_to_appendix) -- exercised
+    # here rather than only through the appendix's own tests, since it is
+    # this function's own guard.
+    gen = _generator()
+    before = len(gen.doc.paragraphs)
+    inserted = gen._insert_reconsidered_segment(
+        "Unroutable synthetic content", "ZZ-NOT-A-CODE")
+    assert inserted is False
+    assert len(gen.doc.paragraphs) == before
+
+
+def test_appendix_noise_only_batch_still_adds_no_paragraphs():
+    # Negative path: the pre-existing empty/boilerplate filter must survive
+    # the glyph-to-list conversion unchanged -- an all-noise batch adds
+    # nothing, list paragraph or otherwise.
+    gen = _generator()
+    before = len(gen.doc.paragraphs)
+    gen._add_remaining_to_appendix([("", "T", 0.0), ("Page 2 of 9", "T", 0.0)])
+    assert len(gen.doc.paragraphs) == before
 
 
 # --- and the K call site actually asks for it --------------------------------
@@ -141,22 +208,26 @@ def test_every_teaching_call_site_requests_a_list_level():
 
 
 def test_every_bulleted_entry_call_site_requests_a_list_level():
-    # #483 extended this to the three non-K sites, so the helper now has no
-    # caller left on the literal-glyph branch. The branch itself stays, because
-    # the two emitters in the appendix/recovery region still take it.
+    # #483 extended this to the three non-K sites, so the helper has no
+    # caller left that omits list_level. The parameter stays optional --
+    # omitting it now defaults to level 0 rather than a literal glyph -- but
+    # every known call site still names it explicitly.
     for name, calls in _bullet_calls_by_function().items():
         for call in calls:
             kwargs = {kw.arg for kw in call.keywords}
             assert "list_level" in kwargs, f"{name} line {call.lineno} lost list_level"
 
 
-def test_only_the_deferred_emitters_still_write_a_literal_glyph():
-    """Pins the residue. Any new glyph emitter fails here rather than in a render.
+def test_no_literal_glyph_emitter_remains():
+    """Pins the residue at zero. Any new glyph emitter fails here rather than
+    in a render.
 
-    #474 handled the six K call sites, #483 the other three plus
-    `_fill_researcher_profiles`. What is left is the appendix/recovery pair,
-    whose own tests assert the glyph -- converting them means updating 16 of
-    those tests, which is the remaining half of #483.
+    #474 handled the six K call sites; #483's first pass converted the other
+    three non-K `_insert_bulleted_entry` sites, `_fill_researcher_profiles`,
+    that helper's own fallback branch, and `_add_remaining_to_appendix`;
+    #483's second pass converted the last one, `_insert_reconsidered_segment`
+    (see test_reconsidered_segment_emits_a_word_list_paragraph_and_drops_the_glyph
+    below, and the rewritten assertions in test_stage6_unrendered_recovery.py).
     """
     emitters = set()
     for source in _sources():
@@ -173,7 +244,7 @@ def test_only_the_deferred_emitters_still_write_a_literal_glyph():
                 first = parts[0] if parts else None
                 if isinstance(first, ast.Constant) and str(first.value).startswith("•"):
                     emitters.add(node.name)
-    assert emitters == {"_insert_reconsidered_segment", "_add_remaining_to_appendix"}, \
+    assert emitters == set(), \
         f"unexpected literal-glyph emitters: {sorted(emitters)}"
 
 
