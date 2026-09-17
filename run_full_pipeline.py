@@ -12,7 +12,7 @@ Runs the complete CViche processing pipeline:
 - Stage 4: Field Extraction (extracts structured fields from classified entries)
 - Stage 4.5: Research Summary Generation (generates biosketch-style M1 summary)
 - Stage 5: PubMed Enrichment (enriches publications with PubMed metadata)
-- Stage 5b: Institution Enrichment (adds city/state via ROR API)
+- Stage 5b: Institution Enrichment (adds city/state via LLM lookups)
 - Stage 5c: Teaching Formatter (LLM-reformats K-code entries for readability)
 - Stage 5d: Citation Formatter (LLM-reformats non-enriched citations to Vancouver format)
 - Stage 6: WCM Word Template Generation (creates formatted Word document)

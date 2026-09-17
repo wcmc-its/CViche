@@ -541,6 +541,36 @@ def resolve_pi_name(
     return pi_name
 
 
+# The WCM template's own M2A placeholder table has row-0 cell-0 "Award
+# Source: (funding agency ...)*"; a freshly built grant table
+# (`_create_grant_table`, below) labels its own row 0 "Award Source:" with no
+# trailing text. Both start with this prefix. N2's placeholder table (a
+# different section entirely) reads "Award Source (funding agency, type of
+# grant):" -- no colon immediately after "Source" -- and must NOT match
+# (#836).
+_FUNDING_PLACEHOLDER_LABEL_PREFIX = 'award source:'
+
+
+def _looks_like_funding_placeholder(table: Table) -> bool:
+    """True when `table`'s header row looks like M2's own placeholder or a
+    grant table this section built (#836, same pattern as
+    `leadership._looks_like_leadership_table`).
+
+    Only `Current Research Funding` has a placeholder table of its own in the
+    WCM template; `Past (Completed) Funding` and `Pending Funding` do not, so
+    `_find_table_after_paragraph`'s unbounded forward scan used to hand those
+    two steps whatever table came next in the document -- N2's placeholder,
+    then a mentee placeholder -- and both got deleted on every render. This
+    guard is what stops the removal from firing on a table that is not M2's.
+    """
+    if not table.rows:
+        return False
+    header_cells = table.rows[0].cells
+    if not header_cells:
+        return False
+    return header_cells[0].text.strip().lower().startswith(_FUNDING_PLACEHOLDER_LABEL_PREFIX)
+
+
 def _format_grant_costs(
     annual_direct_costs: str | int | float | None, total_funding: str | int | float | None
 ) -> str:
@@ -652,10 +682,15 @@ class ResearchSupportSection:
                     print(f"  Warning: Could not find section header '{section_header}'")
                 continue
 
-            # Remove any existing template table after this section
-            # (even if no entries, to avoid leaving empty template tables)
+            # Remove the existing template table after this section, if it is
+            # M2's own placeholder (even with no entries, to avoid leaving an
+            # empty template table). `_find_table_after_paragraph` has no
+            # section boundary and returns the first table anywhere below --
+            # for Past/Pending, which have no placeholder of their own, that
+            # was N2's table and a mentee placeholder (#836); the shape guard
+            # is what keeps this removal inside M2.
             existing_table = self._find_table_after_paragraph(section_idx)
-            if existing_table:
+            if existing_table and _looks_like_funding_placeholder(existing_table):
                 existing_table._element.getparent().remove(existing_table._element)
 
             if not entries:
