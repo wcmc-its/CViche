@@ -113,7 +113,8 @@ def score_entry_seniority(entry: dict, taxonomy_code: str, cv_owner_name: str = 
             if len(author_list) >= 1:
                 first_author = author_list[0].lower()
                 last_author = author_list[-1].lower() if len(author_list) > 1 else ''
-                target_lower = (target_name.split() or [''])[0].lower()
+                parts = (target_name or '').split()
+                target_lower = parts[0].lower() if parts else ''
 
                 if target_lower and (target_lower in first_author or target_lower in last_author):
                     return SENIOR_AUTHOR_BONUS
