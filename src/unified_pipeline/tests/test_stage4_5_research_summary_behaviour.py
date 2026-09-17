@@ -97,7 +97,6 @@ def test_score_entry_seniority_ignores_non_grant_non_pub_codes():
     assert score_entry_seniority(entry, "H") == 0.0
 
 
-@pytest.mark.xfail(strict=True, raises=IndexError, reason="suspected bug: whitespace-only target_name passes the truthiness guard, then .split()[0] raises IndexError (#850)")
 def test_score_entry_seniority_whitespace_only_target_name_degrades_to_no_bonus():
     """A noisy extracted_fields.target_name must cost the entry its seniority
     bonus, not crash prioritize_entries / run_stage_4_5 (#850)."""
@@ -106,6 +105,47 @@ def test_score_entry_seniority_whitespace_only_target_name_degrades_to_no_bonus(
         "text": "x",
     }
     assert score_entry_seniority(entry, "S1") < SENIOR_AUTHOR_BONUS
+
+
+def test_score_entry_seniority_none_target_name_no_bonus():
+    """target_name explicitly None must not reach the split() path at all --
+    the ``if authors and target_name`` guard short-circuits first (#850)."""
+    entry = {
+        "extracted_fields": {"authors": "Smith J, Jones B", "target_name": None},
+        "text": "x",
+    }
+    assert score_entry_seniority(entry, "S1") == 0.0
+
+
+def test_score_entry_seniority_empty_string_target_name_no_bonus():
+    """target_name == "" is the ordinary falsy case the guard already
+    handled before #850; kept as a baseline alongside None/whitespace (#850)."""
+    entry = {
+        "extracted_fields": {"authors": "Smith J, Jones B", "target_name": ""},
+        "text": "x",
+    }
+    assert score_entry_seniority(entry, "S1") == 0.0
+
+
+def test_score_entry_seniority_single_word_target_name_matches_first_author():
+    """A plain single-token target_name (no internal whitespace) must keep
+    matching after the #850 fix -- guards against a regression that only
+    handles the multi-word split case."""
+    entry = {
+        "extracted_fields": {"authors": "Smith J, Jones B", "target_name": "Smith"},
+        "text": "x",
+    }
+    assert score_entry_seniority(entry, "S1") == SENIOR_AUTHOR_BONUS
+
+
+def test_score_entry_seniority_padded_multiword_target_name_matches_first_author():
+    """Leading/trailing whitespace around an otherwise valid multi-word
+    target_name must still resolve to its first token and match (#850)."""
+    entry = {
+        "extracted_fields": {"authors": "Smith J, Jones B", "target_name": "  Smith Jones "},
+        "text": "x",
+    }
+    assert score_entry_seniority(entry, "S1") == SENIOR_AUTHOR_BONUS
 
 
 # --- prioritize_entries --------------------------------------------------------

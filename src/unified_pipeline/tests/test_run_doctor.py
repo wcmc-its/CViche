@@ -822,6 +822,26 @@ def test_stage6_warnings_quiet_on_clean_sidecar():
     assert lint_stage6_warnings({"warnings": [], "dedup_decisions": []}) == []
 
 
+def test_stage6_warnings_reemits_appendix_diversion_with_code_and_count():
+    """#531: an appendix_diversion sidecar entry re-emits as a WARN whose
+    message names the code and the count -- lint_stage6_warnings reads only
+    `message`/`evidence` (KNOWN_LINTS/LintSpec untouched, per the ticket),
+    so this is a re-emission proof, not a lint-registry change."""
+    report = {"document_uid": "X", "warnings": [
+        {"check": "appendix_diversion", "code": "N2", "section": "T. APPENDIX",
+         "count": 3, "reason": "no_render_route",
+         "message": "N2: 3 entries diverted to the Appendix — no stage "
+                    "6 section is routed to render this taxonomy code",
+         "evidence": []},
+    ]}
+    findings = lint_stage6_warnings(report)
+    assert len(findings) == 1
+    f = findings[0]
+    assert f["lint"] == "stage6_render_warnings" and f["severity"] == "WARN"
+    assert "N2" in f["message"] and "3" in f["message"]
+    assert f["evidence"] == []
+
+
 # ----------------------------------------------------- lint 11: dedup drops
 
 def test_dedup_drops_flags_distinct_record_quiet_on_true_dup():
@@ -1375,12 +1395,12 @@ def test_run_doctor_tolerates_missing_artifacts(tmp_path):
     root = tmp_path / "empty"
     root.mkdir()
     payload = run_doctor(root, "NOPE")
-    # One skip per lint in KNOWN_LINTS (19), except no_output: it never even
+    # One skip per lint in KNOWN_LINTS (21), except no_output: it never even
     # reached stage 4, so its "has_stage4 and not has_docx..." condition is
     # False and it emits NOTHING, not a skip -- it is dispatched by hand
     # (booleans, not `_ready()`-checked content) precisely so an incomplete
     # run like this one is silent rather than reported as "no output" (#745).
-    assert len(payload["findings"]) == 19
+    assert len(payload["findings"]) == 20
     assert all(f["lint"] != "no_output" for f in payload["findings"])
     assert all(f["severity"] == "INFO" and "skipped" in f["message"]
                for f in payload["findings"])

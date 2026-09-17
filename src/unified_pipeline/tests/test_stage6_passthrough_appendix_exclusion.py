@@ -34,6 +34,7 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+from unified_pipeline.stage6.sections.appendix import REASON_RENDERER_DECLINED  # noqa: E402
 from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
 
 _APPENDIX_HEADER = "T. APPENDIX"
@@ -62,7 +63,10 @@ def _appendix_text(doc) -> str:
     return ""
 
 
-def _render(tmp_path, entries) -> Document:
+def _render(tmp_path, entries) -> tuple[Document, dict]:
+    """Returns the rendered Document and the `<uid>_render_warnings.json`
+    sidecar actually written to disk, so a test can check both what the
+    document shows and what generate() reported about it (#531)."""
     gen = WCMTemplateGenerator(verbose=False)
     # Neutralize the LLM-driven appendix-reconsider pass: isolates the
     # consumed-entry exclusion under test and keeps the render deterministic
@@ -73,7 +77,15 @@ def _render(tmp_path, entries) -> Document:
     output_path = tmp_path / "out.docx"
     input_path.write_text(json.dumps(data))
     gen.generate(str(input_path), str(output_path), research_summary_path=None)
-    return Document(str(output_path))
+    sidecar = json.loads((tmp_path / "TESTEG_render_warnings.json").read_text())
+    return Document(str(output_path)), sidecar
+
+
+def _appendix_diversion_count(sidecar: dict, code: str) -> int:
+    """Sum of `count` over this sidecar's `appendix_diversion` warnings for
+    *code* -- 0 when the code produced none."""
+    return sum(w["count"] for w in sidecar["warnings"]
+               if w.get("check") == "appendix_diversion" and w["code"] == code)
 
 
 _OWNER_ENTRY = {
@@ -96,7 +108,7 @@ def test_accepted_employment_entry_not_duplicated_refused_entry_stays_in_appendi
             "extracted_fields": {}, "element_idx_start": 2,
         },
     ]
-    doc = _render(tmp_path, entries)
+    doc, sidecar = _render(tmp_path, entries)
     full, appendix = _full_text(doc), _appendix_text(doc)
 
     assert "DISTINCTIVE_E_ACCEPTED_EMPLOYER" in full, "accepted entry did not render at all"
@@ -104,6 +116,9 @@ def test_accepted_employment_entry_not_duplicated_refused_entry_stays_in_appendi
         "accepted E entry duplicated into the Appendix -- #294 regression")
     assert "DISTINCTIVE_E_REFUSED_LABEL" in appendix, (
         "refused E entry (label matches no template row) must still reach the Appendix")
+    # #531: the appendix_diversion count for T must reflect only the refused
+    # entry -- the accepted (passthrough-consumed) one must not inflate it.
+    assert _appendix_diversion_count(sidecar, "T") == 1
 
 
 def test_accepted_affiliation_entry_not_duplicated_refused_entry_stays_in_appendix(tmp_path):
@@ -121,7 +136,7 @@ def test_accepted_affiliation_entry_not_duplicated_refused_entry_stays_in_append
             "extracted_fields": {}, "element_idx_start": 4,
         },
     ]
-    doc = _render(tmp_path, entries)
+    doc, sidecar = _render(tmp_path, entries)
     full, appendix = _full_text(doc), _appendix_text(doc)
 
     assert "DISTINCTIVE_G_ACCEPTED_AFFIL" in full, "accepted entry did not render at all"
@@ -129,6 +144,73 @@ def test_accepted_affiliation_entry_not_duplicated_refused_entry_stays_in_append
         "accepted G entry duplicated into the Appendix -- #294 regression")
     assert "QQ1" in appendix, (
         "refused G entry (too short to be routed) must still reach the Appendix")
+    # #531: same exclusion, checked through the new per-code count.
+    assert _appendix_diversion_count(sidecar, "T") == 1
+
+
+def test_refused_g_entry_reason_is_renderer_declined_accepted_produces_no_warning(tmp_path):
+    """#531-R2 finding F2: an unconsumed G-CODED entry (not just T-coded, as
+    the two tests above use) reads as `renderer_declined`, never
+    `no_render_route` -- `_fill_passthrough_sections` IS G's renderer and
+    declined this entry (too short), it is not that no section routes G at
+    all. The accepted G entry produces no appendix_diversion warning.
+
+    Also pins r11 (#531-R2 finding F-R2-3 / #531-R3 task 3): the exact
+    passthrough-refusal message text, singular case ("1 entry ... refused
+    by..."). `test_refused_g_entries_plural_message` below is the plural
+    companion. Mutant r11 (`if False:` disabling the E/G/J-specific message
+    branch in `_diversion_message`) falls through to the generic
+    `_REASON_TEXT[REASON_RENDERER_DECLINED]` string ("no research summary
+    rendered") instead -- FAILING the message assertion here.
+    """
+    entries = [
+        _OWNER_ENTRY,
+        {  # Accepted, G-coded this time.
+            "text": "Member, DISTINCTIVE_G2_ACCEPTED_AFFIL Research Institute",
+            "taxonomy_code": "G", "hierarchy": ["G. INSTITUTIONAL/HOSPITAL AFFILIATION"],
+            "extracted_fields": {}, "element_idx_start": 5,
+        },
+        {  # Refused: <= 5 chars, below the writer's own admission threshold.
+            "text": "Q2",
+            "taxonomy_code": "G", "hierarchy": ["G. INSTITUTIONAL/HOSPITAL AFFILIATION"],
+            "extracted_fields": {}, "element_idx_start": 6,
+        },
+    ]
+    _doc, sidecar = _render(tmp_path, entries)
+    diversions = [w for w in sidecar["warnings"]
+                  if w.get("check") == "appendix_diversion" and w["code"] == "G"]
+    assert [(w["reason"], w["count"]) for w in diversions] == [
+        (REASON_RENDERER_DECLINED, 1)]
+    assert diversions[0]["message"] == (
+        "G: 1 entry diverted to the Appendix — refused by the passthrough "
+        "writer for G (source section label did not match)")
+
+
+def test_refused_g_entries_plural_message(tmp_path):
+    """r11 (#531-R3 task 3) plural companion to the singular pin above: two
+    refused G entries read as one warning, count 2, "entries"/no verb-
+    agreement pronoun issue."""
+    entries = [
+        _OWNER_ENTRY,
+        {  # Refused #1: <= 5 chars, below the writer's own admission threshold.
+            "text": "Q2",
+            "taxonomy_code": "G", "hierarchy": ["G. INSTITUTIONAL/HOSPITAL AFFILIATION"],
+            "extracted_fields": {}, "element_idx_start": 5,
+        },
+        {  # Refused #2: same reason, a distinct entry.
+            "text": "Q3",
+            "taxonomy_code": "G", "hierarchy": ["G. INSTITUTIONAL/HOSPITAL AFFILIATION"],
+            "extracted_fields": {}, "element_idx_start": 6,
+        },
+    ]
+    _doc, sidecar = _render(tmp_path, entries)
+    diversions = [w for w in sidecar["warnings"]
+                  if w.get("check") == "appendix_diversion" and w["code"] == "G"]
+    assert [(w["reason"], w["count"]) for w in diversions] == [
+        (REASON_RENDERER_DECLINED, 2)]
+    assert diversions[0]["message"] == (
+        "G: 2 entries diverted to the Appendix — refused by the passthrough "
+        "writer for G (source section label did not match)")
 
 
 def test_n1_n2_entries_render_and_do_not_duplicate_into_the_appendix(tmp_path):
@@ -136,7 +218,12 @@ def test_n1_n2_entries_render_and_do_not_duplicate_into_the_appendix(tmp_path):
     mechanism N3A/N3B already use -- `generate()`'s unmapped-code sweep
     (`mapped_codes = set(RENDER_ROUTED_CODES)`) must exclude both codes at
     the source, or every entry `_fill_mentoring` already rendered would also
-    land a second time in the Appendix."""
+    land a second time in the Appendix.
+
+    #840 gave N2 its own training-grants renderer -- a code that used to be
+    Appendix-diverted now renders, so this also pins that neither code
+    produces an `appendix_diversion` warning once its writer has claimed it
+    (`_render` returns the `(doc, sidecar)` pair since #531)."""
     entries = [
         _OWNER_ENTRY,
         {"text": "DISTINCTIVE_N1_LEADERSHIP_LINE", "taxonomy_code": "N1",
@@ -146,7 +233,7 @@ def test_n1_n2_entries_render_and_do_not_duplicate_into_the_appendix(tmp_path):
          "extracted_fields": {"agency": "DISTINCTIVE_N2_GRANT_AGENCY"},
          "element_idx_start": 6},
     ]
-    doc = _render(tmp_path, entries)
+    doc, sidecar = _render(tmp_path, entries)
     full, appendix = _full_text(doc), _appendix_text(doc)
 
     assert "DISTINCTIVE_N1_LEADERSHIP_LINE" in full, "N1 entry did not render at all"
@@ -155,3 +242,5 @@ def test_n1_n2_entries_render_and_do_not_duplicate_into_the_appendix(tmp_path):
     assert "DISTINCTIVE_N2_GRANT_AGENCY" in full, "N2 entry did not render at all"
     assert "DISTINCTIVE_N2_GRANT_AGENCY" not in appendix, (
         "N2 entry duplicated into the Appendix -- #529 regression")
+    assert _appendix_diversion_count(sidecar, "N1") == 0
+    assert _appendix_diversion_count(sidecar, "N2") == 0
