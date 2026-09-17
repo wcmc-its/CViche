@@ -1040,6 +1040,28 @@ Respond **only** with a JSON array containing the identified entries. If no entr
     return all_validated_entries, cost_info
 
 
+def _bound_coverage_indices(
+    all_assigned_indices: set[int | str], doc_length: int
+) -> tuple[set[int], set[int]]:
+    """Coverage indices bounded to doc_length's own index space (#856).
+
+    `all_assigned_indices` mixes real integer paragraph positions with
+    table-row string sub-indices ("2.1") and the artificial int parent
+    marker added alongside each claimed row's string index -- a set already
+    de-dupes those two against each other, but a table's own unified index
+    can still land outside doc_length's paragraph-only count (doc_length is
+    built from num_paragraphs/num_empty only, which never counts a table as
+    a paragraph slot). Intersecting with `range(doc_length)` keeps both the
+    gap check and the coverage numerator subsets of doc_length, so a caller
+    computing `len(covered) / doc_length` can never exceed 100%.
+
+    Returns (unaccounted_indices, covered_doc_indices).
+    """
+    all_doc_indices = set(range(doc_length))
+    integer_assigned = {idx for idx in all_assigned_indices if isinstance(idx, int)}
+    return all_doc_indices - integer_assigned, all_doc_indices & integer_assigned
+
+
 def run_stage_2(
     docx_path: str,
     hierarchy_json_path: str = None,
@@ -1331,11 +1353,9 @@ def run_stage_2(
     header_entries = [e for e in all_entries if e["element_type"] == "header"]
     break_entries = [e for e in all_entries if e["element_type"] == "break"]
 
-    # Check for any gaps in coverage
-    # Only check integer indices (sub-row indices like "22.2" are accounted for by parent)
-    all_doc_indices = set(range(doc_length))
-    integer_assigned = {idx for idx in all_assigned_indices if isinstance(idx, int)}
-    unaccounted_indices = all_doc_indices - integer_assigned
+    # Check for any gaps in coverage; the coverage numerator is bounded to
+    # doc_length's own index space (see _bound_coverage_indices -- #856).
+    unaccounted_indices, covered_doc_indices = _bound_coverage_indices(all_assigned_indices, doc_length)
 
     # Drop WCM-template instruction boilerplate (Layer 1, primary filter).
     # Faculty leave the blank template's instruction scaffolding in their CVs;
@@ -1375,9 +1395,9 @@ def run_stage_2(
             "content_entries": len(content_entries),
             "header_entries": len(header_entries),
             "break_entries": len(break_entries),
-            "assigned_indices": len(all_assigned_indices),
+            "assigned_indices": len(covered_doc_indices),  # bounded to doc_length -- see _bound_coverage_indices (#856)
             "unaccounted_indices": sorted(list(unaccounted_indices)) if unaccounted_indices else [],
-            "coverage_percentage": round(len(all_assigned_indices) / doc_length * 100, 1) if doc_length > 0 else 100.0
+            "coverage_percentage": round(len(covered_doc_indices) / doc_length * 100, 1) if doc_length > 0 else 100.0
         },
         "entries": all_entries
     }
