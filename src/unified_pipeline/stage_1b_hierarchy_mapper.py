@@ -25,6 +25,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from core.output_manager import OutputManager
 from core.docx_structure_extractor import extract_docx_structure, extract_unified_elements
 
+_PREAMBLE_SECTION_ALIASES = frozenset({
+    "personal data", "personal information", "contact information",
+    "contact", "profile", "header",
+})
+
 
 def normalize_text(text: str) -> str:
     """Normalize text for matching (lowercase, strip whitespace, punctuation, etc.)"""
@@ -414,10 +419,7 @@ def _apply_preamble_handling(sections: list[dict], doc_length: int) -> None:
             # Check if "Personal Data" section already exists
             personal_data_sections = [
                 s for s in sections
-                if s["hierarchy"] and s["hierarchy"][0].lower().strip() in [
-                    "personal data", "personal information", "contact information",
-                    "contact", "profile", "header"
-                ]
+                if s["hierarchy"] and s["hierarchy"][0].lower().strip() in _PREAMBLE_SECTION_ALIASES
             ]
 
             if personal_data_sections:

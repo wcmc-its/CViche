@@ -692,6 +692,19 @@ def test_compute_section_boundaries_preamble_extends_existing_personal_data():
     assert len([s for s in sections if s["hierarchy"] == ["Personal Data"]]) == 1
 
 
+def test_compute_section_boundaries_preamble_extends_existing_contact_information():
+    # "Contact Information" is one of the non-"Personal Data" aliases in
+    # _PREAMBLE_SECTION_ALIASES -- it must be recognized the same way.
+    mapped = [
+        {"text": "Contact Information", "level": "H1", "element_idx": 2, "children": []},
+        {"text": "Education", "level": "H1", "element_idx": 5, "children": []},
+    ]
+    sections = compute_section_boundaries(mapped, doc_length=8)
+    ci = next(s for s in sections if s["hierarchy"] == ["Contact Information"])
+    assert ci["element_idx_start"] == 0
+    assert len([s for s in sections if s["hierarchy"] == ["Contact Information"]]) == 1
+
+
 def test_compute_section_boundaries_no_sections_creates_single_fallback_section():
     sections = compute_section_boundaries([], doc_length=4)
     assert len(sections) == 1
