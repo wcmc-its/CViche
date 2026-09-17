@@ -73,3 +73,34 @@ def test_a_stage_exception_fails_the_run_and_stops_the_pipeline(monkeypatch, tmp
     assert run is not None, "run row must survive the failed execute() call"
     assert run.status == "failed"
     assert "simulated stage failure" in run.error_message
+
+
+def test_stage_4_receives_the_real_resolved_cv_path(monkeypatch, tmp_path, db):
+    """#456: the owner-name side-channel tier (stage4/owner_name.py) can only
+    ever fire on the web driver if stage 4 is handed a real, openable .docx
+    path. Before this, `_execute_stage_logic` called `run_stage_4` with a
+    reconstructed `f"{uid}.docx"` that never resolved to a file on disk --
+    contrast stages 1b/2 in the same method, which always passed the real
+    `cv_path`. This exercises the real `_execute_stage_logic` call site
+    directly (not `execute()`) and inspects the kwargs `run_stage_4` actually
+    receives.
+    """
+    from app.pipeline import orchestrator as orch
+
+    captured = {}
+
+    def fake_run_stage_4(**kwargs):
+        captured.update(kwargs)
+        return {"output": {}, "output_path": str(tmp_path / "stage4.json")}
+
+    monkeypatch.setattr(orch, "run_stage_4", fake_run_stage_4)
+
+    o = _orchestrator(monkeypatch, tmp_path, db, "STAGE4PATH")
+    real_cv_path = str(tmp_path / "cv.docx")
+
+    result = asyncio.run(o._execute_stage_logic("4", real_cv_path))
+
+    assert captured.get("docx_path") == real_cv_path
+    assert captured["docx_path"] != f"{o.document_uid}.docx", \
+        "must not regress to the synthetic, non-existent filename"
+    assert result["output_files"] == [str(tmp_path / "stage4.json")]
