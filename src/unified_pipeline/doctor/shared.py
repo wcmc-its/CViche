@@ -168,7 +168,7 @@ def _table_lines(tbl) -> list[str]:
     return lines
 
 
-def docx_body_blocks(doc: "DocumentType") -> list[tuple[str, str]]:
+def docx_body_blocks(doc: DocumentType) -> list[tuple[str, str]]:
     """Body-order blocks of an OPEN python-docx Document: ("p", text) per
     paragraph, ("table", _table_lines joined by newlines) per table. Grants
     render as one Word table per grant, so any output check must read
