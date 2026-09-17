@@ -349,31 +349,42 @@ def _repair_out_of_order_section_bounds(sections: list[dict], doc_length: int) -
                 section["element_idx_end"] = doc_length - 1
 
 
-def _extend_ancestors_to_cover_repaired_children(sections: list[dict]) -> None:
+def _extend_ancestors_to_cover_repaired_children(
+    sections: list[dict],
+    direct_children_by_id: dict[int, list[dict]],
+) -> None:
     """
     Re-extend every ancestor's end to cover its full descendant subtree.
 
     `compute_bounds` extends a parent's end to its children's max end BEFORE
     `_repair_out_of_order_section_bounds` runs, so a child repaired above can
     grow past the bound its parent already settled on, violating this
-    function's docstring invariant #3 ("parent end >= last child end"). This
-    re-extends every section that has mapped children to at least the max end
-    of every section under it (matched by hierarchy-path prefix, not just
-    direct children, so a multi-level nesting cascades in one pass).
+    function's docstring invariant #3 ("parent end >= last child end").
+
+    `sections` is built in document-order-of-completion (DFS post-order): a
+    node's own section is appended only after every section in its subtree
+    has already been appended, so descendants always precede their ancestor
+    in the list. Walking the list in order and extending each section by
+    only its DIRECT children (looked up by object identity in
+    `direct_children_by_id`, keyed by `id(parent_section)`) therefore still
+    cascades correctly through multi-level nesting in one pass: a grandchild
+    repair has already been folded into its parent's end by the time the
+    grandparent is visited.
+
+    Matching by object identity (rather than by hierarchy-path prefix) keeps
+    this scoped to the actual tree: two different sections that happen to
+    share a hierarchy name at the same depth (duplicate-named siblings) must
+    never be treated as one another's descendants.
 
     Mutates `sections` in place.
     """
     for section in sections:
         if not section["has_children"]:
             continue
-        depth = len(section["hierarchy"])
-        descendant_ends = [
-            other["element_idx_end"]
-            for other in sections
-            if len(other["hierarchy"]) > depth and other["hierarchy"][:depth] == section["hierarchy"]
-        ]
-        if descendant_ends:
-            section["element_idx_end"] = max(section["element_idx_end"], max(descendant_ends))
+        children = direct_children_by_id.get(id(section), [])
+        if children:
+            child_max_end = max(child["element_idx_end"] for child in children)
+            section["element_idx_end"] = max(section["element_idx_end"], child_max_end)
 
 
 def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) -> list[dict]:
@@ -398,15 +409,23 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
         Flattened list of sections with boundaries
     """
     sections = []
+    # Maps id(parent_section) -> the list of that section's own direct child
+    # section dicts (by object identity, never by hierarchy-name -- #851).
+    # A synthetic node with no element_idx creates no section of its own, so
+    # its real children are flattened into its parent's direct-children list
+    # (see the `else` branch below).
+    direct_children_by_id: dict[int, list[dict]] = {}
 
     def compute_bounds(
         nodes: list[dict],
         parent_path: list[str] = None,
         default_end: int = None
-    ):
+    ) -> tuple[int, list[dict]]:
         """
         Compute boundaries for nodes at the same level.
-        Returns the maximum end index seen (for parent to use).
+
+        Returns (max end index seen, the section dicts created at this level
+        -- for parent to use as its own direct-children list).
         """
         if parent_path is None:
             parent_path = []
@@ -414,6 +433,7 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
             default_end = doc_length - 1
 
         max_end_seen = 0
+        level_sections: list[dict] = []
 
         for i, node in enumerate(nodes):
             node_text = node.get("text", "")
@@ -442,8 +462,9 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
 
                 # If this node has children, compute their bounds first
                 # and extend this section's end to include them
+                child_sections: list[dict] = []
                 if "children" in node and node["children"]:
-                    children_max_end = compute_bounds(
+                    children_max_end, child_sections = compute_bounds(
                         node["children"],
                         current_path,
                         default_end=end_idx
@@ -467,6 +488,9 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
                     "has_children": has_mapped_children(node)
                 }
                 sections.append(section)
+                if child_sections:
+                    direct_children_by_id[id(section)] = child_sections
+                level_sections.append(section)
 
                 max_end_seen = max(max_end_seen, end_idx)
 
@@ -488,14 +512,17 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
                                 bounded_end = first_child_idx - 1
                                 break
 
-                    children_max_end = compute_bounds(
+                    children_max_end, children_level_sections = compute_bounds(
                         node["children"],
                         current_path,
                         default_end=bounded_end  # Use bounded end, not raw default_end
                     )
                     max_end_seen = max(max_end_seen, children_max_end)
+                    # This synthetic node created no section of its own, so
+                    # its real children are this level's direct children too.
+                    level_sections.extend(children_level_sections)
 
-        return max_end_seen
+        return max_end_seen, level_sections
 
     compute_bounds(mapped_hierarchy)
 
@@ -504,7 +531,7 @@ def compute_section_boundaries(mapped_hierarchy: list[dict], doc_length: int) ->
     # (docstring invariant #3: parent end >= last child end -- #851).
     if sections:
         _repair_out_of_order_section_bounds(sections, doc_length)
-        _extend_ancestors_to_cover_repaired_children(sections)
+        _extend_ancestors_to_cover_repaired_children(sections, direct_children_by_id)
 
     # PREAMBLE HANDLING: Check for unmapped content at the beginning of the document
     if sections:
