@@ -30,7 +30,7 @@ const STAGE_DESCRIPTIONS: Record<string, string> = {
   '4': 'Extracts structured fields from entries: authors, titles, journals, DOIs, grant numbers, institutions, dates. Also infers CV owner location from employment/education history for geographic scope classification.',
   '4.5': 'Generates a biosketch-style M1 research summary statement analyzing your CV content.',
   '5': 'Enriches publications with PubMed metadata: full author lists, MeSH terms, publication types, abstracts, PMCIDs.',
-  '5b': 'Adds institution location data (city, state, country) via ROR API for education, training, and position entries.',
+  '5b': 'Adds institution location data (city, state, country) via batched LLM lookups, using CV owner context for disambiguation. Applies to education (B1, B2), training (C, C1, C2), and position (D1, D2, D3) entries.',
   '5c': 'Reformats teaching entries (K-codes) into a consistent, readable format.',
   '5d': 'Reformats non-enriched citations to Vancouver bibliographic format.',
   '6': 'Generates the final WCM-formatted Word document with all sections filled by taxonomy code. Routes presentations and service activities to Regional/National/International tables based on inferred CV owner location.',

@@ -21,12 +21,16 @@ import logging
 import os
 import sys
 import json
+import traceback
 from types import MappingProxyType
 import re
 from pathlib import Path
 from typing import Dict, List, Any, Literal, Optional, Tuple
+from collections.abc import Callable
 from datetime import datetime
 from collections import defaultdict
+
+logger = logging.getLogger(__name__)
 
 try:
     from docx import Document
@@ -40,7 +44,7 @@ try:
     from docx.parts.document import DocumentPart
     from lxml import etree
 except ImportError:
-    print("Error: python-docx not installed. Install with: pip install python-docx lxml")
+    logger.error("Error: python-docx not installed. Install with: pip install python-docx lxml")
     sys.exit(1)
 
 from unified_pipeline.llm_client import call_llm
@@ -183,7 +187,6 @@ from unified_pipeline.stage6.sections import (  # noqa: F401
     TeachingSection,
 )
 
-logger = logging.getLogger(__name__)
 from unified_pipeline.core.template_boilerplate import (
     is_source_boilerplate,
     is_template_instruction,
@@ -244,8 +247,11 @@ def _is_bullet_paragraph(para: Paragraph) -> bool:
 
     Section K moved to real Word list paragraphs in #474, so a validator that
     tests for a literal "•" prefix stops seeing K at all -- and check 3
-    below then reports no_visible_teaching_content on every CV. The non-K
-    emitters still prefix the glyph (#483), so both forms have to count.
+    below then reports no_visible_teaching_content on every CV. #483 (both
+    passes) moved every emitter this module writes to the same real-list
+    form, but a literal glyph can still arrive verbatim from the SOURCE docx
+    (e.g. a table cell copied through unchanged -- see web240 in #483 R1's
+    render-gate residue attribution), so both forms still have to count.
     """
     if para.text.strip().startswith('•'):
         return True
@@ -327,6 +333,8 @@ TAXONOMY_TO_SECTION = MappingProxyType({
     # NOTE: M4 clinical trial codes removed - clinical trials now use M2A/M2B/M2C based on status
 
     # Mentoring
+    'N1': 'mentoring_leadership',
+    'N2': 'training_grants',
     'N3A': 'current_mentees',
     'N3B': 'past_mentees',
 
@@ -384,6 +392,9 @@ RENDER_ROUTED_CODES = frozenset({
            # in generate(): only routed when the summary actually rendered.
     'M2A', 'M2B', 'M2C',  # Research Support (grants and clinical trials)
     'M2D',  # Patents & Innovations
+    'N1',  # Mentoring - Leadership and mentoring in programs (#529)
+    'N2',  # Mentoring - Institutional Training Grants and Mentored Trainee
+           # Grants (#529)
     'N3A', 'N3B',  # Mentoring (current/past mentees)
     'O',   # Institutional Leadership
     'P',   # Administrative Committees
@@ -392,6 +403,12 @@ RENDER_ROUTED_CODES = frozenset({
     'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9',  # Bibliography
     # NOTE: T is intentionally NOT here - T entries go to Appendix
 })
+
+# Position/training codes represent career-progression stages that share most
+# words but differ in rank -- `_group_and_dedup_entries` uses date-aware dedup
+# for them, merging only entries whose date ranges overlap or match. A
+# taxonomy fact, not a setting (§7.2: no new configuration mechanism).
+_DATE_AWARE_DEDUP_CODES = frozenset({'D1', 'D2', 'D3', 'C', 'B1'})
 
 
 
@@ -497,6 +514,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Appendix entries pending reconsideration
         self._appendix_pending = []  # List of (entry, coverage_pct) tuples
 
+        # Per-section render failures caught by _render_section (#565): one
+        # dict per isolated section that raised, merged into the
+        # render-warnings sidecar ahead of the self-check findings. Reset at
+        # the top of generate(), declared here for typing/reuse across renders.
+        self._section_failures: list[dict[str, Any]] = []
+
         # Memoizes _classify_geographic_scope's LLM calls for the life of one
         # render, keyed on (activity location, owner institutions).
         self._geographic_scope_cache = {}
@@ -574,7 +597,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         if assigned_family == expected_family:
             if self.verbose:
-                print(f"    Mismatch correction: {assigned_code}→{best_expected} "
+                logger.info(f"    Mismatch correction: {assigned_code}→{best_expected} "
                       f"(same family, hierarchy-guided) [{entry.get('text', '')[:60]}...]")
             entry['taxonomy_code_original'] = assigned_code
             entry['taxonomy_code'] = best_expected
@@ -583,7 +606,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Cross-family: only if LLM confidence was low
         if confidence < 0.7:
             if self.verbose:
-                print(f"    Mismatch correction: {assigned_code}→{best_expected} "
+                logger.info(f"    Mismatch correction: {assigned_code}→{best_expected} "
                       f"(cross-family, low confidence {confidence:.2f}) [{entry.get('text', '')[:60]}...]")
             entry['taxonomy_code_original'] = assigned_code
             entry['taxonomy_code'] = best_expected
@@ -628,7 +651,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 merged.append(entry)
 
         if self.verbose and replaced_count > 0:
-            print(f"  Replaced {replaced_count} K-code entries with Stage 5c formatted versions")
+            logger.info(f"  Replaced {replaced_count} K-code entries with Stage 5c formatted versions")
 
         return merged
 
@@ -656,7 +679,58 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 tbl._element.getparent().remove(tbl._element)
                 removed += 1
         if removed and self.verbose:
-            print(f"Removed {removed} WCM-template instruction box(es)")
+            logger.info(f"Removed {removed} WCM-template instruction box(es)")
+
+    def _group_and_dedup_entries(
+        self, entries: list[dict[str, Any]]
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+        """Group entries by taxonomy code (applying mismatch corrections),
+        then deduplicate within each group. Pure move out of generate() --
+        carved out to offset the #565 section-dispatch table's line cost
+        under the §3.2a size ratchet; behavior is unchanged.
+
+        Returns (entries_by_code, pre_dedup_entries_by_code, dedup_decisions).
+        ``pre_dedup_entries_by_code`` is the snapshot the #221 recovery pass
+        scans: dedup keeps the longer near-duplicate, which can eat a unique
+        record line fused into the dropped entry, so recovery needs the
+        pre-dedup groups to re-verify against.
+        """
+        entries_by_code = defaultdict(list)
+        mismatch_corrections = 0
+        for entry in entries:
+            code = normalize_retired_code(entry)
+            code = self._correct_mismatch_if_needed(entry, code)
+            if code != entry.get('taxonomy_code', 'T'):
+                mismatch_corrections += 1
+            entries_by_code[code].append(entry)
+
+        if self.verbose:
+            logger.info(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
+            if mismatch_corrections > 0:
+                logger.info(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
+
+        pre_dedup_entries_by_code = {code: list(group)
+                                     for code, group in entries_by_code.items()}
+        total_deduped = 0
+        dedup_decisions: list[dict[str, Any]] = []
+        for code in list(entries_by_code.keys()):
+            before = len(entries_by_code[code])
+            date_aware = code in _DATE_AWARE_DEDUP_CODES
+            group_decisions: list[dict[str, Any]] = []
+            entries_by_code[code] = deduplicate_entries(
+                entries_by_code[code], verbose=self.verbose,
+                require_date_overlap=date_aware,
+                decisions=group_decisions)
+            for decision in group_decisions:
+                decision["code"] = code
+            dedup_decisions.extend(group_decisions)
+            removed = before - len(entries_by_code[code])
+            if removed > 0:
+                total_deduped += removed
+        if self.verbose and total_deduped > 0:
+            logger.info(f"  Deduplicated: {total_deduped} near-duplicate entries removed")
+
+        return entries_by_code, pre_dedup_entries_by_code, dedup_decisions
 
     def generate(self, input_path: str, output_path: str = None, research_summary_path: str = None,
                  original_doc_path: str = None) -> str:
@@ -675,6 +749,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         Returns:
             Path to generated document
         """
+        # Reset per-render section-failure tracking (#565) -- a generator
+        # instance can render more than once, and a failure from a prior
+        # render must never leak into this one's sidecar.
+        self._section_failures = []
+
         # Load input data - each stage output is self-contained
         with open(input_path, 'r') as f:
             data = json.load(f)
@@ -694,13 +773,13 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                         stage4_data = json.load(f)
                     cv_owner_location = stage4_data.get('cv_owner_location', {})
                     if cv_owner_location and cv_owner_location.get('inference_success') and self.verbose:
-                        print(f"Loaded cv_owner_location from Stage 4 output")
+                        logger.info("Loaded cv_owner_location from Stage 4 output")
                 except Exception as e:
                     # Non-fatal: geographic-scope classification just falls back
                     # to its default. Still say so -- a permission error or a
                     # truncated stage-4 JSON should not vanish without a trace.
                     if self.verbose:
-                        print(f"  Warning: Could not load cv_owner_location from Stage 4: {e}")
+                        logger.warning(f"  Warning: Could not load cv_owner_location from Stage 4: {e}")
 
         # Store location context for geographic scope classification
         self.cv_owner_location = cv_owner_location if cv_owner_location and cv_owner_location.get('inference_success') else None
@@ -708,7 +787,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             metro = self.cv_owner_location.get('metro_area', '')
             primary = self.cv_owner_location.get('primary_location', {})
             if primary:
-                print(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
+                logger.info(f"CV Owner Location: {primary.get('city', '')}, {primary.get('state', '')} (metro: {metro})")
 
         # Try to find original document if not provided -- which every live run
         # is: only render_gate.py --source-dir and stage 6's tests pass one, and
@@ -726,11 +805,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 if path.exists():
                     original_doc_path = str(path.resolve())
                     if self.verbose:
-                        print(f"Found original document: {original_doc_path}")
+                        logger.info(f"Found original document: {original_doc_path}")
                     break
             else:
                 if self.verbose:
-                    print(f"No original document found for {document_uid} in "
+                    logger.info(f"No original document found for {document_uid} in "
                           f"{SAMPLE_CV_DIR} or ./data/sample_cvs/word")
 
         # Load Stage 4.5 research summary if available
@@ -739,7 +818,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             with open(research_summary_path, 'r') as f:
                 research_summary_data = json.load(f)
             if self.verbose:
-                print(f"Loaded research summary from Stage 4.5: {research_summary_path}")
+                logger.info(f"Loaded research summary from Stage 4.5: {research_summary_path}")
         else:
             # Try to find it automatically
             input_dir = Path(input_path).parent.parent
@@ -748,59 +827,18 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 with open(auto_summary_path, 'r') as f:
                     research_summary_data = json.load(f)
                 if self.verbose:
-                    print(f"Auto-loaded research summary from: {auto_summary_path}")
+                    logger.info(f"Auto-loaded research summary from: {auto_summary_path}")
 
         if self.verbose:
-            print(f"\n{'='*60}")
-            print(f"Stage 6: WCM Template Generation - {document_uid}")
-            print(f"{'='*60}")
-            print(f"Total entries: {len(entries)}")
+            logger.info(f"\n{'='*60}")
+            logger.info(f"Stage 6: WCM Template Generation - {document_uid}")
+            logger.info(f"{'='*60}")
+            logger.info(f"Total entries: {len(entries)}")
 
-        # Group entries by taxonomy code, applying mismatch corrections
-        entries_by_code = defaultdict(list)
-        mismatch_corrections = 0
-        for entry in entries:
-            code = normalize_retired_code(entry)
-            code = self._correct_mismatch_if_needed(entry, code)
-            if code != entry.get('taxonomy_code', 'T'):
-                mismatch_corrections += 1
-            entries_by_code[code].append(entry)
-
-        if self.verbose:
-            print(f"Taxonomy codes found: {sorted(entries_by_code.keys())}")
-            if mismatch_corrections > 0:
-                print(f"  Hierarchy mismatch corrections applied: {mismatch_corrections}")
-
-        # Deduplicate within each code group.
-        # Position/training codes (D1, D2, D3, C, B1) represent career progression
-        # stages that share most words but differ in rank — use date-aware dedup
-        # that only merges entries whose date ranges overlap or match.
-        DATE_AWARE_DEDUP_CODES = {'D1', 'D2', 'D3', 'C', 'B1'}
-        # Snapshot the pre-dedup groups for the #221 recovery pass: dedup keeps
-        # the longer near-duplicate, which can eat a unique record line fused
-        # into the dropped entry. Recovery re-verifies every line against the
-        # rendered document, so scanning dropped entries is safe — content the
-        # surviving duplicate rendered is seen as rendered.
-        pre_dedup_entries_by_code = {code: list(group)
-                                     for code, group in entries_by_code.items()}
-        total_deduped = 0
-        dedup_decisions: List[Dict] = []
-        for code in list(entries_by_code.keys()):
-            before = len(entries_by_code[code])
-            date_aware = code in DATE_AWARE_DEDUP_CODES
-            group_decisions: List[Dict] = []
-            entries_by_code[code] = deduplicate_entries(
-                entries_by_code[code], verbose=self.verbose,
-                require_date_overlap=date_aware,
-                decisions=group_decisions)
-            for decision in group_decisions:
-                decision["code"] = code
-            dedup_decisions.extend(group_decisions)
-            removed = before - len(entries_by_code[code])
-            if removed > 0:
-                total_deduped += removed
-        if self.verbose and total_deduped > 0:
-            print(f"  Deduplicated: {total_deduped} near-duplicate entries removed")
+        # Group entries by taxonomy code and deduplicate within each group
+        # (pure-move helper -- see _group_and_dedup_entries).
+        entries_by_code, pre_dedup_entries_by_code, dedup_decisions = \
+            self._group_and_dedup_entries(entries)
 
         # Load template
         self.doc = Document(self.template_path)
@@ -808,33 +846,51 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Flatten all entries for fallback searches
         all_entries = [entry for entries in entries_by_code.values() for entry in entries]
 
-        # Fill each section
+        # Fill each section. _fill_personal_data is FATAL and stays outside
+        # the boundary below by deliberate judgement call (#565): a document
+        # with no owner on it is worse than a failed run, so its raise still
+        # propagates out of generate() and no docx is written. Every other
+        # section -- including passthrough and the appendix below -- runs
+        # through _render_section, so one section raising costs that section
+        # only; the rest still render and the run still produces a document.
         self._fill_personal_data(entries_by_code.get('A', []), cv_owner, document_uid, all_entries, original_doc_path)
-        self._fill_researcher_profiles(entries_by_code.get('S0', []))  # S0 section for ORCID, etc.
-        self._fill_education(entries_by_code.get('B1', []))  # B1 = Academic Degrees only
-        self._fill_other_education(entries_by_code.get('B2', []))  # B2 = Other Educational Experiences
-        self._fill_postdoc_training(entries_by_code, all_entries)
-        self._fill_positions(entries_by_code)
-        self._fill_licensure(entries_by_code.get('F1', []))  # F1 = Licensure
-        self._fill_board_certification(entries_by_code.get('F2', []))  # F2 = Board Certification
-        self._fill_honors(entries_by_code.get('H', []))  # H = Honors and Awards
-        self._fill_memberships(entries_by_code.get('I', []))  # I = Professional Memberships
-        self._fill_teaching(entries_by_code)  # K1-K5 = Teaching Activities
-        research_summary_rendered = self._fill_research_summary(research_summary_data)  # Stage 4.5 output
-        self._fill_research_support(entries_by_code, cv_owner, document_uid)
-        # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
-        self._fill_patents(entries_by_code.get('M2D', []))
-        self._fill_mentoring(entries_by_code)
-        self._fill_clinical_practice(entries_by_code)  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
-        self._fill_leadership(entries_by_code.get('O', []))  # O = Institutional Leadership
-        self._fill_administrative_activities(entries_by_code.get('P', []))  # P = Administrative Committees
-        self._fill_service(entries_by_code)  # Q1-Q4D = Service Activities
-        self._fill_presentations(entries_by_code.get('R', []))  # R = Invited Presentations
-        self._fill_bibliography(entries_by_code, cv_owner, document_uid)
+
+        # (label, callable) in the SAME order as the flat dispatch this
+        # replaced -- test_stage6_section_boundary.py pins that order.
+        section_dispatch: list[tuple[str, Callable[[], Any]]] = [
+            ('researcher_profiles', lambda: self._fill_researcher_profiles(entries_by_code.get('S0', []))),  # S0 section for ORCID, etc.
+            ('education', lambda: self._fill_education(entries_by_code.get('B1', []))),  # B1 = Academic Degrees only
+            ('other_education', lambda: self._fill_other_education(entries_by_code.get('B2', []))),  # B2 = Other Educational Experiences
+            ('postdoc_training', lambda: self._fill_postdoc_training(entries_by_code, all_entries)),
+            ('positions', lambda: self._fill_positions(entries_by_code)),
+            ('licensure', lambda: self._fill_licensure(entries_by_code.get('F1', []))),  # F1 = Licensure
+            ('board_certification', lambda: self._fill_board_certification(entries_by_code.get('F2', []))),  # F2 = Board Certification
+            ('honors', lambda: self._fill_honors(entries_by_code.get('H', []))),  # H = Honors and Awards
+            ('memberships', lambda: self._fill_memberships(entries_by_code.get('I', []))),  # I = Professional Memberships
+            ('teaching', lambda: self._fill_teaching(entries_by_code)),  # K1-K5 = Teaching Activities
+            ('research_summary', lambda: self._fill_research_summary(research_summary_data)),  # Stage 4.5 output
+            ('research_support', lambda: self._fill_research_support(entries_by_code, cv_owner, document_uid)),
+            # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
+            ('patents', lambda: self._fill_patents(entries_by_code.get('M2D', []))),
+            ('mentoring', lambda: self._fill_mentoring(entries_by_code)),
+            ('clinical_practice', lambda: self._fill_clinical_practice(entries_by_code)),  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
+            ('leadership', lambda: self._fill_leadership(entries_by_code.get('O', []))),  # O = Institutional Leadership
+            ('administrative_activities', lambda: self._fill_administrative_activities(entries_by_code.get('P', []))),  # P = Administrative Committees
+            ('service', lambda: self._fill_service(entries_by_code)),  # Q1-Q4D = Service Activities
+            ('presentations', lambda: self._fill_presentations(entries_by_code.get('R', []))),  # R = Invited Presentations
+            ('bibliography', lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
+        ]
+        research_summary_rendered = False
+        for label, fn in section_dispatch:
+            result = self._render_section(label, fn)
+            if label == 'research_summary':
+                research_summary_rendered = bool(result)
 
         # Fill passthrough sections (Employment Status, Institutional Affiliation,
         # Percent Effort) -- copied from source CV when it matches WCM (#294, #260).
-        passthrough_consumed_ids = {id(e) for e in self._fill_passthrough_sections(all_entries)}
+        passthrough_result = self._render_section(
+            'passthrough_sections', lambda: self._fill_passthrough_sections(all_entries))
+        passthrough_consumed_ids = {id(e) for e in (passthrough_result or [])}
 
         # Add appendix for ALL unmapped content. Local mutable copy of the
         # module-level RENDER_ROUTED_CODES: the M1 discard just below mutates
@@ -869,7 +925,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # _unconsumed_personal_data_batch.
 
         if unmapped_entries:
-            self._fill_appendix(unmapped_entries)
+            self._render_section('appendix', lambda: self._fill_appendix(unmapped_entries))
 
         # Route content-overflow entries as tracked-change bullets
         self._route_overflow_entries()
@@ -908,50 +964,89 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Save
         self.doc.save(output_path)
 
-        # Run post-generation validation to catch common issues
+        # Run post-generation validation to catch common issues. Section
+        # failures caught by _render_section are merged in ahead of the
+        # self-check findings (#565) -- one list feeds both the banner below
+        # and the sidecar, so a missing section is never quieter than a
+        # cosmetic self-check finding.
         validation_issues = self._validate_output()
-        if validation_issues:
-            print(f"\n{'!'*60}")
-            print("VALIDATION WARNINGS")
-            print(f"{'!'*60}")
-            for issue in validation_issues:
-                print(f"  ⚠ {issue['message']}")
-            print(f"{'!'*60}")
+        all_warnings = self._section_failures + validation_issues
+        if all_warnings:
+            logger.warning("!" * 60)
+            logger.warning("VALIDATION WARNINGS")
+            logger.warning("!" * 60)
+            for issue in all_warnings:
+                logger.warning(f"  ⚠ {issue['message']}")
+            logger.warning("!" * 60)
 
-        # Persist the self-check warnings and dedup decision trail next to
-        # the docx so the run doctor can re-emit them (#227/#228) — until now
-        # they only ever reached the pod log. Written even when empty, so the
-        # doctor can tell a clean run from a pre-sidecar build. Fail-soft: a
-        # sidecar failure must never fail the render.
+        self._write_render_warnings_sidecar(output_path, document_uid, all_warnings, dedup_decisions)
+
+        if self.verbose:
+            logger.info(f"\n{'='*60}")
+            logger.info("Generation Summary")
+            logger.info(f"{'='*60}")
+            logger.info(f"  Entries inserted: {self.stats['entries_inserted']}")
+            logger.info(f"  Tables populated: {self.stats['tables_populated']}")
+            logger.info(f"  Target names bolded: {self.stats['target_names_bolded']}")
+            logger.info(f"  Track changes added: {self.stats['track_changes_added']}")
+            logger.info(f"  Comments added: {self.stats['comments_added']}")
+            if self.stats.get('overflow_bullets_added', 0) > 0:
+                logger.info(f"  Overflow bullets added: {self.stats['overflow_bullets_added']}")
+            if self.stats.get('overflow_to_appendix', 0) > 0:
+                logger.info(f"  Overflow to appendix: {self.stats['overflow_to_appendix']}")
+            if self.stats.get('appendix_segments_reconsidered', 0) > 0:
+                logger.info(f"  Appendix segments reconsidered: {self.stats['appendix_segments_reconsidered']}")
+            logger.info(f"\nSaved to: {output_path}")
+
+        return output_path
+
+    def _render_section(self, label: str, fn: Callable[[], Any]) -> Any:  # noqa: ANN401
+        """Call one section-dispatch entry, isolating a raise to this section
+        only (#565). Returns fn()'s result on success; on any Exception it
+        logs the traceback, records a severity-carrying failure onto
+        ``self._section_failures`` (merged into the render-warnings sidecar
+        by generate()), and returns None so the caller can fall back.
+
+        Never swallows: every caught exception gets both the log line and
+        the record (§5.4) -- an isolated section must fail loudly, or the
+        isolation trades a whole-document crash for a silent partial render,
+        which is worse.
+        """
+        try:
+            return fn()
+        except Exception as exc:
+            logger.exception(
+                "Stage 6: section %s failed; rendering the remaining sections", label)
+            evidence = [line[:200] for line in traceback.format_exc().splitlines()[-3:]]
+            self._section_failures.append({
+                "check": "section_render_failed",
+                "code": None,
+                "section": label,
+                "message": f"section {label} failed: {type(exc).__name__}: {exc}",
+                "evidence": evidence,
+                "severity": "ERROR",
+            })
+            return None
+
+    def _write_render_warnings_sidecar(self, output_path: str, document_uid: str,
+                                        warnings: list[dict[str, Any]], dedup_decisions: list[dict[str, Any]]) -> None:
+        """Persist the self-check + section-failure warnings and dedup
+        decision trail next to the docx so the run doctor can re-emit them
+        (#227/#228) — until now they only ever reached the pod log. Written
+        even when empty, so the doctor can tell a clean run from a
+        pre-sidecar build. Fail-soft: a sidecar failure must never fail the
+        render.
+        """
         try:
             report_path = Path(output_path).with_name(
                 f"{document_uid}_render_warnings.json")
             report_path.write_text(json.dumps({
                 "document_uid": document_uid,
-                "warnings": validation_issues,
+                "warnings": warnings,
                 "dedup_decisions": dedup_decisions,
             }, indent=2))
-        except Exception as exc:
-            print(f"  ⚠ could not write render-warnings sidecar: {exc}")
-
-        if self.verbose:
-            print(f"\n{'='*60}")
-            print("Generation Summary")
-            print(f"{'='*60}")
-            print(f"  Entries inserted: {self.stats['entries_inserted']}")
-            print(f"  Tables populated: {self.stats['tables_populated']}")
-            print(f"  Target names bolded: {self.stats['target_names_bolded']}")
-            print(f"  Track changes added: {self.stats['track_changes_added']}")
-            print(f"  Comments added: {self.stats['comments_added']}")
-            if self.stats.get('overflow_bullets_added', 0) > 0:
-                print(f"  Overflow bullets added: {self.stats['overflow_bullets_added']}")
-            if self.stats.get('overflow_to_appendix', 0) > 0:
-                print(f"  Overflow to appendix: {self.stats['overflow_to_appendix']}")
-            if self.stats.get('appendix_segments_reconsidered', 0) > 0:
-                print(f"  Appendix segments reconsidered: {self.stats['appendix_segments_reconsidered']}")
-            print(f"\nSaved to: {output_path}")
-
-        return output_path
+        except Exception:
+            logger.exception("could not write render-warnings sidecar")
 
 
 
@@ -1103,7 +1198,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
 
         except Exception as e:
             if self.verbose:
-                print(f"    ⚠ Geographic classification error: {e}")
+                logger.warning(f"    ⚠ Geographic classification error: {e}")
             return 'National'  # Default on error
 
 
@@ -1113,7 +1208,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                                 add_blank_before: bool = False,
                                 list_level: int | None = None,
                                 entry_sibling_paras: list[Paragraph] | None = None) -> Paragraph | None:
-        """Insert a SINGLE bulleted entry paragraph with a bullet character prefix.
+        """Insert a SINGLE bulleted entry paragraph as a real Word list item.
 
         NOTE: For multi-line content, use _insert_multiline_as_bullets() instead.
 
@@ -1122,10 +1217,11 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             text: The text content for the entry (should be single line)
             entry: Optional entry dict for adding comments
             add_blank_before: If True, add a blank line before this entry
-            list_level: When given, emit a real Word list paragraph at this
-                ilvl via _apply_list_bullet instead of prefixing a literal "• "
-                glyph (#474). Left at None by the three non-K call sites, whose
-                1,765 corpus-wide glyphs are #483.
+            list_level: The ilvl passed to _apply_list_bullet (#474). Every
+                call site is expected to pass this explicitly; omitting it
+                defaults to level 0 rather than falling back to a literal
+                "• " glyph prefix (#483 -- the last caller-omittable glyph
+                path, closed alongside _add_remaining_to_appendix).
             entry_sibling_paras: The OTHER paragraphs this same entry already
                 rendered into, when a caller is splitting one entry across
                 several bullets and attaching the entry to this one. Passed on
@@ -1149,14 +1245,9 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             entry_para.insert_paragraph_before("")
 
         body = _clean_inline_tabs(_strip_taxonomy_code(text))
-        # Without list_level, a simple bullet character prefix: it avoids Word
-        # numbering system issues across different templates, at the cost of not
-        # being a list item to Word's outline, to accessibility tooling, or to
-        # anything re-parsing the output.
-        run = entry_para.add_run(body if list_level is not None else f"• {body}")
+        run = entry_para.add_run(body)
         _set_font(run)
-        if list_level is not None:
-            self._apply_list_bullet(entry_para, level=list_level)
+        self._apply_list_bullet(entry_para, level=list_level if list_level is not None else 0)
 
         if entry:
             self._add_entry_comments(entry_para, entry,
@@ -1237,6 +1328,8 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             'M2C': 'Pending Funding',
             # Mentoring (N codes)
             'N': 'Mentees',
+            'N1': 'Leadership and mentoring in programs (Describe activity; include dates)',
+            'N2': 'Institutional Training Grants and Mentored Trainee Grants',
             'N3A': 'Current Mentees:',
             'N3B': 'Past Mentees:',
             # Leadership (O codes)
@@ -1441,7 +1534,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 if matched:
                     paragraphs_to_remove.append(para._element)
                     if self.verbose:
-                        print(f"    Removing template instruction: '{para_text[:60]}...'")
+                        logger.info(f"    Removing template instruction: '{para_text[:60]}...'")
 
         # Remove identified instruction paragraphs
         for para_elem in paragraphs_to_remove:
@@ -1688,7 +1781,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return
 
         if self.verbose:
-            print(f"\nRouting {len(self._overflow_entries)} content-overflow entries...")
+            logger.info(f"\nRouting {len(self._overflow_entries)} content-overflow entries...")
 
         for entry, para, taxonomy_code in self._overflow_entries:
             original_text = entry.get('text', '').strip()
@@ -1727,7 +1820,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                                 )
                                 self.stats['overflow_bullets_added'] += 1
                                 if self.verbose:
-                                    print(f"  Added overflow bullets in section {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
+                                    logger.info(f"  Added overflow bullets in section {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
                                 continue
                 # Fall back to appendix for non-K/L codes or if section insertion failed
                 self._route_overflow_to_appendix(entry, coverage_pct)
@@ -1753,7 +1846,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                     self._remove_abbreviated_entry(para)
                     self.stats['overflow_bullets_added'] += 1
                     if self.verbose:
-                        print(f"  Added overflow bullet in section {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
+                        logger.info(f"  Added overflow bullet in section {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
                 else:
                     # Insertion failed — fall back to appendix, keep original in place
                     self._route_overflow_to_appendix(entry, coverage_pct)
@@ -1839,7 +1932,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return first_para
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not insert overflow bullet: {e}")
+                logger.warning(f"  Warning: Could not insert overflow bullet: {e}")
             return None
 
     def _remove_abbreviated_entry(self, para: Paragraph):
@@ -1868,7 +1961,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
                 parent.remove(p_element)
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not remove abbreviated entry: {e}")
+                logger.warning(f"  Warning: Could not remove abbreviated entry: {e}")
 
     def _route_overflow_to_appendix(self, entry: Dict, coverage_pct: float = 0):
         """Queue an overflow entry for reconsideration before adding to appendix.
@@ -1888,7 +1981,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
         self.stats['overflow_to_appendix'] += 1
         if self.verbose:
             taxonomy_code = entry.get('taxonomy_code', '?')
-            print(f"  Queued for reconsideration: {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
+            logger.info(f"  Queued for reconsideration: {taxonomy_code} ({coverage_pct:.0f}% coverage, {len(original_text)} chars)")
 
     def _reconsider_appendix_entries(self):
         """Analyze appendix-pending entries and reclassify segments to appropriate sections.
@@ -1903,7 +1996,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             return
 
         if self.verbose:
-            print(f"\nReconsidering {len(self._appendix_pending)} appendix entries...")
+            logger.info(f"\nReconsidering {len(self._appendix_pending)} appendix entries...")
 
         # Collect all segments that could be reclassified
         segments_to_route = []  # List of (segment_text, taxonomy_code, original_entry)
@@ -1949,7 +2042,7 @@ Return ONLY a JSON object: {{"scope": "Regional" | "National" | "International"}
             self._add_remaining_to_appendix(remaining_for_appendix)
 
         if self.verbose and segments_to_route:
-            print(f"  Reclassified {len(segments_to_route)} segments to other sections")
+            logger.info(f"  Reclassified {len(segments_to_route)} segments to other sections")
 
     def _reclassify_entry_segments(self, text: str, original_code: str) -> List[Tuple[str, str]]:
         """Use LLM to segment and reclassify content from an appendix entry.
@@ -2048,7 +2141,7 @@ Now analyze the text above:"""
 
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: LLM reclassification failed: {e}")
+                logger.warning(f"  Warning: LLM reclassification failed: {e}")
             return None
 
     def _insert_reconsidered_segment(self, text: str, taxonomy_code: str,
@@ -2091,13 +2184,16 @@ Now analyze the text above:"""
         if insert_idx is None:
             return False
 
-        # Insert as a bullet
+        # Insert as a real Word list paragraph (#483 R2 -- the last of the
+        # four glyph emitters #474/#483 tracked; its own tests in
+        # test_stage6_unrendered_recovery.py were rewritten alongside this).
         try:
             insert_para = self.doc.paragraphs[insert_idx]
             new_para = insert_para.insert_paragraph_before()
 
-            run = new_para.add_run(f"• {_clean_inline_tabs(_strip_taxonomy_code(text))}")
+            run = new_para.add_run(_clean_inline_tabs(_strip_taxonomy_code(text)))
             _set_font(run)
+            self._apply_list_bullet(new_para, level=0)
 
             # Add explanatory comment
             self._add_word_comment(
@@ -2110,12 +2206,12 @@ Now analyze the text above:"""
             )
 
             if self.verbose:
-                print(f"    Inserted [{taxonomy_code}]: {text[:60]}...")
+                logger.info(f"    Inserted [{taxonomy_code}]: {text[:60]}...")
             return True
 
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not insert reconsidered segment: {e}")
+                logger.warning(f"  Warning: Could not insert reconsidered segment: {e}")
             return False
 
     def _find_subsection_header(self, search_text: str,
@@ -2225,8 +2321,9 @@ Now analyze the text above:"""
         # faculty-facing text (#213).
         for segment_text, original_code, coverage_pct in remaining:
             entry_para = self.doc.add_paragraph()
-            run = entry_para.add_run(f"• {segment_text}")
+            run = entry_para.add_run(segment_text)
             _set_font(run)
+            self._apply_list_bullet(entry_para, level=0)
             self._add_word_comment(
                 entry_para,
                 f"Originally classified {original_code}; could not be mapped "
@@ -2359,7 +2456,7 @@ Now analyze the text above:"""
             self._add_remaining_to_appendix(appendix_batch)
 
         if self.verbose and n_recovered:
-            print(f"  Recovered {n_recovered} unrendered record line(s) "
+            logger.info(f"  Recovered {n_recovered} unrendered record line(s) "
                   f"({len(appendix_batch)} routed to appendix)")
 
     def _unconsumed_personal_data_batch(self, haystack: str
@@ -2641,7 +2738,7 @@ Now analyze the text above:"""
             self.stats['comments_added'] += 1
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not add comment: {e}")
+                logger.warning(f"  Warning: Could not add comment: {e}")
 
     def _add_track_change_insertion(self, para: Paragraph, text: str, author: str = "PubMed Enrichment"):
         """Mark text as an insertion (track change) that appears in Word's review mode.
@@ -2707,7 +2804,7 @@ Now analyze the text above:"""
             return ins
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not add track change: {e}")
+                logger.warning(f"  Warning: Could not add track change: {e}")
             # Fall back to normal text
             run = para.add_run(text)
             _set_font(run)
@@ -2770,7 +2867,7 @@ Now analyze the text above:"""
             return del_elem
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not add track change deletion: {e}")
+                logger.warning(f"  Warning: Could not add track change deletion: {e}")
             return None
 
     def _add_track_change_pair(self, para: Paragraph, original_text: str, new_text: str,
@@ -2832,16 +2929,16 @@ Now analyze the text above:"""
                 self.doc.part.relate_to(comments_part, comments_reltype)
 
                 if self.verbose:
-                    print(f"  Created comments.xml with {len(self._comments)} comment(s)")
+                    logger.info(f"  Created comments.xml with {len(self._comments)} comment(s)")
             else:
                 # Append to existing comments
                 # Parse existing and merge
                 if self.verbose:
-                    print(f"  Added {len(self._comments)} comment(s) to existing comments.xml")
+                    logger.info(f"  Added {len(self._comments)} comment(s) to existing comments.xml")
 
         except Exception as e:
             if self.verbose:
-                print(f"  Warning: Could not create comments.xml: {e}")
+                logger.warning(f"  Warning: Could not create comments.xml: {e}")
                 import traceback
                 traceback.print_exc()
 
@@ -3078,12 +3175,12 @@ def main():
         if candidates:
             input_path = str(candidates[0])
         else:
-            print(f"Error: Could not find input file: {args.input}")
+            logger.error(f"Error: Could not find input file: {args.input}")
             sys.exit(1)
 
     # Note: The research summary from Stage 4.5 is auto-loaded by generate() based on document_uid
     output_path = run_stage6(input_path, args.output, verbose=not args.quiet)
-    print(f"\nGenerated: {output_path}")
+    logger.info(f"\nGenerated: {output_path}")
 
 
 if __name__ == '__main__':

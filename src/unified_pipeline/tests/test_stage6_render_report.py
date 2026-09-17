@@ -94,3 +94,26 @@ def test_validate_output_clean_doc_returns_empty_list():
     doc.add_paragraph("Administrative teaching")
     doc.add_paragraph("• Course Director, AI in Medicine")
     assert _generator_for(doc)._validate_output() == []
+
+
+# ------------------------------------------------- warnings go to the logger
+
+def test_comment_failure_logs_via_project_logger_not_print(caplog, capsys):
+    """The monolith's except-branch advisories reach the run log through the
+    project logger (dictConfig's _DynamicStdout), not a bare print(). One
+    representative branch stands in for all twelve: a None paragraph makes
+    _add_word_comment's `para._p` raise, which is the fallback path."""
+    import logging
+
+    gen = WCMTemplateGenerator.__new__(WCMTemplateGenerator)
+    gen.emit_comments = True
+    gen.verbose = True
+    gen._comment_id = 0
+    gen._comments = []
+    gen.stats = {"comments_added": 0}
+
+    with caplog.at_level(logging.WARNING, logger="unified_pipeline.stage_6_word_template"):
+        gen._add_word_comment(None, "note")
+
+    assert any("Could not add comment" in r.message for r in caplog.records)
+    assert capsys.readouterr().out == ""

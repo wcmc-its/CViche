@@ -9,13 +9,29 @@ request/session scope). These tests pin both halves of that contract:
 They also exercise the configure_mappers() graph (any back_populates typo would
 raise at the first query below).
 """
+import os
+
 import pytest
-from sqlalchemy import select
+from sqlalchemy import Text, select
 from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.orm import selectinload
 
 from app.models import (
     User, Run, Step, Log, LLMUsage, Feedback, RunMetrics, Consent, SystemConfig,
+)
+
+os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
+
+# The 6 issue_* columns were String(20) since the feedback table's creation;
+# the frontend sends full sentences into each, and MySQL strict mode raised
+# 1406 on any real answer (#606).
+_FEEDBACK_ISSUE_COLUMNS = (
+    "issue_missing_content",
+    "issue_split_merged",
+    "issue_wrong_section",
+    "issue_inaccurate",
+    "issue_ai_enrichment",
+    "issue_formatting",
 )
 
 
@@ -130,3 +146,56 @@ def test_system_config_updated_by_user(db):
     ).scalar_one()
     assert cfg.updated_by_user is not None
     assert cfg.updated_by_user.email == "admin@example.com"
+
+
+def test_feedback_issue_columns_are_text() -> None:
+    """Each issue_* column is Text (not String) -- isinstance is the correct
+    check here because sqlalchemy.Text subclasses String, so a String(20)
+    column would also pass a `isinstance(type_, String)` assertion; the
+    reverse (Text is-not-instance-of the narrower String(20)) does not hold,
+    so this direction is the one that actually distinguishes them."""
+    for column_name in _FEEDBACK_ISSUE_COLUMNS:
+        column_type = Feedback.__table__.columns[column_name].type
+        assert isinstance(column_type, Text), (
+            f"{column_name} is {column_type!r}, expected Text"
+        )
+
+
+def test_submit_feedback_long_issue_text_roundtrips(client, db):
+    """A long, real-sentence-shaped answer in issue_missing_content survives
+    the full submit_feedback path unmodified -- no truncation at the Pydantic
+    schema, the route, or the ORM layer (#606)."""
+    from app.models import User, Run
+    from app.main import app
+    from app.auth import get_current_user
+
+    user = User(email="longtext@example.com", display_name="Reviewer", role="user")
+    db.add(user)
+    db.flush()
+    db.add(Run(id="_LNGTX", filename="cv.docx", file_type="docx",
+               status="complete", user_id=user.id))
+    db.commit()
+    db.refresh(user)
+
+    long_answer = ("This section is missing the fellowship training entirely. " * 6)[:300]
+    assert len(long_answer) == 300  # would have overflowed the old String(20)
+
+    app.dependency_overrides[get_current_user] = lambda: user
+    try:
+        resp = client.post(
+            "/api/run/_LNGTX/feedback",
+            json={
+                "reviewer_role": "self",
+                "overall_usefulness": 3,
+                "manual_conversion_effort": "1-2 hours",
+                "correction_effort": "1-2 hours",
+                "likelihood_to_recommend": 3,
+                "issue_missing_content": long_answer,
+            },
+        )
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)
+
+    assert resp.status_code == 201
+    saved = db.query(Feedback).filter(Feedback.run_id == "_LNGTX").one()
+    assert saved.issue_missing_content == long_answer

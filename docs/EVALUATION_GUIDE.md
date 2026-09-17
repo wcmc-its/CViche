@@ -179,7 +179,7 @@ Stage 4.5: Research Summary (generates M1 biosketch summary)
 Stage 5: PubMed Enrichment (matches publications to PubMed)
     |
     v
-Stage 5b: Institution Enrichment (ROR API for city/state)
+Stage 5b: Institution Enrichment (LLM lookup for city/state)
     |
     v
 Stage 5c: Teaching Formatter (reformats K-code entries)
@@ -238,7 +238,7 @@ for entry in data['entries']:
 | **Stage 2** | Mega-blocks: 20+ items merged into one entry. Check line count in `text` field. |
 | **Stage 3b** | Misclassification: entry assigned wrong taxonomy code. Check `classification_reasoning`. |
 | **Stage 4** | Field name mismatches: extraction uses `dates_attended_start_date` but Stage 6 expects `start_date`. Low `extraction_coverage_percent` on mega-blocks. |
-| **Stage 5b** | Institution not enriched: ROR API didn't match. Check `ror_enrichment` field. |
+| **Stage 5b** | Institution not enriched: LLM lookup didn't match. Check `institution_enrichment` field. |
 | **Stage 6** | Rendering bugs: correct data in JSON but wrong formatting in .docx. |
 
 ---
