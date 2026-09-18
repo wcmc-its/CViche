@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
+import redis
 from sqlalchemy import func
 from sqlalchemy.orm import Session, contains_eager
 
@@ -289,7 +290,13 @@ async def get_queue_stats(
     url, _ = read_config("redis", "CVICHE_REDIS_URL", default="")
     if not url:
         return {"enabled": False, "db": db_view}
-    return {"enabled": True, **run_queue.stats(), "db": db_view}
+    try:
+        return {"enabled": True, **run_queue.stats(), "db": db_view}
+    except redis.exceptions.RedisError as e:
+        # The endpoint that diagnoses a stuck queue must still answer when
+        # Valkey itself is the problem.
+        logger.warning("Queue stats unavailable: %s", e)
+        return {"enabled": True, "error": str(e), "db": db_view}
 
 
 # ---------------------------------------------------------------------------

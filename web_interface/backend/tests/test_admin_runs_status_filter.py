@@ -150,5 +150,27 @@ def test_queue_stats_with_redis_merges_stream_depth_and_pending(client, db, monk
     assert body["db"] == {"queued": 0, "running": 0, "oldest_queued_age_s": None, "oldest_running_age_s": None}
 
 
+def test_queue_stats_answers_200_when_valkey_is_unreachable(client, db, monkeypatch):
+    """The endpoint that diagnoses a stuck queue must not 500 when Valkey is the
+    problem: the DB view still answers, with the error alongside."""
+    import redis
+    from app.pipeline import run_queue
+
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://unused")
+    _seed_queue_view(db)
+
+    def down():
+        raise redis.exceptions.ConnectionError("Error 111 connecting to valkey:6379")
+    monkeypatch.setattr(run_queue, "stats", down)
+
+    resp = _admin_get(client, "/api/admin/queue/stats")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is True
+    assert "Error 111" in body["error"]
+    assert (body["db"]["queued"], body["db"]["running"]) == (1, 1)
+
+
 def test_queue_stats_requires_admin(client, db):
     assert client.get("/api/admin/queue/stats").status_code in (401, 403)
