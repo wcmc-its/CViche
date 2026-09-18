@@ -17,6 +17,7 @@ stage3b module.
 import json
 import logging
 from dataclasses import dataclass
+from typing import TypedDict
 
 from ..llm_client import call_llm
 from .context import TaxonomyContext
@@ -35,6 +36,14 @@ logger = logging.getLogger(__name__)
 APPENDIX_TAXONOMY_PREFIX = "T"
 M_SERIES_TAXONOMY_PREFIX = "M"
 
+# Sentinel for "this entry carries no hierarchy path". A module constant --
+# not a repeated string literal -- so the producer (group_entries_by_hierarchy
+# below) and every consumer (stage_3b_entry_classifier.py's _classify_group,
+# validate_t_classifications and _classify_one_batch's except path below)
+# agree exactly: a typo in a literal copy on either side would silently
+# produce a one-element hierarchy instead of failing at import time.
+NO_HIERARCHY_KEY = "(no hierarchy)"
+
 
 @dataclass
 class _BatchStats:
@@ -51,6 +60,26 @@ class _BatchStats:
     llm_batches: int = 0  # 1 if this batch attempted an LLM call, else 0
     observed_model: str | None = None  # model id the API actually served (#459)
     failed_batches: int = 0  # 1 if this batch's LLM call raised, else 0
+
+
+class ClassificationStats(TypedDict):
+    """The stats dict `classify_entries_batch` returns and `run_stage_3b`
+    aggregates across groups -- named so a caller (and a type checker) knows
+    the keys up front instead of discovering them via a runtime KeyError.
+    """
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cost: float
+    model: str | None
+    classification_rules_version: str
+    entries_classified: int
+    llm_batches: int
+    failed_batches: int
+    llm_classified: int
+    fallback_entries: int
+    empty_entries: int
+    invalid_code_entries: int
 
 
 def _valid_taxonomy_codes(taxonomy: dict) -> set[str]:
@@ -262,7 +291,7 @@ Return ONLY valid JSON with the classifications array."""
         stats.failed_batches = 1
         # _hierarchy_path INSIDE the except handler: raising here would mask
         # the original exception, not just fail to log it.
-        hierarchy_path = _hierarchy_path(batch_entries[0].get("hierarchy"), "(no hierarchy)")
+        hierarchy_path = _hierarchy_path(batch_entries[0].get("hierarchy"), NO_HIERARCHY_KEY)
         logger.exception(
             "Stage 3b batch classification failed; %d entries fall back to "
             "default codes (batch at offset %d, hierarchy: %s)",
@@ -379,7 +408,7 @@ def classify_entries_batch(
     taxonomy_context: TaxonomyContext,
     taxonomy: dict,
     batch_size: int = 15
-) -> tuple[list[dict], dict]:
+) -> tuple[list[dict], ClassificationStats]:
     """
     Classify a batch of entries with the same taxonomy context.
 
@@ -426,7 +455,7 @@ def classify_entries_batch(
         failed_batches += batch_stats.failed_batches
         observed_model = batch_stats.observed_model or observed_model
 
-    stats = {
+    stats: ClassificationStats = {
         "input_tokens": total_input_tokens,
         "output_tokens": total_output_tokens,
         "total_tokens": total_input_tokens + total_output_tokens,
@@ -473,7 +502,7 @@ def group_entries_by_hierarchy(entries: list[dict]) -> dict[str, list[dict]]:
         # but " > ".join() raises TypeError on a non-string element (e.g. a
         # stray int), which would otherwise crash the whole classification
         # run over a single malformed hierarchy entry.
-        key = " > ".join(str(h) for h in hierarchy) if hierarchy else "(no hierarchy)"
+        key = " > ".join(str(h) for h in hierarchy) if hierarchy else NO_HIERARCHY_KEY
 
         if key not in groups:
             groups[key] = []
@@ -524,7 +553,7 @@ def validate_t_classifications(
     entries_text = []
     for idx, entry in t_entries:
         text = entry.get("text", "")[:500]  # Truncate long entries
-        hierarchy = " > ".join(entry.get("hierarchy", [])) or "(no hierarchy)"
+        hierarchy = " > ".join(entry.get("hierarchy", [])) or NO_HIERARCHY_KEY
         original_reasoning = entry.get("classification_reasoning", "none provided")
         entries_text.append(f"""
 Entry {idx}:
