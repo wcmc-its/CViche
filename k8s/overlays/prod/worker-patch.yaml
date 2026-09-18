@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cviche-worker
+spec:
+  replicas: 2
+  template:
+    spec:
+      nodeSelector:
+        eks.amazonaws.com/nodegroup: cviche-al2023-nodes
+      containers:
+        - name: worker # Must match the name in base/worker/deployment.yaml
+          resources:
+            requests:
+              cpu: "2"
+              memory: "2Gi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          envFrom:
+            - secretRef:
+                name: cviche-secrets
+          volumeMounts:
+            - name: auth-config-volume
+              mountPath: /app/web_interface/backend/auth_config.yaml
+              subPath: auth_config.yaml # Mounts ONLY this file without wiping out existing app files
+      volumes:
+        - name: auth-config-volume
+          configMap:
+            name: cviche-auth-config # Automatically links with your configMapGenerator

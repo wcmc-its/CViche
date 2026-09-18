@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cviche-worker
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: cviche-worker
+  # A run takes 15-20 min; never let a deploy or scale-in drop capacity while
+  # one is in flight (see terminationGracePeriodSeconds below).
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: cviche-worker
+    spec:
+      # Same IRSA setup as the backend to authenticate DB users via IAM.
+      serviceAccountName: cviche-sa
+
+      containers:
+        - name: worker
+          image: backend # Dynamically updated by Kustomize via CodeBuild
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "docker-entrypoint.sh"]
+          args: ["worker"]
+          env:
+            - name: CVICHE_RUN_MIGRATIONS
+              value: "0" # Alembic owns schema; the backend's initContainer runs migrations
+            - name: CVICHE_INIT_DB
+              value: "0" # No metadata.create_all() DDL at boot (#191)
+          # No probes: there is no HTTP server to probe. A dead process just
+          # exits and the ReplicaSet restarts it.
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+      # SIGTERM stops new claims; an in-flight run (15-20 min) finishes and
+      # ACKs before exit. 1800s covers that with margin (#701 §11).
+      terminationGracePeriodSeconds: 1800
