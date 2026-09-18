@@ -33,6 +33,7 @@ from app.pipeline.orchestrator import PipelineOrchestrator
 logger = logging.getLogger(__name__)
 
 CONSUMER = os.environ.get("HOSTNAME") or socket.gethostname()
+RETRY_DELAY_S = 5
 shutting_down = threading.Event()
 
 
@@ -127,13 +128,20 @@ def handle(entry_id: str, fields: dict[str, str], *, reclaimed: bool = False) ->
 
 def loop() -> None:
     while not shutting_down.is_set():
-        entry = run_queue.autoclaim_one(CONSUMER)
-        if entry:
-            handle(*entry, reclaimed=True)
-            continue
-        entry = run_queue.read_one(CONSUMER)
-        if entry:
-            handle(*entry)
+        try:
+            entry = run_queue.autoclaim_one(CONSUMER)
+            if entry:
+                handle(*entry, reclaimed=True)
+                continue
+            entry = run_queue.read_one(CONSUMER)
+            if entry:
+                handle(*entry)
+        except Exception:
+            # A DB or Valkey blip must not crash-loop the pod: the entry in hand
+            # is still pending (handle only ACKs after the claim decided), so
+            # XAUTOCLAIM redelivers it; just wait out the outage and read again.
+            logger.exception("worker %s: loop iteration failed; retrying in %ss", CONSUMER, RETRY_DELAY_S)
+            shutting_down.wait(RETRY_DELAY_S)
 
 
 def main() -> int:

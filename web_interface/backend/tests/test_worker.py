@@ -290,6 +290,64 @@ def test_poison_cap_dead_letters_after_max_deliveries(db, wired, tmp_path, monke
     assert StubOrchestrator.calls == []
 
 
+def test_loop_reclaims_with_the_delivery_count_so_the_poison_cap_fires(db, wired, tmp_path, monkeypatch):
+    """Drives the cap through loop() rather than handle(): the autoclaim branch
+    must pass reclaimed=True, or the cap (and the `reclaimed` log line) is
+    silently disabled in production while every direct handle() test stays green."""
+    _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+    monkeypatch.setattr(run_queue, "MIN_IDLE_MS", 0)
+    monkeypatch.setattr(run_queue, "BLOCK_MS", 50)
+    eid = run_queue.enqueue("WRK001")
+    run_queue.read_one("A")
+    for _ in range(run_queue.MAX_DELIVERIES):
+        wired.xclaim(run_queue.STREAM, run_queue.GROUP, "A", 0, [eid])
+
+    t = threading.Thread(target=worker.loop)
+    t.start()
+    deadline = time.time() + 2
+    while wired.xlen(run_queue.DEAD_STREAM) == 0 and time.time() < deadline:
+        time.sleep(0.02)
+    worker.shutting_down.set()
+    t.join(timeout=2)
+
+    assert not t.is_alive()
+    assert [d[1]["run_id"] for d in wired.xrange(run_queue.DEAD_STREAM)] == ["WRK001"]
+    assert _row(db).status == "failed"
+    assert StubOrchestrator.calls == []
+
+
+def test_loop_survives_a_transient_error_and_leaves_the_entry_pending(db, wired, tmp_path, monkeypatch):
+    """A DB blip inside one iteration must not end the loop (the pod would
+    CrashLoopBackOff, one entry per restart); the entry stays un-ACKed."""
+    _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+    monkeypatch.setattr(run_queue, "BLOCK_MS", 50)
+    monkeypatch.setattr(run_queue, "MIN_IDLE_MS", 0)  # so the redelivery is observable now
+    monkeypatch.setattr(worker, "RETRY_DELAY_S", 0.05)
+    run_queue.enqueue("WRK001")
+    attempts = []
+
+    def flaky():
+        attempts.append(1)
+        raise RuntimeError("MySQL server has gone away")
+    monkeypatch.setattr(worker, "SessionLocal", flaky)
+
+    t = threading.Thread(target=worker.loop)
+    t.start()
+    try:
+        time.sleep(0.3)
+        assert t.is_alive(), "the loop died on the first error instead of retrying"
+        assert len(attempts) >= 2, "the entry was never redelivered after the error"
+    finally:
+        worker.shutting_down.set()
+        t.join(timeout=2)
+
+    assert not t.is_alive()
+    assert _pending() == 1  # still pending, never ACKed
+    assert _row(db).status == "queued"
+
+
 def test_db_error_marking_a_poison_run_failed_keeps_its_entry_out_of_the_dlq(db, wired, tmp_path, monkeypatch):
     """The DB write precedes the DLQ move, so a failed write leaves the entry
     pending for the next reclaim instead of parking it with the row still `queued`."""
