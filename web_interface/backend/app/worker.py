@@ -95,21 +95,32 @@ def handle(entry_id: str, fields: dict[str, str], *, reclaimed: bool = False) ->
         deliveries = run_queue.delivery_count(entry_id)
         _log("reclaimed", run_id, entry_id, deliveries=deliveries)
         if deliveries > run_queue.MAX_DELIVERIES:
-            run_queue.dead_letter(entry_id, fields)
+            # DB first: if this write fails the entry stays pending and comes
+            # back on the next reclaim instead of vanishing into the DLQ.
             _mark_failed(run_id, f"Dead-lettered after {deliveries} deliveries", from_status="queued")
+            run_queue.dead_letter(entry_id, fields)
             _log("dead_lettered", run_id, entry_id)
             return
+    try:  # needs no DB, so a hand-crafted bad token is dropped before any claim
+        start_step = int(fields["start_step"]) if fields.get("start_step") else None
+    except ValueError:
+        _log("skipped_bad_token", run_id, entry_id, start_step=fields.get("start_step"))
+        run_queue.ack(entry_id)
+        return
+    # Outside the ACKing try: a DB error here must leave the entry pending, so
+    # XAUTOCLAIM redelivers it after MIN_IDLE_MS. ACKing without a claim result
+    # would strand the run `queued` with no message and nothing to reap it.
+    won, status, file_type = _claim(run_id)
     try:
-        won, status, file_type = _claim(run_id)
         if not won:
             _log("skipped_not_queued", run_id, entry_id, status=status)
             return
         _log("claimed", run_id, entry_id)
-        start_step = fields.get("start_step")
-        _execute(run_id, file_type, int(start_step) if start_step else None)
+        _execute(run_id, file_type, start_step)
     finally:
-        # Success and handled failure both ACK; only a process death leaves the
-        # entry pending, which is exactly what XAUTOCLAIM exists for.
+        # Success and handled failure both ACK; only a process death or a DB
+        # error before the claim decided leaves the entry pending -- exactly
+        # what XAUTOCLAIM exists for.
         run_queue.ack(entry_id)
         _log("acked", run_id, entry_id)
 
