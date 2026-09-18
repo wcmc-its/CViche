@@ -614,6 +614,7 @@ Return JSON with format:
 
     return prompt
 
+
 def _validate_raw_extractions(raw_extractions: list[Any], code: str) -> dict[int, dict[str, Any]]:
     """Validate raw LLM extraction items at the external trust boundary.
 

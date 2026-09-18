@@ -473,6 +473,117 @@ def test_extract_fields_batch_cancels_between_taxonomy_groups(monkeypatch):
     assert calls["n"] == 1
 
 
+def test_attempt_llm_recovery_forwards_cancel_check_into_call_llm(monkeypatch):
+    recorded_kwargs = {}
+
+    def fake_call_llm(**kwargs):
+        recorded_kwargs.update(kwargs)
+        return {
+            "content": json.dumps({
+                "recovered_entries": [{"entry_id": "0_0", "fields": {"note": "recovered"}}],
+                "recovery_notes": "",
+            }),
+            "cost": 0.01,
+            "total_tokens": 5,
+        }
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+
+    sentinel = object()
+    extraction.attempt_llm_recovery(_one_recovery_entry(), cancel_check=sentinel)
+
+    assert recorded_kwargs["cancel_check"] is sentinel
+
+
+def _long_low_coverage_entry() -> dict:
+    # >=200 chars (crosses needs_llm_recovery's length floor) with a year in
+    # it (satisfies the has_dates check), so a main-extraction response that
+    # extracts an unrelated field leaves coverage near zero without tripping
+    # the total-extraction-loss shortcut (which needs `extracted_fields`
+    # entirely falsy).
+    text = "Long messy entry with plenty of padding text " * 5 + "seen in 2015."
+    assert len(text) >= 200
+    return {
+        "text": text,
+        "taxonomy_code": "A1",
+        "element_idx_start": 0,
+        "element_idx_end": 0,
+    }
+
+
+def test_extract_fields_batch_cancels_before_recovery_call(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_call_llm(**kwargs):
+        calls["n"] += 1
+        # Main-extraction response: a field that shares no words with the
+        # entry's text, so extraction coverage is near zero and
+        # needs_llm_recovery is True.
+        return {
+            "content": json.dumps({"entries": [{"entry_index": 0, "note": "zzz"}]}),
+            "cost": 0.0, "total_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+        }
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+
+    class Cancelled(Exception):
+        pass
+
+    checks = {"n": 0}
+
+    def cancel_check():
+        checks["n"] += 1
+        if checks["n"] == 2:
+            raise Cancelled()
+
+    with pytest.raises(Cancelled):
+        extraction.extract_fields_batch(
+            [_long_low_coverage_entry()], 0, 1, cancel_check=cancel_check,
+        )
+
+    # Second cancel_check() invocation (before the recovery group's call)
+    # raises -- the recovery call_llm must never have started.
+    assert calls["n"] == 1
+
+
+def test_extract_fields_batch_forwards_cancel_check_into_recovery_call_llm(monkeypatch):
+    recorded_kwargs = {}
+    calls = {"n": 0}
+
+    def fake_call_llm(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # Main-extraction call: unrelated field -> low coverage.
+            return {
+                "content": json.dumps({"entries": [{"entry_index": 0, "note": "zzz"}]}),
+                "cost": 0.0, "total_tokens": 0,
+                "cache_read_tokens": 0, "cache_write_tokens": 0,
+            }
+        # Recovery call.
+        recorded_kwargs.update(kwargs)
+        return {
+            "content": json.dumps({
+                "recovered_entries": [{"entry_id": "0_0", "fields": {"note": "recovered"}}],
+                "recovery_notes": "",
+            }),
+            "cost": 0.01,
+            "total_tokens": 5,
+        }
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+
+    def cancel_check():
+        pass  # never raises
+
+    extraction.extract_fields_batch(
+        [_long_low_coverage_entry()], 0, 1, cancel_check=cancel_check,
+    )
+
+    assert calls["n"] == 2
+    assert recorded_kwargs["cancel_check"] is cancel_check
+
+
 # ---------------------------------------------------------------------------
 # calculate_unextracted_content
 # ---------------------------------------------------------------------------
