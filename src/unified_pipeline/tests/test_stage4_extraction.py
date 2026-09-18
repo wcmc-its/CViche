@@ -21,12 +21,15 @@ No network, no LLM: `extract_fields_batch`, `extract_cv_owner_name` and
 the loop reads. Synthetic entries only.
 """
 
+import json
 import sys
 import threading
 import time
 from pathlib import Path
 
+import httpx
 import pytest
+from openai import APITimeoutError
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -63,7 +66,7 @@ def test_results_are_in_batch_order_even_when_later_batches_finish_first(monkeyp
     _stub_owner(monkeypatch)
     n = 6
 
-    def slow_early_batches(entries, batch_idx, total, cv_owner_name):
+    def slow_early_batches(entries, batch_idx, total, cv_owner_name, cancel_check=None):
         time.sleep((n - batch_idx) * 0.01)  # batch 0 finishes last
         return _batch_result(entries)
 
@@ -80,7 +83,7 @@ def test_pool_threads_run_inside_the_callers_run_id_context(monkeypatch):
     lock = threading.Lock()
     main = threading.current_thread()
 
-    def record_context(entries, batch_idx, total, cv_owner_name):
+    def record_context(entries, batch_idx, total, cv_owner_name, cancel_check=None):
         with lock:
             seen.append((prompt_logger._current_run_id.get(), threading.current_thread() is main))
         return _batch_result(entries)
@@ -117,7 +120,7 @@ def test_no_llm_call_starts_after_a_cancel(monkeypatch):
                 cancelled.set()
                 raise Cancelled()
 
-    def llm_batch(entries, batch_idx, total, cv_owner_name):
+    def llm_batch(entries, batch_idx, total, cv_owner_name, cancel_check=None):
         nonlocal started_after_cancel
         if cancelled.is_set():
             with lock:
@@ -143,7 +146,7 @@ def test_a_failing_batch_drops_the_queued_batches(monkeypatch):
     calls = 0
     lock = threading.Lock()
 
-    def explode_on_one(entries, batch_idx, total, cv_owner_name):
+    def explode_on_one(entries, batch_idx, total, cv_owner_name, cancel_check=None):
         nonlocal calls
         with lock:
             calls += 1
@@ -166,7 +169,7 @@ def test_a_failing_batch_drops_the_queued_batches(monkeypatch):
 def test_totals_sum_over_every_batch_across_threads(monkeypatch):
     _stub_owner(monkeypatch)
 
-    def one_failed(entries, batch_idx, total, cv_owner_name):
+    def one_failed(entries, batch_idx, total, cv_owner_name, cancel_check=None):
         return _batch_result(entries, cost=0.5, tokens=100, success=(batch_idx != 2))
 
     monkeypatch.setattr(extraction, "extract_fields_batch", one_failed)
@@ -188,7 +191,7 @@ def test_workers_one_is_strictly_serial_and_ordered(monkeypatch):
     peak = 0
     lock = threading.Lock()
 
-    def track(entries, batch_idx, total, cv_owner_name):
+    def track(entries, batch_idx, total, cv_owner_name, cancel_check=None):
         nonlocal in_flight, peak
         with lock:
             in_flight += 1
@@ -213,3 +216,298 @@ def test_workers_below_one_is_rejected(monkeypatch):
     _stub_owner(monkeypatch)
     with pytest.raises(ValueError, match="max_workers"):
         extraction.extract_fields_from_mapped_entries(_entries(1), workers=0)
+
+
+# ---------------------------------------------------------------------------
+# batch_size validation
+# ---------------------------------------------------------------------------
+
+def test_batch_size_below_one_raises_value_error(monkeypatch):
+    _stub_owner(monkeypatch)
+    with pytest.raises(ValueError, match="batch_size must be >= 1"):
+        extraction.extract_fields_from_mapped_entries(_entries(1), batch_size=0)
+
+
+# ---------------------------------------------------------------------------
+# partial_success
+# ---------------------------------------------------------------------------
+
+def test_partial_success_is_false_when_no_batch_failed(monkeypatch):
+    _stub_owner(monkeypatch)
+    monkeypatch.setattr(
+        extraction, "extract_fields_batch",
+        lambda entries, batch_idx, total, cv_owner_name, cancel_check=None: _batch_result(entries),
+    )
+
+    out = extraction.extract_fields_from_mapped_entries(_entries(4), batch_size=2, workers=2)
+
+    assert out["partial_success"] is False
+    assert out["stats"]["failed_batches"] == 0
+
+
+# ---------------------------------------------------------------------------
+# "no valid entries" early-out
+# ---------------------------------------------------------------------------
+
+def test_no_valid_entries_early_out_never_calls_extract_fields_batch(monkeypatch):
+    _stub_owner(monkeypatch)
+    calls: list[int] = []
+    monkeypatch.setattr(
+        extraction, "extract_fields_batch",
+        lambda *a, **k: calls.append(1) or _batch_result([]),
+    )
+    entries = [
+        {"text": "", "element_idx": 0, "taxonomy_code": "A1"},
+        {"text": "ab", "element_idx": 1, "taxonomy_code": "A1"},
+    ]
+
+    out = extraction.extract_fields_from_mapped_entries(entries, batch_size=5)
+
+    assert calls == []  # attempted 0 -- the early-out never reaches the pool
+    assert len(out["entries"]) == 2  # both entries come back skipped
+    assert out["success"] is True
+
+
+# ---------------------------------------------------------------------------
+# skip-reason tagging
+# ---------------------------------------------------------------------------
+
+def test_skip_reason_tagging_empty_vs_minimal_text(monkeypatch):
+    _stub_owner(monkeypatch)
+
+    def never_called(*a, **k):
+        raise AssertionError("extract_fields_batch must not run -- every entry is skipped")
+
+    monkeypatch.setattr(extraction, "extract_fields_batch", never_called)
+    entries = [
+        {"text": "", "element_idx": 0, "taxonomy_code": "A1"},
+        {"text": "abc", "element_idx": 1, "taxonomy_code": "A1"},
+    ]
+
+    out = extraction.extract_fields_from_mapped_entries(entries, batch_size=5)
+
+    reasons = {e["text"]: e["skip_reason"] for e in out["entries"]}
+    assert reasons[""] == "empty_text"
+    assert reasons["abc"] == "empty_or_minimal_text"
+
+
+# ---------------------------------------------------------------------------
+# needs_llm_recovery
+# ---------------------------------------------------------------------------
+
+def test_needs_llm_recovery_true_on_total_extraction_loss():
+    # >=50 chars of original text but every extracted field is falsy --
+    # sufficient on its own regardless of the length/date/structure checks.
+    entry = {
+        "text": "x" * 60,
+        "extracted_fields": {"a": None, "b": ""},
+        "extraction_coverage": {},
+    }
+    assert extraction.needs_llm_recovery(entry) is True
+
+
+def test_needs_llm_recovery_false_when_text_too_short():
+    entry = {
+        "text": "short",
+        "extracted_fields": {"a": "short"},
+        "extraction_coverage": {"extraction_coverage_percent": 10.0},
+    }
+    assert extraction.needs_llm_recovery(entry) is False
+
+
+def test_needs_llm_recovery_true_when_low_coverage_and_has_dates():
+    text = (
+        "This is a long entry with plenty of content padding to exceed the "
+        "two hundred character floor required before the coverage check even "
+        "runs, and it mentions the year 2015 somewhere in the middle of it."
+    )
+    assert len(text) >= 200
+    entry = {
+        "text": text,
+        "extracted_fields": {"note": "2015"},
+        "extraction_coverage": {"extraction_coverage_percent": 5.0},
+    }
+    assert extraction.needs_llm_recovery(entry) is True
+
+
+# ---------------------------------------------------------------------------
+# attempt_llm_recovery -- one test per exception path it distinguishes
+# ---------------------------------------------------------------------------
+
+def _one_recovery_entry() -> list[dict]:
+    return [{
+        "taxonomy_code": "A1",
+        "text": "some messy table text",
+        "element_idx_start": 0,
+        "element_idx_end": 0,
+    }]
+
+
+def test_attempt_llm_recovery_timeout_sets_llm_timeout_error(monkeypatch):
+    def boom(**kwargs):
+        raise APITimeoutError(request=httpx.Request("POST", "https://example.invalid"))
+
+    monkeypatch.setattr(extraction, "call_llm", boom)
+
+    result = extraction.attempt_llm_recovery(_one_recovery_entry())
+
+    assert result["entries"][0]["llm_recovery_error"] == extraction.LLM_TIMEOUT
+    assert result["cost"] == 0.0
+
+
+def test_attempt_llm_recovery_json_decode_error_sets_response_invalid(monkeypatch):
+    def not_json(**kwargs):
+        return {"content": "not valid json", "cost": 0.02, "total_tokens": 7}
+
+    monkeypatch.setattr(extraction, "call_llm", not_json)
+
+    result = extraction.attempt_llm_recovery(_one_recovery_entry())
+
+    assert result["entries"][0]["llm_recovery_error"] == extraction.LLM_RESPONSE_INVALID
+    assert result["cost"] == pytest.approx(0.02)  # the failed call's spend is still counted
+
+
+def test_attempt_llm_recovery_validation_error_sets_response_invalid(monkeypatch):
+    def wrong_shape(**kwargs):
+        # Missing the required "entry_id" on the one recovered entry.
+        return {
+            "content": json.dumps({"recovered_entries": [{"fields": {}}]}),
+            "cost": 0.01,
+            "total_tokens": 5,
+        }
+
+    monkeypatch.setattr(extraction, "call_llm", wrong_shape)
+
+    result = extraction.attempt_llm_recovery(_one_recovery_entry())
+
+    assert result["entries"][0]["llm_recovery_error"] == extraction.LLM_RESPONSE_INVALID
+    assert result["cost"] == pytest.approx(0.01)
+
+
+def test_attempt_llm_recovery_generic_error_sets_provider_error(monkeypatch):
+    def boom(**kwargs):
+        raise RuntimeError("provider blew up")
+
+    monkeypatch.setattr(extraction, "call_llm", boom)
+
+    result = extraction.attempt_llm_recovery(_one_recovery_entry())
+
+    assert result["entries"][0]["llm_recovery_error"] == extraction.LLM_PROVIDER_ERROR
+
+
+# ---------------------------------------------------------------------------
+# extract_fields_batch -- real implementation, call_llm stubbed
+# (doubles as the reply evidence for threads 4044649899/4044657601/4044660879:
+# a malformed LLM item is dropped with a warning, not raised)
+# ---------------------------------------------------------------------------
+
+def test_extract_fields_batch_real_implementation_drops_malformed_item(monkeypatch, caplog):
+    entries = [
+        {"text": "hello world", "taxonomy_code": "A1", "element_idx_start": 0, "element_idx_end": 0},
+        {"text": "second entry text here", "taxonomy_code": "A1", "element_idx_start": 1, "element_idx_end": 1},
+    ]
+
+    def fake_call_llm(**kwargs):
+        return {
+            "content": json.dumps({"entries": [
+                {"entry_index": 0, "note": "hello world"},
+                {"entry_index": 1, "note": "second entry text here"},
+                {"note": "missing its entry_index"},  # malformed -- dropped
+            ]}),
+            "cost": 0.02,
+            "total_tokens": 42,
+            "cache_read_tokens": 1,
+            "cache_write_tokens": 2,
+        }
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+
+    with caplog.at_level("WARNING"):
+        result = extraction.extract_fields_batch(entries, 0, 1)
+
+    assert result["cost"] == pytest.approx(0.02)
+    assert result["tokens"] == 42
+    assert result["cache_read_tokens"] == 1
+    assert result["cache_write_tokens"] == 2
+    assert result["success"] is True
+    assert len(result["entries"]) == 2
+    by_text = {e["text"]: e for e in result["entries"]}
+    assert by_text["hello world"]["extracted_fields"]["note"] == "hello world"
+    assert by_text["second entry text here"]["extracted_fields"]["note"] == "second entry text here"
+    assert "dropped one malformed LLM entry" in caplog.text
+
+
+def test_extract_fields_batch_cancels_between_taxonomy_groups(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_call_llm(**kwargs):
+        calls["n"] += 1
+        return {
+            "content": json.dumps({"entries": []}),
+            "cost": 0.0, "total_tokens": 0,
+            "cache_read_tokens": 0, "cache_write_tokens": 0,
+        }
+
+    monkeypatch.setattr(extraction, "call_llm", fake_call_llm)
+
+    class Cancelled(Exception):
+        pass
+
+    checks = {"n": 0}
+
+    def cancel_check():
+        checks["n"] += 1
+        if checks["n"] == 2:
+            raise Cancelled()
+
+    entries = [
+        {"text": "entry one", "taxonomy_code": "A1", "element_idx_start": 0, "element_idx_end": 0},
+        {"text": "entry two", "taxonomy_code": "B2", "element_idx_start": 1, "element_idx_end": 1},
+    ]
+
+    with pytest.raises(Cancelled):
+        extraction.extract_fields_batch(entries, 0, 1, cancel_check=cancel_check)
+
+    # The second group's cancel_check() raises before its call_llm -- the
+    # first group's call already went through.
+    assert calls["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# calculate_unextracted_content
+# ---------------------------------------------------------------------------
+
+def test_calculate_unextracted_content_full_coverage():
+    result = extraction.calculate_unextracted_content(
+        "Chief Resident at Example Hospital",
+        {"role": "Chief Resident", "institution": "Example Hospital"},
+    )
+
+    assert result["extraction_coverage_percent"] == 100.0
+    assert result["unextracted_words"] == []
+
+
+def test_calculate_unextracted_content_partial_coverage():
+    result = extraction.calculate_unextracted_content(
+        "Attending Physician in Cardiology at Example Hospital",
+        {"role": "Attending Physician"},
+    )
+
+    assert result["extraction_coverage_percent"] < 100.0
+    assert "cardiology" in result["unextracted_words"]
+
+
+# ---------------------------------------------------------------------------
+# add_target_names fallback
+# ---------------------------------------------------------------------------
+
+def test_add_target_names_fallback_from_raw_text():
+    entries = [{
+        "taxonomy_code": "S1",
+        "text": "Smith J, Doe A. Title of the paper describing findings.",
+        "extracted_fields": {},
+    }]
+
+    out = extraction.add_target_names(entries, "Smith")
+
+    assert out[0]["extracted_fields"]["target_name"] == "Smith J"

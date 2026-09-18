@@ -761,3 +761,31 @@ def test_call_with_retry_rejects_bool_retry_count() -> None:
 def test_call_with_retry_rejects_negative_retry_count() -> None:
     with pytest.raises(ValueError):
         retry._call_with_retry(lambda: "x", retry_count=-1)
+
+
+def test_call_with_retry_cancel_after_backoff_stops_further_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    # cancel_check is checked between attempts, after the backoff sleep and
+    # before the next call_fn() -- so a cancel there propagates out of the
+    # retry loop unchanged, and the provider is never invoked a second time.
+    sleeps: list[float] = []
+    monkeypatch.setattr(retry.time, "sleep", lambda s: sleeps.append(s))
+    attempts = {"n": 0}
+
+    def flaky() -> str:
+        attempts["n"] += 1
+        raise openai.APIConnectionError(request=httpx.Request("POST", "https://example.invalid"))
+
+    class Cancelled(Exception):
+        pass
+
+    checks = {"n": 0}
+
+    def cancel_check() -> None:
+        checks["n"] += 1
+        raise Cancelled()
+
+    with pytest.raises(Cancelled):
+        retry._call_with_retry(flaky, retry_count=3, cancel_check=cancel_check)
+
+    assert attempts["n"] == 1  # cancel fired before a second attempt started
+    assert len(sleeps) == 1  # the first attempt's backoff still ran

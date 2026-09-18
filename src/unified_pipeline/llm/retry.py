@@ -137,12 +137,25 @@ def _get_llm_max_attempts() -> int:
 _client_init_lock = threading.Lock()
 
 
-def _call_with_retry(call_fn: Callable[[], T], retry_count: int = 3) -> tuple[T, float]:
+def _call_with_retry(
+    call_fn: Callable[[], T],
+    retry_count: int = 3,
+    cancel_check: Callable[[], None] | None = None,
+) -> tuple[T, float]:
     """Call function with exponential backoff on transient errors.
+
+    cancel_check: raises to cancel; checked between attempts, never
+    mid-call. Called once per retry, after that attempt's backoff sleep and
+    before the next call_fn() -- so a cancel raised there propagates out of
+    the retry loop unchanged instead of waiting for an in-flight call (which
+    cannot be interrupted) to finish. None (the default) is a no-op, so a
+    caller that never cancels does not need to pass it.
 
     Args:
         call_fn: Zero-argument callable that makes the API call
         retry_count: Max number of retries (total attempts = retry_count + 1)
+        cancel_check: Optional zero-arg callable invoked between retry
+            attempts; see above.
 
     Returns:
         (result, api_seconds) -- the return value of call_fn on success, and
@@ -210,4 +223,6 @@ def _call_with_retry(call_fn: Callable[[], T], retry_count: int = 3) -> tuple[T,
                     f"Retrying in {wait:.1f}s..."
                 )
                 time.sleep(wait)
+                if cancel_check is not None:
+                    cancel_check()
     raise last_error

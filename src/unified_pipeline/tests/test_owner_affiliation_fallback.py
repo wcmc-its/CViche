@@ -251,7 +251,7 @@ def test_location_inference_sees_extracted_fields(monkeypatch):
     ]
     seen = {}
 
-    def fake_batch(batch, batch_idx, num_batches, model=None, cv_owner_name=None):
+    def fake_batch(batch, batch_idx, num_batches, model=None, cv_owner_name=None, cancel_check=None):
         out = []
         for e in batch:
             out.append({**e, 'extracted_fields': {

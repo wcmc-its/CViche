@@ -286,6 +286,7 @@ def _recovery_entry_id(entry: dict[str, Any]) -> str:
 
 def attempt_llm_recovery(
     entries: list[dict[str, Any]],
+    cancel_check: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     """
     Attempt LLM-assisted recovery for entries with poor extraction coverage.
@@ -295,6 +296,9 @@ def attempt_llm_recovery(
 
     Args:
         entries: List of entries needing recovery (same taxonomy code)
+        cancel_check: Optional zero-arg callable forwarded to call_llm's own
+            cancel_check, so a cancel can also fire between this call's
+            retries. Raises to cancel; never returns True.
 
     Returns:
         Dict with:
@@ -372,7 +376,8 @@ def attempt_llm_recovery(
                 {"role": "user", "content": prompt}
             ],
             temperature=0.0,
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            cancel_check=cancel_check,
         )
 
         result_text = llm_result["content"]
@@ -609,11 +614,33 @@ Return JSON with format:
 
     return prompt
 
+def _validate_raw_extractions(raw_extractions: list[Any], code: str) -> dict[int, dict[str, Any]]:
+    """Validate raw LLM extraction items at the external trust boundary.
+
+    Pure move out of extract_fields_batch's per-code loop (function-size
+    ratchet, docs/CODING_STANDARDS.md #3.x) -- same validation, same drop-and-
+    warn on a malformed item, same map shape; not a behavior change.
+    """
+    extraction_map: dict[int, dict[str, Any]] = {}
+    for raw_item in raw_extractions:
+        try:
+            validated_item = _ExtractedEntryFields.model_validate(raw_item)
+        except ValidationError as exc:
+            logger.warning(
+                "Stage 4 batch extraction for %s dropped one malformed LLM entry: %s",
+                code, exc,
+            )
+            continue
+        extraction_map[validated_item.entry_index] = validated_item.model_dump(exclude={"entry_index"})
+    return extraction_map
+
+
 def extract_fields_batch(
     entries: list[dict[str, Any]],
     batch_idx: int,
     total_batches: int,
-    cv_owner_name: dict[str, str] | None = None
+    cv_owner_name: dict[str, str] | None = None,
+    cancel_check: Callable[[], None] | None = None,
 ) -> BatchExtractionResult:
     """
     Extract fields from a batch of entries using LLM.
@@ -623,6 +650,8 @@ def extract_fields_batch(
         batch_idx: Current batch index
         total_batches: Total number of batches
         cv_owner_name: Dict with 'last_name' and optionally 'full_name' of CV owner
+        cancel_check: Raises to cancel; never returns True. Checked before
+            each taxonomy-group's call and forwarded into every call_llm().
     """
     logger.info("Processing batch %d/%d (%d entries)...", batch_idx + 1, total_batches, len(entries))
 
@@ -647,6 +676,11 @@ def extract_fields_batch(
     failed_groups = 0
 
     for code, code_entries in entries_by_code.items():
+        # Outside the try/except below: a raised cancel must propagate, not
+        # be caught as a generic provider failure.
+        if cancel_check is not None:
+            cancel_check()
+
         schema = get_field_schema(code)
         prompt = build_extraction_prompt(code_entries, schema, code, cv_owner_name)
 
@@ -661,7 +695,8 @@ def extract_fields_batch(
                 stage="stage_4",
                 messages=messages,
                 temperature=0.0,
-                response_format={"type": "json_object"}
+                response_format={"type": "json_object"},
+                cancel_check=cancel_check,
             )
 
             # Parse response
@@ -690,22 +725,9 @@ def extract_fields_batch(
                 )
                 raw_extractions = []
 
-            # Validate each item at the external trust boundary -- raw LLM
-            # JSON -- before it is merged into pipeline state. A malformed
-            # item (missing/non-int entry_index, not an object) is dropped
-            # with a warning rather than crashing the whole batch or being
-            # merged in with an unvalidated shape.
-            extraction_map: dict[int, dict[str, Any]] = {}
-            for raw_item in raw_extractions:
-                try:
-                    validated_item = _ExtractedEntryFields.model_validate(raw_item)
-                except ValidationError as exc:
-                    logger.warning(
-                        "Stage 4 batch extraction for %s dropped one malformed LLM entry: %s",
-                        code, exc,
-                    )
-                    continue
-                extraction_map[validated_item.entry_index] = validated_item.model_dump(exclude={"entry_index"})
+            # Validate each item at the external trust boundary -- see
+            # _validate_raw_extractions for what a malformed item does.
+            extraction_map = _validate_raw_extractions(raw_extractions, code)
 
             # Merge using explicit indices to avoid mismapping
             for i, entry in enumerate(code_entries):
@@ -804,8 +826,10 @@ def extract_fields_batch(
         recovery_tokens = 0
 
         for code, code_entries in recovery_by_code.items():
+            if cancel_check is not None:
+                cancel_check()
             logger.info("[%s] Attempting recovery for %d entries...", code, len(code_entries))
-            recovery_result = attempt_llm_recovery(code_entries)
+            recovery_result = attempt_llm_recovery(code_entries, cancel_check=cancel_check)
             recovery_cost += recovery_result.get("cost", 0.0)
             recovery_tokens += recovery_result.get("tokens", 0)
 
@@ -869,8 +893,15 @@ def _extract_batches(
     cv_owner_name: dict[str, str],
     cancel_check: Callable[[], None] | None,
     workers: int,
-) -> list[dict[str, Any]]:
+) -> list[BatchExtractionResult]:
     """Run extract_fields_batch over every batch; results come back in batch order.
+
+    Return shape: one element per batch, in batch order -- NOT a flattened
+    list of entries. Each element is that batch's own result dict from
+    extract_fields_batch (see BatchExtractionResult: entries, cost, tokens,
+    cache_read_tokens, cache_write_tokens, success, failed_groups). The
+    caller (extract_fields_from_mapped_entries) iterates these and extends
+    its own entry list from each one's "entries" key.
 
     Each task runs inside a copy of the caller's contextvars.Context so
     prompt_logger's per-run log directory (#580) follows the call onto the pool
@@ -878,16 +909,27 @@ def _extract_batches(
     into the shared flat directory. A cancel or failure in any task drops the
     queued ones; calls already in flight finish, since a thread cannot be
     interrupted, so at most `workers` LLM calls complete after a cancel.
+
+    cancel_check: raises to cancel; never returns True (the caller's
+    check_cancelled raises CancelledException). Checked once before each
+    batch here, and forwarded into extract_fields_batch so a cancel can also
+    fire between that batch's per-taxonomy-group LLM calls and between an
+    individual call's own retries -- an in-flight LLM call cannot itself be
+    interrupted, so this only bounds how much MORE work starts after a cancel.
     """
     num_batches = (len(valid_entries) + batch_size - 1) // batch_size
 
-    def run_batch(batch_idx: int) -> dict[str, Any]:
+    def run_batch(batch_idx: int) -> BatchExtractionResult:
         # Check for cancellation before each batch's LLM calls so an aborted
         # run terminates promptly rather than running every batch to completion.
         if cancel_check is not None:
             cancel_check()
         batch = valid_entries[batch_idx * batch_size:(batch_idx + 1) * batch_size]
-        return extract_fields_batch(batch, batch_idx, num_batches, cv_owner_name=cv_owner_name)
+        return extract_fields_batch(
+            batch, batch_idx, num_batches,
+            cv_owner_name=cv_owner_name,
+            cancel_check=cancel_check,
+        )
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [
@@ -916,10 +958,10 @@ def extract_fields_from_mapped_entries(
         mapped_entries: List of taxonomy-mapped entries from Stage 3
         batch_size: Number of entries to process per batch (default: 10)
         document_uid: Document identifier for extracting CV owner name
-        cancel_check: Optional zero-arg callable invoked at the top of each
-            batch iteration. It should raise to abort the run (the web
-            orchestrator passes its check_cancelled). None (the standalone CLI
-            default) is a no-op.
+        cancel_check: Raises to abort; never returns True. Checked at the
+            top of each batch and forwarded into every per-taxonomy-group
+            LLM call and its retries (_extract_batches / extract_fields_batch
+            / llm.retry._call_with_retry). None (CLI default) is a no-op.
         workers: Batches in flight at once (default STAGE4_BATCH_WORKERS).
             1 reproduces the pre-#881 serial loop exactly.
     """
@@ -955,7 +997,14 @@ def extract_fields_from_mapped_entries(
                 "extracted_fields": {},
                 "extraction_success": False,
                 "extraction_skipped": True,
-                "skip_reason": "empty_or_minimal_text" if len(text) < 5 else "empty_text"
+                # This branch only runs when `text` is falsy or shorter than
+                # the 5-char floor above -- a falsy (empty) string always has
+                # len 0, so `len(text) < 5 else "empty_text"` made the
+                # "empty_text" arm dead code (every skip landed on
+                # "empty_or_minimal_text", including a truly empty string).
+                # Branch on emptiness directly so the two reasons are
+                # actually distinguishable downstream.
+                "skip_reason": "empty_text" if not text else "empty_or_minimal_text"
             })
 
     logger.info("  - Valid entries (with text): %d", len(valid_entries))
