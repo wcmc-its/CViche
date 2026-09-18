@@ -186,23 +186,42 @@ def test_reclaim_window_e_db_already_running_skips_and_leaves_row_alone(db, wire
     assert _pending() == 0
 
 
-def test_claim_is_won_by_exactly_one_of_two_racing_workers(db, wired):
-    """Logic-layer proof only (SQLite serializes writers; InnoDB row locking is
-    design §17 layer 2)."""
-    _seed(db)
-    results, start = [], threading.Barrier(2)
+def test_claim_is_won_by_exactly_one_of_two_racing_workers(wired, monkeypatch, tmp_path):
+    """Logic-layer proof only: SQLite serializes writers, so this shows exactly
+    one of two concurrent conditional UPDATEs sees rowcount 1; InnoDB row
+    locking is design §17 layer 2. A file-backed DB with per-thread connections
+    (not the shared-connection StaticPool fixture) so the two threads hold
+    separate transactions; the busy timeout makes the loser wait, not raise."""
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+    from app.database import Base
+    from app.models import Run
+
+    engine = create_engine(f"sqlite:///{tmp_path}/race.db", connect_args={"timeout": 5})
+    Base.metadata.create_all(engine)
+    RaceSession = sessionmaker(bind=engine)
+    monkeypatch.setattr(worker, "SessionLocal", RaceSession)
+    with RaceSession() as s:
+        s.add(Run(id="WRK001", filename="cv.docx", file_type="docx", status="queued", started_at=OLD))
+        s.commit()
+    results, errors, start = [], [], threading.Barrier(2)
 
     def race():
         start.wait()
-        results.append(worker._claim("WRK001")[0])
+        try:
+            results.append(worker._claim("WRK001")[0])
+        except Exception as e:  # a thread crash must fail the test, not shrink the list
+            errors.append(e)
 
     threads = [threading.Thread(target=race) for _ in range(2)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
+    assert errors == []
     assert sorted(results) == [False, True]
-    assert _row(db).status == "running"
+    with RaceSession() as s:
+        assert s.query(Run).filter(Run.id == "WRK001").one().status == "running"
 
 
 def test_poison_cap_dead_letters_after_max_deliveries(db, wired, tmp_path, monkeypatch):
