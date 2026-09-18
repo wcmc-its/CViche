@@ -113,7 +113,7 @@ def test_no_llm_call_starts_after_a_cancel(monkeypatch):
     class Cancelled(Exception):
         pass
 
-    def cancel_check():
+    def run_cancel_check():
         nonlocal checks
         with lock:
             checks += 1
@@ -123,6 +123,9 @@ def test_no_llm_call_starts_after_a_cancel(monkeypatch):
 
     def llm_batch(entries, batch_idx, total, cv_owner_name, cancel_check=None):
         nonlocal started_after_cancel
+        # The pool must hand the run's cancel_check to every batch, or the
+        # between-group and between-retry checks inside never fire.
+        assert cancel_check is run_cancel_check
         if cancelled.is_set():
             with lock:
                 started_after_cancel += 1
@@ -133,7 +136,7 @@ def test_no_llm_call_starts_after_a_cancel(monkeypatch):
 
     with pytest.raises(Cancelled):
         extraction.extract_fields_from_mapped_entries(
-            _entries(n), batch_size=1, workers=workers, cancel_check=cancel_check,
+            _entries(n), batch_size=1, workers=workers, cancel_check=run_cancel_check,
         )
 
     # cancel_check gates every task before its LLM call, so once it has raised
