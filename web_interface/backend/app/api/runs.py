@@ -4,6 +4,8 @@ import json
 import logging
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi.responses import JSONResponse
+from sqlalchemy import update
 from sqlalchemy.orm import Session, selectinload
 from pathlib import Path
 
@@ -12,7 +14,7 @@ from app.models import Run, Step, User
 from app.schemas import RunStatus, RunSummary, StepSummary, PaginatedRuns
 from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
-from app.pipeline import concurrency
+from app.pipeline import concurrency, run_queue
 from app.auth import get_current_user
 from app.api.upload import UPLOAD_DIR, create_run_archive
 from app.services.run_service import check_run_access
@@ -73,6 +75,41 @@ def _materialize_input_if_missing(run_id: str, file_type: str, dest: Path) -> No
         logger.info("Re-materialized input for run %s from storage (%d bytes)", run_id, len(data))
     except Exception as e:
         logger.warning("Failed to write re-materialized input for run %s: %s", run_id, e)
+
+
+def _dispatch_queue(
+    run: Run, db: Session, *, allowed_from: tuple[str, ...], start_step: int | None = None,
+) -> JSONResponse:
+    """Queue-mode dispatch (#701): conditional flip to ``queued`` (rowcount-checked,
+    so two concurrent requests cannot both flip), commit, then XADD. A run that
+    is already ``queued`` is re-enqueued without a flip -- the idempotent path
+    that also recovers a run stranded ``queued`` with no message. A failed XADD
+    reverts the flip and answers 503 so no run sits ``queued`` unobserved.
+    """
+    prior = run.status
+    flipped = prior != "queued" and db.execute(
+        update(Run).where(Run.id == run.id, Run.status.in_(allowed_from)).values(status="queued")
+    ).rowcount == 1
+    if flipped:
+        db.commit()
+    else:
+        db.rollback()
+        db.refresh(run)
+        if run.status != "queued":
+            raise bad_request(f"Cannot start run in status: {run.status}")
+    try:
+        run_queue.enqueue(run.id, start_step)
+    except Exception as e:
+        if flipped:
+            run.status = prior
+            db.commit()
+        logger.error("Enqueue failed for run %s; status reverted to %s: %s", run.id, prior, e)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "queue_unavailable",
+                    "message": "The run queue is unavailable right now -- please try again shortly."},
+        ) from e
+    return JSONResponse(status_code=202, content={"message": f"Run {run.id} queued", "status": "queued"})
 
 
 @router.get("/capacity")
@@ -190,7 +227,8 @@ async def start_run(
 
     run = check_run_access(run_id, current_user, db)
 
-    if run.status not in ["created", "paused"]:
+    queue_mode = run_queue.dispatch_mode() == "queue"
+    if run.status not in ["created", "paused"] and not (queue_mode and run.status == "queued"):
         raise bad_request(f"Cannot start run in status: {run.status}")
 
     # Get the uploaded file path. Use the shared UPLOAD_DIR constant (same path
@@ -203,6 +241,9 @@ async def start_run(
         # the pod-local copy nor a durable S3 archive exists -- e.g. a legacy run
         # predating the archive, whose input cannot be recovered.
         raise not_found("Uploaded file no longer available — please upload again.")
+
+    if queue_mode:
+        return _dispatch_queue(run, db, allowed_from=("created", "paused"))
 
     # Admission control: cap concurrent in-process pipelines per pod. Acquire a
     # slot before marking the run "running" so a rejected start leaves the run
@@ -286,7 +327,9 @@ async def cancel_run(
 
     run = check_run_access(run_id, current_user, db)
 
-    if run.status != "running":
+    # A queued run has no orchestrator yet: the status flip alone cancels it,
+    # because the worker's claim requires status == "queued" (#701).
+    if run.status not in ("running", "queued"):
         raise bad_request(f"Cannot cancel run in status: {run.status}")
 
     # Signal cancellation to orchestrator
@@ -473,10 +516,12 @@ async def retry_step(
     if not file_path.exists():
         raise not_found("Uploaded file no longer available — please upload again.")
 
+    queue_mode = run_queue.dispatch_mode() == "queue"
+
     # Admission control: a retry resumes a full pipeline and consumes the same
     # per-pod resource as a fresh start, so gate it the same way. Acquire before
     # mutating step/run state so a rejected retry leaves the run untouched.
-    if not concurrency.try_acquire_slot():
+    if not queue_mode and not concurrency.try_acquire_slot():
         raise HTTPException(
             status_code=429,
             detail={
@@ -515,6 +560,10 @@ async def retry_step(
         s.completed_at = None
         s.duration_seconds = None
         s.cost = None
+
+    if queue_mode:
+        # The step resets above commit with the flip (or roll back with a lost one).
+        return _dispatch_queue(run, db, allowed_from=("failed",), start_step=step_number)
 
     run.status = "running"
     run.error_message = None
