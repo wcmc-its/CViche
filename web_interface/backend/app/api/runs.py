@@ -86,9 +86,12 @@ def _dispatch_queue(
     that also recovers a run stranded ``queued`` with no message. A failed XADD
     reverts the flip and answers 503 so no run sits ``queued`` unobserved.
     """
-    prior = run.status
+    prior, prior_started_at = run.status, run.started_at
+    # started_at is re-stamped here so the admin view's queued age is the age
+    # since this flip (design §14), not the upload or the previous attempt.
     flipped = prior != "queued" and db.execute(
-        update(Run).where(Run.id == run.id, Run.status.in_(allowed_from)).values(status="queued")
+        update(Run).where(Run.id == run.id, Run.status.in_(allowed_from))
+        .values(status="queued", started_at=datetime.now())
     ).rowcount == 1
     if flipped:
         db.commit()
@@ -101,7 +104,7 @@ def _dispatch_queue(
         run_queue.enqueue(run.id, start_step)
     except Exception as e:
         if flipped:
-            run.status = prior
+            run.status, run.started_at = prior, prior_started_at
             db.commit()
         logger.error("Enqueue failed for run %s; status reverted to %s: %s", run.id, prior, e)
         raise HTTPException(

@@ -165,9 +165,8 @@ def queue_db_view(db: Session) -> dict[str, int | float | None]:
     """
     from sqlalchemy import func
 
-    # ponytail: age comes from started_at -- exact for running rows (reset at
-    # claim), an upper bound for queued rows (upload time). Exact queued age
-    # would need a queued_at column; the stream's enqueued_at field has it.
+    # started_at is re-stamped at the queued flip and again at the worker's
+    # claim, so it is the age since the row entered its current status.
     now = datetime.now()
     view: dict[str, int | float | None] = {}
     for status in ("queued", "running"):
