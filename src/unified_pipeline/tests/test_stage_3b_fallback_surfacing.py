@@ -19,6 +19,7 @@ Self-contained: ``call_llm`` stubbed at the module attribute, no Bedrock/OpenAI.
 import json
 import logging
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -499,3 +500,119 @@ def test_groups_run_inside_the_callers_run_id_context(tmp_path, monkeypatch):
         prompt_logger.reset_current_run_id(token)
 
     assert seen == {"run-3b"}
+
+
+class _FakeRoutedStdout:
+    """Minimal stand-in for orchestrator.py's ``_RoutedStdout`` -- a dict
+    keyed by ``threading.get_ident()``. A registered thread's write lands in
+    its own capture; any other thread's write lands in ``leak`` instead,
+    exactly like a pod's real stdout would swallow it (#581).
+    """
+
+    def __init__(self, leak):
+        self._leak = leak
+        self._captures = {}
+
+    def register(self, ident, capture):
+        self._captures[ident] = capture
+
+    def write(self, text):
+        return self._captures.get(threading.get_ident(), self._leak).write(text)
+
+    def flush(self):
+        pass
+
+
+def test_group_progress_prints_only_from_the_calling_thread(tmp_path, monkeypatch):
+    """LEAD defect: _classify_group used to print its "[N/M]" block from
+    inside _classify_group, which map_in_order runs on a pool thread that is
+    never registered with the orchestrator's thread-routed stdout -- those
+    lines reached the pod's real stdout instead of the run's progress bar /
+    log viewer. Install a fake routed stdout that only registers the main
+    (calling) thread and run a real thread pool (workers=4): every "[N/M]"
+    line must land in the registered capture, and none may leak.
+    """
+    import io
+    import time
+
+    def slow_early_sections(**kwargs):
+        prompt = kwargs["messages"][-1]["content"]
+        idx = next(int(t[-2:]) for t in _MANY_GROUPS if t in prompt)
+        time.sleep((len(_MANY_GROUPS) - idx) * 0.005)
+        return _ok_response([0, 1])
+
+    monkeypatch.setattr(stage3b_classify, "call_llm", slow_early_sections)
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, _MANY_ENTRIES, _MANY_MAPPINGS)
+
+    registered = io.StringIO()
+    leak = io.StringIO()
+    fake_stdout = _FakeRoutedStdout(leak)
+    fake_stdout.register(threading.get_ident(), registered)
+
+    real_stdout = sys.stdout
+    monkeypatch.setattr(sys, "stdout", fake_stdout)
+    try:
+        stage_3b.run_stage_3b(
+            "9999_Doe_Jane_CV", stage_2_path=str(stage_2), stage_3a_path=str(stage_3a),
+            output_dir=str(tmp_path / "out"), workers=4,
+        )
+    finally:
+        monkeypatch.setattr(sys, "stdout", real_stdout)
+
+    def progress_lines(text):
+        return [line for line in text.splitlines() if line.startswith("[") and "/8]" in line]
+
+    registered_progress = progress_lines(registered.getvalue())
+    leak_progress = progress_lines(leak.getvalue())
+    assert [int(line[1:line.index("/")]) for line in registered_progress] == list(range(1, 9))
+    assert leak_progress == []
+
+
+def test_no_hierarchy_entries_are_grouped_and_classified(tmp_path, monkeypatch):
+    """Entries with no "hierarchy" field group under NO_HIERARCHY_KEY
+    (group_entries_by_hierarchy) and must still be classified -- with
+    hierarchy=[] context -- not silently dropped. Pins the sentinel
+    round-trip between the producer and _classify_group's consumer: a
+    literal copy drifting on either side would make `hierarchy_key ==
+    NO_HIERARCHY_KEY` false and misclassify with a bogus one-element
+    hierarchy instead."""
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0]))
+
+    entries = [{"element_type": "text", "text": "Some unattached award, 2020"}]
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, entries, [])
+    out_dir = tmp_path / "out"
+
+    result = stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV",
+        stage_2_path=str(stage_2),
+        stage_3a_path=str(stage_3a),
+        output_dir=str(out_dir),
+    )
+
+    output = json.loads(Path(result["output_path"]).read_text())
+    assert len(output["entries"]) == 1
+    assert output["entries"][0]["classification_source"] == "llm"
+    assert output["meta"]["classification_stats"]["llm_classified"] == 1
+
+
+def test_suggested_codes_line_shows_overflow_count(tmp_path, monkeypatch, capsys):
+    """More than 3 suggested codes: the printed line must say how many are
+    hidden, not just show the first 3 as if they were all of them."""
+    monkeypatch.setattr(stage3b_classify, "call_llm", lambda **kw: _ok_response([0]))
+
+    mappings = [{
+        "title": "HONORS AND AWARDS",
+        "taxonomy_options": [{"code": c, "confidence": 0.9} for c in ["H", "H1", "H2", "H3"]],
+        "children": [],
+    }]
+    entries = [{"element_type": "text", "text": "Dean's Award, 2015",
+                "hierarchy": ["HONORS AND AWARDS"]}]
+    stage_2, stage_3a = _write_run_fixtures(tmp_path, entries, mappings)
+
+    stage_3b.run_stage_3b(
+        "9999_Doe_Jane_CV", stage_2_path=str(stage_2), stage_3a_path=str(stage_3a),
+        output_dir=str(tmp_path / "out"),
+    )
+
+    out = capsys.readouterr().out
+    assert "(+1 more)" in out

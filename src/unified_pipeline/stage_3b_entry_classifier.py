@@ -18,7 +18,6 @@ resolve ambiguity and provides constraints.
 
 import json
 import logging
-import threading
 import os
 import sys
 from pathlib import Path
@@ -76,46 +75,55 @@ from unified_pipeline.stage3b.prompt import (  # noqa: F401
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
     build_taxonomy_codes_for_prompt,
 )
-from unified_pipeline.core.batch_pool import map_in_order
+from unified_pipeline.core.batch_pool import map_in_order, workers_from_config
 from unified_pipeline.stage3b.classify import (  # noqa: F401
     _BatchStats,
     _build_taxonomy_ref_for_batch,
     _classify_one_batch,
+    ClassificationStats,
     classify_entries_batch,
     detect_duplicates,
     group_entries_by_hierarchy,
+    NO_HIERARCHY_KEY,
     reconnect_fragments,
     validate_t_classifications,
 )
 
 logger = logging.getLogger(__name__)
 
-# Hierarchy groups are independent of one another (each builds its own
-# taxonomy context; results are merged in group order), so they run on a
-# small thread pool. Sized under llm/retry.py's per-pod semaphore (8) so one
-# run cannot starve the others admitted alongside it (#881).
-STAGE3B_GROUP_WORKERS = 4
+# I/O-bound stage (LLM round trips, not CPU); the default is sized under the
+# per-pod semaphore so one run cannot starve the others admitted alongside it
+# (#881). Knob: CVICHE_STAGE3B_GROUP_WORKERS, env var or llm yaml key.
+STAGE3B_GROUP_WORKERS = workers_from_config("CVICHE_STAGE3B_GROUP_WORKERS")
 
 
-def _group_progress_reporter(total_groups: int) -> Callable[[str, list[str]], None]:
-    """One atomic print per finished group, numbered by completion.
+_GroupResult = tuple[list[dict], ClassificationStats, list[str]]
 
+
+def _group_progress_printer(hierarchy_keys: list[str]) -> Callable[[int, _GroupResult], None]:
+    """Build a map_in_order ``on_result`` callback: one atomic print per
+    finished group, numbered by completion.
+
+    map_in_order guarantees ``on_result`` fires only on the CALLING thread,
+    one call at a time -- both its serial path and its ``as_completed`` loop
+    invoke it inline, never from a pool thread -- so despite the pool
+    underneath, this closure is single-threaded: no lock, no ``nonlocal``
+    gymnastics beyond the one ``done`` counter needs as a closure variable.
     The ``[N/M]`` line is a parsed contract -- orchestrator.py's
     PROGRESS_PATTERNS read it into the progress bar -- so N counts groups
     *finished*, which stays monotonic however the pool orders completions,
-    and the whole block goes out in one print under a lock so two groups'
-    lines cannot splice.
+    and the whole block goes out in one print so two groups' lines cannot
+    splice (#881).
     """
-    lock = threading.Lock()
     done = 0
 
-    def report(hierarchy_key: str, lines: list[str]) -> None:
+    def on_result(index: int, result: _GroupResult) -> None:
         nonlocal done
-        with lock:
-            done += 1
-            print("\n".join([f"[{done}/{total_groups}] {hierarchy_key[:60]}...", *lines]))
+        _, _, lines = result
+        done += 1
+        print("\n".join([f"[{done}/{len(hierarchy_keys)}] {hierarchy_keys[index][:60]}...", *lines]))
 
-    return report
+    return on_result
 
 
 def _classify_group(
@@ -123,10 +131,19 @@ def _classify_group(
     group_entries: list[dict],
     mapping_index: dict,
     taxonomy: dict,
-    report: Callable[[str, list[str]], None],
-) -> tuple[list[dict], dict]:
-    """Classify one hierarchy group; the per-group body of run_stage_3b's loop."""
-    hierarchy = [] if hierarchy_key == "(no hierarchy)" else hierarchy_key.split(" > ")
+) -> _GroupResult:
+    """Classify one hierarchy group; the per-group body of run_stage_3b's loop.
+
+    Returns the progress lines instead of printing them: this runs inside
+    map_in_order, on whichever pool thread the call lands on, and that
+    thread is never registered with the orchestrator's thread-routed stdout
+    (``_RoutedStdout`` dispatches ``write()`` by ``threading.get_ident()``)
+    -- a print from here would reach the pod's real stdout instead of the
+    run's progress bar and log viewer. run_stage_3b prints the returned
+    lines itself, from ``on_result``, which map_in_order guarantees runs on
+    the calling thread.
+    """
+    hierarchy = [] if hierarchy_key == NO_HIERARCHY_KEY else hierarchy_key.split(" > ")
     context = get_taxonomy_context(hierarchy, mapping_index)
     primary_codes = context.get_primary_codes()
 
@@ -134,10 +151,12 @@ def _classify_group(
 
     lines = [f"    Entries: {len(group_entries)}"]
     if primary_codes:
-        lines.append(f"    Suggested codes: {', '.join(primary_codes[:3])}")
+        codes_display = ", ".join(primary_codes[:3])
+        if len(primary_codes) > 3:
+            codes_display += f" (+{len(primary_codes) - 3} more)"
+        lines.append(f"    Suggested codes: {codes_display}")
     lines.append(f"    ✓ Classified {stats['entries_classified']} entries (${stats['cost']:.4f})")
-    report(hierarchy_key, lines)
-    return classified, stats
+    return classified, stats, lines
 
 
 def run_stage_3b(
@@ -235,13 +254,13 @@ def run_stage_3b(
         "model": None
     }
 
-    report = _group_progress_reporter(len(groups))
     results = map_in_order(
         _classify_group,
-        [(key, entries, mapping_index, taxonomy, report) for key, entries in groups.items()],
+        [(key, group_entries, mapping_index, taxonomy) for key, group_entries in groups.items()],
         workers,
+        on_result=_group_progress_printer(list(groups)),
     )
-    for classified, stats in results:
+    for classified, stats, _lines in results:
         all_classified.extend(classified)
 
         # Update totals

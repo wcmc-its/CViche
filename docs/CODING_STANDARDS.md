@@ -459,7 +459,6 @@ This is a target state, in two tables now instead of one. **Mechanically verifie
 
 
 
-
 ### Requires judgment
 
 | Rule | Target | Today | |
