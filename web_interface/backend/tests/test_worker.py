@@ -97,6 +97,52 @@ def test_success_claims_resets_started_at_executes_and_acks(db, wired, tmp_path)
     assert _pending() == 0
 
 
+def test_claim_clears_the_previous_attempts_error_and_completed_at(db, wired):
+    from app.models import Run
+    _seed(db)
+    run = db.query(Run).filter(Run.id == "WRK001").one()
+    run.error_message, run.completed_at = "stage 3 exploded", OLD
+    db.commit()
+
+    assert worker._claim("WRK001") == (True, "running", "docx")
+
+    row = _row(db)
+    assert (row.error_message, row.completed_at) == (None, None)
+    assert worker._claim("WRK001") == (False, "running", "docx")
+
+
+def test_db_error_at_claim_leaves_the_entry_pending_and_the_run_queued(db, wired, tmp_path, monkeypatch):
+    """No claim result means no ACK: the entry must stay pending so XAUTOCLAIM
+    redelivers it, rather than stranding a `queued` row that nothing reaps."""
+    _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+
+    def db_down():
+        raise RuntimeError("MySQL server has gone away")
+    monkeypatch.setattr(worker, "SessionLocal", db_down)
+    run_queue.enqueue("WRK001")
+
+    with pytest.raises(RuntimeError, match="gone away"):
+        worker.handle(*run_queue.read_one("w1"))
+
+    assert _pending() == 1
+    assert (_row(db).status, _row(db).started_at) == ("queued", OLD)
+    assert StubOrchestrator.calls == []
+
+
+def test_bad_start_step_token_is_dropped_without_a_claim(db, wired, tmp_path):
+    _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+    wired.xadd(run_queue.STREAM, {"run_id": "WRK001", "start_step": "two"})
+
+    worker.handle(*run_queue.read_one("w1"))
+
+    row = _row(db)
+    assert (row.status, row.started_at) == ("queued", OLD)
+    assert StubOrchestrator.calls == []
+    assert _pending() == 0
+
+
 def test_start_step_from_the_token_reaches_execute(db, wired, tmp_path):
     _seed(db)
     (tmp_path / "WRK001.docx").write_bytes(b"PK")
@@ -242,6 +288,30 @@ def test_poison_cap_dead_letters_after_max_deliveries(db, wired, tmp_path, monke
     row = _row(db)
     assert row.status == "failed" and "Dead-lettered" in row.error_message
     assert StubOrchestrator.calls == []
+
+
+def test_db_error_marking_a_poison_run_failed_keeps_its_entry_out_of_the_dlq(db, wired, tmp_path, monkeypatch):
+    """The DB write precedes the DLQ move, so a failed write leaves the entry
+    pending for the next reclaim instead of parking it with the row still `queued`."""
+    _seed(db)
+    (tmp_path / "WRK001.docx").write_bytes(b"PK")
+    monkeypatch.setattr(run_queue, "MIN_IDLE_MS", 0)
+    eid = run_queue.enqueue("WRK001")
+    run_queue.read_one("A")
+    for _ in range(run_queue.MAX_DELIVERIES):
+        wired.xclaim(run_queue.STREAM, run_queue.GROUP, "A", 0, [eid])
+    entry = run_queue.autoclaim_one("B")
+
+    def db_down():
+        raise RuntimeError("MySQL server has gone away")
+    monkeypatch.setattr(worker, "SessionLocal", db_down)
+
+    with pytest.raises(RuntimeError, match="gone away"):
+        worker.handle(*entry, reclaimed=True)
+
+    assert wired.xlen(run_queue.DEAD_STREAM) == 0
+    assert _pending() == 1
+    assert _row(db).status == "queued"
 
 
 def test_delivery_at_the_cap_still_executes(db, wired, tmp_path, monkeypatch):

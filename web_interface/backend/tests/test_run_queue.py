@@ -17,6 +17,8 @@ os.environ.setdefault("CVICHE_SESSION_SECRET", "test-secret-not-for-production")
 
 from app.pipeline import run_queue  # noqa: E402
 
+SEEDED_AT = datetime(2026, 1, 1, 0, 0, 0)
+
 
 @pytest.fixture
 def fake_redis(monkeypatch):
@@ -95,7 +97,7 @@ def _seed(db, status="created", run_id="RUNQ01"):
     db.commit()
     db.refresh(user)
     run = Run(id=run_id, filename="cv.docx", file_type="docx", status=status, user_id=user.id,
-              started_at=datetime(2026, 1, 1, 0, 0, 0))
+              started_at=SEEDED_AT)
     db.add(run)
     db.add_all([Step(run_id=run_id, step_number=n, step_name=f"s{n}", status=s)
                 for n, s in ((1, "complete"), (2, "error"), (3, "pending"))])
@@ -119,19 +121,34 @@ def as_user_with_input(db, monkeypatch, tmp_path):
     app.dependency_overrides.pop(get_current_user, None)
 
 
-def _status(db, run_id="RUNQ01"):
+def _row(db, run_id="RUNQ01"):
     from app.models import Run
     db.expire_all()
-    return db.query(Run).filter(Run.id == run_id).one().status
+    return db.query(Run).filter(Run.id == run_id).one()
 
 
-def test_start_in_queue_mode_flips_to_queued_and_enqueues_once(client, db, fake_redis, queue_mode, as_user_with_input):
+def _status(db, run_id="RUNQ01"):
+    return _row(db, run_id).status
+
+
+def test_start_in_queue_mode_flips_to_queued_and_enqueues_once(client, db, fake_redis, queue_mode, monkeypatch, as_user_with_input):
+    """Design §4 window A: the flip is COMMITTED before XADD, so 'XADD ok, DB
+    update lost' cannot happen; the call order is pinned, not just the outcome."""
+    from sqlalchemy.orm import Session
+
     user, _ = _seed(db)
     as_user_with_input(user)
+    order, real_commit, real_enqueue = [], Session.commit, run_queue.enqueue
+    monkeypatch.setattr(Session, "commit", lambda self: (order.append("commit"), real_commit(self))[1])
+    monkeypatch.setattr(run_queue, "enqueue", lambda *a, **k: (order.append("enqueue"), real_enqueue(*a, **k))[1])
+
     resp = client.post("/api/run/RUNQ01/start")
+
     assert resp.status_code == 202, resp.text
     assert resp.json() == {"message": "Run RUNQ01 queued", "status": "queued"}
+    assert order == ["commit", "enqueue"]
     assert _status(db) == "queued"
+    assert _row(db).started_at > SEEDED_AT, "queued age in the admin view counts from the flip"
     assert [e["run_id"] for e in _entries(fake_redis)] == ["RUNQ01"]
     assert "start_step" not in _entries(fake_redis)[0]
 
@@ -163,7 +180,7 @@ def test_start_reverts_status_and_answers_503_when_xadd_fails(client, db, monkey
     resp = client.post("/api/run/RUNQ01/start")
     assert resp.status_code == 503
     assert resp.json()["detail"]["error"] == "queue_unavailable"
-    assert _status(db) == "paused"
+    assert (_status(db), _row(db).started_at) == ("paused", SEEDED_AT)
 
 
 def test_start_on_already_queued_run_re_enqueues_without_flip(client, db, fake_redis, queue_mode, as_user_with_input):
@@ -200,6 +217,7 @@ def test_retry_in_queue_mode_resets_steps_and_enqueues_with_start_step(client, d
     resp = client.post("/api/run/RUNQ01/retry/2")
     assert resp.status_code == 202, resp.text
     assert _status(db) == "queued"
+    assert _row(db).started_at > SEEDED_AT
     assert _entries(fake_redis)[0]["start_step"] == "2"
     assert {s.step_number: s.status for s in db.query(Step).all()} == {1: "complete", 2: "pending", 3: "pending"}
 
