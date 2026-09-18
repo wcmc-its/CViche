@@ -19,6 +19,7 @@ import io
 from pathlib import Path
 from datetime import datetime
 from typing import Any
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
@@ -404,8 +405,15 @@ class PipelineOrchestrator:
         await event_emitter.emit_progress(self.run_id, step_number, current, total, message)
 
     def check_cancelled(self):
-        """Check if this run has been cancelled and raise exception if so."""
-        if is_cancelled(self.run_id):
+        """Check if this run has been cancelled and raise exception if so.
+
+        The DB row is the authoritative cross-process signal (#701): the Redis
+        cancel key expires after 300s, shorter than one stage can take, and a
+        worker pod never sees the backend's in-process set. One SELECT per
+        stage boundary is the price of not finishing a cancelled run.
+        """
+        status = self.db.execute(select(Run.status).where(Run.id == self.run_id)).scalar()
+        if status == "cancelled" or is_cancelled(self.run_id):
             raise CancelledException(f"Run {self.run_id} was cancelled by user")
 
     def _copy_to_pipeline_input(self) -> str:
