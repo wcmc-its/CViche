@@ -22,6 +22,7 @@ import os
 import sys
 from pathlib import Path
 from datetime import datetime
+from collections.abc import Callable
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -74,25 +75,96 @@ from unified_pipeline.stage3b.prompt import (  # noqa: F401
     _CLASSIFICATION_SYSTEM_PROMPT_TEMPLATE,
     build_taxonomy_codes_for_prompt,
 )
+from unified_pipeline.core.batch_pool import map_in_order, workers_from_config
 from unified_pipeline.stage3b.classify import (  # noqa: F401
     _BatchStats,
     _build_taxonomy_ref_for_batch,
     _classify_one_batch,
+    ClassificationStats,
     classify_entries_batch,
     detect_duplicates,
     group_entries_by_hierarchy,
+    NO_HIERARCHY_KEY,
     reconnect_fragments,
     validate_t_classifications,
 )
 
 logger = logging.getLogger(__name__)
 
+# I/O-bound stage (LLM round trips, not CPU); the default is sized under the
+# per-pod semaphore so one run cannot starve the others admitted alongside it
+# (#881). Knob: CVICHE_STAGE3B_GROUP_WORKERS, env var or llm yaml key.
+STAGE3B_GROUP_WORKERS = workers_from_config("CVICHE_STAGE3B_GROUP_WORKERS")
+
+
+_GroupResult = tuple[list[dict], ClassificationStats, list[str]]
+
+
+def _group_progress_printer(hierarchy_keys: list[str]) -> Callable[[int, _GroupResult], None]:
+    """Build a map_in_order ``on_result`` callback: one atomic print per
+    finished group, numbered by completion.
+
+    map_in_order guarantees ``on_result`` fires only on the CALLING thread,
+    one call at a time -- both its serial path and its ``as_completed`` loop
+    invoke it inline, never from a pool thread -- so despite the pool
+    underneath, this closure is single-threaded: no lock, no ``nonlocal``
+    gymnastics beyond the one ``done`` counter needs as a closure variable.
+    The ``[N/M]`` line is a parsed contract -- orchestrator.py's
+    PROGRESS_PATTERNS read it into the progress bar -- so N counts groups
+    *finished*, which stays monotonic however the pool orders completions,
+    and the whole block goes out in one print so two groups' lines cannot
+    splice (#881).
+    """
+    done = 0
+
+    def on_result(index: int, result: _GroupResult) -> None:
+        nonlocal done
+        _, _, lines = result
+        done += 1
+        print("\n".join([f"[{done}/{len(hierarchy_keys)}] {hierarchy_keys[index][:60]}...", *lines]))
+
+    return on_result
+
+
+def _classify_group(
+    hierarchy_key: str,
+    group_entries: list[dict],
+    mapping_index: dict,
+    taxonomy: dict,
+) -> _GroupResult:
+    """Classify one hierarchy group; the per-group body of run_stage_3b's loop.
+
+    Returns the progress lines instead of printing them: this runs inside
+    map_in_order, on whichever pool thread the call lands on, and that
+    thread is never registered with the orchestrator's thread-routed stdout
+    (``_RoutedStdout`` dispatches ``write()`` by ``threading.get_ident()``)
+    -- a print from here would reach the pod's real stdout instead of the
+    run's progress bar and log viewer. run_stage_3b prints the returned
+    lines itself, from ``on_result``, which map_in_order guarantees runs on
+    the calling thread.
+    """
+    hierarchy = [] if hierarchy_key == NO_HIERARCHY_KEY else hierarchy_key.split(" > ")
+    context = get_taxonomy_context(hierarchy, mapping_index)
+    primary_codes = context.get_primary_codes()
+
+    classified, stats = classify_entries_batch(group_entries, context, taxonomy)
+
+    lines = [f"    Entries: {len(group_entries)}"]
+    if primary_codes:
+        codes_display = ", ".join(primary_codes[:3])
+        if len(primary_codes) > 3:
+            codes_display += f" (+{len(primary_codes) - 3} more)"
+        lines.append(f"    Suggested codes: {codes_display}")
+    lines.append(f"    ✓ Classified {stats['entries_classified']} entries (${stats['cost']:.4f})")
+    return classified, stats, lines
+
 
 def run_stage_3b(
     document_uid: str,
     stage_2_path: str | None = None,
     stage_3a_path: str | None = None,
-    output_dir: str | None = None
+    output_dir: str | None = None,
+    workers: int = STAGE3B_GROUP_WORKERS,
 ) -> dict:
     """
     Run Stage 3b entry classification.
@@ -102,6 +174,8 @@ def run_stage_3b(
         stage_2_path: Path to Stage 2 entries (optional, will auto-detect)
         stage_3a_path: Path to Stage 3a mappings (optional, will auto-detect)
         output_dir: Output directory (optional, will auto-detect)
+        workers: Hierarchy groups classified at once (default
+            STAGE3B_GROUP_WORKERS). 1 reproduces the pre-#881 serial loop.
 
     No `model` parameter: it used to exist here purely to be silently
     dropped -- never forwarded to call_llm() -- so it was removed rather
@@ -180,30 +254,13 @@ def run_stage_3b(
         "model": None
     }
 
-    for group_idx, (hierarchy_key, group_entries) in enumerate(groups.items(), 1):
-        # Parse hierarchy from key
-        if hierarchy_key == "(no hierarchy)":
-            hierarchy = []
-        else:
-            hierarchy = hierarchy_key.split(" > ")
-
-        print(f"[{group_idx}/{len(groups)}] {hierarchy_key[:60]}...")
-        print(f"    Entries: {len(group_entries)}")
-
-        # Get taxonomy context
-        context = get_taxonomy_context(hierarchy, mapping_index)
-        primary_codes = context.get_primary_codes()
-
-        if primary_codes:
-            print(f"    Suggested codes: {', '.join(primary_codes[:3])}")
-
-        # Classify entries
-        classified, stats = classify_entries_batch(
-            group_entries,
-            context,
-            taxonomy
-        )
-
+    results = map_in_order(
+        _classify_group,
+        [(key, group_entries, mapping_index, taxonomy) for key, group_entries in groups.items()],
+        workers,
+        on_result=_group_progress_printer(list(groups)),
+    )
+    for classified, stats, _lines in results:
         all_classified.extend(classified)
 
         # Update totals
@@ -219,8 +276,6 @@ def run_stage_3b(
         total_stats["fallback_entries"] += stats["fallback_entries"]
         total_stats["empty_entries"] += stats["empty_entries"]
         total_stats["model"] = stats.get("model") or total_stats.get("model")
-
-        print(f"    ✓ Classified {stats['entries_classified']} entries (${stats['cost']:.4f})")
 
     print()
     print(f"Total: {total_stats['entries_classified']} entries classified")

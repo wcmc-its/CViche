@@ -16,9 +16,11 @@ runner has done to the ambient sys.stdout.
 """
 from __future__ import annotations
 
+import contextvars
 import threading
 
 from app.pipeline import orchestrator as orch_mod
+from unified_pipeline.core.batch_pool import map_in_order
 
 
 class _FakeCapture:
@@ -69,3 +71,100 @@ def test_unregistered_thread_falls_through_without_raising():
     router.unregister()  # in case a prior failed test left a stale registration
     n = router.write("")
     assert n == 0
+
+
+def test_context_var_routes_thread_spawned_via_copy_context(monkeypatch):
+    """Since #883, a stage may spawn work on threads it did not itself
+    register with the router (core/batch_pool runs each call inside
+    contextvars.copy_context().run(...)). Such a thread has no entry in the
+    thread-id dict, but it inherits the ContextVar set by register() on the
+    thread that created the context, so it must still route to that thread's
+    capture -- not fall through to real stdout."""
+    router = orch_mod._STDOUT_ROUTER
+    fake_real = _FakeCapture()
+    monkeypatch.setattr(router, "_real", fake_real)
+
+    capture = _FakeCapture()
+    router.register(capture)
+    try:
+        ctx = contextvars.copy_context()
+
+        def in_thread():
+            router.write("from-copied-context\n")
+
+        t = threading.Thread(target=lambda: ctx.run(in_thread))
+        t.start()
+        t.join(timeout=5)
+    finally:
+        router.unregister()
+
+    assert capture.written == ["from-copied-context\n"]
+    assert fake_real.written == []
+
+
+def test_context_var_routes_batch_pool_threads(monkeypatch):
+    """Same as above, through the real core.batch_pool.map_in_order pool path
+    (workers=2) rather than a bare copy_context().run -- this is what stage
+    3b (and stage 4 in #882) actually calls."""
+    router = orch_mod._STDOUT_ROUTER
+    fake_real = _FakeCapture()
+    monkeypatch.setattr(router, "_real", fake_real)
+
+    capture = _FakeCapture()
+    router.register(capture)
+    try:
+        def fn(i):
+            router.write(f"batch-{i}\n")
+            return i
+
+        results = map_in_order(fn, [(i,) for i in range(4)], workers=2)
+    finally:
+        router.unregister()
+
+    assert results == [0, 1, 2, 3]
+    assert sorted(capture.written) == [f"batch-{i}\n" for i in range(4)]
+    assert fake_real.written == []
+
+
+def test_thread_without_context_still_falls_through_to_real_stdout(monkeypatch):
+    """A plain threading.Thread that was NOT spawned via copy_context() from
+    a registered thread starts with a fresh context where the ContextVar is
+    unset -- it must still fall through to real stdout rather than
+    accidentally picking up another thread's capture. Pins the #581
+    semantics: the ContextVar fallback must not turn into a global default."""
+    router = orch_mod._STDOUT_ROUTER
+    fake_real = _FakeCapture()
+    monkeypatch.setattr(router, "_real", fake_real)
+
+    capture = _FakeCapture()
+    router.register(capture)  # registered on the test thread only
+    try:
+        def in_thread():
+            router.write("no-context\n")
+
+        t = threading.Thread(target=in_thread)
+        t.start()
+        t.join(timeout=5)
+    finally:
+        router.unregister()
+
+    assert capture.written == []
+    assert fake_real.written == ["no-context\n"]
+
+
+def test_unregister_resets_the_context_var(monkeypatch):
+    """unregister() must reset the ContextVar token, not just pop the
+    thread-id dict entry -- otherwise a write from the same thread after
+    unregister() would keep routing to the stale capture via the fallback."""
+    router = orch_mod._STDOUT_ROUTER
+    fake_real = _FakeCapture()
+    monkeypatch.setattr(router, "_real", fake_real)
+
+    capture = _FakeCapture()
+    router.register(capture)
+    router.unregister()
+
+    router.write("after-unregister\n")
+
+    assert capture.written == []
+    assert fake_real.written == ["after-unregister\n"]
