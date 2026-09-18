@@ -26,7 +26,9 @@ from app.schemas import (
 )
 from app.services.admin_service import get_users_with_stats, get_single_user_stats
 from app.services.quality_score_service import get_cached_score, compute_and_cache_score
-from app.services.run_service import reap_orphaned_created_runs
+from app.services.run_service import reap_orphaned_created_runs, queue_db_view
+from app.config_loader import get_config as read_config  # a route below is named get_config
+from app.pipeline import run_queue
 from concurrent.futures import ThreadPoolExecutor
 
 logger = logging.getLogger(__name__)
@@ -269,6 +271,25 @@ async def reap_orphan_runs(
         admin.email, dry_run, result["candidates"], result["reaped"], result["objects_deleted"],
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# GET /api/admin/queue/stats
+# ---------------------------------------------------------------------------
+@router.get("/admin/queue/stats")
+async def get_queue_stats(
+    db: Session = Depends(get_db),
+    admin: User = Depends(require_admin),
+) -> dict:
+    """Run-queue depth and ownership (Valkey) beside the DB view of queued and
+    running runs (#701). A queued row much older than the stream's pending set
+    is the "stranded without a message" signal; /start re-enqueues it.
+    """
+    db_view = queue_db_view(db)
+    url, _ = read_config("redis", "CVICHE_REDIS_URL", default="")
+    if not url:
+        return {"enabled": False, "db": db_view}
+    return {"enabled": True, **run_queue.stats(), "db": db_view}
 
 
 # ---------------------------------------------------------------------------

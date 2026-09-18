@@ -159,6 +159,26 @@ def reconcile_stale_runs(db: Session) -> int:
     return failed_count
 
 
+def queue_db_view(db: Session) -> dict[str, int | float | None]:
+    """DB side of the run-queue stats (#701): how many runs are queued/running
+    and the age of the oldest of each.
+    """
+    from sqlalchemy import func
+
+    # ponytail: age comes from started_at -- exact for running rows (reset at
+    # claim), an upper bound for queued rows (upload time). Exact queued age
+    # would need a queued_at column; the stream's enqueued_at field has it.
+    now = datetime.now()
+    view: dict[str, int | float | None] = {}
+    for status in ("queued", "running"):
+        count, oldest = db.query(func.count(Run.id), func.min(Run.started_at)).filter(
+            Run.status == status
+        ).one()
+        view[status] = count
+        view[f"oldest_{status}_age_s"] = (now - oldest).total_seconds() if oldest else None
+    return view
+
+
 def reap_orphaned_created_runs(
     db: Session,
     *,
