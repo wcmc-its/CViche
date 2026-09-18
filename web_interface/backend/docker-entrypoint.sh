@@ -26,6 +26,13 @@ if [ "${1:-}" = "migrate" ]; then
     exec alembic upgrade head
 fi
 
+# `worker` mode: run the pipeline queue worker loop, no migrations (the
+# backend's initContainer owns them) and no uvicorn.
+if [ "${1:-}" = "worker" ]; then
+    echo "==> Starting pipeline worker..."
+    exec python -m app.worker
+fi
+
 # Default mode: optionally run migrations, then start uvicorn.
 # - Single-container dev / CI: leave CVICHE_RUN_MIGRATIONS unset (defaults
 #   to "1") so the entrypoint keeps schema in sync on every boot.
