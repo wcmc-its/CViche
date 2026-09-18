@@ -165,6 +165,11 @@ class _RoutedStdout:
         self._tokens: dict[int, contextvars.Token] = {}
 
     def register(self, capture: StreamingStdoutCapture) -> None:
+        if threading.get_ident() in self._tokens:
+            # A second register on one thread would overwrite the first token
+            # and leave _capture_var pointing at the outer capture after the
+            # inner unregister. Nothing nests today; keep it that way loudly.
+            raise RuntimeError("stdout capture already registered on this thread")
         self._captures[threading.get_ident()] = capture
         self._tokens[threading.get_ident()] = _capture_var.set(capture)
 
