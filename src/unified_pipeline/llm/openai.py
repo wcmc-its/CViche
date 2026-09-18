@@ -73,6 +73,7 @@ def _handle_openai(messages: list, response_format, cfg: dict) -> dict:
                              response_format, cfg["max_tokens"],
                              **cfg["extra_kwargs"]),
         retry_count=cfg["retry_count"],
+        cancel_check=cfg.get("cancel_check"),
     )
 
     usage = response.usage

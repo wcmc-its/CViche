@@ -70,7 +70,7 @@ from unified_pipeline.llm.retry import (
 # provider SDK untouched.
 _EXPLICIT_KWARGS = frozenset({
     "provider", "model", "temperature", "max_tokens", "retry_count", "stage",
-    "enable_prompt_caching",
+    "enable_prompt_caching", "cancel_check",
 })
 
 
@@ -86,6 +86,10 @@ def _resolve_call_config(stage: str, kwargs: dict) -> dict:
         "enable_prompt_caching": kwargs.get(
             "enable_prompt_caching", config.get("enable_prompt_caching", False)
         ),
+        # Raises to cancel; never returns True. Forwarded to
+        # llm.retry._call_with_retry so a cancel fires between retry
+        # attempts, not just before the call is first dispatched.
+        "cancel_check": kwargs.get("cancel_check"),
         "extra_kwargs": {k: v for k, v in kwargs.items() if k not in _EXPLICIT_KWARGS},
     }
 
