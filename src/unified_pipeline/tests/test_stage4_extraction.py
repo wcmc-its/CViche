@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import unified_pipeline.stage4.extraction as extraction  # noqa: E402
 from unified_pipeline.core import prompt_logger  # noqa: E402
+from unified_pipeline.core.batch_pool import workers_from_config  # noqa: E402
 
 _NO_OWNER = {
     "first_name": "", "middle_name": "", "last_name": "",
@@ -211,11 +212,19 @@ def test_workers_one_is_strictly_serial_and_ordered(monkeypatch):
 
 
 def test_workers_below_one_is_rejected(monkeypatch):
-    # ThreadPoolExecutor's own check; pinned so a future hand-rolled pool
-    # cannot silently accept 0 and hang.
+    # map_in_order's own check (core/batch_pool.py, #882); pinned so a future
+    # caller cannot silently pass 0 and hang.
     _stub_owner(monkeypatch)
-    with pytest.raises(ValueError, match="max_workers"):
+    with pytest.raises(ValueError, match="workers must be >= 1"):
         extraction.extract_fields_from_mapped_entries(_entries(1), workers=0)
+
+
+def test_workers_config_knob_is_read_from_env(monkeypatch):
+    # STAGE4_BATCH_WORKERS itself is bound once, at import time, so it can't
+    # observe an env var set by a test -- this pins the reader it's built
+    # from instead: workers_from_config("CVICHE_STAGE4_BATCH_WORKERS").
+    monkeypatch.setenv("CVICHE_STAGE4_BATCH_WORKERS", "2")
+    assert workers_from_config("CVICHE_STAGE4_BATCH_WORKERS") == 2
 
 
 # ---------------------------------------------------------------------------

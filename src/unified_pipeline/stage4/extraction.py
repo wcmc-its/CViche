@@ -11,15 +11,14 @@ re-export is a second binding, and rebinding it there silently leaves the real
 function in play (the #496 split-state lesson).
 """
 
-import contextvars
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, NotRequired, TypedDict
 
 from openai import APITimeoutError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from unified_pipeline.core.batch_pool import make_batches, map_in_order, workers_from_config
 from unified_pipeline.llm_client import call_llm
 
 from unified_pipeline.stage4.coercion import (
@@ -50,12 +49,10 @@ LLM_RESPONSE_INVALID = "llm_response_invalid"
 LLM_TIMEOUT = "llm_timeout"
 LLM_PROVIDER_ERROR = "llm_provider_error"
 
-# Batches are independent of one another (cv_owner_name is fixed before the
-# loop; entries are re-sorted by element_idx after it), so they run on a small
-# thread pool. Stage 4 was ~35% of a run's wall time, all of it serial round
-# trips (#881). Kept under llm/retry.py's per-pod semaphore (8) so one run
-# cannot starve the others admitted alongside it.
-STAGE4_BATCH_WORKERS = 4
+# I/O-bound stage (LLM round trips, not CPU); the default is sized under the
+# per-pod semaphore so one run cannot starve the others admitted alongside it
+# (#881). Knob: CVICHE_STAGE4_BATCH_WORKERS, env var or llm yaml key.
+STAGE4_BATCH_WORKERS = workers_from_config("CVICHE_STAGE4_BATCH_WORKERS")
 
 
 class _ExtractedEntryFields(BaseModel):
@@ -895,53 +892,25 @@ def _extract_batches(
     cancel_check: Callable[[], None] | None,
     workers: int,
 ) -> list[BatchExtractionResult]:
-    """Run extract_fields_batch over every batch; results come back in batch order.
+    """One BatchExtractionResult per batch, in batch order -- NOT a flattened
+    list of entries (see extract_fields_batch); the caller extends its own
+    entry list from each one's "entries" key.
 
-    Return shape: one element per batch, in batch order -- NOT a flattened
-    list of entries. Each element is that batch's own result dict from
-    extract_fields_batch (see BatchExtractionResult: entries, cost, tokens,
-    cache_read_tokens, cache_write_tokens, success, failed_groups). The
-    caller (extract_fields_from_mapped_entries) iterates these and extends
-    its own entry list from each one's "entries" key.
-
-    Each task runs inside a copy of the caller's contextvars.Context so
-    prompt_logger's per-run log directory (#580) follows the call onto the pool
-    thread -- a bare pool thread starts with an empty context and would write
-    into the shared flat directory. A cancel or failure in any task drops the
-    queued ones; calls already in flight finish, since a thread cannot be
-    interrupted, so at most `workers` LLM calls complete after a cancel.
-
-    cancel_check: raises to cancel; never returns True (the caller's
-    check_cancelled raises CancelledException). Checked once before each
-    batch here, and forwarded into extract_fields_batch so a cancel can also
-    fire between that batch's per-taxonomy-group LLM calls and between an
-    individual call's own retries -- an in-flight LLM call cannot itself be
-    interrupted, so this only bounds how much MORE work starts after a cancel.
+    cancel_check: raises to cancel, never returns True. Checked once before
+    each batch here, and forwarded into extract_fields_batch so a cancel can
+    also fire between that batch's per-taxonomy-group LLM calls and retries.
     """
-    num_batches = (len(valid_entries) + batch_size - 1) // batch_size
+    batches = make_batches(valid_entries, batch_size)
 
-    def run_batch(batch_idx: int) -> BatchExtractionResult:
-        # Check for cancellation before each batch's LLM calls so an aborted
-        # run terminates promptly rather than running every batch to completion.
+    def run_batch(batch_idx: int, batch: list[dict[str, Any]]) -> BatchExtractionResult:
         if cancel_check is not None:
             cancel_check()
-        batch = valid_entries[batch_idx * batch_size:(batch_idx + 1) * batch_size]
         return extract_fields_batch(
-            batch, batch_idx, num_batches,
-            cv_owner_name=cv_owner_name,
-            cancel_check=cancel_check,
+            batch, batch_idx, len(batches), cv_owner_name=cv_owner_name, cancel_check=cancel_check,
         )
 
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = [
-            pool.submit(contextvars.copy_context().run, run_batch, batch_idx)
-            for batch_idx in range(num_batches)
-        ]
-        try:
-            return [future.result() for future in futures]
-        except BaseException:
-            pool.shutdown(wait=False, cancel_futures=True)
-            raise
+    # No on_result: extraction.py has no print() calls needing thread-routed stdout.
+    return map_in_order(run_batch, list(enumerate(batches)), workers=workers)
 
 
 def extract_fields_from_mapped_entries(
