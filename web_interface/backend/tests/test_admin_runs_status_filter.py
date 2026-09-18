@@ -98,3 +98,57 @@ def test_specific_status_exact_match_still_works(client, db):
     assert resp.status_code == 200
     assert _ids(resp) == {"SF_COMPLETE"}
     assert resp.json()["total"] == 1
+
+
+# --- GET /api/admin/queue/stats (#701) ---------------------------------------
+
+def _seed_queue_view(db):
+    from app.models import Run
+
+    old = datetime.now() - timedelta(minutes=30)
+    db.add_all([
+        Run(id="QS_QUEUED", filename="a.docx", file_type="docx", status="queued", started_at=old),
+        Run(id="QS_RUNNING", filename="b.docx", file_type="docx", status="running",
+            started_at=datetime.now() - timedelta(minutes=5)),
+        Run(id="QS_DONE", filename="c.docx", file_type="docx", status="complete", started_at=old),
+    ])
+    db.commit()
+
+
+def test_queue_stats_without_redis_reports_disabled_and_the_db_view(client, db, monkeypatch):
+    monkeypatch.delenv("CVICHE_REDIS_URL", raising=False)
+    _seed_queue_view(db)
+
+    resp = _admin_get(client, "/api/admin/queue/stats")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is False
+    assert (body["db"]["queued"], body["db"]["running"]) == (1, 1)
+    assert 29 * 60 < body["db"]["oldest_queued_age_s"] < 31 * 60
+    assert 4 * 60 < body["db"]["oldest_running_age_s"] < 6 * 60
+
+
+def test_queue_stats_with_redis_merges_stream_depth_and_pending(client, db, monkeypatch):
+    import fakeredis
+    from app.pipeline import run_queue
+
+    monkeypatch.setenv("CVICHE_REDIS_URL", "redis://unused")
+    r = fakeredis.FakeStrictRedis(server=fakeredis.FakeServer(), decode_responses=True)
+    monkeypatch.setattr(run_queue, "_client", lambda: r)
+    run_queue.ensure_group()
+    run_queue.enqueue("QS_QUEUED")
+    run_queue.read_one("pod-a")
+
+    resp = _admin_get(client, "/api/admin/queue/stats")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is True
+    assert (body["queued"], body["pending"], body["dead"]) == (1, 1, 0)
+    assert body["consumers"] == [{"name": "pod-a", "pending": 1}]
+    assert body["db"] == {"queued": 0, "running": 0, "oldest_queued_age_s": None, "oldest_running_age_s": None}
+
+
+def test_queue_stats_requires_admin(client, db):
+    assert client.get("/api/admin/queue/stats").status_code in (401, 403)
