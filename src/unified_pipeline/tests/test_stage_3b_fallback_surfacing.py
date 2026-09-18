@@ -566,6 +566,10 @@ def test_group_progress_prints_only_from_the_calling_thread(tmp_path, monkeypatc
     leak_progress = progress_lines(leak.getvalue())
     assert [int(line[1:line.index("/")]) for line in registered_progress] == list(range(1, 9))
     assert leak_progress == []
+    # Not just the "[N/M]" shape: nothing at all -- a mutant that prints the
+    # group body (not just the progress line) from the pool thread must fail
+    # this test too, not just the narrower progress-line check above.
+    assert leak.getvalue() == ""
 
 
 def test_no_hierarchy_entries_are_grouped_and_classified(tmp_path, monkeypatch):

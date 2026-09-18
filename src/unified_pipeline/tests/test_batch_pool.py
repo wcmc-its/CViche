@@ -214,6 +214,33 @@ def test_context_mutations_in_one_call_do_not_leak_to_sibling_calls():
         assert val == f"call-{i}", f"Call {i} saw {val!r} -- context leaked from another call"
 
 
+def test_serial_path_shares_one_context_snapshot():
+    """workers=1 is a true serial loop that reuses ONE context snapshot
+    across every call (see map_in_order's docstring), unlike workers>1 where
+    each call gets its own fresh copy. So with workers=1 a mutation in call 1
+    IS visible to call 2 -- the documented exception to the sibling-isolation
+    behaviour pinned above -- but it never leaks back out to the calling
+    thread's own live context once map_in_order returns."""
+    _var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+        "test_var_serial", default=None
+    )
+    seen: dict[str, str | None] = {}
+
+    def mutate_and_record(i):
+        seen[f"before-{i}"] = _var.get()
+        _var.set(f"call-{i}")
+        seen[f"after-{i}"] = _var.get()
+        return i
+
+    map_in_order(mutate_and_record, [(0,), (1,)], workers=1)
+
+    assert seen["before-0"] is None
+    assert seen["after-0"] == "call-0"
+    assert seen["before-1"] == "call-0"  # sees call 0's mutation -- one shared snapshot
+    assert seen["after-1"] == "call-1"
+    assert _var.get() is None  # never leaked back to the caller's own context
+
+
 def test_fn_returning_none_is_valid():
     """None is a legitimate return value, not a signal of failure."""
     result = map_in_order(lambda i: None, [(0,), (1,), (2,)], workers=2)

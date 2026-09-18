@@ -4,6 +4,7 @@ Pipeline orchestrator - coordinates execution of all 12 pipeline stages.
 Uses run_full_pipeline.py stage functions directly.
 Stages: 1a, 1b, 2, 3a, 3b, 4, 4.5, 5, 5b, 5c, 5d, 6
 """
+import contextvars
 import json
 import logging
 import time
@@ -151,21 +152,34 @@ class _RoutedStdout:
     (see PipelineOrchestrator._run_with_stdout_capture_sync), so a write is
     routed to whichever run's thread produced it. Not
     contextlib.redirect_stdout -- that rebinds the same global and would
-    carry the identical race.
+    carry the identical race. Since #883, a stage may also fan work out onto
+    a thread pool via contextvars.copy_context().run(...) (core/batch_pool);
+    those pool threads have no entry in the thread-id dict, so _capture_var
+    is the fallback route -- set on the stage thread, it is inherited by
+    every context the pool copies from it.
     """
 
     def __init__(self, real_stdout):
         self._real = real_stdout
         self._captures: dict[int, StreamingStdoutCapture] = {}
+        self._tokens: dict[int, contextvars.Token] = {}
 
     def register(self, capture: StreamingStdoutCapture) -> None:
         self._captures[threading.get_ident()] = capture
+        self._tokens[threading.get_ident()] = _capture_var.set(capture)
 
     def unregister(self) -> None:
         self._captures.pop(threading.get_ident(), None)
+        token = self._tokens.pop(threading.get_ident(), None)
+        if token is not None:
+            _capture_var.reset(token)
 
     def _target(self):
-        return self._captures.get(threading.get_ident(), self._real)
+        ident = threading.get_ident()
+        if ident in self._captures:
+            return self._captures[ident]
+        capture = _capture_var.get()
+        return capture if capture is not None else self._real
 
     def write(self, text: str) -> int:
         return self._target().write(text)
@@ -283,6 +297,15 @@ class StreamingStdoutCapture:
         # Flush any remaining content
         self.flush()
         return self.captured_lines
+
+
+# Referenced by _RoutedStdout.register/unregister/_target above -- defined
+# here (not next to that class) because the type parameter needs
+# StreamingStdoutCapture, which isn't defined yet at that point in the
+# module; methods resolve module globals at call time, so the split is safe.
+_capture_var: contextvars.ContextVar[StreamingStdoutCapture | None] = contextvars.ContextVar(
+    "cviche_stdout_capture", default=None
+)
 
 
 class PipelineOrchestrator:
@@ -972,6 +995,9 @@ class PipelineOrchestrator:
         rather than reassigning sys.stdout directly -- sys.stdout is one
         binding shared by every concurrent run's thread, so reassigning it
         here would race the same way the code this replaced did (#581).
+        register() also sets _capture_var on this thread, so a pool thread
+        spawned from inside func() (see core/batch_pool.map_in_order) still
+        routes to this run's capture instead of falling through to real stdout.
         """
         capture = StreamingStdoutCapture(self, step_number, event_loop)
         sys.stdout = _STDOUT_ROUTER  # idempotent; defends against anything else having swapped it
