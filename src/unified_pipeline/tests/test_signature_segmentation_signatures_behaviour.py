@@ -1007,6 +1007,11 @@ def test_normalise_header_text_strips_parenthetical_colon_semicolon_and_period()
     assert sbs._normalise_header_text("Curriculum Vitae:") == "curriculum vitae"
     assert sbs._normalise_header_text("Resume;") == "resume"
     assert sbs._normalise_header_text("Curriculum Vitae .") == "curriculum vitae"
+    # C-871 round 2 (verify-r1 finding 1, mutant m07): trailing punctuation
+    # BEFORE the parenthetical requires the strip BEFORE the parenthetical
+    # strip too, else the leftover space from the removed "(selected)"
+    # segment survives into the lowered/rstripped result. Pins strip order.
+    assert sbs._normalise_header_text("Publications: (selected)") == "publications"
 
 
 def test_rescue_locked_headers_tolerates_none_or_blank_text():
