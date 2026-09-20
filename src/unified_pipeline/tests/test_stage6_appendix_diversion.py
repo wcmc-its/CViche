@@ -613,6 +613,9 @@ def test_positive_declined_sparse_m2a_entry_reaches_appendix(tmp_path):
     assert diversions[0]["code"] == "M2A"
     assert diversions[0]["count"] == 1
     assert diversions[0]["reason"] == REASON_RENDERER_DECLINED
+    assert diversions[0]["message"] == (
+        "M2A: 1 entry diverted to the Appendix — declined by the "
+        "research-support renderer as too sparse to table")
     lines = _appendix_numbered_lines(doc)
     assert len(lines) == 1
     assert "SPARSE_M2A_TOKEN" in lines[0]
