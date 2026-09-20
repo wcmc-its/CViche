@@ -1340,7 +1340,7 @@ Version-specific behaviors documented in:
 python3 run_full_pipeline.py 'data/sample_cvs/word/2071_Zuschlag_Cv.docx' '2071_Zuschlag_Cv'
 
 # Compare output to known-good result
-diff outputs/stage_3_taxonomy_mapping/2071_Zuschlag_Cv_mapped.json expected/2071_Zuschlag_Cv_mapped.json
+diff outputs/stage_3b_classified_entries/2071_Zuschlag_Cv_classified.json expected/2071_Zuschlag_Cv_classified.json
 ```
 
 **Canonical test CV**: `2071_Zuschlag_Cv.docx` — used for regression testing

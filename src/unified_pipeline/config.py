@@ -43,14 +43,12 @@ OUTPUT_BASE = PROJECT_ROOT / "src" / "unified_pipeline" / "outputs"
 OUTPUT_STAGE_1A = OUTPUT_BASE / "stage_1a_segmentation"
 OUTPUT_STAGE_1B = OUTPUT_BASE / "stage_1b_hierarchy_mapping"
 OUTPUT_STAGE_2 = OUTPUT_BASE / "stage_2_entry_extraction"
-OUTPUT_STAGE_3 = OUTPUT_BASE / "stage_3_taxonomy_mapping"
 OUTPUT_STAGE_4 = OUTPUT_BASE / "stage_4_wcm_templates"
 
 # Legacy compatibility
 OUTPUT_STAGE_1 = OUTPUT_STAGE_1A  # Alias for backward compatibility
 OUTPUT_STAGE_2A = OUTPUT_BASE / "stage_2a_entry_delimitation"  # Deprecated
 OUTPUT_STAGE_2B = OUTPUT_BASE / "stage_2b_extract_entries_from_delimiters"  # Deprecated
-OUTPUT_STAGE_2_LEGACY = OUTPUT_STAGE_3  # Old stage 2 pointed to taxonomy mapping
 
 # Web app output directory
 WEB_OUTPUT_BASE = PROJECT_ROOT / "web_interface" / "outputs"
@@ -638,7 +636,7 @@ def print_validation_report():
 # ============================================================================
 
 # Create output directories on import
-for output_dir in [OUTPUT_STAGE_1A, OUTPUT_STAGE_1B, OUTPUT_STAGE_2, OUTPUT_STAGE_3, OUTPUT_STAGE_4, WEB_OUTPUT_BASE]:
+for output_dir in [OUTPUT_STAGE_1A, OUTPUT_STAGE_1B, OUTPUT_STAGE_2, OUTPUT_STAGE_4, WEB_OUTPUT_BASE]:
     output_dir.mkdir(parents=True, exist_ok=True)
 
 
