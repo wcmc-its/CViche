@@ -944,3 +944,55 @@ def test_redaction_notice_is_not_reported_as_a_recovered_appendix_entry(tmp_path
                  if w.get("check") == "appendix_diversion"
                  and w.get("reason") == "recovered_unrendered"]
     assert recovered == [], recovered
+
+
+# --------------------------------------------------------------------------
+# the template's own visa rows (#897)
+# --------------------------------------------------------------------------
+
+def _personal_data_rows(docx_path) -> dict[str, str]:
+    """label -> value for the PERSONAL DATA table, located by its "Work
+    email:" cell the way `_write_personal_data_table_cells` locates it."""
+    doc = Document(str(docx_path))
+    for table in doc.tables:
+        cells = {c.text.strip() for r in table.rows for c in r.cells}
+        if "Work email:" in cells:
+            return {r.cells[0].text.strip(): r.cells[1].text.strip() for r in table.rows}
+    raise AssertionError("no PERSONAL DATA table in the render")
+
+
+def test_the_visa_answers_fill_the_template_slots_not_the_placeholder(tmp_path):
+    """A CV already in the WCM template answers the two visa rows as
+    label|value entries. Before #897 nothing consumed them: the eligibility
+    slot rendered the template's own "Yes/No" placeholder, so the faculty's
+    "No" read back as unanswered, and the row was not in the Appendix
+    either (stage 2 had dropped it -- the other half of #897)."""
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None
+    ip, op = tmp_path / "in.json", tmp_path / "out.docx"
+    ip.write_text(json.dumps({"document_uid": "TESTPD", "entries": [
+        _a("Is your eligibility to work in the U.S. based on an employment visa?: | Yes"),
+        _a("If yes, please provide Visa type (Examples: J-1, H-1B, E-3, TN, etc.): | H-1B"),
+    ]}))
+    gen.generate(str(ip), str(op), research_summary_path=None)
+
+    rows = _personal_data_rows(op)
+    assert rows["Is your eligibility to work in the U.S. based on an employment visa?:"] == "Yes"
+    assert rows["If yes, please provide Visa type (Examples: J-1, H-1B, E-3, TN, etc.):"] == "H-1B"
+    # consumed into the slots, so neither row is appended as an
+    # "<label> — <value>" Appendix residual
+    text = _all_text(op)
+    assert "— Yes" not in text and "— H-1B" not in text
+
+
+def test_an_unanswered_visa_row_leaves_the_placeholder_alone(tmp_path):
+    gen = WCMTemplateGenerator(verbose=False)
+    gen._reconsider_appendix_entries = lambda: None
+    ip, op = tmp_path / "in.json", tmp_path / "out.docx"
+    ip.write_text(json.dumps({"document_uid": "TESTPD", "entries": [
+        _a("Is your eligibility to work in the U.S. based on an employment visa?: | Yes/No"),
+    ]}))
+    gen.generate(str(ip), str(op), research_summary_path=None)
+
+    rows = _personal_data_rows(op)
+    assert rows["Is your eligibility to work in the U.S. based on an employment visa?:"] == "Yes/No"

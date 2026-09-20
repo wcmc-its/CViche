@@ -132,6 +132,27 @@ def test_pipe_rows_only_drop_on_a_distinctive_template_cell():
     assert is_template_instruction("M.D. | Harvard | 2001") is False
 
 
+@pytest.mark.parametrize("row", [
+    # #897: a filled label|value row whose LABEL is a >= 40-char template
+    # phrase. Rule (b) sees the real cell and keeps the row; rules (c)/(d)
+    # must not get a second look at the joined string.
+    "Is your eligibility to work in the U.S. based on an employment visa?: | No",
+    "If yes, please provide Visa type (Examples: J-1, H-1B, E-3, TN, etc.): | H-1B",
+    "Name of Committee | Role (i.e., member, secretary, etc.) | Chair",
+])
+def test_a_filled_row_with_a_long_template_label_is_kept(row):
+    assert is_template_instruction(row) is False
+
+
+@pytest.mark.parametrize("row", [
+    # the same labels UNFILLED are still scaffolding and still drop
+    "Is your eligibility to work in the U.S. based on an employment visa?: |",
+    "If yes, please provide Visa type (Examples: J-1, H-1B, E-3, TN, etc.): | ",
+])
+def test_an_unfilled_row_with_a_long_template_label_still_drops(row):
+    assert is_template_instruction(row) is True
+
+
 def test_layer1_integration_filter():
     """Mirror the Layer 1 (stage 2) filter on a synthesized mixed entries list."""
     def layer1(entries):
