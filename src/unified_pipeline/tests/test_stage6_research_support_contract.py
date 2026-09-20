@@ -315,6 +315,17 @@ def test_non_declined_entry_is_not_appended_to_declined_grant_entries():
     assert gen._declined_grant_entries == []
 
 
+def test_declined_entry_with_no_entry_arg_is_not_appended():
+    """The `isinstance(entry, dict)` guard's negative path (verify_r2 NOTE 2):
+    `entry=None` still declines (returns None) but must not append -- there
+    is nothing dict-shaped to append. Kills the mutant that drops the guard
+    and appends unconditionally."""
+    gen = _generator()
+    table = gen._create_grant_table({}, 'M2A', None)
+    assert table is None
+    assert gen._declined_grant_entries == []
+
+
 # --- item 6: PI auto-fill from the CV owner -------------------------------------
 
 def test_principal_investigator_role_auto_fills_cv_owner():

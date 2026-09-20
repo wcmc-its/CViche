@@ -154,6 +154,19 @@ def test_nonfatal_section_failure_isolated_to_that_section(tmp_path, caplog):
         "the failure must be logged with logger.exception (traceback attached)"
 
 
+def test_log_validation_warnings_banner_and_message_at_warning(tmp_path, caplog):
+    """`_log_validation_warnings` (#839's pure-move helper, round 3 NOTE):
+    a section failure logs the VALIDATION WARNINGS banner and the failure
+    message itself at WARNING, not just `_render_section`'s ERROR log."""
+    gen = _new_generator()
+    gen._fill_honors = lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom"))
+    with caplog.at_level(logging.WARNING):
+        _render(gen, tmp_path, [_personal_data_entry()])
+    warn_msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("VALIDATION WARNINGS" in m for m in warn_msgs)
+    assert any("boom" in m for m in warn_msgs)
+
+
 # --------------------------------------------------------------- fatal contract
 
 def test_fatal_personal_data_failure_still_raises_no_docx(tmp_path):
