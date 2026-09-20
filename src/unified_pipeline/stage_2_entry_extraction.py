@@ -1152,8 +1152,7 @@ def run_stage_2(
     total_cost = 0.0
     total_tokens = 0
     document_uid = hierarchy_data.get("document_uid")
-    # Index space is the unified element stream (tables included, #870) -- not
-    # just paragraphs -- because unified_idx numbers every element type.
+    # Index space is the unified element stream, tables included (#870).
     doc_length = len(doc_elements)
 
     # Track all assigned indices for coverage analysis
