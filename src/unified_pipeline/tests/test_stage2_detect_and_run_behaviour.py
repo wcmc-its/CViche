@@ -682,14 +682,15 @@ def _build_table_gap_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     return output_data
 
 
-def test_run_stage_2_sorts_table_row_string_indices_and_excludes_tables_from_doc_length(tmp_path, monkeypatch):
+def test_run_stage_2_sorts_table_row_string_indices_and_counts_table_element_in_doc_length(tmp_path, monkeypatch):
     output_data = _build_table_gap_fixture(tmp_path, monkeypatch)
 
-    # A whole table occupies exactly ONE unified index and contributes
-    # nothing to num_paragraphs/num_empty -- doc_length (the coverage
-    # denominator) is computed from those two counts only, so it excludes
-    # the table's rows entirely even though those rows appear in `entries`.
-    assert output_data["document_length"] == 3
+    # A whole table occupies exactly ONE unified index. Since #870,
+    # document_length is the unified element count (paragraphs + tables),
+    # not num_paragraphs + num_empty, so it includes the table's own index
+    # (0, 1, 2, 3 -- four elements) even though the table's rows are
+    # addressed by string sub-indices within `entries`.
+    assert output_data["document_length"] == 4
 
     entries = output_data["entries"]
     assert [e["element_idx_start"] for e in entries] == [0, 1, "2.0", "2.1", 3]
@@ -724,13 +725,15 @@ def test_run_stage_2_coverage_percentage_never_exceeds_100_percent(tmp_path, mon
 
 def test_run_stage_2_coverage_percentage_bounded_when_table_is_last_section(tmp_path, monkeypatch):
     # Distinct shape from the fixture above: with NO paragraph after the
-    # table, the table's own unified index (2) sits OUTSIDE
-    # range(document_length) == {0, 1} entirely (document_length only counts
-    # the 2 real paragraphs). Deduping into a set is not enough here -- the
-    # artificial int parent marker for the claimed/recovered rows is itself
-    # >= document_length, so an unbounded integer_assigned would still read
-    # len({0, 1, 2}) / 2 == 150%. Only intersecting with range(document_length)
-    # (_bound_coverage_indices) keeps this at 100%.
+    # table. Before #870, the table's own unified index (2) sat OUTSIDE
+    # range(document_length) == {0, 1} (document_length counted only the 2
+    # real paragraphs), so an unbounded integer_assigned would have read
+    # len({0, 1, 2}) / 2 == 150% -- only intersecting with
+    # range(document_length) (_bound_coverage_indices) kept that at 100%.
+    # Since #870, document_length is the unified element count (3: two
+    # paragraphs + the table), so index 2 is naturally inside the range and
+    # this configuration can no longer overflow by construction -- this is
+    # now a plain regression guard that coverage still reads 100% here.
     _redirect_output_manager(monkeypatch, tmp_path)
 
     doc = Document()
@@ -758,7 +761,7 @@ def test_run_stage_2_coverage_percentage_bounded_when_table_is_last_section(tmp_
 
     output_data, _ = stage2.run_stage_2(str(docx_path), str(hpath))
 
-    assert output_data["document_length"] == 2
+    assert output_data["document_length"] == 3
     coverage = output_data["coverage"]
     assert coverage["unaccounted_indices"] == []
     assert coverage["assigned_indices"] <= output_data["document_length"]
@@ -854,3 +857,53 @@ def test_run_stage_2_autodetects_hierarchy_json_when_not_given(tmp_path, monkeyp
     output_data, _ = stage2.run_stage_2(str(docx_path))
 
     assert output_data["document_uid"] == "AUTO1"
+
+
+def test_run_stage_2_doc_length_is_unified_element_count_and_flags_trailing_paragraph(tmp_path, monkeypatch):
+    # #870: doc_length used to be num_paragraphs + num_empty (2 real
+    # paragraphs + the trailing one = 3 here), one less than the 4-element
+    # unified stream (paragraph, header, table, trailing paragraph) because
+    # that count ignores the table. A trailing paragraph placed AFTER the
+    # last section boundary (element_idx_end=2, stopping at the table) is
+    # never visited by any header/content/break assignment loop, so it is
+    # never in all_assigned_indices either way -- but under the old
+    # doc_length (3) it also fell OUTSIDE range(doc_length), so
+    # _bound_coverage_indices could never flag it: range(3) == {0, 1, 2}
+    # already reads "fully covered" without index 3 ever being checked.
+    # Under the fixed doc_length (4, the real element count), range(4)
+    # includes index 3 and the loss becomes visible in unaccounted_indices.
+    _redirect_output_manager(monkeypatch, tmp_path)
+
+    doc = Document()
+    doc.add_paragraph("Jane Doe")
+    doc.add_paragraph("AWARDS")
+    table = doc.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "2020"
+    table.cell(0, 1).text = "Best Paper"
+    doc.add_paragraph("Committee reviewer, NIH study section, 2022")
+    docx_path = tmp_path / "trailing.docx"
+    doc.save(docx_path)
+
+    hpath = _write_hierarchy(
+        tmp_path, "trailing_h.json", "TRAIL1",
+        hierarchy_with_indices=[{"text": "Awards", "level": "H1", "element_idx": 1, "children": []}],
+        # Stops at the table (element_idx_end=2) -- the trailing paragraph
+        # (index 3) is outside every section's range, mirroring a stage 1b
+        # hierarchy that never mapped it (the real #870 shape).
+        section_boundaries=[{"hierarchy": ["Awards"], "element_idx_start": 1, "element_idx_end": 2, "has_children": False}],
+    )
+    _route_call_llm(monkeypatch, {
+        "Personal Data": [{"element_idx_start": 0, "element_idx_end": 0, "element_type": "paragraph", "confidence": 0.9}],
+        "Awards": [],  # table row left unclaimed -- recovered as a break, not a content entry
+    })
+
+    output_data, _ = stage2.run_stage_2(str(docx_path), str(hpath))
+
+    assert output_data["document_length"] == 4
+    coverage = output_data["coverage"]
+    assert coverage["unaccounted_indices"] == [3]
+    # The pre-#870 denominator (3) would have bounded range() to {0, 1, 2},
+    # masking index 3 entirely rather than flagging it.
+    old_doc_length = 3
+    assert 3 not in set(range(old_doc_length))
+    assert not any(e["element_idx_start"] == 3 for e in output_data["entries"])
