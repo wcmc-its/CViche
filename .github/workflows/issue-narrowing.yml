@@ -1,0 +1,53 @@
+name: issue-narrowing
+
+# A PR that fixes part of an issue must narrow that issue to what remains, in
+# the same round. The rule has been prose in docs/DEV_WORKFLOW.md since #520;
+# the 2026-09-20 sweep found 47 open issues still titled at full scope whose
+# residual lived only in a merged PR's "Partially addresses #N" paragraph.
+#
+# Contract, in the PR body:
+#   Partially addresses #N        (or "Part of #N")   -- what the PR says today
+#   Narrows #N: <new issue title>                      -- what it must now add
+# gate:  fails the PR when the first appears without the second.
+# apply: on merge, retitles #N and leaves the pointer, so the residual is on the
+#        issue, not buried in the PR.
+
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, closed]
+
+jobs:
+  gate:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: every "partially addresses #N" has a "Narrows #N:" line
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          for n in $(grep -oiE '(partially addresses|part of) #[0-9]+' <<<"$BODY" | grep -oE '[0-9]+' | sort -u); do
+            grep -qE "^Narrows #$n: ." <<<"$BODY" \
+              || { echo "::error::PR body partially addresses #$n but has no 'Narrows #$n: <residual title>' line"; exit 1; }
+          done
+
+  apply:
+    if: github.event.action == 'closed' && github.event.pull_request.merged
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BODY: ${{ github.event.pull_request.body }}
+      PR: ${{ github.event.pull_request.number }}
+    steps:
+      - name: retitle each narrowed issue
+        run: |
+          grep -E '^Narrows #[0-9]+: .' <<<"$BODY" | while IFS= read -r line; do
+            n=${line#Narrows #}; n=${n%%:*}; title=${line#*: }
+            gh issue edit "$n" -R "$GITHUB_REPOSITORY" --title "$title"
+            gh issue comment "$n" -R "$GITHUB_REPOSITORY" \
+              --body "Narrowed by PR #$PR on merge. The part that shipped is in that PR; the title now names only what remains."
+          done
