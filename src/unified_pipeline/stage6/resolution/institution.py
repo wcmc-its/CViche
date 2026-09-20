@@ -13,6 +13,27 @@ value is rendered as a tracked change and an extracted one is not.
 import re
 
 
+def _location_already_in_institution(location: str, institution: str) -> bool:
+    """True when the institution string already carries the location as a
+    comma-led tail: "Massachusetts General Hospital, Boston, MA" or
+    "Columbia University, New York" against "Boston, MA" / "New York, NY".
+
+    Matched as a TAIL (", City" then optionally ", State" then end of string),
+    not as the bare city word anywhere in the name. The word match dropped the
+    location from every institution whose name contains its city -- New York
+    University, New York Presbyterian, Boston Children's -- which is most WCM
+    faculty CVs (#897). The three renderers that append a location all consult
+    this one predicate, so the rule cannot drift between them.
+    """
+    if not (location and institution):
+        return False
+    city = location.split(',')[0].strip()
+    if not city:
+        return False
+    tail = r',\s*' + re.escape(city) + r'(?:\s*,\s*[A-Za-z][A-Za-z .]*)?\s*$'
+    return bool(re.search(tail, institution, re.IGNORECASE))
+
+
 def _get_institution_location(entry: dict) -> tuple[str, bool]:
     """Get formatted location string from institution enrichment data.
 

@@ -34,11 +34,12 @@ most often missing:
    usually names its institution once, above several lines, and extraction
    attaches it only to the first.
 
-Enriched location is then appended as a tracked insertion, but only after
-checking the CITY is not already inside the institution string. "Massachusetts
-General Hospital, Boston, MA" would otherwise gain a second Boston. The check is
-on the city alone rather than the whole location, since the state is nearly
-never present in the institution name and would defeat the comparison.
+Enriched location is then appended as a tracked insertion, unless the
+institution string already ends in it -- "Massachusetts General Hospital,
+Boston, MA" would otherwise gain a second Boston. That predicate lives in
+`resolution._location_already_in_institution`, shared with education and
+positions (#897: the earlier city-word check dropped the location from every
+"New York University" / "New York Presbyterian" entry).
 
 A tab inside `training_type` is the extractor having flattened a table cell
 boundary, so tabs become ", " rather than rendering as a run of whitespace.
@@ -46,7 +47,6 @@ boundary, so tabs become ", " rather than rendering as a run of whitespace.
 which is common once the tab join has run.
 """
 import logging
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -55,6 +55,7 @@ from ..formatting import _clear_table_data, format_date_range
 from ..normalization import _get_cleaned_institution_name
 from ..resolution import (
     _get_institution_location,
+    _location_already_in_institution,
     _recover_institution_from_nearby_entries,
 )
 from ..sorting import sort_entries_reverse_chronological
@@ -124,26 +125,6 @@ def _join_if_list(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         return ', '.join(str(v).strip() for v in value if str(v).strip())
     return str(value or '')
-
-
-def _location_already_in_institution(location: str, institution: str) -> bool:
-    """True when the institution string already names the location's city.
-
-    Compared on the CITY alone rather than the whole location: the state is
-    nearly never present in an institution name and would defeat the match.
-    Word-boundary anchored so a short city name cannot match inside an
-    unrelated longer word.
-    """
-    if not (location and institution):
-        return False
-    location_parts = location.split(',')
-    if not location_parts:
-        return False
-    city = location_parts[0].strip()
-    if not city:
-        return False
-    return bool(re.search(r'\b' + re.escape(city) + r'\b',
-                          institution, re.IGNORECASE))
 
 
 def _normalize_training_entry(
