@@ -175,11 +175,19 @@ REASON_RECOVERED_UNRENDERED = "recovered_unrendered"
 # different lint, and N4 is not a passthrough section -- reusing it here
 # would misclassify N4 the same way F2 is fixing for E/G/J).
 
+# The one code whose REASON_RENDERER_DECLINED case is the M1 conditional
+# discard in `generate()` -- every OTHER routed code that reaches
+# REASON_RENDERER_DECLINED got there because its own section's renderer
+# raised (#842), which is a different mechanism and needs a different
+# message; see `_diversion_message`.
+_RESEARCH_SUMMARY_CODE = 'M1'
+
 # Human-readable text for the two routing-based reasons, used only inside
 # `message` -- the `reason` field itself stays the stable machine key above.
-# REASON_RENDERER_DECLINED covers two different mechanisms with two
-# different messages (the M1 no-research-summary discard, and the E/G/J
-# passthrough refusal) so it is NOT looked up here; see `_diversion_message`.
+# REASON_RENDERER_DECLINED now covers three mechanisms with three different
+# messages (the M1 no-research-summary discard, the E/G/J passthrough
+# refusal, and #842's failed-section discard) so it is NOT looked up here;
+# see `_diversion_message`.
 # REASON_RECOVERED_UNRENDERED's message is also code-specific (repeats the
 # code) so it is built directly in `_diversion_message` too.
 _REASON_TEXT = {
@@ -202,7 +210,7 @@ def _plural_was(count: int) -> str:
 def _diversion_message(code: str, count: int, reason: str,
                         passthrough_codes: frozenset[str]) -> str:
     """The Appendix-diversion warning's human-readable `message` (#531,
-    #531-R2). Three shapes, by *reason*:
+    #531-R2, #842). Four shapes, by *reason*:
 
     - REASON_RECOVERED_UNRENDERED: always names *code* twice (the code that
       classified the record, spelled out rather than left implicit, since
@@ -216,7 +224,17 @@ def _diversion_message(code: str, count: int, reason: str,
       one. Phrased passive ("refused by...") rather than "...declined
       them": the pronoun read wrong in the singular ("1 entry ... declined
       them") (#531-R3 finding r11).
-    - Everything else: the shared `_REASON_TEXT` lookup.
+    - REASON_RENDERER_DECLINED for any other routed code (#842's
+      failed-section discard -- checked AFTER the passthrough branch above,
+      so it never fires for E/G/J, and after excluding
+      `_RESEARCH_SUMMARY_CODE` so M1's own case still gets the
+      `_REASON_TEXT` message below): names the mechanism generically --
+      unlike the passthrough case there is no single writer to name, since
+      any of the ~20 routed sections could be the one whose renderer raised
+      -- and points at the section-failure record rather than repeating the
+      section name (`_diversion_message` has no `label`, only `code`).
+    - Everything else (REASON_NO_RENDER_ROUTE, and REASON_RENDERER_DECLINED
+      for `_RESEARCH_SUMMARY_CODE`): the shared `_REASON_TEXT` lookup.
     """
     noun = _plural_entries(count)
     if reason == REASON_RECOVERED_UNRENDERED:
@@ -228,6 +246,10 @@ def _diversion_message(code: str, count: int, reason: str,
         return (f"{code}: {count} {noun} diverted to the Appendix — "
                 f"refused by the passthrough writer for {code} (source "
                 f"section label did not match)")
+    if reason == REASON_RENDERER_DECLINED and code != _RESEARCH_SUMMARY_CODE:
+        return (f"{code}: {count} {noun} diverted to the Appendix — "
+                f"not placed by the section routed for {code} (see any "
+                f"section_render_failed record for that section)")
     return (f"{code}: {count} {noun} diverted to the Appendix — "
             f"{_REASON_TEXT[reason]}")
 

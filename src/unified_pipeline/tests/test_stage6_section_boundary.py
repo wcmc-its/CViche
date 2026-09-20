@@ -412,6 +412,10 @@ def test_failed_section_entries_fall_to_appendix_with_diversion_warning(tmp_path
     assert len(diversions) == 1
     assert diversions[0]["reason"] == "renderer_declined"
     assert diversions[0]["count"] == 1
+    assert diversions[0]["message"] == (
+        "H: 1 entry diverted to the Appendix — not placed by the section "
+        "routed for H (see any section_render_failed record for that section)"
+    ), "the M1-specific 'no research summary rendered' text must not leak onto other codes (#842 r2)"
 
 
 def test_failed_multi_code_section_all_codes_fall_to_appendix(tmp_path):
@@ -440,9 +444,19 @@ def test_failed_multi_code_section_all_codes_fall_to_appendix(tmp_path):
     assert "Q4B_TOKEN_842" in appendix_text
 
     sidecar = _sidecar(tmp_path)
-    diversions = {w["code"] for w in sidecar["warnings"]
-                  if w["check"] == "appendix_diversion" and w["reason"] == "renderer_declined"}
+    diversion_warnings = [w for w in sidecar["warnings"]
+                           if w["check"] == "appendix_diversion" and w["reason"] == "renderer_declined"]
+    diversions = {w["code"] for w in diversion_warnings}
     assert diversions == {"Q1", "Q4B"}
+    messages = {w["code"]: w["message"] for w in diversion_warnings}
+    assert messages["Q1"] == (
+        "Q1: 1 entry diverted to the Appendix — not placed by the section "
+        "routed for Q1 (see any section_render_failed record for that section)"
+    )
+    assert messages["Q4B"] == (
+        "Q4B: 1 entry diverted to the Appendix — not placed by the section "
+        "routed for Q4B (see any section_render_failed record for that section)"
+    )
 
 
 def test_no_failure_routed_entry_stays_out_of_appendix(tmp_path):

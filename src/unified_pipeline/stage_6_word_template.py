@@ -1166,11 +1166,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         logs the traceback, records a severity-carrying failure onto
         ``self._section_failures`` (merged into the render-warnings sidecar
         by generate()), returns None so the caller can fall back, and
-        discards *codes* -- the taxonomy codes this section owns -- from
-        ``self._failed_section_codes`` so generate() routes them to the
-        Appendix instead of dropping them (#842). Passthrough and appendix
-        callers pass no codes: passthrough already falls through via its
-        return-value fallback, and the appendix has none to discard.
+        records *codes* -- the taxonomy codes this section owns -- onto
+        ``self._failed_section_codes`` so generate() discards them from
+        ``mapped_codes`` and routes them to the Appendix instead of dropping
+        them (#842). Passthrough and appendix callers pass no codes:
+        passthrough already falls through via its return-value fallback,
+        and the appendix has none to discard.
 
         Never swallows: every caught exception gets both the log line and
         the record (§5.4) -- an isolated section must fail loudly, or the
