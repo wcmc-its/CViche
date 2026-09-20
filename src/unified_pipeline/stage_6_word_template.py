@@ -1064,11 +1064,11 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
             'passthrough_sections', lambda: self._fill_passthrough_sections(all_entries))
         passthrough_consumed_ids = {id(e) for e in (passthrough_result or [])}
 
-        # Add appendix for ALL unmapped content (seeded below with declined
-        # M2A/M2B/M2C entries, #839, whose code IS mapped). Local mutable
-        # copy of the module-level RENDER_ROUTED_CODES: the M1 discard just
-        # below mutates it per-call, and a frozenset shared across calls/runs
-        # would make that mutation stick around for the next one (#580/#581).
+        # Add appendix for ALL unmapped content -- declined M2A/M2B/M2C
+        # entries (#839) are appended at the fill below, not seeded here
+        # (their code IS mapped). Local mutable copy of RENDER_ROUTED_CODES:
+        # the M1 discard just below mutates it per-call, and a frozenset
+        # shared across calls/runs would make that stick around (#580/#581).
         mapped_codes = set(RENDER_ROUTED_CODES)
 
         # M1 (Research Activities) entries are consumed by the Stage 4.5 research
@@ -1080,7 +1080,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         if not research_summary_rendered:
             mapped_codes.discard('M1')
 
-        unmapped_entries: list[dict] = list(self._declined_grant_entries)
+        unmapped_entries: list[dict] = []
 
         # Collect ALL entries not in mapped codes, excluding passthrough-consumed ones (#294, #260).
         for code, entries in entries_by_code.items():
@@ -1097,9 +1097,9 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # _unconsumed_personal_data_batch.
 
         written_appendix_entries: list[UnmappedEntry] = []
-        if unmapped_entries:
+        if unmapped_entries or self._declined_grant_entries:
             written_appendix_entries = self._render_section(
-                'appendix', lambda: self._fill_appendix(unmapped_entries)) or []
+                'appendix', lambda: self._fill_appendix(unmapped_entries + self._declined_grant_entries)) or []
 
         # Route content-overflow entries as tracked-change bullets
         self._route_overflow_entries()
