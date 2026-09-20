@@ -1,6 +1,6 @@
 {
-  "count": 40,
-  "excess_lines": 6572,
+  "count": 20,
+  "excess_lines": 2324,
   "threshold": 200,
-  "total_lines": 14572
+  "total_lines": 6324
 }
