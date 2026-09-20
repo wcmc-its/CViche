@@ -1152,8 +1152,9 @@ def run_stage_2(
     total_cost = 0.0
     total_tokens = 0
     document_uid = hierarchy_data.get("document_uid")
-    # Use the number of paragraph indices (not total elements) for coverage calculation
-    doc_length = doc_structure['meta']['num_paragraphs'] + doc_structure['meta']['num_empty']
+    # Index space is the unified element stream (tables included, #870) -- not
+    # just paragraphs -- because unified_idx numbers every element type.
+    doc_length = len(doc_elements)
 
     # Track all assigned indices for coverage analysis
     all_assigned_indices = set()
