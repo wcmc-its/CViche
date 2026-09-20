@@ -56,7 +56,7 @@ def test_load_field_schemas_from_config_missing_file_returns_none():
     assert result is None
 
 
-def test_config_schemas_merge_over_builtin_defaults(tmp_path):
+def test_config_schemas_merge_over_builtin_defaults(tmp_path, monkeypatch):
     """A config file that only covers SOME codes must not blank out the
     built-in schema for codes it omits (the reviewer's "M2/N3/Q4 silently
     disabled" bug)."""
@@ -78,7 +78,10 @@ def test_config_schemas_merge_over_builtin_defaults(tmp_path):
     assert set(config_schemas.keys()) == {"A"}
     assert config_schemas["A"]["fields"] == ["name", "email"]
 
-    schemas_mod.FIELD_SCHEMA_CONFIG_PATH = config_path
+    # monkeypatch, not assignment: a bare assignment leaked this partial
+    # config into every later test in the session, which then read F2 from
+    # the built-in FIELD_SCHEMAS instead of the real file (#897 found it).
+    monkeypatch.setattr(schemas_mod, "FIELD_SCHEMA_CONFIG_PATH", config_path)
     active = schemas_mod.get_active_schemas()
 
     # Overridden code reflects the config file.
@@ -139,5 +142,23 @@ def test_unknown_taxonomy_code_falls_back_to_default_schema():
 
 
 def test_get_field_schema_exact_match_still_works():
+    """A code the active schemas know returns that code's schema, never
+    DEFAULT_SCHEMA. Compared against the ACTIVE schemas: the previous
+    `== FIELD_SCHEMAS["S1"]` only held because the merge test above had
+    leaked a partial config path, so S1 was falling back to the built-in
+    table -- with the real config file loaded the two legitimately differ."""
     schema = schemas_mod.get_field_schema("S1")
-    assert schema["fields"] == schemas_mod.FIELD_SCHEMAS["S1"]["fields"]
+    assert schema != schemas_mod.DEFAULT_SCHEMA
+    assert schema["fields"] == schemas_mod.get_active_schemas()["S1"]["fields"]
+
+
+def test_f2_asks_the_llm_for_the_specialty():
+    """#897: `specialty` was `extract: false` in field_schemas_v1.1.json, so
+    the F2 prompt never asked for it and "American Board of Pediatrics,
+    Certification in General Pediatrics" came back as the board alone --
+    two certifications from one board rendered as identical rows. The
+    prompt's field list is `get_field_schema('F2')['fields']`, so this pins
+    the wire, not the JSON."""
+    fields = schemas_mod.get_field_schema("F2")["fields"]
+    assert "specialty" in fields
+    assert "certifying_board" in fields
