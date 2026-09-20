@@ -142,6 +142,15 @@ AppendixLine = tuple[UnmappedEntry, str]
 # would silently create a third, undocumented reason.
 REASON_NO_RENDER_ROUTE = "no_render_route"
 REASON_RENDERER_DECLINED = "renderer_declined"
+
+# The third REASON_RENDERER_DECLINED mechanism (#839): an M2A/M2B/M2C entry
+# `_create_grant_table` declined as too sparse to table. Named here, not
+# imported from `research_support.py` (a `stage6/sections/*` peer -- see the
+# module-docstring comment above `_REASON_TEXT` for why peers pass constants
+# down instead of importing each other), so `_diversion_message` can tell it
+# apart from the M1 no-research-summary case, which the shared `_REASON_TEXT`
+# string actually describes.
+_DECLINED_GRANT_CODES = frozenset({'M2A', 'M2B', 'M2C'})
 # A record `_add_remaining_to_appendix` bulleted on behalf of
 # `_reconsider_appendix_entries` / `_recover_unrendered_records` (#531-R2
 # finding F1) -- distinct from the two reasons above because it is not
@@ -202,7 +211,7 @@ def _plural_was(count: int) -> str:
 def _diversion_message(code: str, count: int, reason: str,
                         passthrough_codes: frozenset[str]) -> str:
     """The Appendix-diversion warning's human-readable `message` (#531,
-    #531-R2). Three shapes, by *reason*:
+    #531-R2). Four shapes, by *reason*:
 
     - REASON_RECOVERED_UNRENDERED: always names *code* twice (the code that
       classified the record, spelled out rather than left implicit, since
@@ -216,7 +225,11 @@ def _diversion_message(code: str, count: int, reason: str,
       one. Phrased passive ("refused by...") rather than "...declined
       them": the pronoun read wrong in the singular ("1 entry ... declined
       them") (#531-R3 finding r11).
-    - Everything else: the shared `_REASON_TEXT` lookup.
+    - REASON_RENDERER_DECLINED for an M2A/M2B/M2C code (`_DECLINED_GRANT_CODES`,
+      #839): names the research-support renderer's own decline (too sparse
+      to table) -- the shared `_REASON_TEXT` string is the M1 case and would
+      misdescribe this one exactly as it would the passthrough case above.
+    - Everything else (M1's own case): the shared `_REASON_TEXT` lookup.
     """
     noun = _plural_entries(count)
     if reason == REASON_RECOVERED_UNRENDERED:
@@ -228,6 +241,10 @@ def _diversion_message(code: str, count: int, reason: str,
         return (f"{code}: {count} {noun} diverted to the Appendix — "
                 f"refused by the passthrough writer for {code} (source "
                 f"section label did not match)")
+    if reason == REASON_RENDERER_DECLINED and code in _DECLINED_GRANT_CODES:
+        return (f"{code}: {count} {noun} diverted to the Appendix — "
+                f"declined by the research-support renderer as too sparse "
+                f"to table")
     return (f"{code}: {count} {noun} diverted to the Appendix — "
             f"{_REASON_TEXT[reason]}")
 
