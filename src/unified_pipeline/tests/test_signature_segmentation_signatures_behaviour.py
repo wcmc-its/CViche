@@ -943,6 +943,72 @@ def test_rescue_locked_headers_bug_document_title_with_trailing_punctuation_not_
     assert "classification" not in sig  # correct behaviour: document titles must never be rescued
 
 
+def _assert_title_not_rescued(title_text: str) -> None:
+    doc = Document()
+    p = doc.add_paragraph(title_text)
+    sig = sbs.extract_paragraph_signature(p, 0, 1)
+    assert sig["text_metadata"]["matches_locked_header"] is True  # precondition for the bug
+
+    sig_hash = sig["signature_hash"]
+    signature_groups = {sig_hash: [sig]}
+    classifications = {sig_hash: {"level": "NOT_HEADER", "confidence": 0.5, "reasoning": "seed"}}
+
+    sbs.rescue_locked_headers(signature_groups, classifications)
+
+    assert "classification" not in sig  # document titles must never be rescued
+
+
+def test_rescue_locked_headers_excludes_title_with_trailing_parenthetical():
+    # #871: the signature step strips a trailing parenthetical before matching
+    # LOCKED_CV_HEADERS, but rescue_locked_headers' EXCLUDED_HEADERS check did
+    # not, so "Curriculum Vitae (CV)" escaped the exclusion (web152).
+    _assert_title_not_rescued("Curriculum Vitae (CV)")
+
+
+def test_rescue_locked_headers_excludes_title_with_semicolon():
+    _assert_title_not_rescued("Resume;")
+
+
+def test_rescue_locked_headers_excludes_title_with_period():
+    _assert_title_not_rescued("Curriculum Vitae .")
+
+
+def test_rescue_locked_headers_excludes_title_with_space_before_colon():
+    # #871: rescue_locked_headers had no trailing .strip() after rstrip(':;.'),
+    # so a title with whitespace before the colon left a trailing space that
+    # never matched EXCLUDED_HEADERS.
+    _assert_title_not_rescued("Curriculum Vitae :")
+
+
+def test_rescue_locked_headers_still_rescues_real_header_with_parenthetical():
+    # Negative case: a real section header with a parenthetical that is NOT
+    # in EXCLUDED_HEADERS must still be rescued -- the parenthetical strip
+    # must not swallow legitimate headers.
+    doc = Document()
+    p = doc.add_paragraph("Publications (peer reviewed)")
+    sig = sbs.extract_paragraph_signature(p, 0, 1)
+    sig["text_metadata"]["matches_locked_header"] = True  # force the rescue path
+
+    sig_hash = sig["signature_hash"]
+    signature_groups = {sig_hash: [sig]}
+    classifications = {sig_hash: {"level": "NOT_HEADER", "confidence": 0.5, "reasoning": "seed"}}
+
+    sbs.rescue_locked_headers(signature_groups, classifications)
+
+    assert sig["classification"] == "H1"
+    assert sig["is_rescued_locked_header"] is True
+
+
+def test_normalise_header_text_strips_parenthetical_colon_semicolon_and_period():
+    # Direct unit coverage for the shared normaliser (#857's verifier: a
+    # mutant stripping only ':' survived rstrip(':;.') coverage -- pin ';'
+    # and '.' explicitly alongside ':' and the parenthetical strip.
+    assert sbs._normalise_header_text("Curriculum Vitae (CV)") == "curriculum vitae"
+    assert sbs._normalise_header_text("Curriculum Vitae:") == "curriculum vitae"
+    assert sbs._normalise_header_text("Resume;") == "resume"
+    assert sbs._normalise_header_text("Curriculum Vitae .") == "curriculum vitae"
+
+
 def test_rescue_locked_headers_tolerates_none_or_blank_text():
     # A flagged paragraph with text=None or all-whitespace text must not
     # crash on `.strip()`/`.lower()` and must never be promoted to a header.

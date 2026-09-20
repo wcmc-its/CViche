@@ -14,6 +14,7 @@ Key insight: Let the LLM classify ~10-20 format signature groups, not 200+ parag
 
 import json
 import hashlib
+import re
 from pathlib import Path
 from typing import Any
 from dataclasses import dataclass, asdict
@@ -190,6 +191,17 @@ def extract_border_info(para) -> dict[str, Any]:
             }
 
     return borders
+
+
+def _normalise_header_text(text: str) -> str:
+    """Normalise header text for locked-header matching (#857, #871).
+
+    Strips a trailing parenthetical (e.g. "(CV)"), then trailing colons/
+    semicolons/periods and whitespace -- the single normalisation both the
+    signature step's locked-header match and rescue_locked_headers'
+    EXCLUDED_HEADERS check must share, so they can't drift apart.
+    """
+    return re.sub(r'\([^)]*\)', '', text).strip().lower().rstrip(':;.').strip()
 
 
 def extract_paragraph_signature(para, para_idx: int, total_paras: int) -> dict[str, Any]:
@@ -410,11 +422,8 @@ def extract_paragraph_signature(para, para_idx: int, total_paras: int) -> dict[s
     )
 
     # Check if text matches locked headers (secondary signal)
-    # Strip parenthetical content like "(recent years)" or "(NIU Only)"
-    # Then strip common trailing punctuation: colons, semicolons, periods
-    import re
-    text_cleaned = re.sub(r'\([^)]*\)', '', text).strip()  # Remove parentheticals
-    text_lower = text_cleaned.lower().rstrip(':;.').strip()
+    # See _normalise_header_text for the parenthetical/punctuation strip.
+    text_lower = _normalise_header_text(text)
     matches_locked_header = text_lower in LOCKED_CV_HEADERS
 
     return {
@@ -799,7 +808,7 @@ def rescue_locked_headers(signature_groups: dict, classifications: dict) -> dict
                 text = (para.get('text') or '').strip()
                 if not text:
                     continue
-                text_lower = text.lower().rstrip(':;.')
+                text_lower = _normalise_header_text(text)
 
                 # Skip document titles (not section headers)
                 if text_lower in EXCLUDED_HEADERS:
