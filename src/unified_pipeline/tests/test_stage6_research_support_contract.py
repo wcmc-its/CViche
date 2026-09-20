@@ -81,6 +81,7 @@ def _generator(emit_comments=False):
     gen._comments = []
     gen._comment_id = 1
     gen._overflow_entries = []
+    gen._declined_grant_entries = []  # #839: _create_grant_table's decline path appends here
     return gen
 
 
@@ -288,6 +289,30 @@ def test_grant_number_already_in_the_title_is_not_duplicated():
               'grant_number': 'R01 CA123456'}
     table = _generator()._create_grant_table(fields, 'M2A')
     assert _cells(table)['Award Source:'] == 'NIH'
+
+
+# --- #839: a decline appends to _declined_grant_entries -------------------------
+
+def test_declined_sparse_entry_is_appended_to_declined_grant_entries():
+    """No title, no substantive info, no grant-number info: `_create_grant_table`
+    returns None and records the entry so `generate()` can still route it to
+    the Appendix instead of dropping it outright."""
+    gen = _generator()
+    fields = {}
+    entry = {'text': 'DECLINED_SPARSE_TOKEN', 'taxonomy_code': 'M2A', 'extracted_fields': fields}
+    table = gen._create_grant_table(fields, 'M2A', entry)
+    assert table is None
+    assert gen._declined_grant_entries == [entry]
+
+
+def test_non_declined_entry_is_not_appended_to_declined_grant_entries():
+    """A well-formed grant renders a table and leaves the decline list empty."""
+    gen = _generator()
+    fields = {'agency': 'NIH', 'title': 'Cancer Immunology Project'}
+    entry = {'text': 'Cancer Immunology Project', 'taxonomy_code': 'M2A', 'extracted_fields': fields}
+    table = gen._create_grant_table(fields, 'M2A', entry)
+    assert table is not None
+    assert gen._declined_grant_entries == []
 
 
 # --- item 6: PI auto-fill from the CV owner -------------------------------------

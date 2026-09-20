@@ -588,3 +588,68 @@ def test_passthrough_codes_matches_pinned_value_and_its_own_docstring_source():
     doc = PassthroughSection._fill_passthrough_sections.__doc__ or ""
     bullet_codes = frozenset(re.findall(r'^\s*-\s+([A-Z])\.\s', doc, re.MULTILINE))
     assert PASSTHROUGH_CODES == bullet_codes
+
+
+# --------------------------------------------------------- #839: declined grants
+
+_WELLFORMED_M2B_ENTRY = {
+    "text": "WELLFORMED_M2B_GRANT_TOKEN", "taxonomy_code": "M2B",
+    "extracted_fields": {"title": "Longitudinal Study of a Distinctive Grant Title",
+                          "agency": "NIH"},
+    "hierarchy": ["Research Support"], "element_idx_start": 1,
+}
+
+
+def test_positive_declined_sparse_m2a_entry_reaches_appendix(tmp_path):
+    """#839: an M2A entry `_create_grant_table` declines as too sparse (no
+    title, no substantive info, no grant number) now reaches T. APPENDIX as
+    a numbered line AND fires a `renderer_declined` appendix_diversion
+    warning for M2A -- previously it rendered nowhere and warned nothing."""
+    entries = [_OWNER_ENTRY,
+               _t_entry("SPARSE_M2A_TOKEN", "M2A", ["Research Support"], 1)]
+    doc, sidecar = _render(tmp_path, "T839A", entries)
+    diversions = _diversion_warnings(sidecar)
+    assert len(diversions) == 1
+    assert diversions[0]["code"] == "M2A"
+    assert diversions[0]["count"] == 1
+    assert diversions[0]["reason"] == REASON_RENDERER_DECLINED
+    lines = _appendix_numbered_lines(doc)
+    assert len(lines) == 1
+    assert "SPARSE_M2A_TOKEN" in lines[0]
+
+
+def test_wellformed_m2b_entry_does_not_seed_the_appendix(tmp_path):
+    """Wire/mutant-killer: a `_create_grant_table` call that returns a real
+    table (well-formed M2B entry) must leave `_declined_grant_entries` empty
+    -- no Appendix line, no M2B appendix_diversion warning."""
+    entries = [_OWNER_ENTRY, _WELLFORMED_M2B_ENTRY]
+    doc, sidecar = _render(tmp_path, "T839B", entries)
+    assert not any(w["code"] == "M2B" for w in _diversion_warnings(sidecar))
+    assert _appendix_numbered_lines(doc) == []
+
+
+def test_declined_grant_entries_reset_between_renders(tmp_path):
+    """Per-call reset (#580/#581's class of bug): a generator instance that
+    renders a sparse M2A entry, then renders a second, well-formed CV, must
+    not carry the first render's decline into the second render's sidecar
+    or Appendix."""
+    gen = WCMTemplateGenerator(verbose=False, recover_unrendered_records=False)
+    gen._reconsider_appendix_entries = lambda: None
+
+    sparse_entries = [_OWNER_ENTRY,
+                       _t_entry("SPARSE_M2A_TOKEN", "M2A", ["Research Support"], 1)]
+    data1 = {"document_uid": "T839C1", "entries": sparse_entries}
+    input1, output1 = tmp_path / "in1.json", tmp_path / "out1.docx"
+    input1.write_text(json.dumps(data1))
+    gen.generate(str(input1), str(output1), research_summary_path=None)
+
+    data2 = {"document_uid": "T839C2", "entries": [_OWNER_ENTRY, _WELLFORMED_M2B_ENTRY]}
+    input2, output2 = tmp_path / "in2.json", tmp_path / "out2.docx"
+    input2.write_text(json.dumps(data2))
+    gen.generate(str(input2), str(output2), research_summary_path=None)
+
+    sidecar2 = json.loads((tmp_path / "T839C2_render_warnings.json").read_text())
+    doc2 = Document(str(output2))
+    assert not any(w["code"] == "M2A" for w in _diversion_warnings(sidecar2))
+    assert all("SPARSE_M2A_TOKEN" not in p.text for p in doc2.paragraphs)
+    assert _appendix_numbered_lines(doc2) == []
