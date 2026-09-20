@@ -396,6 +396,20 @@ def test_duplicate_ratio_breakpoints(tmp_path, dup, total, expected):
     assert fraction == pytest.approx(expected, abs=1e-9), detail
 
 
+def test_duplicate_ratio_stale_coverage_pct_over_130_no_longer_bumps(tmp_path):
+    """#856 bounds coverage_percentage to <= 100; a pre-#856 artifact on disk
+    can still carry a stale value over 130 (e.g. web207's stored 450.8), and
+    #869 deletes the dead +0.1 bump that used to fire on it. dup=11/100 ->
+    dup_ratio=0.11, strictly inside the (0.10, 0.30] interpolation band, so
+    the interpolated fraction (0.02) must come through with no bump."""
+    _write_json(tmp_path, "X_classified.json",
+               _classified(total_entries=100, duplicate_entries=11))
+    _write_json(tmp_path, "X_entries.json", {"coverage": {"coverage_percentage": 450.0}})
+    fraction, detail, cap = score_duplicate_ratio(tmp_path)
+    assert fraction == pytest.approx(0.02, abs=1e-9), detail
+    assert "entries_coverage_pct=450.0" in detail, detail
+
+
 # D14 (T3.2): duplicate_entries > total_entries, duplicate_entries < 0,
 # total_entries < 0, and total_entries != sum(code_distribution.values())
 # are covered by the D10 tests above (test_duplicate_ratio_negative_*,
