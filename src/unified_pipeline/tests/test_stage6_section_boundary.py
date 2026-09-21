@@ -28,7 +28,9 @@ _SRC = Path(__file__).resolve().parents[2]
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from unified_pipeline.stage_6_word_template import WCMTemplateGenerator  # noqa: E402
+from unified_pipeline.stage_6_word_template import (  # noqa: E402
+    RENDER_ROUTED_CODES, WCMTemplateGenerator,
+)
 from unified_pipeline.doctor.lints.render import lint_stage6_warnings  # noqa: E402
 
 # The 21-name flat dispatch this replaced (`stage_6_word_template.py:812-833`
@@ -370,3 +372,170 @@ def test_appendix_failure_with_recovered_codes_still_writes_the_document(tmp_pat
                   if w["check"] == "appendix_diversion"]
     assert diversions == [("T", "recovered_unrendered")], \
         "only the recovered code is reported; nothing is derived from the failed appendix"
+
+
+# --------------------------------------------------------------- #842: failed section -> Appendix
+
+def test_failed_section_entries_fall_to_appendix_with_diversion_warning(tmp_path):
+    """#842: on dev, a failed section's entries are absent from BOTH the
+    section and the Appendix -- their codes are in RENDER_ROUTED_CODES, so
+    the unmapped sweep never sees them, and no renderer ran to place them.
+    Once `_render_section` discards the failed section's codes from
+    mapped_codes, they fall to the Appendix as numbered lines, and
+    appendix.py's existing `renderer_declined` reason (#838) covers the
+    warning for free -- no new reason vocabulary."""
+    gen = _new_generator()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    gen._fill_honors = _boom
+
+    entries = [
+        _personal_data_entry(),
+        {"text": "HONORS_TOKEN_842 Some Award", "taxonomy_code": "H",
+         "extracted_fields": {}, "element_idx_start": 1},
+    ]
+    op = _render(gen, tmp_path, entries)
+    assert op.exists()
+
+    doc = Document(str(op))
+    assert "HONORS_TOKEN_842" in "\n".join(_appendix_paragraphs(doc)), \
+        "a failed section's entry must fall to the Appendix, not vanish"
+
+    sidecar = _sidecar(tmp_path)
+    section_failures = [w for w in sidecar["warnings"] if w["check"] == "section_render_failed"]
+    assert [f["section"] for f in section_failures] == ["honors"]
+
+    diversions = [w for w in sidecar["warnings"]
+                  if w["check"] == "appendix_diversion" and w["code"] == "H"]
+    assert len(diversions) == 1
+    assert diversions[0]["reason"] == "renderer_declined"
+    assert diversions[0]["count"] == 1
+    assert diversions[0]["message"] == (
+        "H: 1 entry diverted to the Appendix — not placed by the section "
+        "routed for H (see any section_render_failed record for that section)"
+    ), "the M1-specific 'no research summary rendered' text must not leak onto other codes (#842 r2)"
+
+
+def test_failed_multi_code_section_all_codes_fall_to_appendix(tmp_path):
+    """A section that owns several codes (service: Q1..Q4D) must divert
+    ALL of them when it raises, not just one -- kills a mutant that only
+    unions in a single code from the failed section's set."""
+    gen = _new_generator()
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    gen._fill_service = _boom
+
+    entries = [
+        _personal_data_entry(),
+        {"text": "Q1_TOKEN_842 leadership role", "taxonomy_code": "Q1",
+         "extracted_fields": {}, "element_idx_start": 1},
+        {"text": "Q4B_TOKEN_842 grant review", "taxonomy_code": "Q4B",
+         "extracted_fields": {}, "element_idx_start": 2},
+    ]
+    op = _render(gen, tmp_path, entries)
+    assert op.exists()
+
+    appendix_text = "\n".join(_appendix_paragraphs(Document(str(op))))
+    assert "Q1_TOKEN_842" in appendix_text
+    assert "Q4B_TOKEN_842" in appendix_text
+
+    sidecar = _sidecar(tmp_path)
+    diversion_warnings = [w for w in sidecar["warnings"]
+                           if w["check"] == "appendix_diversion" and w["reason"] == "renderer_declined"]
+    diversions = {w["code"] for w in diversion_warnings}
+    assert diversions == {"Q1", "Q4B"}
+    messages = {w["code"]: w["message"] for w in diversion_warnings}
+    assert messages["Q1"] == (
+        "Q1: 1 entry diverted to the Appendix — not placed by the section "
+        "routed for Q1 (see any section_render_failed record for that section)"
+    )
+    assert messages["Q4B"] == (
+        "Q4B: 1 entry diverted to the Appendix — not placed by the section "
+        "routed for Q4B (see any section_render_failed record for that section)"
+    )
+
+
+def test_no_failure_routed_entry_stays_out_of_appendix(tmp_path):
+    """Mutant-killer: when no section fails, `_failed_section_codes` must
+    stay empty and a routed H entry renders in its own slot, NOT the
+    Appendix -- kills a mutant that discards a section's codes
+    unconditionally instead of only on failure."""
+    gen = _new_generator()
+
+    entries = [
+        _personal_data_entry(),
+        {"text": "HONORS_TOKEN_842_CLEAN Some Award", "taxonomy_code": "H",
+         "extracted_fields": {}, "element_idx_start": 1},
+    ]
+    op = _render(gen, tmp_path, entries)
+    assert gen._failed_section_codes == set()
+
+    appendix_text = "\n".join(_appendix_paragraphs(Document(str(op))))
+    assert "HONORS_TOKEN_842_CLEAN" not in appendix_text, \
+        "a section that did not fail must not divert its codes to the Appendix"
+
+
+def test_failed_section_codes_reset_between_renders(tmp_path):
+    """Per-call reset (#842): a failure in one `generate()` call must not
+    leak into the next call's `mapped_codes` discard -- same generator
+    instance, two successive renders."""
+    gen = _new_generator()
+    real_fill_honors = gen._fill_honors
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("boom")
+
+    gen._fill_honors = _boom
+    first_entries = [
+        _personal_data_entry(),
+        {"text": "HONORS_TOKEN_842_FIRST Some Award", "taxonomy_code": "H",
+         "extracted_fields": {}, "element_idx_start": 1},
+    ]
+    _render(gen, tmp_path, first_entries, document_uid="TESTAA")
+    assert gen._failed_section_codes == {"H"}
+
+    gen._fill_honors = real_fill_honors
+    second_entries = [
+        _personal_data_entry(),
+        {"text": "HONORS_TOKEN_842_SECOND Some Award", "taxonomy_code": "H",
+         "extracted_fields": {}, "element_idx_start": 1},
+    ]
+    _render(gen, tmp_path, second_entries, document_uid="TESTBB")
+    assert gen._failed_section_codes == set(), \
+        "a prior render's failed codes must not leak into this one"
+
+    sidecar = _sidecar(tmp_path, document_uid="TESTBB")
+    h_diversions = [w for w in sidecar["warnings"]
+                    if w["check"] == "appendix_diversion" and w["code"] == "H"]
+    assert h_diversions == [], "the second render's H entry must not be diverted"
+
+
+def test_dispatch_codes_cover_render_routed_codes_exactly(tmp_path):
+    """Completeness self-check (#842): the union of every dispatch entry's
+    `codes` covers exactly `RENDER_ROUTED_CODES - {'A'}` (A is Personal
+    Data, outside the `_render_section` boundary by deliberate judgement
+    call), and the sets are pairwise disjoint. Catches a forgotten or
+    duplicated code before it costs a real failure. Drives the real
+    `generate()` with a spy on `_render_section` (the harness already spies
+    `_fill_*` methods the same way) rather than hoisting the dispatch table
+    to module level just for this test."""
+    gen = _new_generator()
+    recorded: list[tuple[str, frozenset]] = []
+    real_render_section = gen._render_section
+
+    def _spy(label, fn, codes=frozenset()):
+        recorded.append((label, codes))
+        return real_render_section(label, fn, codes)
+
+    gen._render_section = _spy
+    _render(gen, tmp_path, [_personal_data_entry()])
+
+    code_sets = [codes for _label, codes in recorded if codes]
+    union: frozenset[str] = frozenset().union(*code_sets)
+    assert union == RENDER_ROUTED_CODES - {'A'}
+    assert sum(len(c) for c in code_sets) == len(union), \
+        "dispatch code sets must be pairwise disjoint"

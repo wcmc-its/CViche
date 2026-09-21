@@ -598,6 +598,12 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # the top of generate(), declared here for typing/reuse across renders.
         self._section_failures: list[dict[str, Any]] = []
 
+        # Taxonomy codes owned by a section that raised (#842): removed from
+        # mapped_codes before the unmapped sweep so a failed section's
+        # entries fall to the Appendix instead of vanishing. Reset alongside
+        # _section_failures.
+        self._failed_section_codes: set[str] = set()
+
         # Memoizes _classify_geographic_scope's LLM calls for the life of one
         # render, keyed on (activity location, owner institutions).
         self._geographic_scope_cache = {}
@@ -943,7 +949,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # Reset per-render section-failure tracking (#565) -- a generator
         # instance can render more than once, and a failure from a prior
         # render must never leak into this one's sidecar.
-        self._section_failures = []
+        self._section_failures, self._failed_section_codes = [], set()
 
         # Load input data - each stage output is self-contained
         with open(input_path, 'r') as f:
@@ -1004,34 +1010,34 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # only; the rest still render and the run still produces a document.
         self._fill_personal_data(entries_by_code.get('A', []), cv_owner, document_uid, all_entries, original_doc_path)
 
-        # (label, callable) in the SAME order as the flat dispatch this
-        # replaced -- test_stage6_section_boundary.py pins that order.
-        section_dispatch: list[tuple[str, Callable[[], Any]]] = [
-            ('researcher_profiles', lambda: self._fill_researcher_profiles(entries_by_code.get('S0', []))),  # S0 section for ORCID, etc.
-            ('education', lambda: self._fill_education(entries_by_code.get('B1', []))),  # B1 = Academic Degrees only
-            ('other_education', lambda: self._fill_other_education(entries_by_code.get('B2', []))),  # B2 = Other Educational Experiences
-            ('postdoc_training', lambda: self._fill_postdoc_training(entries_by_code, all_entries)),
-            ('positions', lambda: self._fill_positions(entries_by_code)),
-            ('licensure', lambda: self._fill_licensure(entries_by_code.get('F1', []))),  # F1 = Licensure
-            ('board_certification', lambda: self._fill_board_certification(entries_by_code.get('F2', []))),  # F2 = Board Certification
-            ('honors', lambda: self._fill_honors(entries_by_code.get('H', []))),  # H = Honors and Awards
-            ('memberships', lambda: self._fill_memberships(entries_by_code.get('I', []))),  # I = Professional Memberships
-            ('teaching', lambda: self._fill_teaching(entries_by_code)),  # K1-K5 = Teaching Activities
-            ('research_summary', lambda: self._fill_research_summary(research_summary_data)),  # Stage 4.5 output
-            ('research_support', lambda: self._fill_research_support(entries_by_code, cv_owner, document_uid)),
+        # (label, codes, callable), SAME order as the flat dispatch this
+        # replaced (order pinned by test_stage6_section_boundary.py); codes are dropped from mapped_codes on failure (#842).
+        section_dispatch: list[tuple[str, frozenset[str], Callable[[], Any]]] = [
+            ('researcher_profiles', frozenset({'S0'}), lambda: self._fill_researcher_profiles(entries_by_code.get('S0', []))),  # S0 section for ORCID, etc.
+            ('education', frozenset({'B1'}), lambda: self._fill_education(entries_by_code.get('B1', []))),  # B1 = Academic Degrees only
+            ('other_education', frozenset({'B2'}), lambda: self._fill_other_education(entries_by_code.get('B2', []))),  # B2 = Other Educational Experiences
+            ('postdoc_training', frozenset({'C', 'C1', 'C2', 'C3'}), lambda: self._fill_postdoc_training(entries_by_code, all_entries)),
+            ('positions', frozenset({'D1', 'D2', 'D3'}), lambda: self._fill_positions(entries_by_code)),
+            ('licensure', frozenset({'F1'}), lambda: self._fill_licensure(entries_by_code.get('F1', []))),  # F1 = Licensure
+            ('board_certification', frozenset({'F2'}), lambda: self._fill_board_certification(entries_by_code.get('F2', []))),  # F2 = Board Certification
+            ('honors', frozenset({'H'}), lambda: self._fill_honors(entries_by_code.get('H', []))),  # H = Honors and Awards
+            ('memberships', frozenset({'I'}), lambda: self._fill_memberships(entries_by_code.get('I', []))),  # I = Professional Memberships
+            ('teaching', frozenset({'K1', 'K2', 'K3', 'K4', 'K5'}), lambda: self._fill_teaching(entries_by_code)),  # K1-K5 = Teaching Activities
+            ('research_summary', frozenset({'M1'}), lambda: self._fill_research_summary(research_summary_data)),  # Stage 4.5 output
+            ('research_support', frozenset({'M2A', 'M2B', 'M2C'}), lambda: self._fill_research_support(entries_by_code, cv_owner, document_uid)),
             # NOTE: Clinical trials now handled by _fill_research_support via M2A/M2B/M2C codes
-            ('patents', lambda: self._fill_patents(entries_by_code.get('M2D', []))),
-            ('mentoring', lambda: self._fill_mentoring(entries_by_code)),
-            ('clinical_practice', lambda: self._fill_clinical_practice(entries_by_code)),  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
-            ('leadership', lambda: self._fill_leadership(entries_by_code.get('O', []))),  # O = Institutional Leadership
-            ('administrative_activities', lambda: self._fill_administrative_activities(entries_by_code.get('P', []))),  # P = Administrative Committees
-            ('service', lambda: self._fill_service(entries_by_code)),  # Q1-Q4D = Service Activities
-            ('presentations', lambda: self._fill_presentations(entries_by_code.get('R', []))),  # R = Invited Presentations
-            ('bibliography', lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
+            ('patents', frozenset({'M2D'}), lambda: self._fill_patents(entries_by_code.get('M2D', []))),
+            ('mentoring', frozenset({'N1', 'N2', 'N3A', 'N3B'}), lambda: self._fill_mentoring(entries_by_code)),
+            ('clinical_practice', frozenset({'L1', 'L2', 'L3'}), lambda: self._fill_clinical_practice(entries_by_code)),  # L1, L2, L3 = Clinical Practice, Innovation, Leadership
+            ('leadership', frozenset({'O'}), lambda: self._fill_leadership(entries_by_code.get('O', []))),  # O = Institutional Leadership
+            ('administrative_activities', frozenset({'P'}), lambda: self._fill_administrative_activities(entries_by_code.get('P', []))),  # P = Administrative Committees
+            ('service', frozenset({'Q1', 'Q2', 'Q3', 'Q4', 'Q4A', 'Q4B', 'Q4C', 'Q4D'}), lambda: self._fill_service(entries_by_code)),  # Q1-Q4D = Service Activities
+            ('presentations', frozenset({'R'}), lambda: self._fill_presentations(entries_by_code.get('R', []))),  # R = Invited Presentations
+            ('bibliography', frozenset({'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9'}), lambda: self._fill_bibliography(entries_by_code, cv_owner, document_uid)),
         ]
         research_summary_rendered = False
-        for label, fn in section_dispatch:
-            result = self._render_section(label, fn)
+        for label, codes, fn in section_dispatch:
+            result = self._render_section(label, fn, codes)
             if label == 'research_summary':
                 research_summary_rendered = bool(result)
 
@@ -1045,8 +1051,8 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
         # module-level RENDER_ROUTED_CODES: the M1 discard just below mutates
         # it per-call, and a frozenset shared across calls/runs would make
         # that mutation stick around for the next one (#580/#581's class of
-        # bug -- process-global state mutated per run).
-        mapped_codes = set(RENDER_ROUTED_CODES)
+        # bug -- process-global state mutated per run). Also drops any code a failed section owns (#842), so its entries fall to the Appendix.
+        mapped_codes = set(RENDER_ROUTED_CODES) - self._failed_section_codes
 
         # M1 (Research Activities) entries are consumed by the Stage 4.5 research
         # summary. When that summary did NOT render (no Stage 4.5 output, empty
@@ -1153,12 +1159,19 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
 
         return output_path
 
-    def _render_section(self, label: str, fn: Callable[[], Any]) -> Any:  # noqa: ANN401
+    def _render_section(self, label: str, fn: Callable[[], Any],
+                         codes: frozenset[str] = frozenset()) -> Any:  # noqa: ANN401
         """Call one section-dispatch entry, isolating a raise to this section
         only (#565). Returns fn()'s result on success; on any Exception it
         logs the traceback, records a severity-carrying failure onto
         ``self._section_failures`` (merged into the render-warnings sidecar
-        by generate()), and returns None so the caller can fall back.
+        by generate()), returns None so the caller can fall back, and
+        records *codes* -- the taxonomy codes this section owns -- onto
+        ``self._failed_section_codes`` so generate() discards them from
+        ``mapped_codes`` and routes them to the Appendix instead of dropping
+        them (#842). Passthrough and appendix callers pass no codes:
+        passthrough already falls through via its return-value fallback,
+        and the appendix has none to discard.
 
         Never swallows: every caught exception gets both the log line and
         the record (§5.4) -- an isolated section must fail loudly, or the
@@ -1179,6 +1192,7 @@ class WCMTemplateGenerator(AdministrativeActivitiesSection, AppendixSection,
                 "evidence": evidence,
                 "severity": "ERROR",
             })
+            self._failed_section_codes |= codes
             return None
 
     def _write_render_warnings_sidecar(self, output_path: str, document_uid: str,
