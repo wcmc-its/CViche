@@ -14,7 +14,7 @@ from app.pipeline.orchestrator import PipelineOrchestrator
 from app.pipeline.step_registry import STEP_REGISTRY
 from app.pipeline import concurrency
 from app.auth import get_current_user
-from app.api.upload import UPLOAD_DIR, create_run_archive, _commit_run_or_compensate
+from app.api.upload import UPLOAD_DIR, create_run_archive, commit_run_or_compensate
 from app.services.run_service import check_run_access
 from app.rate_limiter import check_rate_limit
 from app.errors import not_found, bad_request
@@ -429,7 +429,7 @@ async def restart_run(
         )
         db.add(step)
 
-    _commit_run_or_compensate(db, new_run_id, current_user.email, new_file_path)
+    commit_run_or_compensate(db, new_run_id, current_user.email, new_file_path)
 
     return {"run_id": new_run_id, "message": f"New run created from {run_id}"}
 

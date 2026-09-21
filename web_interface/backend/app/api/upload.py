@@ -290,7 +290,7 @@ def _compensate_failed_run(run_id: str, email: str, file_path: Path) -> None:
     -- nothing else can live under it (unlike a general run_id, this one is
     never reused for another archive).
 
-    Called from _commit_run_or_compensate below, shared by /upload and
+    Called from commit_run_or_compensate below, shared by /upload and
     restart_run (runs.py imports that).
 
     # ponytail: compensation runs in-process; a crash between archive and
@@ -310,7 +310,7 @@ def _compensate_failed_run(run_id: str, email: str, file_path: Path) -> None:
     _unlink_best_effort(file_path)
 
 
-def _commit_run_or_compensate(
+def commit_run_or_compensate(
     db: Session, run_id: str, email: str, file_path: Path,
 ) -> None:
     """Commit the pending Run/Step rows, or compensate the archive and raise
@@ -523,7 +523,7 @@ async def upload_cv(
         )
         db.add(step)
 
-    _commit_run_or_compensate(db, run_id, current_user.email, file_path)
+    commit_run_or_compensate(db, run_id, current_user.email, file_path)
 
     return UploadResponse(
         run_id=run_id,

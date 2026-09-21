@@ -762,7 +762,7 @@ def test_upload_traversal_filename_cannot_escape(client, db, seed_simple_mode, t
 
 # --- collision thread item 2: DB commit fails after the archive succeeded ---
 
-def test_upload_db_commit_failure_leaves_archive_but_no_run(client, db, seed_simple_mode, tmp_path):
+def test_upload_db_commit_failure_compensates_the_archive_and_creates_no_run(client, db, seed_simple_mode, tmp_path):
     """PR #779 review thread web_interface/backend/tests/test_upload_run_id_collision.py item 2
 
     upload.py's `db.commit()` is now guarded (#802): a DB fault there is
@@ -817,8 +817,22 @@ def test_upload_compensates_archive_when_commit_fails(client, db, seed_simple_mo
     patches.append(patch("app.api.upload.get_storage", return_value=storage))
     patches.append(patch("app.api.upload.generate_run_id", return_value="CMFAIL"))
     patches.append(patch.object(db, "commit", side_effect=OperationalError("stmt", {}, Exception("db down"))))
-    with caplog.at_level(logging.ERROR, logger="app.api.upload"):
-        resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+
+    # Wraps the real rollback (so the session actually rolls back) while
+    # still recording the call, so we can pin BOTH that it happened and
+    # that it happened before the compensating delete_run -- not just that
+    # the two were called at all (r1 m07: deleting `db.rollback()` in
+    # `commit_run_or_compensate` left every other assertion green).
+    call_order = MagicMock()
+    with patch.object(db, "rollback", wraps=db.rollback) as rollback_mock:
+        call_order.attach_mock(rollback_mock, "rollback")
+        call_order.attach_mock(storage.delete_run, "delete_run")
+        with caplog.at_level(logging.ERROR, logger="app.api.upload"):
+            resp = _run_patches(patches, lambda: _post_dummy_upload(client))
+        rollback_mock.assert_called_once()
+
+    call_names = [c[0] for c in call_order.mock_calls]
+    assert call_names.index("rollback") < call_names.index("delete_run"), call_order.mock_calls
 
     assert resp.status_code == 500, resp.text
     assert resp.json()["detail"]["error"] == "internal_error"
