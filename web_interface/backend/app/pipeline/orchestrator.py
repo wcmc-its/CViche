@@ -1027,6 +1027,22 @@ class PipelineOrchestrator:
             func, step_number, event_loop, *args, **kwargs
         )
 
+    def _render_options(self) -> tuple[bool, bool, bool]:
+        """(emit_track_changes, emit_comments, strip_template_instructions) for stage 6.
+
+        Pure move out of `_execute_stage_logic` (#550, keeps the §3 ratchet
+        from rising): identical body, no behaviour change.
+        """
+        # Issue #153: honor the user's output-rendering choices recorded
+        # on the Run row. Columns default to track changes ON (1) and
+        # classification comments OFF (0); treat as truthy ints, falling
+        # back to those defaults if the row/column is unexpectedly None.
+        run = self.db.query(Run).filter(Run.id == self.run_id).first()
+        emit_track_changes = bool(run.show_track_changes) if run and run.show_track_changes is not None else True
+        emit_comments = bool(run.show_pipeline_comments) if run and run.show_pipeline_comments is not None else False
+        strip_template_instructions = bool(run.strip_template_instructions) if run and run.strip_template_instructions is not None else True
+        return emit_track_changes, emit_comments, strip_template_instructions
+
     async def _execute_stage_logic(self, stage_id: str, cv_path: str) -> dict[str, Any]:
         """Execute a specific pipeline stage."""
         output_paths = self._get_output_paths()
@@ -1388,14 +1404,7 @@ class PipelineOrchestrator:
                 if not input_path:
                     raise ValueError("No input available for Stage 6")
 
-                # Issue #153: honor the user's output-rendering choices recorded
-                # on the Run row. Columns default to track changes ON (1) and
-                # classification comments OFF (0); treat as truthy ints, falling
-                # back to those defaults if the row/column is unexpectedly None.
-                run = self.db.query(Run).filter(Run.id == self.run_id).first()
-                emit_track_changes = bool(run.show_track_changes) if run and run.show_track_changes is not None else True
-                emit_comments = bool(run.show_pipeline_comments) if run and run.show_pipeline_comments is not None else False
-                strip_template_instructions = bool(run.strip_template_instructions) if run and run.strip_template_instructions is not None else True
+                emit_track_changes, emit_comments, strip_template_instructions = self._render_options()
 
                 stage6_output_path = await self._run_with_stdout_capture(
                     run_stage6,
