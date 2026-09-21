@@ -862,6 +862,38 @@ def test_call_with_retry_outage_error_keeps_retrying_past_retry_count(
     assert attempts["n"] > 2  # far more than retry_count(1)+1 == 2 would allow
 
 
+def test_call_with_retry_outage_backoff_saturates_at_60s_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The outage path's equal-jitter backoff doubles from 1s and saturates
+    # at _OUTAGE_BACKOFF_CAP_SECONDS (60), not the ordinary path's 30s cap
+    # and not unbounded. random.uniform is pinned to its upper bound so
+    # each wait equals `base` exactly. Verifier round 3: the cap assertion
+    # was lost in a rewrite and both `no cap` and `30s cap` mutants
+    # survived -- this pins it on its own.
+    clock = {"t": 0.0}
+    sleeps: list[float] = []
+
+    def fake_sleep(s: float) -> None:
+        sleeps.append(s)
+        clock["t"] += s
+
+    monkeypatch.setattr(retry.time, "sleep", fake_sleep)
+    monkeypatch.setattr(retry.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setattr(retry.random, "uniform", lambda lo, hi: hi)
+    monkeypatch.setenv("CVICHE_LLM_OUTAGE_BUDGET_SECONDS", "200")
+    attempts = {"n": 0}
+
+    def down_eight_times() -> str:
+        attempts["n"] += 1
+        if attempts["n"] <= 8:
+            raise ClientError({"Error": {"Code": "ServiceUnavailableException", "Message": "down"}}, "Converse")
+        return "recovered"
+
+    result, _ = retry._call_with_retry(down_eight_times, retry_count=1)
+
+    assert result == "recovered"
+    assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0, 60.0]
+
+
 def test_call_with_retry_outage_budget_exhausted_raises_llmoutageerror(monkeypatch: pytest.MonkeyPatch) -> None:
     clock = {"t": 0.0}
 
