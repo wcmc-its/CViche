@@ -986,6 +986,12 @@ def test_parallel_sections_write_the_same_artifact_as_the_serial_loop(tmp_path, 
     """Sections finish in reverse order under the pool; the artifact must not."""
     in_flight = {"now": 0, "peak": 0}
     lock = threading.Lock()
+    # Distinct per-section cost: belt-and-braces on top of the full-artifact
+    # equality below -- total_cost is a float sum, so an accumulation-order
+    # mutant (e.g. completion order) is likely, not just possibly, to shift
+    # the last bit or two of the sum even though the section-level costs
+    # themselves are order-independent values.
+    costs = {key: round(0.1 * (i + 1), 4) for i, key in enumerate(_MANY_SECTION_KEYS)}
 
     def slow_early_sections(**kwargs):
         prompt = kwargs["messages"][1]["content"]
@@ -998,7 +1004,7 @@ def test_parallel_sections_write_the_same_artifact_as_the_serial_loop(tmp_path, 
         time.sleep((len(_MANY_SECTION_KEYS) - idx) * 0.005)
         with lock:
             in_flight["now"] -= 1
-        return _llm_result({"delimiters": _many_section_delimiters(key)})
+        return _llm_result({"delimiters": _many_section_delimiters(key)}, cost=costs[key])
 
     _redirect_output_manager(monkeypatch, tmp_path)
     docx_path = _build_many_sections_docx(tmp_path)
@@ -1018,6 +1024,9 @@ def test_parallel_sections_write_the_same_artifact_as_the_serial_loop(tmp_path, 
     assert "datetime.now" not in src
 
     assert serial == parallel
+    # Exact float equality: sum order (not just the final entries list) must
+    # match the serial loop too.
+    assert serial["total_cost"] == parallel["total_cost"]
 
 
 def test_section_progress_lines_are_monotonic_and_unspliced(tmp_path, monkeypatch, capsys):
@@ -1258,6 +1267,65 @@ def test_assigned_indices_union_matches_the_serial_loop(tmp_path, monkeypatch):
     assert serial["coverage"] == parallel["coverage"]
     assert serial["coverage"]["unaccounted_indices"] == []
     assert serial["coverage"]["coverage_percentage"] == pytest.approx(100.0)
+
+
+def test_tied_start_indices_keep_section_submission_order(tmp_path, monkeypatch):
+    """A stage-1b leaf section can legitimately enclose another leaf
+    section's range (corpus A/B, 21/107 real CVs: a wide catch-all leaf
+    alongside a narrower nested leaf sharing an element index). Both
+    sections then independently call the LLM over the shared index and can
+    each independently claim it as a same-type content entry -- the text
+    comes from the shared element_index_map, so it is identical either way
+    -- and filter_extraction_noise's (element_type, text, idx) dedup then
+    keeps only the FIRST of the two survivors in `all_entries`. Because the
+    later `all_entries.sort(key=sort_key)` is stable, "first" means
+    accumulation order, not LLM-completion order -- this pins that
+    accumulation stays SUBMISSION order (the earlier `reversed(results)`
+    mutant flips which section's hierarchy the tied entry carries) even
+    when the later-submitted section's call finishes first.
+    """
+    doc = Document()
+    for text in ["Jane Researcher", "CURRENT POSITION", "Professor of Chemistry"]:
+        doc.add_paragraph(text)
+    docx_path = tmp_path / "tie.docx"
+    doc.save(docx_path)
+
+    hpath = _write_hierarchy(
+        tmp_path, "tie_h.json", "TIE1",
+        hierarchy_with_indices=[{"text": "Current Position", "level": "H1", "element_idx": 1, "children": []}],
+        section_boundaries=[
+            # Wide leaf enclosing the narrower leaf below -- element 2 is in
+            # BOTH ranges. Order here fixes submission order: Personal Data
+            # is section index 0, Current Position is section index 1.
+            {"hierarchy": ["Personal Data"], "element_idx_start": 0, "element_idx_end": 2, "has_children": False},
+            {"hierarchy": ["Current Position"], "element_idx_start": 1, "element_idx_end": 2, "has_children": False},
+        ],
+    )
+
+    submission_order = {"Personal Data": 0, "Current Position": 1}
+
+    def slow_first_submitted_finishes_last(**kwargs):
+        prompt = kwargs["messages"][1]["content"]
+        key = _section_key_from_prompt(prompt, list(submission_order))
+        # Personal Data (submitted first) sleeps longest, so under
+        # workers=4 Current Position (submitted second) completes first --
+        # completion order is the exact reverse of submission order.
+        time.sleep((len(submission_order) - submission_order[key]) * 0.02)
+        return _llm_result({"delimiters": [
+            {"element_idx_start": 2, "element_idx_end": 2, "element_type": "paragraph", "confidence": 0.9},
+        ]})
+
+    _redirect_output_manager(monkeypatch, tmp_path)
+    monkeypatch.setattr(stage2, "call_llm", slow_first_submitted_finishes_last)
+
+    serial, _ = stage2.run_stage_2(str(docx_path), str(hpath), workers=1)
+    parallel, _ = stage2.run_stage_2(str(docx_path), str(hpath), workers=4)
+
+    assert serial == parallel
+
+    tied = [e for e in parallel["entries"] if e["element_idx_start"] == 2]
+    assert len(tied) == 1  # filter_extraction_noise collapsed the duplicate claim
+    assert tied[0]["hierarchy"] == ["Personal Data"]  # first-SUBMITTED section wins
 
 
 def test_batch_progress_goes_to_the_logger_not_stdout(monkeypatch, caplog, capsys):
