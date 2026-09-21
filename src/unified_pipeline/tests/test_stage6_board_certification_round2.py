@@ -901,3 +901,49 @@ class TestEmptyEntriesClearsTemplatePlaceholderRow:
             "American Board of Synthetic Medicine", "999999", "2019",
         ]
         assert gen.stats['tables_populated'] == 1
+
+
+class TestBoardCellCarriesTheSpecialty:
+    """#897 item 4: two certifications from one board rendered as identical
+    "American Board of Pediatrics" rows. The "Full Name of Board" cell is
+    now board + specialty, through the structured path and through
+    `_parse_and_add_multiple_certifications`'s structured fallback alike."""
+
+    def test_two_certifications_from_one_board_stay_distinct(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "American Board of Pediatrics, \nCertification in General Pediatrics | 109949 | 10/09/2014",
+             "extracted_fields": {"certifying_board": "American Board of Pediatrics",
+                                  "specialty": "General Pediatrics",
+                                  "certificate_number": "109949", "year_certified": "2014-10-09"}},
+            {"text": "American Board of Pediatrics, \nCertification in Pediatric Emergency Medicine | 2611 | 5/21/2019",
+             "extracted_fields": {"certifying_board": "American Board of Pediatrics",
+                                  "specialty": "Pediatric Emergency Medicine",
+                                  "certificate_number": "2611", "year_certified": "2019-05-21"}},
+        ])
+        assert _rows_after_board(gen) == [
+            ("American Board of Pediatrics, Pediatric Emergency Medicine", "2611", "2019"),
+            ("American Board of Pediatrics, General Pediatrics", "109949", "2014"),
+        ]
+
+    def test_a_specialty_already_in_the_board_name_is_not_repeated(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "American Board of Internal Medicine (Cardiovascular Disease) | 98765 | 2015",
+             "extracted_fields": {"certifying_board": "American Board of Internal Medicine (Cardiovascular Disease)",
+                                  "specialty": "Cardiovascular Disease",
+                                  "certificate_number": "98765", "year_certified": "2015"}},
+        ])
+        assert _rows_after_board(gen) == [
+            ("American Board of Internal Medicine (Cardiovascular Disease)", "98765", "2015"),
+        ]
+
+    def test_no_specialty_renders_the_board_alone(self):
+        gen = _generator()
+        gen._fill_board_certification([
+            {"text": "American Board of Internal Medicine | 123456 | 2010",
+             "extracted_fields": {"certifying_board": "American Board of Internal Medicine",
+                                  "specialty": None,
+                                  "certificate_number": "123456", "year_certified": "2010"}},
+        ])
+        assert _rows_after_board(gen) == [("American Board of Internal Medicine", "123456", "2010")]

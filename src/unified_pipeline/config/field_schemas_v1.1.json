@@ -173,7 +173,7 @@
         "certificate_number": {"extract": true, "category": "template", "wcm_column": "Certificate #"},
         "year_certified": {"extract": true, "category": "template", "wcm_column": "Dates of Certification"},
         "recertification_date": {"extract": true, "category": "template", "wcm_column": "Dates of Certification"},
-        "specialty": {"extract": false, "category": "optional"},
+        "specialty": {"extract": true, "category": "template", "wcm_column": "Full Name of Board", "notes": "The certification named beside the board ('Certification in General Pediatrics', 'Cardiovascular Disease'); rendered after the board name in the same cell (#897)"},
         "status": {"extract": false, "category": "optional"},
         "narrative": {"extract": false, "category": "optional"}
       }
