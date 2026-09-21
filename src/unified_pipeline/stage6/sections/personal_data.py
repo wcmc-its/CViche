@@ -38,9 +38,10 @@ a corpus batch on a path or from a worktree.
 Earlier versions of this paragraph were wrong twice: "the server always passes
 original_doc_path" (false until #550's wiring), then "unreachable in
 production until a driver supplies the path" (false for the web path, see
-above). If it goes stale again, the two other copies are
-`stage_6_word_template.py`'s SAMPLE_CV_DIR constant and `run_stage6()`'s
-docstring.
+above). If it goes stale again, the other copies are
+`stage_6_word_template.py`'s SAMPLE_CV_DIR constant, `run_stage6()`'s
+docstring, `scripts/render_gate.py`'s module docstring and
+`docs/guides/render-doctor-gates.md`.
 
 5. There is no step 5 any more, and that is the point. Steps 2, the
    all-entries email scan and 3 all store into the SAME three slot names --
