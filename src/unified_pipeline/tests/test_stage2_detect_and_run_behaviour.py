@@ -988,9 +988,12 @@ def test_parallel_sections_write_the_same_artifact_as_the_serial_loop(tmp_path, 
     lock = threading.Lock()
     # Distinct per-section cost: belt-and-braces on top of the full-artifact
     # equality below -- total_cost is a float sum, so an accumulation-order
-    # mutant (e.g. completion order) is likely, not just possibly, to shift
-    # the last bit or two of the sum even though the section-level costs
-    # themselves are order-independent values.
+    # mutant (e.g. completion order) COULD shift the last bit or two of the
+    # sum, but in practice reversed(results) still passes this assertion
+    # (float addition is commutative enough here). The real guard against an
+    # accumulation-order mutant is test_tied_start_indices_keep_section_
+    # submission_order; this assertion only pins that the totals are
+    # order-independent in value, not that ordering is enforced.
     costs = {key: round(0.1 * (i + 1), 4) for i, key in enumerate(_MANY_SECTION_KEYS)}
 
     def slow_early_sections(**kwargs):
@@ -1086,8 +1089,13 @@ def test_sections_run_inside_the_callers_run_id_context(tmp_path, monkeypatch):
 class _FakeRoutedStdout:
     """Minimal stand-in for orchestrator.py's ``_RoutedStdout`` -- a dict
     keyed by ``threading.get_ident()``. A registered thread's write lands in
-    its own capture; any other thread's write lands in ``leak`` instead,
-    exactly like a pod's real stdout would swallow it (#581).
+    its own capture; any other thread's write lands in ``leak`` instead. The
+    real ``_RoutedStdout`` would not actually lose an unregistered thread's
+    write (since #883 it falls back to the ``_capture_var`` ContextVar that
+    ``map_in_order`` copies onto every pool thread) -- this fake omits that
+    fallback on purpose, to isolate the property this test actually checks:
+    output must come from the calling thread's ``on_result`` callback, not
+    from a print inside ``_extract_section`` itself.
     """
 
     def __init__(self, leak):
@@ -1106,12 +1114,17 @@ class _FakeRoutedStdout:
 
 def test_section_progress_prints_only_from_the_calling_thread(tmp_path, monkeypatch):
     """LEAD defect shape: a print from inside _extract_section would run on
-    map_in_order's pool thread, which is never registered with the
-    orchestrator's thread-routed stdout -- those lines would reach the pod's
-    real stdout instead of the run's progress bar / log viewer. Install a
-    fake routed stdout that only registers the main (calling) thread and run
-    a real thread pool (workers=4): every "[N/M]" line must land in the
-    registered capture, and none may leak.
+    map_in_order's pool thread instead of the calling thread's on_result
+    callback. That would not literally lose the output -- since #883 the
+    real _RoutedStdout falls back to a ContextVar map_in_order copies onto
+    each pool thread -- but it would break two other guarantees: the
+    "[N/M]" number is assigned by completion order on the calling thread
+    (on_result), and each section's block (Processing/Elements/summary/
+    blank) must go out as one atomic print so concurrent sections' blocks
+    cannot splice together. Install a fake routed stdout that only
+    registers the main (calling) thread and run a real thread pool
+    (workers=4): every "[N/M]" line must land in the registered capture,
+    and none may leak.
     """
     def slow_early_sections(**kwargs):
         prompt = kwargs["messages"][1]["content"]
@@ -1228,6 +1241,16 @@ def test_stage2_workers_config_knob_is_read_from_env(monkeypatch):
     # built from instead: workers_from_config("CVICHE_STAGE2_SECTION_WORKERS").
     monkeypatch.setenv("CVICHE_STAGE2_SECTION_WORKERS", "7")
     assert stage2.workers_from_config("CVICHE_STAGE2_SECTION_WORKERS") == 7
+
+
+def test_run_stage_2_defaults_to_the_config_knob():
+    # Pins the default itself, not just the reader: a hardcoded literal
+    # default (e.g. `workers: int = 1`) would pass every other test here
+    # (they all pass workers= explicitly) while silently dropping the
+    # CVICHE_STAGE2_SECTION_WORKERS knob in production.
+    default = inspect.signature(stage2.run_stage_2).parameters["workers"].default
+    assert default is stage2.STAGE2_SECTION_WORKERS
+    assert default == stage2.workers_from_config("CVICHE_STAGE2_SECTION_WORKERS")
 
 
 def test_assigned_indices_union_matches_the_serial_loop(tmp_path, monkeypatch):
