@@ -275,6 +275,34 @@ def test_extract_leaf_sections_child_of_unregistered_parent_treated_as_plain_lea
     assert result == [(["PARENT", "Child"], 5, 10)]
 
 
+def test_parent_gap_ends_at_the_next_header_in_document_order():
+    # S1 reproducer 3 (#916): P > N > G, P > D. N starts at 1, so P's gap
+    # (start_idx + 1 = 1) is not > next header start (1) -- no ["P"]
+    # pseudo-leaf. N's own gap likewise collapses (next header G at 2 is
+    # not > N's start_idx + 1 = 2). Only the true leaves G and D survive.
+    boundaries = [
+        _b(["P"], 0, 9, has_children=True),
+        _b(["P", "N"], 1, 4, has_children=True),
+        _b(["P", "N", "G"], 2, 3),
+        _b(["P", "D"], 8, 9),
+    ]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["P", "N", "G"], 2, 3), (["P", "D"], 8, 9)]
+
+
+def test_parent_gap_stops_at_an_out_of_order_foreign_section():
+    # P has_children and starts at 0; its own mapped child C starts at 10,
+    # but a foreign section Q (unrelated hierarchy) sits at 5 -- the gap
+    # must stop before Q, not run all the way to C.
+    boundaries = [
+        _b(["P"], 0, 20, has_children=True),
+        _b(["P", "C"], 10, 20),
+        _b(["Q"], 5, 9),
+    ]
+    result = extract_leaf_sections_with_boundaries(boundaries, [])
+    assert result == [(["P"], 1, 4), (["P", "C"], 10, 20), (["Q"], 5, 9)]
+
+
 def test_extract_leaf_sections_first_child_start_keeps_earlier_minimum():
     """Children already in document order (increasing start): once the
     first child sets first_child_start, a LATER child with a larger start

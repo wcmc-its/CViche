@@ -408,9 +408,13 @@ def test_compute_section_boundaries_nested_bounds_extend_parent_to_cover_child()
 
 def test_compute_section_boundaries_parent_end_extends_past_next_sibling_to_cover_a_late_child():
     # A's next sibling B sits at 3, so A's naive end is 2 -- but A's second
-    # child A2 lives at 9, past B. The parent is extended to cover its full
-    # descendant subtree (A2's repaired 9..11), not stopped at 2 or at A1's
-    # own 1..8 (docstring invariant #3, fixed by #851).
+    # child A2 lives at 9, past B. The PARENT is still extended to cover its
+    # full descendant subtree (A2's repaired 9..11), not stopped at 2
+    # (docstring invariant #3, fixed by #851) -- parents keep their
+    # subtree-covering range even though it overlaps B (#916 point 4).
+    # A1 (a LEAF) is a different story: post-#916 it is clipped to end just
+    # before the next mapped header in document order, which is B at 3, not
+    # A2 at 9 -- so A1 now ends at 2, not 8.
     mapped = [
         {
             "text": "A",
@@ -425,7 +429,7 @@ def test_compute_section_boundaries_parent_end_extends_past_next_sibling_to_cove
     ]
     sections = compute_section_boundaries(mapped, doc_length=12)
     by_path = {tuple(s["hierarchy"]): s for s in sections}
-    assert by_path[("A", "A1")]["element_idx_end"] == 8
+    assert by_path[("A", "A1")]["element_idx_end"] == 2
     assert by_path[("A", "A2")]["element_idx_end"] == 11
     assert by_path[("A",)]["element_idx_end"] == 11
     assert by_path[("A",)]["element_idx_end"] > by_path[("B",)]["element_idx_start"]
@@ -716,6 +720,147 @@ def test_compute_section_boundaries_no_sections_creates_single_fallback_section(
 
 def test_compute_section_boundaries_empty_hierarchy_and_zero_doc_length():
     assert compute_section_boundaries([], doc_length=0) == []
+
+
+# ------------------------------------------------- _clip_leaves_to_next_header (#916)
+
+def test_out_of_order_sibling_leaf_ends_before_the_next_header():
+    # B is listed after A but starts before it -- the OUT_OF_ORDER_FALLBACK
+    # mechanism used to give both A and B an end of doc_length - 1
+    # (overlapping). Each leaf must now end just before the next header in
+    # document order instead.
+    mapped = [
+        {"text": "A", "level": "H1", "element_idx": 5, "children": []},
+        {"text": "B", "level": "H1", "element_idx": 2, "children": []},
+    ]
+    sections = compute_section_boundaries(mapped, doc_length=10)
+    by_path = {tuple(s["hierarchy"]): s for s in sections}
+    assert (by_path[("A",)]["element_idx_start"], by_path[("A",)]["element_idx_end"]) == (5, 9)
+    assert (by_path[("B",)]["element_idx_start"], by_path[("B",)]["element_idx_end"]) == (2, 4)
+
+
+def test_sibling_listed_out_of_document_order_does_not_stretch_its_predecessor():
+    # Z is listed before Y under P but starts after it (SIBLING_DISORDER) --
+    # X's naive end used to reach past Y's actual start into Z's range.
+    # Each child now ends at the next header in document order regardless
+    # of list position; the parent P still covers the whole subtree.
+    mapped = [
+        {
+            "text": "P",
+            "level": "H1",
+            "element_idx": 0,
+            "children": [
+                {"text": "X", "level": "H2", "element_idx": 10, "children": []},
+                {"text": "Z", "level": "H2", "element_idx": 30, "children": []},
+                {"text": "Y", "level": "H2", "element_idx": 20, "children": []},
+            ],
+        },
+    ]
+    sections = compute_section_boundaries(mapped, doc_length=40)
+    by_path = {tuple(s["hierarchy"]): s for s in sections}
+    assert (by_path[("P", "X")]["element_idx_start"], by_path[("P", "X")]["element_idx_end"]) == (10, 19)
+    assert (by_path[("P", "Y")]["element_idx_start"], by_path[("P", "Y")]["element_idx_end"]) == (20, 29)
+    assert (by_path[("P", "Z")]["element_idx_start"], by_path[("P", "Z")]["element_idx_end"]) == (30, 39)
+    assert (by_path[("P",)]["element_idx_start"], by_path[("P",)]["element_idx_end"]) == (0, 39)
+
+
+def test_late_personal_data_section_is_not_extended_over_earlier_sections():
+    # Personal Data starts AFTER SHORT BIO, so it must not be stretched back
+    # to 0 (it would swallow SHORT BIO). A synthetic preamble section covers
+    # the true gap before the first real section instead (#916).
+    mapped = [
+        {"text": "SHORT BIO", "level": "H1", "element_idx": 3, "children": []},
+        {"text": "Personal Data", "level": "H1", "element_idx": 6, "children": []},
+    ]
+    sections = compute_section_boundaries(mapped, doc_length=12)
+    assert sections[0]["hierarchy"] == ["Personal Data"]
+    assert sections[0]["synthetic"] is True
+    assert (sections[0]["element_idx_start"], sections[0]["element_idx_end"]) == (0, 2)
+    by_path = {tuple(s["hierarchy"]): s for s in sections if not s.get("synthetic")}
+    assert (by_path[("SHORT BIO",)]["element_idx_start"], by_path[("SHORT BIO",)]["element_idx_end"]) == (3, 5)
+    assert (by_path[("Personal Data",)]["element_idx_start"], by_path[("Personal Data",)]["element_idx_end"]) == (6, 11)
+
+
+def test_first_personal_data_section_still_absorbs_the_preamble():
+    # When Personal Data really is the first section in document order,
+    # existing behaviour is unchanged: it absorbs the preamble by extending
+    # backwards to 0, and no synthetic section is created.
+    mapped = [
+        {"text": "Personal Data", "level": "H1", "element_idx": 3, "children": []},
+        {"text": "X", "level": "H1", "element_idx": 8, "children": []},
+    ]
+    sections = compute_section_boundaries(mapped, doc_length=12)
+    assert len(sections) == 2
+    by_path = {tuple(s["hierarchy"]): s for s in sections}
+    assert (by_path[("Personal Data",)]["element_idx_start"], by_path[("Personal Data",)]["element_idx_end"]) == (0, 7)
+    assert not any(s.get("synthetic") for s in sections)
+
+
+def test_leaf_ranges_are_pairwise_disjoint_and_cover_the_document():
+    # A 6-node tree mixing top-level out-of-order (C listed first but starts
+    # late; A listed last but starts earliest), nested sibling disorder
+    # (Z listed before Y under P but starts after it), and a preamble gap
+    # before A -- every mechanism from #916 in one tree.
+    mapped = [
+        {"text": "C", "level": "H1", "element_idx": 25, "children": []},
+        {
+            "text": "P",
+            "level": "H1",
+            "element_idx": 5,
+            "children": [
+                {"text": "X", "level": "H2", "element_idx": 8, "children": []},
+                {"text": "Z", "level": "H2", "element_idx": 20, "children": []},
+                {"text": "Y", "level": "H2", "element_idx": 12, "children": []},
+            ],
+        },
+        {"text": "A", "level": "H1", "element_idx": 3, "children": []},
+    ]
+    doc_length = 30
+    sections = compute_section_boundaries(mapped, doc_length=doc_length)
+    leaves = [s for s in sections if not s["has_children"]]
+    parents = [s for s in sections if s["has_children"]]
+
+    for i, a in enumerate(leaves):
+        for b in leaves[i + 1:]:
+            a_range = set(range(a["element_idx_start"], a["element_idx_end"] + 1))
+            b_range = set(range(b["element_idx_start"], b["element_idx_end"] + 1))
+            assert not (a_range & b_range), (a["hierarchy"], b["hierarchy"])
+
+    covered = set()
+    for leaf in leaves:
+        covered.update(range(leaf["element_idx_start"], leaf["element_idx_end"] + 1))
+    all_starts = [s["element_idx_start"] for s in sections]
+    for parent in parents:
+        later_starts = [s for s in all_starts if s > parent["element_idx_start"]]
+        if later_starts:
+            covered.update(range(parent["element_idx_start"], min(later_starts)))
+    assert covered == set(range(doc_length))
+
+
+def test_parent_ranges_still_cover_their_children_after_clipping():
+    # P's first child C1 and a foreign top-level sibling Q sit between P's
+    # start and its second child C2 -- if the clip step did not skip
+    # has_children sections, P's own range would be clipped down to just
+    # before C1, same as a leaf. Parents must keep covering every child
+    # they have, clip or no clip (#916 point 4; invariant #3 from #851).
+    mapped = [
+        {
+            "text": "P",
+            "level": "H1",
+            "element_idx": 0,
+            "children": [
+                {"text": "C1", "level": "H2", "element_idx": 2, "children": []},
+                {"text": "C2", "level": "H2", "element_idx": 15, "children": []},
+            ],
+        },
+        {"text": "Q", "level": "H1", "element_idx": 8, "children": []},
+    ]
+    sections = compute_section_boundaries(mapped, doc_length=20)
+    by_path = {tuple(s["hierarchy"]): s for s in sections}
+    assert by_path[("P", "C1")]["element_idx_end"] == 7
+    assert by_path[("P", "C2")]["element_idx_end"] == 19
+    assert by_path[("P",)]["element_idx_end"] == 19
+    assert by_path[("P",)]["has_children"] is True
 
 
 # ------------------------------------------------------------- run_stage_1b (end to end)
