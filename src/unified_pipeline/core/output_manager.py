@@ -13,7 +13,6 @@ Usage:
     stage1a_path = om.get_stage1a_json_path()  # stage_1a_segmentation/2071_Zuschlag_Cv_segmented.json
     stage1b_path = om.get_stage1b_path()        # stage_1b_hierarchy_mapping/2071_Zuschlag_Cv_hierarchy_mapped.json
     stage2_path = om.get_stage2_path()          # stage_2_entry_extraction/2071_Zuschlag_Cv_entries.json
-    stage3_path = om.get_stage3_path()          # stage_3_taxonomy_mapping/2071_Zuschlag_Cv_mapped.json
 """
 
 import re
@@ -63,7 +62,6 @@ class OutputManager:
             "stage_1a_segmentation": self.base_dir / "stage_1a_segmentation",
             "stage_1b_hierarchy_mapping": self.base_dir / "stage_1b_hierarchy_mapping",
             "stage_2_entry_extraction": self.base_dir / "stage_2_entry_extraction",
-            "stage_3_taxonomy_mapping": self.base_dir / "stage_3_taxonomy_mapping",
             "archive": self.base_dir / "archive"
         }
 
@@ -161,11 +159,6 @@ class OutputManager:
         """Get output path for Stage 2b entry extraction. DEPRECATED: Use get_stage2_path()."""
         return self.stage_dirs["stage_2b_extract_entries_from_delimiters"] / f"{self.file_handle}_entries.json"
 
-    # Stage 3: Taxonomy Mapping
-    def get_stage3_path(self) -> Path:
-        """Get output path for Stage 3 taxonomy mapping."""
-        return self.stage_dirs["stage_3_taxonomy_mapping"] / f"{self.file_handle}_mapped.json"
-
     # Utility methods
     def get_stage_dir(self, stage_name: str) -> Path:
         """
@@ -173,7 +166,7 @@ class OutputManager:
 
         Args:
             stage_name: One of: "stage_1_segmentation", "stage_2a_entry_delimitation",
-                       "stage_2b_extract_entries_from_delimiters", "stage_3_taxonomy_mapping"
+                       "stage_2b_extract_entries_from_delimiters"
 
         Returns:
             Path to stage directory
@@ -199,7 +192,6 @@ class OutputManager:
             "stage_1a_segmentation": self.get_stage1a_json_path,
             "stage_1b_hierarchy_mapping": self.get_stage1b_path,
             "stage_2_entry_extraction": self.get_stage2_path,
-            "stage_3_taxonomy_mapping": self.get_stage3_path,
             # Legacy support
             "stage_1_segmentation": self.get_stage1_json_path,
             "stage_2a_entry_delimitation": self.get_stage2a_path,
@@ -224,7 +216,6 @@ class OutputManager:
             "stage_1a_txt": self.get_stage1a_txt_path(),
             "stage_1b": self.get_stage1b_path(),
             "stage_2": self.get_stage2_path(),
-            "stage_3": self.get_stage3_path()
         }
 
     def archive_existing_outputs(self):
@@ -286,7 +277,6 @@ def get_output_path(input_path: str, stage: str, base_dir: Path | None = None) -
         "stage_1a_txt": om.get_stage1a_txt_path(),
         "stage_1b": om.get_stage1b_path(),
         "stage_2": om.get_stage2_path(),
-        "stage_3": om.get_stage3_path(),
         # Legacy support
         "stage_1": om.get_stage1_json_path(),
         "stage_1_json": om.get_stage1_json_path(),
@@ -310,8 +300,6 @@ def get_output_path(input_path: str, stage: str, base_dir: Path | None = None) -
             return om.get_stage2a_path()
         elif "stage_2b" in stage:
             return om.get_stage2b_path()
-        elif "stage_3" in stage:
-            return om.get_stage3_path()
 
     if stage not in stage_map:
         raise ValueError(f"Unknown stage: {stage}")

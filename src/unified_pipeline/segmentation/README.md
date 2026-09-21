@@ -44,9 +44,6 @@ Stage 1b (Hierarchy Mapping - NO LLM)
 
 Stage 2 (Entry Extraction)
     → outputs/stage_2_entry_extraction/{file_handle}_entries.json
-
-Stage 3 (Taxonomy Mapping)
-    → outputs/stage_3_taxonomy_mapping/{file_handle}_mapped.json
 ```
 
 ## Documentation
