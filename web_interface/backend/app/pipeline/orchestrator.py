@@ -1405,6 +1405,10 @@ class PipelineOrchestrator:
                     emit_track_changes=emit_track_changes,
                     emit_comments=emit_comments,
                     strip_template_instructions=strip_template_instructions,
+                    # #550: explicit, like stages 1b/2/4 -- not the
+                    # SAMPLE_CV_DIR auto-discovery that happened to find
+                    # _copy_to_pipeline_input's copy by uid and CWD.
+                    original_doc_path=cv_path,
                 )
 
                 self.stage_outputs['6'] = stage6_output_path

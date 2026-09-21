@@ -26,27 +26,21 @@ almost nothing about a CV's contact block is structured. The work is in order:
 This is the only section writer that reads the source document directly, which
 is why `Document` and `Path` are imported here and nowhere else in this package.
 
-Step 3 still does not run on a live CV, but the reason has moved, so read this
-paragraph rather than remembering it. `run_stage6()` now DOES take an
-`original_doc_path` parameter and forwards it
-(`stage_6_word_template.py:2921-2972`); what no longer happens is any driver
-passing one -- `run_full_pipeline.py:994` and
-`web_interface/backend/app/pipeline/orchestrator.py:1370-1377` both call
-`run_stage6` without it. So the callers that supply a source document anywhere
-in the repo are `scripts/render_gate.py --source-dir` and this package's own
-tests, and the `SAMPLE_CV_DIR` auto-discovery those drivers fall through to
-(`stage_6_word_template.py:711-727`) resolves for no farm uid in a fresh
-worktree and finds an empty directory in the deployed image. Of the two scans
-that can fill an empty `work_email` slot, only the all-entries JSON scan is
-live, because it needs no source document. Step 3's table and paragraph scans
-are measurable by the render gate and unreachable in production until a driver
-supplies the path.
+Step 3 runs on a live CV because both drivers hand `run_stage6()` the resolved
+source path (`run_full_pipeline.py` `_stage_6`, `orchestrator.py` stage `'6'`;
+#550), as do `scripts/render_gate.py --source-dir` and this package's tests.
+Before that wiring the web path reached step 3 only by coincidence -- the
+orchestrator's `_copy_to_pipeline_input` drops each upload into the same
+directory `generate()`'s `SAMPLE_CV_DIR` guess scans, under the same uid --
+and the CLI reached it only for a uid-style run from the repo root, never for
+a corpus batch on a path or from a worktree.
 
-Three copies of the previous version of this paragraph asserted "the server
-always passes original_doc_path". All three were false, and #550 was
-originally diagnosed off them. If this one goes stale again, the two others
-are `stage_6_word_template.py`'s SAMPLE_CV_DIR constant and its `generate()`
-fallback.
+Earlier versions of this paragraph were wrong twice: "the server always passes
+original_doc_path" (false until #550's wiring), then "unreachable in
+production until a driver supplies the path" (false for the web path, see
+above). If it goes stale again, the two other copies are
+`stage_6_word_template.py`'s SAMPLE_CV_DIR constant and `run_stage6()`'s
+docstring.
 
 5. There is no step 5 any more, and that is the point. Steps 2, the
    all-entries email scan and 3 all store into the SAME three slot names --
